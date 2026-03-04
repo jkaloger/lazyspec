@@ -5,12 +5,13 @@ pub mod link;
 pub mod list;
 pub mod show;
 pub mod update;
+pub mod search;
 pub mod validate;
 
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "lazyspec", about = "Manage project specs, RFCs, ADRs, and plans")]
+#[command(name = "lazyspec", about = "Manage project stories, RFCs, ADRs, and iterations")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -22,7 +23,7 @@ pub enum Commands {
     Init,
     /// Create a new document from template
     Create {
-        /// Document type (rfc, adr, spec, plan)
+        /// Document type (rfc, adr, story, iteration)
         #[arg()]
         doc_type: String,
         /// Document title
@@ -34,7 +35,7 @@ pub enum Commands {
     },
     /// List documents
     List {
-        /// Filter by type (rfc, adr, spec, plan)
+        /// Filter by type (rfc, adr, story, iteration)
         #[arg()]
         doc_type: Option<String>,
         /// Filter by status
@@ -91,6 +92,18 @@ pub enum Commands {
         /// Target document path
         #[arg()]
         to: String,
+    },
+    /// Search across all documents
+    Search {
+        /// Search query
+        #[arg()]
+        query: String,
+        /// Filter by type (rfc, adr, story, iteration)
+        #[arg(long, name = "type")]
+        doc_type: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Validate all documents
     Validate {

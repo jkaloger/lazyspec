@@ -6,8 +6,8 @@ pub fn run(store: &Store, doc_type: Option<&str>, status: Option<&str>, json: bo
         doc_type: doc_type.and_then(|t| match t.to_lowercase().as_str() {
             "rfc" => Some(DocType::Rfc),
             "adr" => Some(DocType::Adr),
-            "spec" => Some(DocType::Spec),
-            "plan" => Some(DocType::Plan),
+            "story" => Some(DocType::Story),
+            "iteration" => Some(DocType::Iteration),
             _ => None,
         }),
         status: status.and_then(|s| match s.to_lowercase().as_str() {

@@ -6,8 +6,8 @@ fn parse_config_from_toml() {
 [directories]
 rfcs = "docs/rfcs"
 adrs = "docs/adrs"
-specs = "docs/specs"
-plans = "docs/plans"
+stories = "docs/stories"
+iterations = "docs/iterations"
 
 [templates]
 dir = ".lazyspec/templates"
@@ -26,8 +26,8 @@ fn default_config() {
     let config = Config::default();
     assert_eq!(config.directories.rfcs, "docs/rfcs");
     assert_eq!(config.directories.adrs, "docs/adrs");
-    assert_eq!(config.directories.specs, "docs/specs");
-    assert_eq!(config.directories.plans, "docs/plans");
+    assert_eq!(config.directories.stories, "docs/stories");
+    assert_eq!(config.directories.iterations, "docs/iterations");
     assert_eq!(config.templates.dir, ".lazyspec/templates");
     assert_eq!(config.naming.pattern, "{type}-{n:03}-{title}.md");
 }

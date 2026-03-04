@@ -12,8 +12,8 @@ pub struct Config {
 pub struct Directories {
     pub rfcs: String,
     pub adrs: String,
-    pub specs: String,
-    pub plans: String,
+    pub stories: String,
+    pub iterations: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,8 +32,8 @@ impl Default for Config {
             directories: Directories {
                 rfcs: "docs/rfcs".to_string(),
                 adrs: "docs/adrs".to_string(),
-                specs: "docs/specs".to_string(),
-                plans: "docs/plans".to_string(),
+                stories: "docs/stories".to_string(),
+                iterations: "docs/iterations".to_string(),
             },
             templates: Templates {
                 dir: ".lazyspec/templates".to_string(),

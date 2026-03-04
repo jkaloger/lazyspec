@@ -9,8 +9,8 @@ use std::path::PathBuf;
 pub enum DocType {
     Rfc,
     Adr,
-    Spec,
-    Plan,
+    Story,
+    Iteration,
 }
 
 impl fmt::Display for DocType {
@@ -18,8 +18,8 @@ impl fmt::Display for DocType {
         match self {
             DocType::Rfc => write!(f, "RFC"),
             DocType::Adr => write!(f, "ADR"),
-            DocType::Spec => write!(f, "SPEC"),
-            DocType::Plan => write!(f, "PLAN"),
+            DocType::Story => write!(f, "STORY"),
+            DocType::Iteration => write!(f, "ITERATION"),
         }
     }
 }

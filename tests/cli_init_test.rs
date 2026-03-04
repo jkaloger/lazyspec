@@ -11,8 +11,8 @@ fn init_creates_config_and_directories() {
     assert!(root.join(".lazyspec.toml").exists());
     assert!(root.join("docs/rfcs").is_dir());
     assert!(root.join("docs/adrs").is_dir());
-    assert!(root.join("docs/specs").is_dir());
-    assert!(root.join("docs/plans").is_dir());
+    assert!(root.join("docs/stories").is_dir());
+    assert!(root.join("docs/iterations").is_dir());
     assert!(root.join(".lazyspec/templates").is_dir());
 
     let content = fs::read_to_string(root.join(".lazyspec.toml")).unwrap();

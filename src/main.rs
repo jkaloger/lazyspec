@@ -56,6 +56,12 @@ fn main() -> anyhow::Result<()> {
             lazyspec::cli::link::unlink(&cwd, &from, &rel_type, &to)?;
             println!("Unlinked {} --{}--> {}", from, rel_type, to);
         }
+        Some(Commands::Search { query, doc_type, json }) => {
+            let cwd = std::env::current_dir()?;
+            let config = Config::load(&cwd)?;
+            let store = Store::load(&cwd, &config)?;
+            lazyspec::cli::search::run(&store, &query, doc_type.as_deref(), json);
+        }
         Some(Commands::Validate { json }) => {
             let cwd = std::env::current_dir()?;
             let config = Config::load(&cwd)?;

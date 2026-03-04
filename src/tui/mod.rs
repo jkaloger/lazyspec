@@ -36,8 +36,8 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     let dirs = [
         &config.directories.rfcs,
         &config.directories.adrs,
-        &config.directories.specs,
-        &config.directories.plans,
+        &config.directories.stories,
+        &config.directories.iterations,
     ];
     for dir in dirs {
         let full = root.join(dir);

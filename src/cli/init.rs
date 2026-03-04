@@ -13,8 +13,8 @@ pub fn run(root: &Path) -> Result<()> {
 
     fs::create_dir_all(root.join(&config.directories.rfcs))?;
     fs::create_dir_all(root.join(&config.directories.adrs))?;
-    fs::create_dir_all(root.join(&config.directories.specs))?;
-    fs::create_dir_all(root.join(&config.directories.plans))?;
+    fs::create_dir_all(root.join(&config.directories.stories))?;
+    fs::create_dir_all(root.join(&config.directories.iterations))?;
     fs::create_dir_all(root.join(&config.templates.dir))?;
 
     fs::write(&config_path, config.to_toml()?)?;

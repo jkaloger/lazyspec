@@ -89,17 +89,50 @@ fn create_uses_default_template_when_custom_missing() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
-    fs::create_dir_all(root.join("docs/specs")).unwrap();
+    fs::create_dir_all(root.join("docs/stories")).unwrap();
 
     let config = Config::default();
     let path =
-        lazyspec::cli::create::run(root, &config, "spec", "API Design", "jkaloger").unwrap();
+        lazyspec::cli::create::run(root, &config, "story", "API Design", "jkaloger").unwrap();
 
     assert!(path.exists());
     let content = fs::read_to_string(&path).unwrap();
     assert!(content.contains("title: \"API Design\""));
-    assert!(content.contains("type: spec"));
+    assert!(content.contains("type: story"));
     assert!(content.contains("status: draft"));
+}
+
+#[test]
+fn create_story_uses_default_template_with_ac_sections() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("docs/stories")).unwrap();
+
+    let config = Config::default();
+    let path = lazyspec::cli::create::run(root, &config, "story", "User Auth", "jkaloger").unwrap();
+
+    let content = fs::read_to_string(&path).unwrap();
+    assert!(content.contains("type: story"));
+    assert!(content.contains("## Acceptance Criteria"));
+    assert!(content.contains("**Given**"));
+    assert!(content.contains("**When**"));
+    assert!(content.contains("**Then**"));
+    assert!(content.contains("## Scope"));
+}
+
+#[test]
+fn create_iteration_uses_default_template() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("docs/iterations")).unwrap();
+
+    let config = Config::default();
+    let path = lazyspec::cli::create::run(root, &config, "iteration", "Auth Impl 1", "agent").unwrap();
+
+    let content = fs::read_to_string(&path).unwrap();
+    assert!(content.contains("type: iteration"));
+    assert!(content.contains("## Changes"));
+    assert!(content.contains("## Test Plan"));
 }
 
 #[test]

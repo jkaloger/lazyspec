@@ -26,8 +26,8 @@ impl Store {
         let dirs = [
             &config.directories.rfcs,
             &config.directories.adrs,
-            &config.directories.specs,
-            &config.directories.plans,
+            &config.directories.stories,
+            &config.directories.iterations,
         ];
 
         for dir in &dirs {
@@ -184,6 +184,7 @@ impl Store {
 
     pub fn validate(&self) -> Vec<ValidationError> {
         let mut errors = Vec::new();
+
         for (path, meta) in &self.docs {
             for rel in &meta.related {
                 let target = PathBuf::from(&rel.target);
@@ -194,26 +195,106 @@ impl Store {
                     });
                 }
             }
+
+            if meta.doc_type == DocType::Iteration {
+                let has_story_link = meta.related.iter().any(|r| {
+                    r.rel_type == RelationType::Implements
+                        && self
+                            .docs
+                            .get(&PathBuf::from(&r.target))
+                            .map(|d| d.doc_type == DocType::Story)
+                            .unwrap_or(false)
+                });
+                if !has_story_link {
+                    errors.push(ValidationError::UnlinkedIteration {
+                        path: path.clone(),
+                    });
+                }
+            }
+
+            if meta.doc_type == DocType::Adr && meta.related.is_empty() {
+                errors.push(ValidationError::UnlinkedAdr {
+                    path: path.clone(),
+                });
+            }
         }
+
         errors
+    }
+
+    pub fn search(&self, query: &str) -> Vec<SearchResult<'_>> {
+        let query_lower = query.to_lowercase();
+        let mut results = Vec::new();
+
+        for meta in self.docs.values() {
+            if meta.title.to_lowercase().contains(&query_lower) {
+                results.push(SearchResult {
+                    doc: meta,
+                    match_field: "title",
+                    snippet: meta.title.clone(),
+                });
+                continue;
+            }
+
+            if meta.tags.iter().any(|t| t.to_lowercase().contains(&query_lower)) {
+                let matched_tag = meta
+                    .tags
+                    .iter()
+                    .find(|t| t.to_lowercase().contains(&query_lower))
+                    .unwrap();
+                results.push(SearchResult {
+                    doc: meta,
+                    match_field: "tag",
+                    snippet: matched_tag.clone(),
+                });
+                continue;
+            }
+
+            if let Ok(body) = self.get_body(&meta.path) {
+                let body_lower = body.to_lowercase();
+                if let Some(pos) = body_lower.find(&query_lower) {
+                    let start = pos.saturating_sub(40);
+                    let end = (pos + query.len() + 40).min(body.len());
+                    let snippet = body[start..end].to_string();
+                    results.push(SearchResult {
+                        doc: meta,
+                        match_field: "body",
+                        snippet,
+                    });
+                }
+            }
+        }
+
+        results.sort_by(|a, b| a.doc.path.cmp(&b.doc.path));
+        results
     }
 }
 
 #[derive(Debug)]
 pub enum ValidationError {
     BrokenLink { source: PathBuf, target: PathBuf },
+    UnlinkedIteration { path: PathBuf },
+    UnlinkedAdr { path: PathBuf },
+}
+
+#[derive(Debug)]
+pub struct SearchResult<'a> {
+    pub doc: &'a DocMeta,
+    pub match_field: &'static str,
+    pub snippet: String,
 }
 
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ValidationError::BrokenLink { source, target } => {
-                write!(
-                    f,
-                    "broken link: {} -> {}",
-                    source.display(),
-                    target.display()
-                )
+                write!(f, "broken link: {} -> {}", source.display(), target.display())
+            }
+            ValidationError::UnlinkedIteration { path } => {
+                write!(f, "iteration without story link: {}", path.display())
+            }
+            ValidationError::UnlinkedAdr { path } => {
+                write!(f, "ADR without any relation: {}", path.display())
             }
         }
     }

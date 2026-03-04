@@ -10,8 +10,8 @@ fn setup_test_dir() -> TempDir {
 
     fs::create_dir_all(root.join("docs/rfcs")).unwrap();
     fs::create_dir_all(root.join("docs/adrs")).unwrap();
-    fs::create_dir_all(root.join("docs/specs")).unwrap();
-    fs::create_dir_all(root.join("docs/plans")).unwrap();
+    fs::create_dir_all(root.join("docs/stories")).unwrap();
+    fs::create_dir_all(root.join("docs/iterations")).unwrap();
 
     fs::write(
         root.join("docs/rfcs/RFC-001-event-sourcing.md"),
@@ -138,4 +138,58 @@ fn store_filters_by_tag() {
     let results = store.list(&filter);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].title, "Adopt Event Sourcing");
+}
+
+#[test]
+fn store_search_matches_title() {
+    let dir = setup_test_dir();
+    let config = Config::default();
+    let store = Store::load(dir.path(), &config).unwrap();
+
+    let results = store.search("Event");
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().any(|r| r.doc.title == "Event Sourcing"));
+    assert!(results.iter().any(|r| r.doc.title == "Adopt Event Sourcing"));
+}
+
+#[test]
+fn store_search_matches_body() {
+    let dir = setup_test_dir();
+    let config = Config::default();
+    let store = Store::load(dir.path(), &config).unwrap();
+
+    let results = store.search("proposal");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].doc.title, "Event Sourcing");
+}
+
+#[test]
+fn store_search_matches_tags() {
+    let dir = setup_test_dir();
+    let config = Config::default();
+    let store = Store::load(dir.path(), &config).unwrap();
+
+    let results = store.search("events");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].doc.title, "Adopt Event Sourcing");
+}
+
+#[test]
+fn store_search_is_case_insensitive() {
+    let dir = setup_test_dir();
+    let config = Config::default();
+    let store = Store::load(dir.path(), &config).unwrap();
+
+    let results = store.search("event sourcing");
+    assert!(!results.is_empty());
+}
+
+#[test]
+fn store_search_no_results() {
+    let dir = setup_test_dir();
+    let config = Config::default();
+    let store = Store::load(dir.path(), &config).unwrap();
+
+    let results = store.search("nonexistent_xyz");
+    assert!(results.is_empty());
 }

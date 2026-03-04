@@ -62,7 +62,7 @@ fn parse_frontmatter_invalid_yaml() {
 fn extract_body_skips_frontmatter() {
     let content = r#"---
 title: "Test"
-type: spec
+type: story
 status: draft
 author: a
 date: 2026-01-01

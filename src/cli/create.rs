@@ -15,8 +15,8 @@ pub fn run(
     let dir = match doc_type.to_lowercase().as_str() {
         "rfc" => &config.directories.rfcs,
         "adr" => &config.directories.adrs,
-        "spec" => &config.directories.specs,
-        "plan" => &config.directories.plans,
+        "story" => &config.directories.stories,
+        "iteration" => &config.directories.iterations,
         _ => return Err(anyhow!("unknown doc type: {}", doc_type)),
     };
 
@@ -51,8 +51,65 @@ pub fn run(
 }
 
 fn default_template(doc_type: &str) -> String {
-    format!(
-        r#"---
+    match doc_type.to_lowercase().as_str() {
+        "story" => r#"---
+title: "{title}"
+type: story
+status: draft
+author: "{author}"
+date: {date}
+tags: []
+related: []
+---
+
+## Context
+
+TODO: Describe the background and motivation.
+
+## Acceptance Criteria
+
+- **Given** a precondition
+  **When** an action is taken
+  **Then** an expected outcome occurs
+
+## Scope
+
+### In Scope
+
+- TODO
+
+### Out of Scope
+
+- TODO
+"#
+        .to_string(),
+
+        "iteration" => r#"---
+title: "{title}"
+type: iteration
+status: draft
+author: "{author}"
+date: {date}
+tags: []
+related: []
+---
+
+## Changes
+
+- TODO
+
+## Test Plan
+
+- TODO
+
+## Notes
+
+TODO
+"#
+        .to_string(),
+
+        _ => format!(
+            r#"---
 title: "{{title}}"
 type: {}
 status: draft
@@ -65,6 +122,7 @@ tags: []
 
 TODO
 "#,
-        doc_type.to_lowercase()
-    )
+            doc_type.to_lowercase()
+        ),
+    }
 }

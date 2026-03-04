@@ -30,7 +30,7 @@ impl App {
             active_panel: Panel::Types,
             selected_type: 0,
             selected_doc: 0,
-            doc_types: vec![DocType::Rfc, DocType::Adr, DocType::Spec, DocType::Plan],
+            doc_types: vec![DocType::Rfc, DocType::Adr, DocType::Story, DocType::Iteration],
             should_quit: false,
             fullscreen_doc: false,
             scroll_offset: 0,
