@@ -79,3 +79,12 @@ Content here.
     assert!(body.contains("Content here."));
     assert!(!body.contains("title:"));
 }
+
+#[test]
+fn relation_type_display() {
+    use lazyspec::engine::document::RelationType;
+    assert_eq!(format!("{}", RelationType::Implements), "implements");
+    assert_eq!(format!("{}", RelationType::Supersedes), "supersedes");
+    assert_eq!(format!("{}", RelationType::Blocks), "blocks");
+    assert_eq!(format!("{}", RelationType::RelatedTo), "related to");
+}
