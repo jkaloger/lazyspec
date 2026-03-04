@@ -20,15 +20,29 @@ If ACs fail, return to create-iteration.
 ## Workflow Position
 
 ```d2
-write-rfc -> create-story -> resolve-context -> create-iteration -> review-iteration
+plan -> write-rfc -> create-story -> resolve-context -> create-iteration -> build -> review-iteration
 
 review-iteration.style.fill: "#4A9EFF"
 review-iteration.style.font-color: "#FFFFFF"
+plan.style.opacity: 0.4
 write-rfc.style.opacity: 0.4
 create-story.style.opacity: 0.4
 resolve-context.style.opacity: 0.4
 create-iteration.style.opacity: 0.4
+build.style.opacity: 0.4
 ```
+
+## Modes
+
+This skill operates in two modes:
+
+**Per-task review** (invoked by `build` after each task):
+- Checks only the ACs relevant to the completed task
+- Same two-stage process (AC compliance first, code quality second)
+
+**Full review** (invoked by `build` as final gate, or standalone):
+- Checks ALL Story ACs
+- Used after all tasks complete to verify the complete implementation
 
 ## The Gate
 

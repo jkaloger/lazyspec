@@ -19,14 +19,15 @@ After completion: invoke create-story for each vertical slice identified.
 ## Workflow Position
 
 ```d2
-write-rfc -> create-story -> resolve-context -> create-iteration -> review-iteration
+plan -> write-rfc -> create-story -> resolve-context -> create-iteration -> build
 
 write-rfc.style.fill: "#4A9EFF"
 write-rfc.style.font-color: "#FFFFFF"
+plan.style.opacity: 0.4
 create-story.style.opacity: 0.4
 resolve-context.style.opacity: 0.4
 create-iteration.style.opacity: 0.4
-review-iteration.style.opacity: 0.4
+build.style.opacity: 0.4
 ```
 
 ## Workflow

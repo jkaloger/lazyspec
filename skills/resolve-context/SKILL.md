@@ -20,14 +20,15 @@ After completion: invoke create-iteration.
 ## Workflow Position
 
 ```d2
-write-rfc -> create-story -> resolve-context -> create-iteration -> review-iteration
+plan -> write-rfc -> create-story -> resolve-context -> create-iteration -> build
 
 resolve-context.style.fill: "#4A9EFF"
 resolve-context.style.font-color: "#FFFFFF"
+plan.style.opacity: 0.4
 write-rfc.style.opacity: 0.4
 create-story.style.opacity: 0.4
 create-iteration.style.opacity: 0.4
-review-iteration.style.opacity: 0.4
+build.style.opacity: 0.4
 ```
 
 ## Workflow

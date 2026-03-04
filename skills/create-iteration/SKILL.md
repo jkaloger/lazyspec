@@ -12,7 +12,7 @@ Write code before the test? Delete it. Start over.
 <HARD-GATE>
 Do NOT write production code before writing a failing test derived from
 Story ACs. If you haven't resolved context, invoke resolve-context first.
-After completion: invoke review-iteration.
+After completion: invoke build.
 </HARD-GATE>
 
 # Create Iteration
@@ -20,14 +20,15 @@ After completion: invoke review-iteration.
 ## Workflow Position
 
 ```d2
-write-rfc -> create-story -> resolve-context -> create-iteration -> review-iteration
+plan -> write-rfc -> create-story -> resolve-context -> create-iteration -> build
 
 create-iteration.style.fill: "#4A9EFF"
 create-iteration.style.font-color: "#FFFFFF"
+plan.style.opacity: 0.4
 write-rfc.style.opacity: 0.4
 create-story.style.opacity: 0.4
 resolve-context.style.opacity: 0.4
-review-iteration.style.opacity: 0.4
+build.style.opacity: 0.4
 ```
 
 ## Workflow
@@ -42,11 +43,11 @@ Create iteration doc -> Link to story -> Write failing test -> Run test (must fa
 
 More ACs?.shape: diamond
 More ACs? -> Write failing test: yes
-More ACs? -> Update iteration doc: no
+More ACs? -> Write task breakdown: no
 
-Update iteration doc -> Validate -> Invoke review-iteration
+Write task breakdown -> Update iteration doc -> Validate -> Invoke build
 
-Invoke review-iteration.shape: double_circle
+Invoke build.shape: double_circle
 ```
 
 ## Steps
@@ -66,9 +67,29 @@ Invoke review-iteration.shape: double_circle
 
 5. **Implement:** Write minimal code to make tests pass. No more.
 
-6. **Document:** Update `## Changes` with what was implemented. Add any discoveries or decisions to `## Notes`. If a significant decision was made, create an ADR: `lazyspec create adr "<decision>"`.
+6. **Write task breakdown:** The `## Changes` section must contain a numbered task list. Each task must be self-contained enough for a zero-context subagent to implement independently:
 
-7. **Validate:** Run `lazyspec validate`.
+   ```markdown
+   ### Task 1: [descriptive name]
+
+   **ACs addressed:** AC-1, AC-3
+
+   **Files:**
+   - Create/Modify: `exact/path/to/file`
+   - Test: `tests/exact/path/to/test`
+
+   **What to implement:**
+   [Complete description -- not "add validation" but the actual logic]
+
+   **How to verify:**
+   [Test commands and expected output]
+   ```
+
+   Each task should reference which Story ACs it addresses, include exact file paths, describe the implementation in enough detail that someone unfamiliar with the codebase can execute it, and specify how to verify correctness.
+
+7. **Document:** Add any discoveries or decisions to `## Notes`. If a significant decision was made, create an ADR: `lazyspec create adr "<decision>"`.
+
+8. **Validate:** Run `lazyspec validate`.
 
 ## Red Flags
 
@@ -88,7 +109,8 @@ Before claiming this skill is complete:
 - [ ] `lazyspec validate` passes (iteration links to story)
 - [ ] Test suite has been run with output shown (not just claimed)
 - [ ] All tests pass
-- [ ] `## Changes` section is filled in the iteration doc
+- [ ] `## Changes` section contains a numbered task breakdown
+- [ ] Each task references Story ACs, includes file paths, and describes implementation
 - [ ] `## Test Plan` section documents the tests written
 
 ## Rules
