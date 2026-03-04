@@ -1,6 +1,7 @@
 pub mod create;
 pub mod delete;
 pub mod init;
+pub mod link;
 pub mod list;
 pub mod show;
 pub mod update;
