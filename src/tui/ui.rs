@@ -24,6 +24,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_fullscreen(f, app);
         return;
     }
+    if app.search_mode {
+        draw_search_overlay(f, app);
+        return;
+    }
 
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -202,4 +206,61 @@ fn draw_fullscreen(f: &mut Frame, app: &App) {
             .scroll((app.scroll_offset, 0));
         f.render_widget(paragraph, layout[1]);
     }
+}
+
+fn draw_search_overlay(f: &mut Frame, app: &App) {
+    let area = f.area();
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .split(area);
+
+    let input = Paragraph::new(Line::from(vec![
+        Span::styled(" / ", Style::default().fg(Color::Cyan)),
+        Span::raw(&app.search_query),
+        Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Search ")
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+    f.render_widget(input, layout[0]);
+
+    let items: Vec<ListItem> = app
+        .search_results
+        .iter()
+        .enumerate()
+        .map(|(i, path)| {
+            let doc = app.store.get(path);
+            let (title, status_str, status_clr) = match doc {
+                Some(d) => (
+                    d.title.as_str(),
+                    format!("{}", d.status),
+                    status_color(&d.status),
+                ),
+                None => ("?", "?".to_string(), Color::White),
+            };
+            let style = if i == app.search_selected {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            let line = Line::from(vec![
+                Span::raw(format!("  {:<40} ", title)),
+                Span::styled(status_str, Style::default().fg(status_clr)),
+            ]);
+            ListItem::new(line).style(style)
+        })
+        .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Results ")
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(list, layout[1]);
 }

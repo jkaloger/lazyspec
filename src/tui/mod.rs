@@ -28,7 +28,45 @@ pub fn run(store: Store) -> Result<()> {
             code, modifiers, ..
         }) = event::read()?
         {
-            if app.fullscreen_doc {
+            if app.search_mode {
+                match code {
+                    KeyCode::Esc => app.exit_search(),
+                    KeyCode::Enter => app.select_search_result(),
+                    KeyCode::Backspace => {
+                        app.search_query.pop();
+                        app.update_search();
+                    }
+                    KeyCode::Up => {
+                        if app.search_selected > 0 {
+                            app.search_selected -= 1;
+                        }
+                    }
+                    KeyCode::Down => {
+                        if !app.search_results.is_empty()
+                            && app.search_selected < app.search_results.len() - 1
+                        {
+                            app.search_selected += 1;
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        if modifiers.contains(KeyModifiers::CONTROL) && c == 'k' {
+                            if app.search_selected > 0 {
+                                app.search_selected -= 1;
+                            }
+                        } else if modifiers.contains(KeyModifiers::CONTROL) && c == 'j' {
+                            if !app.search_results.is_empty()
+                                && app.search_selected < app.search_results.len() - 1
+                            {
+                                app.search_selected += 1;
+                            }
+                        } else {
+                            app.search_query.push(c);
+                            app.update_search();
+                        }
+                    }
+                    _ => {}
+                }
+            } else if app.fullscreen_doc {
                 match code {
                     KeyCode::Esc | KeyCode::Char('q') => app.exit_fullscreen(),
                     KeyCode::Char('j') | KeyCode::Down => app.scroll_down(),
@@ -42,6 +80,7 @@ pub fn run(store: Store) -> Result<()> {
                     (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                         app.should_quit = true;
                     }
+                    (KeyCode::Char('/'), _) => app.enter_search(),
                     (KeyCode::Enter, _) => app.enter_fullscreen(),
                     (KeyCode::Char('j') | KeyCode::Down, _) => app.move_down(),
                     (KeyCode::Char('k') | KeyCode::Up, _) => app.move_up(),

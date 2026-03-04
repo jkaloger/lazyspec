@@ -16,6 +16,10 @@ pub struct App {
     pub should_quit: bool,
     pub fullscreen_doc: bool,
     pub scroll_offset: u16,
+    pub search_mode: bool,
+    pub search_query: String,
+    pub search_results: Vec<std::path::PathBuf>,
+    pub search_selected: usize,
 }
 
 impl App {
@@ -29,6 +33,10 @@ impl App {
             should_quit: false,
             fullscreen_doc: false,
             scroll_offset: 0,
+            search_mode: false,
+            search_query: String::new(),
+            search_results: Vec::new(),
+            search_selected: 0,
         }
     }
 
@@ -137,5 +145,63 @@ impl App {
                 }
             }
         }
+    }
+
+    pub fn enter_search(&mut self) {
+        self.search_mode = true;
+        self.search_query.clear();
+        self.search_results.clear();
+        self.search_selected = 0;
+    }
+
+    pub fn exit_search(&mut self) {
+        self.search_mode = false;
+        self.search_query.clear();
+        self.search_results.clear();
+        self.search_selected = 0;
+    }
+
+    pub fn update_search(&mut self) {
+        if self.search_query.is_empty() {
+            self.search_results.clear();
+            self.search_selected = 0;
+            return;
+        }
+
+        let query = self.search_query.to_lowercase();
+        let mut results: Vec<_> = self
+            .store
+            .all_docs()
+            .into_iter()
+            .filter(|doc| {
+                let title_match = doc.title.to_lowercase().contains(&query);
+                let tag_match = doc.tags.iter().any(|t| t.to_lowercase().contains(&query));
+                let path_match = doc.path.to_string_lossy().to_lowercase().contains(&query);
+                title_match || tag_match || path_match
+            })
+            .map(|doc| doc.path.clone())
+            .collect();
+        results.sort();
+        self.search_results = results;
+        self.search_selected = 0;
+    }
+
+    pub fn select_search_result(&mut self) {
+        let path = match self.search_results.get(self.search_selected) {
+            Some(p) => p.clone(),
+            None => return,
+        };
+
+        if let Some(doc) = self.store.get(&path) {
+            let doc_type = doc.doc_type.clone();
+            if let Some(idx) = self.doc_types.iter().position(|t| *t == doc_type) {
+                self.selected_type = idx;
+                let docs = self.docs_for_current_type();
+                if let Some(di) = docs.iter().position(|d| d.path == path) {
+                    self.selected_doc = di;
+                }
+            }
+        }
+        self.exit_search();
     }
 }
