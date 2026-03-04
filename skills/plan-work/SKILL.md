@@ -1,5 +1,5 @@
 ---
-name: plan
+name: plan-work
 description: Use when starting new work, planning a feature, or deciding what to implement next. Detects existing RFCs, Stories, and Iterations to determine the right starting point.
 ---
 
@@ -70,6 +70,7 @@ lazyspec list iteration --status draft
 ### 2. Present findings
 
 Tell the user what you found:
+
 - Which RFCs, Stories, Iterations already exist for this work
 - Their current status (draft, accepted, etc.)
 - What relationships exist between them
@@ -78,31 +79,34 @@ Tell the user what you found:
 
 Based on what exists:
 
-| State | Action |
-|-------|--------|
-| Nothing exists | Brainstorm the design, then invoke `write-rfc` |
-| RFC exists, no Stories | Brainstorm vertical slices, then invoke `create-story` |
-| Story exists, no Iteration | Invoke `resolve-context` (chains to `create-iteration`) |
-| Iteration exists with task breakdown | Invoke `build` |
-| Iteration exists without task breakdown | Invoke `create-iteration` to add tasks |
+| State                                   | Action                                                  |
+| --------------------------------------- | ------------------------------------------------------- |
+| Nothing exists                          | Brainstorm the design, then invoke `write-rfc`          |
+| RFC exists, no Stories                  | Brainstorm vertical slices, then invoke `create-story`  |
+| Story exists, no Iteration              | Invoke `resolve-context` (chains to `create-iteration`) |
+| Iteration exists with task breakdown    | Invoke `build`                                          |
+| Iteration exists without task breakdown | Invoke `create-iteration` to add tasks                  |
 
 ### 4. Brainstorm (when needed)
 
 Brainstorming is fractal -- it applies at whatever level you're entering:
 
 **RFC level (no RFC exists):**
+
 - Ask clarifying questions about the problem (one at a time)
 - Propose 2-3 design approaches with trade-offs
 - Present your recommendation
 - Get user approval before invoking write-rfc
 
 **Story level (RFC exists, no Stories):**
+
 - Read the RFC to understand intent
 - Propose vertical slices
 - Discuss scope of each slice
 - Get user approval before invoking create-story
 
 **Iteration level (Story exists, no Iteration):**
+
 - This is handled by create-iteration, which generates the task breakdown
 - Invoke resolve-context, which chains to create-iteration
 
@@ -112,12 +116,12 @@ After determining the entry point and brainstorming (if needed), invoke the skil
 
 ## Red Flags
 
-| Red Flag | Reality |
-|----------|---------|
-| "Let me just start coding" | Code without a plan = rework. Plan first. |
-| "I already know what to build" | Then the plan should be quick. Still do it. |
-| "This is too small to plan" | Small unplanned work causes the most rework. |
-| "I'll figure out the design as I code" | That's not design. That's hoping. |
+| Red Flag                               | Reality                                      |
+| -------------------------------------- | -------------------------------------------- |
+| "Let me just start coding"             | Code without a plan = rework. Plan first.    |
+| "I already know what to build"         | Then the plan should be quick. Still do it.  |
+| "This is too small to plan"            | Small unplanned work causes the most rework. |
+| "I'll figure out the design as I code" | That's not design. That's hoping.            |
 
 ## Rules
 
