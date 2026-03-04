@@ -1,0 +1,110 @@
+use lazyspec::engine::config::Config;
+use lazyspec::engine::template;
+use std::fs;
+use tempfile::TempDir;
+
+#[test]
+fn create_generates_doc_from_template() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("docs/rfcs")).unwrap();
+    fs::create_dir_all(root.join(".lazyspec/templates")).unwrap();
+
+    fs::write(
+        root.join(".lazyspec/templates/rfc.md"),
+        r#"---
+title: "{title}"
+type: rfc
+status: draft
+author: "{author}"
+date: {date}
+tags: []
+---
+
+## Summary
+
+TODO: Describe the proposal.
+"#,
+    )
+    .unwrap();
+
+    let config = Config::default();
+    let path =
+        lazyspec::cli::create::run(root, &config, "rfc", "Event Sourcing", "jkaloger").unwrap();
+
+    assert!(path.exists());
+    let content = fs::read_to_string(&path).unwrap();
+    assert!(content.contains("title: \"Event Sourcing\""));
+    assert!(content.contains("type: rfc"));
+    assert!(content.contains("author: \"jkaloger\""));
+}
+
+#[test]
+fn create_auto_increments_number() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("docs/rfcs")).unwrap();
+    fs::create_dir_all(root.join(".lazyspec/templates")).unwrap();
+    fs::write(
+        root.join(".lazyspec/templates/rfc.md"),
+        "---\ntitle: \"{title}\"\ntype: rfc\nstatus: draft\nauthor: \"{author}\"\ndate: {date}\ntags: []\n---\n",
+    )
+    .unwrap();
+
+    fs::write(root.join("docs/rfcs/RFC-001-old.md"), "").unwrap();
+
+    let config = Config::default();
+    let path = lazyspec::cli::create::run(root, &config, "rfc", "New Feature", "a").unwrap();
+
+    let filename = path.file_name().unwrap().to_str().unwrap();
+    assert!(filename.starts_with("RFC-002"), "got: {}", filename);
+}
+
+#[test]
+fn create_with_date_pattern() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("docs/rfcs")).unwrap();
+    fs::create_dir_all(root.join(".lazyspec/templates")).unwrap();
+    fs::write(
+        root.join(".lazyspec/templates/rfc.md"),
+        "---\ntitle: \"{title}\"\ntype: rfc\nstatus: draft\nauthor: \"{author}\"\ndate: {date}\ntags: []\n---\n",
+    )
+    .unwrap();
+
+    let mut config = Config::default();
+    config.naming.pattern = "{date}-{title}.md".to_string();
+
+    let path = lazyspec::cli::create::run(root, &config, "rfc", "My Feature", "a").unwrap();
+
+    let filename = path.file_name().unwrap().to_str().unwrap();
+    assert!(filename.ends_with("-my-feature.md"), "got: {}", filename);
+}
+
+#[test]
+fn create_uses_default_template_when_custom_missing() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("docs/specs")).unwrap();
+
+    let config = Config::default();
+    let path =
+        lazyspec::cli::create::run(root, &config, "spec", "API Design", "jkaloger").unwrap();
+
+    assert!(path.exists());
+    let content = fs::read_to_string(&path).unwrap();
+    assert!(content.contains("title: \"API Design\""));
+    assert!(content.contains("type: spec"));
+    assert!(content.contains("status: draft"));
+}
+
+#[test]
+fn slugify_converts_title() {
+    assert_eq!(template::slugify("Event Sourcing"), "event-sourcing");
+    assert_eq!(template::slugify("API v2.0 Design"), "api-v2-0-design");
+    assert_eq!(template::slugify("  Hello  World  "), "hello-world");
+}
