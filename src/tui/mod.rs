@@ -71,6 +71,19 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             {
                 if app.show_help {
                     app.show_help = false;
+                } else if app.create_form.active {
+                    match code {
+                        KeyCode::Esc => app.close_create_form(),
+                        KeyCode::Enter => {
+                            let root = app.store.root().to_path_buf();
+                            let _ = app.submit_create_form(&root, config);
+                        }
+                        KeyCode::Tab => app.form_next_field(),
+                        KeyCode::BackTab => app.form_prev_field(),
+                        KeyCode::Backspace => app.form_backspace(),
+                        KeyCode::Char(c) => app.form_type_char(c),
+                        _ => {}
+                    }
                 } else if app.search_mode {
                     match code {
                         KeyCode::Esc => app.exit_search(),
@@ -127,6 +140,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                             app.show_help = true;
                         }
                         (KeyCode::Char('/'), _) => app.enter_search(),
+                        (KeyCode::Char('n'), _) => app.open_create_form(),
                         (KeyCode::Enter, _) => {
                             if app.preview_tab == app::PreviewTab::Relations {
                                 app.navigate_to_relation();

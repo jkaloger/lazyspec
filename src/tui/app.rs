@@ -1,5 +1,104 @@
+use crate::engine::config::Config;
 use crate::engine::document::{DocMeta, DocType};
 use crate::engine::store::{Filter, Store};
+use anyhow::{anyhow, Result};
+use std::path::Path;
+
+fn update_tags(root: &Path, relative: &Path, tags: &[String]) -> Result<()> {
+    let full_path = root.join(relative);
+    let content = std::fs::read_to_string(&full_path)?;
+
+    let trimmed = content.trim_start();
+    let after_first = &trimmed[3..];
+    let end = after_first.find("\n---")
+        .ok_or_else(|| anyhow!("unterminated frontmatter"))?;
+    let yaml_str = &after_first[..end];
+    let body = &after_first[end + 4..];
+
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(yaml_str)?;
+    let tag_values: Vec<serde_yaml::Value> = tags.iter()
+        .map(|t| serde_yaml::Value::String(t.clone()))
+        .collect();
+    doc["tags"] = serde_yaml::Value::Sequence(tag_values);
+
+    let new_yaml = serde_yaml::to_string(&doc)?;
+    let new_content = format!("---\n{}---\n{}", new_yaml, body);
+    std::fs::write(&full_path, new_content)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FormField {
+    Title,
+    Author,
+    Tags,
+    Related,
+}
+
+impl FormField {
+    fn next(self) -> Self {
+        match self {
+            FormField::Title => FormField::Author,
+            FormField::Author => FormField::Tags,
+            FormField::Tags => FormField::Related,
+            FormField::Related => FormField::Title,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            FormField::Title => FormField::Related,
+            FormField::Author => FormField::Title,
+            FormField::Tags => FormField::Author,
+            FormField::Related => FormField::Tags,
+        }
+    }
+}
+
+pub struct CreateForm {
+    pub active: bool,
+    pub doc_type: DocType,
+    pub focused_field: FormField,
+    pub title: String,
+    pub author: String,
+    pub tags: String,
+    pub related: String,
+    pub error: Option<String>,
+}
+
+impl CreateForm {
+    pub fn new() -> Self {
+        CreateForm {
+            active: false,
+            doc_type: DocType::Rfc,
+            focused_field: FormField::Title,
+            title: String::new(),
+            author: String::new(),
+            tags: String::new(),
+            related: String::new(),
+            error: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.active = false;
+        self.focused_field = FormField::Title;
+        self.title.clear();
+        self.author.clear();
+        self.tags.clear();
+        self.related.clear();
+        self.error = None;
+    }
+
+    fn focused_value_mut(&mut self) -> &mut String {
+        match self.focused_field {
+            FormField::Title => &mut self.title,
+            FormField::Author => &mut self.author,
+            FormField::Tags => &mut self.tags,
+            FormField::Related => &mut self.related,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Panel {
@@ -29,6 +128,7 @@ pub struct App {
     pub show_help: bool,
     pub preview_tab: PreviewTab,
     pub selected_relation: usize,
+    pub create_form: CreateForm,
 }
 
 impl App {
@@ -49,6 +149,7 @@ impl App {
             show_help: false,
             preview_tab: PreviewTab::Preview,
             selected_relation: 0,
+            create_form: CreateForm::new(),
         }
     }
 
@@ -276,5 +377,128 @@ impl App {
         }
         self.preview_tab = PreviewTab::Preview;
         self.selected_relation = 0;
+    }
+
+    pub fn open_create_form(&mut self) {
+        self.create_form.reset();
+        self.create_form.active = true;
+        self.create_form.doc_type = self.current_type().clone();
+    }
+
+    pub fn close_create_form(&mut self) {
+        self.create_form.reset();
+    }
+
+    pub fn form_type_char(&mut self, c: char) {
+        self.create_form.focused_value_mut().push(c);
+        self.create_form.error = None;
+    }
+
+    pub fn form_backspace(&mut self) {
+        self.create_form.focused_value_mut().pop();
+        self.create_form.error = None;
+    }
+
+    pub fn form_next_field(&mut self) {
+        self.create_form.focused_field = self.create_form.focused_field.next();
+    }
+
+    pub fn form_prev_field(&mut self) {
+        self.create_form.focused_field = self.create_form.focused_field.prev();
+    }
+
+    pub fn submit_create_form(&mut self, root: &Path, config: &Config) -> Result<()> {
+        let title = self.create_form.title.trim().to_string();
+        if title.is_empty() {
+            self.create_form.error = Some("Title is required".to_string());
+            return Err(anyhow!("Title is required"));
+        }
+
+        let doc_type_str = match self.create_form.doc_type {
+            DocType::Rfc => "rfc",
+            DocType::Adr => "adr",
+            DocType::Story => "story",
+            DocType::Iteration => "iteration",
+        };
+
+        let author = if self.create_form.author.trim().is_empty() {
+            "unknown"
+        } else {
+            self.create_form.author.trim()
+        };
+
+        // Validate relations before creating anything
+        let relations = match self.parse_relations() {
+            Ok(r) => r,
+            Err(e) => {
+                self.create_form.error = Some(e.to_string());
+                return Err(e);
+            }
+        };
+
+        let path = crate::cli::create::run(root, config, doc_type_str, &title, author)?;
+        let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+        let relative_str = relative.to_string_lossy().to_string();
+
+        // Apply tags
+        let tags_str = self.create_form.tags.trim().to_string();
+        if !tags_str.is_empty() {
+            let tags: Vec<String> = tags_str.split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            update_tags(root, &relative, &tags)?;
+        }
+
+        // Apply relations
+        for (rel_type, target_path) in &relations {
+            crate::cli::link::link(root, &relative_str, rel_type, &target_path.to_string_lossy())?;
+        }
+
+        // Reload the store to pick up the new file
+        let _ = self.store.reload_file(root, &relative);
+
+        // Navigate to the new document
+        let doc_type = self.create_form.doc_type.clone();
+        if let Some(type_idx) = self.doc_types.iter().position(|t| *t == doc_type) {
+            self.selected_type = type_idx;
+            let docs = self.docs_for_current_type();
+            if let Some(doc_idx) = docs.iter().position(|d| d.path == relative) {
+                self.selected_doc = doc_idx;
+            }
+        }
+
+        self.close_create_form();
+        Ok(())
+    }
+
+    fn parse_relations(&self) -> Result<Vec<(String, std::path::PathBuf)>> {
+        let related_str = self.create_form.related.trim().to_string();
+        if related_str.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut results = Vec::new();
+        for entry in related_str.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let (rel_type, shorthand) = if let Some((prefix, id)) = entry.split_once(':') {
+                let rel = match prefix.trim() {
+                    "implements" => "implements",
+                    "supersedes" => "supersedes",
+                    "blocks" => "blocks",
+                    "related-to" => "related-to",
+                    _ => {
+                        return Err(anyhow!("Unknown relation type: {}", prefix.trim()));
+                    }
+                };
+                (rel.to_string(), id.trim().to_string())
+            } else {
+                ("related-to".to_string(), entry.to_string())
+            };
+
+            let doc = self.store.resolve_shorthand(&shorthand)
+                .ok_or_else(|| anyhow!("Cannot resolve: {}", shorthand))?;
+            results.push((rel_type, doc.path.clone()));
+        }
+        Ok(results)
     }
 }

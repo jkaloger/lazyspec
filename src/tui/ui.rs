@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::engine::document::{RelationType, Status};
-use crate::tui::app::{App, Panel, PreviewTab};
+use crate::tui::app::{App, FormField, Panel, PreviewTab};
 
 fn status_color(status: &Status) -> Color {
     match status {
@@ -39,6 +39,13 @@ fn tag_color(tag: &str) -> Color {
 pub fn draw(f: &mut Frame, app: &App) {
     if app.fullscreen_doc {
         draw_fullscreen(f, app);
+        if app.show_help {
+            draw_help_overlay(f);
+        }
+        return;
+    }
+    if app.create_form.active {
+        draw_create_form(f, app);
         if app.show_help {
             draw_help_overlay(f);
         }
@@ -435,6 +442,7 @@ fn draw_help_overlay(f: &mut Frame) {
         Line::from("  Enter     Open document fullscreen"),
         Line::from("  Esc       Back / close"),
         Line::from("  /         Search"),
+        Line::from("  n         Create new document"),
         Line::from("  Tab       Switch preview tab"),
         Line::from("  g         Jump to top"),
         Line::from("  G         Jump to bottom"),
@@ -452,6 +460,72 @@ fn draw_help_overlay(f: &mut Frame) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .title(" Help "));
+    f.render_widget(paragraph, popup_area);
+}
+
+fn draw_create_form(f: &mut Frame, app: &App) {
+    let area = f.area();
+
+    let popup_width = 60.min(area.width.saturating_sub(4));
+    let popup_height = 14.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let form = &app.create_form;
+    let title = format!(" Create {} ", form.doc_type);
+
+    let fields = [
+        ("Title", &form.title, FormField::Title),
+        ("Author", &form.author, FormField::Author),
+        ("Tags", &form.tags, FormField::Tags),
+        ("Related", &form.related, FormField::Related),
+    ];
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(""));
+
+    for (label, value, field) in &fields {
+        let is_focused = form.focused_field == *field;
+        let label_style = if is_focused {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        let cursor = if is_focused { "_" } else { "" };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<10}", format!("{}:", label)), label_style),
+            Span::raw(format!("{}{}", value, cursor)),
+        ]));
+        lines.push(Line::from(""));
+    }
+
+    if let Some(ref err) = form.error {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", err),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  Tab", Style::default().fg(Color::DarkGray)),
+        Span::raw(" next  "),
+        Span::styled("Enter", Style::default().fg(Color::DarkGray)),
+        Span::raw(" create  "),
+        Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+        Span::raw(" cancel"),
+    ]));
+
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(title),
+    );
     f.render_widget(paragraph, popup_area);
 }
 
