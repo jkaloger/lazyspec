@@ -1,7 +1,9 @@
 pub mod create;
+pub mod delete;
 pub mod init;
 pub mod list;
 pub mod show;
+pub mod update;
 
 use clap::{Parser, Subcommand};
 
