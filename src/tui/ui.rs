@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::engine::document::{RelationType, Status};
-use crate::tui::app::{App, FormField, Panel, PreviewTab};
+use crate::tui::app::{App, FormField, PreviewTab};
 
 fn status_color(status: &Status) -> Color {
     match status {
@@ -114,23 +114,10 @@ fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let border_style = if app.active_panel == Panel::Types {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-
-    let border_type = if app.active_panel == Panel::Types {
-        BorderType::Double
-    } else {
-        BorderType::Plain
-    };
-
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(border_style)
-            .border_type(border_type)
+            .border_style(Style::default().fg(Color::DarkGray))
             .title(" Types "),
     );
     f.render_widget(list, area);
@@ -177,23 +164,11 @@ fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let border_style = if app.active_panel == Panel::DocList {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-
-    let border_type = if app.active_panel == Panel::DocList {
-        BorderType::Double
-    } else {
-        BorderType::Plain
-    };
-
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(border_style)
-            .border_type(border_type)
+            .border_style(Style::default().fg(Color::Cyan))
+            .border_type(BorderType::Double)
             .title(" Documents "),
     );
     f.render_widget(list, area);
@@ -315,7 +290,6 @@ fn draw_relations_content(f: &mut Frame, app: &App, area: Rect, block: Block) {
     }
 
     let mut items: Vec<ListItem> = Vec::new();
-    let mut flat_index = 0usize;
 
     let type_order = [
         RelationType::Implements,
@@ -342,12 +316,6 @@ fn draw_relations_content(f: &mut Frame, app: &App, area: Rect, block: Block) {
         ))));
 
         for (_, target_path) in &matching {
-            let indicator = if flat_index == app.selected_relation {
-                "  > "
-            } else {
-                "    "
-            };
-
             let (title, status_str, status_clr) =
                 if let Some(target_doc) = app.store.get(target_path) {
                     (
@@ -363,19 +331,11 @@ fn draw_relations_content(f: &mut Frame, app: &App, area: Rect, block: Block) {
                     (name, "missing".to_string(), Color::Red)
                 };
 
-            let style = if flat_index == app.selected_relation {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-
             items.push(ListItem::new(Line::from(vec![
-                Span::raw(indicator),
+                Span::raw("    "),
                 Span::raw(format!("{:<35} ", title)),
                 Span::styled(status_str, Style::default().fg(status_clr)),
-            ])).style(style));
-
-            flat_index += 1;
+            ])));
         }
     }
 
@@ -441,7 +401,7 @@ fn draw_help_overlay(f: &mut Frame) {
     let help_text = vec![
         Line::from(Span::styled("Keybindings", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
         Line::from(""),
-        Line::from("  h/l       Switch panels"),
+        Line::from("  h/l       Switch type"),
         Line::from("  j/k       Navigate up/down"),
         Line::from("  Enter     Open document fullscreen"),
         Line::from("  Esc       Back / close"),
