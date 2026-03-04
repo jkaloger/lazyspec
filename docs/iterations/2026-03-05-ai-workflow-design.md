@@ -1,3 +1,15 @@
+---
+title: "AI-Driven Workflow Design"
+type: iteration
+status: accepted
+author: "jkaloger"
+date: 2026-03-05
+tags: [design, ai-workflow]
+related:
+  - implements: docs/stories/STORY-004-story-iteration-types.md
+  - implements: docs/stories/STORY-005-agent-workflow-skills.md
+---
+
 # AI-Driven Development Workflow Design
 
 > Extends lazyspec with Story/Iteration document types, full-text search, strict validation, and Superpowers skill files to support agent-driven development workflows.

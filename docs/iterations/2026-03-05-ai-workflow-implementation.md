@@ -1,3 +1,15 @@
+---
+title: "AI-Driven Workflow Implementation"
+type: iteration
+status: accepted
+author: "jkaloger"
+date: 2026-03-05
+tags: [implementation, ai-workflow]
+related:
+  - implements: docs/stories/STORY-004-story-iteration-types.md
+  - implements: docs/stories/STORY-005-agent-workflow-skills.md
+---
+
 # AI-Driven Workflow Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.

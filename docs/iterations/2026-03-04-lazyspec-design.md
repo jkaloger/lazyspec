@@ -1,3 +1,16 @@
+---
+title: "lazyspec Design"
+type: iteration
+status: accepted
+author: "jkaloger"
+date: 2026-03-04
+tags: [design, architecture]
+related:
+  - implements: docs/stories/STORY-001-document-model-and-store.md
+  - implements: docs/stories/STORY-002-cli-commands.md
+  - implements: docs/stories/STORY-003-tui-dashboard.md
+---
+
 # lazyspec Design
 
 A TUI and CLI for managing project specifications, RFCs, ADRs, and plans.
