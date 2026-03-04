@@ -120,7 +120,7 @@ fn parse_relation(value: &serde_yaml::Value) -> Result<Relation> {
         "implements" => RelationType::Implements,
         "supersedes" => RelationType::Supersedes,
         "blocks" => RelationType::Blocks,
-        "related_to" => RelationType::RelatedTo,
+        "related-to" => RelationType::RelatedTo,
         other => return Err(anyhow!("unknown relation type: {}", other)),
     };
 
