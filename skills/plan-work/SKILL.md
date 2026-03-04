@@ -1,6 +1,6 @@
 ---
 name: plan-work
-description: Use when starting new work, planning a feature, or deciding what to implement next. Detects existing RFCs, Stories, and Iterations to determine the right starting point.
+description: Use when starting new work, planning a feature, or deciding what to implement next. Detects existing RFCs, Stories, and Iterations to determine the right starting point. Supports lightweight paths for bug fixes and small tweaks.
 ---
 
 ```
@@ -10,8 +10,8 @@ NO WORK WITHOUT A PLAN
 If you're about to write code without knowing where you are in the workflow, stop. Plan first.
 
 <HARD-GATE>
-Do NOT skip to implementation. Detect existing artifacts, brainstorm at the
-appropriate level, and invoke the right skill.
+Do NOT skip to implementation. Detect existing artifacts, classify the work,
+and invoke the right skill.
 </HARD-GATE>
 
 # Plan
@@ -33,7 +33,12 @@ build.style.opacity: 0.4
 ## Workflow
 
 ```d2
-User describes work -> Detect existing artifacts -> Determine entry point
+User describes work -> Detect existing artifacts -> Classify work
+
+Classify work -> New feature (full pipeline)
+Classify work -> Bug fix / small tweak (lightweight)
+
+New feature (full pipeline) -> Determine entry point
 
 Determine entry point -> No RFC: Brainstorm design
 Determine entry point -> RFC exists, no Story: Brainstorm slices
@@ -48,9 +53,17 @@ RFC exists, no Story: Brainstorm slices -> Invoke create-story
 Story exists, no Iteration: Resolve context -> Invoke resolve-context
 Iteration with tasks: Ready to build -> Invoke build
 
+Bug fix / small tweak (lightweight) -> Related Story exists?
+Related Story exists? -> Create iteration against it: yes
+Related Story exists? -> Create standalone iteration: no
+
+Create iteration against it -> Invoke create-iteration
+Create standalone iteration -> Invoke create-iteration
+
 Invoke write-rfc.shape: double_circle
 Invoke create-story.shape: double_circle
 Invoke resolve-context.shape: double_circle
+Invoke create-iteration.shape: double_circle
 Invoke build.shape: double_circle
 ```
 
@@ -75,9 +88,27 @@ Tell the user what you found:
 - Their current status (draft, accepted, etc.)
 - What relationships exist between them
 
-### 3. Determine entry point
+### 3. Classify the work
 
-Based on what exists:
+Not all work needs the full pipeline. Before determining entry point, classify what the user is asking for:
+
+| Classification       | Criteria                                                                  | Pipeline             |
+| -------------------- | ------------------------------------------------------------------------- | -------------------- |
+| **New feature**      | Adds new capability or behavior. Even small features need a Story.        | Full (RFC optional)  |
+| **Bug fix**          | Corrects existing behavior that doesn't match intent.                     | Iteration only       |
+| **Small tweak**      | Minor adjustment to existing behavior (config change, copy, styling).     | Iteration only       |
+| **Refactor**         | Restructures code without changing behavior.                              | Iteration only       |
+
+> [!NOTE]
+> When unsure, ask the user. The classification determines how much ceremony the work gets.
+
+**New features** always need a Story (and an RFC if the design is non-trivial or cross-cutting). This is the full pipeline.
+
+**Bug fixes, small tweaks, and refactors** skip RFC and Story creation entirely. They go straight to `create-iteration`, optionally linked to an existing Story if one is related.
+
+### 4. Determine entry point
+
+**For new features** (full pipeline):
 
 | State                                   | Action                                                  |
 | --------------------------------------- | ------------------------------------------------------- |
@@ -87,7 +118,15 @@ Based on what exists:
 | Iteration exists with task breakdown    | Invoke `build`                                          |
 | Iteration exists without task breakdown | Invoke `create-iteration` to add tasks                  |
 
-### 4. Brainstorm (when needed)
+**For bug fixes, tweaks, and refactors** (lightweight pipeline):
+
+| State                                   | Action                                                                    |
+| --------------------------------------- | ------------------------------------------------------------------------- |
+| Related Story exists                    | Invoke `create-iteration` linked to that Story                            |
+| No related Story (standalone fix)       | Invoke `create-iteration` as a standalone iteration                       |
+| Iteration already exists with tasks     | Invoke `build`                                                            |
+
+### 5. Brainstorm (when needed)
 
 Brainstorming is fractal -- it applies at whatever level you're entering:
 
@@ -110,7 +149,13 @@ Brainstorming is fractal -- it applies at whatever level you're entering:
 - This is handled by create-iteration, which generates the task breakdown
 - Invoke resolve-context, which chains to create-iteration
 
-### 5. Invoke the appropriate skill
+**Lightweight iteration (bug fix / tweak):**
+
+- Confirm the problem or change with the user
+- If a related Story exists, confirm linking to it
+- Invoke create-iteration directly (no resolve-context needed for standalone iterations)
+
+### 6. Invoke the appropriate skill
 
 After determining the entry point and brainstorming (if needed), invoke the skill. Each skill chains directly to its successor.
 
@@ -120,13 +165,17 @@ After determining the entry point and brainstorming (if needed), invoke the skil
 | -------------------------------------- | -------------------------------------------- |
 | "Let me just start coding"             | Code without a plan = rework. Plan first.    |
 | "I already know what to build"         | Then the plan should be quick. Still do it.  |
-| "This is too small to plan"            | Small unplanned work causes the most rework. |
+| "This is too small to plan"            | Small work still gets an iteration. The iteration can be small too. |
 | "I'll figure out the design as I code" | That's not design. That's hoping.            |
+| "This bug fix needs an RFC"            | No it doesn't. Classify the work correctly.  |
+| "Let me create a Story for this typo fix" | Overkill. Bug fixes and tweaks skip Story creation. |
 
 ## Rules
 
 - Always search for existing artifacts before creating new ones
 - Present findings to the user before deciding direction
+- Classify the work before choosing a pipeline
+- New features need Stories. Bug fixes, tweaks, and refactors do not.
 - Brainstorm at the appropriate level (RFC, Story, or Iteration)
 - One question at a time during brainstorming
 - Get user approval before invoking the next skill

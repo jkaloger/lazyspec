@@ -99,7 +99,16 @@ Your job:
 1. Implement exactly what the task specifies
 2. Write tests (TDD: failing test first, then implementation)
 3. Run tests, verify they pass
-4. Self-review your work (completeness, quality, YAGNI, testing)
+4. Self-review your work against these criteria:
+   - Completeness: does it satisfy the task ACs?
+   - Quality: is the code clear and correct?
+   - YAGNI: did you build only what was asked for?
+   - DRY: is there real duplication to extract? (three instances, not two)
+   - Test properties: are your tests behavioral (not implementation-coupled),
+     isolated (no order dependence), deterministic, readable (motivation
+     obvious), and specific (failure cause obvious)?
+   - Tradeoffs: if you traded a test property for another (e.g. speed for
+     predictiveness in an integration test), note it.
 5. Report: what you implemented, test results, files changed, concerns
 ```
 
@@ -137,9 +146,18 @@ The implementer's report may be incomplete or optimistic. Verify independently.
 
 ## Stage 2: Code Quality (only if Stage 1 passes)
 - Review code for correctness and clarity
-- Check tests are meaningful (not just asserting true)
-- Verify no unnecessary complexity
+- Verify no unnecessary complexity (YAGNI -- only what was asked for)
+- Check for real duplication worth extracting (DRY -- three instances, not two)
 - Check for security issues
+- Evaluate tests against these properties:
+  - Behavioral: tests assert on behavior, not implementation details
+  - Structure-insensitive: a refactor that preserves behavior shouldn't break tests
+  - Isolated: no order dependence between tests
+  - Deterministic: no flaky results from timing, randomness, or shared state
+  - Readable: the motivation for each test is obvious
+  - Specific: when a test fails, the cause is obvious
+  - If a property was traded for another (e.g. Fast for Predictive), the
+    tradeoff should be noted and justified
 
 Report:
 - Stage 1: ✅ or ❌ with specifics
@@ -180,7 +198,10 @@ You are performing a final review of the complete implementation.
 ## Stage 2: Code Quality
 - Review the full implementation holistically
 - Check for consistency across tasks
-- Verify no duplication or conflicting patterns
+- Verify no duplication or conflicting patterns (DRY)
+- Verify no unnecessary abstractions or features (YAGNI)
+- Evaluate test quality: behavioral, structure-insensitive, isolated,
+  deterministic, readable, specific. Flag unjustified property tradeoffs.
 ```
 
 ### 12. Update document statuses

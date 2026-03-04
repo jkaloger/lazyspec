@@ -1,6 +1,6 @@
 ---
 name: create-iteration
-description: Use when planning an iteration against a Story. Creates an Iteration document with task breakdown and test plan, then presents to user for confirmation before build.
+description: Use when planning an iteration against a Story or as a standalone iteration for bug fixes, tweaks, and refactors. Creates an Iteration document with task breakdown and test plan, then presents to user for confirmation before build.
 ---
 
 ```
@@ -11,7 +11,9 @@ This skill creates the iteration document. It does NOT write code.
 
 <HARD-GATE>
 Do NOT write test code or production code in this skill. Plan tests and
-tasks only. If you haven't resolved context, invoke resolve-context first.
+tasks only. For feature work linked to a Story, invoke resolve-context first
+if you haven't already. Standalone iterations (bug fixes, tweaks, refactors)
+do not require a parent Story or resolve-context.
 After completion: present the iteration to the user for review.
 Only invoke build after the user explicitly confirms.
 </HARD-GATE>
@@ -56,15 +58,41 @@ Invoke build.shape: double_circle
 
 ## Steps
 
-1. **Gather context:** Run `lazyspec show <story-id>` to read the Story and its ACs. Check existing iterations: `lazyspec list iteration`. Use `lazyspec search "<keyword>"` to find related documents, ADRs, and prior work. If you haven't already resolved context, invoke resolve-context first.
+1. **Gather context:** Check existing iterations: `lazyspec list iteration`. Use `lazyspec search "<keyword>"` to find related documents, ADRs, and prior work.
+   - **If linked to a Story:** Run `lazyspec show <story-id>` to read the Story and its ACs. If you haven't already resolved context, invoke resolve-context first.
+   - **If standalone (bug fix, tweak, refactor):** Gather context from the codebase directly. Understand the affected code and the problem being solved. No Story or resolve-context required.
 
 2. **Discover relevant code:** Use `lazyspec search` to find specs that reference the modules and types you'll be working with. Read the referenced file paths from those specs to understand the existing code before planning tasks. Task breakdowns must reference real, verified file paths.
 
 3. **Create the iteration:** Run `lazyspec create iteration "<title>" --author agent`
 
-4. **Link to story:** Run `lazyspec link <iteration-path> implements <story-path>`
+4. **Link to story (if applicable):** If this iteration implements a Story, run `lazyspec link <iteration-path> implements <story-path>`. Standalone iterations for bug fixes, tweaks, or refactors do not require a parent Story link.
 
 5. **Plan tests:** For each AC this iteration covers, describe the test that will verify it. Document these in the iteration's `## Test Plan` section. Do NOT write test code or production code yet -- that happens during build.
+
+   Each planned test should be evaluated against these properties:
+
+   | Property              | Meaning                                                   |
+   | --------------------- | --------------------------------------------------------- |
+   | Isolated              | Same results regardless of execution order                |
+   | Composable            | Run 1 or 1,000,000 and get the same results               |
+   | Fast                  | Cheap to run                                              |
+   | Inspiring             | Passing builds confidence in production readiness         |
+   | Writable              | Cheap to write relative to the code under test            |
+   | Readable              | Motivation for the test is obvious to the reader          |
+   | Behavioral            | Sensitive to changes in behavior, not implementation      |
+   | Structure-insensitive | Result unchanged by structural refactoring                |
+   | Deterministic         | Same result when nothing changes                          |
+   | Predictive            | All passing implies production-suitable                   |
+   | Specific              | Failure cause is obvious                                  |
+
+   These properties conflict. When planning a test that trades one for another
+   (e.g. an integration test that sacrifices Fast for Predictive), note the
+   tradeoff in the test plan and present it to the collaborator for guidance.
+
+   Apply standard design principles to test code: don't repeat yourself, don't
+   build what you don't need yet. Shared fixtures and helpers should be planned
+   when real duplication is visible, not preemptively.
 
 6. **Write task breakdown:** The `## Changes` section must contain a numbered task list. Each task must be self-contained enough for a zero-context subagent to implement independently:
 
@@ -105,10 +133,11 @@ Invoke build.shape: double_circle
 
 Before claiming this skill is complete:
 
-- [ ] `lazyspec validate` passes (iteration links to story)
+- [ ] `lazyspec validate` passes
+- [ ] If linked to a Story: iteration links to Story correctly
 - [ ] `## Changes` section contains a numbered task breakdown
-- [ ] Each task references Story ACs, includes file paths, and describes implementation
-- [ ] `## Test Plan` section documents planned tests for each AC
+- [ ] Each task includes file paths and describes implementation. If linked to a Story, tasks reference Story ACs.
+- [ ] `## Test Plan` section documents planned tests
 - [ ] Iteration has been presented to the user
 - [ ] User has explicitly confirmed before build is invoked
 - [ ] No test code or production code has been written

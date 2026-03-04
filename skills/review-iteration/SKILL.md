@@ -92,9 +92,24 @@ Approve.shape: double_circle
 Only enter this stage if all ACs are satisfied.
 
 1. Review the code changes for correctness and clarity.
-2. Check that tests are meaningful (not just asserting true).
-3. Verify no unnecessary complexity was introduced.
+2. Verify no unnecessary complexity (YAGNI -- only what was asked for).
+3. Check for real duplication worth extracting (DRY -- three instances, not two).
 4. Check for security issues.
+5. Evaluate test quality against these properties:
+
+   | Property              | What to check                                             |
+   | --------------------- | --------------------------------------------------------- |
+   | Behavioral            | Tests assert on behavior, not implementation details      |
+   | Structure-insensitive | A refactor preserving behavior shouldn't break tests      |
+   | Isolated              | No order dependence, no shared mutable state between tests|
+   | Deterministic         | No flaky results from timing, randomness, or global state |
+   | Readable              | Motivation for each test is obvious to the reader         |
+   | Specific              | When a test fails, the cause is obvious                   |
+   | Writable              | Test complexity is proportional to code complexity        |
+
+   These properties conflict. If a test trades one for another (e.g. an
+   integration test that sacrifices Fast/Isolated for Predictive/Inspiring),
+   the tradeoff should be noted. Flag unjustified tradeoffs to the collaborator.
 
 ## Red Flags
 
