@@ -128,6 +128,13 @@ impl Store {
         results
     }
 
+    pub fn referenced_by(&self, path: &Path) -> Vec<(&RelationType, &PathBuf)> {
+        match self.reverse_links.get(path) {
+            Some(rev) => rev.iter().map(|(rel, src)| (rel, src)).collect(),
+            None => Vec::new(),
+        }
+    }
+
     pub fn resolve_shorthand(&self, id: &str) -> Option<&DocMeta> {
         self.docs.values().find(|d| {
             d.path

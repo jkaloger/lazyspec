@@ -2,7 +2,7 @@ use crate::engine::config::Config;
 use crate::engine::document::{DocMeta, DocType};
 use crate::engine::store::{Filter, Store};
 use anyhow::{anyhow, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn update_tags(root: &Path, relative: &Path, tags: &[String]) -> Result<()> {
     let full_path = root.join(relative);
@@ -100,6 +100,24 @@ impl CreateForm {
     }
 }
 
+pub struct DeleteConfirm {
+    pub active: bool,
+    pub doc_path: PathBuf,
+    pub doc_title: String,
+    pub references: Vec<(String, PathBuf)>,
+}
+
+impl DeleteConfirm {
+    pub fn new() -> Self {
+        DeleteConfirm {
+            active: false,
+            doc_path: PathBuf::new(),
+            doc_title: String::new(),
+            references: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Panel {
     Types,
@@ -129,6 +147,7 @@ pub struct App {
     pub preview_tab: PreviewTab,
     pub selected_relation: usize,
     pub create_form: CreateForm,
+    pub delete_confirm: DeleteConfirm,
 }
 
 impl App {
@@ -150,6 +169,7 @@ impl App {
             preview_tab: PreviewTab::Preview,
             selected_relation: 0,
             create_form: CreateForm::new(),
+            delete_confirm: DeleteConfirm::new(),
         }
     }
 
@@ -469,6 +489,49 @@ impl App {
         }
 
         self.close_create_form();
+        Ok(())
+    }
+
+    pub fn open_delete_confirm(&mut self) {
+        let doc = match self.selected_doc_meta() {
+            Some(d) => d,
+            None => return,
+        };
+        let path = doc.path.clone();
+        let title = doc.title.clone();
+        let refs = self
+            .store
+            .referenced_by(&path)
+            .into_iter()
+            .map(|(rel, p)| (rel.to_string(), p.clone()))
+            .collect();
+        self.delete_confirm.active = true;
+        self.delete_confirm.doc_path = path;
+        self.delete_confirm.doc_title = title;
+        self.delete_confirm.references = refs;
+    }
+
+    pub fn close_delete_confirm(&mut self) {
+        self.delete_confirm.active = false;
+        self.delete_confirm.doc_path = PathBuf::new();
+        self.delete_confirm.doc_title.clear();
+        self.delete_confirm.references.clear();
+    }
+
+    pub fn confirm_delete(&mut self, root: &Path) -> Result<()> {
+        let doc_path = self.delete_confirm.doc_path.clone();
+        let doc_path_str = doc_path.to_string_lossy().to_string();
+        crate::cli::delete::run(root, &doc_path_str)?;
+        self.store.remove_file(&doc_path);
+
+        let count = self.docs_for_current_type().len();
+        if count == 0 {
+            self.selected_doc = 0;
+        } else if self.selected_doc >= count {
+            self.selected_doc = count - 1;
+        }
+
+        self.close_delete_confirm();
         Ok(())
     }
 

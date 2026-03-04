@@ -84,6 +84,12 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                         KeyCode::Char(c) => app.form_type_char(c),
                         _ => {}
                     }
+                } else if app.delete_confirm.active {
+                    match code {
+                        KeyCode::Enter => { let _ = app.confirm_delete(&root); }
+                        KeyCode::Esc => app.close_delete_confirm(),
+                        _ => {}
+                    }
                 } else if app.search_mode {
                     match code {
                         KeyCode::Esc => app.exit_search(),
@@ -141,6 +147,9 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                         }
                         (KeyCode::Char('/'), _) => app.enter_search(),
                         (KeyCode::Char('n'), _) => app.open_create_form(),
+                        (KeyCode::Char('d'), _) if app.active_panel == app::Panel::DocList => {
+                            app.open_delete_confirm();
+                        }
                         (KeyCode::Enter, _) => {
                             if app.preview_tab == app::PreviewTab::Relations {
                                 app.navigate_to_relation();

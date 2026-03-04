@@ -86,6 +86,10 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_doc_list(f, app, right[0]);
     draw_preview(f, app, right[1]);
 
+    if app.delete_confirm.active {
+        draw_delete_confirm(f, app);
+    }
+
     if app.show_help {
         draw_help_overlay(f);
     }
@@ -443,6 +447,7 @@ fn draw_help_overlay(f: &mut Frame) {
         Line::from("  Esc       Back / close"),
         Line::from("  /         Search"),
         Line::from("  n         Create new document"),
+        Line::from("  d         Delete document"),
         Line::from("  Tab       Switch preview tab"),
         Line::from("  g         Jump to top"),
         Line::from("  G         Jump to bottom"),
@@ -525,6 +530,59 @@ fn draw_create_form(f: &mut Frame, app: &App) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .title(title),
+    );
+    f.render_widget(paragraph, popup_area);
+}
+
+fn draw_delete_confirm(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let dc = &app.delete_confirm;
+
+    let ref_count = dc.references.len();
+    let content_height = if ref_count > 0 {
+        6 + ref_count as u16
+    } else {
+        4
+    };
+    let popup_width = 50.min(area.width.saturating_sub(4));
+    let popup_height = content_height.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(format!("  Delete \"{}\"?", dc.doc_title)),
+    ];
+
+    if !dc.references.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Referenced by:",
+            Style::default().fg(Color::DarkGray),
+        )));
+        for (rel_type, path) in &dc.references {
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?");
+            lines.push(Line::from(format!("    \u{2022} {} ({})", name, rel_type)));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "         [Enter: delete]  [Esc: cancel]",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red))
+            .title(" Delete? "),
     );
     f.render_widget(paragraph, popup_area);
 }
