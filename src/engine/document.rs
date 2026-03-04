@@ -54,6 +54,17 @@ pub enum RelationType {
     RelatedTo,
 }
 
+impl fmt::Display for RelationType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RelationType::Implements => write!(f, "implements"),
+            RelationType::Supersedes => write!(f, "supersedes"),
+            RelationType::Blocks => write!(f, "blocks"),
+            RelationType::RelatedTo => write!(f, "related to"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relation {
     pub rel_type: RelationType,

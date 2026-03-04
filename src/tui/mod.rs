@@ -127,15 +127,38 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                             app.show_help = true;
                         }
                         (KeyCode::Char('/'), _) => app.enter_search(),
-                        (KeyCode::Enter, _) => app.enter_fullscreen(),
-                        (KeyCode::Char('j') | KeyCode::Down, _) => app.move_down(),
-                        (KeyCode::Char('k') | KeyCode::Up, _) => app.move_up(),
+                        (KeyCode::Enter, _) => {
+                            if app.preview_tab == app::PreviewTab::Relations {
+                                app.navigate_to_relation();
+                            } else {
+                                app.enter_fullscreen();
+                            }
+                        }
+                        (KeyCode::Char('j') | KeyCode::Down, _) => {
+                            if app.preview_tab == app::PreviewTab::Relations
+                                && app.active_panel == app::Panel::DocList
+                            {
+                                app.move_relation_down();
+                            } else {
+                                app.move_down();
+                            }
+                        }
+                        (KeyCode::Char('k') | KeyCode::Up, _) => {
+                            if app.preview_tab == app::PreviewTab::Relations
+                                && app.active_panel == app::Panel::DocList
+                            {
+                                app.move_relation_up();
+                            } else {
+                                app.move_up();
+                            }
+                        }
                         (KeyCode::Char('h') | KeyCode::Left, _) => {
                             app.active_panel = app::Panel::Types;
                         }
                         (KeyCode::Char('l') | KeyCode::Right, _) => {
                             app.active_panel = app::Panel::DocList;
                         }
+                        (KeyCode::Tab, _) => app.toggle_preview_tab(),
                         (KeyCode::Char('g'), _) => app.move_to_top(),
                         (KeyCode::Char('G'), _) => app.move_to_bottom(),
                         _ => {}

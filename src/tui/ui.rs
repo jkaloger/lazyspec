@@ -2,12 +2,12 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
-use crate::engine::document::Status;
-use crate::tui::app::{App, Panel};
+use crate::engine::document::{RelationType, Status};
+use crate::tui::app::{App, Panel, PreviewTab};
 
 fn status_color(status: &Status) -> Color {
     match status {
@@ -17,6 +17,23 @@ fn status_color(status: &Status) -> Color {
         Status::Rejected => Color::Red,
         Status::Superseded => Color::DarkGray,
     }
+}
+
+fn tag_color(tag: &str) -> Color {
+    const PALETTE: &[Color] = &[
+        Color::Magenta,
+        Color::Cyan,
+        Color::Green,
+        Color::Yellow,
+        Color::Blue,
+        Color::Red,
+        Color::LightMagenta,
+        Color::LightCyan,
+        Color::LightGreen,
+        Color::LightBlue,
+    ];
+    let hash = tag.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    PALETTE[(hash as usize) % PALETTE.len()]
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -92,10 +109,17 @@ fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
 
+    let border_type = if app.active_panel == Panel::Types {
+        BorderType::Double
+    } else {
+        BorderType::Plain
+    };
+
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
+            .border_type(border_type)
             .title(" Types "),
     );
     f.render_widget(list, area);
@@ -113,10 +137,26 @@ fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
                 .and_then(|s| s.to_str())
                 .unwrap_or("?");
             let status_style = Style::default().fg(status_color(&doc.status));
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::raw(format!("  {:<30} ", filename)),
-                Span::styled(format!("{}", doc.status), status_style),
-            ]);
+                Span::styled(format!("{:<12}", doc.status), status_style),
+            ];
+            for (idx, tag) in doc.tags.iter().take(3).enumerate() {
+                if idx > 0 {
+                    spans.push(Span::raw(" "));
+                }
+                spans.push(Span::styled(
+                    format!("[{}]", tag),
+                    Style::default().fg(tag_color(tag)),
+                ));
+            }
+            if doc.tags.len() > 3 {
+                spans.push(Span::styled(
+                    format!(" +{}", doc.tags.len() - 3),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            let line = Line::from(spans);
             let style = if i == app.selected_doc {
                 Style::default().add_modifier(Modifier::REVERSED)
             } else {
@@ -132,46 +172,204 @@ fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
 
+    let border_type = if app.active_panel == Panel::DocList {
+        BorderType::Double
+    } else {
+        BorderType::Plain
+    };
+
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
+            .border_type(border_type)
             .title(" Documents "),
     );
     f.render_widget(list, area);
 }
 
 fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
-    let content = if let Some(doc) = app.selected_doc_meta() {
-        match app.store.get_body(&doc.path) {
-            Ok(body) => {
-                let header = format!(
-                    "# {}\nType: {} | Status: {} | Author: {}\nDate: {} | Tags: {}\n\n",
-                    doc.title,
-                    doc.doc_type,
-                    doc.status,
-                    doc.author,
-                    doc.date,
-                    doc.tags.join(", ")
-                );
-                format!("{}{}", header, body)
-            }
-            Err(_) => "Error loading document body.".to_string(),
-        }
+    let preview_title = if app.preview_tab == PreviewTab::Preview {
+        Line::from(vec![
+            Span::styled(
+                " Preview ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("| "),
+            Span::styled("Relations ", Style::default().fg(Color::DarkGray)),
+        ])
     } else {
-        "No document selected.".to_string()
+        Line::from(vec![
+            Span::styled(" Preview ", Style::default().fg(Color::DarkGray)),
+            Span::raw("| "),
+            Span::styled(
+                "Relations ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
     };
 
-    let text = tui_markdown::from_str(&content);
-    let paragraph = Paragraph::new(text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray))
-                .title(" Preview "),
-        )
-        .wrap(Wrap { trim: false });
-    f.render_widget(paragraph, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(preview_title);
+
+    match app.preview_tab {
+        PreviewTab::Preview => draw_preview_content(f, app, area, block),
+        PreviewTab::Relations => draw_relations_content(f, app, area, block),
+    }
+}
+
+fn draw_preview_content(f: &mut Frame, app: &App, area: Rect, block: Block) {
+    if let Some(doc) = app.selected_doc_meta() {
+        let body = app.store.get_body(&doc.path).unwrap_or_default();
+
+        let mut lines = vec![
+            Line::from(Span::styled(
+                format!(" {}", doc.title),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(vec![
+                Span::raw(" Type: "),
+                Span::styled(format!("{}", doc.doc_type), Style::default().fg(Color::White)),
+                Span::raw("  Status: "),
+                Span::styled(
+                    format!("{}", doc.status),
+                    Style::default().fg(status_color(&doc.status)),
+                ),
+                Span::raw("  Author: "),
+                Span::raw(&doc.author),
+            ]),
+            Line::from(vec![
+                Span::raw(format!(" Date: {}", doc.date)),
+            ]),
+        ];
+
+        if !doc.tags.is_empty() {
+            let mut tag_spans = vec![Span::raw(" Tags: ")];
+            for (idx, tag) in doc.tags.iter().enumerate() {
+                if idx > 0 {
+                    tag_spans.push(Span::raw(" "));
+                }
+                tag_spans.push(Span::styled(
+                    format!("[{}]", tag),
+                    Style::default().fg(tag_color(tag)),
+                ));
+            }
+            lines.push(Line::from(tag_spans));
+        }
+
+        lines.push(Line::from(""));
+
+        let body_text = tui_markdown::from_str(&body);
+        for line in body_text.lines {
+            lines.push(line);
+        }
+
+        let paragraph = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
+        f.render_widget(paragraph, area);
+    } else {
+        let paragraph = Paragraph::new(" No document selected.")
+            .block(block)
+            .wrap(Wrap { trim: false });
+        f.render_widget(paragraph, area);
+    }
+}
+
+fn draw_relations_content(f: &mut Frame, app: &App, area: Rect, block: Block) {
+    let Some(doc) = app.selected_doc_meta() else {
+        let paragraph = Paragraph::new(" No document selected.")
+            .block(block)
+            .wrap(Wrap { trim: false });
+        f.render_widget(paragraph, area);
+        return;
+    };
+
+    let relations = app.store.related_to(&doc.path);
+
+    if relations.is_empty() {
+        let paragraph = Paragraph::new(" No relations.")
+            .block(block)
+            .wrap(Wrap { trim: false });
+        f.render_widget(paragraph, area);
+        return;
+    }
+
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut flat_index = 0usize;
+
+    let type_order = [
+        RelationType::Implements,
+        RelationType::Supersedes,
+        RelationType::Blocks,
+        RelationType::RelatedTo,
+    ];
+
+    for rel_type in &type_order {
+        let matching: Vec<_> = relations
+            .iter()
+            .filter(|(rt, _)| *rt == rel_type)
+            .collect();
+
+        if matching.is_empty() {
+            continue;
+        }
+
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!("  {}", rel_type),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        ))));
+
+        for (_, target_path) in &matching {
+            let indicator = if flat_index == app.selected_relation {
+                "  > "
+            } else {
+                "    "
+            };
+
+            let (title, status_str, status_clr) =
+                if let Some(target_doc) = app.store.get(target_path) {
+                    (
+                        target_doc.title.as_str(),
+                        format!("{}", target_doc.status),
+                        status_color(&target_doc.status),
+                    )
+                } else {
+                    let name = target_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("?");
+                    (name, "missing".to_string(), Color::Red)
+                };
+
+            let style = if flat_index == app.selected_relation {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+
+            items.push(ListItem::new(Line::from(vec![
+                Span::raw(indicator),
+                Span::raw(format!("{:<35} ", title)),
+                Span::styled(status_str, Style::default().fg(status_clr)),
+            ])).style(style));
+
+            flat_index += 1;
+        }
+    }
+
+    let list = List::new(items).block(block);
+    f.render_widget(list, area);
 }
 
 fn draw_fullscreen(f: &mut Frame, app: &App) {
@@ -222,7 +420,7 @@ fn draw_help_overlay(f: &mut Frame) {
     let area = f.area();
 
     let popup_width = 50.min(area.width.saturating_sub(4));
-    let popup_height = 18.min(area.height.saturating_sub(4));
+    let popup_height = 20.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(popup_width)) / 2;
     let y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -237,6 +435,7 @@ fn draw_help_overlay(f: &mut Frame) {
         Line::from("  Enter     Open document fullscreen"),
         Line::from("  Esc       Back / close"),
         Line::from("  /         Search"),
+        Line::from("  Tab       Switch preview tab"),
         Line::from("  g         Jump to top"),
         Line::from("  G         Jump to bottom"),
         Line::from("  q         Quit"),
