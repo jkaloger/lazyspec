@@ -66,7 +66,10 @@ fn main() -> anyhow::Result<()> {
             }
         }
         None => {
-            println!("TUI not implemented yet");
+            let cwd = std::env::current_dir()?;
+            let config = Config::load(&cwd)?;
+            let store = Store::load(&cwd, &config)?;
+            lazyspec::tui::run(store)?;
         }
     }
 
