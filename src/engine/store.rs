@@ -138,6 +138,50 @@ impl Store {
         })
     }
 
+    pub fn reload_file(&mut self, root: &Path, relative_path: &Path) -> Result<()> {
+        let full_path = root.join(relative_path);
+        if !full_path.exists() {
+            self.docs.remove(relative_path);
+            self.rebuild_links();
+            return Ok(());
+        }
+
+        let content = std::fs::read_to_string(&full_path)?;
+        if let Ok(mut meta) = DocMeta::parse(&content) {
+            meta.path = relative_path.to_path_buf();
+            self.docs.insert(relative_path.to_path_buf(), meta);
+        }
+        self.rebuild_links();
+        Ok(())
+    }
+
+    pub fn remove_file(&mut self, relative_path: &Path) {
+        self.docs.remove(relative_path);
+        self.rebuild_links();
+    }
+
+    fn rebuild_links(&mut self) {
+        self.forward_links.clear();
+        self.reverse_links.clear();
+        for (path, meta) in &self.docs {
+            for rel in &meta.related {
+                let target = PathBuf::from(&rel.target);
+                self.forward_links
+                    .entry(path.clone())
+                    .or_default()
+                    .push((rel.rel_type.clone(), target.clone()));
+                self.reverse_links
+                    .entry(target)
+                    .or_default()
+                    .push((rel.rel_type.clone(), path.clone()));
+            }
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn validate(&self) -> Vec<ValidationError> {
         let mut errors = Vec::new();
         for (path, meta) in &self.docs {

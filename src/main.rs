@@ -69,7 +69,7 @@ fn main() -> anyhow::Result<()> {
             let cwd = std::env::current_dir()?;
             let config = Config::load(&cwd)?;
             let store = Store::load(&cwd, &config)?;
-            lazyspec::tui::run(store)?;
+            lazyspec::tui::run(store, &config)?;
         }
     }
 

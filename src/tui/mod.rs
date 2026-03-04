@@ -2,6 +2,7 @@ pub mod app;
 pub mod ui;
 
 use app::App;
+use crate::engine::config::Config;
 use crate::engine::store::Store;
 use anyhow::Result;
 use crossterm::{
@@ -9,10 +10,13 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use notify::{RecursiveMode, Watcher, EventKind};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
+use std::sync::mpsc;
+use std::time::Duration;
 
-pub fn run(store: Store) -> Result<()> {
+pub fn run(store: Store, config: &Config) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -21,83 +25,121 @@ pub fn run(store: Store) -> Result<()> {
 
     let mut app = App::new(store);
 
+    let (tx, rx) = mpsc::channel();
+    let root = app.store.root().to_path_buf();
+    let mut _watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(event) = res {
+            let _ = tx.send(event);
+        }
+    })?;
+
+    let dirs = [
+        &config.directories.rfcs,
+        &config.directories.adrs,
+        &config.directories.specs,
+        &config.directories.plans,
+    ];
+    for dir in dirs {
+        let full = root.join(dir);
+        if full.exists() {
+            _watcher.watch(&full, RecursiveMode::NonRecursive)?;
+        }
+    }
+
     loop {
         terminal.draw(|f| ui::draw(f, &app))?;
 
-        if let Event::Key(KeyEvent {
-            code, modifiers, ..
-        }) = event::read()?
-        {
-            if app.show_help {
-                app.show_help = false;
-            } else if app.search_mode {
-                match code {
-                    KeyCode::Esc => app.exit_search(),
-                    KeyCode::Enter => app.select_search_result(),
-                    KeyCode::Backspace => {
-                        app.search_query.pop();
-                        app.update_search();
-                    }
-                    KeyCode::Up => {
-                        if app.search_selected > 0 {
-                            app.search_selected -= 1;
+        while let Ok(event) = rx.try_recv() {
+            match event.kind {
+                EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
+                    for path in &event.paths {
+                        if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                            if let Ok(relative) = path.strip_prefix(&root) {
+                                let _ = app.store.reload_file(&root, relative);
+                            }
                         }
                     }
-                    KeyCode::Down => {
-                        if !app.search_results.is_empty()
-                            && app.search_selected < app.search_results.len() - 1
-                        {
-                            app.search_selected += 1;
+                }
+                _ => {}
+            }
+        }
+
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(KeyEvent {
+                code, modifiers, ..
+            }) = event::read()?
+            {
+                if app.show_help {
+                    app.show_help = false;
+                } else if app.search_mode {
+                    match code {
+                        KeyCode::Esc => app.exit_search(),
+                        KeyCode::Enter => app.select_search_result(),
+                        KeyCode::Backspace => {
+                            app.search_query.pop();
+                            app.update_search();
                         }
-                    }
-                    KeyCode::Char(c) => {
-                        if modifiers.contains(KeyModifiers::CONTROL) && c == 'k' {
+                        KeyCode::Up => {
                             if app.search_selected > 0 {
                                 app.search_selected -= 1;
                             }
-                        } else if modifiers.contains(KeyModifiers::CONTROL) && c == 'j' {
+                        }
+                        KeyCode::Down => {
                             if !app.search_results.is_empty()
                                 && app.search_selected < app.search_results.len() - 1
                             {
                                 app.search_selected += 1;
                             }
-                        } else {
-                            app.search_query.push(c);
-                            app.update_search();
                         }
+                        KeyCode::Char(c) => {
+                            if modifiers.contains(KeyModifiers::CONTROL) && c == 'k' {
+                                if app.search_selected > 0 {
+                                    app.search_selected -= 1;
+                                }
+                            } else if modifiers.contains(KeyModifiers::CONTROL) && c == 'j' {
+                                if !app.search_results.is_empty()
+                                    && app.search_selected < app.search_results.len() - 1
+                                {
+                                    app.search_selected += 1;
+                                }
+                            } else {
+                                app.search_query.push(c);
+                                app.update_search();
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                }
-            } else if app.fullscreen_doc {
-                match code {
-                    KeyCode::Esc | KeyCode::Char('q') => app.exit_fullscreen(),
-                    KeyCode::Char('j') | KeyCode::Down => app.scroll_down(),
-                    KeyCode::Char('k') | KeyCode::Up => app.scroll_up(),
-                    KeyCode::Char('g') => app.scroll_offset = 0,
-                    KeyCode::Char('G') => app.scroll_offset = u16::MAX / 2,
-                    _ => {}
-                }
-            } else {
-                match (code, modifiers) {
-                    (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                        app.should_quit = true;
+                } else if app.fullscreen_doc {
+                    match code {
+                        KeyCode::Esc | KeyCode::Char('q') => app.exit_fullscreen(),
+                        KeyCode::Char('j') | KeyCode::Down => app.scroll_down(),
+                        KeyCode::Char('k') | KeyCode::Up => app.scroll_up(),
+                        KeyCode::Char('g') => app.scroll_offset = 0,
+                        KeyCode::Char('G') => app.scroll_offset = u16::MAX / 2,
+                        _ => {}
                     }
-                    (KeyCode::Char('?'), _) => {
-                        app.show_help = true;
+                } else {
+                    match (code, modifiers) {
+                        (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                            app.should_quit = true;
+                        }
+                        (KeyCode::Char('?'), _) => {
+                            app.show_help = true;
+                        }
+                        (KeyCode::Char('/'), _) => app.enter_search(),
+                        (KeyCode::Enter, _) => app.enter_fullscreen(),
+                        (KeyCode::Char('j') | KeyCode::Down, _) => app.move_down(),
+                        (KeyCode::Char('k') | KeyCode::Up, _) => app.move_up(),
+                        (KeyCode::Char('h') | KeyCode::Left, _) => {
+                            app.active_panel = app::Panel::Types;
+                        }
+                        (KeyCode::Char('l') | KeyCode::Right, _) => {
+                            app.active_panel = app::Panel::DocList;
+                        }
+                        (KeyCode::Char('g'), _) => app.move_to_top(),
+                        (KeyCode::Char('G'), _) => app.move_to_bottom(),
+                        _ => {}
                     }
-                    (KeyCode::Char('/'), _) => app.enter_search(),
-                    (KeyCode::Enter, _) => app.enter_fullscreen(),
-                    (KeyCode::Char('j') | KeyCode::Down, _) => app.move_down(),
-                    (KeyCode::Char('k') | KeyCode::Up, _) => app.move_up(),
-                    (KeyCode::Char('h') | KeyCode::Left, _) => {
-                        app.active_panel = app::Panel::Types;
-                    }
-                    (KeyCode::Char('l') | KeyCode::Right, _) => {
-                        app.active_panel = app::Panel::DocList;
-                    }
-                    (KeyCode::Char('g'), _) => app.move_to_top(),
-                    (KeyCode::Char('G'), _) => app.move_to_bottom(),
-                    _ => {}
                 }
             }
         }
