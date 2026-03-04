@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -22,10 +22,16 @@ fn status_color(status: &Status) -> Color {
 pub fn draw(f: &mut Frame, app: &App) {
     if app.fullscreen_doc {
         draw_fullscreen(f, app);
+        if app.show_help {
+            draw_help_overlay(f);
+        }
         return;
     }
     if app.search_mode {
         draw_search_overlay(f, app);
+        if app.show_help {
+            draw_help_overlay(f);
+        }
         return;
     }
 
@@ -55,6 +61,10 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_type_panel(f, app, main[0]);
     draw_doc_list(f, app, right[0]);
     draw_preview(f, app, right[1]);
+
+    if app.show_help {
+        draw_help_overlay(f);
+    }
 }
 
 fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
@@ -206,6 +216,44 @@ fn draw_fullscreen(f: &mut Frame, app: &App) {
             .scroll((app.scroll_offset, 0));
         f.render_widget(paragraph, layout[1]);
     }
+}
+
+fn draw_help_overlay(f: &mut Frame) {
+    let area = f.area();
+
+    let popup_width = 50.min(area.width.saturating_sub(4));
+    let popup_height = 18.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let help_text = vec![
+        Line::from(Span::styled("Keybindings", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from("  h/l       Switch panels"),
+        Line::from("  j/k       Navigate up/down"),
+        Line::from("  Enter     Open document fullscreen"),
+        Line::from("  Esc       Back / close"),
+        Line::from("  /         Search"),
+        Line::from("  g         Jump to top"),
+        Line::from("  G         Jump to bottom"),
+        Line::from("  q         Quit"),
+        Line::from("  ?         Toggle this help"),
+        Line::from(""),
+        Line::from(Span::styled("Fullscreen", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from("  j/k       Scroll"),
+        Line::from("  Esc/q     Back to dashboard"),
+    ];
+
+    let paragraph = Paragraph::new(help_text)
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" Help "));
+    f.render_widget(paragraph, popup_area);
 }
 
 fn draw_search_overlay(f: &mut Frame, app: &App) {

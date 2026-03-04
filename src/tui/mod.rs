@@ -28,7 +28,9 @@ pub fn run(store: Store) -> Result<()> {
             code, modifiers, ..
         }) = event::read()?
         {
-            if app.search_mode {
+            if app.show_help {
+                app.show_help = false;
+            } else if app.search_mode {
                 match code {
                     KeyCode::Esc => app.exit_search(),
                     KeyCode::Enter => app.select_search_result(),
@@ -79,6 +81,9 @@ pub fn run(store: Store) -> Result<()> {
                 match (code, modifiers) {
                     (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                         app.should_quit = true;
+                    }
+                    (KeyCode::Char('?'), _) => {
+                        app.show_help = true;
                     }
                     (KeyCode::Char('/'), _) => app.enter_search(),
                     (KeyCode::Enter, _) => app.enter_fullscreen(),

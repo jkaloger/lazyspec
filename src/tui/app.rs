@@ -20,6 +20,7 @@ pub struct App {
     pub search_query: String,
     pub search_results: Vec<std::path::PathBuf>,
     pub search_selected: usize,
+    pub show_help: bool,
 }
 
 impl App {
@@ -37,6 +38,7 @@ impl App {
             search_query: String::new(),
             search_results: Vec::new(),
             search_selected: 0,
+            show_help: false,
         }
     }
 
