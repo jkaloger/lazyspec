@@ -49,9 +49,11 @@ Context complete.shape: double_circle
 
 4. **Check for existing work:** Run `lazyspec search <story-title>` to find any existing iterations, ADRs, or related documents.
 
-5. **Assemble context:** You now have the full chain: RFC (intent) -> Story (ACs) -> existing Iterations (prior work).
+5. **Discover relevant code:** Use `lazyspec search` and `lazyspec list` to find documents that reference the types, modules, or features you'll be working with. The spec documents often name exact files and symbols -- use those as starting points rather than guessing at file paths.
 
-6. **State it back:** Before proceeding, summarise the context chain: what the RFC intends, what ACs the Story defines, and what prior iterations have already done. This forces you to confirm you actually understood it.
+6. **Assemble context:** You now have the full chain: RFC (intent) -> Story (ACs) -> existing Iterations (prior work) -> relevant codebase locations.
+
+7. **State it back:** Before proceeding, summarise the context chain: what the RFC intends, what ACs the Story defines, what prior iterations have already done, and which parts of the codebase are involved. This forces you to confirm you actually understood it.
 
 ## Red Flags
 

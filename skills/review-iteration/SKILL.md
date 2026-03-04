@@ -114,8 +114,21 @@ Before claiming this review is approved:
 - [ ] Code quality review completed (only after Stage 1 passes)
 - [ ] `lazyspec validate` passes
 
+## Status Updates
+
+When a review passes (both stages), update document statuses:
+
+```bash
+lazyspec update <iteration-path> --status accepted
+```
+
+Then check whether the parent Story and RFC should also be promoted:
+- If all iterations under a Story are accepted and all Story ACs are covered, mark the Story as accepted.
+- If all Stories under an RFC are accepted, mark the RFC as accepted.
+
 ## Rules
 
 - Never review code quality before AC compliance
 - The Story is the spec -- if the code satisfies the ACs, it's correct by definition
 - If ACs are ambiguous, that's a Story problem, not an Iteration problem
+- Always update document statuses after a successful review

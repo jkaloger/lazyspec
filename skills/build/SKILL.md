@@ -88,6 +88,13 @@ Include in the prompt:
 Before you begin: if you have questions about requirements, approach,
 dependencies, or anything unclear -- ask them now. Don't guess.
 
+To find relevant files and prior work, use the lazyspec CLI:
+- `lazyspec search "<query>"` to find documents by keyword
+- `lazyspec show <path>` to read a document and its links
+- `lazyspec list iteration` to see existing iterations
+
+Use lazyspec to discover related specs before grepping the codebase.
+
 Your job:
 1. Implement exactly what the task specifies
 2. Write tests (TDD: failing test first, then implementation)
@@ -176,11 +183,26 @@ You are performing a final review of the complete implementation.
 - Verify no duplication or conflicting patterns
 ```
 
-### 12. Update iteration status
+### 12. Update document statuses
 
-If final review passes:
-- Update iteration doc status
-- Run `lazyspec validate`
+If final review passes, mark documents as accepted:
+
+```bash
+# Mark the iteration as accepted
+lazyspec update <iteration-path> --status accepted
+
+# If ALL Story ACs are now covered by accepted iterations,
+# mark the Story as accepted
+lazyspec update <story-path> --status accepted
+
+# If ALL Stories under an RFC are accepted,
+# mark the RFC as accepted
+lazyspec update <rfc-path> --status accepted
+```
+
+Check each level: iteration -> story -> RFC. Only promote a parent document when all its children are complete.
+
+Run `lazyspec validate` after all updates.
 
 ## Red Flags
 
@@ -201,3 +223,5 @@ If final review passes:
 - Answer implementer questions before letting them proceed
 - One task, one review cycle. No batching tasks.
 - Do not dispatch implementation subagents in parallel (conflicts)
+- Always update document statuses after a successful final review
+- Promote parent documents (Story, RFC) only when all children are accepted
