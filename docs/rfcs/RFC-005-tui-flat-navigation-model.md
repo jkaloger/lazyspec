@@ -39,13 +39,13 @@ Border highlighting: active panel gets cyan double-border, inactive gets dark gr
 ## Proposed Behaviour
 
 ```
-h/l  → cycle selected_type through doc_types (wrapping or clamping)
-j/k  → navigate selected_doc within current type's document list
+h/l  → cycle selected_type through doc_types (clamping at boundaries)
+j/k  → navigate documents (Preview tab) or relations (Relations tab)
 Tab  → toggle between Preview and Relations tabs (unchanged)
-Enter → fullscreen document (always, regardless of tab)
+Enter → fullscreen document (Preview tab) or navigate to relation (Relations tab)
 ```
 
-Border highlighting: the Types panel always uses a static style (no active/inactive distinction). The doc list border is always cyan/double since it is always the navigable surface. The relations tab never shows a `> ` indicator or `REVERSED` style on items.
+Border highlighting follows focus. The Types panel always uses a static plain/gray border. The doc list gets cyan/double when it has focus (Preview tab) and dims to plain/gray when focus shifts to relations. The relations panel gets a cyan border when active. The selected relation uses a cyan `>` indicator and bold title rather than REVERSED styling. Doc list items dim to dark gray when Relations tab is active.
 
 ## Interface Sketch
 

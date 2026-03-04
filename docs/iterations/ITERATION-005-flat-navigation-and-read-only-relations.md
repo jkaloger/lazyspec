@@ -46,16 +46,17 @@ Remove conditional border logic from `draw_type_panel` (always plain/dark gray) 
 ## Changes
 
 - Removed `Panel` enum and `active_panel` field from App
-- Removed `selected_relation` field and all relation navigation methods (`relation_count`, `move_relation_up`, `move_relation_down`, `navigate_to_relation`)
 - Simplified `move_down`/`move_up`/`move_to_top`/`move_to_bottom` to always operate on `selected_doc`
 - Added `move_type_next`/`move_type_prev` methods for `h/l` type cycling
 - Remapped `h/l` to `move_type_prev`/`move_type_next` in key handler
-- `j/k` always call `move_down`/`move_up` (no relation hijack)
-- `Enter` always calls `enter_fullscreen`
+- `j/k` navigate docs by default, or relations when Relations tab is active
+- `Enter` opens fullscreen by default, or navigates to selected relation when Relations tab is active
 - `d` guards on `selected_doc_meta().is_some()` instead of panel check
 - Types panel: static plain border, dark gray
-- Doc list: static double border, cyan
-- Relations tab: no selection indicator, no reversed highlighting, uniform item style
+- Doc list: cyan/double when Preview tab active, dims to plain/gray when Relations tab active
+- Doc list items dim to dark gray when Relations tab is active (filenames, status, tags)
+- Relations tab: cyan `>` indicator and bold cyan title on selected relation (no REVERSED)
+- Relations panel: cyan border when active, gray when inactive
 - Help overlay: "Switch panels" changed to "Switch type"
 
 ## Test Plan

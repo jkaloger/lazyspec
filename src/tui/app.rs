@@ -138,6 +138,7 @@ pub struct App {
     pub search_selected: usize,
     pub show_help: bool,
     pub preview_tab: PreviewTab,
+    pub selected_relation: usize,
     pub create_form: CreateForm,
     pub delete_confirm: DeleteConfirm,
 }
@@ -158,6 +159,7 @@ impl App {
             search_selected: 0,
             show_help: false,
             preview_tab: PreviewTab::Preview,
+            selected_relation: 0,
             create_form: CreateForm::new(),
             delete_confirm: DeleteConfirm::new(),
         }
@@ -297,8 +299,53 @@ impl App {
             PreviewTab::Preview => PreviewTab::Relations,
             PreviewTab::Relations => PreviewTab::Preview,
         };
+        self.selected_relation = 0;
     }
 
+    pub fn relation_count(&self) -> usize {
+        match self.selected_doc_meta() {
+            Some(doc) => self.store.related_to(&doc.path).len(),
+            None => 0,
+        }
+    }
+
+    pub fn move_relation_down(&mut self) {
+        let count = self.relation_count();
+        if count > 0 && self.selected_relation < count - 1 {
+            self.selected_relation += 1;
+        }
+    }
+
+    pub fn move_relation_up(&mut self) {
+        if self.selected_relation > 0 {
+            self.selected_relation -= 1;
+        }
+    }
+
+    pub fn navigate_to_relation(&mut self) {
+        let doc = match self.selected_doc_meta() {
+            Some(d) => d,
+            None => return,
+        };
+        let relations = self.store.related_to(&doc.path);
+        let target = match relations.get(self.selected_relation) {
+            Some((_, path)) => (*path).clone(),
+            None => return,
+        };
+
+        if let Some(target_doc) = self.store.get(&target) {
+            let doc_type = target_doc.doc_type.clone();
+            if let Some(type_idx) = self.doc_types.iter().position(|t| *t == doc_type) {
+                self.selected_type = type_idx;
+                let docs = self.docs_for_current_type();
+                if let Some(doc_idx) = docs.iter().position(|d| d.path == target) {
+                    self.selected_doc = doc_idx;
+                }
+            }
+        }
+        self.preview_tab = PreviewTab::Preview;
+        self.selected_relation = 0;
+    }
 
     pub fn move_type_next(&mut self) {
         if self.selected_type < self.doc_types.len() - 1 {

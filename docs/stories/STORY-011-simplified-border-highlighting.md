@@ -13,7 +13,7 @@ related:
 
 ## Context
 
-With the panel focus model removed, the conditional border styling (cyan/double for active panel, dark gray/plain for inactive) no longer makes sense. The Types panel is never "active" in the old sense, and the doc list is always the navigable surface. Borders should reflect this static reality. The help overlay also references the old "Switch panels" keybinding text.
+With the panel focus model removed, border styling shifts from tracking which panel is active to tracking which surface the user is interacting with. The Types panel is never navigable, so it always gets a passive border. The doc list and relations panel trade focus via the Tab key, and their borders reflect this.
 
 ## Acceptance Criteria
 
@@ -23,13 +23,25 @@ With the panel focus model removed, the conditional border styling (cyan/double 
   **When** the Types panel renders
   **Then** it always uses a plain border with dark gray colour, regardless of any selection state
 
-### AC2: Document list always has an active border
+### AC2: Document list has an active border by default
 
-- **Given** the dashboard is displayed
+- **Given** the Preview tab is active
   **When** the document list renders
-  **Then** it always uses a double border with cyan colour
+  **Then** it uses a double border with cyan colour
 
-### AC3: Help overlay reflects new keybindings
+### AC3: Document list border dims when Relations tab is active
+
+- **Given** the Relations tab is active
+  **When** the document list renders
+  **Then** it uses a plain border with dark gray colour
+
+### AC4: Relations panel gets an active border when focused
+
+- **Given** the Relations tab is active
+  **When** the relations panel renders
+  **Then** it uses a cyan border
+
+### AC5: Help overlay reflects new keybindings
 
 - **Given** the help overlay is open
   **When** the user reads the keybinding list
@@ -39,14 +51,13 @@ With the panel focus model removed, the conditional border styling (cyan/double 
 
 ### In Scope
 
-- Removing conditional border logic from `draw_type_panel` and `draw_doc_list`
 - Types panel: always plain border, dark gray
-- Doc list: always double border, cyan
+- Doc list: cyan/double when Preview tab active, plain/gray when Relations tab active
+- Relations panel: cyan border when active, gray when inactive
 - Updating help overlay text
 
 ### Out of Scope
 
-- Changing the preview/relations tab border style
 - Layout changes (panel sizes, positions)
 - Navigation model changes (STORY-009)
-- Relations tab changes (STORY-010)
+- Relation navigation styling (STORY-010)

@@ -150,9 +150,27 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                         (KeyCode::Char('d'), _) if app.selected_doc_meta().is_some() => {
                             app.open_delete_confirm();
                         }
-                        (KeyCode::Enter, _) => app.enter_fullscreen(),
-                        (KeyCode::Char('j') | KeyCode::Down, _) => app.move_down(),
-                        (KeyCode::Char('k') | KeyCode::Up, _) => app.move_up(),
+                        (KeyCode::Enter, _) => {
+                            if app.preview_tab == app::PreviewTab::Relations {
+                                app.navigate_to_relation();
+                            } else {
+                                app.enter_fullscreen();
+                            }
+                        }
+                        (KeyCode::Char('j') | KeyCode::Down, _) => {
+                            if app.preview_tab == app::PreviewTab::Relations {
+                                app.move_relation_down();
+                            } else {
+                                app.move_down();
+                            }
+                        }
+                        (KeyCode::Char('k') | KeyCode::Up, _) => {
+                            if app.preview_tab == app::PreviewTab::Relations {
+                                app.move_relation_up();
+                            } else {
+                                app.move_up();
+                            }
+                        }
                         (KeyCode::Char('h') | KeyCode::Left, _) => app.move_type_prev(),
                         (KeyCode::Char('l') | KeyCode::Right, _) => app.move_type_next(),
                         (KeyCode::Tab, _) => app.toggle_preview_tab(),

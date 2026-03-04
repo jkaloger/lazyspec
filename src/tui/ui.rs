@@ -124,6 +124,7 @@ fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
+    let relations_focused = app.preview_tab == PreviewTab::Relations;
     let docs = app.docs_for_current_type();
     let items: Vec<ListItem> = docs
         .iter()
@@ -134,19 +135,25 @@ fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("?");
-            let status_style = Style::default().fg(status_color(&doc.status));
+            let dim = relations_focused;
+            let status_style = if dim {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default().fg(status_color(&doc.status))
+            };
             let mut spans = vec![
-                Span::raw(format!("  {:<30} ", filename)),
+                Span::styled(
+                    format!("  {:<30} ", filename),
+                    if dim { Style::default().fg(Color::DarkGray) } else { Style::default() },
+                ),
                 Span::styled(format!("{:<12}", doc.status), status_style),
             ];
             for (idx, tag) in doc.tags.iter().take(3).enumerate() {
                 if idx > 0 {
                     spans.push(Span::raw(" "));
                 }
-                spans.push(Span::styled(
-                    format!("[{}]", tag),
-                    Style::default().fg(tag_color(tag)),
-                ));
+                let tc = if dim { Color::DarkGray } else { tag_color(tag) };
+                spans.push(Span::styled(format!("[{}]", tag), Style::default().fg(tc)));
             }
             if doc.tags.len() > 3 {
                 spans.push(Span::styled(
@@ -155,7 +162,13 @@ fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
                 ));
             }
             let line = Line::from(spans);
-            let style = if i == app.selected_doc {
+            let style = if dim {
+                if i == app.selected_doc {
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                }
+            } else if i == app.selected_doc {
                 Style::default().add_modifier(Modifier::REVERSED)
             } else {
                 Style::default()
@@ -164,11 +177,17 @@ fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    let (border_style, border_type) = if relations_focused {
+        (Style::default().fg(Color::DarkGray), BorderType::Plain)
+    } else {
+        (Style::default().fg(Color::Cyan), BorderType::Double)
+    };
+
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .border_type(BorderType::Double)
+            .border_style(border_style)
+            .border_type(border_type)
             .title(" Documents "),
     );
     f.render_widget(list, area);
@@ -199,9 +218,15 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
         ])
     };
 
+    let border_style = if app.preview_tab == PreviewTab::Relations {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(border_style)
         .title(preview_title);
 
     match app.preview_tab {
@@ -290,6 +315,7 @@ fn draw_relations_content(f: &mut Frame, app: &App, area: Rect, block: Block) {
     }
 
     let mut items: Vec<ListItem> = Vec::new();
+    let mut flat_index = 0usize;
 
     let type_order = [
         RelationType::Implements,
@@ -316,6 +342,8 @@ fn draw_relations_content(f: &mut Frame, app: &App, area: Rect, block: Block) {
         ))));
 
         for (_, target_path) in &matching {
+            let selected = flat_index == app.selected_relation;
+
             let (title, status_str, status_clr) =
                 if let Some(target_doc) = app.store.get(target_path) {
                     (
@@ -331,11 +359,25 @@ fn draw_relations_content(f: &mut Frame, app: &App, area: Rect, block: Block) {
                     (name, "missing".to_string(), Color::Red)
                 };
 
+            let (indicator_span, title_style) = if selected {
+                (
+                    Span::styled("  > ", Style::default().fg(Color::Cyan)),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                )
+            } else {
+                (
+                    Span::raw("    "),
+                    Style::default(),
+                )
+            };
+
             items.push(ListItem::new(Line::from(vec![
-                Span::raw("    "),
-                Span::raw(format!("{:<35} ", title)),
+                indicator_span,
+                Span::styled(format!("{:<35} ", title), title_style),
                 Span::styled(status_str, Style::default().fg(status_clr)),
             ])));
+
+            flat_index += 1;
         }
     }
 
