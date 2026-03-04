@@ -28,21 +28,33 @@ pub fn run(store: Store) -> Result<()> {
             code, modifiers, ..
         }) = event::read()?
         {
-            match (code, modifiers) {
-                (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                    app.should_quit = true;
+            if app.fullscreen_doc {
+                match code {
+                    KeyCode::Esc | KeyCode::Char('q') => app.exit_fullscreen(),
+                    KeyCode::Char('j') | KeyCode::Down => app.scroll_down(),
+                    KeyCode::Char('k') | KeyCode::Up => app.scroll_up(),
+                    KeyCode::Char('g') => app.scroll_offset = 0,
+                    KeyCode::Char('G') => app.scroll_offset = u16::MAX / 2,
+                    _ => {}
                 }
-                (KeyCode::Char('j') | KeyCode::Down, _) => app.move_down(),
-                (KeyCode::Char('k') | KeyCode::Up, _) => app.move_up(),
-                (KeyCode::Char('h') | KeyCode::Left, _) => {
-                    app.active_panel = app::Panel::Types;
+            } else {
+                match (code, modifiers) {
+                    (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                        app.should_quit = true;
+                    }
+                    (KeyCode::Enter, _) => app.enter_fullscreen(),
+                    (KeyCode::Char('j') | KeyCode::Down, _) => app.move_down(),
+                    (KeyCode::Char('k') | KeyCode::Up, _) => app.move_up(),
+                    (KeyCode::Char('h') | KeyCode::Left, _) => {
+                        app.active_panel = app::Panel::Types;
+                    }
+                    (KeyCode::Char('l') | KeyCode::Right, _) => {
+                        app.active_panel = app::Panel::DocList;
+                    }
+                    (KeyCode::Char('g'), _) => app.move_to_top(),
+                    (KeyCode::Char('G'), _) => app.move_to_bottom(),
+                    _ => {}
                 }
-                (KeyCode::Char('l') | KeyCode::Right, _) => {
-                    app.active_panel = app::Panel::DocList;
-                }
-                (KeyCode::Char('g'), _) => app.move_to_top(),
-                (KeyCode::Char('G'), _) => app.move_to_bottom(),
-                _ => {}
             }
         }
 

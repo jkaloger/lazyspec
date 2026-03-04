@@ -14,6 +14,8 @@ pub struct App {
     pub selected_doc: usize,
     pub doc_types: Vec<DocType>,
     pub should_quit: bool,
+    pub fullscreen_doc: bool,
+    pub scroll_offset: u16,
 }
 
 impl App {
@@ -25,6 +27,8 @@ impl App {
             selected_doc: 0,
             doc_types: vec![DocType::Rfc, DocType::Adr, DocType::Spec, DocType::Plan],
             should_quit: false,
+            fullscreen_doc: false,
+            scroll_offset: 0,
         }
     }
 
@@ -98,6 +102,26 @@ impl App {
                 self.selected_doc = 0;
             }
         }
+    }
+
+    pub fn enter_fullscreen(&mut self) {
+        if self.selected_doc_meta().is_some() {
+            self.fullscreen_doc = true;
+            self.scroll_offset = 0;
+        }
+    }
+
+    pub fn exit_fullscreen(&mut self) {
+        self.fullscreen_doc = false;
+        self.scroll_offset = 0;
+    }
+
+    pub fn scroll_down(&mut self) {
+        self.scroll_offset = self.scroll_offset.saturating_add(1);
+    }
+
+    pub fn scroll_up(&mut self) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(1);
     }
 
     pub fn move_to_bottom(&mut self) {

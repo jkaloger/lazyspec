@@ -1,7 +1,7 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
+    text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
     Frame,
 };
@@ -20,6 +20,11 @@ fn status_color(status: &Status) -> Color {
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
+    if app.fullscreen_doc {
+        draw_fullscreen(f, app);
+        return;
+    }
+
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(0)])
@@ -143,7 +148,8 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
         "No document selected.".to_string()
     };
 
-    let paragraph = Paragraph::new(Text::raw(content))
+    let text = tui_markdown::from_str(&content);
+    let paragraph = Paragraph::new(text)
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -152,4 +158,48 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
         )
         .wrap(Wrap { trim: false });
     f.render_widget(paragraph, area);
+}
+
+fn draw_fullscreen(f: &mut Frame, app: &App) {
+    let area = f.area();
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
+        .split(area);
+
+    if let Some(doc) = app.selected_doc_meta() {
+        let header = Line::from(vec![
+            Span::styled(
+                format!(" {} ", doc.title),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" | "),
+            Span::styled(
+                format!("{}", doc.status),
+                Style::default().fg(status_color(&doc.status)),
+            ),
+            Span::raw(format!(" | {} | {} ", doc.doc_type, doc.author)),
+            Span::styled("[Esc] back", Style::default().fg(Color::DarkGray)),
+        ]);
+        f.render_widget(Paragraph::new(header), layout[0]);
+
+        let body = match app.store.get_body(&doc.path) {
+            Ok(b) => b,
+            Err(_) => "Error loading document.".to_string(),
+        };
+
+        let text = tui_markdown::from_str(&body);
+        let paragraph = Paragraph::new(text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            )
+            .wrap(Wrap { trim: false })
+            .scroll((app.scroll_offset, 0));
+        f.render_widget(paragraph, layout[1]);
+    }
 }
