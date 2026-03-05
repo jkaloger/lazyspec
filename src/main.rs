@@ -11,11 +11,16 @@ fn main() -> anyhow::Result<()> {
             let cwd = std::env::current_dir()?;
             lazyspec::cli::init::run(&cwd)?;
         }
-        Some(Commands::Create { doc_type, title, author }) => {
+        Some(Commands::Create { doc_type, title, author, json }) => {
             let cwd = std::env::current_dir()?;
             let config = Config::load(&cwd)?;
-            let path = lazyspec::cli::create::run(&cwd, &config, &doc_type, &title, &author)?;
-            println!("{}", path.display());
+            if json {
+                let output = lazyspec::cli::create::run_json(&cwd, &config, &doc_type, &title, &author)?;
+                println!("{}", output);
+            } else {
+                let path = lazyspec::cli::create::run(&cwd, &config, &doc_type, &title, &author)?;
+                println!("{}", path.display());
+            }
         }
         Some(Commands::List { doc_type, status, json }) => {
             let cwd = std::env::current_dir()?;
@@ -23,11 +28,16 @@ fn main() -> anyhow::Result<()> {
             let store = Store::load(&cwd, &config)?;
             lazyspec::cli::list::run(&store, doc_type.as_deref(), status.as_deref(), json);
         }
-        Some(Commands::Show { id }) => {
+        Some(Commands::Show { id, json }) => {
             let cwd = std::env::current_dir()?;
             let config = Config::load(&cwd)?;
             let store = Store::load(&cwd, &config)?;
-            lazyspec::cli::show::run(&store, &id)?;
+            if json {
+                let output = lazyspec::cli::show::run_json(&store, &id)?;
+                println!("{}", output);
+            } else {
+                lazyspec::cli::show::run(&store, &id)?;
+            }
         }
         Some(Commands::Update { path, status, title }) => {
             let cwd = std::env::current_dir()?;
@@ -62,11 +72,38 @@ fn main() -> anyhow::Result<()> {
             let store = Store::load(&cwd, &config)?;
             lazyspec::cli::search::run(&store, &query, doc_type.as_deref(), json);
         }
-        Some(Commands::Validate { json }) => {
+        Some(Commands::Status { json }) => {
             let cwd = std::env::current_dir()?;
             let config = Config::load(&cwd)?;
             let store = Store::load(&cwd, &config)?;
-            let exit_code = lazyspec::cli::validate::run(&store, json);
+            if json {
+                println!("{}", lazyspec::cli::status::run_json(&store));
+            } else {
+                let output = lazyspec::cli::status::run_human(&store);
+                if output.is_empty() {
+                    println!("No documents found.");
+                } else {
+                    print!("{}", output);
+                }
+            }
+        }
+        Some(Commands::Context { id, json }) => {
+            let cwd = std::env::current_dir()?;
+            let config = Config::load(&cwd)?;
+            let store = Store::load(&cwd, &config)?;
+            if json {
+                let output = lazyspec::cli::context::run_json(&store, &id)?;
+                println!("{}", output);
+            } else {
+                let output = lazyspec::cli::context::run_human(&store, &id)?;
+                print!("{}", output);
+            }
+        }
+        Some(Commands::Validate { json, warnings }) => {
+            let cwd = std::env::current_dir()?;
+            let config = Config::load(&cwd)?;
+            let store = Store::load(&cwd, &config)?;
+            let exit_code = lazyspec::cli::validate::run_full(&store, json, warnings);
             if exit_code != 0 {
                 std::process::exit(exit_code);
             }

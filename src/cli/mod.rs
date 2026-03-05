@@ -1,6 +1,9 @@
+pub mod context;
 pub mod create;
+pub mod status;
 pub mod delete;
 pub mod init;
+pub mod json;
 pub mod link;
 pub mod list;
 pub mod show;
@@ -32,6 +35,9 @@ pub enum Commands {
         /// Author name
         #[arg(long, default_value = "unknown")]
         author: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// List documents
     List {
@@ -50,6 +56,9 @@ pub enum Commands {
         /// Document path or shorthand ID (e.g. RFC-001)
         #[arg()]
         id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Update document frontmatter
     Update {
@@ -105,10 +114,28 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Show full project status with all documents and validation
+    Status {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the full document chain (RFC -> Story -> Iteration)
+    Context {
+        /// Document path or shorthand ID (e.g. ITERATION-001)
+        #[arg()]
+        id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Validate all documents
     Validate {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Show warnings in addition to errors
+        #[arg(long)]
+        warnings: bool,
     },
 }

@@ -1,9 +1,8 @@
+use crate::cli::json::doc_to_json;
 use crate::engine::document::DocType;
-use crate::engine::store::Store;
+use crate::engine::store::{SearchResult, Store};
 
-pub fn run(store: &Store, query: &str, doc_type: Option<&str>, json: bool) {
-    let mut results = store.search(query);
-
+fn filter_results<'a>(results: &mut Vec<SearchResult<'a>>, doc_type: Option<&str>) {
     if let Some(dt) = doc_type {
         let filter_type = match dt.to_lowercase().as_str() {
             "rfc" => Some(DocType::Rfc),
@@ -16,22 +15,27 @@ pub fn run(store: &Store, query: &str, doc_type: Option<&str>, json: bool) {
             results.retain(|r| r.doc.doc_type == ft);
         }
     }
+}
+
+fn json_output(results: &[SearchResult]) -> String {
+    let items: Vec<_> = results
+        .iter()
+        .map(|r| {
+            let mut json = doc_to_json(r.doc);
+            json["match_field"] = serde_json::Value::String(r.match_field.to_string());
+            json["snippet"] = serde_json::Value::String(r.snippet.clone());
+            json
+        })
+        .collect();
+    serde_json::to_string_pretty(&items).unwrap()
+}
+
+pub fn run(store: &Store, query: &str, doc_type: Option<&str>, json: bool) {
+    let mut results = store.search(query);
+    filter_results(&mut results, doc_type);
 
     if json {
-        let items: Vec<_> = results
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "path": r.doc.path.to_string_lossy(),
-                    "title": r.doc.title,
-                    "type": format!("{}", r.doc.doc_type),
-                    "status": format!("{}", r.doc.status),
-                    "match_field": r.match_field,
-                    "snippet": r.snippet,
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&items).unwrap());
+        println!("{}", json_output(&results));
     } else {
         if results.is_empty() {
             println!("No results for \"{}\"", query);
@@ -50,4 +54,10 @@ pub fn run(store: &Store, query: &str, doc_type: Option<&str>, json: bool) {
             println!();
         }
     }
+}
+
+pub fn run_json(store: &Store, query: &str, doc_type: Option<&str>) -> String {
+    let mut results = store.search(query);
+    filter_results(&mut results, doc_type);
+    json_output(&results)
 }

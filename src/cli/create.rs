@@ -1,4 +1,6 @@
+use crate::cli::json::doc_to_json;
 use crate::engine::config::Config;
+use crate::engine::document::DocMeta;
 use crate::engine::template;
 use anyhow::{anyhow, Result};
 use chrono::Local;
@@ -48,6 +50,24 @@ pub fn run(
     fs::write(&target_path, content)?;
 
     Ok(target_path)
+}
+
+pub fn run_json(
+    root: &Path,
+    config: &Config,
+    doc_type: &str,
+    title: &str,
+    author: &str,
+) -> Result<String> {
+    let path = run(root, config, doc_type, title, author)?;
+    let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+
+    let content = fs::read_to_string(&path)?;
+    let mut meta = DocMeta::parse(&content)?;
+    meta.path = relative;
+
+    let json = doc_to_json(&meta);
+    Ok(serde_json::to_string_pretty(&json)?)
 }
 
 fn default_template(doc_type: &str) -> String {
