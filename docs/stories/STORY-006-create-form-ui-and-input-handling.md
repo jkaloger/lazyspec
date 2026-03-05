@@ -1,7 +1,7 @@
 ---
 title: "Create Form UI and Input Handling"
 type: story
-status: draft
+status: accepted
 author: "jkaloger"
 date: 2026-03-05
 tags: [tui, modal, input]

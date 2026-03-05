@@ -1,7 +1,7 @@
 ---
 title: "Document Creation on Submit"
 type: story
-status: draft
+status: accepted
 author: "jkaloger"
 date: 2026-03-05
 tags: [tui, creation, engine]
