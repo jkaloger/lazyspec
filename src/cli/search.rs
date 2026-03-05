@@ -1,4 +1,5 @@
 use crate::cli::json::doc_to_json;
+use crate::cli::style::{dim, doc_card};
 use crate::engine::document::DocType;
 use crate::engine::store::{SearchResult, Store};
 
@@ -43,14 +44,11 @@ pub fn run(store: &Store, query: &str, doc_type: Option<&str>, json: bool) {
         }
         for r in &results {
             println!(
-                "{:<40} {:<10} {:<12} [{}]",
-                r.doc.title,
-                r.doc.doc_type,
-                r.doc.status,
-                r.match_field,
+                "{} {}",
+                doc_card(&r.doc.title, &r.doc.doc_type, &r.doc.status, &r.doc.path),
+                dim(&format!("[{}]", r.match_field)),
             );
-            println!("  {}", r.doc.path.display());
-            println!("  ...{}...", r.snippet.trim());
+            println!("  {}", dim(&format!("...{}...", r.snippet.trim())));
             println!();
         }
     }

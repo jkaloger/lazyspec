@@ -1,4 +1,5 @@
 pub mod context;
+pub mod style;
 pub mod create;
 pub mod status;
 pub mod delete;

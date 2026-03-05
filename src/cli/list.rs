@@ -1,4 +1,5 @@
 use crate::cli::json::doc_to_json;
+use crate::cli::style::doc_card;
 use crate::engine::document::DocType;
 use crate::engine::store::{Filter, Store};
 
@@ -32,10 +33,8 @@ pub fn run(store: &Store, doc_type: Option<&str>, status: Option<&str>, json: bo
     } else {
         for doc in docs {
             println!(
-                "{:<40} {:<12} {}",
-                doc.title,
-                doc.status,
-                doc.path.display()
+                "{}",
+                doc_card(&doc.title, &doc.doc_type, &doc.status, &doc.path)
             );
         }
     }
