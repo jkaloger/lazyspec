@@ -1,10 +1,23 @@
+use crate::cli::style::{error_prefix, warning_prefix};
 use crate::engine::store::Store;
+use console::{colors_enabled, Style};
+
+fn success_message() -> String {
+    if colors_enabled() {
+        format!(
+            "{} All documents valid.",
+            Style::new().green().bold().apply_to("\u{2713}")
+        )
+    } else {
+        "All documents valid.".to_string()
+    }
+}
 
 pub fn run(store: &Store, json: bool) -> i32 {
     let errors = store.validate();
     if errors.is_empty() {
         if !json {
-            println!("All documents valid.");
+            println!("{}", success_message());
         }
         return 0;
     }
@@ -14,7 +27,7 @@ pub fn run(store: &Store, json: bool) -> i32 {
         println!("{}", serde_json::to_string_pretty(&items).unwrap());
     } else {
         for error in &errors {
-            eprintln!("  {}", error);
+            eprintln!("  {} {}", error_prefix(), error);
         }
     }
     2
@@ -29,7 +42,7 @@ pub fn run_full(store: &Store, json: bool, warnings: bool) -> i32 {
     } else {
         let output = run_human(store, warnings);
         if output.is_empty() {
-            println!("All documents valid.");
+            println!("{}", success_message());
         } else {
             eprint!("{}", output);
         }
@@ -54,11 +67,11 @@ pub fn run_human(store: &Store, show_warnings: bool) -> String {
     let mut output = String::new();
 
     for error in &result.errors {
-        output.push_str(&format!("  error: {}\n", error));
+        output.push_str(&format!("  {} {}\n", error_prefix(), error));
     }
     if show_warnings {
         for warning in &result.warnings {
-            output.push_str(&format!("  warning: {}\n", warning));
+            output.push_str(&format!("  {} {}\n", warning_prefix(), warning));
         }
     }
 

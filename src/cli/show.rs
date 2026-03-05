@@ -1,19 +1,41 @@
 use crate::cli::json::doc_to_json;
+use crate::cli::style::{bold, dim, separator, styled_status};
 use crate::engine::store::Store;
 use anyhow::Result;
+use console::colors_enabled;
+
+fn title_box(title: &str) -> String {
+    if !colors_enabled() {
+        return format!("# {}", title);
+    }
+
+    let padded = format!(" {} ", title);
+    let width = padded.len();
+    let top = format!("\u{256d}{}\u{256e}", "\u{2500}".repeat(width));
+    let mid = format!("\u{2502}{}\u{2502}", bold(&padded));
+    let bot = format!("\u{2570}{}\u{256f}", "\u{2500}".repeat(width));
+    format!("{}\n{}\n{}", top, mid, bot)
+}
 
 pub fn run(store: &Store, id: &str) -> Result<()> {
     let doc = store
         .resolve_shorthand(id)
         .ok_or_else(|| anyhow::anyhow!("document not found: {}", id))?;
 
-    println!("# {}", doc.title);
+    println!("{}", title_box(&doc.title));
     println!(
-        "Type: {} | Status: {} | Author: {}",
-        doc.doc_type, doc.status, doc.author
+        "{} {}  {} {}  {} {}",
+        dim("Type:"),
+        bold(&doc.doc_type.to_string()),
+        dim("Status:"),
+        styled_status(&doc.status),
+        dim("Author:"),
+        bold(&doc.author),
     );
-    println!("Date: {} | Tags: {}", doc.date, doc.tags.join(", "));
-    println!();
+    if !doc.tags.is_empty() {
+        println!("{} {}", dim("Tags:"), doc.tags.join(", "));
+    }
+    println!("{}", separator());
 
     let body = store.get_body(&doc.path)?;
     println!("{}", body);
