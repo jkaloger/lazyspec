@@ -7,7 +7,7 @@ description: Use when an Iteration has a task breakdown and is ready for impleme
 NO IMPLEMENTATION WITHOUT A PLAN
 ```
 
-If the Iteration doesn't have a numbered task breakdown in `## Changes`, you can't build yet. Invoke create-iteration first.
+If the Iteration doesn't have a numbered task breakdown in `## Changes`, you can't build yet. Use the `/create-iteration` skill first.
 
 <HARD-GATE>
 Do NOT begin implementation without a complete Iteration document with numbered
@@ -72,12 +72,11 @@ Done.shape: double_circle
 
 ## Preflight
 
-1. Read relevant documents using `lazyspec show` before modifying anything
-2. Check for existing artifacts using `lazyspec search` and `lazyspec list`
-3. Read the iteration document with `lazyspec show <iteration-id>`
-4. Read the parent Story with `lazyspec show <story-id>`
-5. Read the RFC with `lazyspec show <rfc-id>`
-6. Extract all tasks from `## Changes` before dispatching any subagent
+1. Resolve the full chain with `lazyspec context <iteration-id>` to see RFC -> Story -> Iteration
+2. Read the iteration body with `lazyspec show <iteration-id>` to get the task breakdown
+3. Read the parent Story body with `lazyspec show <story-id>` to get the ACs
+4. Read the RFC body with `lazyspec show <rfc-id>` for design intent
+5. Extract all tasks from `## Changes` before dispatching any subagent
 
 ## Subagent Dispatch
 
@@ -98,11 +97,10 @@ Done.shape: double_circle
 
 ## Setup
 
-1. **Read the iteration:** Run `lazyspec show <iteration-id>` to get the full document with task breakdown.
-2. **Read the parent story:** Follow the `implements` link. Run `lazyspec show <story-id>` to get the ACs.
-3. **Read the RFC:** Follow the Story's `implements` link. Run `lazyspec show <rfc-id>` for design intent.
-4. **Extract all tasks** from the iteration's `## Changes` section. Copy the full text of each task -- subagents receive text, not file references.
-5. **Create task tracking** using TodoWrite with one entry per task.
+1. **Resolve the chain:** Run `lazyspec context <iteration-id>` to see the full RFC -> Story -> Iteration chain at a glance.
+2. **Read the documents:** Run `lazyspec show <iteration-id>`, `lazyspec show <story-id>`, and `lazyspec show <rfc-id>` to get the full bodies (task breakdown, ACs, design intent).
+3. **Extract all tasks** from the iteration's `## Changes` section. Copy the full text of each task -- subagents receive text, not file references.
+4. **Create task tracking** using TodoWrite with one entry per task.
 
 ## Per-Task Loop
 
@@ -129,9 +127,10 @@ Before you begin: if you have questions about requirements, approach,
 dependencies, or anything unclear -- ask them now. Don't guess.
 
 To find relevant files and prior work, use the lazyspec CLI:
+- `lazyspec context <id>` to see the full RFC -> Story -> Iteration chain
 - `lazyspec search "<query>"` to find documents by keyword
-- `lazyspec show <path>` to read a document and its links
-- `lazyspec list iteration` to see existing iterations
+- `lazyspec show <id>` to read a document's full body
+- `lazyspec status --json` to get all documents and validation at once
 
 Use lazyspec to discover related specs before grepping the codebase.
 
@@ -222,11 +221,12 @@ Update task tracking. Proceed to next task.
 
 ### 10a. Context refresh (every 2 tasks)
 
-After completing tasks 2, 4, 6, etc., re-read the iteration and Story to prevent context drift:
+After completing tasks 2, 4, 6, etc., re-read the chain to prevent context drift:
 
-1. Run `lazyspec show <iteration-id>` to refresh the task list and status
-2. Run `lazyspec show <story-id>` to refresh the ACs
-3. Verify you are still following the task breakdown as written (not improvising)
+1. Run `lazyspec context <iteration-id>` to verify the chain is intact
+2. Run `lazyspec show <iteration-id>` to refresh the task list and status
+3. Run `lazyspec show <story-id>` to refresh the ACs
+4. Verify you are still following the task breakdown as written (not improvising)
 
 This counteracts the tendency for agents to drift from the plan as context grows.
 

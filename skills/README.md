@@ -12,7 +12,7 @@ A typical flow looks like:
 plan-work → write-rfc → create-story → create-iteration → build → review-iteration
 ```
 
-`resolve-context` can be called at any point to gather the full document chain (iteration → story → RFC) before starting work.
+`/resolve-context` can be used at any point to gather the full document chain (iteration → story → RFC) before starting work. When continuing in the same session (e.g. after `/create-story`), you already have context and can skip directly to `/create-iteration`.
 
 ### Reference
 

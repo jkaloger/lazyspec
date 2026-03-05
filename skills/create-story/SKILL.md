@@ -11,8 +11,10 @@ If you can't state given/when/then, you don't understand the work yet.
 
 <HARD-GATE>
 Do NOT create a Story without a parent RFC. If no RFC exists for this work,
-invoke write-rfc first.
-After completion: invoke resolve-context before any implementation.
+use the `/write-rfc` skill first.
+After completion: use the `/create-iteration` skill to plan the first iteration.
+You already have the RFC and Story context from writing this Story, so
+resolve-context is not needed when continuing in the same session.
 </HARD-GATE>
 
 ## Forbidden Actions
@@ -47,13 +49,13 @@ Find parent RFC -> RFC exists?
 
 RFC exists?.shape: diamond
 RFC exists? -> Create story: yes
-RFC exists? -> Invoke write-rfc: no
+RFC exists? -> Use /write-rfc skill: no
 
-Invoke write-rfc.shape: hexagon
+Use /write-rfc skill.shape: hexagon
 
-Create story -> Write acceptance criteria -> Link to RFC -> Define scope -> Validate -> Invoke resolve-context
+Create story -> Write acceptance criteria -> Link to RFC -> Define scope -> Validate -> Use /create-iteration skill
 
-Invoke resolve-context.shape: double_circle
+Use /create-iteration skill.shape: double_circle
 ```
 
 ## Preflight
@@ -66,7 +68,7 @@ Invoke resolve-context.shape: double_circle
 
 ## Steps
 
-1. **Find the parent RFC:** Run `lazyspec list rfc` to find the relevant RFC. Use `lazyspec show <id>` to verify it's the right one. If no RFC exists, invoke write-rfc first.
+1. **Find the parent RFC:** Run `lazyspec list rfc` to find the relevant RFC. Use `lazyspec show <id>` to verify it's the right one. If no RFC exists, use the `/write-rfc` skill first.
 
 2. **Create the story:** Run `lazyspec create story "<title>" --author <name>`
 

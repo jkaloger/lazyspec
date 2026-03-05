@@ -11,7 +11,7 @@ If you're about to write code without knowing where you are in the workflow, sto
 
 <HARD-GATE>
 Do NOT skip to implementation. Detect existing artifacts, classify the work,
-and invoke the right skill.
+and use the right skill.
 </HARD-GATE>
 
 ## Forbidden Actions
@@ -20,7 +20,7 @@ and invoke the right skill.
 - Do NOT write document files directly. Use `lazyspec create` to create documents and `lazyspec link` to create relationships.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id>` or `Read` a file before modifying it.
 - Do NOT skip the workflow pipeline. Features need RFC -> Story -> Iteration. Bug fixes need Iteration.
-- Do NOT invoke write-rfc, create-story, or create-iteration without user approval of the direction first.
+- Do NOT use /write-rfc, create-story, or create-iteration without user approval of the direction first.
 </NEVER>
 
 # Plan
@@ -54,35 +54,34 @@ Determine entry point -> RFC exists, no Story: Brainstorm slices
 Determine entry point -> Story exists, no Iteration: Resolve context
 Determine entry point -> Iteration with tasks: Ready to build
 
-No RFC: Brainstorm design -> User approves direction? -> Invoke write-rfc: yes
+No RFC: Brainstorm design -> User approves direction? -> Use /write-rfc skill: yes
 User approves direction? -> Revise: no
 Revise -> No RFC: Brainstorm design
 
-RFC exists, no Story: Brainstorm slices -> Invoke create-story
-Story exists, no Iteration: Resolve context -> Invoke resolve-context
-Iteration with tasks: Ready to build -> Invoke build
+RFC exists, no Story: Brainstorm slices -> Use /create-story skill
+Story exists, no Iteration: Resolve context -> Use /resolve-context skill
+Iteration with tasks: Ready to build -> Use /build skill
 
 Bug fix / small tweak (lightweight) -> Related Story exists?
 Related Story exists? -> Create iteration against it: yes
 Related Story exists? -> Create standalone iteration: no
 
-Create iteration against it -> Invoke create-iteration
-Create standalone iteration -> Invoke create-iteration
+Create iteration against it -> Use /create-iteration skill
+Create standalone iteration -> Use /create-iteration skill
 
-Invoke write-rfc.shape: double_circle
-Invoke create-story.shape: double_circle
-Invoke resolve-context.shape: double_circle
-Invoke create-iteration.shape: double_circle
-Invoke build.shape: double_circle
+Use /write-rfc skill.shape: double_circle
+Use /create-story skill.shape: double_circle
+Use /resolve-context skill.shape: double_circle
+Use /create-iteration skill.shape: double_circle
+Use /build skill.shape: double_circle
 ```
 
 ## Preflight
 
-1. Read relevant documents using `lazyspec show` before modifying anything
-2. Check for existing artifacts using `lazyspec search` and `lazyspec list`
-3. Search for existing RFCs, Stories, Iterations related to the work: `lazyspec search "<topic>"`, `lazyspec list rfc`, `lazyspec list story`, `lazyspec list iteration`
-4. Present findings to the user before choosing a direction
-5. Classify the work (new feature, bug fix, tweak, refactor) before selecting a pipeline
+1. Run `lazyspec status --json` to get all documents, relationships, and validation in one call
+2. Search for topic-specific matches: `lazyspec search "<topic>"`
+3. Present findings to the user before choosing a direction
+4. Classify the work (new feature, bug fix, tweak, refactor) before selecting a pipeline
 
 ## Subagent Dispatch
 
@@ -101,13 +100,11 @@ Invoke build.shape: double_circle
 
 ### 1. Detect existing artifacts
 
-Search for work related to what the user described:
+Get the full project state and search for related work:
 
 ```
+lazyspec status --json
 lazyspec search "<topic>"
-lazyspec list rfc
-lazyspec list story
-lazyspec list iteration --status draft
 ```
 
 ### 2. Present findings
@@ -142,19 +139,19 @@ Not all work needs the full pipeline. Before determining entry point, classify w
 
 | State                                   | Action                                                  |
 | --------------------------------------- | ------------------------------------------------------- |
-| Nothing exists                          | Brainstorm the design, then invoke `write-rfc`          |
-| RFC exists, no Stories                  | Brainstorm vertical slices, then invoke `create-story`  |
-| Story exists, no Iteration              | Invoke `resolve-context` (chains to `create-iteration`) |
-| Iteration exists with task breakdown    | Invoke `build`                                          |
-| Iteration exists without task breakdown | Invoke `create-iteration` to add tasks                  |
+| Nothing exists                          | Brainstorm the design, then use `/write-rfc`              |
+| RFC exists, no Stories                  | Brainstorm vertical slices, then use `/create-story`      |
+| Story exists, no Iteration              | Use `/resolve-context` (chains to `/create-iteration`)    |
+| Iteration exists with task breakdown    | Use `/build`                                              |
+| Iteration exists without task breakdown | Use `/create-iteration` to add tasks                      |
 
 **For bug fixes, tweaks, and refactors** (lightweight pipeline):
 
 | State                               | Action                                              |
 | ----------------------------------- | --------------------------------------------------- |
-| Related Story exists                | Invoke `create-iteration` linked to that Story      |
-| No related Story (standalone fix)   | Invoke `create-iteration` as a standalone iteration |
-| Iteration already exists with tasks | Invoke `build`                                      |
+| Related Story exists                | Use `/create-iteration` linked to that Story      |
+| No related Story (standalone fix)   | Use `/create-iteration` as a standalone iteration |
+| Iteration already exists with tasks | Use `/build`                                      |
 
 ### 5. Brainstorm (when needed)
 
@@ -179,18 +176,18 @@ Brainstorming is fractal -- it applies at whatever level you're entering:
 
 - This is handled by create-iteration, which generates the task breakdown
 - Propose 2-3 design approaches with trade-offs
-- Invoke resolve-context, which chains to create-iteration
+- Use /resolve-context skill, which chains to create-iteration
 
 **Lightweight iteration (bug fix / tweak):**
 
 - Confirm the problem or change with the user
 - If a related Story exists, confirm linking to it
 - Propose 2-3 design approaches with trade-offs
-- Invoke create-iteration directly (no resolve-context needed for standalone iterations)
+- Use /create-iteration skill directly (no resolve-context needed for standalone iterations)
 
-### 6. Invoke the appropriate skill
+### 6. Use the appropriate skill
 
-After determining the entry point and brainstorming (if needed), invoke the skill. Each skill chains directly to its successor.
+After determining the entry point and brainstorming (if needed), use the Skill tool to invoke the next skill (e.g. `/write-rfc`, `/create-story`, `/create-iteration`, `/build`). Each skill chains to its successor -- follow the chain, don't skip ahead.
 
 ## Red Flags
 

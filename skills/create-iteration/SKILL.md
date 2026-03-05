@@ -11,11 +11,11 @@ This skill creates the iteration document. It does NOT write code.
 
 <HARD-GATE>
 Do NOT write test code or production code in this skill. Plan tests and
-tasks only. For feature work linked to a Story, invoke resolve-context first
+tasks only. For feature work linked to a Story, use `/resolve-context` first
 if you haven't already. Standalone iterations (bug fixes, tweaks, refactors)
 do not require a parent Story or resolve-context.
 After completion: present the iteration to the user for review.
-Only invoke build after the user explicitly confirms.
+Only use the `/build` skill after the user explicitly confirms.
 </HARD-GATE>
 
 ## Forbidden Actions
@@ -59,19 +59,17 @@ Present to user for review -> User confirms: approved
 Present to user for review -> Revise: changes requested
 Revise -> Write task breakdown
 
-User confirms -> Invoke build
+User confirms -> Use /build skill
 
 Present to user for review.shape: diamond
-Invoke build.shape: double_circle
+Use /build skill.shape: double_circle
 ```
 
 ## Preflight
 
-1. Read relevant documents using `lazyspec show` before modifying anything
-2. Check for existing artifacts using `lazyspec search` and `lazyspec list`
-3. Read the parent Story's ACs with `lazyspec show <story-id>`
-4. List existing iterations: `lazyspec list iteration`
-5. Check no existing iteration already covers the same ACs
+1. If linked to a Story: run `lazyspec context <story-id>` to see the chain, then `lazyspec show <story-id>` for the full ACs
+2. Run `lazyspec status --json` to see all documents and check no existing iteration covers the same ACs
+3. Read relevant documents using `lazyspec show` before modifying anything
 
 ## Subagent Dispatch
 
@@ -88,8 +86,8 @@ Invoke build.shape: double_circle
 
 ## Steps
 
-1. **Gather context:** Check existing iterations: `lazyspec list iteration`. Use `lazyspec search "<keyword>"` to find related documents, ADRs, and prior work.
-   - **If linked to a Story:** Run `lazyspec show <story-id>` to read the Story and its ACs. If you haven't already resolved context, invoke resolve-context first.
+1. **Gather context:** Run `lazyspec status --json` to see all documents at once, then `lazyspec search "<keyword>"` for topic-specific matches.
+   - **If linked to a Story:** Run `lazyspec context <story-id>` to see the chain, then `lazyspec show <story-id>` to read the full ACs. If you haven't already resolved context, use `/resolve-context` first.
    - **If standalone (bug fix, tweak, refactor):** Gather context from the codebase directly. Understand the affected code and the problem being solved. No Story or resolve-context required.
 
 2. **Discover relevant code:** Use `lazyspec search` to find specs that reference the modules and types you'll be working with. Read the referenced file paths from those specs to understand the existing code before planning tasks. Task breakdowns must reference real, verified file paths.
@@ -148,7 +146,7 @@ Invoke build.shape: double_circle
 
 9. **Validate:** Run `lazyspec validate`.
 
-10. **Present to user:** Show the user the complete iteration document (task breakdown, test plan, linked ACs). Ask for explicit confirmation before proceeding. Do NOT invoke build until the user approves.
+10. **Present to user:** Show the user the complete iteration document (task breakdown, test plan, linked ACs). Ask for explicit confirmation before proceeding. Do NOT use `/build` until the user approves.
 
 ## Red Flags
 
@@ -156,7 +154,7 @@ Invoke build.shape: double_circle
 |----------|---------|
 | "Let me just start coding" | This skill plans. Build writes code. |
 | "I'll write the tests now" | Plan the tests here, write them during build. |
-| "I'll invoke build right after" | Stop. Present to the user. Wait for confirmation. |
+| "I'll use /build right after" | Stop. Present to the user. Wait for confirmation. |
 | "The user will probably approve" | Probably isn't confirmed. Ask. |
 
 ## Verification
@@ -169,7 +167,7 @@ Before claiming this skill is complete:
 - [ ] Each task includes file paths and describes implementation. If linked to a Story, tasks reference Story ACs.
 - [ ] `## Test Plan` section documents planned tests
 - [ ] Iteration has been presented to the user
-- [ ] User has explicitly confirmed before build is invoked
+- [ ] User has explicitly confirmed before `/build` is used
 - [ ] No test code or production code has been written
 
 ## Rules

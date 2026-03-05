@@ -12,7 +12,7 @@ If you haven't read the RFC -> Story -> existing Iteration chain, you cannot wri
 <HARD-GATE>
 Do NOT begin implementation without completing this skill. Read the full
 RFC -> Story -> existing Iteration chain before writing any code.
-After completion: invoke create-iteration.
+After completion: use the `/create-iteration` skill.
 </HARD-GATE>
 
 ## Forbidden Actions
@@ -42,18 +42,15 @@ build.style.opacity: 0.4
 ## Workflow
 
 ```d2
-Identify target doc -> Show target -> Walk related links -> Show each linked doc -> Search for existing work -> State context back -> Context complete
+Identify target doc -> Resolve chain -> Read bodies if needed -> Check for existing work -> State context back -> Context complete
 
 Context complete.shape: double_circle
 ```
 
 ## Preflight
 
-1. Read relevant documents using `lazyspec show` before modifying anything
-2. Check for existing artifacts using `lazyspec search` and `lazyspec list`
-3. Identify the target document path or ID
-4. Confirm the document exists with `lazyspec show <id>`
-5. Check the document's `related` frontmatter for links to follow
+1. Identify the target document path or ID
+2. Confirm the document exists with `lazyspec show <id>`
 
 ## Subagent Dispatch
 
@@ -65,7 +62,6 @@ Context complete.shape: double_circle
 
 | Operation | Agent Type | Tier | Context to provide |
 |-----------|-----------|------|-------------------|
-| Walk document chain | Explore | Medium | Starting document path, relationship types to follow |
 | Discover relevant codebase files | Explore | Medium | Type names, module paths from spec documents |
 | Summarize context | _(inline)_ | - | Main agent synthesizes findings |
 
@@ -73,13 +69,13 @@ Context complete.shape: double_circle
 
 1. **Identify the document:** Use `lazyspec list` or `lazyspec search <query>` to find the target document.
 
-2. **Read the document:** Run `lazyspec show <id>` to get its full content and frontmatter.
+2. **Resolve the chain:** Run `lazyspec context <id>` to get the full implements chain (RFC -> Story -> Iteration) in one call. Use `lazyspec context <id> --json` if you need structured output for parsing.
 
-3. **Walk the chain:** Check the `related` frontmatter for linked documents. For each link, run `lazyspec show <path>` to read the linked document.
+3. **Read document bodies:** The context command shows frontmatter only. For documents where you need the full body (typically the Story ACs and RFC design intent), follow up with `lazyspec show <id>` on those specific documents.
 
-4. **Check for existing work:** Run `lazyspec search <story-title>` to find any existing iterations, ADRs, or related documents.
+4. **Check for existing work:** Run `lazyspec status --json` to get all documents, relationships, and validation results in one call. Look for existing iterations, ADRs, or related documents that cover the same ground.
 
-5. **Discover relevant code:** Use `lazyspec search` and `lazyspec list` to find documents that reference the types, modules, or features you'll be working with. The spec documents often name exact files and symbols -- use those as starting points rather than guessing at file paths.
+5. **Discover relevant code:** The spec documents often name exact files and symbols -- use those as starting points rather than guessing at file paths.
 
 6. **Assemble context:** You now have the full chain: RFC (intent) -> Story (ACs) -> existing Iterations (prior work) -> relevant codebase locations.
 
@@ -97,9 +93,9 @@ Context complete.shape: double_circle
 
 Before claiming this skill is complete:
 
-- [ ] `lazyspec show` has been run on the target document
-- [ ] `lazyspec show` has been run on the parent Story and RFC
-- [ ] Existing iterations and ADRs have been checked
+- [ ] `lazyspec context <id>` has been run on the target document
+- [ ] `lazyspec show` has been run on documents where the body is needed (Story ACs, RFC design)
+- [ ] Existing iterations and ADRs have been checked (via `lazyspec status --json` or search)
 - [ ] Context chain has been stated back (RFC intent, Story ACs, prior work)
 
 ## Rules

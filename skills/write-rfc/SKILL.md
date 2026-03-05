@@ -11,7 +11,7 @@ If you're about to create a Story without an RFC, stop. Write the RFC first.
 
 <HARD-GATE>
 Do NOT create Stories until this RFC is written and the user has approved it.
-After completion: invoke create-story for each vertical slice identified.
+After completion: use the `/create-story` skill for each vertical slice identified.
 </HARD-GATE>
 
 ## Forbidden Actions
@@ -20,7 +20,7 @@ After completion: invoke create-story for each vertical slice identified.
 - Do NOT write document files directly. Use `lazyspec create` to create documents and `lazyspec link` to create relationships.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id>` or `Read` a file before modifying it.
 - Do NOT skip the workflow pipeline. Features need RFC -> Story -> Iteration. Bug fixes need Iteration.
-- Do NOT create Story documents from this skill. Finish the RFC, get approval, then invoke create-story.
+- Do NOT create Story documents from this skill. Finish the RFC, get approval, then use the `/create-story` skill.
 </NEVER>
 
 # Write RFC
@@ -45,11 +45,11 @@ build.style.opacity: 0.4
 Understand the problem -> Create RFC -> Write intent and context -> Sketch interfaces -> Identify stories -> Validate -> User approves?
 
 User approves?.shape: diamond
-User approves? -> Invoke create-story: yes
+User approves? -> Use /create-story skill: yes
 User approves? -> Revise RFC: no
 Revise RFC -> Write intent and context
 
-Invoke create-story.shape: double_circle
+Use /create-story skill.shape: double_circle
 ```
 
 ## Preflight

@@ -12,7 +12,8 @@ If you haven't run the tests in this session, you cannot claim they pass.
 <HARD-GATE>
 Do NOT approve without running verification commands in this session.
 Stage 1 (AC compliance) MUST pass before entering Stage 2 (code quality).
-If ACs fail, return to create-iteration.
+If ACs fail during a `/build` per-task review, dispatch a fix subagent.
+If ACs fail during a standalone review, use `/create-iteration` to re-plan.
 </HARD-GATE>
 
 ## Forbidden Actions
@@ -45,21 +46,22 @@ build.style.opacity: 0.4
 
 This skill operates in two modes:
 
-**Per-task review** (invoked by `build` after each task):
-- Checks only the ACs relevant to the completed task
+**Per-task review** (dispatched as a reviewer subagent by `/build` after each task):
+- Scoped to the ACs relevant to the completed task
 - Same two-stage process (AC compliance first, code quality second)
+- On failure: report back to `/build` orchestrator, which dispatches a fix subagent
 
-**Full review** (invoked by `build` as final gate, or standalone):
-- Checks ALL Story ACs
-- Used after all tasks complete to verify the complete implementation
+**Full review** (dispatched by `/build` as final gate, or used standalone):
+- Checks ALL Story ACs against the complete implementation
+- On failure during `/build`: targeted fix subagents for specific gaps
+- On failure standalone: report to user
 
 ## Preflight
 
-1. Read relevant documents using `lazyspec show` before modifying anything
-2. Check for existing artifacts using `lazyspec search` and `lazyspec list`
-3. Read the iteration document with `lazyspec show <iteration-id>`
-4. Read the parent Story ACs with `lazyspec show <story-id>`
-5. Do NOT begin review until both documents are loaded into context
+1. Resolve the chain with `lazyspec context <iteration-id>` to see RFC -> Story -> Iteration
+2. Read the iteration body with `lazyspec show <iteration-id>`
+3. Read the parent Story ACs with `lazyspec show <story-id>`
+4. Do NOT begin review until both documents are loaded into context
 
 ## The Gate
 
@@ -83,13 +85,13 @@ Skip any step = not a review
 Read iteration doc -> Read parent story ACs -> Run full test suite -> All ACs satisfied?
 
 All ACs satisfied?.shape: diamond
-All ACs satisfied? -> Return to create-iteration: no
+All ACs satisfied? -> Fix (see failure handling below): no
 All ACs satisfied? -> Code quality review: yes
 
 Code quality review -> Critical issues?
 
 Critical issues?.shape: diamond
-Critical issues? -> Return to create-iteration: yes
+Critical issues? -> Fix (see failure handling below): yes
 Critical issues? -> Approve: no
 
 Approve.shape: double_circle
@@ -97,12 +99,12 @@ Approve.shape: double_circle
 
 ## Stage 1: AC Compliance
 
-1. Run `lazyspec show <iteration-id>` to read the iteration.
-2. Follow the `implements` link to get the parent Story.
+1. Run `lazyspec context <iteration-id>` to see the full chain.
+2. Run `lazyspec show <iteration-id>` to read the iteration body.
 3. Run `lazyspec show <story-id>` to read the Story's ACs.
 4. Run the full test suite. Show the output.
 5. For each AC the iteration claims to cover: verify the test exists and passes.
-6. If any AC is not satisfied, state which ACs are unmet and return to create-iteration.
+6. If any AC is not satisfied, state which ACs are unmet. See Failure Handling below for what to do next.
 
 ## Stage 2: Code Quality
 
@@ -127,6 +129,16 @@ Only enter this stage if all ACs are satisfied.
    These properties conflict. If a test trades one for another (e.g. an
    integration test that sacrifices Fast/Isolated for Predictive/Inspiring),
    the tradeoff should be noted. Flag unjustified tradeoffs to the collaborator.
+
+## Failure Handling
+
+The response to a failed review depends on context:
+
+**During `/build` per-task review:** Report the specific failures back to the `/build` orchestrator. The build skill will dispatch a fresh implementer subagent with the failure details. Do NOT re-plan the iteration or use `/create-iteration`.
+
+**During `/build` final review:** If individual ACs are unmet, the build skill dispatches targeted fix subagents. If the failures indicate a fundamental planning problem (wrong approach, missing tasks), escalate to the user.
+
+**Standalone review (not during build):** Report failures to the user. The user decides whether to use `/create-iteration` to re-plan or fix directly.
 
 ## Red Flags
 
