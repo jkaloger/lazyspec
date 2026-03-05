@@ -15,6 +15,15 @@ invoke write-rfc first.
 After completion: invoke resolve-context before any implementation.
 </HARD-GATE>
 
+## Forbidden Actions
+
+<NEVER>
+- Do NOT write document files directly. Use `lazyspec create` to create documents and `lazyspec link` to create relationships.
+- Do NOT edit a document you haven't read. Always `lazyspec show <id>` or `Read` a file before modifying it.
+- Do NOT skip the workflow pipeline. Features need RFC -> Story -> Iteration. Bug fixes need Iteration.
+- Do NOT write acceptance criteria without reading the parent RFC first.
+</NEVER>
+
 # Create Story
 
 ## Workflow Position
@@ -46,6 +55,14 @@ Create story -> Write acceptance criteria -> Link to RFC -> Define scope -> Vali
 
 Invoke resolve-context.shape: double_circle
 ```
+
+## Preflight
+
+1. Read relevant documents using `lazyspec show` before modifying anything
+2. Check for existing artifacts using `lazyspec search` and `lazyspec list`
+3. Read the parent RFC with `lazyspec show <rfc-id>`
+4. Confirm you understand the design intent before writing ACs
+5. Check for existing stories under this RFC: `lazyspec search "<rfc-title>"`
 
 ## Steps
 

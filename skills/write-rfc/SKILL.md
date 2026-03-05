@@ -14,6 +14,15 @@ Do NOT create Stories until this RFC is written and the user has approved it.
 After completion: invoke create-story for each vertical slice identified.
 </HARD-GATE>
 
+## Forbidden Actions
+
+<NEVER>
+- Do NOT write document files directly. Use `lazyspec create` to create documents and `lazyspec link` to create relationships.
+- Do NOT edit a document you haven't read. Always `lazyspec show <id>` or `Read` a file before modifying it.
+- Do NOT skip the workflow pipeline. Features need RFC -> Story -> Iteration. Bug fixes need Iteration.
+- Do NOT create Story documents from this skill. Finish the RFC, get approval, then invoke create-story.
+</NEVER>
+
 # Write RFC
 
 ## Workflow Position
@@ -42,6 +51,14 @@ Revise RFC -> Write intent and context
 
 Invoke create-story.shape: double_circle
 ```
+
+## Preflight
+
+1. Read relevant documents using `lazyspec show` before modifying anything
+2. Check for existing artifacts using `lazyspec search` and `lazyspec list`
+3. Search for existing RFCs on the topic: `lazyspec search "<topic>"`, `lazyspec list rfc`
+4. Read any related RFCs with `lazyspec show <id>`
+5. Confirm no existing RFC already covers this design
 
 ## Steps
 

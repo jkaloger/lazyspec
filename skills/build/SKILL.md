@@ -14,6 +14,15 @@ Do NOT begin implementation without a complete Iteration document with numbered
 task breakdown. Each task must have enough detail for a zero-context subagent.
 </HARD-GATE>
 
+## Forbidden Actions
+
+<NEVER>
+- Do NOT write document files directly. Use `lazyspec create` to create documents and `lazyspec link` to create relationships.
+- Do NOT edit a document you haven't read. Always `lazyspec show <id>` or `Read` a file before modifying it.
+- Do NOT skip the workflow pipeline. Features need RFC -> Story -> Iteration. Bug fixes need Iteration.
+- Do NOT implement tasks yourself. Dispatch a subagent per task. Do NOT dispatch parallel implementers.
+</NEVER>
+
 # Build
 
 ## Workflow Position
@@ -61,6 +70,32 @@ All Story ACs met? -> Fix gaps: no
 Done.shape: double_circle
 ```
 
+## Preflight
+
+1. Read relevant documents using `lazyspec show` before modifying anything
+2. Check for existing artifacts using `lazyspec search` and `lazyspec list`
+3. Read the iteration document with `lazyspec show <iteration-id>`
+4. Read the parent Story with `lazyspec show <story-id>`
+5. Read the RFC with `lazyspec show <rfc-id>`
+6. Extract all tasks from `## Changes` before dispatching any subagent
+
+## Subagent Dispatch
+
+| Tier | Model | Use for |
+|------|-------|---------|
+| Light | Haiku | Parsing frontmatter, extracting structured data, simple validation |
+| Medium | Sonnet | Codebase exploration, searching for patterns, reading and summarizing documents |
+| Heavy | Opus | Implementation, complex reasoning, multi-file changes, review |
+
+| Operation | Agent Type | Tier | Context to provide |
+|-----------|-----------|------|-------------------|
+| Implement task | general-purpose | Heavy | Full task text, RFC intent, Story ACs, prior task results |
+| Review task (AC compliance) | general-purpose | Heavy | Task text, Story ACs, implementer report |
+| Review task (code quality) | general-purpose | Medium | Changed files, test output, quality criteria |
+| Final review | general-purpose | Heavy | All Story ACs, full implementation summary |
+
+> This skill follows the [obra/superpowers](https://github.com/obra/superpowers) subagent-driven development pattern: dispatch a fresh subagent per task, with two-stage review (spec compliance first, code quality second). Each subagent starts with zero prior context to prevent pollution. The reviewer is always a separate agent from the implementer.
+
 ## Setup
 
 1. **Read the iteration:** Run `lazyspec show <iteration-id>` to get the full document with task breakdown.
@@ -85,6 +120,11 @@ Use the Agent tool with `subagent_type: "general-purpose"`. Provide:
 Include in the prompt:
 
 ```
+IMPORTANT: You are working within the lazyspec workflow.
+- Use `lazyspec` CLI commands for document operations. Do NOT write document files directly.
+- Read files before editing them. Use the Read tool or `lazyspec show` before any modification.
+- Implement ONLY what the task specifies. Do not add features, refactor surrounding code, or "improve" things not in the task.
+
 Before you begin: if you have questions about requirements, approach,
 dependencies, or anything unclear -- ask them now. Don't guess.
 
@@ -123,6 +163,11 @@ After the implementer reports back, dispatch a **separate** reviewer subagent us
 The reviewer runs review-iteration adapted for per-task scope:
 
 ```
+IMPORTANT: You are reviewing within the lazyspec workflow.
+- Verify the implementer used `lazyspec` CLI for any document operations.
+- Check that no files were modified that aren't listed in the task specification.
+- Flag any scope creep (work done beyond what the task requested).
+
 You are reviewing a task implementation for spec compliance and code quality.
 
 ## What Was Requested
@@ -175,7 +220,29 @@ If the reviewer reports issues:
 
 Update task tracking. Proceed to next task.
 
+### 10a. Context refresh (every 2 tasks)
+
+After completing tasks 2, 4, 6, etc., re-read the iteration and Story to prevent context drift:
+
+1. Run `lazyspec show <iteration-id>` to refresh the task list and status
+2. Run `lazyspec show <story-id>` to refresh the ACs
+3. Verify you are still following the task breakdown as written (not improvising)
+
+This counteracts the tendency for agents to drift from the plan as context grows.
+
 ## Final Review
+
+### 10b. Pipeline checkpoint
+
+Before the final review, verify the workflow is intact:
+
+1. Re-read the iteration document: `lazyspec show <iteration-id>`
+2. Confirm all tasks in `## Changes` have been completed
+3. Check that no work was done outside the task breakdown
+4. Verify the iteration document is up to date with actual changes
+5. Run `lazyspec validate` to check document integrity
+
+If anything is out of alignment, fix it before proceeding to final review.
 
 ### 11. Dispatch final reviewer
 
@@ -246,3 +313,14 @@ Run `lazyspec validate` after all updates.
 - Do not dispatch implementation subagents in parallel (conflicts)
 - Always update document statuses after a successful final review
 - Promote parent documents (Story, RFC) only when all children are accepted
+
+## Guardrails
+
+Before dispatching any implementer subagent, verify:
+
+- [ ] Does an Iteration document exist with a numbered task breakdown?
+- [ ] Have you read the Iteration, Story, and RFC documents? (all three, not assumed)
+- [ ] Are you dispatching tasks sequentially (not in parallel)?
+- [ ] Is the subagent receiving full task text (not a file reference)?
+
+If any answer is "no", stop. Complete the missing step.

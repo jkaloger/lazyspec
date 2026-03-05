@@ -15,6 +15,15 @@ Stage 1 (AC compliance) MUST pass before entering Stage 2 (code quality).
 If ACs fail, return to create-iteration.
 </HARD-GATE>
 
+## Forbidden Actions
+
+<NEVER>
+- Do NOT write document files directly. Use `lazyspec create` to create documents and `lazyspec link` to create relationships.
+- Do NOT edit a document you haven't read. Always `lazyspec show <id>` or `Read` a file before modifying it.
+- Do NOT skip the workflow pipeline. Features need RFC -> Story -> Iteration. Bug fixes need Iteration.
+- Do NOT approve without running tests in the current session. Do NOT trust prior test reports.
+</NEVER>
+
 # Review Iteration
 
 ## Workflow Position
@@ -43,6 +52,14 @@ This skill operates in two modes:
 **Full review** (invoked by `build` as final gate, or standalone):
 - Checks ALL Story ACs
 - Used after all tasks complete to verify the complete implementation
+
+## Preflight
+
+1. Read relevant documents using `lazyspec show` before modifying anything
+2. Check for existing artifacts using `lazyspec search` and `lazyspec list`
+3. Read the iteration document with `lazyspec show <iteration-id>`
+4. Read the parent Story ACs with `lazyspec show <story-id>`
+5. Do NOT begin review until both documents are loaded into context
 
 ## The Gate
 

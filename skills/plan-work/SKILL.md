@@ -14,6 +14,15 @@ Do NOT skip to implementation. Detect existing artifacts, classify the work,
 and invoke the right skill.
 </HARD-GATE>
 
+## Forbidden Actions
+
+<NEVER>
+- Do NOT write document files directly. Use `lazyspec create` to create documents and `lazyspec link` to create relationships.
+- Do NOT edit a document you haven't read. Always `lazyspec show <id>` or `Read` a file before modifying it.
+- Do NOT skip the workflow pipeline. Features need RFC -> Story -> Iteration. Bug fixes need Iteration.
+- Do NOT invoke write-rfc, create-story, or create-iteration without user approval of the direction first.
+</NEVER>
+
 # Plan
 
 ## Workflow Position
@@ -66,6 +75,27 @@ Invoke resolve-context.shape: double_circle
 Invoke create-iteration.shape: double_circle
 Invoke build.shape: double_circle
 ```
+
+## Preflight
+
+1. Read relevant documents using `lazyspec show` before modifying anything
+2. Check for existing artifacts using `lazyspec search` and `lazyspec list`
+3. Search for existing RFCs, Stories, Iterations related to the work: `lazyspec search "<topic>"`, `lazyspec list rfc`, `lazyspec list story`, `lazyspec list iteration`
+4. Present findings to the user before choosing a direction
+5. Classify the work (new feature, bug fix, tweak, refactor) before selecting a pipeline
+
+## Subagent Dispatch
+
+| Tier | Model | Use for |
+|------|-------|---------|
+| Light | Haiku | Parsing frontmatter, extracting structured data, simple validation |
+| Medium | Sonnet | Codebase exploration, searching for patterns, reading and summarizing documents |
+| Heavy | Opus | Implementation, complex reasoning, multi-file changes, review |
+
+| Operation | Agent Type | Tier | Context to provide |
+|-----------|-----------|------|-------------------|
+| Search existing artifacts | Explore | Medium | Topic keywords, document types to search |
+| Classify work complexity | _(inline)_ | - | No subagent needed, main agent classifies |
 
 ## Steps
 
@@ -183,3 +213,14 @@ After determining the entry point and brainstorming (if needed), invoke the skil
 - One question at a time during brainstorming
 - Get user approval before invoking the next skill
 - Never skip directly to build without an Iteration with tasks
+
+## Guardrails
+
+Before invoking any downstream skill, verify:
+
+- [ ] Have you searched for existing artifacts? (`lazyspec search`, `lazyspec list`)
+- [ ] Have you presented findings to the user?
+- [ ] Has the user approved the direction?
+- [ ] Are you invoking the correct skill for the work classification?
+
+If any answer is "no", stop. Complete the missing step.

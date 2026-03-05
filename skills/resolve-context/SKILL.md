@@ -15,6 +15,14 @@ RFC -> Story -> existing Iteration chain before writing any code.
 After completion: invoke create-iteration.
 </HARD-GATE>
 
+## Forbidden Actions
+
+<NEVER>
+- Do NOT write document files directly. Use `lazyspec create` to create documents and `lazyspec link` to create relationships.
+- Do NOT edit a document you haven't read. Always `lazyspec show <id>` or `Read` a file before modifying it.
+- Do NOT skip the workflow pipeline. Features need RFC -> Story -> Iteration. Bug fixes need Iteration.
+</NEVER>
+
 # Resolve Context
 
 ## Workflow Position
@@ -38,6 +46,28 @@ Identify target doc -> Show target -> Walk related links -> Show each linked doc
 
 Context complete.shape: double_circle
 ```
+
+## Preflight
+
+1. Read relevant documents using `lazyspec show` before modifying anything
+2. Check for existing artifacts using `lazyspec search` and `lazyspec list`
+3. Identify the target document path or ID
+4. Confirm the document exists with `lazyspec show <id>`
+5. Check the document's `related` frontmatter for links to follow
+
+## Subagent Dispatch
+
+| Tier | Model | Use for |
+|------|-------|---------|
+| Light | Haiku | Parsing frontmatter, extracting structured data, simple validation |
+| Medium | Sonnet | Codebase exploration, searching for patterns, reading and summarizing documents |
+| Heavy | Opus | Implementation, complex reasoning, multi-file changes, review |
+
+| Operation | Agent Type | Tier | Context to provide |
+|-----------|-----------|------|-------------------|
+| Walk document chain | Explore | Medium | Starting document path, relationship types to follow |
+| Discover relevant codebase files | Explore | Medium | Type names, module paths from spec documents |
+| Summarize context | _(inline)_ | - | Main agent synthesizes findings |
 
 ## Steps
 

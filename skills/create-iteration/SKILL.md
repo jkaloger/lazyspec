@@ -18,6 +18,15 @@ After completion: present the iteration to the user for review.
 Only invoke build after the user explicitly confirms.
 </HARD-GATE>
 
+## Forbidden Actions
+
+<NEVER>
+- Do NOT write document files directly. Use `lazyspec create` to create documents and `lazyspec link` to create relationships.
+- Do NOT edit a document you haven't read. Always `lazyspec show <id>` or `Read` a file before modifying it.
+- Do NOT skip the workflow pipeline. Features need RFC -> Story -> Iteration. Bug fixes need Iteration.
+- Do NOT write test or production code. This skill produces a plan document only.
+</NEVER>
+
 # Create Iteration
 
 ## Workflow Position
@@ -55,6 +64,27 @@ User confirms -> Invoke build
 Present to user for review.shape: diamond
 Invoke build.shape: double_circle
 ```
+
+## Preflight
+
+1. Read relevant documents using `lazyspec show` before modifying anything
+2. Check for existing artifacts using `lazyspec search` and `lazyspec list`
+3. Read the parent Story's ACs with `lazyspec show <story-id>`
+4. List existing iterations: `lazyspec list iteration`
+5. Check no existing iteration already covers the same ACs
+
+## Subagent Dispatch
+
+| Tier | Model | Use for |
+|------|-------|---------|
+| Light | Haiku | Parsing frontmatter, extracting structured data, simple validation |
+| Medium | Sonnet | Codebase exploration, searching for patterns, reading and summarizing documents |
+| Heavy | Opus | Implementation, complex reasoning, multi-file changes, review |
+
+| Operation | Agent Type | Tier | Context to provide |
+|-----------|-----------|------|-------------------|
+| Discover relevant code | Explore | Medium | File paths and symbols from Story ACs |
+| Validate file paths exist | Explore | Light | List of paths referenced in task breakdown |
 
 ## Steps
 
@@ -149,3 +179,14 @@ Before claiming this skill is complete:
 - If you discover a contract needs to change, emit an ADR
 - Keep iterations small and committable
 - Always present the iteration to the user and wait for confirmation before invoking build
+
+## Guardrails
+
+Before presenting the iteration to the user, verify:
+
+- [ ] Is this a feature? Then confirm a parent Story exists and is linked.
+- [ ] Have you read the parent Story's ACs? (not assumed -- actually read with `lazyspec show`)
+- [ ] Does every task reference real, verified file paths? (not guessed)
+- [ ] Is the task breakdown detailed enough for a zero-context subagent?
+
+If any answer is "no", stop. Complete the missing step.
