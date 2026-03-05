@@ -1,13 +1,17 @@
 ---
-title: "TUI Document Creation"
+title: TUI Document Creation
 type: rfc
-status: draft
-author: "jkaloger"
+status: accepted
+author: jkaloger
 date: 2026-03-05
-tags: [tui, creation, modal]
+tags:
+- tui
+- creation
+- modal
 related:
-  - related-to: docs/rfcs/RFC-001-my-first-rfc.md
+- related-to: docs/rfcs/RFC-001-my-first-rfc.md
 ---
+
 
 ## Summary
 

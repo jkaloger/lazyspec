@@ -1,13 +1,17 @@
 ---
-title: "Expanded Validation"
+title: Expanded Validation
 type: story
-status: draft
-author: "jkaloger"
+status: accepted
+author: jkaloger
 date: 2026-03-05
-tags: [cli, agents, validation]
+tags:
+- cli
+- agents
+- validation
 related:
-  - implements: docs/rfcs/RFC-007-agent-native-cli.md
+- implements: docs/rfcs/RFC-007-agent-native-cli.md
 ---
+
 
 ## Context
 

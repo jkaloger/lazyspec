@@ -1,7 +1,7 @@
 ---
 title: Styled CLI Output
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-05
 tags:
@@ -10,6 +10,7 @@ tags:
 related:
 - implements: docs/rfcs/RFC-007-agent-native-cli.md
 ---
+
 
 
 ## Context

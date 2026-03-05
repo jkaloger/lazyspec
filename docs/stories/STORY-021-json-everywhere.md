@@ -1,13 +1,17 @@
 ---
-title: "JSON Everywhere"
+title: JSON Everywhere
 type: story
-status: draft
-author: "jkaloger"
+status: accepted
+author: jkaloger
 date: 2026-03-05
-tags: [cli, agents, json]
+tags:
+- cli
+- agents
+- json
 related:
-  - implements: docs/rfcs/RFC-007-agent-native-cli.md
+- implements: docs/rfcs/RFC-007-agent-native-cli.md
 ---
+
 
 ## Context
 

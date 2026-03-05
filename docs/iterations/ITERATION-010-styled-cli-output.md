@@ -1,13 +1,14 @@
 ---
 title: Styled CLI Output
 type: iteration
-status: draft
+status: accepted
 author: agent
 date: 2026-03-05
 tags: []
 related:
 - implements: docs/stories/STORY-023-styled-cli-output.md
 ---
+
 
 
 ## Changes
