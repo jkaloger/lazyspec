@@ -1,21 +1,16 @@
-use lazyspec::engine::config::Config;
-use lazyspec::engine::store::{Store, ValidationIssue};
-use std::fs;
-use tempfile::TempDir;
+mod common;
+
+use lazyspec::engine::validation::ValidationIssue;
 
 #[test]
 fn validate_catches_broken_link() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
-
-    fs::create_dir_all(root.join("docs/adrs")).unwrap();
-    fs::write(
-        root.join("docs/adrs/ADR-001.md"),
+    let fixture = common::TestFixture::new();
+    fixture.write_doc(
+        "docs/adrs/ADR-001.md",
         "---\ntitle: \"Bad Link\"\ntype: adr\nstatus: draft\nauthor: a\ndate: 2026-01-01\ntags: []\nrelated:\n  - implements: docs/rfcs/DOES-NOT-EXIST.md\n---\n",
-    ).unwrap();
+    );
 
-    let config = Config::default();
-    let store = Store::load(root, &config).unwrap();
+    let store = fixture.store();
     let result = store.validate_full();
 
     assert!(!result.errors.is_empty());
@@ -23,17 +18,10 @@ fn validate_catches_broken_link() {
 
 #[test]
 fn validate_passes_clean_repo() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
+    let fixture = common::TestFixture::new();
+    fixture.write_rfc("RFC-001.md", "Good", "draft");
 
-    fs::create_dir_all(root.join("docs/rfcs")).unwrap();
-    fs::write(
-        root.join("docs/rfcs/RFC-001.md"),
-        "---\ntitle: \"Good\"\ntype: rfc\nstatus: draft\nauthor: a\ndate: 2026-01-01\ntags: []\n---\n",
-    ).unwrap();
-
-    let config = Config::default();
-    let store = Store::load(root, &config).unwrap();
+    let store = fixture.store();
     let result = store.validate_full();
 
     assert!(result.errors.is_empty());
@@ -41,17 +29,10 @@ fn validate_passes_clean_repo() {
 
 #[test]
 fn validate_catches_unlinked_iteration() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
+    let fixture = common::TestFixture::new();
+    fixture.write_iteration("ITERATION-001.md", "Orphan Iteration", "draft", None);
 
-    fs::create_dir_all(root.join("docs/iterations")).unwrap();
-    fs::write(
-        root.join("docs/iterations/ITERATION-001.md"),
-        "---\ntitle: \"Orphan Iteration\"\ntype: iteration\nstatus: draft\nauthor: a\ndate: 2026-01-01\ntags: []\n---\n",
-    ).unwrap();
-
-    let config = Config::default();
-    let store = Store::load(root, &config).unwrap();
+    let store = fixture.store();
     let result = store.validate_full();
 
     assert!(!result.errors.is_empty());
@@ -61,17 +42,10 @@ fn validate_catches_unlinked_iteration() {
 
 #[test]
 fn validate_catches_unlinked_adr() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
+    let fixture = common::TestFixture::new();
+    fixture.write_adr("ADR-001.md", "Orphan ADR", "draft", None);
 
-    fs::create_dir_all(root.join("docs/adrs")).unwrap();
-    fs::write(
-        root.join("docs/adrs/ADR-001.md"),
-        "---\ntitle: \"Orphan ADR\"\ntype: adr\nstatus: draft\nauthor: a\ndate: 2026-01-01\ntags: []\n---\n",
-    ).unwrap();
-
-    let config = Config::default();
-    let store = Store::load(root, &config).unwrap();
+    let store = fixture.store();
     let result = store.validate_full();
 
     assert!(!result.errors.is_empty());
@@ -81,24 +55,16 @@ fn validate_catches_unlinked_adr() {
 
 #[test]
 fn validate_passes_linked_iteration() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
+    let fixture = common::TestFixture::new();
+    fixture.write_story("STORY-001.md", "A Story", "draft", None);
+    fixture.write_iteration(
+        "ITERATION-001.md",
+        "Impl",
+        "draft",
+        Some("docs/stories/STORY-001.md"),
+    );
 
-    fs::create_dir_all(root.join("docs/stories")).unwrap();
-    fs::create_dir_all(root.join("docs/iterations")).unwrap();
-
-    fs::write(
-        root.join("docs/stories/STORY-001.md"),
-        "---\ntitle: \"A Story\"\ntype: story\nstatus: draft\nauthor: a\ndate: 2026-01-01\ntags: []\n---\n",
-    ).unwrap();
-
-    fs::write(
-        root.join("docs/iterations/ITERATION-001.md"),
-        "---\ntitle: \"Impl\"\ntype: iteration\nstatus: draft\nauthor: a\ndate: 2026-01-01\ntags: []\nrelated:\n  - implements: docs/stories/STORY-001.md\n---\n",
-    ).unwrap();
-
-    let config = Config::default();
-    let store = Store::load(root, &config).unwrap();
+    let store = fixture.store();
     let result = store.validate_full();
 
     assert!(result.errors.is_empty());

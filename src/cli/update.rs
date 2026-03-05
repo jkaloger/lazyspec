@@ -9,15 +9,16 @@ pub fn run(root: &Path, doc_path: &str, updates: &[(&str, &str)]) -> Result<()> 
 
     let (yaml, body) = split_frontmatter(&content)?;
 
-    let mut doc: serde_yaml::Value = serde_yaml::from_str(&yaml)?;
-
+    let mut lines: Vec<String> = yaml.lines().map(|l| l.to_string()).collect();
     for (key, value) in updates {
-        doc[*key] = serde_yaml::Value::String(value.to_string());
+        let prefix = format!("{}:", key);
+        if let Some(line) = lines.iter_mut().find(|l| l.trim_start().starts_with(&prefix)) {
+            *line = format!("{}: {}", key, value);
+        }
     }
 
-    let new_yaml = serde_yaml::to_string(&doc)?;
-    let new_content = format!("---\n{}---\n{}", new_yaml, body);
-
+    let new_yaml = lines.join("\n");
+    let new_content = format!("---\n{}\n---\n{}", new_yaml, body);
     fs::write(&full_path, new_content)?;
     Ok(())
 }

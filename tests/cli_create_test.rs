@@ -1,16 +1,14 @@
-use lazyspec::engine::config::Config;
+mod common;
+
 use lazyspec::engine::template;
 use std::fs;
-use tempfile::TempDir;
 
 #[test]
 fn create_generates_doc_from_template() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
+    let fixture = common::TestFixture::new();
+    let root = fixture.root();
 
-    fs::create_dir_all(root.join("docs/rfcs")).unwrap();
     fs::create_dir_all(root.join(".lazyspec/templates")).unwrap();
-
     fs::write(
         root.join(".lazyspec/templates/rfc.md"),
         r#"---
@@ -29,7 +27,7 @@ TODO: Describe the proposal.
     )
     .unwrap();
 
-    let config = Config::default();
+    let config = fixture.config();
     let path =
         lazyspec::cli::create::run(root, &config, "rfc", "Event Sourcing", "jkaloger").unwrap();
 
@@ -42,10 +40,9 @@ TODO: Describe the proposal.
 
 #[test]
 fn create_auto_increments_number() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
+    let fixture = common::TestFixture::new();
+    let root = fixture.root();
 
-    fs::create_dir_all(root.join("docs/rfcs")).unwrap();
     fs::create_dir_all(root.join(".lazyspec/templates")).unwrap();
     fs::write(
         root.join(".lazyspec/templates/rfc.md"),
@@ -55,7 +52,7 @@ fn create_auto_increments_number() {
 
     fs::write(root.join("docs/rfcs/RFC-001-old.md"), "").unwrap();
 
-    let config = Config::default();
+    let config = fixture.config();
     let path = lazyspec::cli::create::run(root, &config, "rfc", "New Feature", "a").unwrap();
 
     let filename = path.file_name().unwrap().to_str().unwrap();
@@ -64,10 +61,9 @@ fn create_auto_increments_number() {
 
 #[test]
 fn create_with_date_pattern() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
+    let fixture = common::TestFixture::new();
+    let root = fixture.root();
 
-    fs::create_dir_all(root.join("docs/rfcs")).unwrap();
     fs::create_dir_all(root.join(".lazyspec/templates")).unwrap();
     fs::write(
         root.join(".lazyspec/templates/rfc.md"),
@@ -75,7 +71,7 @@ fn create_with_date_pattern() {
     )
     .unwrap();
 
-    let mut config = Config::default();
+    let mut config = fixture.config();
     config.naming.pattern = "{date}-{title}.md".to_string();
 
     let path = lazyspec::cli::create::run(root, &config, "rfc", "My Feature", "a").unwrap();
@@ -86,14 +82,11 @@ fn create_with_date_pattern() {
 
 #[test]
 fn create_uses_default_template_when_custom_missing() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
+    let fixture = common::TestFixture::new();
 
-    fs::create_dir_all(root.join("docs/stories")).unwrap();
-
-    let config = Config::default();
+    let config = fixture.config();
     let path =
-        lazyspec::cli::create::run(root, &config, "story", "API Design", "jkaloger").unwrap();
+        lazyspec::cli::create::run(fixture.root(), &config, "story", "API Design", "jkaloger").unwrap();
 
     assert!(path.exists());
     let content = fs::read_to_string(&path).unwrap();
@@ -104,12 +97,10 @@ fn create_uses_default_template_when_custom_missing() {
 
 #[test]
 fn create_story_uses_default_template_with_ac_sections() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
-    fs::create_dir_all(root.join("docs/stories")).unwrap();
+    let fixture = common::TestFixture::new();
 
-    let config = Config::default();
-    let path = lazyspec::cli::create::run(root, &config, "story", "User Auth", "jkaloger").unwrap();
+    let config = fixture.config();
+    let path = lazyspec::cli::create::run(fixture.root(), &config, "story", "User Auth", "jkaloger").unwrap();
 
     let content = fs::read_to_string(&path).unwrap();
     assert!(content.contains("type: story"));
@@ -122,12 +113,10 @@ fn create_story_uses_default_template_with_ac_sections() {
 
 #[test]
 fn create_iteration_uses_default_template() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
-    fs::create_dir_all(root.join("docs/iterations")).unwrap();
+    let fixture = common::TestFixture::new();
 
-    let config = Config::default();
-    let path = lazyspec::cli::create::run(root, &config, "iteration", "Auth Impl 1", "agent").unwrap();
+    let config = fixture.config();
+    let path = lazyspec::cli::create::run(fixture.root(), &config, "iteration", "Auth Impl 1", "agent").unwrap();
 
     let content = fs::read_to_string(&path).unwrap();
     assert!(content.contains("type: iteration"));

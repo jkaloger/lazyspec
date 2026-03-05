@@ -2,6 +2,7 @@ use crate::engine::config::Config;
 use crate::engine::document::{DocMeta, DocType};
 use crate::engine::store::{Filter, Store};
 use anyhow::{anyhow, Result};
+use crossterm::event::{KeyCode, KeyModifiers};
 use std::path::{Path, PathBuf};
 
 fn update_tags(root: &Path, relative: &Path, tags: &[String]) -> Result<()> {
@@ -485,6 +486,138 @@ impl App {
 
         self.close_delete_confirm();
         Ok(())
+    }
+
+    pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path, config: &Config) {
+        if self.show_help {
+            self.show_help = false;
+            return;
+        }
+        if self.create_form.active {
+            return self.handle_create_form_key(code, root, config);
+        }
+        if self.delete_confirm.active {
+            return self.handle_delete_confirm_key(code, root);
+        }
+        if self.search_mode {
+            return self.handle_search_key(code, modifiers);
+        }
+        if self.fullscreen_doc {
+            return self.handle_fullscreen_key(code);
+        }
+        self.handle_normal_key(code, modifiers);
+    }
+
+    fn handle_create_form_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
+        match code {
+            KeyCode::Esc => self.close_create_form(),
+            KeyCode::Enter => {
+                let _ = self.submit_create_form(root, config);
+            }
+            KeyCode::Tab => self.form_next_field(),
+            KeyCode::BackTab => self.form_prev_field(),
+            KeyCode::Backspace => self.form_backspace(),
+            KeyCode::Char(c) => self.form_type_char(c),
+            _ => {}
+        }
+    }
+
+    fn handle_delete_confirm_key(&mut self, code: KeyCode, root: &Path) {
+        match code {
+            KeyCode::Enter => { let _ = self.confirm_delete(root); }
+            KeyCode::Esc => self.close_delete_confirm(),
+            _ => {}
+        }
+    }
+
+    fn handle_search_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        match code {
+            KeyCode::Esc => self.exit_search(),
+            KeyCode::Enter => self.select_search_result(),
+            KeyCode::Backspace => {
+                self.search_query.pop();
+                self.update_search();
+            }
+            KeyCode::Up => self.search_move_up(),
+            KeyCode::Down => self.search_move_down(),
+            KeyCode::Char(c) => {
+                if modifiers.contains(KeyModifiers::CONTROL) && c == 'k' {
+                    self.search_move_up();
+                } else if modifiers.contains(KeyModifiers::CONTROL) && c == 'j' {
+                    self.search_move_down();
+                } else {
+                    self.search_query.push(c);
+                    self.update_search();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_fullscreen_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => self.exit_fullscreen(),
+            KeyCode::Char('j') | KeyCode::Down => self.scroll_down(),
+            KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
+            KeyCode::Char('g') => self.scroll_offset = 0,
+            KeyCode::Char('G') => self.scroll_offset = u16::MAX / 2,
+            _ => {}
+        }
+    }
+
+    fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        match (code, modifiers) {
+            (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                self.should_quit = true;
+            }
+            (KeyCode::Char('?'), _) => {
+                self.show_help = true;
+            }
+            (KeyCode::Char('/'), _) => self.enter_search(),
+            (KeyCode::Char('n'), _) => self.open_create_form(),
+            (KeyCode::Char('d'), _) if self.selected_doc_meta().is_some() => {
+                self.open_delete_confirm();
+            }
+            (KeyCode::Enter, _) => {
+                if self.preview_tab == PreviewTab::Relations {
+                    self.navigate_to_relation();
+                } else {
+                    self.enter_fullscreen();
+                }
+            }
+            (KeyCode::Char('j') | KeyCode::Down, _) => {
+                if self.preview_tab == PreviewTab::Relations {
+                    self.move_relation_down();
+                } else {
+                    self.move_down();
+                }
+            }
+            (KeyCode::Char('k') | KeyCode::Up, _) => {
+                if self.preview_tab == PreviewTab::Relations {
+                    self.move_relation_up();
+                } else {
+                    self.move_up();
+                }
+            }
+            (KeyCode::Char('h') | KeyCode::Left, _) => self.move_type_prev(),
+            (KeyCode::Char('l') | KeyCode::Right, _) => self.move_type_next(),
+            (KeyCode::Tab, _) => self.toggle_preview_tab(),
+            (KeyCode::Char('g'), _) => self.move_to_top(),
+            (KeyCode::Char('G'), _) => self.move_to_bottom(),
+            _ => {}
+        }
+    }
+
+    pub fn search_move_up(&mut self) {
+        if self.search_selected > 0 {
+            self.search_selected -= 1;
+        }
+    }
+
+    pub fn search_move_down(&mut self) {
+        if !self.search_results.is_empty() && self.search_selected < self.search_results.len() - 1 {
+            self.search_selected += 1;
+        }
     }
 
     fn parse_relations(&self) -> Result<Vec<(String, std::path::PathBuf)>> {

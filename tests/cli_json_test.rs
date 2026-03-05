@@ -1,36 +1,24 @@
+mod common;
+
 use lazyspec::cli::json::doc_to_json;
-use lazyspec::engine::config::Config;
-use lazyspec::engine::store::Store;
-use std::fs;
-use tempfile::TempDir;
 
-fn setup() -> (TempDir, Store) {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
-
-    fs::create_dir_all(root.join("docs/rfcs")).unwrap();
-    fs::create_dir_all(root.join("docs/stories")).unwrap();
-
-    fs::write(
-        root.join("docs/rfcs/RFC-001-auth.md"),
+fn setup() -> (common::TestFixture, lazyspec::engine::store::Store) {
+    let fixture = common::TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-auth.md",
         "---\ntitle: \"Auth Redesign\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: [security, auth]\nrelated: []\n---\n\nAuth body content.\n",
-    )
-    .unwrap();
-
-    fs::write(
-        root.join("docs/stories/STORY-001-auth-impl.md"),
+    );
+    fixture.write_doc(
+        "docs/stories/STORY-001-auth-impl.md",
         "---\ntitle: \"Auth Implementation\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: [security]\nrelated:\n- implements: docs/rfcs/RFC-001-auth.md\n---\n\nStory body.\n",
-    )
-    .unwrap();
-
-    let config = Config::default();
-    let store = Store::load(root, &config).unwrap();
-    (dir, store)
+    );
+    let store = fixture.store();
+    (fixture, store)
 }
 
 #[test]
 fn doc_to_json_includes_full_schema() {
-    let (_dir, store) = setup();
+    let (_fixture, store) = setup();
     let doc = store.resolve_shorthand("RFC-001").unwrap();
     let json = doc_to_json(doc);
 
@@ -48,7 +36,7 @@ fn doc_to_json_includes_full_schema() {
 
 #[test]
 fn doc_to_json_includes_related() {
-    let (_dir, store) = setup();
+    let (_fixture, store) = setup();
     let doc = store.resolve_shorthand("STORY-001").unwrap();
     let json = doc_to_json(doc);
 
@@ -61,7 +49,7 @@ fn doc_to_json_includes_related() {
 
 #[test]
 fn show_json_includes_body() {
-    let (_dir, store) = setup();
+    let (_fixture, store) = setup();
     let doc = store.resolve_shorthand("RFC-001").unwrap();
     let body = store.get_body(&doc.path).unwrap();
     let mut json = doc_to_json(doc);
@@ -73,7 +61,7 @@ fn show_json_includes_body() {
 
 #[test]
 fn show_json_output() {
-    let (_dir, store) = setup();
+    let (_fixture, store) = setup();
     let output = lazyspec::cli::show::run_json(&store, "RFC-001").unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
@@ -87,13 +75,11 @@ fn show_json_output() {
 
 #[test]
 fn create_json_output() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
-    fs::create_dir_all(root.join("docs/rfcs")).unwrap();
+    let fixture = common::TestFixture::new();
 
-    let config = Config::default();
+    let config = fixture.config();
     let output =
-        lazyspec::cli::create::run_json(root, &config, "rfc", "New Feature", "jkaloger").unwrap();
+        lazyspec::cli::create::run_json(fixture.root(), &config, "rfc", "New Feature", "jkaloger").unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     assert_eq!(parsed["title"], "New Feature");
@@ -105,7 +91,7 @@ fn create_json_output() {
 
 #[test]
 fn list_json_includes_full_schema() {
-    let (_dir, store) = setup();
+    let (_fixture, store) = setup();
     let output = lazyspec::cli::list::run_json(&store, None, None);
     let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
 
@@ -118,7 +104,7 @@ fn list_json_includes_full_schema() {
 
 #[test]
 fn search_json_includes_full_schema() {
-    let (_dir, store) = setup();
+    let (_fixture, store) = setup();
     let output = lazyspec::cli::search::run_json(&store, "Auth", None);
     let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
 

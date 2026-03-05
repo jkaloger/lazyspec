@@ -1,21 +1,16 @@
+mod common;
+
+use common::TestFixture;
 use lazyspec::engine::config::Config;
 use lazyspec::engine::document::{DocMeta, DocType};
-use lazyspec::engine::store::Store;
 use lazyspec::tui::app::App;
 use std::fs;
-use tempfile::TempDir;
 
-fn setup_app_with_rfc() -> (TempDir, App, Config) {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
+fn setup_app_with_rfc() -> (TestFixture, App, Config) {
+    let fixture = TestFixture::new();
 
-    fs::create_dir_all(root.join("docs/rfcs")).unwrap();
-    fs::create_dir_all(root.join("docs/adrs")).unwrap();
-    fs::create_dir_all(root.join("docs/stories")).unwrap();
-    fs::create_dir_all(root.join("docs/iterations")).unwrap();
-
-    fs::write(
-        root.join("docs/rfcs/RFC-001-existing.md"),
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-existing.md",
         r#"---
 title: "Existing RFC"
 type: rfc
@@ -29,20 +24,19 @@ related: []
 ## Summary
 An existing RFC.
 "#,
-    )
-    .unwrap();
+    );
 
-    let config = Config::default();
-    let store = Store::load(root, &config).unwrap();
+    let config = fixture.config();
+    let store = fixture.store();
     let app = App::new(store);
-    (dir, app, config)
+    (fixture, app, config)
 }
 
 // AC1: Submit creates document on disk
 #[test]
 fn test_submit_creates_document() {
-    let (dir, mut app, config) = setup_app_with_rfc();
-    let root = dir.path();
+    let (fixture, mut app, config) = setup_app_with_rfc();
+    let root = fixture.root();
 
     app.open_create_form();
     for c in "My New RFC".chars() {
@@ -68,8 +62,8 @@ fn test_submit_creates_document() {
 // AC1: Submit with different doc type
 #[test]
 fn test_submit_creates_correct_type() {
-    let (dir, mut app, config) = setup_app_with_rfc();
-    let root = dir.path();
+    let (fixture, mut app, config) = setup_app_with_rfc();
+    let root = fixture.root();
 
     // Select Story type (index 2)
     app.selected_type = 2;
@@ -91,8 +85,8 @@ fn test_submit_creates_correct_type() {
 // AC2: Tags are applied
 #[test]
 fn test_submit_applies_tags() {
-    let (dir, mut app, config) = setup_app_with_rfc();
-    let root = dir.path();
+    let (fixture, mut app, config) = setup_app_with_rfc();
+    let root = fixture.root();
 
     app.open_create_form();
     for c in "Tagged Doc".chars() {
@@ -119,8 +113,8 @@ fn test_submit_applies_tags() {
 // AC3: Relations are applied with type prefix
 #[test]
 fn test_submit_applies_relations() {
-    let (dir, mut app, config) = setup_app_with_rfc();
-    let root = dir.path();
+    let (fixture, mut app, config) = setup_app_with_rfc();
+    let root = fixture.root();
 
     // Create a story that implements RFC-001
     app.selected_type = 2; // Story
@@ -149,8 +143,8 @@ fn test_submit_applies_relations() {
 // AC4: Relation without prefix defaults to related-to
 #[test]
 fn test_submit_relation_defaults_to_related_to() {
-    let (dir, mut app, config) = setup_app_with_rfc();
-    let root = dir.path();
+    let (fixture, mut app, config) = setup_app_with_rfc();
+    let root = fixture.root();
 
     app.selected_type = 2; // Story
     app.open_create_form();
@@ -178,8 +172,8 @@ fn test_submit_relation_defaults_to_related_to() {
 // AC5: Empty title shows error, no file created
 #[test]
 fn test_submit_empty_title_shows_error() {
-    let (dir, mut app, config) = setup_app_with_rfc();
-    let root = dir.path();
+    let (fixture, mut app, config) = setup_app_with_rfc();
+    let root = fixture.root();
 
     app.open_create_form();
     // Don't type anything in title
@@ -199,8 +193,8 @@ fn test_submit_empty_title_shows_error() {
 // AC6: Invalid relation shorthand shows error
 #[test]
 fn test_submit_invalid_relation_shows_error() {
-    let (dir, mut app, config) = setup_app_with_rfc();
-    let root = dir.path();
+    let (fixture, mut app, config) = setup_app_with_rfc();
+    let root = fixture.root();
 
     app.open_create_form();
     for c in "Bad Rel Doc".chars() {
@@ -228,8 +222,8 @@ fn test_submit_invalid_relation_shows_error() {
 // AC7: Navigate to newly created document
 #[test]
 fn test_submit_navigates_to_new_doc() {
-    let (dir, mut app, config) = setup_app_with_rfc();
-    let root = dir.path();
+    let (fixture, mut app, config) = setup_app_with_rfc();
+    let root = fixture.root();
 
     // Start on Story type
     app.selected_type = 2;

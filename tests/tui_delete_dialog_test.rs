@@ -1,76 +1,20 @@
-use lazyspec::engine::config::Config;
-use lazyspec::engine::store::Store;
+mod common;
+
+use common::TestFixture;
 use lazyspec::tui::app::App;
-use std::fs;
-use tempfile::TempDir;
 
-fn setup_dirs(root: &std::path::Path) {
-    fs::create_dir_all(root.join("docs/rfcs")).unwrap();
-    fs::create_dir_all(root.join("docs/adrs")).unwrap();
-    fs::create_dir_all(root.join("docs/stories")).unwrap();
-    fs::create_dir_all(root.join("docs/iterations")).unwrap();
-}
-
-fn write_rfc(root: &std::path::Path, filename: &str, title: &str) {
-    fs::write(
-        root.join(format!("docs/rfcs/{}", filename)),
-        format!(
-            r#"---
-title: "{title}"
-type: rfc
-status: draft
-author: "tester"
-date: 2026-03-05
-tags: []
-related: []
----
-
-## Summary
-{title} body.
-"#
-        ),
-    )
-    .unwrap();
-}
-
-fn write_story_implementing(root: &std::path::Path, filename: &str, title: &str, rfc_path: &str) {
-    fs::write(
-        root.join(format!("docs/stories/{}", filename)),
-        format!(
-            r#"---
-title: "{title}"
-type: story
-status: draft
-author: "tester"
-date: 2026-03-05
-tags: []
-related:
-  - implements: "{rfc_path}"
----
-
-## Summary
-{title} body.
-"#
-        ),
-    )
-    .unwrap();
-}
-
-fn setup_app_with_rfc(title: &str) -> (TempDir, App) {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
-    setup_dirs(root);
-    write_rfc(root, "RFC-001-test.md", title);
-    let config = Config::default();
-    let store = Store::load(root, &config).unwrap();
+fn setup_app_with_rfc(title: &str) -> (TestFixture, App) {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-test.md", title, "draft");
+    let store = fixture.store();
     let app = App::new(store);
-    (dir, app)
+    (fixture, app)
 }
 
 // AC1: open_delete_confirm populates from selected doc
 #[test]
 fn test_open_delete_populates_from_selected_doc() {
-    let (_dir, mut app) = setup_app_with_rfc("Delete Me");
+    let (_fixture, mut app) = setup_app_with_rfc("Delete Me");
 
     app.selected_type = 0; // RFC
     app.selected_doc = 0;
@@ -87,19 +31,27 @@ fn test_open_delete_populates_from_selected_doc() {
 // AC2: open_delete_confirm collects reverse references
 #[test]
 fn test_open_delete_collects_references() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
-    setup_dirs(root);
-    write_rfc(root, "RFC-001-target.md", "Target RFC");
-    write_story_implementing(
-        root,
-        "STORY-001-impl.md",
-        "Impl Story",
-        "docs/rfcs/RFC-001-target.md",
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-target.md", "Target RFC", "draft");
+    fixture.write_doc(
+        "docs/stories/STORY-001-impl.md",
+        r#"---
+title: "Impl Story"
+type: story
+status: draft
+author: "tester"
+date: 2026-03-05
+tags: []
+related:
+  - implements: "docs/rfcs/RFC-001-target.md"
+---
+
+## Summary
+Impl Story body.
+"#,
     );
 
-    let config = Config::default();
-    let store = Store::load(root, &config).unwrap();
+    let store = fixture.store();
     let mut app = App::new(store);
 
     app.selected_type = 0; // RFC
@@ -119,7 +71,7 @@ fn test_open_delete_collects_references() {
 // AC3: open_delete_confirm with no references
 #[test]
 fn test_open_delete_no_references() {
-    let (_dir, mut app) = setup_app_with_rfc("Lonely RFC");
+    let (_fixture, mut app) = setup_app_with_rfc("Lonely RFC");
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -132,8 +84,8 @@ fn test_open_delete_no_references() {
 // AC4: confirm_delete removes file from disk and store
 #[test]
 fn test_confirm_delete_removes_file() {
-    let (dir, mut app) = setup_app_with_rfc("Doomed RFC");
-    let root = dir.path();
+    let (fixture, mut app) = setup_app_with_rfc("Doomed RFC");
+    let root = fixture.root();
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -151,8 +103,8 @@ fn test_confirm_delete_removes_file() {
 // AC5: cancel preserves file
 #[test]
 fn test_cancel_delete_preserves_file() {
-    let (dir, mut app) = setup_app_with_rfc("Safe RFC");
-    let root = dir.path();
+    let (fixture, mut app) = setup_app_with_rfc("Safe RFC");
+    let root = fixture.root();
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -166,20 +118,17 @@ fn test_cancel_delete_preserves_file() {
 // AC6: selection adjusts after deleting last item
 #[test]
 fn test_selection_adjusts_after_delete_last() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
-    setup_dirs(root);
-    write_rfc(root, "RFC-001-first.md", "First RFC");
-    write_rfc(root, "RFC-002-second.md", "Second RFC");
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-first.md", "First RFC", "draft");
+    fixture.write_rfc("RFC-002-second.md", "Second RFC", "draft");
 
-    let config = Config::default();
-    let store = Store::load(root, &config).unwrap();
+    let store = fixture.store();
     let mut app = App::new(store);
 
     app.selected_type = 0;
     app.selected_doc = 1; // second RFC (sorted by path)
     app.open_delete_confirm();
-    app.confirm_delete(root).unwrap();
+    app.confirm_delete(fixture.root()).unwrap();
 
     assert_eq!(app.selected_doc, 0);
     assert_eq!(app.docs_for_current_type().len(), 1);
@@ -188,12 +137,8 @@ fn test_selection_adjusts_after_delete_last() {
 // AC7: open on empty list is a no-op
 #[test]
 fn test_open_delete_empty_list_noop() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
-    setup_dirs(root);
-
-    let config = Config::default();
-    let store = Store::load(root, &config).unwrap();
+    let fixture = TestFixture::new();
+    let store = fixture.store();
     let mut app = App::new(store);
 
     app.selected_type = 0;

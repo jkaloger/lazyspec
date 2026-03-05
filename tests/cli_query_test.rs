@@ -1,36 +1,25 @@
-use lazyspec::engine::config::Config;
+mod common;
+
 use lazyspec::engine::document::DocType;
-use lazyspec::engine::store::{Filter, Store};
-use std::fs;
-use tempfile::TempDir;
+use lazyspec::engine::store::Filter;
 
-fn setup() -> (TempDir, Store) {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
-
-    fs::create_dir_all(root.join("docs/rfcs")).unwrap();
-    fs::create_dir_all(root.join("docs/adrs")).unwrap();
-
-    fs::write(
-        root.join("docs/rfcs/RFC-001-auth.md"),
+fn setup() -> (common::TestFixture, lazyspec::engine::store::Store) {
+    let fixture = common::TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-auth.md",
         "---\ntitle: \"Auth Redesign\"\ntype: rfc\nstatus: review\nauthor: jkaloger\ndate: 2026-03-01\ntags: [security, auth]\n---\n\nAuth body.\n",
-    )
-    .unwrap();
-
-    fs::write(
-        root.join("docs/rfcs/RFC-002-api.md"),
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-002-api.md",
         "---\ntitle: \"API Versioning\"\ntype: rfc\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: [api]\n---\n\nAPI body.\n",
-    )
-    .unwrap();
-
-    let config = Config::default();
-    let store = Store::load(root, &config).unwrap();
-    (dir, store)
+    );
+    let store = fixture.store();
+    (fixture, store)
 }
 
 #[test]
 fn list_all_rfcs() {
-    let (_dir, store) = setup();
+    let (_fixture, store) = setup();
     let filter = Filter {
         doc_type: Some(DocType::Rfc),
         ..Default::default()
@@ -41,7 +30,7 @@ fn list_all_rfcs() {
 
 #[test]
 fn filter_by_tag() {
-    let (_dir, store) = setup();
+    let (_fixture, store) = setup();
     let filter = Filter {
         tag: Some("security".to_string()),
         ..Default::default()
@@ -53,7 +42,7 @@ fn filter_by_tag() {
 
 #[test]
 fn resolve_shorthand_id() {
-    let (_dir, store) = setup();
+    let (_fixture, store) = setup();
     let doc = store.resolve_shorthand("RFC-001");
     assert!(doc.is_some());
     assert_eq!(doc.unwrap().title, "Auth Redesign");

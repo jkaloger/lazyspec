@@ -1,29 +1,20 @@
-use lazyspec::engine::config::Config;
+mod common;
+
+use common::TestFixture;
 use lazyspec::engine::document::DocType;
-use lazyspec::engine::store::Store;
 use lazyspec::tui::app::{App, FormField};
-use std::fs;
-use tempfile::TempDir;
 
-fn setup_app() -> (TempDir, App) {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
-
-    fs::create_dir_all(root.join("docs/rfcs")).unwrap();
-    fs::create_dir_all(root.join("docs/adrs")).unwrap();
-    fs::create_dir_all(root.join("docs/stories")).unwrap();
-    fs::create_dir_all(root.join("docs/iterations")).unwrap();
-
-    let config = Config::default();
-    let store = Store::load(root, &config).unwrap();
+fn setup_app() -> (TestFixture, App) {
+    let fixture = TestFixture::new();
+    let store = fixture.store();
     let app = App::new(store);
-    (dir, app)
+    (fixture, app)
 }
 
 // AC1: Open create form with current type
 #[test]
 fn test_create_form_opens_with_current_type() {
-    let (_dir, mut app) = setup_app();
+    let (_fixture, mut app) = setup_app();
 
     // Default selected type is index 0 = Rfc
     assert!(!app.create_form.active);
@@ -36,7 +27,7 @@ fn test_create_form_opens_with_current_type() {
 
 #[test]
 fn test_create_form_opens_with_selected_type() {
-    let (_dir, mut app) = setup_app();
+    let (_fixture, mut app) = setup_app();
 
     // Select Story (index 2)
     app.selected_type = 2;
@@ -49,7 +40,7 @@ fn test_create_form_opens_with_selected_type() {
 // AC2: Initial state - fields present, author pre-filled, title focused
 #[test]
 fn test_create_form_initial_state() {
-    let (_dir, mut app) = setup_app();
+    let (_fixture, mut app) = setup_app();
     app.open_create_form();
 
     assert_eq!(app.create_form.focused_field, FormField::Title);
@@ -61,7 +52,7 @@ fn test_create_form_initial_state() {
 // AC3: Text input appears in focused field
 #[test]
 fn test_create_form_text_input() {
-    let (_dir, mut app) = setup_app();
+    let (_fixture, mut app) = setup_app();
     app.open_create_form();
 
     app.form_type_char('H');
@@ -75,7 +66,7 @@ fn test_create_form_text_input() {
 
 #[test]
 fn test_create_form_text_input_follows_focus() {
-    let (_dir, mut app) = setup_app();
+    let (_fixture, mut app) = setup_app();
     app.open_create_form();
 
     // Type in title
@@ -102,7 +93,7 @@ fn test_create_form_text_input_follows_focus() {
 // AC4: Backspace removes last character
 #[test]
 fn test_create_form_backspace() {
-    let (_dir, mut app) = setup_app();
+    let (_fixture, mut app) = setup_app();
     app.open_create_form();
 
     app.form_type_char('A');
@@ -115,7 +106,7 @@ fn test_create_form_backspace() {
 
 #[test]
 fn test_create_form_backspace_on_empty() {
-    let (_dir, mut app) = setup_app();
+    let (_fixture, mut app) = setup_app();
     app.open_create_form();
 
     // Should not panic on empty field
@@ -126,7 +117,7 @@ fn test_create_form_backspace_on_empty() {
 // AC5: Tab cycles fields forward, Shift+Tab cycles backward
 #[test]
 fn test_create_form_tab_navigation() {
-    let (_dir, mut app) = setup_app();
+    let (_fixture, mut app) = setup_app();
     app.open_create_form();
 
     assert_eq!(app.create_form.focused_field, FormField::Title);
@@ -147,7 +138,7 @@ fn test_create_form_tab_navigation() {
 
 #[test]
 fn test_create_form_shift_tab_navigation() {
-    let (_dir, mut app) = setup_app();
+    let (_fixture, mut app) = setup_app();
     app.open_create_form();
 
     assert_eq!(app.create_form.focused_field, FormField::Title);
@@ -169,7 +160,7 @@ fn test_create_form_shift_tab_navigation() {
 // AC6: Cancel closes form and discards input
 #[test]
 fn test_create_form_cancel() {
-    let (_dir, mut app) = setup_app();
+    let (_fixture, mut app) = setup_app();
     app.open_create_form();
 
     app.form_type_char('T');

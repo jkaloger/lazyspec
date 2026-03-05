@@ -1,39 +1,28 @@
-use lazyspec::engine::config::Config;
-use lazyspec::engine::store::Store;
-use std::fs;
-use tempfile::TempDir;
+mod common;
 
-fn setup() -> (TempDir, Store) {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
+use common::TestFixture;
 
-    fs::create_dir_all(root.join("docs/rfcs")).unwrap();
-    fs::create_dir_all(root.join("docs/stories")).unwrap();
-    fs::create_dir_all(root.join("docs/iterations")).unwrap();
-
-    fs::write(
-        root.join("docs/rfcs/RFC-001-auth.md"),
+fn setup() -> TestFixture {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-auth.md",
         "---\ntitle: \"Auth Redesign\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: [security]\nrelated: []\n---\n\nRFC body.\n",
-    ).unwrap();
-
-    fs::write(
-        root.join("docs/stories/STORY-001-auth-impl.md"),
+    );
+    fixture.write_doc(
+        "docs/stories/STORY-001-auth-impl.md",
         "---\ntitle: \"Auth Implementation\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: [security]\nrelated:\n- implements: docs/rfcs/RFC-001-auth.md\n---\n\nStory body.\n",
-    ).unwrap();
-
-    fs::write(
-        root.join("docs/iterations/ITERATION-001-auth-sprint.md"),
+    );
+    fixture.write_doc(
+        "docs/iterations/ITERATION-001-auth-sprint.md",
         "---\ntitle: \"Auth Sprint 1\"\ntype: iteration\nstatus: draft\nauthor: agent\ndate: 2026-03-03\ntags: []\nrelated:\n- implements: docs/stories/STORY-001-auth-impl.md\n---\n\nIteration body.\n",
-    ).unwrap();
-
-    let config = Config::default();
-    let store = Store::load(root, &config).unwrap();
-    (dir, store)
+    );
+    fixture
 }
 
 #[test]
 fn context_walks_full_chain() {
-    let (_dir, store) = setup();
+    let fixture = setup();
+    let store = fixture.store();
     let chain = lazyspec::cli::context::resolve_chain(&store, "ITERATION-001").unwrap();
 
     assert_eq!(chain.len(), 3);
@@ -44,7 +33,8 @@ fn context_walks_full_chain() {
 
 #[test]
 fn context_standalone_document() {
-    let (_dir, store) = setup();
+    let fixture = setup();
+    let store = fixture.store();
     let chain = lazyspec::cli::context::resolve_chain(&store, "RFC-001").unwrap();
 
     assert_eq!(chain.len(), 1);
@@ -53,7 +43,8 @@ fn context_standalone_document() {
 
 #[test]
 fn context_json_output() {
-    let (_dir, store) = setup();
+    let fixture = setup();
+    let store = fixture.store();
     let output = lazyspec::cli::context::run_json(&store, "ITERATION-001").unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
@@ -67,7 +58,8 @@ fn context_json_output() {
 
 #[test]
 fn context_human_output() {
-    let (_dir, store) = setup();
+    let fixture = setup();
+    let store = fixture.store();
     let output = lazyspec::cli::context::run_human(&store, "ITERATION-001").unwrap();
 
     assert!(output.contains("Auth Redesign"));
@@ -80,7 +72,8 @@ fn context_human_output() {
 
 #[test]
 fn context_not_found() {
-    let (_dir, store) = setup();
+    let fixture = setup();
+    let store = fixture.store();
     let result = lazyspec::cli::context::resolve_chain(&store, "NONEXISTENT-999");
 
     assert!(result.is_err());
