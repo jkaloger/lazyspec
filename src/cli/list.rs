@@ -1,25 +1,11 @@
 use crate::cli::json::doc_to_json;
 use crate::cli::style::doc_card;
-use crate::engine::document::DocType;
 use crate::engine::store::{Filter, Store};
 
 fn build_filter(doc_type: Option<&str>, status: Option<&str>) -> Filter {
     Filter {
-        doc_type: doc_type.and_then(|t| match t.to_lowercase().as_str() {
-            "rfc" => Some(DocType::Rfc),
-            "adr" => Some(DocType::Adr),
-            "story" => Some(DocType::Story),
-            "iteration" => Some(DocType::Iteration),
-            _ => None,
-        }),
-        status: status.and_then(|s| match s.to_lowercase().as_str() {
-            "draft" => Some(crate::engine::document::Status::Draft),
-            "review" => Some(crate::engine::document::Status::Review),
-            "accepted" => Some(crate::engine::document::Status::Accepted),
-            "rejected" => Some(crate::engine::document::Status::Rejected),
-            "superseded" => Some(crate::engine::document::Status::Superseded),
-            _ => None,
-        }),
+        doc_type: doc_type.and_then(|t| t.parse().ok()),
+        status: status.and_then(|s| s.parse().ok()),
         ..Default::default()
     }
 }

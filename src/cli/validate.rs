@@ -13,26 +13,6 @@ fn success_message() -> String {
     }
 }
 
-pub fn run(store: &Store, json: bool) -> i32 {
-    let errors = store.validate();
-    if errors.is_empty() {
-        if !json {
-            println!("{}", success_message());
-        }
-        return 0;
-    }
-
-    if json {
-        let items: Vec<_> = errors.iter().map(|e| format!("{}", e)).collect();
-        println!("{}", serde_json::to_string_pretty(&items).unwrap());
-    } else {
-        for error in &errors {
-            eprintln!("  {} {}", error_prefix(), error);
-        }
-    }
-    2
-}
-
 pub fn run_full(store: &Store, json: bool, warnings: bool) -> i32 {
     let result = store.validate_full();
 

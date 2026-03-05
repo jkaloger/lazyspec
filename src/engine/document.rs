@@ -65,6 +65,46 @@ impl fmt::Display for RelationType {
     }
 }
 
+impl std::str::FromStr for DocType {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "rfc" => Ok(DocType::Rfc),
+            "adr" => Ok(DocType::Adr),
+            "story" => Ok(DocType::Story),
+            "iteration" => Ok(DocType::Iteration),
+            _ => Err(anyhow!("unknown doc type: {}", s)),
+        }
+    }
+}
+
+impl std::str::FromStr for Status {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "draft" => Ok(Status::Draft),
+            "review" => Ok(Status::Review),
+            "accepted" => Ok(Status::Accepted),
+            "rejected" => Ok(Status::Rejected),
+            "superseded" => Ok(Status::Superseded),
+            _ => Err(anyhow!("unknown status: {}", s)),
+        }
+    }
+}
+
+impl std::str::FromStr for RelationType {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "implements" => Ok(RelationType::Implements),
+            "supersedes" => Ok(RelationType::Supersedes),
+            "blocks" => Ok(RelationType::Blocks),
+            "related-to" | "related to" => Ok(RelationType::RelatedTo),
+            _ => Err(anyhow!("unknown relation type: {}", s)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relation {
     pub rel_type: RelationType,
@@ -96,7 +136,7 @@ struct RawFrontmatter {
     related: Vec<serde_yaml::Value>,
 }
 
-fn split_frontmatter(content: &str) -> Result<(String, String)> {
+pub fn split_frontmatter(content: &str) -> Result<(String, String)> {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
         return Err(anyhow!("no frontmatter found"));
@@ -127,13 +167,7 @@ fn parse_relation(value: &serde_yaml::Value) -> Result<Relation> {
         .as_str()
         .ok_or_else(|| anyhow!("relation key must be a string"))?;
 
-    let rel_type = match key_str {
-        "implements" => RelationType::Implements,
-        "supersedes" => RelationType::Supersedes,
-        "blocks" => RelationType::Blocks,
-        "related-to" => RelationType::RelatedTo,
-        other => return Err(anyhow!("unknown relation type: {}", other)),
-    };
+    let rel_type: RelationType = key_str.parse()?;
 
     let target = val
         .as_str()

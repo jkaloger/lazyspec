@@ -1,5 +1,5 @@
 use lazyspec::engine::config::Config;
-use lazyspec::engine::store::Store;
+use lazyspec::engine::store::{Store, ValidationIssue};
 use std::fs;
 use tempfile::TempDir;
 
@@ -16,9 +16,9 @@ fn validate_catches_broken_link() {
 
     let config = Config::default();
     let store = Store::load(root, &config).unwrap();
-    let errors = store.validate();
+    let result = store.validate_full();
 
-    assert!(!errors.is_empty());
+    assert!(!result.errors.is_empty());
 }
 
 #[test]
@@ -34,9 +34,9 @@ fn validate_passes_clean_repo() {
 
     let config = Config::default();
     let store = Store::load(root, &config).unwrap();
-    let errors = store.validate();
+    let result = store.validate_full();
 
-    assert!(errors.is_empty());
+    assert!(result.errors.is_empty());
 }
 
 #[test]
@@ -52,10 +52,10 @@ fn validate_catches_unlinked_iteration() {
 
     let config = Config::default();
     let store = Store::load(root, &config).unwrap();
-    let errors = store.validate();
+    let result = store.validate_full();
 
-    assert!(!errors.is_empty());
-    let has_unlinked = errors.iter().any(|e| matches!(e, lazyspec::engine::store::ValidationError::UnlinkedIteration { .. }));
+    assert!(!result.errors.is_empty());
+    let has_unlinked = result.errors.iter().any(|e| matches!(e, ValidationIssue::UnlinkedIteration { .. }));
     assert!(has_unlinked);
 }
 
@@ -72,10 +72,10 @@ fn validate_catches_unlinked_adr() {
 
     let config = Config::default();
     let store = Store::load(root, &config).unwrap();
-    let errors = store.validate();
+    let result = store.validate_full();
 
-    assert!(!errors.is_empty());
-    let has_unlinked = errors.iter().any(|e| matches!(e, lazyspec::engine::store::ValidationError::UnlinkedAdr { .. }));
+    assert!(!result.errors.is_empty());
+    let has_unlinked = result.errors.iter().any(|e| matches!(e, ValidationIssue::UnlinkedAdr { .. }));
     assert!(has_unlinked);
 }
 
@@ -99,7 +99,7 @@ fn validate_passes_linked_iteration() {
 
     let config = Config::default();
     let store = Store::load(root, &config).unwrap();
-    let errors = store.validate();
+    let result = store.validate_full();
 
-    assert!(errors.is_empty());
+    assert!(result.errors.is_empty());
 }

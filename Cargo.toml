@@ -9,9 +9,7 @@ crossterm = "0.28"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
-pulldown-cmark = "0.12"
 tui-markdown = "0.3"
-nucleo = "0.5"
 notify = "7"
 chrono = { version = "0.4", features = ["serde"] }
 toml = "0.8"

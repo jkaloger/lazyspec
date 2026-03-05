@@ -8,14 +8,9 @@ fn update_tags(root: &Path, relative: &Path, tags: &[String]) -> Result<()> {
     let full_path = root.join(relative);
     let content = std::fs::read_to_string(&full_path)?;
 
-    let trimmed = content.trim_start();
-    let after_first = &trimmed[3..];
-    let end = after_first.find("\n---")
-        .ok_or_else(|| anyhow!("unterminated frontmatter"))?;
-    let yaml_str = &after_first[..end];
-    let body = &after_first[end + 4..];
+    let (yaml_str, body) = crate::engine::document::split_frontmatter(&content)?;
 
-    let mut doc: serde_yaml::Value = serde_yaml::from_str(yaml_str)?;
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&yaml_str)?;
     let tag_values: Vec<serde_yaml::Value> = tags.iter()
         .map(|t| serde_yaml::Value::String(t.clone()))
         .collect();
@@ -396,12 +391,7 @@ impl App {
             return Err(anyhow!("Title is required"));
         }
 
-        let doc_type_str = match self.create_form.doc_type {
-            DocType::Rfc => "rfc",
-            DocType::Adr => "adr",
-            DocType::Story => "story",
-            DocType::Iteration => "iteration",
-        };
+        let doc_type_str = self.create_form.doc_type.to_string().to_lowercase();
 
         let author = if self.create_form.author.trim().is_empty() {
             "unknown"
@@ -418,7 +408,7 @@ impl App {
             }
         };
 
-        let path = crate::cli::create::run(root, config, doc_type_str, &title, author)?;
+        let path = crate::cli::create::run(root, config, &doc_type_str, &title, author)?;
         let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
         let relative_str = relative.to_string_lossy().to_string();
 
@@ -506,15 +496,7 @@ impl App {
         let mut results = Vec::new();
         for entry in related_str.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
             let (rel_type, shorthand) = if let Some((prefix, id)) = entry.split_once(':') {
-                let rel = match prefix.trim() {
-                    "implements" => "implements",
-                    "supersedes" => "supersedes",
-                    "blocks" => "blocks",
-                    "related-to" => "related-to",
-                    _ => {
-                        return Err(anyhow!("Unknown relation type: {}", prefix.trim()));
-                    }
-                };
+                let rel: crate::engine::document::RelationType = prefix.trim().parse()?;
                 (rel.to_string(), id.trim().to_string())
             } else {
                 ("related-to".to_string(), entry.to_string())

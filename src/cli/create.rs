@@ -1,8 +1,8 @@
 use crate::cli::json::doc_to_json;
 use crate::engine::config::Config;
-use crate::engine::document::DocMeta;
+use crate::engine::document::{DocMeta, DocType};
 use crate::engine::template;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use chrono::Local;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,12 +14,12 @@ pub fn run(
     title: &str,
     author: &str,
 ) -> Result<PathBuf> {
-    let dir = match doc_type.to_lowercase().as_str() {
-        "rfc" => &config.directories.rfcs,
-        "adr" => &config.directories.adrs,
-        "story" => &config.directories.stories,
-        "iteration" => &config.directories.iterations,
-        _ => return Err(anyhow!("unknown doc type: {}", doc_type)),
+    let parsed: DocType = doc_type.parse()?;
+    let dir = match parsed {
+        DocType::Rfc => &config.directories.rfcs,
+        DocType::Adr => &config.directories.adrs,
+        DocType::Story => &config.directories.stories,
+        DocType::Iteration => &config.directories.iterations,
     };
 
     let target_dir = root.join(dir);

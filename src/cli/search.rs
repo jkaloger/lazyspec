@@ -5,14 +5,7 @@ use crate::engine::store::{SearchResult, Store};
 
 fn filter_results<'a>(results: &mut Vec<SearchResult<'a>>, doc_type: Option<&str>) {
     if let Some(dt) = doc_type {
-        let filter_type = match dt.to_lowercase().as_str() {
-            "rfc" => Some(DocType::Rfc),
-            "adr" => Some(DocType::Adr),
-            "story" => Some(DocType::Story),
-            "iteration" => Some(DocType::Iteration),
-            _ => None,
-        };
-        if let Some(ft) = filter_type {
+        if let Ok(ft) = dt.parse::<DocType>() {
             results.retain(|r| r.doc.doc_type == ft);
         }
     }

@@ -189,46 +189,6 @@ impl Store {
         &self.root
     }
 
-    pub fn validate(&self) -> Vec<ValidationError> {
-        let mut errors = Vec::new();
-
-        for (path, meta) in &self.docs {
-            for rel in &meta.related {
-                let target = PathBuf::from(&rel.target);
-                if !self.docs.contains_key(&target) {
-                    errors.push(ValidationError::BrokenLink {
-                        source: path.clone(),
-                        target,
-                    });
-                }
-            }
-
-            if meta.doc_type == DocType::Iteration {
-                let has_story_link = meta.related.iter().any(|r| {
-                    r.rel_type == RelationType::Implements
-                        && self
-                            .docs
-                            .get(&PathBuf::from(&r.target))
-                            .map(|d| d.doc_type == DocType::Story)
-                            .unwrap_or(false)
-                });
-                if !has_story_link {
-                    errors.push(ValidationError::UnlinkedIteration {
-                        path: path.clone(),
-                    });
-                }
-            }
-
-            if meta.doc_type == DocType::Adr && meta.related.is_empty() {
-                errors.push(ValidationError::UnlinkedAdr {
-                    path: path.clone(),
-                });
-            }
-        }
-
-        errors
-    }
-
     pub fn validate_full(&self) -> ValidationResult {
         let mut result = ValidationResult::default();
 
@@ -415,13 +375,6 @@ impl Store {
 }
 
 #[derive(Debug)]
-pub enum ValidationError {
-    BrokenLink { source: PathBuf, target: PathBuf },
-    UnlinkedIteration { path: PathBuf },
-    UnlinkedAdr { path: PathBuf },
-}
-
-#[derive(Debug)]
 pub enum ValidationIssue {
     BrokenLink { source: PathBuf, target: PathBuf },
     UnlinkedIteration { path: PathBuf },
@@ -452,22 +405,6 @@ pub struct SearchResult<'a> {
     pub snippet: String,
 }
 
-impl std::fmt::Display for ValidationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ValidationError::BrokenLink { source, target } => {
-                write!(f, "broken link: {} -> {}", source.display(), target.display())
-            }
-            ValidationError::UnlinkedIteration { path } => {
-                write!(f, "iteration without story link: {}", path.display())
-            }
-            ValidationError::UnlinkedAdr { path } => {
-                write!(f, "ADR without any relation: {}", path.display())
-            }
-        }
-    }
-}
-
 impl std::fmt::Display for ValidationIssue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -490,7 +427,7 @@ impl std::fmt::Display for ValidationIssue {
                 write!(f, "accepted but parent not accepted: {} -> {}", path.display(), parent.display())
             }
             ValidationIssue::AllChildrenAccepted { parent, children } => {
-                write!(f, "all children accepted but parent is draft: {} ({} children)", parent.display(), children.len())
+                write!(f, "all children accepted but parent not accepted: {} ({} children)", parent.display(), children.len())
             }
             ValidationIssue::UpwardOrphanedAcceptance { path, parent } => {
                 write!(f, "accepted story but parent RFC not accepted: {} -> {}", path.display(), parent.display())
