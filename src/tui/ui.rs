@@ -111,6 +111,7 @@ fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(Color::DarkGray))
                 .title(" Types "),
         )
@@ -171,10 +172,10 @@ fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let (border_style, border_type) = if relations_focused {
-        (Style::default().fg(Color::DarkGray), BorderType::Plain)
+    let border_style = if relations_focused {
+        Style::default().fg(Color::DarkGray)
     } else {
-        (Style::default().fg(Color::Cyan), BorderType::Double)
+        Style::default().fg(Color::Cyan)
     };
 
     let highlight_style = if relations_focused {
@@ -187,8 +188,8 @@ fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(border_style)
-                .border_type(border_type)
                 .title(" Documents "),
         )
         .highlight_style(highlight_style);
@@ -230,6 +231,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border_style)
         .title(preview_title);
 
@@ -423,6 +425,7 @@ fn draw_fullscreen(f: &mut Frame, app: &App) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(Color::DarkGray)),
             )
             .wrap(Wrap { trim: false })
@@ -467,6 +470,7 @@ fn draw_help_overlay(f: &mut Frame) {
     let paragraph = Paragraph::new(help_text)
         .block(Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Cyan))
             .title(" Help "));
     f.render_widget(paragraph, popup_area);
@@ -532,6 +536,7 @@ fn draw_create_form(f: &mut Frame, app: &App) {
     let paragraph = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Cyan))
             .title(title),
     );
@@ -585,6 +590,7 @@ fn draw_delete_confirm(f: &mut Frame, app: &App) {
     let paragraph = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Red))
             .title(" Delete? "),
     );
@@ -607,6 +613,7 @@ fn draw_search_overlay(f: &mut Frame, app: &App) {
     .block(
         Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .title(" Search ")
             .border_style(Style::default().fg(Color::Cyan)),
     );
@@ -637,6 +644,7 @@ fn draw_search_overlay(f: &mut Frame, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .title(" Results ")
                 .border_style(Style::default().fg(Color::DarkGray)),
         )
