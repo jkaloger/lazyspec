@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
@@ -100,27 +100,27 @@ fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
         .doc_types
         .iter()
         .enumerate()
-        .map(|(i, dt)| {
+        .map(|(_, dt)| {
             let count = app.doc_count(dt);
             let content = format!("  {}s  ({})", dt, count);
-            let style = if i == app.selected_type {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            ListItem::new(content).style(style)
+            ListItem::new(content)
         })
         .collect();
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(" Types "),
-    );
-    f.render_widget(list, area);
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title(" Types "),
+        )
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+    let mut state = ListState::default().with_selected(Some(app.selected_type));
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
@@ -129,7 +129,7 @@ fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = docs
         .iter()
         .enumerate()
-        .map(|(i, doc)| {
+        .map(|(_, doc)| {
             let filename = doc
                 .path
                 .file_stem()
@@ -163,13 +163,7 @@ fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
             }
             let line = Line::from(spans);
             let style = if dim {
-                if i == app.selected_doc {
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                }
-            } else if i == app.selected_doc {
-                Style::default().add_modifier(Modifier::REVERSED)
+                Style::default().fg(Color::DarkGray)
             } else {
                 Style::default()
             };
@@ -183,14 +177,24 @@ fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
         (Style::default().fg(Color::Cyan), BorderType::Double)
     };
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .border_type(border_type)
-            .title(" Documents "),
-    );
-    f.render_widget(list, area);
+    let highlight_style = if relations_focused {
+        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::REVERSED)
+    };
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style)
+                .border_type(border_type)
+                .title(" Documents "),
+        )
+        .highlight_style(highlight_style);
+
+    let mut state = ListState::default().with_selected(Some(app.selected_doc));
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
@@ -316,6 +320,8 @@ fn draw_relations_content(f: &mut Frame, app: &App, area: Rect, block: Block) {
 
     let mut items: Vec<ListItem> = Vec::new();
     let mut flat_index = 0usize;
+    let mut list_index = 0usize;
+    let mut selected_flat_index = 0usize;
 
     let type_order = [
         RelationType::Implements,
@@ -340,9 +346,12 @@ fn draw_relations_content(f: &mut Frame, app: &App, area: Rect, block: Block) {
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
         ))));
+        list_index += 1;
 
         for (_, target_path) in &matching {
-            let selected = flat_index == app.selected_relation;
+            if flat_index == app.selected_relation {
+                selected_flat_index = list_index;
+            }
 
             let (title, status_str, status_clr) =
                 if let Some(target_doc) = app.store.get(target_path) {
@@ -359,30 +368,23 @@ fn draw_relations_content(f: &mut Frame, app: &App, area: Rect, block: Block) {
                     (name, "missing".to_string(), Color::Red)
                 };
 
-            let (indicator_span, title_style) = if selected {
-                (
-                    Span::styled("  > ", Style::default().fg(Color::Cyan)),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                )
-            } else {
-                (
-                    Span::raw("    "),
-                    Style::default(),
-                )
-            };
-
             items.push(ListItem::new(Line::from(vec![
-                indicator_span,
-                Span::styled(format!("{:<35} ", title), title_style),
+                Span::raw("    "),
+                Span::styled(format!("{:<35} ", title), Style::default()),
                 Span::styled(status_str, Style::default().fg(status_clr)),
             ])));
 
             flat_index += 1;
+            list_index += 1;
         }
     }
 
-    let list = List::new(items).block(block);
-    f.render_widget(list, area);
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .highlight_symbol("  > ");
+    let mut state = ListState::default().with_selected(Some(selected_flat_index));
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_fullscreen(f: &mut Frame, app: &App) {
@@ -613,8 +615,7 @@ fn draw_search_overlay(f: &mut Frame, app: &App) {
     let items: Vec<ListItem> = app
         .search_results
         .iter()
-        .enumerate()
-        .map(|(i, path)| {
+        .map(|path| {
             let doc = app.store.get(path);
             let (title, status_str, status_clr) = match doc {
                 Some(d) => (
@@ -624,24 +625,22 @@ fn draw_search_overlay(f: &mut Frame, app: &App) {
                 ),
                 None => ("?", "?".to_string(), Color::White),
             };
-            let style = if i == app.search_selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
             let line = Line::from(vec![
                 Span::raw(format!("  {:<40} ", title)),
                 Span::styled(status_str, Style::default().fg(status_clr)),
             ]);
-            ListItem::new(line).style(style)
+            ListItem::new(line)
         })
         .collect();
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Results ")
-            .border_style(Style::default().fg(Color::DarkGray)),
-    );
-    f.render_widget(list, layout[1]);
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Results ")
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let mut state = ListState::default().with_selected(Some(app.search_selected));
+    f.render_stateful_widget(list, layout[1], &mut state);
 }
