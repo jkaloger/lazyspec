@@ -92,12 +92,12 @@ Tell the user what you found:
 
 Not all work needs the full pipeline. Before determining entry point, classify what the user is asking for:
 
-| Classification       | Criteria                                                                  | Pipeline             |
-| -------------------- | ------------------------------------------------------------------------- | -------------------- |
-| **New feature**      | Adds new capability or behavior. Even small features need a Story.        | Full (RFC optional)  |
-| **Bug fix**          | Corrects existing behavior that doesn't match intent.                     | Iteration only       |
-| **Small tweak**      | Minor adjustment to existing behavior (config change, copy, styling).     | Iteration only       |
-| **Refactor**         | Restructures code without changing behavior.                              | Iteration only       |
+| Classification  | Criteria                                                              | Pipeline            |
+| --------------- | --------------------------------------------------------------------- | ------------------- |
+| **New feature** | Adds new capability or behavior. Even small features need a Story.    | Full (RFC optional) |
+| **Bug fix**     | Corrects existing behavior that doesn't match intent.                 | Iteration only      |
+| **Small tweak** | Minor adjustment to existing behavior (config change, copy, styling). | Iteration only      |
+| **Refactor**    | Restructures code without changing behavior.                          | Iteration only      |
 
 > [!NOTE]
 > When unsure, ask the user. The classification determines how much ceremony the work gets.
@@ -120,11 +120,11 @@ Not all work needs the full pipeline. Before determining entry point, classify w
 
 **For bug fixes, tweaks, and refactors** (lightweight pipeline):
 
-| State                                   | Action                                                                    |
-| --------------------------------------- | ------------------------------------------------------------------------- |
-| Related Story exists                    | Invoke `create-iteration` linked to that Story                            |
-| No related Story (standalone fix)       | Invoke `create-iteration` as a standalone iteration                       |
-| Iteration already exists with tasks     | Invoke `build`                                                            |
+| State                               | Action                                              |
+| ----------------------------------- | --------------------------------------------------- |
+| Related Story exists                | Invoke `create-iteration` linked to that Story      |
+| No related Story (standalone fix)   | Invoke `create-iteration` as a standalone iteration |
+| Iteration already exists with tasks | Invoke `build`                                      |
 
 ### 5. Brainstorm (when needed)
 
@@ -142,17 +142,20 @@ Brainstorming is fractal -- it applies at whatever level you're entering:
 - Read the RFC to understand intent
 - Propose vertical slices
 - Discuss scope of each slice
+- Propose 2-3 slice approaches with trade-offs
 - Get user approval before invoking create-story
 
 **Iteration level (Story exists, no Iteration):**
 
 - This is handled by create-iteration, which generates the task breakdown
+- Propose 2-3 design approaches with trade-offs
 - Invoke resolve-context, which chains to create-iteration
 
 **Lightweight iteration (bug fix / tweak):**
 
 - Confirm the problem or change with the user
 - If a related Story exists, confirm linking to it
+- Propose 2-3 design approaches with trade-offs
 - Invoke create-iteration directly (no resolve-context needed for standalone iterations)
 
 ### 6. Invoke the appropriate skill
@@ -161,14 +164,14 @@ After determining the entry point and brainstorming (if needed), invoke the skil
 
 ## Red Flags
 
-| Red Flag                               | Reality                                      |
-| -------------------------------------- | -------------------------------------------- |
-| "Let me just start coding"             | Code without a plan = rework. Plan first.    |
-| "I already know what to build"         | Then the plan should be quick. Still do it.  |
-| "This is too small to plan"            | Small work still gets an iteration. The iteration can be small too. |
-| "I'll figure out the design as I code" | That's not design. That's hoping.            |
-| "This bug fix needs an RFC"            | No it doesn't. Classify the work correctly.  |
-| "Let me create a Story for this typo fix" | Overkill. Bug fixes and tweaks skip Story creation. |
+| Red Flag                                  | Reality                                                             |
+| ----------------------------------------- | ------------------------------------------------------------------- |
+| "Let me just start coding"                | Code without a plan = rework. Plan first.                           |
+| "I already know what to build"            | Then the plan should be quick. Still do it.                         |
+| "This is too small to plan"               | Small work still gets an iteration. The iteration can be small too. |
+| "I'll figure out the design as I code"    | That's not design. That's hoping.                                   |
+| "This bug fix needs an RFC"               | No it doesn't. Classify the work correctly.                         |
+| "Let me create a Story for this typo fix" | Overkill. Bug fixes and tweaks skip Story creation.                 |
 
 ## Rules
 
