@@ -8,6 +8,10 @@
   </p>
 </p>
 
+
+<img width="1292" height="1193" alt="screenshot of a terminal interface displaying codebase documentation, categorised by type" src="https://github.com/user-attachments/assets/6a1447f9-7397-4db5-9ee5-8720bd500269" />
+
+
 ## Install
 
 ```sh
