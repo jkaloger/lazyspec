@@ -101,3 +101,121 @@ fn validate_with_warnings_flag_shows_warnings() {
 
     assert!(output.contains("superseded"));
 }
+
+fn setup_with_two_stories(rfc_status: &str, story1_status: &str, story2_status: &str) -> (TempDir, Store) {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("docs/rfcs")).unwrap();
+    fs::create_dir_all(root.join("docs/stories")).unwrap();
+
+    fs::write(
+        root.join("docs/rfcs/RFC-001-feature.md"),
+        format!(
+            "---\ntitle: \"Feature\"\ntype: rfc\nstatus: {}\nauthor: a\ndate: 2026-01-01\ntags: []\nrelated: []\n---\n",
+            rfc_status
+        ),
+    ).unwrap();
+
+    fs::write(
+        root.join("docs/stories/STORY-001-impl.md"),
+        format!(
+            "---\ntitle: \"Impl\"\ntype: story\nstatus: {}\nauthor: a\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-feature.md\n---\n",
+            story1_status
+        ),
+    ).unwrap();
+
+    fs::write(
+        root.join("docs/stories/STORY-002-impl.md"),
+        format!(
+            "---\ntitle: \"Impl2\"\ntype: story\nstatus: {}\nauthor: a\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-feature.md\n---\n",
+            story2_status
+        ),
+    ).unwrap();
+
+    let config = Config::default();
+    let store = Store::load(root, &config).unwrap();
+    (dir, store)
+}
+
+#[test]
+fn all_stories_accepted_warns_draft_rfc() {
+    let (_dir, store) = setup_with_chain("draft", "accepted", "accepted");
+    let result = store.validate_full();
+
+    assert!(
+        result.warnings.iter().any(|w| matches!(
+            w,
+            ValidationIssue::AllChildrenAccepted { parent, .. }
+                if parent.ends_with("RFC-001-feature.md")
+        )),
+        "expected AllChildrenAccepted warning with RFC as parent, got: {:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn all_iterations_accepted_warns_draft_story() {
+    let (_dir, store) = setup_with_chain("accepted", "draft", "accepted");
+    let result = store.validate_full();
+
+    assert!(
+        result.warnings.iter().any(|w| matches!(
+            w,
+            ValidationIssue::AllChildrenAccepted { parent, .. }
+                if parent.ends_with("STORY-001-impl.md")
+        )),
+        "expected AllChildrenAccepted warning with Story as parent, got: {:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn partial_children_no_all_accepted_warning() {
+    let (_dir, store) = setup_with_two_stories("draft", "accepted", "draft");
+    let result = store.validate_full();
+
+    assert!(
+        !result.warnings.iter().any(|w| matches!(
+            w,
+            ValidationIssue::AllChildrenAccepted { parent, .. }
+                if parent.ends_with("RFC-001-feature.md")
+        )),
+        "expected no AllChildrenAccepted warning for RFC, got: {:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn accepted_story_draft_rfc_orphaned() {
+    let (_dir, store) = setup_with_two_stories("draft", "accepted", "draft");
+    let result = store.validate_full();
+
+    assert!(
+        result.warnings.iter().any(|w| matches!(
+            w,
+            ValidationIssue::UpwardOrphanedAcceptance { path, parent }
+                if path.ends_with("STORY-001-impl.md") && parent.ends_with("RFC-001-feature.md")
+        )),
+        "expected UpwardOrphanedAcceptance for accepted story with draft RFC parent, got: {:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn all_children_accepted_json_output() {
+    let (_dir, store) = setup_with_chain("draft", "accepted", "accepted");
+    let output = lazyspec::cli::validate::run_json(&store);
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    let warnings = parsed["warnings"].as_array().expect("warnings should be an array");
+    assert!(
+        warnings.iter().any(|w| {
+            w.as_str()
+                .map(|s| s.contains("all children accepted"))
+                .unwrap_or(false)
+        }),
+        "expected JSON warnings to contain 'all children accepted', got: {:?}",
+        warnings
+    );
+}

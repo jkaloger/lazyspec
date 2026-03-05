@@ -296,6 +296,73 @@ impl Store {
             }
         }
 
+        for (parent_path, meta) in &self.docs {
+            if meta.doc_type != DocType::Rfc && meta.doc_type != DocType::Story {
+                continue;
+            }
+
+            let expected_child_type = match meta.doc_type {
+                DocType::Rfc => DocType::Story,
+                DocType::Story => DocType::Iteration,
+                _ => continue,
+            };
+
+            let children: Vec<PathBuf> = self
+                .reverse_links
+                .get(parent_path)
+                .into_iter()
+                .flatten()
+                .filter(|(rel_type, child_path)| {
+                    *rel_type == RelationType::Implements
+                        && self
+                            .docs
+                            .get(child_path)
+                            .map(|d| d.doc_type == expected_child_type)
+                            .unwrap_or(false)
+                })
+                .map(|(_, child_path)| child_path.clone())
+                .collect();
+
+            if children.is_empty() {
+                continue;
+            }
+
+            let parent_is_draft_or_review =
+                meta.status == Status::Draft || meta.status == Status::Review;
+
+            let all_accepted = children.iter().all(|cp| {
+                self.docs
+                    .get(cp)
+                    .map(|d| d.status == Status::Accepted)
+                    .unwrap_or(false)
+            });
+
+            if all_accepted && parent_is_draft_or_review {
+                result.warnings.push(ValidationIssue::AllChildrenAccepted {
+                    parent: parent_path.clone(),
+                    children,
+                });
+                continue;
+            }
+
+            if parent_is_draft_or_review && meta.doc_type == DocType::Rfc {
+                for child_path in &children {
+                    if let Some(child) = self.docs.get(child_path) {
+                        if child.status == Status::Accepted
+                            && child.doc_type == DocType::Story
+                        {
+                            result
+                                .warnings
+                                .push(ValidationIssue::UpwardOrphanedAcceptance {
+                                    path: child_path.clone(),
+                                    parent: parent_path.clone(),
+                                });
+                        }
+                    }
+                }
+            }
+        }
+
         result
     }
 
@@ -362,6 +429,14 @@ pub enum ValidationIssue {
     SupersededParent { path: PathBuf, parent: PathBuf },
     RejectedParent { path: PathBuf, parent: PathBuf },
     OrphanedAcceptance { path: PathBuf, parent: PathBuf },
+    AllChildrenAccepted {
+        parent: PathBuf,
+        children: Vec<PathBuf>,
+    },
+    UpwardOrphanedAcceptance {
+        path: PathBuf,
+        parent: PathBuf,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -413,6 +488,12 @@ impl std::fmt::Display for ValidationIssue {
             }
             ValidationIssue::OrphanedAcceptance { path, parent } => {
                 write!(f, "accepted but parent not accepted: {} -> {}", path.display(), parent.display())
+            }
+            ValidationIssue::AllChildrenAccepted { parent, children } => {
+                write!(f, "all children accepted but parent is draft: {} ({} children)", parent.display(), children.len())
+            }
+            ValidationIssue::UpwardOrphanedAcceptance { path, parent } => {
+                write!(f, "accepted story but parent RFC not accepted: {} -> {}", path.display(), parent.display())
             }
         }
     }
