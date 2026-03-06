@@ -23,6 +23,27 @@ fn update_tags(root: &Path, relative: &Path, tags: &[String]) -> Result<()> {
     Ok(())
 }
 
+pub fn resolve_editor_from(editor: Option<&str>, visual: Option<&str>) -> String {
+    if let Some(e) = editor {
+        if !e.is_empty() {
+            return e.to_string();
+        }
+    }
+    if let Some(v) = visual {
+        if !v.is_empty() {
+            return v.to_string();
+        }
+    }
+    "vi".to_string()
+}
+
+pub fn resolve_editor() -> String {
+    resolve_editor_from(
+        std::env::var("EDITOR").ok().as_deref(),
+        std::env::var("VISUAL").ok().as_deref(),
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FormField {
     Title,
@@ -177,6 +198,7 @@ pub struct App {
     pub view_mode: ViewMode,
     pub graph_nodes: Vec<GraphNode>,
     pub graph_selected: usize,
+    pub editor_request: Option<PathBuf>,
 }
 
 impl App {
@@ -201,6 +223,7 @@ impl App {
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
+            editor_request: None,
         }
     }
 
@@ -631,7 +654,7 @@ impl App {
         if self.fullscreen_doc {
             return self.handle_fullscreen_key(code);
         }
-        self.handle_normal_key(code, modifiers);
+        self.handle_normal_key(code, modifiers, root);
     }
 
     fn handle_create_form_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
@@ -691,7 +714,7 @@ impl App {
         }
     }
 
-    fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+    fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path) {
         if self.view_mode == ViewMode::Graph {
             match code {
                 KeyCode::Char('j') | KeyCode::Down => {
@@ -723,6 +746,11 @@ impl App {
                 KeyCode::Char('G') => {
                     self.graph_selected = self.graph_nodes.len().saturating_sub(1);
                 }
+                KeyCode::Char('e') => {
+                    if let Some(node) = self.graph_nodes.get(self.graph_selected) {
+                        self.editor_request = Some(root.join(&node.path));
+                    }
+                }
                 KeyCode::Char('q') => {
                     self.should_quit = true;
                 }
@@ -745,6 +773,10 @@ impl App {
             (KeyCode::Char('n'), _) => self.open_create_form(),
             (KeyCode::Char('d'), _) if self.selected_doc_meta().is_some() => {
                 self.open_delete_confirm();
+            }
+            (KeyCode::Char('e'), _) if self.selected_doc_meta().is_some() => {
+                let doc = self.selected_doc_meta().unwrap();
+                self.editor_request = Some(root.join(&doc.path));
             }
             (KeyCode::Enter, _) => {
                 if self.preview_tab == PreviewTab::Relations {

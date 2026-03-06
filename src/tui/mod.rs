@@ -13,8 +13,31 @@ use crossterm::{
 use notify::{RecursiveMode, Watcher, EventKind};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
+use std::path::Path;
+use std::process::Command;
 use std::sync::mpsc;
 use std::time::Duration;
+
+fn run_editor(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    path: &Path,
+) -> Result<()> {
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    disable_raw_mode()?;
+
+    let editor = app::resolve_editor();
+    let status = Command::new(&editor).arg(path).status();
+
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    terminal.clear()?;
+
+    if let Err(e) = status {
+        eprintln!("Failed to launch editor '{}': {}", editor, e);
+    }
+
+    Ok(())
+}
 
 pub fn run(store: Store, config: &Config) -> Result<()> {
     enable_raw_mode()?;
@@ -68,6 +91,14 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             if let Event::Key(KeyEvent { code, modifiers, .. }) = event::read()? {
                 let root = app.store.root().to_path_buf();
                 app.handle_key(code, modifiers, &root, config);
+            }
+        }
+
+        if let Some(path) = app.editor_request.take() {
+            run_editor(&mut terminal, &path)?;
+            let root = app.store.root().to_path_buf();
+            if let Ok(relative) = path.strip_prefix(&root) {
+                let _ = app.store.reload_file(&root, relative);
             }
         }
 

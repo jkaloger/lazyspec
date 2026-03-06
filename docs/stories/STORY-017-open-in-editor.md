@@ -1,13 +1,17 @@
 ---
-title: "Open in Editor"
+title: Open in Editor
 type: story
-status: draft
-author: "jkaloger"
+status: accepted
+author: jkaloger
 date: 2026-03-05
-tags: [tui]
+tags:
+- tui
 related:
-  - implements: docs/rfcs/RFC-006-tui-progressive-disclosure.md
+- implements: docs/rfcs/RFC-006-tui-progressive-disclosure.md
+- implements: docs/rfcs/RFC-011-tui-ux-refinements.md
 ---
+
+
 
 ## Context
 
@@ -39,9 +43,9 @@ The TUI is read-only for document body content. Editing a document means finding
   **When** the TUI resumes
   **Then** the store reloads the edited document and the display reflects any changes
 
-### AC5: Editor available in Types and Filters modes
+### AC5: Editor available in Types, Filters, and Graph modes
 
-- **Given** the TUI is in Types mode or Filters mode
+- **Given** the TUI is in Types, Filters, or Graph mode
   **When** a document is selected and the user presses `e`
   **Then** the editor opens for that document
 
