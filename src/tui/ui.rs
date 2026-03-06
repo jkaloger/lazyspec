@@ -6,8 +6,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::engine::document::{DocType, RelationType, Status};
-use crate::tui::app::{App, FormField, PreviewTab, ViewMode};
+use crate::engine::document::{DocMeta, DocType, RelationType, Status};
+use crate::tui::app::{App, FilterField, FormField, PreviewTab, ViewMode};
 
 fn status_color(status: &Status) -> Color {
     match status {
@@ -110,7 +110,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             draw_doc_list(f, app, right[0]);
             draw_preview(f, app, right[1]);
         }
-        ViewMode::Filters => draw_filters_skeleton(f, outer[1]),
+        ViewMode::Filters => draw_filters_mode(f, app, outer[1]),
         ViewMode::Metrics => draw_metrics_skeleton(f, outer[1]),
         ViewMode::Graph => draw_graph(f, app, outer[1]),
     }
@@ -260,14 +260,15 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
         .border_style(border_style)
         .title(preview_title);
 
+    let doc = app.selected_doc_meta();
     match app.preview_tab {
-        PreviewTab::Preview => draw_preview_content(f, app, area, block),
-        PreviewTab::Relations => draw_relations_content(f, app, area, block),
+        PreviewTab::Preview => draw_preview_content(f, app, area, block, doc),
+        PreviewTab::Relations => draw_relations_content(f, app, area, block, doc),
     }
 }
 
-fn draw_preview_content(f: &mut Frame, app: &App, area: Rect, block: Block) {
-    if let Some(doc) = app.selected_doc_meta() {
+fn draw_preview_content(f: &mut Frame, app: &App, area: Rect, block: Block, doc: Option<&DocMeta>) {
+    if let Some(doc) = doc {
         let body = app.store.get_body(&doc.path).unwrap_or_default();
 
         let mut lines = vec![
@@ -326,8 +327,8 @@ fn draw_preview_content(f: &mut Frame, app: &App, area: Rect, block: Block) {
     }
 }
 
-fn draw_relations_content(f: &mut Frame, app: &App, area: Rect, block: Block) {
-    let Some(doc) = app.selected_doc_meta() else {
+fn draw_relations_content(f: &mut Frame, app: &App, area: Rect, block: Block, doc: Option<&DocMeta>) {
+    let Some(doc) = doc else {
         let paragraph = Paragraph::new(" No document selected.")
             .block(block)
             .wrap(Wrap { trim: false });
@@ -672,25 +673,179 @@ fn draw_search_overlay(f: &mut Frame, app: &App) {
     f.render_stateful_widget(list, layout[1], &mut state);
 }
 
-fn draw_filters_skeleton(f: &mut Frame, area: Rect) {
-    let layout = Layout::default()
+fn draw_filters_mode(f: &mut Frame, app: &App, area: Rect) {
+    let main = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
         .split(area);
 
-    let left = Block::default()
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(main[1]);
+
+    // Left panel: filter controls
+    let status_value = match &app.filter_status {
+        None => "all".to_string(),
+        Some(s) => format!("{}", s),
+    };
+    let tag_value = match &app.filter_tag {
+        None => "all".to_string(),
+        Some(t) => t.clone(),
+    };
+
+    let status_style = if app.filter_focused == FilterField::Status {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else if app.filter_status.is_some() {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
+
+    let tag_style = if app.filter_focused == FilterField::Tag {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else if app.filter_tag.is_some() {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
+
+    let clear_style = if app.filter_focused == FilterField::ClearAction {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    let filter_lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(format!("  Status: [{}]", status_value), status_style)),
+        Line::from(""),
+        Line::from(Span::styled(format!("  Tag:    [{}]", tag_value), tag_style)),
+        Line::from(""),
+        Line::from(Span::styled("  [clear filters]", clear_style)),
+    ];
+
+    let filter_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .title(" Filters ");
-    f.render_widget(left, layout[0]);
+    let filter_paragraph = Paragraph::new(filter_lines).block(filter_block);
+    f.render_widget(filter_paragraph, main[0]);
 
-    let right = Block::default()
+    // Right panel: doc list
+    let filtered = app.filtered_docs();
+    let filtered_count = filtered.len();
+    let total_count = app.store.all_docs().len();
+
+    let relations_focused = app.preview_tab == PreviewTab::Relations;
+    let items: Vec<ListItem> = filtered
+        .iter()
+        .map(|doc| {
+            let filename = display_name(&doc.path);
+            let dim = relations_focused;
+            let status_style = if dim {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default().fg(status_color(&doc.status))
+            };
+            let mut spans = vec![
+                Span::styled(
+                    format!("  {:<30} ", filename),
+                    if dim { Style::default().fg(Color::DarkGray) } else { Style::default() },
+                ),
+                Span::styled(format!("{:<12}", doc.status), status_style),
+            ];
+            for (idx, tag) in doc.tags.iter().take(3).enumerate() {
+                if idx > 0 {
+                    spans.push(Span::raw(" "));
+                }
+                let tc = if dim { Color::DarkGray } else { tag_color(tag) };
+                spans.push(Span::styled(format!("[{}]", tag), Style::default().fg(tc)));
+            }
+            if doc.tags.len() > 3 {
+                spans.push(Span::styled(
+                    format!(" +{}", doc.tags.len() - 3),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            let line = Line::from(spans);
+            let style = if dim {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+            ListItem::new(line).style(style)
+        })
+        .collect();
+
+    let border_style = if relations_focused {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+
+    let highlight_style = if relations_focused {
+        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::REVERSED)
+    };
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(border_style)
+                .title(format!(" Documents ({} of {}) ", filtered_count, total_count)),
+        )
+        .highlight_style(highlight_style);
+
+    let mut state = ListState::default().with_selected(Some(app.selected_doc));
+    f.render_stateful_widget(list, right[0], &mut state);
+
+    // Right panel: preview
+    let doc = app.selected_filtered_doc();
+    let preview_title = if app.preview_tab == PreviewTab::Preview {
+        Line::from(vec![
+            Span::styled(
+                " Preview ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("| "),
+            Span::styled("Relations ", Style::default().fg(Color::DarkGray)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" Preview ", Style::default().fg(Color::DarkGray)),
+            Span::raw("| "),
+            Span::styled(
+                "Relations ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+    };
+
+    let preview_border_style = if app.preview_tab == PreviewTab::Relations {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Documents ");
-    f.render_widget(right, layout[1]);
+        .border_style(preview_border_style)
+        .title(preview_title);
+
+    match app.preview_tab {
+        PreviewTab::Preview => draw_preview_content(f, app, right[1], block, doc),
+        PreviewTab::Relations => draw_relations_content(f, app, right[1], block, doc),
+    }
 }
 
 fn draw_metrics_skeleton(f: &mut Frame, area: Rect) {

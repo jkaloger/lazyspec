@@ -1,13 +1,14 @@
 ---
 title: "Filters Mode"
 type: story
-status: draft
+status: accepted
 author: "jkaloger"
 date: 2026-03-05
 tags: [tui]
 related:
   - implements: docs/rfcs/RFC-006-tui-progressive-disclosure.md
 ---
+
 
 ## Context
 
@@ -19,12 +20,12 @@ As document counts grow, browsing the full list per type becomes unwieldy. The s
 
 - **Given** the TUI is in Filters mode
   **When** the screen renders
-  **Then** the left panel shows filter fields for status, tag, author, and sort order
+  **Then** the left panel shows filter fields for status and tag
 
 ### AC2: Navigate filter fields
 
 - **Given** the TUI is in Filters mode
-  **When** the user presses `j/k`
+  **When** the user presses `Tab/Shift-Tab`
   **Then** focus moves between filter fields
 
 ### AC3: Cycle filter values
@@ -51,13 +52,7 @@ As document counts grow, browsing the full list per type becomes unwieldy. The s
   **When** the user selects "clear filters" and presses Enter
   **Then** all filters reset to their defaults and the document list shows all documents
 
-### AC7: Filters persist across mode switches
-
-- **Given** filters are active in Filters mode
-  **When** the user switches to Types mode
-  **Then** the filters remain applied to the document list
-
-### AC8: Preview and relations work with filtered list
+### AC7: Preview and relations work with filtered list
 
 - **Given** filters are active and a filtered document is selected
   **When** the user views the Preview or Relations tab
@@ -67,11 +62,9 @@ As document counts grow, browsing the full list per type becomes unwieldy. The s
 
 ### In Scope
 
-- Filter state fields on App (status, tag, author, sort)
+- Filter state fields on App (status, tag)
 - Filter controls panel rendering and interaction
 - Filter application to the document list
-- Filter persistence across mode switches
-- Sort by name, date, or status
 
 ### Out of Scope
 

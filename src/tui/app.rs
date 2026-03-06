@@ -52,6 +52,31 @@ pub enum FormField {
     Related,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FilterField {
+    Status,
+    Tag,
+    ClearAction,
+}
+
+impl FilterField {
+    pub fn next(self) -> Self {
+        match self {
+            FilterField::Status => FilterField::Tag,
+            FilterField::Tag => FilterField::ClearAction,
+            FilterField::ClearAction => FilterField::Status,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            FilterField::Status => FilterField::ClearAction,
+            FilterField::Tag => FilterField::Status,
+            FilterField::ClearAction => FilterField::Tag,
+        }
+    }
+}
+
 impl FormField {
     fn next(self) -> Self {
         match self {
@@ -199,6 +224,10 @@ pub struct App {
     pub graph_nodes: Vec<GraphNode>,
     pub graph_selected: usize,
     pub editor_request: Option<PathBuf>,
+    pub filter_focused: FilterField,
+    pub filter_status: Option<Status>,
+    pub filter_tag: Option<String>,
+    pub available_tags: Vec<String>,
 }
 
 impl App {
@@ -224,13 +253,116 @@ impl App {
             graph_nodes: Vec::new(),
             graph_selected: 0,
             editor_request: None,
+            filter_focused: FilterField::Status,
+            filter_status: None,
+            filter_tag: None,
+            available_tags: Vec::new(),
         }
     }
 
     pub fn cycle_mode(&mut self) {
+        if self.view_mode == ViewMode::Filters {
+            self.reset_filters();
+        }
         self.view_mode = self.view_mode.next();
         if self.view_mode == ViewMode::Graph {
             self.rebuild_graph();
+        }
+        if self.view_mode == ViewMode::Filters {
+            self.enter_filters_mode();
+            self.selected_doc = 0;
+        }
+    }
+
+    pub fn enter_filters_mode(&mut self) {
+        let mut tags: Vec<String> = self
+            .store
+            .all_docs()
+            .iter()
+            .flat_map(|doc| doc.tags.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        tags.sort();
+        self.available_tags = tags;
+    }
+
+    pub fn filtered_docs(&self) -> Vec<&DocMeta> {
+        let mut docs = self.store.list(&Filter {
+            doc_type: None,
+            status: self.filter_status.clone(),
+            tag: self.filter_tag.clone(),
+        });
+        docs.sort_by(|a, b| a.path.cmp(&b.path));
+        docs
+    }
+
+    pub fn selected_filtered_doc(&self) -> Option<&DocMeta> {
+        let docs = self.filtered_docs();
+        docs.get(self.selected_doc).copied()
+    }
+
+    pub fn reset_filters(&mut self) {
+        self.filter_status = None;
+        self.filter_tag = None;
+        self.filter_focused = FilterField::Status;
+    }
+
+    pub fn cycle_filter_value_next(&mut self) {
+        match self.filter_focused {
+            FilterField::Status => {
+                self.filter_status = match &self.filter_status {
+                    None => Some(Status::Draft),
+                    Some(Status::Draft) => Some(Status::Review),
+                    Some(Status::Review) => Some(Status::Accepted),
+                    Some(Status::Accepted) => Some(Status::Rejected),
+                    Some(Status::Rejected) => Some(Status::Superseded),
+                    Some(Status::Superseded) => None,
+                };
+            }
+            FilterField::Tag => {
+                self.filter_tag = match &self.filter_tag {
+                    None => self.available_tags.first().cloned(),
+                    Some(current) => {
+                        let pos = self.available_tags.iter().position(|t| t == current);
+                        match pos {
+                            Some(i) if i + 1 < self.available_tags.len() => {
+                                Some(self.available_tags[i + 1].clone())
+                            }
+                            _ => None,
+                        }
+                    }
+                };
+            }
+            FilterField::ClearAction => {}
+        }
+    }
+
+    pub fn cycle_filter_value_prev(&mut self) {
+        match self.filter_focused {
+            FilterField::Status => {
+                self.filter_status = match &self.filter_status {
+                    None => Some(Status::Superseded),
+                    Some(Status::Superseded) => Some(Status::Rejected),
+                    Some(Status::Rejected) => Some(Status::Accepted),
+                    Some(Status::Accepted) => Some(Status::Review),
+                    Some(Status::Review) => Some(Status::Draft),
+                    Some(Status::Draft) => None,
+                };
+            }
+            FilterField::Tag => {
+                self.filter_tag = match &self.filter_tag {
+                    None => self.available_tags.last().cloned(),
+                    Some(current) => {
+                        let pos = self.available_tags.iter().position(|t| t == current);
+                        match pos {
+                            Some(0) | None => None,
+                            Some(i) => Some(self.available_tags[i - 1].clone()),
+                        }
+                    }
+                };
+            }
+            FilterField::ClearAction => {}
         }
     }
 
@@ -715,6 +847,75 @@ impl App {
     }
 
     fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path) {
+        if self.view_mode == ViewMode::Filters {
+            match code {
+                KeyCode::Tab => {
+                    self.filter_focused = self.filter_focused.next();
+                }
+                KeyCode::BackTab => {
+                    self.filter_focused = self.filter_focused.prev();
+                }
+                KeyCode::Char('h') | KeyCode::Left => {
+                    self.cycle_filter_value_prev();
+                }
+                KeyCode::Char('l') | KeyCode::Right => {
+                    self.cycle_filter_value_next();
+                }
+                KeyCode::Enter if self.filter_focused == FilterField::ClearAction => {
+                    self.reset_filters();
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let count = self.filtered_docs().len();
+                    if count > 0 && self.selected_doc < count - 1 {
+                        self.selected_doc += 1;
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if self.selected_doc > 0 {
+                        self.selected_doc -= 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    if self.preview_tab == PreviewTab::Relations {
+                        self.navigate_to_relation();
+                    } else {
+                        if self.selected_filtered_doc().is_some() {
+                            self.fullscreen_doc = true;
+                            self.scroll_offset = 0;
+                        }
+                    }
+                }
+                KeyCode::Char('g') => {
+                    self.selected_doc = 0;
+                }
+                KeyCode::Char('G') => {
+                    let count = self.filtered_docs().len();
+                    if count > 0 {
+                        self.selected_doc = count - 1;
+                    }
+                }
+                KeyCode::Char('e') => {
+                    if let Some(doc) = self.selected_filtered_doc() {
+                        self.editor_request = Some(root.join(&doc.path));
+                    }
+                }
+                KeyCode::Char('q') => {
+                    self.should_quit = true;
+                }
+                KeyCode::Char('`') => {
+                    self.cycle_mode();
+                }
+                KeyCode::Char('?') => {
+                    self.show_help = true;
+                }
+                KeyCode::Char('/') => {
+                    self.enter_search();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.view_mode == ViewMode::Graph {
             match code {
                 KeyCode::Char('j') | KeyCode::Down => {
