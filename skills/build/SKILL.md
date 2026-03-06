@@ -12,6 +12,7 @@ If the Iteration doesn't have a numbered task breakdown in `## Changes`, you can
 <HARD-GATE>
 Do NOT begin implementation without a complete Iteration document with numbered
 task breakdown. Each task must have enough detail for a zero-context subagent.
+ALWAYS use subagents for development.
 </HARD-GATE>
 
 ## Forbidden Actions
@@ -93,18 +94,18 @@ Done.shape: double_circle
 
 ## Subagent Dispatch
 
-| Tier | Model | Use for |
-|------|-------|---------|
-| Light | Haiku | Parsing frontmatter, extracting structured data, simple validation |
+| Tier   | Model  | Use for                                                                         |
+| ------ | ------ | ------------------------------------------------------------------------------- |
+| Light  | Haiku  | Parsing frontmatter, extracting structured data, simple validation              |
 | Medium | Sonnet | Codebase exploration, searching for patterns, reading and summarizing documents |
-| Heavy | Opus | Implementation, complex reasoning, multi-file changes, review |
+| Heavy  | Opus   | Implementation, complex reasoning, multi-file changes, review                   |
 
-| Operation | Agent Type | Tier | Context to provide |
-|-----------|-----------|------|-------------------|
-| Implement task | general-purpose | Heavy | Full task text, RFC intent, Story ACs, prior task results |
-| Review task (AC compliance) | general-purpose | Heavy | Task text, Story ACs, implementer report |
-| Review task (code quality) | general-purpose | Medium | Changed files, test output, quality criteria |
-| Final review | general-purpose | Heavy | All Story ACs, full implementation summary |
+| Operation                   | Agent Type      | Tier   | Context to provide                                        |
+| --------------------------- | --------------- | ------ | --------------------------------------------------------- |
+| Implement task              | general-purpose | Heavy  | Full task text, RFC intent, Story ACs, prior task results |
+| Review task (AC compliance) | general-purpose | Heavy  | Task text, Story ACs, implementer report                  |
+| Review task (code quality)  | general-purpose | Medium | Changed files, test output, quality criteria              |
+| Final review                | general-purpose | Heavy  | All Story ACs, full implementation summary                |
 
 > This skill follows the [obra/superpowers](https://github.com/obra/superpowers) subagent-driven development pattern: dispatch a fresh subagent per task, with two-stage review (spec compliance first, code quality second). Each subagent starts with zero prior context to prevent pollution. The reviewer is always a separate agent from the implementer.
 
@@ -224,6 +225,7 @@ Report:
 ### 9. Handle review failures
 
 If the reviewer reports issues:
+
 - Dispatch a fresh implementer subagent with the specific issues to fix
 - After fixes, dispatch reviewer again
 - Repeat until both stages pass
@@ -309,12 +311,12 @@ Run `lazyspec validate --json` after all updates.
 
 ## Red Flags
 
-| Red Flag | Reality |
-|----------|---------|
-| "I'll review all tasks at the end" | Per-task review catches issues early. Fixing one task is cheaper than fixing five. |
-| "The implementer self-reviewed, that's enough" | Self-review is necessary but not sufficient. The reviewer is a separate subagent. |
-| "I'll skip spec compliance and just do code quality" | Spec compliance FIRST. Beautiful code that doesn't meet the spec is wrong code. |
-| "Let me implement two tasks before reviewing" | One task, one review. No batching. |
+| Red Flag                                                 | Reality                                                                                       |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| "I'll review all tasks at the end"                       | Per-task review catches issues early. Fixing one task is cheaper than fixing five.            |
+| "The implementer self-reviewed, that's enough"           | Self-review is necessary but not sufficient. The reviewer is a separate subagent.             |
+| "I'll skip spec compliance and just do code quality"     | Spec compliance FIRST. Beautiful code that doesn't meet the spec is wrong code.               |
+| "Let me implement two tasks before reviewing"            | One task, one review. No batching.                                                            |
 | "I'll provide a file reference instead of the full text" | Subagents receive full text. File references require them to read and parse, wasting context. |
 
 ## Rules
