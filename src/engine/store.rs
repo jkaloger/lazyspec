@@ -240,8 +240,8 @@ impl Store {
             if let Ok(body) = self.get_body(&meta.path) {
                 let body_lower = body.to_lowercase();
                 if let Some(pos) = body_lower.find(&query_lower) {
-                    let start = pos.saturating_sub(40);
-                    let end = (pos + query.len() + 40).min(body.len());
+                    let start = body.floor_char_boundary(pos.saturating_sub(40));
+                    let end = body.ceil_char_boundary((pos + query.len() + 40).min(body.len()));
                     let snippet = body[start..end].to_string();
                     results.push(SearchResult {
                         doc: meta,
