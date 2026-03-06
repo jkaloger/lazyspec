@@ -10,8 +10,13 @@ lazyspec gives your codebase a lightweight spec layer. Define decisions, track f
 
 <img width="1864" height="1193" alt="screenshot of a terminal interface displaying codebase documentation, categorised by type" src="https://github.com/user-attachments/assets/18bdd9a7-16db-43f6-b6cc-a3dced1c9f66" />
 
-
 ## Install
+
+```sh
+cargo install --git https://github.com/jkaloger/lazyspec
+```
+
+### Local
 
 ```sh
 cargo install --path .
