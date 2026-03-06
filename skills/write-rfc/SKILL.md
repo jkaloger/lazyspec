@@ -23,6 +23,19 @@ After completion: use the `/create-story` skill for each vertical slice identifi
 - Do NOT create Story documents from this skill. Finish the RFC, get approval, then use the `/create-story` skill.
 </NEVER>
 
+## CLI Reference
+
+Before using any `lazyspec` command, run `lazyspec help` to see all available
+commands, and `lazyspec help <subcommand>` to see the full usage for that
+command. Do not assume you know the flags or arguments -- verify with `--help`.
+
+Always pass `--json` when the command supports it. This gives you structured,
+parseable output. Only omit `--json` when presenting output directly to the user.
+
+If a `lazyspec` command fails, run `lazyspec help <subcommand>` to check
+the correct usage before retrying. Do not guess at fixes or retry the same
+command blindly.
+
 # Write RFC
 
 ## Workflow Position
@@ -54,17 +67,17 @@ Use /create-story skill.shape: double_circle
 
 ## Preflight
 
-1. Read relevant documents using `lazyspec show` before modifying anything
-2. Check for existing artifacts using `lazyspec search` and `lazyspec list`
-3. Search for existing RFCs on the topic: `lazyspec search "<topic>"`, `lazyspec list rfc`
-4. Read any related RFCs with `lazyspec show <id>`
+1. Read relevant documents using `lazyspec show --json` before modifying anything
+2. Check for existing artifacts using `lazyspec search --json` and `lazyspec list --json`
+3. Search for existing RFCs on the topic: `lazyspec search "<topic>" --json`, `lazyspec list rfc --json`
+4. Read any related RFCs with `lazyspec show <id> --json`
 5. Confirm no existing RFC already covers this design
 
 ## Steps
 
-1. **Understand the problem:** Search existing docs with `lazyspec search <topic>` to avoid duplicating prior work. Check for superseded RFCs.
+1. **Understand the problem:** Search existing docs with `lazyspec search <topic> --json` to avoid duplicating prior work. Check for superseded RFCs.
 
-2. **Create the RFC:** Run `lazyspec create rfc "<title>" --author <name>`
+2. **Create the RFC:** Run `lazyspec help create` to confirm usage, then: `lazyspec create rfc "<title>" --author <name>`
 
 3. **Write intent:** Describe the problem being solved and why. This is design intent, not implementation detail.
 
@@ -79,9 +92,9 @@ Use /create-story skill.shape: double_circle
 
 5. **Identify Stories:** List the vertical slices that fall out of this RFC. Each should be independently shippable.
 
-6. **Emit ADRs:** For significant decisions made during RFC writing, create ADRs: `lazyspec create adr "<decision>"` and link them: `lazyspec link <adr-path> related-to <rfc-path>`.
+6. **Emit ADRs:** For significant decisions made during RFC writing, run `lazyspec help create` to confirm usage, then: `lazyspec create adr "<decision>"`. Run `lazyspec help link` to confirm usage, then: `lazyspec link <adr-path> related-to <rfc-path>`.
 
-7. **Validate:** Run `lazyspec validate`.
+7. **Validate:** Run `lazyspec validate --json`.
 
 ## Red Flags
 
@@ -95,7 +108,7 @@ Use /create-story skill.shape: double_circle
 
 Before claiming this skill is complete:
 
-- [ ] `lazyspec validate` passes
+- [ ] `lazyspec validate --json` passes
 - [ ] User has explicitly approved the RFC
 - [ ] At least one Story has been identified
 - [ ] Any significant decisions have ADRs

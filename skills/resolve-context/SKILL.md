@@ -23,6 +23,19 @@ After completion: use the `/create-iteration` skill.
 - Do NOT skip the workflow pipeline. Features need RFC -> Story -> Iteration. Bug fixes need Iteration.
 </NEVER>
 
+## CLI Reference
+
+Before using any `lazyspec` command, run `lazyspec help` to see all available
+commands, and `lazyspec help <subcommand>` to see the full usage for that
+command. Do not assume you know the flags or arguments -- verify with `--help`.
+
+Always pass `--json` when the command supports it. This gives you structured,
+parseable output. Only omit `--json` when presenting output directly to the user.
+
+If a `lazyspec` command fails, run `lazyspec help <subcommand>` to check
+the correct usage before retrying. Do not guess at fixes or retry the same
+command blindly.
+
 # Resolve Context
 
 ## Workflow Position
@@ -50,7 +63,7 @@ Context complete.shape: double_circle
 ## Preflight
 
 1. Identify the target document path or ID
-2. Confirm the document exists with `lazyspec show <id>`
+2. Confirm the document exists with `lazyspec show <id> --json`
 
 ## Subagent Dispatch
 
@@ -67,11 +80,11 @@ Context complete.shape: double_circle
 
 ## Steps
 
-1. **Identify the document:** Use `lazyspec list` or `lazyspec search <query>` to find the target document.
+1. **Identify the document:** Use `lazyspec list --json` or `lazyspec search <query> --json` to find the target document.
 
-2. **Resolve the chain:** Run `lazyspec context <id>` to get the full implements chain (RFC -> Story -> Iteration) in one call. Use `lazyspec context <id> --json` if you need structured output for parsing.
+2. **Resolve the chain:** Run `lazyspec context <id> --json` to get the full implements chain (RFC -> Story -> Iteration) in one call.
 
-3. **Read document bodies:** The context command shows frontmatter only. For documents where you need the full body (typically the Story ACs and RFC design intent), follow up with `lazyspec show <id>` on those specific documents.
+3. **Read document bodies:** The context command shows frontmatter only. For documents where you need the full body (typically the Story ACs and RFC design intent), follow up with `lazyspec show <id> --json` on those specific documents.
 
 4. **Check for existing work:** Run `lazyspec status --json` to get all documents, relationships, and validation results in one call. Look for existing iterations, ADRs, or related documents that cover the same ground.
 
@@ -93,8 +106,8 @@ Context complete.shape: double_circle
 
 Before claiming this skill is complete:
 
-- [ ] `lazyspec context <id>` has been run on the target document
-- [ ] `lazyspec show` has been run on documents where the body is needed (Story ACs, RFC design)
+- [ ] `lazyspec context <id> --json` has been run on the target document
+- [ ] `lazyspec show --json` has been run on documents where the body is needed (Story ACs, RFC design)
 - [ ] Existing iterations and ADRs have been checked (via `lazyspec status --json` or search)
 - [ ] Context chain has been stated back (RFC intent, Story ACs, prior work)
 

@@ -26,6 +26,19 @@ resolve-context is not needed when continuing in the same session.
 - Do NOT write acceptance criteria without reading the parent RFC first.
 </NEVER>
 
+## CLI Reference
+
+Before using any `lazyspec` command, run `lazyspec help` to see all available
+commands, and `lazyspec help <subcommand>` to see the full usage for that
+command. Do not assume you know the flags or arguments -- verify with `--help`.
+
+Always pass `--json` when the command supports it. This gives you structured,
+parseable output. Only omit `--json` when presenting output directly to the user.
+
+If a `lazyspec` command fails, run `lazyspec help <subcommand>` to check
+the correct usage before retrying. Do not guess at fixes or retry the same
+command blindly.
+
 # Create Story
 
 ## Workflow Position
@@ -60,28 +73,28 @@ Use /create-iteration skill.shape: double_circle
 
 ## Preflight
 
-1. Read relevant documents using `lazyspec show` before modifying anything
-2. Check for existing artifacts using `lazyspec search` and `lazyspec list`
-3. Read the parent RFC with `lazyspec show <rfc-id>`
+1. Read relevant documents using `lazyspec show --json` before modifying anything
+2. Check for existing artifacts using `lazyspec search --json` and `lazyspec list --json`
+3. Read the parent RFC with `lazyspec show <rfc-id> --json`
 4. Confirm you understand the design intent before writing ACs
-5. Check for existing stories under this RFC: `lazyspec search "<rfc-title>"`
+5. Check for existing stories under this RFC: `lazyspec search "<rfc-title>" --json`
 
 ## Steps
 
-1. **Find the parent RFC:** Run `lazyspec list rfc` to find the relevant RFC. Use `lazyspec show <id>` to verify it's the right one. If no RFC exists, use the `/write-rfc` skill first.
+1. **Find the parent RFC:** Run `lazyspec list rfc --json` to find the relevant RFC. Use `lazyspec show <id> --json` to verify it's the right one. If no RFC exists, use the `/write-rfc` skill first.
 
-2. **Create the story:** Run `lazyspec create story "<title>" --author <name>`
+2. **Create the story:** Run `lazyspec help create` to confirm usage, then: `lazyspec create story "<title>" --author <name>`
 
 3. **Write acceptance criteria:** Edit the created file. Each AC must follow given/when/then:
    - **Given** a precondition that establishes context
    - **When** an action is taken
    - **Then** an observable outcome occurs
 
-4. **Link to RFC:** Run `lazyspec link <story-path> implements <rfc-path>`
+4. **Link to RFC:** Run `lazyspec help link` to confirm usage, then: `lazyspec link <story-path> implements <rfc-path>`
 
 5. **Define scope:** Fill in the In Scope and Out of Scope sections. Be explicit about what this story does NOT cover.
 
-6. **Validate:** Run `lazyspec validate` to ensure all links resolve.
+6. **Validate:** Run `lazyspec validate --json` to ensure all links resolve.
 
 ## Red Flags
 
@@ -95,7 +108,7 @@ Use /create-iteration skill.shape: double_circle
 
 Before claiming this skill is complete:
 
-- [ ] `lazyspec validate` passes (story links to RFC)
+- [ ] `lazyspec validate --json` passes (story links to RFC)
 - [ ] Every AC has given/when/then structure
 - [ ] Scope sections are filled (not TODO)
 - [ ] Story is readable without implementation specifics

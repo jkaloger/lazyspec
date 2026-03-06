@@ -25,6 +25,19 @@ If ACs fail during a standalone review, use `/create-iteration` to re-plan.
 - Do NOT approve without running tests in the current session. Do NOT trust prior test reports.
 </NEVER>
 
+## CLI Reference
+
+Before using any `lazyspec` command, run `lazyspec help` to see all available
+commands, and `lazyspec help <subcommand>` to see the full usage for that
+command. Do not assume you know the flags or arguments -- verify with `--help`.
+
+Always pass `--json` when the command supports it. This gives you structured,
+parseable output. Only omit `--json` when presenting output directly to the user.
+
+If a `lazyspec` command fails, run `lazyspec help <subcommand>` to check
+the correct usage before retrying. Do not guess at fixes or retry the same
+command blindly.
+
 # Review Iteration
 
 ## Workflow Position
@@ -58,9 +71,9 @@ This skill operates in two modes:
 
 ## Preflight
 
-1. Resolve the chain with `lazyspec context <iteration-id>` to see RFC -> Story -> Iteration
-2. Read the iteration body with `lazyspec show <iteration-id>`
-3. Read the parent Story ACs with `lazyspec show <story-id>`
+1. Resolve the chain with `lazyspec context <iteration-id> --json` to see RFC -> Story -> Iteration
+2. Read the iteration body with `lazyspec show <iteration-id> --json`
+3. Read the parent Story ACs with `lazyspec show <story-id> --json`
 4. Do NOT begin review until both documents are loaded into context
 
 ## The Gate
@@ -99,9 +112,9 @@ Approve.shape: double_circle
 
 ## Stage 1: AC Compliance
 
-1. Run `lazyspec context <iteration-id>` to see the full chain.
-2. Run `lazyspec show <iteration-id>` to read the iteration body.
-3. Run `lazyspec show <story-id>` to read the Story's ACs.
+1. Run `lazyspec context <iteration-id> --json` to see the full chain.
+2. Run `lazyspec show <iteration-id> --json` to read the iteration body.
+3. Run `lazyspec show <story-id> --json` to read the Story's ACs.
 4. Run the full test suite. Show the output.
 5. For each AC the iteration claims to cover: verify the test exists and passes.
 6. If any AC is not satisfied, state which ACs are unmet. See Failure Handling below for what to do next.
@@ -156,11 +169,13 @@ Before claiming this review is approved:
 - [ ] Test suite has been run in this session with full output shown
 - [ ] Every claimed AC has a corresponding passing test
 - [ ] Code quality review completed (only after Stage 1 passes)
-- [ ] `lazyspec validate` passes
+- [ ] `lazyspec validate --json` passes
 
 ## Status Updates
 
-When a review passes (both stages), update document statuses:
+When a review passes (both stages), update document statuses.
+
+Run `lazyspec help update` to confirm usage.
 
 ```bash
 lazyspec update <iteration-path> --status accepted

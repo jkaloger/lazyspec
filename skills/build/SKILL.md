@@ -23,6 +23,19 @@ task breakdown. Each task must have enough detail for a zero-context subagent.
 - Do NOT implement tasks yourself. Dispatch a subagent per task. Do NOT dispatch parallel implementers.
 </NEVER>
 
+## CLI Reference
+
+Before using any `lazyspec` command, run `lazyspec help` to see all available
+commands, and `lazyspec help <subcommand>` to see the full usage for that
+command. Do not assume you know the flags or arguments -- verify with `--help`.
+
+Always pass `--json` when the command supports it. This gives you structured,
+parseable output. Only omit `--json` when presenting output directly to the user.
+
+If a `lazyspec` command fails, run `lazyspec help <subcommand>` to check
+the correct usage before retrying. Do not guess at fixes or retry the same
+command blindly.
+
 # Build
 
 ## Workflow Position
@@ -72,10 +85,10 @@ Done.shape: double_circle
 
 ## Preflight
 
-1. Resolve the full chain with `lazyspec context <iteration-id>` to see RFC -> Story -> Iteration
-2. Read the iteration body with `lazyspec show <iteration-id>` to get the task breakdown
-3. Read the parent Story body with `lazyspec show <story-id>` to get the ACs
-4. Read the RFC body with `lazyspec show <rfc-id>` for design intent
+1. Resolve the full chain with `lazyspec context <iteration-id> --json` to see RFC -> Story -> Iteration
+2. Read the iteration body with `lazyspec show <iteration-id> --json` to get the task breakdown
+3. Read the parent Story body with `lazyspec show <story-id> --json` to get the ACs
+4. Read the RFC body with `lazyspec show <rfc-id> --json` for design intent
 5. Extract all tasks from `## Changes` before dispatching any subagent
 
 ## Subagent Dispatch
@@ -97,8 +110,8 @@ Done.shape: double_circle
 
 ## Setup
 
-1. **Resolve the chain:** Run `lazyspec context <iteration-id>` to see the full RFC -> Story -> Iteration chain at a glance.
-2. **Read the documents:** Run `lazyspec show <iteration-id>`, `lazyspec show <story-id>`, and `lazyspec show <rfc-id>` to get the full bodies (task breakdown, ACs, design intent).
+1. **Resolve the chain:** Run `lazyspec context <iteration-id> --json` to see the full RFC -> Story -> Iteration chain at a glance.
+2. **Read the documents:** Run `lazyspec show <iteration-id> --json`, `lazyspec show <story-id> --json`, and `lazyspec show <rfc-id> --json` to get the full bodies (task breakdown, ACs, design intent).
 3. **Extract all tasks** from the iteration's `## Changes` section. Copy the full text of each task -- subagents receive text, not file references.
 4. **Create task tracking** using TodoWrite with one entry per task.
 
@@ -120,16 +133,16 @@ Include in the prompt:
 ```
 IMPORTANT: You are working within the lazyspec workflow.
 - Use `lazyspec` CLI commands for document operations. Do NOT write document files directly.
-- Read files before editing them. Use the Read tool or `lazyspec show` before any modification.
+- Read files before editing them. Use the Read tool or `lazyspec show --json` before any modification.
 - Implement ONLY what the task specifies. Do not add features, refactor surrounding code, or "improve" things not in the task.
 
 Before you begin: if you have questions about requirements, approach,
 dependencies, or anything unclear -- ask them now. Don't guess.
 
 To find relevant files and prior work, use the lazyspec CLI:
-- `lazyspec context <id>` to see the full RFC -> Story -> Iteration chain
-- `lazyspec search "<query>"` to find documents by keyword
-- `lazyspec show <id>` to read a document's full body
+- `lazyspec context <id> --json` to see the full RFC -> Story -> Iteration chain
+- `lazyspec search "<query>" --json` to find documents by keyword
+- `lazyspec show <id> --json` to read a document's full body
 - `lazyspec status --json` to get all documents and validation at once
 
 Use lazyspec to discover related specs before grepping the codebase.
@@ -223,9 +236,9 @@ Update task tracking. Proceed to next task.
 
 After completing tasks 2, 4, 6, etc., re-read the chain to prevent context drift:
 
-1. Run `lazyspec context <iteration-id>` to verify the chain is intact
-2. Run `lazyspec show <iteration-id>` to refresh the task list and status
-3. Run `lazyspec show <story-id>` to refresh the ACs
+1. Run `lazyspec context <iteration-id> --json` to verify the chain is intact
+2. Run `lazyspec show <iteration-id> --json` to refresh the task list and status
+3. Run `lazyspec show <story-id> --json` to refresh the ACs
 4. Verify you are still following the task breakdown as written (not improvising)
 
 This counteracts the tendency for agents to drift from the plan as context grows.
@@ -236,11 +249,11 @@ This counteracts the tendency for agents to drift from the plan as context grows
 
 Before the final review, verify the workflow is intact:
 
-1. Re-read the iteration document: `lazyspec show <iteration-id>`
+1. Re-read the iteration document: `lazyspec show <iteration-id> --json`
 2. Confirm all tasks in `## Changes` have been completed
 3. Check that no work was done outside the task breakdown
 4. Verify the iteration document is up to date with actual changes
-5. Run `lazyspec validate` to check document integrity
+5. Run `lazyspec validate --json` to check document integrity
 
 If anything is out of alignment, fix it before proceeding to final review.
 
@@ -273,7 +286,9 @@ You are performing a final review of the complete implementation.
 
 ### 12. Update document statuses
 
-If final review passes, mark documents as accepted:
+If final review passes, mark documents as accepted.
+
+Run `lazyspec help update` to confirm usage.
 
 ```bash
 # Mark the iteration as accepted
@@ -290,7 +305,7 @@ lazyspec update <rfc-path> --status accepted
 
 Check each level: iteration -> story -> RFC. Only promote a parent document when all its children are complete.
 
-Run `lazyspec validate` after all updates.
+Run `lazyspec validate --json` after all updates.
 
 ## Red Flags
 

@@ -27,6 +27,19 @@ Only use the `/build` skill after the user explicitly confirms.
 - Do NOT write test or production code. This skill produces a plan document only.
 </NEVER>
 
+## CLI Reference
+
+Before using any `lazyspec` command, run `lazyspec help` to see all available
+commands, and `lazyspec help <subcommand>` to see the full usage for that
+command. Do not assume you know the flags or arguments -- verify with `--help`.
+
+Always pass `--json` when the command supports it. This gives you structured,
+parseable output. Only omit `--json` when presenting output directly to the user.
+
+If a `lazyspec` command fails, run `lazyspec help <subcommand>` to check
+the correct usage before retrying. Do not guess at fixes or retry the same
+command blindly.
+
 # Create Iteration
 
 ## Workflow Position
@@ -67,9 +80,9 @@ Use /build skill.shape: double_circle
 
 ## Preflight
 
-1. If linked to a Story: run `lazyspec context <story-id>` to see the chain, then `lazyspec show <story-id>` for the full ACs
+1. If linked to a Story: run `lazyspec context <story-id> --json` to see the chain, then `lazyspec show <story-id> --json` for the full ACs
 2. Run `lazyspec status --json` to see all documents and check no existing iteration covers the same ACs
-3. Read relevant documents using `lazyspec show` before modifying anything
+3. Read relevant documents using `lazyspec show --json` before modifying anything
 
 ## Subagent Dispatch
 
@@ -86,15 +99,15 @@ Use /build skill.shape: double_circle
 
 ## Steps
 
-1. **Gather context:** Run `lazyspec status --json` to see all documents at once, then `lazyspec search "<keyword>"` for topic-specific matches.
-   - **If linked to a Story:** Run `lazyspec context <story-id>` to see the chain, then `lazyspec show <story-id>` to read the full ACs. If you haven't already resolved context, use `/resolve-context` first.
+1. **Gather context:** Run `lazyspec status --json` to see all documents at once, then `lazyspec search "<keyword>" --json` for topic-specific matches.
+   - **If linked to a Story:** Run `lazyspec context <story-id> --json` to see the chain, then `lazyspec show <story-id> --json` to read the full ACs. If you haven't already resolved context, use `/resolve-context` first.
    - **If standalone (bug fix, tweak, refactor):** Gather context from the codebase directly. Understand the affected code and the problem being solved. No Story or resolve-context required.
 
-2. **Discover relevant code:** Use `lazyspec search` to find specs that reference the modules and types you'll be working with. Read the referenced file paths from those specs to understand the existing code before planning tasks. Task breakdowns must reference real, verified file paths.
+2. **Discover relevant code:** Use `lazyspec search --json` to find specs that reference the modules and types you'll be working with. Read the referenced file paths from those specs to understand the existing code before planning tasks. Task breakdowns must reference real, verified file paths.
 
-3. **Create the iteration:** Run `lazyspec create iteration "<title>" --author agent`
+3. **Create the iteration:** Run `lazyspec help create` to confirm usage, then: `lazyspec create iteration "<title>" --author agent`
 
-4. **Link to story (if applicable):** If this iteration implements a Story, run `lazyspec link <iteration-path> implements <story-path>`. Standalone iterations for bug fixes, tweaks, or refactors do not require a parent Story link.
+4. **Link to story (if applicable):** If this iteration implements a Story, run `lazyspec help link` to confirm usage, then: `lazyspec link <iteration-path> implements <story-path>`. Standalone iterations for bug fixes, tweaks, or refactors do not require a parent Story link.
 
 5. **Plan tests:** For each AC this iteration covers, describe the test that will verify it. Document these in the iteration's `## Test Plan` section. Do NOT write test code or production code yet -- that happens during build.
 
@@ -142,9 +155,9 @@ Use /build skill.shape: double_circle
 
    Each task should reference which Story ACs it addresses, include exact file paths, describe the implementation in enough detail that someone unfamiliar with the codebase can execute it, and specify how to verify correctness.
 
-8. **Document:** Add any discoveries or decisions to `## Notes`. If a significant decision was made, create an ADR: `lazyspec create adr "<decision>"`.
+8. **Document:** Add any discoveries or decisions to `## Notes`. If a significant decision was made, run `lazyspec help create` to confirm usage, then: `lazyspec create adr "<decision>"`.
 
-9. **Validate:** Run `lazyspec validate`.
+9. **Validate:** Run `lazyspec validate --json`.
 
 10. **Present to user:** Show the user the complete iteration document (task breakdown, test plan, linked ACs). Ask for explicit confirmation before proceeding. Do NOT use `/build` until the user approves.
 
@@ -161,7 +174,7 @@ Use /build skill.shape: double_circle
 
 Before claiming this skill is complete:
 
-- [ ] `lazyspec validate` passes
+- [ ] `lazyspec validate --json` passes
 - [ ] If linked to a Story: iteration links to Story correctly
 - [ ] `## Changes` section contains a numbered task breakdown
 - [ ] Each task includes file paths and describes implementation. If linked to a Story, tasks reference Story ACs.
@@ -183,7 +196,7 @@ Before claiming this skill is complete:
 Before presenting the iteration to the user, verify:
 
 - [ ] Is this a feature? Then confirm a parent Story exists and is linked.
-- [ ] Have you read the parent Story's ACs? (not assumed -- actually read with `lazyspec show`)
+- [ ] Have you read the parent Story's ACs? (not assumed -- actually read with `lazyspec show --json`)
 - [ ] Does every task reference real, verified file paths? (not guessed)
 - [ ] Is the task breakdown detailed enough for a zero-context subagent?
 

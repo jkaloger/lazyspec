@@ -25,6 +25,19 @@ and use the right skill.
 - Do NOT use /write-rfc, create-story, or create-iteration without user approval of the direction first.
 </NEVER>
 
+## CLI Reference
+
+Before using any `lazyspec` command, run `lazyspec help` to see all available
+commands, and `lazyspec help <subcommand>` to see the full usage for that
+command. Do not assume you know the flags or arguments -- verify with `--help`.
+
+Always pass `--json` when the command supports it. This gives you structured,
+parseable output. Only omit `--json` when presenting output directly to the user.
+
+If a `lazyspec` command fails, run `lazyspec help <subcommand>` to check
+the correct usage before retrying. Do not guess at fixes or retry the same
+command blindly.
+
 # Plan
 
 ## Workflow Position
@@ -81,7 +94,7 @@ Use /build skill.shape: double_circle
 ## Preflight
 
 1. Run `lazyspec status --json` to get all documents, relationships, and validation in one call
-2. Search for topic-specific matches: `lazyspec search "<topic>"`
+2. Search for topic-specific matches: `lazyspec search "<topic>" --json`
 3. Present findings to the user before choosing a direction
 4. Classify the work (new feature, bug fix, tweak, refactor) before selecting a pipeline
 
@@ -106,7 +119,7 @@ Get the full project state and search for related work:
 
 ```
 lazyspec status --json
-lazyspec search "<topic>"
+lazyspec search "<topic>" --json
 ```
 
 ### 2. Present findings
@@ -217,7 +230,7 @@ After determining the entry point and brainstorming (if needed), use the Skill t
 
 Before invoking any downstream skill, verify:
 
-- [ ] Have you searched for existing artifacts? (`lazyspec search`, `lazyspec list`)
+- [ ] Have you searched for existing artifacts? (`lazyspec search --json`, `lazyspec list --json`)
 - [ ] Have you presented findings to the user?
 - [ ] Has the user approved the direction?
 - [ ] Are you invoking the correct skill for the work classification?
