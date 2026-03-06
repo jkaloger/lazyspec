@@ -1,10 +1,9 @@
-<h1>
-<p align="center">
-  lazyspec
+<h1 align="center">
+  🤖
+  <br>lazyspec
 </h1>
-  <p align="center">
-    A TUI and CLI for managing project documentation — RFCs, ADRs, Stories, and Iterations.
-  </p>
+<p align="center">
+    A little TUI for project documentation.
 </p>
 
 lazyspec gives your codebase a lightweight spec layer. Define decisions, track features from RFC through to iteration, and validate that everything links together. Works from the terminal as a dashboard or as a scriptable CLI with `--json` output.
