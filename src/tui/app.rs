@@ -115,6 +115,34 @@ impl DeleteConfirm {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ViewMode {
+    Types,
+    Filters,
+    Metrics,
+    Graph,
+}
+
+impl ViewMode {
+    pub fn next(self) -> Self {
+        match self {
+            ViewMode::Types => ViewMode::Filters,
+            ViewMode::Filters => ViewMode::Metrics,
+            ViewMode::Metrics => ViewMode::Graph,
+            ViewMode::Graph => ViewMode::Types,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            ViewMode::Types => "Types",
+            ViewMode::Filters => "Filters",
+            ViewMode::Metrics => "Metrics",
+            ViewMode::Graph => "Graph",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PreviewTab {
     Preview,
     Relations,
@@ -137,6 +165,7 @@ pub struct App {
     pub selected_relation: usize,
     pub create_form: CreateForm,
     pub delete_confirm: DeleteConfirm,
+    pub view_mode: ViewMode,
 }
 
 impl App {
@@ -158,7 +187,12 @@ impl App {
             selected_relation: 0,
             create_form: CreateForm::new(),
             delete_confirm: DeleteConfirm::new(),
+            view_mode: ViewMode::Types,
         }
+    }
+
+    pub fn cycle_mode(&mut self) {
+        self.view_mode = self.view_mode.next();
     }
 
     pub fn current_type(&self) -> &DocType {
@@ -604,6 +638,7 @@ impl App {
             (KeyCode::Tab, _) => self.toggle_preview_tab(),
             (KeyCode::Char('g'), _) => self.move_to_top(),
             (KeyCode::Char('G'), _) => self.move_to_bottom(),
+            (KeyCode::Char('`'), _) => self.cycle_mode(),
             _ => {}
         }
     }

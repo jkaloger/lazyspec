@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::engine::document::{RelationType, Status};
-use crate::tui::app::{App, FormField, PreviewTab};
+use crate::tui::app::{App, FormField, PreviewTab, ViewMode};
 
 fn status_color(status: &Status) -> Color {
     match status {
@@ -85,19 +85,35 @@ pub fn draw(f: &mut Frame, app: &App) {
     )]);
     f.render_widget(Paragraph::new(title), outer[0]);
 
-    let main = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
-        .split(outer[1]);
+    let mode_indicator = Line::from(vec![Span::styled(
+        format!("[{}] ` to cycle ", app.view_mode.name()),
+        Style::default().fg(Color::DarkGray),
+    )]);
+    f.render_widget(
+        Paragraph::new(mode_indicator).alignment(Alignment::Right),
+        outer[0],
+    );
 
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(main[1]);
+    match app.view_mode {
+        ViewMode::Types => {
+            let main = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
+                .split(outer[1]);
 
-    draw_type_panel(f, app, main[0]);
-    draw_doc_list(f, app, right[0]);
-    draw_preview(f, app, right[1]);
+            let right = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .split(main[1]);
+
+            draw_type_panel(f, app, main[0]);
+            draw_doc_list(f, app, right[0]);
+            draw_preview(f, app, right[1]);
+        }
+        ViewMode::Filters => draw_filters_skeleton(f, outer[1]),
+        ViewMode::Metrics => draw_metrics_skeleton(f, outer[1]),
+        ViewMode::Graph => draw_graph_skeleton(f, outer[1]),
+    }
 
     if app.delete_confirm.active {
         draw_delete_confirm(f, app);
@@ -654,6 +670,69 @@ fn draw_search_overlay(f: &mut Frame, app: &App) {
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     let mut state = ListState::default().with_selected(Some(app.search_selected));
     f.render_stateful_widget(list, layout[1], &mut state);
+}
+
+fn draw_filters_skeleton(f: &mut Frame, area: Rect) {
+    let layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
+        .split(area);
+
+    let left = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" Filters ");
+    f.render_widget(left, layout[0]);
+
+    let right = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" Documents ");
+    f.render_widget(right, layout[1]);
+}
+
+fn draw_metrics_skeleton(f: &mut Frame, area: Rect) {
+    let layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
+        .split(area);
+
+    let left = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" Metrics ");
+    f.render_widget(left, layout[0]);
+
+    let right = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" Status Flow ");
+    f.render_widget(right, layout[1]);
+}
+
+fn draw_graph_skeleton(f: &mut Frame, area: Rect) {
+    let layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
+        .split(area);
+
+    let left = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" Graph ");
+    f.render_widget(left, layout[0]);
+
+    let right = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" Dependency Graph ");
+    f.render_widget(right, layout[1]);
 }
 
 #[cfg(test)]
