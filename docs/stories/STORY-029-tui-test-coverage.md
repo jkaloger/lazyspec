@@ -1,13 +1,14 @@
 ---
 title: TUI Test Coverage
 type: story
-status: draft
+status: accepted
 author: agent
 date: 2026-03-05
 tags: [testing, tui, quality]
 related:
 - implements: docs/rfcs/RFC-009-codebase-quality-baseline.md
 ---
+
 
 
 ## Context

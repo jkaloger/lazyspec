@@ -1,11 +1,12 @@
 ---
 title: "Codebase Quality Baseline"
 type: rfc
-status: draft
+status: accepted
 author: "agent"
 date: 2026-03-05
 tags: [refactor, quality, testing]
 ---
+
 
 ## Summary
 
