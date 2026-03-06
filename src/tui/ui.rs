@@ -36,6 +36,19 @@ fn tag_color(tag: &str) -> Color {
     PALETTE[(hash as usize) % PALETTE.len()]
 }
 
+fn display_name(path: &std::path::Path) -> &str {
+    let stem = path.file_stem().and_then(|s| s.to_str());
+    match stem {
+        Some("index") => path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .unwrap_or("?"),
+        Some(name) => name,
+        None => "?",
+    }
+}
+
 pub fn draw(f: &mut Frame, app: &App) {
     if app.fullscreen_doc {
         draw_fullscreen(f, app);
@@ -131,11 +144,7 @@ fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(_, doc)| {
-            let filename = doc
-                .path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("?");
+            let filename = display_name(&doc.path);
             let dim = relations_focused;
             let status_style = if dim {
                 Style::default().fg(Color::DarkGray)
@@ -363,10 +372,7 @@ fn draw_relations_content(f: &mut Frame, app: &App, area: Rect, block: Block) {
                         status_color(&target_doc.status),
                     )
                 } else {
-                    let name = target_path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("?");
+                    let name = display_name(target_path);
                     (name, "missing".to_string(), Color::Red)
                 };
 
@@ -573,10 +579,7 @@ fn draw_delete_confirm(f: &mut Frame, app: &App) {
             Style::default().fg(Color::DarkGray),
         )));
         for (rel_type, path) in &dc.references {
-            let name = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("?");
+            let name = display_name(path);
             lines.push(Line::from(format!("    \u{2022} {} ({})", name, rel_type)));
         }
     }
@@ -651,4 +654,20 @@ fn draw_search_overlay(f: &mut Frame, app: &App) {
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     let mut state = ListState::default().with_selected(Some(app.search_selected));
     f.render_stateful_widget(list, layout[1], &mut state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn display_name_flat_file() {
+        assert_eq!(display_name(Path::new("docs/rfcs/RFC-001-foo.md")), "RFC-001-foo");
+    }
+
+    #[test]
+    fn display_name_subfolder_index() {
+        assert_eq!(display_name(Path::new("docs/rfcs/RFC-002-bar/index.md")), "RFC-002-bar");
+    }
 }
