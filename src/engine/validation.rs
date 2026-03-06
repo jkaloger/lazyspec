@@ -60,6 +60,10 @@ pub fn validate_full(store: &super::store::Store) -> ValidationResult {
     let mut result = ValidationResult::default();
 
     for (path, meta) in &store.docs {
+        if meta.validate_ignore {
+            continue;
+        }
+
         for rel in &meta.related {
             let target = PathBuf::from(&rel.target);
             if !store.docs.contains_key(&target) {
@@ -144,7 +148,7 @@ pub fn validate_full(store: &super::store::Store) -> ValidationResult {
                     && store
                         .docs
                         .get(child_path)
-                        .map(|d| d.doc_type == expected_child_type)
+                        .map(|d| d.doc_type == expected_child_type && !d.validate_ignore)
                         .unwrap_or(false)
             })
             .map(|(_, child_path)| child_path.clone())

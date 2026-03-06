@@ -81,6 +81,43 @@ Content here.
 }
 
 #[test]
+fn validate_ignore_defaults_to_false() {
+    let content = r#"---
+title: "No Ignore Flag"
+type: rfc
+status: draft
+author: someone
+date: 2026-01-01
+tags: []
+---
+
+Body.
+"#;
+
+    let meta = DocMeta::parse(content).unwrap();
+    assert_eq!(meta.validate_ignore, false);
+}
+
+#[test]
+fn validate_ignore_parsed_when_true() {
+    let content = r#"---
+title: "Legacy Doc"
+type: rfc
+status: draft
+author: someone
+date: 2026-01-01
+tags: []
+validate-ignore: true
+---
+
+Body.
+"#;
+
+    let meta = DocMeta::parse(content).unwrap();
+    assert_eq!(meta.validate_ignore, true);
+}
+
+#[test]
 fn relation_type_display() {
     use lazyspec::engine::document::RelationType;
     assert_eq!(format!("{}", RelationType::Implements), "implements");

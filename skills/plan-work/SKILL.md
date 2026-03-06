@@ -9,6 +9,8 @@ NO WORK WITHOUT A PLAN
 
 If you're about to write code without knowing where you are in the workflow, stop. Plan first.
 
+use the `lazyspec` cli tool. this is in the user's path.
+
 <HARD-GATE>
 Do NOT skip to implementation. Detect existing artifacts, classify the work,
 and use the right skill.
@@ -85,16 +87,16 @@ Use /build skill.shape: double_circle
 
 ## Subagent Dispatch
 
-| Tier | Model | Use for |
-|------|-------|---------|
-| Light | Haiku | Parsing frontmatter, extracting structured data, simple validation |
+| Tier   | Model  | Use for                                                                         |
+| ------ | ------ | ------------------------------------------------------------------------------- |
+| Light  | Haiku  | Parsing frontmatter, extracting structured data, simple validation              |
 | Medium | Sonnet | Codebase exploration, searching for patterns, reading and summarizing documents |
-| Heavy | Opus | Implementation, complex reasoning, multi-file changes, review |
+| Heavy  | Opus   | Implementation, complex reasoning, multi-file changes, review                   |
 
-| Operation | Agent Type | Tier | Context to provide |
-|-----------|-----------|------|-------------------|
-| Search existing artifacts | Explore | Medium | Topic keywords, document types to search |
-| Classify work complexity | _(inline)_ | - | No subagent needed, main agent classifies |
+| Operation                 | Agent Type | Tier   | Context to provide                        |
+| ------------------------- | ---------- | ------ | ----------------------------------------- |
+| Search existing artifacts | Explore    | Medium | Topic keywords, document types to search  |
+| Classify work complexity  | _(inline)_ | -      | No subagent needed, main agent classifies |
 
 ## Steps
 
@@ -137,18 +139,18 @@ Not all work needs the full pipeline. Before determining entry point, classify w
 
 **For new features** (full pipeline):
 
-| State                                   | Action                                                  |
-| --------------------------------------- | ------------------------------------------------------- |
-| Nothing exists                          | Brainstorm the design, then use `/write-rfc`              |
-| RFC exists, no Stories                  | Brainstorm vertical slices, then use `/create-story`      |
-| Story exists, no Iteration              | Use `/resolve-context` (chains to `/create-iteration`)    |
-| Iteration exists with task breakdown    | Use `/build`                                              |
-| Iteration exists without task breakdown | Use `/create-iteration` to add tasks                      |
+| State                                   | Action                                                 |
+| --------------------------------------- | ------------------------------------------------------ |
+| Nothing exists                          | Brainstorm the design, then use `/write-rfc`           |
+| RFC exists, no Stories                  | Brainstorm vertical slices, then use `/create-story`   |
+| Story exists, no Iteration              | Use `/resolve-context` (chains to `/create-iteration`) |
+| Iteration exists with task breakdown    | Use `/build`                                           |
+| Iteration exists without task breakdown | Use `/create-iteration` to add tasks                   |
 
 **For bug fixes, tweaks, and refactors** (lightweight pipeline):
 
-| State                               | Action                                              |
-| ----------------------------------- | --------------------------------------------------- |
+| State                               | Action                                            |
+| ----------------------------------- | ------------------------------------------------- |
 | Related Story exists                | Use `/create-iteration` linked to that Story      |
 | No related Story (standalone fix)   | Use `/create-iteration` as a standalone iteration |
 | Iteration already exists with tasks | Use `/build`                                      |

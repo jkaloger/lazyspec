@@ -103,6 +103,29 @@ fn list_json_includes_full_schema() {
 }
 
 #[test]
+fn doc_to_json_includes_validate_ignore() {
+    let fixture = common::TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-legacy.md",
+        "---\ntitle: \"Legacy Doc\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\nvalidate-ignore: true\n---\n",
+    );
+    let store = fixture.store();
+    let doc = store.resolve_shorthand("RFC-001").unwrap();
+    let json = doc_to_json(doc);
+
+    assert_eq!(json["validate_ignore"], true);
+}
+
+#[test]
+fn doc_to_json_validate_ignore_defaults_false() {
+    let (_fixture, store) = setup();
+    let doc = store.resolve_shorthand("RFC-001").unwrap();
+    let json = doc_to_json(doc);
+
+    assert_eq!(json["validate_ignore"], false);
+}
+
+#[test]
 fn search_json_includes_full_schema() {
     let (_fixture, store) = setup();
     let output = lazyspec::cli::search::run_json(&store, "Auth", None);

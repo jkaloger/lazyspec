@@ -16,5 +16,6 @@ pub fn doc_to_json(doc: &DocMeta) -> Value {
                 "target": r.target,
             })
         }).collect::<Vec<_>>(),
+        "validate_ignore": doc.validate_ignore,
     })
 }

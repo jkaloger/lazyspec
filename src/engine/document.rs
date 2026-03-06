@@ -121,6 +121,7 @@ pub struct DocMeta {
     pub date: NaiveDate,
     pub tags: Vec<String>,
     pub related: Vec<Relation>,
+    pub validate_ignore: bool,
 }
 
 #[derive(Deserialize)]
@@ -134,6 +135,8 @@ struct RawFrontmatter {
     tags: Vec<String>,
     #[serde(default)]
     related: Vec<serde_yaml::Value>,
+    #[serde(default, rename = "validate-ignore")]
+    validate_ignore: bool,
 }
 
 pub fn split_frontmatter(content: &str) -> Result<(String, String)> {
@@ -197,6 +200,7 @@ impl DocMeta {
             date: raw.date,
             tags: raw.tags,
             related,
+            validate_ignore: raw.validate_ignore,
         })
     }
 
