@@ -1,5 +1,5 @@
 use crate::engine::config::Config;
-use crate::engine::document::{DocMeta, DocType, RelationType, Status};
+use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, RelationType, Status};
 use crate::engine::store::{Filter, Store};
 use anyhow::{anyhow, Result};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -7,20 +7,13 @@ use std::path::{Path, PathBuf};
 
 fn update_tags(root: &Path, relative: &Path, tags: &[String]) -> Result<()> {
     let full_path = root.join(relative);
-    let content = std::fs::read_to_string(&full_path)?;
-
-    let (yaml_str, body) = crate::engine::document::split_frontmatter(&content)?;
-
-    let mut doc: serde_yaml::Value = serde_yaml::from_str(&yaml_str)?;
-    let tag_values: Vec<serde_yaml::Value> = tags.iter()
-        .map(|t| serde_yaml::Value::String(t.clone()))
-        .collect();
-    doc["tags"] = serde_yaml::Value::Sequence(tag_values);
-
-    let new_yaml = serde_yaml::to_string(&doc)?;
-    let new_content = format!("---\n{}---\n{}", new_yaml, body);
-    std::fs::write(&full_path, new_content)?;
-    Ok(())
+    rewrite_frontmatter(&full_path, |doc| {
+        let tag_values: Vec<serde_yaml::Value> = tags.iter()
+            .map(|t| serde_yaml::Value::String(t.clone()))
+            .collect();
+        doc["tags"] = serde_yaml::Value::Sequence(tag_values);
+        Ok(())
+    })
 }
 
 pub fn resolve_editor_from(editor: Option<&str>, visual: Option<&str>) -> String {

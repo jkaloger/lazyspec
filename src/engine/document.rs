@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use serde::Deserialize;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -137,6 +137,20 @@ struct RawFrontmatter {
     related: Vec<serde_yaml::Value>,
     #[serde(default, rename = "validate-ignore")]
     validate_ignore: bool,
+}
+
+pub fn rewrite_frontmatter<F>(path: &Path, mutate: F) -> Result<()>
+where
+    F: FnOnce(&mut serde_yaml::Value) -> Result<()>,
+{
+    let content = std::fs::read_to_string(path)?;
+    let (yaml, body) = split_frontmatter(&content)?;
+    let mut value: serde_yaml::Value = serde_yaml::from_str(&yaml)?;
+    mutate(&mut value)?;
+    let new_yaml = serde_yaml::to_string(&value)?;
+    let output = format!("---\n{}---\n{}", new_yaml, body);
+    std::fs::write(path, output)?;
+    Ok(())
 }
 
 pub fn split_frontmatter(content: &str) -> Result<(String, String)> {
