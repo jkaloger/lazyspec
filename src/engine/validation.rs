@@ -91,8 +91,8 @@ pub fn validate_full(store: &super::store::Store) -> ValidationResult {
                     }
 
                     if meta.status == Status::Accepted
-                        && meta.doc_type == DocType::Iteration
-                        && parent.doc_type == DocType::Story
+                        && meta.doc_type == DocType::new(DocType::ITERATION)
+                        && parent.doc_type == DocType::new(DocType::STORY)
                         && parent.status != Status::Accepted
                     {
                         result.warnings.push(ValidationIssue::OrphanedAcceptance {
@@ -104,13 +104,13 @@ pub fn validate_full(store: &super::store::Store) -> ValidationResult {
             }
         }
 
-        if meta.doc_type == DocType::Iteration {
+        if meta.doc_type == DocType::new(DocType::ITERATION) {
             let has_story_link = meta.related.iter().any(|r| {
                 r.rel_type == RelationType::Implements
                     && store
                         .docs
                         .get(&PathBuf::from(&r.target))
-                        .map(|d| d.doc_type == DocType::Story)
+                        .map(|d| d.doc_type == DocType::new(DocType::STORY))
                         .unwrap_or(false)
             });
             if !has_story_link {
@@ -120,7 +120,7 @@ pub fn validate_full(store: &super::store::Store) -> ValidationResult {
             }
         }
 
-        if meta.doc_type == DocType::Adr && meta.related.is_empty() {
+        if meta.doc_type == DocType::new(DocType::ADR) && meta.related.is_empty() {
             result.errors.push(ValidationIssue::UnlinkedAdr {
                 path: path.clone(),
             });
@@ -128,14 +128,16 @@ pub fn validate_full(store: &super::store::Store) -> ValidationResult {
     }
 
     for (parent_path, meta) in &store.docs {
-        if meta.doc_type != DocType::Rfc && meta.doc_type != DocType::Story {
+        if meta.doc_type != DocType::new(DocType::RFC) && meta.doc_type != DocType::new(DocType::STORY) {
             continue;
         }
 
-        let expected_child_type = match meta.doc_type {
-            DocType::Rfc => DocType::Story,
-            DocType::Story => DocType::Iteration,
-            _ => continue,
+        let expected_child_type = if meta.doc_type == DocType::new(DocType::RFC) {
+            DocType::new(DocType::STORY)
+        } else if meta.doc_type == DocType::new(DocType::STORY) {
+            DocType::new(DocType::ITERATION)
+        } else {
+            continue;
         };
 
         let children: Vec<PathBuf> = store
@@ -177,11 +179,11 @@ pub fn validate_full(store: &super::store::Store) -> ValidationResult {
             continue;
         }
 
-        if parent_is_draft_or_review && meta.doc_type == DocType::Rfc {
+        if parent_is_draft_or_review && meta.doc_type == DocType::new(DocType::RFC) {
             for child_path in &children {
                 if let Some(child) = store.docs.get(child_path) {
                     if child.status == Status::Accepted
-                        && child.doc_type == DocType::Story
+                        && child.doc_type == DocType::new(DocType::STORY)
                     {
                         result
                             .warnings

@@ -1,7 +1,8 @@
 use crate::cli::json::doc_to_json;
-use crate::cli::style::{doc_card, type_header};
+use crate::cli::style::type_header;
 use crate::engine::document::DocType;
 use crate::engine::store::Store;
+use crate::cli::style::doc_card;
 
 pub fn run_json(store: &Store) -> String {
     let docs: Vec<_> = store.all_docs().iter().map(|d| doc_to_json(d)).collect();
@@ -29,7 +30,12 @@ pub fn run_human(store: &Store) -> String {
     all_docs.sort_by(|a, b| a.path.cmp(&b.path));
 
     let mut output = String::new();
-    let type_order = [DocType::Rfc, DocType::Story, DocType::Iteration, DocType::Adr];
+    let type_order = [
+        DocType::new(DocType::RFC),
+        DocType::new(DocType::STORY),
+        DocType::new(DocType::ITERATION),
+        DocType::new(DocType::ADR),
+    ];
     let mut first = true;
 
     for dt in &type_order {

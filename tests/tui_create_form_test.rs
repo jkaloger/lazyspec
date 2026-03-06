@@ -22,7 +22,7 @@ fn test_create_form_opens_with_current_type() {
     app.open_create_form();
 
     assert!(app.create_form.active);
-    assert_eq!(app.create_form.doc_type, DocType::Rfc);
+    assert_eq!(app.create_form.doc_type, DocType::new(DocType::RFC));
 }
 
 #[test]
@@ -34,7 +34,7 @@ fn test_create_form_opens_with_selected_type() {
     app.open_create_form();
 
     assert!(app.create_form.active);
-    assert_eq!(app.create_form.doc_type, DocType::Story);
+    assert_eq!(app.create_form.doc_type, DocType::new(DocType::STORY));
 }
 
 // AC2: Initial state - fields present, author pre-filled, title focused

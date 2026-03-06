@@ -902,12 +902,11 @@ fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
                 ));
             }
 
-            let type_icon = match node.doc_type {
-                DocType::Rfc => "●",
-                DocType::Adr => "■",
-                DocType::Story => "▲",
-                DocType::Iteration => "◆",
-            };
+            let type_icon = if node.doc_type == DocType::new(DocType::RFC) { "●" }
+                else if node.doc_type == DocType::new(DocType::ADR) { "■" }
+                else if node.doc_type == DocType::new(DocType::STORY) { "▲" }
+                else if node.doc_type == DocType::new(DocType::ITERATION) { "◆" }
+                else { "○" };
             spans.push(Span::styled(
                 format!("{} ", type_icon),
                 Style::default().fg(Color::Gray),

@@ -105,7 +105,7 @@ impl CreateForm {
     pub fn new() -> Self {
         CreateForm {
             active: false,
-            doc_type: DocType::Rfc,
+            doc_type: DocType::new(DocType::RFC),
             focused_field: FormField::Title,
             title: String::new(),
             author: String::new(),
@@ -229,7 +229,12 @@ impl App {
             store,
             selected_type: 0,
             selected_doc: 0,
-            doc_types: vec![DocType::Rfc, DocType::Adr, DocType::Story, DocType::Iteration],
+            doc_types: vec![
+                DocType::new(DocType::RFC),
+                DocType::new(DocType::ADR),
+                DocType::new(DocType::STORY),
+                DocType::new(DocType::ITERATION),
+            ],
             should_quit: false,
             fullscreen_doc: false,
             scroll_offset: 0,

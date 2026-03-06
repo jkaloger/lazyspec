@@ -58,7 +58,7 @@ fn store_filters_by_type() {
     let store = fixture.store();
 
     let filter = Filter {
-        doc_type: Some(DocType::Rfc),
+        doc_type: Some(DocType::new(DocType::RFC)),
         ..Default::default()
     };
     let results = store.list(&filter);
@@ -86,7 +86,7 @@ fn store_gets_body_lazily() {
     let store = fixture.store();
 
     let docs = store.all_docs();
-    let rfc = docs.iter().find(|d| d.doc_type == DocType::Rfc).unwrap();
+    let rfc = docs.iter().find(|d| d.doc_type == DocType::new(DocType::RFC)).unwrap();
     let body = store.get_body(&rfc.path).unwrap();
     assert!(body.contains("Event sourcing proposal."));
 }
@@ -97,7 +97,7 @@ fn store_resolves_related_docs() {
     let store = fixture.store();
 
     let docs = store.all_docs();
-    let adr = docs.iter().find(|d| d.doc_type == DocType::Adr).unwrap();
+    let adr = docs.iter().find(|d| d.doc_type == DocType::new(DocType::ADR)).unwrap();
     let related = store.related_to(&adr.path);
     assert_eq!(related.len(), 1);
 }
@@ -285,7 +285,7 @@ tags: []
     let docs = store.all_docs();
     let story = docs
         .iter()
-        .find(|d| d.doc_type == DocType::Story)
+        .find(|d| d.doc_type == DocType::new(DocType::STORY))
         .unwrap();
     let related = store.related_to(&story.path);
     assert_eq!(related.len(), 1);

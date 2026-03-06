@@ -1,8 +1,19 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TypeDef {
+    pub name: String,
+    pub plural: String,
+    pub dir: String,
+    pub prefix: String,
+    pub icon: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(skip)]
+    pub types: Vec<TypeDef>,
     pub directories: Directories,
     pub templates: Templates,
     pub naming: Naming,
@@ -26,15 +37,103 @@ pub struct Naming {
     pub pattern: String,
 }
 
+#[derive(Deserialize)]
+struct RawConfig {
+    types: Option<Vec<TypeDef>>,
+    directories: Option<Directories>,
+    templates: Option<Templates>,
+    naming: Option<Naming>,
+}
+
+fn default_types() -> Vec<TypeDef> {
+    vec![
+        TypeDef {
+            name: "rfc".to_string(),
+            plural: "rfcs".to_string(),
+            dir: "docs/rfcs".to_string(),
+            prefix: "RFC".to_string(),
+            icon: Some("●".to_string()),
+        },
+        TypeDef {
+            name: "story".to_string(),
+            plural: "stories".to_string(),
+            dir: "docs/stories".to_string(),
+            prefix: "STORY".to_string(),
+            icon: Some("▲".to_string()),
+        },
+        TypeDef {
+            name: "iteration".to_string(),
+            plural: "iterations".to_string(),
+            dir: "docs/iterations".to_string(),
+            prefix: "ITERATION".to_string(),
+            icon: Some("◆".to_string()),
+        },
+        TypeDef {
+            name: "adr".to_string(),
+            plural: "adrs".to_string(),
+            dir: "docs/adrs".to_string(),
+            prefix: "ADR".to_string(),
+            icon: Some("■".to_string()),
+        },
+    ]
+}
+
+fn directories_from_types(types: &[TypeDef]) -> Directories {
+    let find = |name: &str| -> String {
+        types
+            .iter()
+            .find(|t| t.name == name)
+            .map(|t| t.dir.clone())
+            .unwrap_or_default()
+    };
+    Directories {
+        rfcs: find("rfc"),
+        adrs: find("adr"),
+        stories: find("story"),
+        iterations: find("iteration"),
+    }
+}
+
+fn types_from_directories(dirs: &Directories) -> Vec<TypeDef> {
+    vec![
+        TypeDef {
+            name: "rfc".to_string(),
+            plural: "rfcs".to_string(),
+            dir: dirs.rfcs.clone(),
+            prefix: "RFC".to_string(),
+            icon: Some("●".to_string()),
+        },
+        TypeDef {
+            name: "story".to_string(),
+            plural: "stories".to_string(),
+            dir: dirs.stories.clone(),
+            prefix: "STORY".to_string(),
+            icon: Some("▲".to_string()),
+        },
+        TypeDef {
+            name: "iteration".to_string(),
+            plural: "iterations".to_string(),
+            dir: dirs.iterations.clone(),
+            prefix: "ITERATION".to_string(),
+            icon: Some("◆".to_string()),
+        },
+        TypeDef {
+            name: "adr".to_string(),
+            plural: "adrs".to_string(),
+            dir: dirs.adrs.clone(),
+            prefix: "ADR".to_string(),
+            icon: Some("■".to_string()),
+        },
+    ]
+}
+
 impl Default for Config {
     fn default() -> Self {
+        let types = default_types();
+        let directories = directories_from_types(&types);
         Config {
-            directories: Directories {
-                rfcs: "docs/rfcs".to_string(),
-                adrs: "docs/adrs".to_string(),
-                stories: "docs/stories".to_string(),
-                iterations: "docs/iterations".to_string(),
-            },
+            types,
+            directories,
             templates: Templates {
                 dir: ".lazyspec/templates".to_string(),
             },
@@ -47,8 +146,32 @@ impl Default for Config {
 
 impl Config {
     pub fn parse(toml_str: &str) -> Result<Self> {
-        let config: Config = toml::from_str(toml_str)?;
-        Ok(config)
+        let raw: RawConfig = toml::from_str(toml_str)?;
+
+        let types = if let Some(types) = raw.types {
+            types
+        } else if let Some(ref dirs) = raw.directories {
+            types_from_directories(dirs)
+        } else {
+            default_types()
+        };
+
+        let directories = if let Some(dirs) = raw.directories {
+            dirs
+        } else {
+            directories_from_types(&types)
+        };
+
+        Ok(Config {
+            types,
+            directories,
+            templates: raw.templates.unwrap_or(Templates {
+                dir: ".lazyspec/templates".to_string(),
+            }),
+            naming: raw.naming.unwrap_or(Naming {
+                pattern: "{type}-{n:03}-{title}.md".to_string(),
+            }),
+        })
     }
 
     pub fn load(project_root: &std::path::Path) -> Result<Self> {
@@ -62,5 +185,9 @@ impl Config {
 
     pub fn to_toml(&self) -> Result<String> {
         Ok(toml::to_string_pretty(self)?)
+    }
+
+    pub fn type_by_name(&self, name: &str) -> Option<&TypeDef> {
+        self.types.iter().find(|t| t.name == name)
     }
 }

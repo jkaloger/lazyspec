@@ -23,12 +23,7 @@ impl Store {
     pub fn load(root: &Path, config: &Config) -> Result<Self> {
         let mut docs = HashMap::new();
 
-        let dirs = [
-            &config.directories.rfcs,
-            &config.directories.adrs,
-            &config.directories.stories,
-            &config.directories.iterations,
-        ];
+        let dirs: Vec<&str> = config.types.iter().map(|t| t.dir.as_str()).collect();
 
         for dir in &dirs {
             let full_path = root.join(dir);

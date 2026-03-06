@@ -65,7 +65,7 @@ fn test_rebuild_graph_roots_have_no_incoming_implements() {
 
     use lazyspec::engine::document::DocType;
     for root in &roots {
-        assert_eq!(root.doc_type, DocType::Rfc, "root should be an RFC");
+        assert_eq!(root.doc_type, DocType::new(DocType::RFC), "root should be an RFC");
     }
 }
 
@@ -114,7 +114,7 @@ fn test_graph_enter_jumps_to_types_mode() {
     let story_idx = app
         .graph_nodes
         .iter()
-        .position(|n| n.doc_type == lazyspec::engine::document::DocType::Story)
+        .position(|n| n.doc_type == lazyspec::engine::document::DocType::new(lazyspec::engine::document::DocType::STORY))
         .expect("should have a story node");
 
     let story_path = app.graph_nodes[story_idx].path.clone();

@@ -1,26 +1,40 @@
 use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DocType {
-    Rfc,
-    Adr,
-    Story,
-    Iteration,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct DocType(String);
+
+impl DocType {
+    pub const RFC: &str = "rfc";
+    pub const STORY: &str = "story";
+    pub const ITERATION: &str = "iteration";
+    pub const ADR: &str = "adr";
+
+    pub fn new(s: &str) -> Self {
+        DocType(s.to_lowercase())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl fmt::Display for DocType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            DocType::Rfc => write!(f, "RFC"),
-            DocType::Adr => write!(f, "ADR"),
-            DocType::Story => write!(f, "STORY"),
-            DocType::Iteration => write!(f, "ITERATION"),
-        }
+        write!(f, "{}", self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for DocType {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(DocType(s.to_lowercase()))
     }
 }
 
@@ -68,13 +82,7 @@ impl fmt::Display for RelationType {
 impl std::str::FromStr for DocType {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "rfc" => Ok(DocType::Rfc),
-            "adr" => Ok(DocType::Adr),
-            "story" => Ok(DocType::Story),
-            "iteration" => Ok(DocType::Iteration),
-            _ => Err(anyhow!("unknown doc type: {}", s)),
-        }
+        Ok(DocType::new(s))
     }
 }
 

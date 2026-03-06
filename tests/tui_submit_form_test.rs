@@ -237,7 +237,7 @@ fn test_submit_navigates_to_new_doc() {
     // Form should be closed
     assert!(!app.create_form.active);
     // Should be on Story type
-    assert_eq!(*app.current_type(), DocType::Story);
+    assert_eq!(*app.current_type(), DocType::new(DocType::STORY));
     // Should have a doc selected (the new one)
     assert!(app.selected_doc_meta().is_some());
 }
