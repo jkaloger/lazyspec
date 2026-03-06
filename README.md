@@ -8,7 +8,8 @@
 
 lazyspec gives your codebase a lightweight spec layer. Define decisions, track features from RFC through to iteration, and validate that everything links together. Works from the terminal as a dashboard or as a scriptable CLI with `--json` output.
 
-<img width="1292" height="1193" alt="screenshot of a terminal interface displaying codebase documentation, categorised by type" src="https://github.com/user-attachments/assets/6a1447f9-7397-4db5-9ee5-8720bd500269" />
+<img width="1864" height="1193" alt="screenshot of a terminal interface displaying codebase documentation, categorised by type" src="https://github.com/user-attachments/assets/18bdd9a7-16db-43f6-b6cc-a3dced1c9f66" />
+
 
 ## Install
 
