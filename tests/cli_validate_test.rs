@@ -11,7 +11,7 @@ fn validate_catches_broken_link() {
     );
 
     let store = fixture.store();
-    let result = store.validate_full();
+    let result = store.validate_full(&fixture.config());
 
     assert!(!result.errors.is_empty());
 }
@@ -22,7 +22,7 @@ fn validate_passes_clean_repo() {
     fixture.write_rfc("RFC-001.md", "Good", "draft");
 
     let store = fixture.store();
-    let result = store.validate_full();
+    let result = store.validate_full(&fixture.config());
 
     assert!(result.errors.is_empty());
 }
@@ -33,10 +33,10 @@ fn validate_catches_unlinked_iteration() {
     fixture.write_iteration("ITERATION-001.md", "Orphan Iteration", "draft", None);
 
     let store = fixture.store();
-    let result = store.validate_full();
+    let result = store.validate_full(&fixture.config());
 
     assert!(!result.errors.is_empty());
-    let has_unlinked = result.errors.iter().any(|e| matches!(e, ValidationIssue::UnlinkedIteration { .. }));
+    let has_unlinked = result.errors.iter().any(|e| matches!(e, ValidationIssue::MissingParentLink { .. }));
     assert!(has_unlinked);
 }
 
@@ -46,10 +46,10 @@ fn validate_catches_unlinked_adr() {
     fixture.write_adr("ADR-001.md", "Orphan ADR", "draft", None);
 
     let store = fixture.store();
-    let result = store.validate_full();
+    let result = store.validate_full(&fixture.config());
 
     assert!(!result.errors.is_empty());
-    let has_unlinked = result.errors.iter().any(|e| matches!(e, ValidationIssue::UnlinkedAdr { .. }));
+    let has_unlinked = result.errors.iter().any(|e| matches!(e, ValidationIssue::MissingRelation { .. }));
     assert!(has_unlinked);
 }
 
@@ -65,7 +65,7 @@ fn validate_passes_linked_iteration() {
     );
 
     let store = fixture.store();
-    let result = store.validate_full();
+    let result = store.validate_full(&fixture.config());
 
     assert!(result.errors.is_empty());
 }

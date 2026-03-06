@@ -1,14 +1,13 @@
 ---
 title: Config-driven type definitions
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-06
 tags: []
 related:
-- implements: docs/rfcs/RFC-013-custom-document-types.md
+  - implements: docs/rfcs/RFC-013-custom-document-types.md
 ---
-
 
 ## Context
 

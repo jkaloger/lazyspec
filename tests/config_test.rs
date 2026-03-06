@@ -1,4 +1,4 @@
-use lazyspec::engine::config::Config;
+use lazyspec::engine::config::{Config, Severity, ValidationRule};
 
 #[test]
 fn parse_config_from_toml() {
@@ -156,4 +156,143 @@ dir = "docs/rfcs"
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(err_msg.contains("prefix"), "Error should mention missing field 'prefix', got: {err_msg}");
+}
+
+#[test]
+fn default_config_has_three_default_rules() {
+    let config = Config::default();
+    assert_eq!(config.rules.len(), 3);
+    assert_eq!(
+        config.rules[0],
+        ValidationRule::ParentChild {
+            name: "stories-need-rfcs".to_string(),
+            child: "story".to_string(),
+            parent: "rfc".to_string(),
+            link: "implements".to_string(),
+            severity: Severity::Warning,
+        }
+    );
+    assert_eq!(
+        config.rules[1],
+        ValidationRule::ParentChild {
+            name: "iterations-need-stories".to_string(),
+            child: "iteration".to_string(),
+            parent: "story".to_string(),
+            link: "implements".to_string(),
+            severity: Severity::Error,
+        }
+    );
+    assert_eq!(
+        config.rules[2],
+        ValidationRule::RelationExistence {
+            name: "adrs-need-relations".to_string(),
+            doc_type: "adr".to_string(),
+            require: "any-relation".to_string(),
+            severity: Severity::Error,
+        }
+    );
+}
+
+#[test]
+fn no_rules_section_uses_defaults() {
+    let toml_str = r#"
+[templates]
+dir = ".lazyspec/templates"
+
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+"#;
+
+    let config = Config::parse(toml_str).unwrap();
+    assert_eq!(config.rules.len(), 3);
+}
+
+#[test]
+fn parse_parent_child_rule() {
+    let toml_str = r#"
+[[rules]]
+shape = "parent-child"
+name = "epics-need-themes"
+child = "epic"
+parent = "theme"
+link = "belongs-to"
+severity = "warning"
+"#;
+
+    let config = Config::parse(toml_str).unwrap();
+    assert_eq!(config.rules.len(), 1);
+    assert_eq!(
+        config.rules[0],
+        ValidationRule::ParentChild {
+            name: "epics-need-themes".to_string(),
+            child: "epic".to_string(),
+            parent: "theme".to_string(),
+            link: "belongs-to".to_string(),
+            severity: Severity::Warning,
+        }
+    );
+}
+
+#[test]
+fn parse_relation_existence_rule() {
+    let toml_str = r#"
+[[rules]]
+shape = "relation-existence"
+name = "rfcs-need-relations"
+type = "rfc"
+require = "any-relation"
+severity = "error"
+"#;
+
+    let config = Config::parse(toml_str).unwrap();
+    assert_eq!(config.rules.len(), 1);
+    assert_eq!(
+        config.rules[0],
+        ValidationRule::RelationExistence {
+            name: "rfcs-need-relations".to_string(),
+            doc_type: "rfc".to_string(),
+            require: "any-relation".to_string(),
+            severity: Severity::Error,
+        }
+    );
+}
+
+#[test]
+fn custom_rules_fully_replace_defaults() {
+    let toml_str = r#"
+[[rules]]
+shape = "relation-existence"
+name = "only-this-rule"
+type = "rfc"
+require = "any-relation"
+severity = "warning"
+"#;
+
+    let config = Config::parse(toml_str).unwrap();
+    assert_eq!(config.rules.len(), 1);
+    assert_eq!(
+        config.rules[0],
+        ValidationRule::RelationExistence {
+            name: "only-this-rule".to_string(),
+            doc_type: "rfc".to_string(),
+            require: "any-relation".to_string(),
+            severity: Severity::Warning,
+        }
+    );
+}
+
+#[test]
+fn invalid_severity_returns_parse_error() {
+    let toml_str = r#"
+[[rules]]
+shape = "parent-child"
+name = "bad-rule"
+child = "iteration"
+parent = "story"
+link = "implements"
+severity = "fatal"
+"#;
+
+    let result = Config::parse(toml_str);
+    assert!(result.is_err(), "Expected parse error for invalid severity 'fatal'");
 }

@@ -200,8 +200,8 @@ impl Store {
         &self.root
     }
 
-    pub fn validate_full(&self) -> crate::engine::validation::ValidationResult {
-        crate::engine::validation::validate_full(self)
+    pub fn validate_full(&self, config: &Config) -> crate::engine::validation::ValidationResult {
+        crate::engine::validation::validate_full(self, config)
     }
 
     pub fn search(&self, query: &str) -> Vec<SearchResult<'_>> {

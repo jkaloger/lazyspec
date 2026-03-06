@@ -2,6 +2,34 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "shape")]
+pub enum ValidationRule {
+    #[serde(rename = "parent-child")]
+    ParentChild {
+        name: String,
+        child: String,
+        parent: String,
+        link: String,
+        severity: Severity,
+    },
+    #[serde(rename = "relation-existence")]
+    RelationExistence {
+        name: String,
+        #[serde(rename = "type")]
+        doc_type: String,
+        require: String,
+        severity: Severity,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TypeDef {
     pub name: String,
     pub plural: String,
@@ -14,6 +42,8 @@ pub struct TypeDef {
 pub struct Config {
     #[serde(skip)]
     pub types: Vec<TypeDef>,
+    #[serde(skip)]
+    pub rules: Vec<ValidationRule>,
     pub directories: Directories,
     pub templates: Templates,
     pub naming: Naming,
@@ -40,6 +70,7 @@ pub struct Naming {
 #[derive(Deserialize)]
 struct RawConfig {
     types: Option<Vec<TypeDef>>,
+    rules: Option<Vec<ValidationRule>>,
     directories: Option<Directories>,
     templates: Option<Templates>,
     naming: Option<Naming>,
@@ -74,6 +105,31 @@ fn default_types() -> Vec<TypeDef> {
             dir: "docs/adrs".to_string(),
             prefix: "ADR".to_string(),
             icon: Some("■".to_string()),
+        },
+    ]
+}
+
+fn default_rules() -> Vec<ValidationRule> {
+    vec![
+        ValidationRule::ParentChild {
+            name: "stories-need-rfcs".to_string(),
+            child: "story".to_string(),
+            parent: "rfc".to_string(),
+            link: "implements".to_string(),
+            severity: Severity::Warning,
+        },
+        ValidationRule::ParentChild {
+            name: "iterations-need-stories".to_string(),
+            child: "iteration".to_string(),
+            parent: "story".to_string(),
+            link: "implements".to_string(),
+            severity: Severity::Error,
+        },
+        ValidationRule::RelationExistence {
+            name: "adrs-need-relations".to_string(),
+            doc_type: "adr".to_string(),
+            require: "any-relation".to_string(),
+            severity: Severity::Error,
         },
     ]
 }
@@ -133,6 +189,7 @@ impl Default for Config {
         let directories = directories_from_types(&types);
         Config {
             types,
+            rules: default_rules(),
             directories,
             templates: Templates {
                 dir: ".lazyspec/templates".to_string(),
@@ -162,8 +219,11 @@ impl Config {
             directories_from_types(&types)
         };
 
+        let rules = raw.rules.unwrap_or_else(default_rules);
+
         Ok(Config {
             types,
+            rules,
             directories,
             templates: raw.templates.unwrap_or(Templates {
                 dir: ".lazyspec/templates".to_string(),

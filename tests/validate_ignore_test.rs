@@ -11,7 +11,7 @@ fn ignored_document_with_broken_link_produces_no_error() {
         "---\ntitle: \"Ignored ADR\"\ntype: adr\nstatus: accepted\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nvalidate-ignore: true\nrelated:\n- implements: docs/rfcs/NONEXISTENT.md\n---\n",
     );
     let store = fixture.store();
-    let result = store.validate_full();
+    let result = store.validate_full(&fixture.config());
 
     assert!(
         !result.errors.iter().any(|e| matches!(e, ValidationIssue::BrokenLink { .. })),
@@ -32,7 +32,7 @@ fn ignored_story_skips_upward_orphaned_acceptance() {
         "---\ntitle: \"Impl\"\ntype: story\nstatus: accepted\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nvalidate-ignore: true\nrelated:\n- implements: docs/rfcs/RFC-001-feature.md\n---\n",
     );
     let store = fixture.store();
-    let result = store.validate_full();
+    let result = store.validate_full(&fixture.config());
 
     assert!(
         !result.warnings.iter().any(|w| matches!(w, ValidationIssue::UpwardOrphanedAcceptance { .. })),
@@ -55,7 +55,7 @@ fn non_ignored_documents_still_report_errors() {
         "---\ntitle: \"Normal ADR\"\ntype: adr\nstatus: accepted\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: docs/rfcs/ALSO-NONEXISTENT.md\n---\n",
     );
     let store = fixture.store();
-    let result = store.validate_full();
+    let result = store.validate_full(&fixture.config());
 
     assert!(
         result.errors.iter().any(|e| matches!(
@@ -97,7 +97,7 @@ fn ignored_children_excluded_from_all_children_accepted_check() {
         Some("docs/rfcs/RFC-001-feature.md"),
     );
     let store = fixture.store();
-    let result = store.validate_full();
+    let result = store.validate_full(&fixture.config());
 
     // The ignored child should be excluded. Only STORY-002 remains, which is accepted,
     // so AllChildrenAccepted should fire (one non-ignored child, all accepted).
