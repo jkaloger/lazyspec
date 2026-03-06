@@ -61,6 +61,14 @@ fn main() -> anyhow::Result<()> {
             lazyspec::cli::link::unlink(&cwd, &from, &rel_type, &to)?;
             println!("Unlinked {} --{}--> {}", from, rel_type, to);
         }
+        Some(Commands::Ignore { path }) => {
+            lazyspec::cli::ignore::ignore(&cwd, &path)?;
+            println!("Ignoring {}", path);
+        }
+        Some(Commands::Unignore { path }) => {
+            lazyspec::cli::ignore::unignore(&cwd, &path)?;
+            println!("Unignoring {}", path);
+        }
         Some(Commands::Search { query, doc_type, json }) => {
             let store = Store::load(&cwd, &config)?;
             lazyspec::cli::search::run(&store, &query, doc_type.as_deref(), json);

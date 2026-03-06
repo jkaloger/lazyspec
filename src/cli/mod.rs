@@ -5,6 +5,7 @@ pub mod status;
 pub mod delete;
 pub mod init;
 pub mod json;
+pub mod ignore;
 pub mod link;
 pub mod list;
 pub mod show;
@@ -129,6 +130,18 @@ pub enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Mark a document to skip validation
+    Ignore {
+        /// Document path
+        #[arg()]
+        path: String,
+    },
+    /// Remove validation skip from a document
+    Unignore {
+        /// Document path
+        #[arg()]
+        path: String,
     },
     /// Validate all documents
     Validate {

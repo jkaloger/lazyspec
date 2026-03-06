@@ -13,6 +13,8 @@ related:
 
 
 
+
+
 ## Context
 
 `validate_full()` checks child-to-parent consistency: rejected parent (error), superseded parent (warning), and orphaned acceptance where an accepted iteration has a draft parent story (warning). It doesn't check the reverse direction. When all stories under an RFC are accepted but the RFC itself is still draft, nothing flags it. This is the most common form of status drift and the one that triggered RFC-008.

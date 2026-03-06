@@ -41,6 +41,8 @@ lazyspec
 | `search <query> [--doc-type X]`      | Full-text search across all documents                                 |
 | `context <id>`                       | Show the full document chain (RFC -> Story -> Iteration)              |
 | `status`                             | Show full project status with all documents and validation            |
+| `ignore <path>`                      | Mark a document to skip validation                                    |
+| `unignore <path>`                    | Remove validation skip from a document                                |
 | `validate [--warnings]`              | Check document integrity and link consistency                         |
 
 Most commands accept `--json` for machine-readable output.
