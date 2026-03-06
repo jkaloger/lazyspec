@@ -1,5 +1,5 @@
 use crate::engine::config::Config;
-use crate::engine::document::{DocMeta, DocType};
+use crate::engine::document::{DocMeta, DocType, RelationType, Status};
 use crate::engine::store::{Filter, Store};
 use anyhow::{anyhow, Result};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -96,6 +96,15 @@ impl CreateForm {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct GraphNode {
+    pub path: PathBuf,
+    pub title: String,
+    pub doc_type: DocType,
+    pub status: Status,
+    pub depth: usize,
+}
+
 pub struct DeleteConfirm {
     pub active: bool,
     pub doc_path: PathBuf,
@@ -166,6 +175,8 @@ pub struct App {
     pub create_form: CreateForm,
     pub delete_confirm: DeleteConfirm,
     pub view_mode: ViewMode,
+    pub graph_nodes: Vec<GraphNode>,
+    pub graph_selected: usize,
 }
 
 impl App {
@@ -188,11 +199,92 @@ impl App {
             create_form: CreateForm::new(),
             delete_confirm: DeleteConfirm::new(),
             view_mode: ViewMode::Types,
+            graph_nodes: Vec::new(),
+            graph_selected: 0,
         }
     }
 
     pub fn cycle_mode(&mut self) {
         self.view_mode = self.view_mode.next();
+        if self.view_mode == ViewMode::Graph {
+            self.rebuild_graph();
+        }
+    }
+
+    pub fn rebuild_graph(&mut self) {
+        use std::collections::HashSet;
+
+        let all_docs = self.store.all_docs();
+
+        // Find root documents: those with no outgoing Implements links
+        // (i.e., docs that don't implement anything else)
+        let mut roots: Vec<&DocMeta> = all_docs
+            .iter()
+            .filter(|doc| {
+                !doc.related
+                    .iter()
+                    .any(|r| r.rel_type == RelationType::Implements)
+            })
+            .copied()
+            .collect();
+
+        roots.sort_by(|a, b| a.doc_type.to_string().cmp(&b.doc_type.to_string()).then(a.title.cmp(&b.title)));
+
+        let mut nodes = Vec::new();
+        let mut visited = HashSet::new();
+
+        fn walk(
+            store: &crate::engine::store::Store,
+            path: &Path,
+            depth: usize,
+            nodes: &mut Vec<GraphNode>,
+            visited: &mut HashSet<PathBuf>,
+        ) {
+            if !visited.insert(path.to_path_buf()) {
+                return;
+            }
+
+            let doc = match store.get(path) {
+                Some(d) => d,
+                None => return,
+            };
+
+            nodes.push(GraphNode {
+                path: doc.path.clone(),
+                title: doc.title.clone(),
+                doc_type: doc.doc_type.clone(),
+                status: doc.status.clone(),
+                depth,
+            });
+
+            // Children are docs whose forward `implements` link points to this doc.
+            // referenced_by returns reverse links: docs that reference this path.
+            // Filter for Implements to get docs that implement this one.
+            let mut children: Vec<&PathBuf> = store
+                .referenced_by(path)
+                .into_iter()
+                .filter(|(rel, _)| **rel == RelationType::Implements)
+                .map(|(_, p)| p)
+                .collect();
+            children.sort_by(|a, b| {
+                let a_doc = store.get(a);
+                let b_doc = store.get(b);
+                let a_title = a_doc.map(|d| d.title.as_str()).unwrap_or("");
+                let b_title = b_doc.map(|d| d.title.as_str()).unwrap_or("");
+                a_title.cmp(b_title)
+            });
+
+            for child_path in children {
+                walk(store, child_path, depth + 1, nodes, visited);
+            }
+        }
+
+        for root in &roots {
+            walk(&self.store, &root.path, 0, &mut nodes, &mut visited);
+        }
+
+        self.graph_nodes = nodes;
+        self.graph_selected = 0;
     }
 
     pub fn current_type(&self) -> &DocType {
@@ -600,6 +692,48 @@ impl App {
     }
 
     fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        if self.view_mode == ViewMode::Graph {
+            match code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.graph_selected = (self.graph_selected + 1)
+                        .min(self.graph_nodes.len().saturating_sub(1));
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.graph_selected = self.graph_selected.saturating_sub(1);
+                }
+                KeyCode::Enter => {
+                    if let Some(node) = self.graph_nodes.get(self.graph_selected) {
+                        let path = node.path.clone();
+                        if let Some(doc) = self.store.get(&path) {
+                            let doc_type = doc.doc_type.clone();
+                            if let Some(type_idx) = self.doc_types.iter().position(|t| *t == doc_type) {
+                                self.selected_type = type_idx;
+                                let docs = self.docs_for_current_type();
+                                if let Some(doc_idx) = docs.iter().position(|d| d.path == path) {
+                                    self.selected_doc = doc_idx;
+                                }
+                            }
+                        }
+                        self.view_mode = ViewMode::Types;
+                    }
+                }
+                KeyCode::Char('g') => {
+                    self.graph_selected = 0;
+                }
+                KeyCode::Char('G') => {
+                    self.graph_selected = self.graph_nodes.len().saturating_sub(1);
+                }
+                KeyCode::Char('q') => {
+                    self.should_quit = true;
+                }
+                KeyCode::Char('`') => {
+                    self.cycle_mode();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match (code, modifiers) {
             (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 self.should_quit = true;

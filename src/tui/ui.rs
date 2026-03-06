@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::engine::document::{RelationType, Status};
+use crate::engine::document::{DocType, RelationType, Status};
 use crate::tui::app::{App, FormField, PreviewTab, ViewMode};
 
 fn status_color(status: &Status) -> Color {
@@ -112,7 +112,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
         ViewMode::Filters => draw_filters_skeleton(f, outer[1]),
         ViewMode::Metrics => draw_metrics_skeleton(f, outer[1]),
-        ViewMode::Graph => draw_graph_skeleton(f, outer[1]),
+        ViewMode::Graph => draw_graph(f, app, outer[1]),
     }
 
     if app.delete_confirm.active {
@@ -714,7 +714,7 @@ fn draw_metrics_skeleton(f: &mut Frame, area: Rect) {
     f.render_widget(right, layout[1]);
 }
 
-fn draw_graph_skeleton(f: &mut Frame, area: Rect) {
+fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
     let layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
@@ -727,12 +727,67 @@ fn draw_graph_skeleton(f: &mut Frame, area: Rect) {
         .title(" Graph ");
     f.render_widget(left, layout[0]);
 
-    let right = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Dependency Graph ");
-    f.render_widget(right, layout[1]);
+    let items: Vec<ListItem> = app
+        .graph_nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| {
+            let mut spans = Vec::new();
+
+            if node.depth > 0 {
+                let leading = "   ".repeat(node.depth - 1);
+                let is_last = match app.graph_nodes.get(i + 1) {
+                    Some(next) => next.depth <= node.depth,
+                    None => true,
+                };
+                let connector = if is_last { " └─▶ " } else { " ├─▶ " };
+                spans.push(Span::styled(
+                    format!("{}{}", leading, connector),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+
+            let type_icon = match node.doc_type {
+                DocType::Rfc => "●",
+                DocType::Adr => "■",
+                DocType::Story => "▲",
+                DocType::Iteration => "◆",
+            };
+            spans.push(Span::styled(
+                format!("{} ", type_icon),
+                Style::default().fg(Color::Gray),
+            ));
+
+            spans.push(Span::styled(
+                format!("{} ", node.title),
+                Style::default().fg(Color::White),
+            ));
+
+            spans.push(Span::styled(
+                format!("{}", node.status),
+                Style::default().fg(status_color(&node.status)),
+            ));
+
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(" Dependency Graph "),
+        )
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let mut state = ListState::default().with_selected(Some(app.graph_selected));
+    f.render_stateful_widget(list, layout[1], &mut state);
 }
 
 #[cfg(test)]
