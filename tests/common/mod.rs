@@ -38,6 +38,14 @@ impl TestFixture {
         path
     }
 
+    pub fn write_subfolder_doc(&self, rel_path: &str, content: &str) -> PathBuf {
+        let dir = self.root().join(rel_path);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("index.md");
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
     pub fn write_rfc(&self, filename: &str, title: &str, status: &str) -> PathBuf {
         let content = format!(
             "---\ntitle: \"{}\"\ntype: rfc\nstatus: {}\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",

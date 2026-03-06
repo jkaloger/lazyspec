@@ -38,6 +38,21 @@ impl Store {
             for entry in fs::read_dir(&full_path)? {
                 let entry = entry?;
                 let path = entry.path();
+
+                if entry.file_type()?.is_dir() {
+                    let index_path = path.join("index.md");
+                    if !index_path.exists() {
+                        continue;
+                    }
+                    let content = fs::read_to_string(&index_path)?;
+                    if let Ok(mut meta) = DocMeta::parse(&content) {
+                        let relative = index_path.strip_prefix(root).unwrap_or(&index_path).to_path_buf();
+                        meta.path = relative;
+                        docs.insert(meta.path.clone(), meta);
+                    }
+                    continue;
+                }
+
                 if path.extension().and_then(|e| e.to_str()) != Some("md") {
                     continue;
                 }
@@ -137,11 +152,12 @@ impl Store {
 
     pub fn resolve_shorthand(&self, id: &str) -> Option<&DocMeta> {
         self.docs.values().find(|d| {
-            d.path
-                .file_name()
-                .and_then(|f| f.to_str())
-                .map(|f| f.starts_with(id))
-                .unwrap_or(false)
+            let name = if d.path.file_name().and_then(|f| f.to_str()) == Some("index.md") {
+                d.path.parent().and_then(|p| p.file_name()).and_then(|f| f.to_str())
+            } else {
+                d.path.file_name().and_then(|f| f.to_str())
+            };
+            name.map(|n| n.starts_with(id)).unwrap_or(false)
         })
     }
 
