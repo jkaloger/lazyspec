@@ -2,6 +2,9 @@ mod common;
 
 use common::TestFixture;
 use crossterm::event::{KeyCode, KeyModifiers};
+use lazyspec::engine::config::TypeDef;
+use lazyspec::engine::document::DocType;
+use lazyspec::engine::store::Store;
 use lazyspec::tui::app::{App, ViewMode};
 
 fn setup_graph_fixture() -> (TestFixture, App) {
@@ -30,7 +33,7 @@ fn setup_graph_fixture() -> (TestFixture, App) {
     );
 
     let store = fixture.store();
-    let app = App::new(store);
+    let app = App::new(store, &fixture.config());
     (fixture, app)
 }
 
@@ -63,7 +66,6 @@ fn test_rebuild_graph_roots_have_no_incoming_implements() {
     let roots: Vec<_> = app.graph_nodes.iter().filter(|n| n.depth == 0).collect();
     assert_eq!(roots.len(), 2);
 
-    use lazyspec::engine::document::DocType;
     for root in &roots {
         assert_eq!(root.doc_type, DocType::new(DocType::RFC), "root should be an RFC");
     }
@@ -123,7 +125,7 @@ fn test_graph_enter_jumps_to_types_mode() {
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE, fixture.root(), &fixture.config());
 
     assert_eq!(app.view_mode, ViewMode::Types, "should switch to Types mode");
-    assert_eq!(app.selected_type, 2, "Story is at index 2 in doc_types");
+    assert_eq!(app.selected_type, 1, "Story is at index 1 in doc_types");
 
     let selected_doc = app.selected_doc_meta().expect("should have a selected doc");
     assert_eq!(selected_doc.path, story_path, "should select the correct story");
@@ -160,4 +162,34 @@ fn test_graph_rebuilds_on_mode_switch() {
         first_count,
         "graph should be rebuilt with same count"
     );
+}
+
+#[test]
+fn custom_types_populate_doc_types_and_icons() {
+    let fixture = TestFixture::new();
+    let mut config = fixture.config();
+    config.types = vec![
+        TypeDef {
+            name: "epic".into(),
+            plural: "epics".into(),
+            dir: "docs/epics".into(),
+            prefix: "EPIC".into(),
+            icon: Some("⚡".into()),
+        },
+        TypeDef {
+            name: "task".into(),
+            plural: "tasks".into(),
+            dir: "docs/tasks".into(),
+            prefix: "TASK".into(),
+            icon: None,
+        },
+    ];
+    let store = Store::load(fixture.root(), &config).unwrap();
+    let app = App::new(store, &config);
+
+    assert_eq!(app.doc_types.len(), 2);
+    assert_eq!(app.doc_types[0], DocType::new("epic"));
+    assert_eq!(app.doc_types[1], DocType::new("task"));
+    assert_eq!(app.type_icons["epic"], "⚡");
+    assert_eq!(app.type_icons["task"], "■"); // second fallback glyph (index 1)
 }

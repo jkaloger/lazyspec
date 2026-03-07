@@ -28,7 +28,7 @@ An existing RFC.
 
     let config = fixture.config();
     let store = fixture.store();
-    let app = App::new(store);
+    let app = App::new(store, &fixture.config());
     (fixture, app, config)
 }
 
@@ -65,8 +65,8 @@ fn test_submit_creates_correct_type() {
     let (fixture, mut app, config) = setup_app_with_rfc();
     let root = fixture.root();
 
-    // Select Story type (index 2)
-    app.selected_type = 2;
+    // Select Story type (index 1)
+    app.selected_type = 1;
     app.open_create_form();
     for c in "My Story".chars() {
         app.form_type_char(c);
@@ -117,7 +117,7 @@ fn test_submit_applies_relations() {
     let root = fixture.root();
 
     // Create a story that implements RFC-001
-    app.selected_type = 2; // Story
+    app.selected_type = 1; // Story
     app.open_create_form();
     for c in "Linked Story".chars() {
         app.form_type_char(c);
@@ -146,7 +146,7 @@ fn test_submit_relation_defaults_to_related_to() {
     let (fixture, mut app, config) = setup_app_with_rfc();
     let root = fixture.root();
 
-    app.selected_type = 2; // Story
+    app.selected_type = 1; // Story
     app.open_create_form();
     for c in "Default Rel".chars() {
         app.form_type_char(c);
@@ -226,7 +226,7 @@ fn test_submit_navigates_to_new_doc() {
     let root = fixture.root();
 
     // Start on Story type
-    app.selected_type = 2;
+    app.selected_type = 1;
     app.open_create_form();
     for c in "Navigate Test".chars() {
         app.form_type_char(c);

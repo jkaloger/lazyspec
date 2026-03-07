@@ -46,7 +46,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(store);
+    let mut app = App::new(store, config);
 
     let (tx, rx) = mpsc::channel();
     let root = app.store.root().to_path_buf();

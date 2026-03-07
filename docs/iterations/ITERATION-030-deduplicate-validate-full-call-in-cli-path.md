@@ -6,7 +6,7 @@ author: "agent"
 date: 2026-03-07
 tags: []
 related: []
-validate_ignore: true
+validate-ignore: true
 ---
 
 ## Changes

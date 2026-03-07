@@ -3,6 +3,7 @@ use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, RelationTyp
 use crate::engine::store::{Filter, Store};
 use anyhow::{anyhow, Result};
 use crossterm::event::{KeyCode, KeyModifiers};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 fn update_tags(root: &Path, relative: &Path, tags: &[String]) -> Result<()> {
@@ -221,20 +222,26 @@ pub struct App {
     pub filter_status: Option<Status>,
     pub filter_tag: Option<String>,
     pub available_tags: Vec<String>,
+    pub type_icons: HashMap<String, String>,
+    pub type_plurals: HashMap<String, String>,
 }
 
 impl App {
-    pub fn new(store: Store) -> Self {
+    pub fn new(store: Store, config: &Config) -> Self {
+        let default_glyphs = ["●", "■", "▲", "◆", "★", "◎"];
+        let type_icons: HashMap<String, String> = config.types.iter().enumerate().map(|(i, t)| {
+            let icon = t.icon.clone().unwrap_or_else(|| default_glyphs[i % default_glyphs.len()].to_string());
+            (t.name.clone(), icon)
+        }).collect();
+        let type_plurals: HashMap<String, String> = config.types.iter()
+            .map(|t| (t.name.clone(), t.plural.clone()))
+            .collect();
+
         App {
             store,
             selected_type: 0,
             selected_doc: 0,
-            doc_types: vec![
-                DocType::new(DocType::RFC),
-                DocType::new(DocType::ADR),
-                DocType::new(DocType::STORY),
-                DocType::new(DocType::ITERATION),
-            ],
+            doc_types: config.types.iter().map(|t| DocType::new(&t.name)).collect(),
             should_quit: false,
             fullscreen_doc: false,
             scroll_offset: 0,
@@ -255,6 +262,8 @@ impl App {
             filter_status: None,
             filter_tag: None,
             available_tags: Vec::new(),
+            type_icons,
+            type_plurals,
         }
     }
 

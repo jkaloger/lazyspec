@@ -27,7 +27,7 @@ fn setup_app_with_relations() -> (TestFixture, App) {
     );
 
     let store = fixture.store();
-    let app = App::new(store);
+    let app = App::new(store, &fixture.config());
     (fixture, app)
 }
 
@@ -68,8 +68,8 @@ fn test_relation_count() {
     app.selected_doc = 0;
     assert!(app.relation_count() > 0);
 
-    // ADR type (index 1) has no docs, so relation_count is 0
-    app.selected_type = 1;
+    // ADR type (index 3) has no docs, so relation_count is 0
+    app.selected_type = 3;
     app.selected_doc = 0;
     assert_eq!(app.relation_count(), 0);
 }
@@ -143,8 +143,8 @@ fn test_navigate_to_relation() {
     app.selected_relation = 0;
     app.navigate_to_relation();
 
-    // Should have navigated to the related doc (a Story, type index 2)
-    assert_eq!(app.selected_type, 2, "should navigate to Story type");
+    // Should have navigated to the related doc (a Story, type index 1)
+    assert_eq!(app.selected_type, 1, "should navigate to Story type");
     assert_eq!(app.preview_tab, PreviewTab::Preview);
     assert_eq!(app.selected_relation, 0);
 }
@@ -153,7 +153,7 @@ fn test_navigate_to_relation() {
 fn test_navigate_to_relation_no_doc() {
     let fixture = TestFixture::new();
     let store = fixture.store();
-    let mut app = App::new(store);
+    let mut app = App::new(store, &fixture.config());
 
     let before_type = app.selected_type;
     let before_doc = app.selected_doc;
