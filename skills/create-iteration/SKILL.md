@@ -1,6 +1,6 @@
 ---
 name: create-iteration
-description: Use when planning an iteration against a Story or as a standalone iteration for bug fixes, tweaks, and refactors. Creates an Iteration document with task breakdown and test plan, then presents to user for confirmation before build.
+description: Use when planning an iteration against a Story or as a standalone iteration for bug fixes, tweaks, and refactors. Creates Iteration documents with task breakdown and test plan. Supports parallel subagent dispatch for Stories with multiple AC groups.
 ---
 
 ```
@@ -14,6 +14,8 @@ Do NOT write test code or production code in this skill. Plan tests and
 tasks only. For feature work linked to a Story, use `/resolve-context` first
 if you haven't already. Standalone iterations (bug fixes, tweaks, refactors)
 do not require a parent Story or resolve-context.
+After identifying multiple AC groups, partition upfront and get user approval
+before dispatching subagents.
 After completion: present the iteration to the user for review.
 Only use the `/build` skill after the user explicitly confirms.
 </HARD-GATE>
@@ -25,6 +27,7 @@ Only use the `/build` skill after the user explicitly confirms.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id>` or `Read` a file before modifying it.
 - Do NOT skip the workflow pipeline. Features need RFC -> Story -> Iteration. Bug fixes need Iteration.
 - Do NOT write test or production code. This skill produces a plan document only.
+- Do NOT dispatch subagents without user approval of the AC grouping.
 </NEVER>
 
 ## CLI Reference
@@ -60,21 +63,28 @@ build.style.opacity: 0.4
 
 ```d2
 Context resolved? -> Gather context: no
-Context resolved? -> Create iteration doc: yes
+Context resolved? -> Read Story ACs: yes
 
 Gather context.shape: hexagon
 
-Create iteration doc -> Link to story -> Plan tests for ACs -> Write task breakdown
+Read Story ACs -> Multiple iteration groups?
 
-Write task breakdown -> Update iteration doc -> Validate -> Present to user for review
+Multiple iteration groups?.shape: diamond
+Multiple iteration groups? -> Define AC groups -> User approves groups?: yes
+Multiple iteration groups? -> Create single iteration (inline): no
 
-Present to user for review -> User confirms: approved
-Present to user for review -> Revise: changes requested
-Revise -> Write task breakdown
+User approves groups?.shape: diamond
+User approves groups? -> Dispatch N subagents: yes
+User approves groups? -> Revise groups: no
+Revise groups -> Define AC groups
 
-User confirms -> Use /build skill
+Dispatch N subagents -> Collect results -> Validate -> Present to user
+Create single iteration (inline) -> Link to story -> Plan tests -> Write task breakdown -> Present to user
 
-Present to user for review.shape: diamond
+Present to user -> User confirms -> Use /build skill: approved
+Present to user -> Revise: changes requested
+
+Present to user.shape: diamond
 Use /build skill.shape: double_circle
 ```
 
@@ -83,6 +93,18 @@ Use /build skill.shape: double_circle
 1. If linked to a Story: run `lazyspec context <story-id> --json` to see the chain, then `lazyspec show <story-id> --json` for the full ACs
 2. Run `lazyspec status --json` to see all documents and check no existing iteration covers the same ACs
 3. Read relevant documents using `lazyspec show --json` before modifying anything
+
+## AC Grouping
+
+Before dispatching subagents, the orchestrator must:
+
+1. Read the story with `lazyspec show <story-id> --json`
+2. List all ACs
+3. Group ACs into iteration-sized chunks. Each group should be a coherent unit of work (not arbitrary splits). Consider dependencies between ACs.
+4. Verify each AC belongs to exactly one group (no overlap, no gaps)
+5. Present the grouping table to the user for approval
+
+The grouping table should clearly show each iteration's title, which ACs it covers, and a brief rationale for why those ACs belong together. The user must approve or request revisions before any subagents are dispatched.
 
 ## Subagent Dispatch
 
@@ -94,10 +116,91 @@ Use /build skill.shape: double_circle
 
 | Operation | Agent Type | Tier | Context to provide |
 |-----------|-----------|------|-------------------|
+| Create iteration | general-purpose | Heavy | Story context, AC group, other group boundaries, RFC intent |
 | Discover relevant code | Explore | Medium | File paths and symbols from Story ACs |
 | Validate file paths exist | Explore | Light | List of paths referenced in task breakdown |
 
+Each subagent receives a prompt containing:
+- The full Story body (not a file reference)
+- The RFC design intent (1-2 paragraphs)
+- Its specific AC group (which ACs to cover)
+- The AC assignments of all other groups (so it knows what to exclude)
+- Instructions to: create the iteration with `lazyspec create iteration`, link to story with `lazyspec link`, plan tests for its ACs, write task breakdown with real file paths
+- The standard lazyspec CLI reference block
+- Instructions to use Explore agents for code discovery before writing the task breakdown
+
+Subagents are dispatched in parallel using the Agent tool.
+
+### Subagent Prompt Template
+
+```
+IMPORTANT: You are working within the lazyspec workflow.
+- Use `lazyspec` CLI commands for document operations. Do NOT write document files directly.
+- Read files before editing them. Use the Read tool or `lazyspec show --json` before any modification.
+- Implement ONLY what the task specifies. Do not add features, refactor surrounding code, or "improve" things not in the task.
+
+You are creating a single Iteration document within the lazyspec workflow.
+
+## CLI Reference
+
+Before using any `lazyspec` command, run `lazyspec help` to see all available
+commands, and `lazyspec help <subcommand>` to see the full usage for that
+command. Do not assume you know the flags or arguments -- verify with `--help`.
+
+Always pass `--json` when the command supports it. This gives you structured,
+parseable output. Only omit `--json` when presenting output directly to the user.
+
+If a `lazyspec` command fails, run `lazyspec help <subcommand>` to check
+the correct usage before retrying. Do not guess at fixes or retry the same
+command blindly.
+
+## Story Context
+[Full Story body]
+
+## RFC Design Intent
+[1-2 paragraphs from the RFC]
+
+## Your AC Group
+[List of ACs this iteration covers]
+
+## Other AC Groups (for boundary awareness)
+[List of other groups and their AC assignments]
+
+## Instructions
+1. Create the iteration: `lazyspec create iteration "<title>" --author agent`
+2. Link to story: `lazyspec link <iteration-path> implements <story-path>`
+3. Discover relevant code using `lazyspec search` and Explore subagents
+4. Plan tests for each AC in your group
+5. Write task breakdown with real, verified file paths
+6. Validate: `lazyspec validate --json`
+7. Report: iteration path, ACs covered, task count, any concerns
+
+IMPORTANT: Use `lazyspec` CLI commands for document operations. Do NOT write document files directly.
+Read files before editing them. Use the Read tool or `lazyspec show --json` before any modification.
+```
+
 ## Steps
+
+### Multi-iteration stories
+
+1. **Gather context:** Run `lazyspec status --json` to see all documents at once, then `lazyspec search "<keyword>" --json` for topic-specific matches.
+   - Run `lazyspec context <story-id> --json` to see the chain, then `lazyspec show <story-id> --json` to read the full ACs. If you haven't already resolved context, use `/resolve-context` first.
+
+2. **Read Story ACs:** Extract all ACs from the story. Identify natural groupings based on coherence and dependencies.
+
+3. **Group ACs into iteration-sized chunks:** Per the AC Grouping section. Each group should be a self-contained unit of deliverable work.
+
+4. **Present grouping to user for approval:** Show the grouping table. Wait for explicit approval. If the user requests changes, revise and re-present.
+
+5. **Dispatch N subagents in parallel:** One subagent per iteration, using the Agent tool with the prompt template above. Each receives the full Story body, RFC design intent, its AC group, and the boundaries of all other groups.
+
+6. **Collect results:** Gather reports from all subagents. Run `lazyspec validate --json` to verify all iterations link correctly and pass validation.
+
+7. **Present all created iterations to the user:** Show a summary of each iteration created, its ACs, task breakdown, and the validation result.
+
+### Single-iteration stories (fallback) and standalone iterations
+
+When all ACs fit in a single iteration, or for standalone iterations (bug fixes, tweaks, refactors), create the iteration directly without subagent dispatch:
 
 1. **Gather context:** Run `lazyspec status --json` to see all documents at once, then `lazyspec search "<keyword>" --json` for topic-specific matches.
    - **If linked to a Story:** Run `lazyspec context <story-id> --json` to see the chain, then `lazyspec show <story-id> --json` to read the full ACs. If you haven't already resolved context, use `/resolve-context` first.
@@ -169,34 +272,44 @@ Use /build skill.shape: double_circle
 | "I'll write the tests now" | Plan the tests here, write them during build. |
 | "I'll use /build right after" | Stop. Present to the user. Wait for confirmation. |
 | "The user will probably approve" | Probably isn't confirmed. Ask. |
+| "I'll create all iterations myself" | Subagents prevent context pollution. One agent per iteration. |
+| "I don't need user approval for the grouping" | Always get approval. AC grouping affects iteration scope. |
 
 ## Verification
 
 Before claiming this skill is complete:
 
 - [ ] `lazyspec validate --json` passes
-- [ ] If linked to a Story: iteration links to Story correctly
-- [ ] `## Changes` section contains a numbered task breakdown
-- [ ] Each task includes file paths and describes implementation. If linked to a Story, tasks reference Story ACs.
+- [ ] If linked to a Story: all iterations link to Story correctly
+- [ ] Each AC belongs to exactly one iteration (no overlap)
+- [ ] Each iteration has a task breakdown with file paths in `## Changes`
+- [ ] Each task references Story ACs
 - [ ] `## Test Plan` section documents planned tests
-- [ ] Iteration has been presented to the user
+- [ ] Iterations have been presented to the user
 - [ ] User has explicitly confirmed before `/build` is used
 - [ ] No test code or production code has been written
 
 ## Rules
 
 - This skill produces a document, not code
-- One iteration should cover a subset of Story ACs, not all of them
+- One iteration should cover a subset of Story ACs, not all of them (unless they all fit in one)
 - If you discover a contract needs to change, emit an ADR
 - Keep iterations small and committable
 - Always present the iteration to the user and wait for confirmation before invoking build
+- For multi-iteration stories, dispatch one subagent per iteration
+- Always get user approval of the AC grouping before dispatching
+- Each subagent receives full Story text, not file references
+- Each AC must belong to exactly one iteration
 
 ## Guardrails
 
 Before presenting the iteration to the user, verify:
 
 - [ ] Is this a feature? Then confirm a parent Story exists and is linked.
-- [ ] Have you read the parent Story's ACs? (not assumed -- actually read with `lazyspec show --json`)
+- [ ] Have you read the Story ACs? (not assumed -- actually read with `lazyspec show --json`)
+- [ ] Are the AC groups non-overlapping with no gaps?
+- [ ] Has the user approved the grouping?
+- [ ] Is each subagent receiving full Story text (not a file reference)?
 - [ ] Does every task reference real, verified file paths? (not guessed)
 - [ ] Is the task breakdown detailed enough for a zero-context subagent?
 

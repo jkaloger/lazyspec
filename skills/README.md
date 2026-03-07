@@ -14,6 +14,8 @@ plan-work → write-rfc → create-story → create-iteration → build → revi
 
 `/resolve-context` can be used at any point to gather the full document chain (iteration → story → RFC) before starting work. When continuing in the same session (e.g. after `/create-story`), you already have context and can skip directly to `/create-iteration`.
 
+`create-audit` runs independently of the main pipeline. It produces findings that the user can triage into iterations.
+
 ### Reference
 
 | Skill              | Description                                                                         |
@@ -25,6 +27,7 @@ plan-work → write-rfc → create-story → create-iteration → build → revi
 | `build`            | Execute an Iteration's task breakdown, dispatching per-task with review gates       |
 | `review-iteration` | Two-stage review: AC compliance first, code quality second                          |
 | `resolve-context`  | Gather the full document chain for an agent before it begins work                   |
+| `create-audit`     | Run a criteria-based review and document findings for user triage                   |
 
 ### Usage
 
