@@ -22,7 +22,7 @@ Some body content here.
     let meta = DocMeta::parse(content).unwrap();
 
     assert_eq!(meta.title, "Adopt Event Sourcing");
-    assert_eq!(meta.doc_type, DocType::Adr);
+    assert_eq!(meta.doc_type, DocType::new("adr"));
     assert_eq!(meta.status, Status::Draft);
     assert_eq!(meta.author, "jkaloger");
     assert_eq!(meta.date, NaiveDate::from_ymd_opt(2026, 3, 4).unwrap());
@@ -48,7 +48,7 @@ Body.
 
     let meta = DocMeta::parse(content).unwrap();
     assert_eq!(meta.title, "Simple Doc");
-    assert_eq!(meta.doc_type, DocType::Rfc);
+    assert_eq!(meta.doc_type, DocType::new("rfc"));
     assert!(meta.related.is_empty());
 }
 
@@ -124,4 +124,49 @@ fn relation_type_display() {
     assert_eq!(format!("{}", RelationType::Supersedes), "supersedes");
     assert_eq!(format!("{}", RelationType::Blocks), "blocks");
     assert_eq!(format!("{}", RelationType::RelatedTo), "related to");
+}
+
+#[test]
+fn doctype_new_lowercases_input() {
+    assert_eq!(DocType::new("RFC"), DocType::new("rfc"));
+    assert_eq!(DocType::new("Adr"), DocType::new("adr"));
+    assert_eq!(DocType::new("STORY"), DocType::new("story"));
+}
+
+#[test]
+fn doctype_display_returns_lowercase() {
+    assert_eq!(format!("{}", DocType::new("RFC")), "rfc");
+    assert_eq!(format!("{}", DocType::new("custom")), "custom");
+}
+
+#[test]
+fn doctype_fromstr_accepts_any_string() {
+    let dt: DocType = "something-custom".parse().unwrap();
+    assert_eq!(dt, DocType::new("something-custom"));
+}
+
+#[test]
+fn doctype_constants() {
+    assert_eq!(DocType::RFC, "rfc");
+    assert_eq!(DocType::STORY, "story");
+    assert_eq!(DocType::ITERATION, "iteration");
+    assert_eq!(DocType::ADR, "adr");
+}
+
+#[test]
+fn doctype_deserializes_lowercase() {
+    let content = r#"---
+title: "Custom Type Doc"
+type: SomeCustomType
+status: draft
+author: someone
+date: 2026-01-01
+tags: []
+---
+
+Body.
+"#;
+
+    let meta = DocMeta::parse(content).unwrap();
+    assert_eq!(meta.doc_type, DocType::new("somecustomtype"));
 }

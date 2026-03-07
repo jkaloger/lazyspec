@@ -1,0 +1,95 @@
+# .lazyspec.toml for spec-driver repos
+# https://github.com/davidlee/spec-driver
+
+# --- specify/ artifacts ---
+
+[[types]]
+name = "tech-spec"
+plural = "tech-specs"
+dir = "specify/tech-specs"
+prefix = "TS"
+icon = "●"
+
+[[types]]
+name = "product-spec"
+plural = "product-specs"
+dir = "specify/product-specs"
+prefix = "PS"
+icon = "▲"
+
+[[types]]
+name = "adr"
+plural = "adrs"
+dir = "specify/adrs"
+prefix = "ADR"
+icon = "■"
+
+[[types]]
+name = "policy"
+plural = "policies"
+dir = "specify/policies"
+prefix = "POL"
+icon = "◆"
+
+[[types]]
+name = "standard"
+plural = "standards"
+dir = "specify/standards"
+prefix = "STD"
+icon = "★"
+
+# --- change/ artifacts ---
+
+[[types]]
+name = "delta"
+plural = "deltas"
+dir = "change/deltas"
+prefix = "DE"
+icon = "◎"
+
+[[types]]
+name = "design-revision"
+plural = "design-revisions"
+dir = "change/design-revisions"
+prefix = "DR"
+
+[[types]]
+name = "implementation-plan"
+plural = "implementation-plans"
+dir = "change/implementation-plans"
+prefix = "IP"
+
+# --- rules ---
+
+[[rules]]
+name = "deltas-need-specs"
+child = "delta"
+parent = "tech-spec"
+link = "implements"
+severity = "error"
+
+[[rules]]
+name = "implementation-plans-need-deltas"
+child = "implementation-plan"
+parent = "delta"
+link = "implements"
+severity = "error"
+
+[[rules]]
+name = "design-revisions-need-deltas"
+child = "design-revision"
+parent = "delta"
+link = "implements"
+severity = "warning"
+
+[[rules]]
+name = "adrs-need-relations"
+type = "adr"
+require = "any-relation"
+severity = "error"
+
+[templates]
+dir = ".spec-driver/templates"
+
+[naming]
+pattern = "{prefix}-{n:03}-{title}.md"

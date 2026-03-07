@@ -23,12 +23,7 @@ impl Store {
     pub fn load(root: &Path, config: &Config) -> Result<Self> {
         let mut docs = HashMap::new();
 
-        let dirs = [
-            &config.directories.rfcs,
-            &config.directories.adrs,
-            &config.directories.stories,
-            &config.directories.iterations,
-        ];
+        let dirs: Vec<&str> = config.types.iter().map(|t| t.dir.as_str()).collect();
 
         for dir in &dirs {
             let full_path = root.join(dir);
@@ -205,8 +200,8 @@ impl Store {
         &self.root
     }
 
-    pub fn validate_full(&self) -> crate::engine::validation::ValidationResult {
-        crate::engine::validation::validate_full(self)
+    pub fn validate_full(&self, config: &Config) -> crate::engine::validation::ValidationResult {
+        crate::engine::validation::validate_full(self, config)
     }
 
     pub fn search(&self, query: &str) -> Vec<SearchResult<'_>> {

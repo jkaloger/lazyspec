@@ -7,7 +7,7 @@ use lazyspec::tui::app::{App, FormField};
 fn setup_app() -> (TestFixture, App) {
     let fixture = TestFixture::new();
     let store = fixture.store();
-    let app = App::new(store);
+    let app = App::new(store, &fixture.config());
     (fixture, app)
 }
 
@@ -22,19 +22,19 @@ fn test_create_form_opens_with_current_type() {
     app.open_create_form();
 
     assert!(app.create_form.active);
-    assert_eq!(app.create_form.doc_type, DocType::Rfc);
+    assert_eq!(app.create_form.doc_type, DocType::new(DocType::RFC));
 }
 
 #[test]
 fn test_create_form_opens_with_selected_type() {
     let (_fixture, mut app) = setup_app();
 
-    // Select Story (index 2)
-    app.selected_type = 2;
+    // Select Story (index 1)
+    app.selected_type = 1;
     app.open_create_form();
 
     assert!(app.create_form.active);
-    assert_eq!(app.create_form.doc_type, DocType::Story);
+    assert_eq!(app.create_form.doc_type, DocType::new(DocType::STORY));
 }
 
 // AC2: Initial state - fields present, author pre-filled, title focused

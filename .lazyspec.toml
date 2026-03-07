@@ -1,8 +1,37 @@
-[directories]
-rfcs = "docs/rfcs"
-adrs = "docs/adrs"
-stories = "docs/stories"
-iterations = "docs/iterations"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+icon = "●"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+icon = "▲"
+
+[[types]]
+name = "iteration"
+plural = "iterations"
+dir = "docs/iterations"
+prefix = "ITERATION"
+icon = "◆"
+
+[[types]]
+name = "adr"
+plural = "adrs"
+dir = "docs/adrs"
+prefix = "ADR"
+icon = "■"
+
+[[types]]
+name = "audit"
+plural = "audits"
+dir = "docs/audits"
+prefix = "AUDIT"
+icon = "🔍"
 
 [templates]
 dir = ".lazyspec/templates"

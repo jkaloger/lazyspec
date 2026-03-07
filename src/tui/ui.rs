@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::engine::document::{DocMeta, DocType, RelationType, Status};
+use crate::engine::document::{DocMeta, RelationType, Status};
 use crate::tui::app::{App, FilterField, FormField, PreviewTab, ViewMode};
 
 fn status_color(status: &Status) -> Color {
@@ -131,7 +131,8 @@ fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
         .enumerate()
         .map(|(_, dt)| {
             let count = app.doc_count(dt);
-            let content = format!("  {}s  ({})", dt, count);
+            let plural = app.type_plurals.get(&dt.to_string()).map(|s| s.as_str()).unwrap_or("unknown");
+            let content = format!("  {}  ({})", plural, count);
             ListItem::new(content)
         })
         .collect();
@@ -902,12 +903,10 @@ fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
                 ));
             }
 
-            let type_icon = match node.doc_type {
-                DocType::Rfc => "●",
-                DocType::Adr => "■",
-                DocType::Story => "▲",
-                DocType::Iteration => "◆",
-            };
+            let type_icon = app.type_icons
+                .get(&node.doc_type.to_string())
+                .map(|s| s.as_str())
+                .unwrap_or("○");
             spans.push(Span::styled(
                 format!("{} ", type_icon),
                 Style::default().fg(Color::Gray),

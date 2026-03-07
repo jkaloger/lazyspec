@@ -21,7 +21,7 @@ fn setup() -> (common::TestFixture, lazyspec::engine::store::Store) {
 fn list_all_rfcs() {
     let (_fixture, store) = setup();
     let filter = Filter {
-        doc_type: Some(DocType::Rfc),
+        doc_type: Some(DocType::new(DocType::RFC)),
         ..Default::default()
     };
     let results = store.list(&filter);

@@ -125,6 +125,17 @@ fn create_iteration_uses_default_template() {
 }
 
 #[test]
+fn create_unknown_type_returns_error_with_valid_types() {
+    let fixture = common::TestFixture::new();
+    let config = fixture.config();
+    let result = lazyspec::cli::create::run(fixture.root(), &config, "foobar", "Test", "a");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("unknown doc type"), "got: {}", err);
+    assert!(err.contains("rfc"), "error should list valid types, got: {}", err);
+    assert!(err.contains("story"), "error should list valid types, got: {}", err);
+}
+
+#[test]
 fn slugify_converts_title() {
     assert_eq!(template::slugify("Event Sourcing"), "event-sourcing");
     assert_eq!(template::slugify("API v2.0 Design"), "api-v2-0-design");

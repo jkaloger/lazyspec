@@ -1,8 +1,8 @@
 use crate::cli::json::doc_to_json;
 use crate::engine::config::Config;
-use crate::engine::document::{DocMeta, DocType};
+use crate::engine::document::DocMeta;
 use crate::engine::template;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::Local;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,13 +14,10 @@ pub fn run(
     title: &str,
     author: &str,
 ) -> Result<PathBuf> {
-    let parsed: DocType = doc_type.parse()?;
-    let dir = match parsed {
-        DocType::Rfc => &config.directories.rfcs,
-        DocType::Adr => &config.directories.adrs,
-        DocType::Story => &config.directories.stories,
-        DocType::Iteration => &config.directories.iterations,
-    };
+    let type_def = config.type_by_name(doc_type)
+        .ok_or_else(|| anyhow!("unknown doc type: '{}'. valid types: {}", doc_type,
+            config.types.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ")))?;
+    let dir = &type_def.dir;
 
     let target_dir = root.join(dir);
     fs::create_dir_all(&target_dir)?;

@@ -7,7 +7,7 @@ fn setup_app_with_rfc(title: &str) -> (TestFixture, App) {
     let fixture = TestFixture::new();
     fixture.write_rfc("RFC-001-test.md", title, "draft");
     let store = fixture.store();
-    let app = App::new(store);
+    let app = App::new(store, &fixture.config());
     (fixture, app)
 }
 
@@ -52,7 +52,7 @@ Impl Story body.
     );
 
     let store = fixture.store();
-    let mut app = App::new(store);
+    let mut app = App::new(store, &fixture.config());
 
     app.selected_type = 0; // RFC
     app.selected_doc = 0;
@@ -123,7 +123,7 @@ fn test_selection_adjusts_after_delete_last() {
     fixture.write_rfc("RFC-002-second.md", "Second RFC", "draft");
 
     let store = fixture.store();
-    let mut app = App::new(store);
+    let mut app = App::new(store, &fixture.config());
 
     app.selected_type = 0;
     app.selected_doc = 1; // second RFC (sorted by path)
@@ -139,7 +139,7 @@ fn test_selection_adjusts_after_delete_last() {
 fn test_open_delete_empty_list_noop() {
     let fixture = TestFixture::new();
     let store = fixture.store();
-    let mut app = App::new(store);
+    let mut app = App::new(store, &fixture.config());
 
     app.selected_type = 0;
     app.open_delete_confirm();

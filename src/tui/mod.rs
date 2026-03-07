@@ -46,7 +46,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(store);
+    let mut app = App::new(store, config);
 
     let (tx, rx) = mpsc::channel();
     let root = app.store.root().to_path_buf();
@@ -56,13 +56,8 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         }
     })?;
 
-    let dirs = [
-        &config.directories.rfcs,
-        &config.directories.adrs,
-        &config.directories.stories,
-        &config.directories.iterations,
-    ];
-    for dir in dirs {
+    let dirs: Vec<&str> = config.types.iter().map(|t| t.dir.as_str()).collect();
+    for dir in &dirs {
         let full = root.join(dir);
         if full.exists() {
             _watcher.watch(&full, RecursiveMode::NonRecursive)?;

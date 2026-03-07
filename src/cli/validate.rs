@@ -1,4 +1,5 @@
 use crate::cli::style::{error_prefix, warning_prefix};
+use crate::engine::config::Config;
 use crate::engine::store::Store;
 use console::{colors_enabled, Style};
 
@@ -13,14 +14,14 @@ fn success_message() -> String {
     }
 }
 
-pub fn run_full(store: &Store, json: bool, warnings: bool) -> i32 {
-    let result = store.validate_full();
+pub fn run_full(store: &Store, config: &Config, json: bool, warnings: bool) -> i32 {
+    let result = store.validate_full(config);
 
     if json {
-        let output = run_json(store);
+        let output = run_json(store, config);
         println!("{}", output);
     } else {
-        let output = run_human(store, warnings);
+        let output = run_human(store, config, warnings);
         if output.is_empty() {
             println!("{}", success_message());
         } else {
@@ -31,8 +32,8 @@ pub fn run_full(store: &Store, json: bool, warnings: bool) -> i32 {
     if result.errors.is_empty() { 0 } else { 2 }
 }
 
-pub fn run_json(store: &Store) -> String {
-    let result = store.validate_full();
+pub fn run_json(store: &Store, config: &Config) -> String {
+    let result = store.validate_full(config);
     let errors: Vec<_> = result.errors.iter().map(|e| format!("{}", e)).collect();
     let warnings: Vec<_> = result.warnings.iter().map(|w| format!("{}", w)).collect();
     serde_json::to_string_pretty(&serde_json::json!({
@@ -42,8 +43,8 @@ pub fn run_json(store: &Store) -> String {
     .unwrap()
 }
 
-pub fn run_human(store: &Store, show_warnings: bool) -> String {
-    let result = store.validate_full();
+pub fn run_human(store: &Store, config: &Config, show_warnings: bool) -> String {
+    let result = store.validate_full(config);
     let mut output = String::new();
 
     for error in &result.errors {

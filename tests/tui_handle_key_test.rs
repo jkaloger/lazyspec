@@ -18,7 +18,7 @@ fn setup_app_with_docs() -> (TestFixture, App) {
     );
 
     let store = fixture.store();
-    let app = App::new(store);
+    let app = App::new(store, &fixture.config());
     (fixture, app)
 }
 

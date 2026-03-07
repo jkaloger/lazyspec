@@ -25,7 +25,7 @@ fn setup_app_with_docs() -> (TestFixture, App) {
     );
 
     let store = fixture.store();
-    let app = App::new(store);
+    let app = App::new(store, &fixture.config());
     (fixture, app)
 }
 
@@ -115,8 +115,8 @@ fn test_select_search_result_navigates_to_doc() {
 
     app.select_search_result();
 
-    // Story is at index 2 in doc_types (Rfc=0, Adr=1, Story=2, Iteration=3)
-    assert_eq!(app.selected_type, 2);
+    // Story is at index 1 in doc_types (Rfc=0, Story=1, Iteration=2, Adr=3)
+    assert_eq!(app.selected_type, 1);
     assert_eq!(app.selected_doc, 0);
     assert!(!app.search_mode);
 }

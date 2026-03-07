@@ -20,8 +20,8 @@ fn setup() -> (common::TestFixture, lazyspec::engine::store::Store) {
 
 #[test]
 fn status_json_has_documents_and_validation() {
-    let (_fixture, store) = setup();
-    let output = lazyspec::cli::status::run_json(&store);
+    let (fixture, store) = setup();
+    let output = lazyspec::cli::status::run_json(&store, &fixture.config());
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     assert!(parsed["documents"].is_array());
@@ -32,8 +32,8 @@ fn status_json_has_documents_and_validation() {
 
 #[test]
 fn status_json_includes_all_documents() {
-    let (_fixture, store) = setup();
-    let output = lazyspec::cli::status::run_json(&store);
+    let (fixture, store) = setup();
+    let output = lazyspec::cli::status::run_json(&store, &fixture.config());
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let docs = parsed["documents"].as_array().unwrap();
@@ -47,8 +47,8 @@ fn status_json_includes_all_documents() {
 
 #[test]
 fn status_json_documents_use_full_schema() {
-    let (_fixture, store) = setup();
-    let output = lazyspec::cli::status::run_json(&store);
+    let (fixture, store) = setup();
+    let output = lazyspec::cli::status::run_json(&store, &fixture.config());
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let doc = &parsed["documents"][0];
@@ -81,7 +81,7 @@ fn status_empty_project() {
 
     let store = fixture.store();
 
-    let json_output = lazyspec::cli::status::run_json(&store);
+    let json_output = lazyspec::cli::status::run_json(&store, &fixture.config());
     let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
     assert_eq!(parsed["documents"].as_array().unwrap().len(), 0);
 

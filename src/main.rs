@@ -76,7 +76,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Status { json }) => {
             let store = Store::load(&cwd, &config)?;
             if json {
-                println!("{}", lazyspec::cli::status::run_json(&store));
+                println!("{}", lazyspec::cli::status::run_json(&store, &config));
             } else {
                 let output = lazyspec::cli::status::run_human(&store);
                 if output.is_empty() {
@@ -98,7 +98,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Validate { json, warnings }) => {
             let store = Store::load(&cwd, &config)?;
-            let exit_code = lazyspec::cli::validate::run_full(&store, json, warnings);
+            let exit_code = lazyspec::cli::validate::run_full(&store, &config, json, warnings);
             if exit_code != 0 {
                 std::process::exit(exit_code);
             }

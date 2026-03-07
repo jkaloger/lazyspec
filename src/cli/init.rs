@@ -11,10 +11,9 @@ pub fn run(root: &Path) -> Result<()> {
 
     let config = Config::default();
 
-    fs::create_dir_all(root.join(&config.directories.rfcs))?;
-    fs::create_dir_all(root.join(&config.directories.adrs))?;
-    fs::create_dir_all(root.join(&config.directories.stories))?;
-    fs::create_dir_all(root.join(&config.directories.iterations))?;
+    for type_def in &config.types {
+        fs::create_dir_all(root.join(&type_def.dir))?;
+    }
     fs::create_dir_all(root.join(&config.templates.dir))?;
 
     fs::write(&config_path, config.to_toml()?)?;
