@@ -316,3 +316,195 @@ tags: []
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].doc.title, "Unique Folder Feature");
 }
+
+#[test]
+fn store_discovers_child_md_files() {
+    let fixture = TestFixture::new();
+    fixture.write_subfolder_doc(
+        "docs/rfcs/RFC-003-multi",
+        "---\ntitle: \"Multi Doc\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_child_doc(
+        "docs/rfcs/RFC-003-multi",
+        "appendix.md",
+        "---\ntitle: \"Appendix\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    assert_eq!(store.all_docs().len(), 2);
+    let child = store.all_docs().into_iter().find(|d| d.title == "Appendix").unwrap();
+    assert!(child.path.to_string_lossy().contains("appendix.md"));
+}
+
+#[test]
+fn store_tracks_parent_child_relationship() {
+    let fixture = TestFixture::new();
+    fixture.write_subfolder_doc(
+        "docs/rfcs/RFC-003-multi",
+        "---\ntitle: \"Multi Doc\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_child_doc(
+        "docs/rfcs/RFC-003-multi",
+        "appendix.md",
+        "---\ntitle: \"Appendix\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    let parent_path = PathBuf::from("docs/rfcs/RFC-003-multi/index.md");
+    let child_path = PathBuf::from("docs/rfcs/RFC-003-multi/appendix.md");
+
+    let children = store.children_of(&parent_path);
+    assert!(children.contains(&child_path));
+
+    let parent = store.parent_of(&child_path);
+    assert_eq!(parent, Some(&parent_path));
+}
+
+#[test]
+fn store_synthesises_virtual_parent() {
+    let fixture = TestFixture::new();
+    fixture.write_child_doc(
+        "docs/rfcs/RFC-004-virtual",
+        "notes.md",
+        "---\ntitle: \"Notes\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_child_doc(
+        "docs/rfcs/RFC-004-virtual",
+        "design.md",
+        "---\ntitle: \"Design\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    let virtual_parent = store.all_docs().into_iter().find(|d| d.virtual_doc).unwrap();
+    assert_eq!(virtual_parent.title, "Virtual");
+    assert_eq!(virtual_parent.status, Status::Draft);
+}
+
+#[test]
+fn store_virtual_parent_accepted_when_all_children_accepted() {
+    let fixture = TestFixture::new();
+    fixture.write_child_doc(
+        "docs/rfcs/RFC-004-virtual",
+        "notes.md",
+        "---\ntitle: \"Notes\"\ntype: rfc\nstatus: accepted\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_child_doc(
+        "docs/rfcs/RFC-004-virtual",
+        "design.md",
+        "---\ntitle: \"Design\"\ntype: rfc\nstatus: accepted\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    let virtual_parent = store.all_docs().into_iter().find(|d| d.virtual_doc).unwrap();
+    assert_eq!(virtual_parent.status, Status::Accepted);
+}
+
+#[test]
+fn store_virtual_parent_not_on_disk() {
+    let fixture = TestFixture::new();
+    fixture.write_child_doc(
+        "docs/rfcs/RFC-004-virtual",
+        "notes.md",
+        "---\ntitle: \"Notes\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_child_doc(
+        "docs/rfcs/RFC-004-virtual",
+        "design.md",
+        "---\ntitle: \"Design\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    assert!(store.all_docs().iter().any(|d| d.virtual_doc));
+    assert!(!fixture.root().join("docs/rfcs/RFC-004-virtual/index.md").exists());
+    assert!(!fixture.root().join("docs/rfcs/RFC-004-virtual/.virtual").exists());
+}
+
+#[test]
+fn store_qualified_shorthand_resolves_child() {
+    let fixture = TestFixture::new();
+    fixture.write_subfolder_doc(
+        "docs/rfcs/RFC-003-multi",
+        "---\ntitle: \"Multi Doc\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_child_doc(
+        "docs/rfcs/RFC-003-multi",
+        "appendix.md",
+        "---\ntitle: \"Appendix\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    let doc = store.resolve_shorthand("RFC-003/appendix");
+    assert!(doc.is_some());
+    assert_eq!(doc.unwrap().title, "Appendix");
+}
+
+#[test]
+fn store_unqualified_shorthand_skips_children() {
+    let fixture = TestFixture::new();
+    fixture.write_subfolder_doc(
+        "docs/rfcs/RFC-003-multi",
+        "---\ntitle: \"Multi Doc\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_child_doc(
+        "docs/rfcs/RFC-003-multi",
+        "notes.md",
+        "---\ntitle: \"Notes A\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_subfolder_doc(
+        "docs/rfcs/RFC-005-other",
+        "---\ntitle: \"Other Doc\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_child_doc(
+        "docs/rfcs/RFC-005-other",
+        "notes.md",
+        "---\ntitle: \"Notes B\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    let doc = store.resolve_shorthand("notes");
+    assert!(doc.is_none());
+}
+
+#[test]
+fn store_child_relationships_resolve() {
+    let fixture = TestFixture::new();
+    fixture.write_subfolder_doc(
+        "docs/rfcs/RFC-003-multi",
+        "---\ntitle: \"Multi Doc\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_child_doc(
+        "docs/rfcs/RFC-003-multi",
+        "appendix.md",
+        "---\ntitle: \"Appendix\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nrelated:\n  - implements: docs/stories/STORY-001-impl.md\n---\n",
+    );
+    fixture.write_story("STORY-001-impl.md", "Implement Feature", "draft", None);
+
+    let store = fixture.store();
+    let child_path = PathBuf::from("docs/rfcs/RFC-003-multi/appendix.md");
+    let story_path = PathBuf::from("docs/stories/STORY-001-impl.md");
+
+    let related = store.related_to(&child_path);
+    assert!(related.iter().any(|(_, p)| **p == story_path));
+
+    let refs = store.referenced_by(&story_path);
+    assert!(refs.iter().any(|(_, p)| **p == child_path));
+}
+
+#[test]
+fn store_ignores_nested_subdirectories() {
+    let fixture = TestFixture::new();
+    fixture.write_subfolder_doc(
+        "docs/rfcs/RFC-003-multi",
+        "---\ntitle: \"Multi Doc\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    let deep_dir = fixture.root().join("docs/rfcs/RFC-003-multi/deep");
+    std::fs::create_dir_all(&deep_dir).unwrap();
+    std::fs::write(
+        deep_dir.join("hidden.md"),
+        "---\ntitle: \"Hidden\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    ).unwrap();
+
+    let store = fixture.store();
+    assert_eq!(store.all_docs().len(), 1);
+    assert!(store.all_docs().iter().all(|d| d.title != "Hidden"));
+}

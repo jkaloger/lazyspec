@@ -1,13 +1,14 @@
 ---
 title: CLI child document support
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-07
 tags: []
 related:
 - implements: docs/rfcs/RFC-014-nested-child-document-support.md
 ---
+
 
 
 ## Context

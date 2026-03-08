@@ -3,7 +3,7 @@ use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, RelationTyp
 use crate::engine::store::{Filter, Store};
 use anyhow::{anyhow, Result};
 use crossterm::event::{KeyCode, KeyModifiers};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 fn update_tags(root: &Path, relative: &Path, tags: &[String]) -> Result<()> {
@@ -145,6 +145,18 @@ pub struct GraphNode {
     pub depth: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct DocListNode {
+    pub path: PathBuf,
+    pub id: String,
+    pub title: String,
+    pub doc_type: DocType,
+    pub status: Status,
+    pub depth: usize,
+    pub is_parent: bool,
+    pub is_virtual: bool,
+}
+
 pub struct DeleteConfirm {
     pub active: bool,
     pub doc_path: PathBuf,
@@ -224,6 +236,8 @@ pub struct App {
     pub available_tags: Vec<String>,
     pub type_icons: HashMap<String, String>,
     pub type_plurals: HashMap<String, String>,
+    pub expanded_parents: HashSet<PathBuf>,
+    pub doc_tree: Vec<DocListNode>,
 }
 
 impl App {
@@ -237,7 +251,7 @@ impl App {
             .map(|t| (t.name.clone(), t.plural.clone()))
             .collect();
 
-        App {
+        let mut app = App {
             store,
             selected_type: 0,
             selected_doc: 0,
@@ -264,7 +278,11 @@ impl App {
             available_tags: Vec::new(),
             type_icons,
             type_plurals,
-        }
+            expanded_parents: HashSet::new(),
+            doc_tree: Vec::new(),
+        };
+        app.build_doc_tree();
+        app
     }
 
     pub fn cycle_mode(&mut self) {
@@ -279,6 +297,73 @@ impl App {
             self.enter_filters_mode();
             self.selected_doc = 0;
         }
+    }
+
+    pub fn toggle_expanded(&mut self, path: &Path) {
+        let key = path.to_path_buf();
+        if !self.expanded_parents.remove(&key) {
+            self.expanded_parents.insert(key);
+        }
+        self.build_doc_tree();
+    }
+
+    pub fn is_expanded(&self, path: &Path) -> bool {
+        self.expanded_parents.contains(path)
+    }
+
+    pub fn build_doc_tree(&mut self) {
+        let docs = self.store.list(&Filter {
+            doc_type: Some(self.current_type().clone()),
+            ..Default::default()
+        });
+
+        let mut sorted: Vec<&DocMeta> = docs.into_iter().collect();
+        sorted.sort_by(|a, b| a.path.cmp(&b.path));
+
+        let mut tree = Vec::new();
+
+        for doc in &sorted {
+            if self.store.parent_of(&doc.path).is_some() {
+                continue;
+            }
+
+            let children = self.store.children_of(&doc.path);
+            let is_parent = !children.is_empty();
+
+            tree.push(DocListNode {
+                path: doc.path.clone(),
+                id: doc.id.clone(),
+                title: doc.title.clone(),
+                doc_type: doc.doc_type.clone(),
+                status: doc.status.clone(),
+                depth: 0,
+                is_parent,
+                is_virtual: doc.virtual_doc,
+            });
+
+            if is_parent && self.is_expanded(&doc.path) {
+                let mut child_docs: Vec<&DocMeta> = children
+                    .iter()
+                    .filter_map(|cp| self.store.get(cp))
+                    .collect();
+                child_docs.sort_by(|a, b| a.path.cmp(&b.path));
+
+                for child in child_docs {
+                    tree.push(DocListNode {
+                        path: child.path.clone(),
+                        id: child.id.clone(),
+                        title: child.title.clone(),
+                        doc_type: child.doc_type.clone(),
+                        status: child.status.clone(),
+                        depth: 1,
+                        is_parent: false,
+                        is_virtual: child.virtual_doc,
+                    });
+                }
+            }
+        }
+
+        self.doc_tree = tree;
     }
 
     pub fn enter_filters_mode(&mut self) {
@@ -463,8 +548,9 @@ impl App {
     }
 
     pub fn selected_doc_meta(&self) -> Option<&DocMeta> {
-        let docs = self.docs_for_current_type();
-        docs.get(self.selected_doc).copied()
+        self.doc_tree
+            .get(self.selected_doc)
+            .and_then(|node| self.store.get(&node.path))
     }
 
     pub fn doc_count(&self, doc_type: &DocType) -> usize {
@@ -477,7 +563,7 @@ impl App {
     }
 
     pub fn move_down(&mut self) {
-        let count = self.docs_for_current_type().len();
+        let count = self.doc_tree.len();
         if count > 0 && self.selected_doc < count - 1 {
             self.selected_doc += 1;
         }
@@ -486,6 +572,15 @@ impl App {
     pub fn move_up(&mut self) {
         if self.selected_doc > 0 {
             self.selected_doc -= 1;
+        }
+    }
+
+    pub fn clamp_selected_doc(&mut self) {
+        let count = self.doc_tree.len();
+        if count == 0 {
+            self.selected_doc = 0;
+        } else if self.selected_doc >= count {
+            self.selected_doc = count - 1;
         }
     }
 
@@ -514,7 +609,7 @@ impl App {
     }
 
     pub fn move_to_bottom(&mut self) {
-        let count = self.docs_for_current_type().len();
+        let count = self.doc_tree.len();
         if count > 0 {
             self.selected_doc = count - 1;
         }
@@ -569,8 +664,8 @@ impl App {
             let doc_type = doc.doc_type.clone();
             if let Some(idx) = self.doc_types.iter().position(|t| *t == doc_type) {
                 self.selected_type = idx;
-                let docs = self.docs_for_current_type();
-                if let Some(di) = docs.iter().position(|d| d.path == path) {
+                self.build_doc_tree();
+                if let Some(di) = self.doc_tree.iter().position(|n| n.path == path) {
                     self.selected_doc = di;
                 }
             }
@@ -621,8 +716,8 @@ impl App {
             let doc_type = target_doc.doc_type.clone();
             if let Some(type_idx) = self.doc_types.iter().position(|t| *t == doc_type) {
                 self.selected_type = type_idx;
-                let docs = self.docs_for_current_type();
-                if let Some(doc_idx) = docs.iter().position(|d| d.path == target) {
+                self.build_doc_tree();
+                if let Some(doc_idx) = self.doc_tree.iter().position(|n| n.path == target) {
                     self.selected_doc = doc_idx;
                 }
             }
@@ -635,6 +730,7 @@ impl App {
         if self.selected_type < self.doc_types.len() - 1 {
             self.selected_type += 1;
             self.selected_doc = 0;
+            self.build_doc_tree();
         }
     }
 
@@ -642,6 +738,7 @@ impl App {
         if self.selected_type > 0 {
             self.selected_type -= 1;
             self.selected_doc = 0;
+            self.build_doc_tree();
         }
     }
 
@@ -723,8 +820,8 @@ impl App {
         let doc_type = self.create_form.doc_type.clone();
         if let Some(type_idx) = self.doc_types.iter().position(|t| *t == doc_type) {
             self.selected_type = type_idx;
-            let docs = self.docs_for_current_type();
-            if let Some(doc_idx) = docs.iter().position(|d| d.path == relative) {
+            self.build_doc_tree();
+            if let Some(doc_idx) = self.doc_tree.iter().position(|n| n.path == relative) {
                 self.selected_doc = doc_idx;
             }
         }
@@ -765,14 +862,9 @@ impl App {
         crate::cli::delete::run(root, &doc_path_str)?;
         self.store.remove_file(&doc_path);
 
-        let count = self.docs_for_current_type().len();
-        if count == 0 {
-            self.selected_doc = 0;
-        } else if self.selected_doc >= count {
-            self.selected_doc = count - 1;
-        }
-
         self.close_delete_confirm();
+        self.build_doc_tree();
+        self.clamp_selected_doc();
         Ok(())
     }
 
@@ -939,8 +1031,8 @@ impl App {
                             let doc_type = doc.doc_type.clone();
                             if let Some(type_idx) = self.doc_types.iter().position(|t| *t == doc_type) {
                                 self.selected_type = type_idx;
-                                let docs = self.docs_for_current_type();
-                                if let Some(doc_idx) = docs.iter().position(|d| d.path == path) {
+                                self.build_doc_tree();
+                                if let Some(doc_idx) = self.doc_tree.iter().position(|n| n.path == path) {
                                     self.selected_doc = doc_idx;
                                 }
                             }
@@ -1007,8 +1099,39 @@ impl App {
                     self.move_up();
                 }
             }
-            (KeyCode::Char('h') | KeyCode::Left, _) => self.move_type_prev(),
-            (KeyCode::Char('l') | KeyCode::Right, _) => self.move_type_next(),
+            (KeyCode::Char('l') | KeyCode::Right, _) => {
+                self.move_type_next();
+            }
+            (KeyCode::Char('h') | KeyCode::Left, _) => {
+                self.move_type_prev();
+            }
+            (KeyCode::Char(' '), _) => {
+                let node = self.doc_tree.get(self.selected_doc).cloned();
+                if let Some(ref n) = node {
+                    if n.is_parent && !self.is_expanded(&n.path) {
+                        let path = n.path.clone();
+                        self.toggle_expanded(&path);
+                    } else if n.is_parent && self.is_expanded(&n.path) {
+                        let path = n.path.clone();
+                        self.toggle_expanded(&path);
+                        self.clamp_selected_doc();
+                    } else if n.depth > 0 {
+                        let mut parent_idx = self.selected_doc;
+                        for i in (0..self.selected_doc).rev() {
+                            if self.doc_tree[i].depth == 0 {
+                                parent_idx = i;
+                                break;
+                            }
+                        }
+                        self.selected_doc = parent_idx;
+                        let path = self.doc_tree[parent_idx].path.clone();
+                        if self.is_expanded(&path) {
+                            self.toggle_expanded(&path);
+                            self.clamp_selected_doc();
+                        }
+                    }
+                }
+            }
             (KeyCode::Tab, _) => self.toggle_preview_tab(),
             (KeyCode::Char('g'), _) => self.move_to_top(),
             (KeyCode::Char('G'), _) => self.move_to_bottom(),

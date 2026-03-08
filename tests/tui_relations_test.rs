@@ -70,6 +70,7 @@ fn test_relation_count() {
 
     // ADR type (index 3) has no docs, so relation_count is 0
     app.selected_type = 3;
+    app.build_doc_tree();
     app.selected_doc = 0;
     assert_eq!(app.relation_count(), 0);
 }
