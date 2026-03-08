@@ -491,6 +491,36 @@ fn store_child_relationships_resolve() {
 }
 
 #[test]
+fn store_collects_parse_errors() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-broken.md",
+        "---\ntitle: \"Broken\"\ntype: rfc\nauthor: test\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    assert_eq!(store.parse_errors().len(), 1);
+    assert!(store.parse_errors()[0].path.to_string_lossy().contains("RFC-broken.md"));
+    assert!(store.all_docs().is_empty());
+}
+
+#[test]
+fn store_loads_valid_alongside_invalid() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-good.md", "Good RFC", "draft");
+    fixture.write_doc(
+        "docs/rfcs/RFC-002-bad.md",
+        "---\ntitle: \"Bad\"\ntype: rfc\nauthor: test\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    assert_eq!(store.all_docs().len(), 1);
+    assert_eq!(store.all_docs()[0].title, "Good RFC");
+    assert_eq!(store.parse_errors().len(), 1);
+    assert!(store.parse_errors()[0].path.to_string_lossy().contains("RFC-002-bad.md"));
+}
+
+#[test]
 fn store_ignores_nested_subdirectories() {
     let fixture = TestFixture::new();
     fixture.write_subfolder_doc(

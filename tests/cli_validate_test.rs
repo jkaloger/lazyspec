@@ -54,6 +54,24 @@ fn validate_catches_unlinked_adr() {
 }
 
 #[test]
+fn validate_json_includes_parse_errors() {
+    let fixture = common::TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-broken.md",
+        "---\ntitle: \"Broken\"\ntype: rfc\nauthor: test\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::validate::run_json(&store, &fixture.config());
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    let errors = parsed["parse_errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0]["path"].is_string());
+    assert!(errors[0]["error"].is_string());
+}
+
+#[test]
 fn validate_passes_linked_iteration() {
     let fixture = common::TestFixture::new();
     fixture.write_story("STORY-001.md", "A Story", "draft", None);

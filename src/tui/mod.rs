@@ -97,6 +97,19 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             }
         }
 
+        if app.fix_request {
+            app.fix_request = false;
+            let root = app.store.root().to_path_buf();
+            let paths: Vec<String> = app.store.parse_errors()
+                .iter()
+                .map(|e| e.path.to_string_lossy().to_string())
+                .collect();
+            let output = crate::cli::fix::run_human(&root, &app.store, config, &paths, false);
+            app.store = Store::load(&root, config)?;
+            app.fix_result = if output.is_empty() { None } else { Some(output) };
+            app.warnings_selected = 0;
+        }
+
         if app.should_quit {
             break;
         }

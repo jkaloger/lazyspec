@@ -12,12 +12,17 @@ pub fn run_json(store: &Store, config: &Config) -> String {
     let errors: Vec<_> = result.errors.iter().map(|e| format!("{}", e)).collect();
     let warnings: Vec<_> = result.warnings.iter().map(|w| format!("{}", w)).collect();
 
+    let parse_errors: Vec<_> = store.parse_errors().iter().map(|pe| {
+        serde_json::json!({ "path": pe.path.display().to_string(), "error": pe.error })
+    }).collect();
+
     serde_json::to_string_pretty(&serde_json::json!({
         "documents": docs,
         "validation": {
             "errors": errors,
             "warnings": warnings,
-        }
+        },
+        "parse_errors": parse_errors,
     }))
     .unwrap()
 }

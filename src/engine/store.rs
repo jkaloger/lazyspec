@@ -6,6 +6,12 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone)]
+pub struct ParseError {
+    pub path: PathBuf,
+    pub error: String,
+}
+
 #[derive(Default)]
 pub struct Filter {
     pub doc_type: Option<DocType>,
@@ -20,6 +26,7 @@ pub struct Store {
     pub(crate) reverse_links: HashMap<PathBuf, Vec<(RelationType, PathBuf)>>,
     pub(crate) children: HashMap<PathBuf, Vec<PathBuf>>,
     pub(crate) parent_of: HashMap<PathBuf, PathBuf>,
+    parse_errors: Vec<ParseError>,
 }
 
 impl Store {
@@ -27,6 +34,7 @@ impl Store {
         let mut docs = HashMap::new();
         let mut children: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
         let mut parent_of: HashMap<PathBuf, PathBuf> = HashMap::new();
+        let mut parse_errors: Vec<ParseError> = Vec::new();
 
         for type_def in &config.types {
             let full_path = root.join(&type_def.dir);
@@ -42,10 +50,18 @@ impl Store {
                     if index_path.exists() {
                         let content = fs::read_to_string(&index_path)?;
                         let parent_relative = index_path.strip_prefix(root).unwrap_or(&index_path).to_path_buf();
-                        if let Ok(mut meta) = DocMeta::parse(&content) {
-                            meta.path = parent_relative.clone();
-                            meta.id = extract_id(&meta.path);
-                            docs.insert(meta.path.clone(), meta);
+                        match DocMeta::parse(&content) {
+                            Ok(mut meta) => {
+                                meta.path = parent_relative.clone();
+                                meta.id = extract_id(&meta.path);
+                                docs.insert(meta.path.clone(), meta);
+                            }
+                            Err(e) => {
+                                parse_errors.push(ParseError {
+                                    path: parent_relative.clone(),
+                                    error: e.to_string(),
+                                });
+                            }
                         }
 
                         let mut child_paths = Vec::new();
@@ -62,13 +78,21 @@ impl Store {
                                 continue;
                             }
                             let child_content = fs::read_to_string(&child_path)?;
-                            if let Ok(mut child_meta) = DocMeta::parse(&child_content) {
-                                let child_relative = child_path.strip_prefix(root).unwrap_or(&child_path).to_path_buf();
-                                child_meta.path = child_relative.clone();
-                                child_meta.id = extract_id(&child_meta.path);
-                                parent_of.insert(child_relative.clone(), parent_relative.clone());
-                                child_paths.push(child_relative.clone());
-                                docs.insert(child_meta.path.clone(), child_meta);
+                            let child_relative = child_path.strip_prefix(root).unwrap_or(&child_path).to_path_buf();
+                            match DocMeta::parse(&child_content) {
+                                Ok(mut child_meta) => {
+                                    child_meta.path = child_relative.clone();
+                                    child_meta.id = extract_id(&child_meta.path);
+                                    parent_of.insert(child_relative.clone(), parent_relative.clone());
+                                    child_paths.push(child_relative.clone());
+                                    docs.insert(child_meta.path.clone(), child_meta);
+                                }
+                                Err(e) => {
+                                    parse_errors.push(ParseError {
+                                        path: child_relative,
+                                        error: e.to_string(),
+                                    });
+                                }
                             }
                         }
                         if !child_paths.is_empty() {
@@ -86,12 +110,20 @@ impl Store {
                                 continue;
                             }
                             let child_content = fs::read_to_string(&child_path)?;
-                            if let Ok(mut child_meta) = DocMeta::parse(&child_content) {
-                                let child_relative = child_path.strip_prefix(root).unwrap_or(&child_path).to_path_buf();
-                                child_meta.path = child_relative.clone();
-                                child_meta.id = extract_id(&child_meta.path);
-                                child_paths.push(child_relative.clone());
-                                docs.insert(child_meta.path.clone(), child_meta);
+                            let child_relative = child_path.strip_prefix(root).unwrap_or(&child_path).to_path_buf();
+                            match DocMeta::parse(&child_content) {
+                                Ok(mut child_meta) => {
+                                    child_meta.path = child_relative.clone();
+                                    child_meta.id = extract_id(&child_meta.path);
+                                    child_paths.push(child_relative.clone());
+                                    docs.insert(child_meta.path.clone(), child_meta);
+                                }
+                                Err(e) => {
+                                    parse_errors.push(ParseError {
+                                        path: child_relative,
+                                        error: e.to_string(),
+                                    });
+                                }
                             }
                         }
 
@@ -134,11 +166,19 @@ impl Store {
                     continue;
                 }
                 let content = fs::read_to_string(&path)?;
-                if let Ok(mut meta) = DocMeta::parse(&content) {
-                    let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-                    meta.path = relative;
-                    meta.id = extract_id(&meta.path);
-                    docs.insert(meta.path.clone(), meta);
+                let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+                match DocMeta::parse(&content) {
+                    Ok(mut meta) => {
+                        meta.path = relative;
+                        meta.id = extract_id(&meta.path);
+                        docs.insert(meta.path.clone(), meta);
+                    }
+                    Err(e) => {
+                        parse_errors.push(ParseError {
+                            path: relative,
+                            error: e.to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -167,11 +207,16 @@ impl Store {
             reverse_links,
             children,
             parent_of,
+            parse_errors,
         })
     }
 
     pub fn all_docs(&self) -> Vec<&DocMeta> {
         self.docs.values().collect()
+    }
+
+    pub fn parse_errors(&self) -> &[ParseError] {
+        &self.parse_errors
     }
 
     pub fn list(&self, filter: &Filter) -> Vec<&DocMeta> {
@@ -291,10 +336,21 @@ impl Store {
         }
 
         let content = std::fs::read_to_string(&full_path)?;
-        if let Ok(mut meta) = DocMeta::parse(&content) {
-            meta.path = relative_path.to_path_buf();
-            meta.id = extract_id(&meta.path);
-            self.docs.insert(relative_path.to_path_buf(), meta);
+        match DocMeta::parse(&content) {
+            Ok(mut meta) => {
+                meta.path = relative_path.to_path_buf();
+                meta.id = extract_id(&meta.path);
+                self.docs.insert(relative_path.to_path_buf(), meta);
+                self.parse_errors.retain(|e| e.path != relative_path);
+            }
+            Err(e) => {
+                self.docs.remove(relative_path);
+                self.parse_errors.retain(|pe| pe.path != relative_path);
+                self.parse_errors.push(ParseError {
+                    path: relative_path.to_path_buf(),
+                    error: e.to_string(),
+                });
+            }
         }
         self.rebuild_links();
         Ok(())
