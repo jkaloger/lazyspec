@@ -156,7 +156,7 @@ Your job:
    - Completeness: does it satisfy the task ACs?
    - Quality: is the code clear and correct?
    - YAGNI: did you build only what was asked for?
-   - DRY: is there real duplication to extract? (three instances, not two)
+   - DRY: is there real duplication to extract?
    - Test properties: are your tests behavioral (not implementation-coupled),
      isolated (no order dependence), deterministic, readable (motivation
      obvious), and specific (failure cause obvious)?
@@ -205,7 +205,7 @@ The implementer's report may be incomplete or optimistic. Verify independently.
 ## Stage 2: Code Quality (only if Stage 1 passes)
 - Review code for correctness and clarity
 - Verify no unnecessary complexity (YAGNI -- only what was asked for)
-- Check for real duplication worth extracting (DRY -- three instances, not two)
+- Check for real duplication worth extracting (DRY)
 - Check for security issues
 - Evaluate tests against these properties:
   - Behavioral: tests assert on behavior, not implementation details

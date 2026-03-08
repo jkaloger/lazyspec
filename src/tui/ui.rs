@@ -1,8 +1,8 @@
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap},
+    widgets::{Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap},
     Frame,
 };
 
@@ -34,6 +34,17 @@ fn tag_color(tag: &str) -> Color {
     ];
     let hash = tag.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
     PALETTE[(hash as usize) % PALETTE.len()]
+}
+
+fn render_scrollbar(f: &mut Frame, area: Rect, total: usize, visible: usize, position: usize) {
+    let inner = area.inner(Margin { vertical: 1, horizontal: 0 });
+    let mut scrollbar_state = ScrollbarState::new(total)
+        .viewport_content_length(visible)
+        .position(position);
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .track_style(Style::default().fg(Color::DarkGray))
+        .thumb_style(Style::default().fg(Color::Cyan));
+    f.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
 }
 
 fn display_name(path: &std::path::Path) -> &str {
@@ -307,6 +318,11 @@ fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect) {
         .with_selected(Some(app.selected_doc))
         .with_offset(app.doc_list_offset);
     f.render_stateful_widget(table, area, &mut state);
+
+    let total_items = app.doc_tree.len();
+    if !dim && total_items > app.doc_list_height {
+        render_scrollbar(f, area, total_items, app.doc_list_height, app.selected_doc);
+    }
 }
 
 fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
@@ -494,8 +510,14 @@ fn draw_relations_content(f: &mut Frame, app: &App, area: Rect, block: Block, do
         .block(block)
         .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
         .highlight_symbol("  > ");
+    let total_items = list_index;
     let mut state = ListState::default().with_selected(Some(selected_flat_index));
     f.render_stateful_widget(list, area, &mut state);
+
+    let visible_height = area.height.saturating_sub(2) as usize;
+    if total_items > visible_height {
+        render_scrollbar(f, area, total_items, visible_height, selected_flat_index);
+    }
 }
 
 fn draw_fullscreen(f: &mut Frame, app: &mut App) {
@@ -531,6 +553,16 @@ fn draw_fullscreen(f: &mut Frame, app: &mut App) {
         };
 
         let text = tui_markdown::from_str(&body);
+        let content_width = layout[1].width.saturating_sub(2) as usize;
+        let total_lines: usize = text.lines.iter().map(|line| {
+            let line_width: usize = line.spans.iter().map(|s| s.content.len()).sum();
+            if content_width == 0 {
+                1
+            } else {
+                (line_width / content_width) + 1
+            }
+        }).sum();
+
         let paragraph = Paragraph::new(text)
             .block(
                 Block::default()
@@ -541,6 +573,10 @@ fn draw_fullscreen(f: &mut Frame, app: &mut App) {
             .wrap(Wrap { trim: false })
             .scroll((app.scroll_offset, 0));
         f.render_widget(paragraph, layout[1]);
+
+        if total_lines > app.fullscreen_height {
+            render_scrollbar(f, layout[1], total_lines, app.fullscreen_height, app.scroll_offset as usize);
+        }
     }
 }
 
