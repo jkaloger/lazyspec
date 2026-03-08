@@ -143,6 +143,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_status_picker(f, app);
     }
 
+    if app.agent_dialog.active {
+        draw_agent_dialog(f, app);
+    }
+
     if app.show_warnings {
         draw_warnings_panel(f, app);
     }
@@ -791,6 +795,42 @@ fn draw_status_picker(f: &mut Frame, app: &App) {
             .title(" Status "),
     );
     f.render_widget(paragraph, popup_area);
+}
+
+fn draw_agent_dialog(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let dialog = &app.agent_dialog;
+
+    let action_count = dialog.actions.len() as u16;
+    let content_height = action_count + 2; // border chrome
+    let popup_width = (area.width * 40 / 100).max(20).min(area.width.saturating_sub(4));
+    let popup_height = content_height.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let items: Vec<ListItem> = dialog
+        .actions
+        .iter()
+        .map(|action| ListItem::new(format!("  {}", action)))
+        .collect();
+
+    let title = format!(" Agent Actions \u{2014} {} ", dialog.doc_title);
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(title),
+        )
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+    let mut state = ListState::default().with_selected(Some(dialog.selected_index));
+    f.render_stateful_widget(list, popup_area, &mut state);
 }
 
 fn draw_warnings_panel(f: &mut Frame, app: &App) {

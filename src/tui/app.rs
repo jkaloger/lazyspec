@@ -191,6 +191,26 @@ impl StatusPicker {
     }
 }
 
+pub struct AgentDialog {
+    pub active: bool,
+    pub selected_index: usize,
+    pub actions: Vec<String>,
+    pub doc_path: PathBuf,
+    pub doc_title: String,
+}
+
+impl AgentDialog {
+    pub fn new() -> Self {
+        AgentDialog {
+            active: false,
+            selected_index: 0,
+            actions: Vec::new(),
+            doc_path: PathBuf::new(),
+            doc_title: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ViewMode {
     Types,
@@ -245,6 +265,7 @@ pub struct App {
     pub create_form: CreateForm,
     pub delete_confirm: DeleteConfirm,
     pub status_picker: StatusPicker,
+    pub agent_dialog: AgentDialog,
     pub view_mode: ViewMode,
     pub graph_nodes: Vec<GraphNode>,
     pub graph_selected: usize,
@@ -295,6 +316,7 @@ impl App {
             create_form: CreateForm::new(),
             delete_confirm: DeleteConfirm::new(),
             status_picker: StatusPicker::new(),
+            agent_dialog: AgentDialog::new(),
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
@@ -1044,13 +1066,16 @@ impl App {
         if self.status_picker.active {
             return self.handle_status_picker_key(code, root, config);
         }
+        if self.agent_dialog.active {
+            return self.handle_agent_dialog_key(code);
+        }
         if self.search_mode {
             return self.handle_search_key(code, modifiers);
         }
         if self.fullscreen_doc {
             return self.handle_fullscreen_key(code, modifiers);
         }
-        self.handle_normal_key(code, modifiers, root);
+        self.handle_normal_key(code, modifiers, root, config);
     }
 
     fn handle_create_form_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
@@ -1091,6 +1116,32 @@ impl App {
                 let _ = self.confirm_status_change(root, config);
             }
             KeyCode::Esc => self.close_status_picker(),
+            _ => {}
+        }
+    }
+
+    fn handle_agent_dialog_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => {
+                self.agent_dialog.active = false;
+            }
+            KeyCode::Up => {
+                if self.agent_dialog.selected_index > 0 {
+                    self.agent_dialog.selected_index -= 1;
+                } else {
+                    self.agent_dialog.selected_index = self.agent_dialog.actions.len().saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if self.agent_dialog.actions.is_empty() {
+                    return;
+                }
+                self.agent_dialog.selected_index = (self.agent_dialog.selected_index + 1) % self.agent_dialog.actions.len();
+            }
+            KeyCode::Enter => {
+                // Stub: close the dialog. Group B will add action execution.
+                self.agent_dialog.active = false;
+            }
             _ => {}
         }
     }
@@ -1136,7 +1187,7 @@ impl App {
         }
     }
 
-    fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path) {
+    fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path, config: &Config) {
         if self.view_mode == ViewMode::Filters {
             if modifiers.contains(KeyModifiers::CONTROL) {
                 match code {
@@ -1363,6 +1414,33 @@ impl App {
             (KeyCode::Char('`'), _) => self.cycle_mode(),
             (KeyCode::Char('w'), _) => self.open_warnings(),
             (KeyCode::Char('s'), _) => self.open_status_picker(),
+            (KeyCode::Char('a'), _) => {
+                if let Some(doc) = self.selected_doc_meta() {
+                    let doc_type_str = doc.doc_type.to_string();
+                    let doc_path = doc.path.clone();
+                    let doc_title = doc.title.clone();
+
+                    let has_children = config.rules.iter().any(|rule| {
+                        matches!(rule, crate::engine::config::ValidationRule::ParentChild { parent, .. } if parent == &doc_type_str)
+                    });
+
+                    let mut actions = vec![
+                        "Expand document".to_string(),
+                        "Custom prompt".to_string(),
+                    ];
+                    if has_children {
+                        actions.push("Create children".to_string());
+                    }
+
+                    self.agent_dialog = AgentDialog {
+                        active: true,
+                        selected_index: 0,
+                        actions,
+                        doc_path,
+                        doc_title,
+                    };
+                }
+            }
             _ => {}
         }
     }
@@ -1449,6 +1527,7 @@ mod tests {
             create_form: CreateForm::new(),
             delete_confirm: DeleteConfirm::new(),
             status_picker: StatusPicker::new(),
+            agent_dialog: AgentDialog::new(),
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
