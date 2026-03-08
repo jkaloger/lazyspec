@@ -130,6 +130,8 @@ pub struct DocMeta {
     pub tags: Vec<String>,
     pub related: Vec<Relation>,
     pub validate_ignore: bool,
+    pub virtual_doc: bool,
+    pub id: String,
 }
 
 #[derive(Deserialize)]
@@ -223,6 +225,8 @@ impl DocMeta {
             tags: raw.tags,
             related,
             validate_ignore: raw.validate_ignore,
+            virtual_doc: false,
+            id: String::new(),
         })
     }
 

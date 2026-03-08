@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::engine::document::{DocMeta, RelationType, Status};
-use crate::tui::app::{App, FilterField, FormField, PreviewTab, ViewMode};
+use crate::tui::app::{App, DocListNode, FilterField, FormField, PreviewTab, ViewMode};
 
 fn status_color(status: &Status) -> Color {
     match status {
@@ -154,40 +154,89 @@ fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
+fn doc_list_node_spans(app: &App, node: &DocListNode, index: usize, dim: bool) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+
+    if node.depth > 0 {
+        let leading = "   ".repeat(node.depth - 1);
+        let is_last = match app.doc_tree.get(index + 1) {
+            Some(next) => next.depth < node.depth,
+            None => true,
+        };
+        let connector = if is_last { " └─ " } else { " ├─ " };
+        spans.push(Span::styled(
+            format!("{}{}", leading, connector),
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else if node.is_parent {
+        let indicator = if app.is_expanded(&node.path) { "▼ " } else { "▶ " };
+        spans.push(Span::styled(
+            format!("  {}", indicator),
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        spans.push(Span::raw("  "));
+    }
+
+    let id_style = if dim {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+    };
+    spans.push(Span::styled(format!("{:<12} ", node.id), id_style));
+
+    let title = format!("{:<20} ", node.title);
+
+    let title_style = if dim {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+    };
+    spans.push(Span::styled(title, title_style));
+
+    if node.is_virtual {
+        spans.push(Span::styled(
+            "(virtual) ".to_string(),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    let status_style = if dim {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(status_color(&node.status))
+    };
+    spans.push(Span::styled(format!("{:<12}", node.status), status_style));
+
+    if let Some(doc) = app.store.get(&node.path) {
+        for (idx, tag) in doc.tags.iter().take(3).enumerate() {
+            if idx > 0 {
+                spans.push(Span::raw(" "));
+            }
+            let tc = if dim { Color::DarkGray } else { tag_color(tag) };
+            spans.push(Span::styled(format!("[{}]", tag), Style::default().fg(tc)));
+        }
+        if doc.tags.len() > 3 {
+            spans.push(Span::styled(
+                format!(" +{}", doc.tags.len() - 3),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    }
+
+    spans
+}
+
 fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
     let relations_focused = app.preview_tab == PreviewTab::Relations;
-    let docs = app.docs_for_current_type();
-    let items: Vec<ListItem> = docs
+    let dim = relations_focused;
+
+    let items: Vec<ListItem> = app
+        .doc_tree
         .iter()
         .enumerate()
-        .map(|(_, doc)| {
-            let filename = display_name(&doc.path);
-            let dim = relations_focused;
-            let status_style = if dim {
-                Style::default().fg(Color::DarkGray)
-            } else {
-                Style::default().fg(status_color(&doc.status))
-            };
-            let mut spans = vec![
-                Span::styled(
-                    format!("  {:<30} ", filename),
-                    if dim { Style::default().fg(Color::DarkGray) } else { Style::default() },
-                ),
-                Span::styled(format!("{:<12}", doc.status), status_style),
-            ];
-            for (idx, tag) in doc.tags.iter().take(3).enumerate() {
-                if idx > 0 {
-                    spans.push(Span::raw(" "));
-                }
-                let tc = if dim { Color::DarkGray } else { tag_color(tag) };
-                spans.push(Span::styled(format!("[{}]", tag), Style::default().fg(tc)));
-            }
-            if doc.tags.len() > 3 {
-                spans.push(Span::styled(
-                    format!(" +{}", doc.tags.len() - 3),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
+        .map(|(i, node)| {
+            let spans = doc_list_node_spans(app, node, i, dim);
             let line = Line::from(spans);
             let style = if dim {
                 Style::default().fg(Color::DarkGray)
@@ -473,6 +522,7 @@ fn draw_help_overlay(f: &mut Frame) {
         Line::from(Span::styled("Keybindings", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
         Line::from(""),
         Line::from("  h/l       Switch type"),
+        Line::from("  Space     Expand/collapse tree node"),
         Line::from("  j/k       Navigate up/down"),
         Line::from("  Enter     Open document fullscreen"),
         Line::from("  Esc       Back / close"),

@@ -90,6 +90,14 @@ impl TestFixture {
         self.write_doc(&format!("docs/iterations/{}", filename), &content)
     }
 
+    pub fn write_child_doc(&self, folder_rel_path: &str, filename: &str, content: &str) -> PathBuf {
+        let dir = self.root().join(folder_rel_path);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(filename);
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
     pub fn write_adr(
         &self,
         filename: &str,

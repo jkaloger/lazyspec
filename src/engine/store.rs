@@ -1,6 +1,7 @@
 use crate::engine::config::Config;
 use crate::engine::document::{DocMeta, DocType, RelationType, Status};
 use anyhow::Result;
+use chrono::Utc;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,16 +18,18 @@ pub struct Store {
     pub(crate) docs: HashMap<PathBuf, DocMeta>,
     forward_links: HashMap<PathBuf, Vec<(RelationType, PathBuf)>>,
     pub(crate) reverse_links: HashMap<PathBuf, Vec<(RelationType, PathBuf)>>,
+    pub(crate) children: HashMap<PathBuf, Vec<PathBuf>>,
+    pub(crate) parent_of: HashMap<PathBuf, PathBuf>,
 }
 
 impl Store {
     pub fn load(root: &Path, config: &Config) -> Result<Self> {
         let mut docs = HashMap::new();
+        let mut children: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        let mut parent_of: HashMap<PathBuf, PathBuf> = HashMap::new();
 
-        let dirs: Vec<&str> = config.types.iter().map(|t| t.dir.as_str()).collect();
-
-        for dir in &dirs {
-            let full_path = root.join(dir);
+        for type_def in &config.types {
+            let full_path = root.join(&type_def.dir);
             if !full_path.exists() {
                 continue;
             }
@@ -36,15 +39,94 @@ impl Store {
 
                 if entry.file_type()?.is_dir() {
                     let index_path = path.join("index.md");
-                    if !index_path.exists() {
-                        continue;
+                    if index_path.exists() {
+                        let content = fs::read_to_string(&index_path)?;
+                        let parent_relative = index_path.strip_prefix(root).unwrap_or(&index_path).to_path_buf();
+                        if let Ok(mut meta) = DocMeta::parse(&content) {
+                            meta.path = parent_relative.clone();
+                            meta.id = extract_id(&meta.path);
+                            docs.insert(meta.path.clone(), meta);
+                        }
+
+                        let mut child_paths = Vec::new();
+                        for child_entry in fs::read_dir(&path)? {
+                            let child_entry = child_entry?;
+                            if child_entry.file_type()?.is_dir() {
+                                continue;
+                            }
+                            let child_path = child_entry.path();
+                            if child_path.file_name().and_then(|f| f.to_str()) == Some("index.md") {
+                                continue;
+                            }
+                            if child_path.extension().and_then(|e| e.to_str()) != Some("md") {
+                                continue;
+                            }
+                            let child_content = fs::read_to_string(&child_path)?;
+                            if let Ok(mut child_meta) = DocMeta::parse(&child_content) {
+                                let child_relative = child_path.strip_prefix(root).unwrap_or(&child_path).to_path_buf();
+                                child_meta.path = child_relative.clone();
+                                child_meta.id = extract_id(&child_meta.path);
+                                parent_of.insert(child_relative.clone(), parent_relative.clone());
+                                child_paths.push(child_relative.clone());
+                                docs.insert(child_meta.path.clone(), child_meta);
+                            }
+                        }
+                        if !child_paths.is_empty() {
+                            children.insert(parent_relative, child_paths);
+                        }
+                    } else {
+                        let mut child_paths = Vec::new();
+                        for child_entry in fs::read_dir(&path)? {
+                            let child_entry = child_entry?;
+                            if child_entry.file_type()?.is_dir() {
+                                continue;
+                            }
+                            let child_path = child_entry.path();
+                            if child_path.extension().and_then(|e| e.to_str()) != Some("md") {
+                                continue;
+                            }
+                            let child_content = fs::read_to_string(&child_path)?;
+                            if let Ok(mut child_meta) = DocMeta::parse(&child_content) {
+                                let child_relative = child_path.strip_prefix(root).unwrap_or(&child_path).to_path_buf();
+                                child_meta.path = child_relative.clone();
+                                child_meta.id = extract_id(&child_meta.path);
+                                child_paths.push(child_relative.clone());
+                                docs.insert(child_meta.path.clone(), child_meta);
+                            }
+                        }
+
+                        if !child_paths.is_empty() {
+                            let folder_name = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+                            let folder_relative = path.strip_prefix(root).unwrap_or(&path);
+                            let parent_relative = folder_relative.join(".virtual");
+
+                            let all_accepted = child_paths.iter().all(|cp| {
+                                docs.get(cp).map(|d| d.status == Status::Accepted).unwrap_or(false)
+                            });
+
+                            let virtual_id = extract_id(&parent_relative);
+                            let virtual_meta = DocMeta {
+                                path: parent_relative.clone(),
+                                title: title_from_folder_name(folder_name),
+                                doc_type: DocType::new(&type_def.name),
+                                status: if all_accepted { Status::Accepted } else { Status::Draft },
+                                author: "".to_string(),
+                                date: Utc::now().date_naive(),
+                                tags: vec![],
+                                related: vec![],
+                                validate_ignore: false,
+                                virtual_doc: true,
+                                id: virtual_id,
+                            };
+                            docs.insert(parent_relative.clone(), virtual_meta);
+
+                            for cp in &child_paths {
+                                parent_of.insert(cp.clone(), parent_relative.clone());
+                            }
+                            children.insert(parent_relative, child_paths);
+                        }
                     }
-                    let content = fs::read_to_string(&index_path)?;
-                    if let Ok(mut meta) = DocMeta::parse(&content) {
-                        let relative = index_path.strip_prefix(root).unwrap_or(&index_path).to_path_buf();
-                        meta.path = relative;
-                        docs.insert(meta.path.clone(), meta);
-                    }
+
                     continue;
                 }
 
@@ -55,6 +137,7 @@ impl Store {
                 if let Ok(mut meta) = DocMeta::parse(&content) {
                     let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
                     meta.path = relative;
+                    meta.id = extract_id(&meta.path);
                     docs.insert(meta.path.clone(), meta);
                 }
             }
@@ -82,6 +165,8 @@ impl Store {
             docs,
             forward_links,
             reverse_links,
+            children,
+            parent_of,
         })
     }
 
@@ -146,14 +231,55 @@ impl Store {
     }
 
     pub fn resolve_shorthand(&self, id: &str) -> Option<&DocMeta> {
-        self.docs.values().find(|d| {
-            let name = if d.path.file_name().and_then(|f| f.to_str()) == Some("index.md") {
-                d.path.parent().and_then(|p| p.file_name()).and_then(|f| f.to_str())
-            } else {
-                d.path.file_name().and_then(|f| f.to_str())
-            };
-            name.map(|n| n.starts_with(id)).unwrap_or(false)
-        })
+        if let Some((parent_id, child_stem)) = id.split_once('/') {
+            // Qualified: find parent first (among non-children only)
+            let parent = self.docs.values().find(|d| {
+                if self.parent_of.contains_key(&d.path) {
+                    return false;
+                }
+                let name =
+                    if d.path.file_name().and_then(|f| f.to_str()) == Some("index.md")
+                        || d.path.file_name().and_then(|f| f.to_str()) == Some(".virtual")
+                    {
+                        d.path
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|f| f.to_str())
+                    } else {
+                        d.path.file_name().and_then(|f| f.to_str())
+                    };
+                name.map(|n| n.starts_with(parent_id)).unwrap_or(false)
+            })?;
+            // Then find child within parent's children
+            let child_paths = self.children.get(&parent.path)?;
+            child_paths.iter().find_map(|cp| {
+                let stem = cp.file_stem().and_then(|f| f.to_str())?;
+                if stem.starts_with(child_stem) {
+                    self.docs.get(cp)
+                } else {
+                    None
+                }
+            })
+        } else {
+            // Unqualified: existing logic but exclude children
+            self.docs.values().find(|d| {
+                if self.parent_of.contains_key(&d.path) {
+                    return false;
+                }
+                let name =
+                    if d.path.file_name().and_then(|f| f.to_str()) == Some("index.md")
+                        || d.path.file_name().and_then(|f| f.to_str()) == Some(".virtual")
+                    {
+                        d.path
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|f| f.to_str())
+                    } else {
+                        d.path.file_name().and_then(|f| f.to_str())
+                    };
+                name.map(|n| n.starts_with(id)).unwrap_or(false)
+            })
+        }
     }
 
     pub fn reload_file(&mut self, root: &Path, relative_path: &Path) -> Result<()> {
@@ -167,6 +293,7 @@ impl Store {
         let content = std::fs::read_to_string(&full_path)?;
         if let Ok(mut meta) = DocMeta::parse(&content) {
             meta.path = relative_path.to_path_buf();
+            meta.id = extract_id(&meta.path);
             self.docs.insert(relative_path.to_path_buf(), meta);
         }
         self.rebuild_links();
@@ -198,6 +325,14 @@ impl Store {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn children_of(&self, path: &Path) -> &[PathBuf] {
+        self.children.get(path).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    pub fn parent_of(&self, path: &Path) -> Option<&PathBuf> {
+        self.parent_of.get(path)
     }
 
     pub fn validate_full(&self, config: &Config) -> crate::engine::validation::ValidationResult {
@@ -250,6 +385,86 @@ impl Store {
         results.sort_by(|a, b| a.doc.path.cmp(&b.doc.path));
         results
     }
+}
+
+fn extract_id_from_name(name: &str) -> String {
+    let parts: Vec<&str> = name.split('-').collect();
+    for (i, part) in parts.iter().enumerate() {
+        if part.chars().all(|c| c.is_ascii_digit()) && !part.is_empty() {
+            return parts[..=i].join("-");
+        }
+    }
+    name.to_string()
+}
+
+fn extract_id(path: &Path) -> String {
+    let file_name = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+    let stem = path.file_stem().and_then(|f| f.to_str()).unwrap_or("");
+
+    if file_name == "index.md" || file_name == ".virtual" {
+        let folder = path.parent().and_then(|p| p.file_name()).and_then(|f| f.to_str()).unwrap_or("");
+        return extract_id_from_name(folder);
+    }
+
+    // Check if this is a child document (depth > 1 from type dir means it's inside a parent folder)
+    // A child has a parent folder that itself has a TYPE-NNN pattern
+    if let Some(parent) = path.parent() {
+        let parent_name = parent.file_name().and_then(|f| f.to_str()).unwrap_or("");
+        let parent_id = extract_id_from_name(parent_name);
+        if parent_id != parent_name {
+            // Parent has a TYPE-NNN pattern, so this is a child document
+            return stem.to_string();
+        }
+    }
+
+    extract_id_from_name(stem)
+}
+
+fn strip_type_prefix(name: &str) -> &str {
+    let bytes = name.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() && bytes[i].is_ascii_uppercase() {
+        i += 1;
+    }
+    if i == 0 || i >= bytes.len() || bytes[i] != b'-' {
+        return name;
+    }
+    i += 1;
+
+    let digit_start = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == digit_start || i >= bytes.len() || bytes[i] != b'-' {
+        return name;
+    }
+    i += 1;
+
+    &name[i..]
+}
+
+fn title_from_folder_name(name: &str) -> String {
+    let stripped = strip_type_prefix(name);
+    stripped
+        .split('-')
+        .filter(|w| !w.is_empty())
+        .enumerate()
+        .map(|(i, w)| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(c) if i == 0 => {
+                    let upper: String = c.to_uppercase().collect();
+                    format!("{}{}", upper, chars.as_str().to_lowercase())
+                }
+                Some(c) => {
+                    format!("{}{}", c.to_lowercase().collect::<String>(), chars.as_str().to_lowercase())
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[derive(Debug)]

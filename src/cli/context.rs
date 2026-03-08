@@ -1,4 +1,4 @@
-use crate::cli::json::doc_to_json;
+use crate::cli::json::doc_to_json_with_family;
 use crate::cli::style::{bold, dim, styled_status};
 use crate::engine::document::{DocMeta, RelationType};
 use crate::engine::store::Store;
@@ -34,7 +34,7 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str) -> Result<Vec<&'a DocMeta>>
 
 pub fn run_json(store: &Store, id: &str) -> Result<String> {
     let chain = resolve_chain(store, id)?;
-    let items: Vec<_> = chain.iter().map(|d| doc_to_json(d)).collect();
+    let items: Vec<_> = chain.iter().map(|d| doc_to_json_with_family(d, store)).collect();
     let output = serde_json::json!({ "chain": items });
     Ok(serde_json::to_string_pretty(&output)?)
 }
@@ -88,6 +88,20 @@ pub fn run_human(store: &Store, id: &str) -> Result<String> {
         }
         output.push_str(&mini_card(doc));
         output.push('\n');
+
+        let child_paths = store.children_of(&doc.path);
+        if !child_paths.is_empty() {
+            let children: Vec<_> = child_paths
+                .iter()
+                .filter_map(|cp| store.get(cp))
+                .collect();
+            for (j, child) in children.iter().enumerate() {
+                let connector = if j == children.len() - 1 { "\u{2514}\u{2500}" } else { "\u{251c}\u{2500}" };
+                let title = &child.title;
+                let path = child.path.to_string_lossy();
+                output.push_str(&format!("  {} {}  ({})\n", connector, title, path));
+            }
+        }
     }
 
     Ok(output)
