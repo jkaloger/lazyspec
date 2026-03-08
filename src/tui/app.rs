@@ -238,6 +238,10 @@ pub struct App {
     pub type_plurals: HashMap<String, String>,
     pub expanded_parents: HashSet<PathBuf>,
     pub doc_tree: Vec<DocListNode>,
+    pub show_warnings: bool,
+    pub warnings_selected: usize,
+    pub fix_request: bool,
+    pub fix_result: Option<String>,
 }
 
 impl App {
@@ -280,6 +284,10 @@ impl App {
             type_plurals,
             expanded_parents: HashSet::new(),
             doc_tree: Vec::new(),
+            show_warnings: false,
+            warnings_selected: 0,
+            fix_request: false,
+            fix_result: None,
         };
         app.build_doc_tree();
         app
@@ -868,10 +876,49 @@ impl App {
         Ok(())
     }
 
+    pub fn open_warnings(&mut self) {
+        self.show_warnings = true;
+        self.warnings_selected = 0;
+        self.fix_result = None;
+    }
+
+    pub fn close_warnings(&mut self) {
+        self.show_warnings = false;
+        self.warnings_selected = 0;
+    }
+
+    pub fn warnings_move_up(&mut self) {
+        if self.warnings_selected > 0 {
+            self.warnings_selected -= 1;
+        }
+    }
+
+    pub fn warnings_move_down(&mut self) {
+        let len = self.store.parse_errors().len();
+        if len > 0 && self.warnings_selected < len - 1 {
+            self.warnings_selected += 1;
+        }
+    }
+
+    fn handle_warnings_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc | KeyCode::Char('w') | KeyCode::Char('q') => self.close_warnings(),
+            KeyCode::Char('f') => {
+                self.fix_request = true;
+            }
+            KeyCode::Char('j') | KeyCode::Down => self.warnings_move_down(),
+            KeyCode::Char('k') | KeyCode::Up => self.warnings_move_up(),
+            _ => {}
+        }
+    }
+
     pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path, config: &Config) {
         if self.show_help {
             self.show_help = false;
             return;
+        }
+        if self.show_warnings {
+            return self.handle_warnings_key(code);
         }
         if self.create_form.active {
             return self.handle_create_form_key(code, root, config);
@@ -1010,6 +1057,9 @@ impl App {
                 KeyCode::Char('/') => {
                     self.enter_search();
                 }
+                KeyCode::Char('w') => {
+                    self.open_warnings();
+                }
                 _ => {}
             }
             return;
@@ -1136,6 +1186,7 @@ impl App {
             (KeyCode::Char('g'), _) => self.move_to_top(),
             (KeyCode::Char('G'), _) => self.move_to_bottom(),
             (KeyCode::Char('`'), _) => self.cycle_mode(),
+            (KeyCode::Char('w'), _) => self.open_warnings(),
             _ => {}
         }
     }

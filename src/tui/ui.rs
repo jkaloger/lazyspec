@@ -52,6 +52,9 @@ fn display_name(path: &std::path::Path) -> &str {
 pub fn draw(f: &mut Frame, app: &App) {
     if app.fullscreen_doc {
         draw_fullscreen(f, app);
+        if app.show_warnings {
+            draw_warnings_panel(f, app);
+        }
         if app.show_help {
             draw_help_overlay(f);
         }
@@ -59,6 +62,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     if app.create_form.active {
         draw_create_form(f, app);
+        if app.show_warnings {
+            draw_warnings_panel(f, app);
+        }
         if app.show_help {
             draw_help_overlay(f);
         }
@@ -66,6 +72,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     if app.search_mode {
         draw_search_overlay(f, app);
+        if app.show_warnings {
+            draw_warnings_panel(f, app);
+        }
         if app.show_help {
             draw_help_overlay(f);
         }
@@ -117,6 +126,10 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     if app.delete_confirm.active {
         draw_delete_confirm(f, app);
+    }
+
+    if app.show_warnings {
+        draw_warnings_panel(f, app);
     }
 
     if app.show_help {
@@ -666,6 +679,74 @@ fn draw_delete_confirm(f: &mut Frame, app: &App) {
             .title(" Delete? "),
     );
     f.render_widget(paragraph, popup_area);
+}
+
+fn draw_warnings_panel(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let errors = app.store.parse_errors();
+
+    let popup_width = 70.min(area.width.saturating_sub(4));
+    let content_height = if errors.is_empty() {
+        match &app.fix_result {
+            Some(output) => (output.lines().count() as u16).max(1) + 2,
+            None => 3,
+        }
+    } else {
+        (errors.len() as u16) * 2 + 2
+    };
+    let popup_height = (content_height + 2).min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" Warnings (f: fix, q/w/Esc: close) ");
+
+    if errors.is_empty() {
+        let message = match &app.fix_result {
+            Some(output) => output.clone(),
+            None => "  No warnings".to_string(),
+        };
+        let lines: Vec<Line> = message.lines()
+            .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(Color::DarkGray))))
+            .collect();
+        let msg = Paragraph::new(lines).block(block);
+        f.render_widget(msg, popup_area);
+        return;
+    }
+
+    let items: Vec<ListItem> = errors
+        .iter()
+        .map(|err| {
+            let lines = vec![
+                Line::from(Span::styled(
+                    format!("  {}", err.path.display()),
+                    Style::default().fg(Color::Yellow),
+                )),
+                Line::from(Span::styled(
+                    format!("    {}", err.error),
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            ListItem::new(lines)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let mut state = ListState::default().with_selected(Some(app.warnings_selected));
+    f.render_stateful_widget(list, popup_area, &mut state);
 }
 
 fn draw_search_overlay(f: &mut Frame, app: &App) {
