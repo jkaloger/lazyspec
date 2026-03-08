@@ -65,7 +65,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     }
 
     loop {
-        terminal.draw(|f| ui::draw(f, &app))?;
+        terminal.draw(|f| ui::draw(f, &mut app))?;
 
         while let Ok(event) = rx.try_recv() {
             match event.kind {

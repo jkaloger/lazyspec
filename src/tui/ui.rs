@@ -1,8 +1,8 @@
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap},
     Frame,
 };
 
@@ -36,6 +36,17 @@ fn tag_color(tag: &str) -> Color {
     PALETTE[(hash as usize) % PALETTE.len()]
 }
 
+fn render_scrollbar(f: &mut Frame, area: Rect, total: usize, visible: usize, position: usize) {
+    let inner = area.inner(Margin { vertical: 1, horizontal: 0 });
+    let mut scrollbar_state = ScrollbarState::new(total)
+        .viewport_content_length(visible)
+        .position(position);
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .track_style(Style::default().fg(Color::DarkGray))
+        .thumb_style(Style::default().fg(Color::Cyan));
+    f.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
+}
+
 fn display_name(path: &std::path::Path) -> &str {
     let stem = path.file_stem().and_then(|s| s.to_str());
     match stem {
@@ -49,7 +60,7 @@ fn display_name(path: &std::path::Path) -> &str {
     }
 }
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     if app.fullscreen_doc {
         draw_fullscreen(f, app);
         if app.show_warnings {
@@ -167,98 +178,119 @@ fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
-fn doc_list_node_spans(app: &App, node: &DocListNode, index: usize, dim: bool) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
+fn doc_table_widths() -> [Constraint; 5] {
+    [
+        Constraint::Length(4),  // tree
+        Constraint::Length(14), // ID
+        Constraint::Fill(1),   // title
+        Constraint::Length(12), // status
+        Constraint::Min(20),   // tags
+    ]
+}
 
-    if node.depth > 0 {
+fn doc_row_cells(
+    id: &str,
+    title: &str,
+    status: &Status,
+    tags: &[String],
+    is_virtual: bool,
+    dim: bool,
+) -> Vec<Cell<'static>> {
+    let dim_style = Style::default().fg(Color::DarkGray);
+    let normal_style = Style::default();
+
+    let id_style = if dim { dim_style } else { normal_style };
+    let id_cell = Cell::new(Span::styled(format!("{:<14}", id), id_style));
+
+    let title_text = if is_virtual {
+        format!("{} (virtual)", title)
+    } else {
+        title.to_string()
+    };
+    let title_style = if dim { dim_style } else { normal_style };
+    let title_cell = Cell::new(Span::styled(title_text, title_style));
+
+    let status_style = if dim {
+        dim_style
+    } else {
+        Style::default().fg(status_color(status))
+    };
+    let status_cell = Cell::new(Span::styled(format!("{:<12}", status), status_style));
+
+    let mut tag_spans: Vec<Span<'static>> = Vec::new();
+    for (idx, tag) in tags.iter().take(3).enumerate() {
+        if idx > 0 {
+            tag_spans.push(Span::raw(" "));
+        }
+        let tc = if dim { Color::DarkGray } else { tag_color(tag) };
+        tag_spans.push(Span::styled(format!("[{}]", tag), Style::default().fg(tc)));
+    }
+    if tags.len() > 3 {
+        tag_spans.push(Span::styled(
+            format!(" +{}", tags.len() - 3),
+            dim_style,
+        ));
+    }
+    let tags_cell = Cell::new(Line::from(tag_spans));
+
+    vec![id_cell, title_cell, status_cell, tags_cell]
+}
+
+/// Builds a Table Row for a tree node: tree indicator cell + 4 doc column cells.
+fn doc_row_for_node(app: &App, node: &DocListNode, index: usize, dim: bool) -> Row<'static> {
+    let tree_text = if node.depth > 0 {
         let leading = "   ".repeat(node.depth - 1);
         let is_last = match app.doc_tree.get(index + 1) {
             Some(next) => next.depth < node.depth,
             None => true,
         };
         let connector = if is_last { " └─ " } else { " ├─ " };
-        spans.push(Span::styled(
-            format!("{}{}", leading, connector),
-            Style::default().fg(Color::DarkGray),
-        ));
+        format!("{}{}", leading, connector)
     } else if node.is_parent {
         let indicator = if app.is_expanded(&node.path) { "▼ " } else { "▶ " };
-        spans.push(Span::styled(
-            format!("  {}", indicator),
-            Style::default().fg(Color::DarkGray),
-        ));
+        format!("  {}", indicator)
     } else {
-        spans.push(Span::raw("  "));
-    }
+        "  ".to_string()
+    };
+    let tree_cell = Cell::new(Span::styled(tree_text, Style::default().fg(Color::DarkGray)));
 
-    let id_style = if dim {
+    let tags = app
+        .store
+        .get(&node.path)
+        .map(|doc| doc.tags.clone())
+        .unwrap_or_default();
+
+    let mut cells = vec![tree_cell];
+    cells.extend(doc_row_cells(
+        &node.id,
+        &node.title,
+        &node.status,
+        &tags,
+        node.is_virtual,
+        dim,
+    ));
+
+    let style = if dim {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default()
     };
-    spans.push(Span::styled(format!("{:<12} ", node.id), id_style));
-
-    let title = format!("{:<20} ", node.title);
-
-    let title_style = if dim {
-        Style::default().fg(Color::DarkGray)
-    } else {
-        Style::default()
-    };
-    spans.push(Span::styled(title, title_style));
-
-    if node.is_virtual {
-        spans.push(Span::styled(
-            "(virtual) ".to_string(),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-
-    let status_style = if dim {
-        Style::default().fg(Color::DarkGray)
-    } else {
-        Style::default().fg(status_color(&node.status))
-    };
-    spans.push(Span::styled(format!("{:<12}", node.status), status_style));
-
-    if let Some(doc) = app.store.get(&node.path) {
-        for (idx, tag) in doc.tags.iter().take(3).enumerate() {
-            if idx > 0 {
-                spans.push(Span::raw(" "));
-            }
-            let tc = if dim { Color::DarkGray } else { tag_color(tag) };
-            spans.push(Span::styled(format!("[{}]", tag), Style::default().fg(tc)));
-        }
-        if doc.tags.len() > 3 {
-            spans.push(Span::styled(
-                format!(" +{}", doc.tags.len() - 3),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-    }
-
-    spans
+    Row::new(cells).style(style)
 }
 
-fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
+fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect) {
+    app.doc_list_height = area.height.saturating_sub(2) as usize;
     let relations_focused = app.preview_tab == PreviewTab::Relations;
     let dim = relations_focused;
 
-    let items: Vec<ListItem> = app
+    let rows: Vec<Row> = app
         .doc_tree
         .iter()
         .enumerate()
-        .map(|(i, node)| {
-            let spans = doc_list_node_spans(app, node, i, dim);
-            let line = Line::from(spans);
-            let style = if dim {
-                Style::default().fg(Color::DarkGray)
-            } else {
-                Style::default()
-            };
-            ListItem::new(line).style(style)
-        })
+        .map(|(i, node)| doc_row_for_node(app, node, i, dim))
         .collect();
+
+    let widths = doc_table_widths();
 
     let border_style = if relations_focused {
         Style::default().fg(Color::DarkGray)
@@ -272,7 +304,7 @@ fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
         Style::default().add_modifier(Modifier::REVERSED)
     };
 
-    let list = List::new(items)
+    let table = Table::new(rows, widths)
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -280,10 +312,17 @@ fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
                 .border_style(border_style)
                 .title(" Documents "),
         )
-        .highlight_style(highlight_style);
+        .row_highlight_style(highlight_style);
 
-    let mut state = ListState::default().with_selected(Some(app.selected_doc));
-    f.render_stateful_widget(list, area, &mut state);
+    let mut state = TableState::default()
+        .with_selected(Some(app.selected_doc))
+        .with_offset(app.doc_list_offset);
+    f.render_stateful_widget(table, area, &mut state);
+
+    let total_items = app.doc_tree.len();
+    if !dim && total_items > app.doc_list_height {
+        render_scrollbar(f, area, total_items, app.doc_list_height, app.selected_doc);
+    }
 }
 
 fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
@@ -471,12 +510,19 @@ fn draw_relations_content(f: &mut Frame, app: &App, area: Rect, block: Block, do
         .block(block)
         .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
         .highlight_symbol("  > ");
+    let total_items = list_index;
     let mut state = ListState::default().with_selected(Some(selected_flat_index));
     f.render_stateful_widget(list, area, &mut state);
+
+    let visible_height = area.height.saturating_sub(2) as usize;
+    if total_items > visible_height {
+        render_scrollbar(f, area, total_items, visible_height, selected_flat_index);
+    }
 }
 
-fn draw_fullscreen(f: &mut Frame, app: &App) {
+fn draw_fullscreen(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    app.fullscreen_height = area.height.saturating_sub(2) as usize;
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -507,6 +553,16 @@ fn draw_fullscreen(f: &mut Frame, app: &App) {
         };
 
         let text = tui_markdown::from_str(&body);
+        let content_width = layout[1].width.saturating_sub(2) as usize;
+        let total_lines: usize = text.lines.iter().map(|line| {
+            let line_width: usize = line.spans.iter().map(|s| s.content.len()).sum();
+            if content_width == 0 {
+                1
+            } else {
+                (line_width / content_width) + 1
+            }
+        }).sum();
+
         let paragraph = Paragraph::new(text)
             .block(
                 Block::default()
@@ -517,6 +573,10 @@ fn draw_fullscreen(f: &mut Frame, app: &App) {
             .wrap(Wrap { trim: false })
             .scroll((app.scroll_offset, 0));
         f.render_widget(paragraph, layout[1]);
+
+        if total_lines > app.fullscreen_height {
+            render_scrollbar(f, layout[1], total_lines, app.fullscreen_height, app.scroll_offset as usize);
+        }
     }
 }
 
@@ -805,7 +865,7 @@ fn draw_search_overlay(f: &mut Frame, app: &App) {
     f.render_stateful_widget(list, layout[1], &mut state);
 }
 
-fn draw_filters_mode(f: &mut Frame, app: &App, area: Rect) {
+fn draw_filters_mode(f: &mut Frame, app: &mut App, area: Rect) {
     let main = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
@@ -866,50 +926,30 @@ fn draw_filters_mode(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(filter_paragraph, main[0]);
 
     // Right panel: doc list
+    app.doc_list_height = right[0].height.saturating_sub(2) as usize;
     let filtered = app.filtered_docs();
     let filtered_count = filtered.len();
     let total_count = app.store.all_docs().len();
 
     let relations_focused = app.preview_tab == PreviewTab::Relations;
-    let items: Vec<ListItem> = filtered
+    let dim = relations_focused;
+
+    let rows: Vec<Row> = filtered
         .iter()
         .map(|doc| {
-            let filename = display_name(&doc.path);
-            let dim = relations_focused;
-            let status_style = if dim {
-                Style::default().fg(Color::DarkGray)
-            } else {
-                Style::default().fg(status_color(&doc.status))
-            };
-            let mut spans = vec![
-                Span::styled(
-                    format!("  {:<30} ", filename),
-                    if dim { Style::default().fg(Color::DarkGray) } else { Style::default() },
-                ),
-                Span::styled(format!("{:<12}", doc.status), status_style),
-            ];
-            for (idx, tag) in doc.tags.iter().take(3).enumerate() {
-                if idx > 0 {
-                    spans.push(Span::raw(" "));
-                }
-                let tc = if dim { Color::DarkGray } else { tag_color(tag) };
-                spans.push(Span::styled(format!("[{}]", tag), Style::default().fg(tc)));
-            }
-            if doc.tags.len() > 3 {
-                spans.push(Span::styled(
-                    format!(" +{}", doc.tags.len() - 3),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
-            let line = Line::from(spans);
+            let tree_cell = Cell::new("");
+            let mut cells = vec![tree_cell];
+            cells.extend(doc_row_cells(&doc.id, &doc.title, &doc.status, &doc.tags, doc.virtual_doc, dim));
             let style = if dim {
                 Style::default().fg(Color::DarkGray)
             } else {
                 Style::default()
             };
-            ListItem::new(line).style(style)
+            Row::new(cells).style(style)
         })
         .collect();
+
+    let widths = doc_table_widths();
 
     let border_style = if relations_focused {
         Style::default().fg(Color::DarkGray)
@@ -923,7 +963,7 @@ fn draw_filters_mode(f: &mut Frame, app: &App, area: Rect) {
         Style::default().add_modifier(Modifier::REVERSED)
     };
 
-    let list = List::new(items)
+    let table = Table::new(rows, widths)
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -931,10 +971,12 @@ fn draw_filters_mode(f: &mut Frame, app: &App, area: Rect) {
                 .border_style(border_style)
                 .title(format!(" Documents ({} of {}) ", filtered_count, total_count)),
         )
-        .highlight_style(highlight_style);
+        .row_highlight_style(highlight_style);
 
-    let mut state = ListState::default().with_selected(Some(app.selected_doc));
-    f.render_stateful_widget(list, right[0], &mut state);
+    let mut state = TableState::default()
+        .with_selected(Some(app.selected_doc))
+        .with_offset(app.doc_list_offset);
+    f.render_stateful_widget(table, right[0], &mut state);
 
     // Right panel: preview
     let doc = app.selected_filtered_doc();
@@ -1088,5 +1130,79 @@ mod tests {
     #[test]
     fn display_name_subfolder_index() {
         assert_eq!(display_name(Path::new("docs/rfcs/RFC-002-bar/index.md")), "RFC-002-bar");
+    }
+
+    fn cell_debug(cell: &Cell) -> String {
+        format!("{:?}", cell)
+    }
+
+    #[test]
+    fn doc_row_cells_standard_document() {
+        let tags = vec!["cli".to_string(), "tui".to_string()];
+        let cells = doc_row_cells("RFC-001", "Test Title", &Status::Draft, &tags, false, false);
+
+        assert_eq!(cells.len(), 4);
+
+        let id_dbg = cell_debug(&cells[0]);
+        assert!(id_dbg.contains("RFC-001"), "ID cell should contain RFC-001, got: {}", id_dbg);
+        assert!(!id_dbg.contains("(virtual)"), "Non-virtual doc should not contain (virtual)");
+
+        let title_dbg = cell_debug(&cells[1]);
+        assert!(title_dbg.contains("Test Title"), "Title cell should contain Test Title, got: {}", title_dbg);
+        assert!(!title_dbg.contains("(virtual)"), "Non-virtual doc should not contain (virtual)");
+
+        let status_dbg = cell_debug(&cells[2]);
+        assert!(status_dbg.contains("draft"), "Status cell should contain draft, got: {}", status_dbg);
+
+        let tags_dbg = cell_debug(&cells[3]);
+        assert!(tags_dbg.contains("[cli]"), "Tags cell should contain [cli], got: {}", tags_dbg);
+        assert!(tags_dbg.contains("[tui]"), "Tags cell should contain [tui], got: {}", tags_dbg);
+    }
+
+    #[test]
+    fn doc_row_cells_virtual_document() {
+        let cells = doc_row_cells("RFC-002", "Virtual Doc", &Status::Draft, &[], true, false);
+
+        assert_eq!(cells.len(), 4);
+
+        let title_dbg = cell_debug(&cells[1]);
+        assert!(title_dbg.contains("(virtual)"), "Virtual doc title should contain (virtual), got: {}", title_dbg);
+    }
+
+    #[test]
+    fn doc_row_cells_tag_overflow() {
+        let tags = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+            "e".to_string(),
+        ];
+        let cells = doc_row_cells("RFC-003", "Tags", &Status::Draft, &tags, false, false);
+
+        let tags_dbg = cell_debug(&cells[3]);
+        assert!(tags_dbg.contains("[a]"), "Tags cell should contain [a], got: {}", tags_dbg);
+        assert!(tags_dbg.contains("[b]"), "Tags cell should contain [b], got: {}", tags_dbg);
+        assert!(tags_dbg.contains("[c]"), "Tags cell should contain [c], got: {}", tags_dbg);
+        assert!(tags_dbg.contains("+2"), "Tags cell should contain +2 overflow, got: {}", tags_dbg);
+        assert!(!tags_dbg.contains("[d]"), "Tags cell should not contain [d], got: {}", tags_dbg);
+        assert!(!tags_dbg.contains("[e]"), "Tags cell should not contain [e], got: {}", tags_dbg);
+    }
+
+    #[test]
+    fn doc_row_cells_dim_when_relations_focused() {
+        let tags = vec!["x".to_string()];
+        let cells = doc_row_cells("RFC-004", "Dim", &Status::Accepted, &tags, false, true);
+
+        for (i, cell) in cells.iter().enumerate() {
+            let dbg = cell_debug(cell);
+            let has_dark_gray = dbg.contains("DarkGray") || dbg.contains("dark_gray");
+            assert!(
+                has_dark_gray,
+                "Cell {} should have DarkGray style when dim=true, got: {}",
+                i,
+                dbg,
+            );
+        }
     }
 }

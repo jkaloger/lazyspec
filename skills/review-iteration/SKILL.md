@@ -60,11 +60,13 @@ build.style.opacity: 0.4
 This skill operates in two modes:
 
 **Per-task review** (dispatched as a reviewer subagent by `/build` after each task):
+
 - Scoped to the ACs relevant to the completed task
 - Same two-stage process (AC compliance first, code quality second)
 - On failure: report back to `/build` orchestrator, which dispatches a fix subagent
 
 **Full review** (dispatched by `/build` as final gate, or used standalone):
+
 - Checks ALL Story ACs against the complete implementation
 - On failure during `/build`: targeted fix subagents for specific gaps
 - On failure standalone: report to user
@@ -125,19 +127,19 @@ Only enter this stage if all ACs are satisfied.
 
 1. Review the code changes for correctness and clarity.
 2. Verify no unnecessary complexity (YAGNI -- only what was asked for).
-3. Check for real duplication worth extracting (DRY -- three instances, not two).
+3. Check for real duplication worth extracting (DRY).
 4. Check for security issues.
 5. Evaluate test quality against these properties:
 
-   | Property              | What to check                                             |
-   | --------------------- | --------------------------------------------------------- |
-   | Behavioral            | Tests assert on behavior, not implementation details      |
-   | Structure-insensitive | A refactor preserving behavior shouldn't break tests      |
-   | Isolated              | No order dependence, no shared mutable state between tests|
-   | Deterministic         | No flaky results from timing, randomness, or global state |
-   | Readable              | Motivation for each test is obvious to the reader         |
-   | Specific              | When a test fails, the cause is obvious                   |
-   | Writable              | Test complexity is proportional to code complexity        |
+   | Property              | What to check                                              |
+   | --------------------- | ---------------------------------------------------------- |
+   | Behavioral            | Tests assert on behavior, not implementation details       |
+   | Structure-insensitive | A refactor preserving behavior shouldn't break tests       |
+   | Isolated              | No order dependence, no shared mutable state between tests |
+   | Deterministic         | No flaky results from timing, randomness, or global state  |
+   | Readable              | Motivation for each test is obvious to the reader          |
+   | Specific              | When a test fails, the cause is obvious                    |
+   | Writable              | Test complexity is proportional to code complexity         |
 
    These properties conflict. If a test trades one for another (e.g. an
    integration test that sacrifices Fast/Isolated for Predictive/Inspiring),
@@ -155,12 +157,12 @@ The response to a failed review depends on context:
 
 ## Red Flags
 
-| Red Flag | Reality |
-|----------|---------|
-| "The agent says tests pass" | Run them yourself. Trust is not evidence. |
-| "I ran them earlier" | Earlier is stale. Run them now, in this session. |
+| Red Flag                     | Reality                                                         |
+| ---------------------------- | --------------------------------------------------------------- |
+| "The agent says tests pass"  | Run them yourself. Trust is not evidence.                       |
+| "I ran them earlier"         | Earlier is stale. Run them now, in this session.                |
 | "The code looks right to me" | Code review before AC compliance is backwards. Check ACs first. |
-| "It mostly works" | Mostly = some ACs aren't met. Return to implementation. |
+| "It mostly works"            | Mostly = some ACs aren't met. Return to implementation.         |
 
 ## Verification
 
@@ -182,6 +184,7 @@ lazyspec update <iteration-path> --status accepted
 ```
 
 Then check whether the parent Story and RFC should also be promoted:
+
 - If all iterations under a Story are accepted and all Story ACs are covered, mark the Story as accepted.
 - If all Stories under an RFC are accepted, mark the RFC as accepted.
 
