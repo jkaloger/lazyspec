@@ -1,13 +1,14 @@
 ---
 title: "TUI Enhancements Design"
 type: iteration
-status: draft
+status: rejected
 author: "jkaloger"
 date: 2026-03-05
 tags: [tui, design]
 related:
   - implements: docs/stories/STORY-003-tui-dashboard.md
 ---
+
 
 ## Overview
 

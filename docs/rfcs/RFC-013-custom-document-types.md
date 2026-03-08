@@ -1,7 +1,7 @@
 ---
 title: "Custom document types"
 type: rfc
-status: draft
+status: accepted
 author: "@jkaloger"
 date: 2026-03-06
 tags:
@@ -9,6 +9,7 @@ tags:
 - types
 - validation
 ---
+
 
 ## Summary
 

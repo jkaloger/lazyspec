@@ -1,7 +1,7 @@
 ---
 title: 'Architecture Review: YAGNI/DRY Cleanup'
 type: rfc
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-06
 tags:
@@ -10,6 +10,7 @@ tags:
 related:
 - related-to: docs/rfcs/RFC-009-codebase-quality-baseline.md
 ---
+
 
 
 ## Summary

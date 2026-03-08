@@ -1,13 +1,14 @@
 ---
 title: "Graph Mode"
 type: story
-status: draft
+status: accepted
 author: "jkaloger"
 date: 2026-03-05
 tags: [tui]
 related:
   - implements: docs/rfcs/RFC-006-tui-progressive-disclosure.md
 ---
+
 
 ## Context
 

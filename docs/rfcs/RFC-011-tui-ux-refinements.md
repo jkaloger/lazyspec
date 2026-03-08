@@ -1,7 +1,7 @@
 ---
 title: TUI UX Refinements
 type: rfc
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-06
 tags:
@@ -11,6 +11,7 @@ tags:
 related:
 - related-to: docs/rfcs/RFC-006-tui-progressive-disclosure.md
 ---
+
 
 
 ## Problem
