@@ -96,6 +96,13 @@ fn main() -> anyhow::Result<()> {
                 print!("{}", output);
             }
         }
+        Some(Commands::Fix { paths, dry_run, json }) => {
+            let store = Store::load(&cwd, &config)?;
+            let exit_code = lazyspec::cli::fix::run(&cwd, &store, &config, &paths, dry_run, json);
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+        }
         Some(Commands::Validate { json, warnings }) => {
             let store = Store::load(&cwd, &config)?;
             let exit_code = lazyspec::cli::validate::run_full(&store, &config, json, warnings);

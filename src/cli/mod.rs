@@ -12,6 +12,7 @@ pub mod show;
 pub mod update;
 pub mod search;
 pub mod validate;
+pub mod fix;
 
 use clap::{Parser, Subcommand};
 
@@ -142,6 +143,18 @@ pub enum Commands {
         /// Document path
         #[arg()]
         path: String,
+    },
+    /// Fix documents with broken or incomplete frontmatter
+    Fix {
+        /// Document paths to fix (fixes all broken docs if none given)
+        #[arg()]
+        paths: Vec<String>,
+        /// Show what would change without writing
+        #[arg(long)]
+        dry_run: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Validate all documents
     Validate {
