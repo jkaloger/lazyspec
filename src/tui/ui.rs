@@ -139,6 +139,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_delete_confirm(f, app);
     }
 
+    if app.status_picker.active {
+        draw_status_picker(f, app);
+    }
+
     if app.show_warnings {
         draw_warnings_panel(f, app);
     }
@@ -737,6 +741,54 @@ fn draw_delete_confirm(f: &mut Frame, app: &App) {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Red))
             .title(" Delete? "),
+    );
+    f.render_widget(paragraph, popup_area);
+}
+
+fn draw_status_picker(f: &mut Frame, app: &App) {
+    let area = f.area();
+
+    let popup_width = 25u16.min(area.width.saturating_sub(4));
+    let popup_height = 9u16.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let statuses = [
+        Status::Draft,
+        Status::Review,
+        Status::Accepted,
+        Status::Rejected,
+        Status::Superseded,
+    ];
+
+    let mut lines: Vec<Line> = statuses
+        .iter()
+        .enumerate()
+        .map(|(i, status)| {
+            let prefix = if i == app.status_picker.selected { "> " } else { "  " };
+            let mut style = Style::default().fg(status_color(status));
+            if i == app.status_picker.selected {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            Line::from(Span::styled(format!("{}{}", prefix, status), style))
+        })
+        .collect();
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "[j/k] [Enter] [Esc]",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" Status "),
     );
     f.render_widget(paragraph, popup_area);
 }
