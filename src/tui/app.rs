@@ -175,6 +175,22 @@ impl DeleteConfirm {
     }
 }
 
+pub struct StatusPicker {
+    pub active: bool,
+    pub selected: usize,
+    pub doc_path: PathBuf,
+}
+
+impl StatusPicker {
+    pub fn new() -> Self {
+        StatusPicker {
+            active: false,
+            selected: 0,
+            doc_path: PathBuf::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ViewMode {
     Types,
@@ -228,6 +244,7 @@ pub struct App {
     pub selected_relation: usize,
     pub create_form: CreateForm,
     pub delete_confirm: DeleteConfirm,
+    pub status_picker: StatusPicker,
     pub view_mode: ViewMode,
     pub graph_nodes: Vec<GraphNode>,
     pub graph_selected: usize,
@@ -277,6 +294,7 @@ impl App {
             selected_relation: 0,
             create_form: CreateForm::new(),
             delete_confirm: DeleteConfirm::new(),
+            status_picker: StatusPicker::new(),
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
@@ -921,6 +939,58 @@ impl App {
         Ok(())
     }
 
+    pub fn open_status_picker(&mut self) {
+        let doc = if self.view_mode == ViewMode::Filters {
+            match self.selected_filtered_doc() {
+                Some(d) => d,
+                None => return,
+            }
+        } else {
+            match self.selected_doc_meta() {
+                Some(d) => d,
+                None => return,
+            }
+        };
+
+        let index = match &doc.status {
+            Status::Draft => 0,
+            Status::Review => 1,
+            Status::Accepted => 2,
+            Status::Rejected => 3,
+            Status::Superseded => 4,
+        };
+        let path = doc.path.clone();
+
+        self.status_picker.selected = index;
+        self.status_picker.doc_path = path;
+        self.status_picker.active = true;
+    }
+
+    pub fn close_status_picker(&mut self) {
+        self.status_picker.active = false;
+        self.status_picker.selected = 0;
+        self.status_picker.doc_path = PathBuf::new();
+    }
+
+    pub fn confirm_status_change(&mut self, root: &Path, _config: &Config) -> Result<()> {
+        let status = match self.status_picker.selected {
+            0 => Status::Draft,
+            1 => Status::Review,
+            2 => Status::Accepted,
+            3 => Status::Rejected,
+            4 => Status::Superseded,
+            _ => return Err(anyhow!("invalid status index")),
+        };
+        let doc_path = self.status_picker.doc_path.clone();
+        let doc_path_str = doc_path.to_string_lossy().to_string();
+
+        crate::cli::update::run(root, &doc_path_str, &[("status", &status.to_string())])?;
+        self.store.reload_file(root, &doc_path)?;
+        self.build_doc_tree();
+        self.close_status_picker();
+        Ok(())
+    }
+
     pub fn open_warnings(&mut self) {
         self.show_warnings = true;
         self.warnings_selected = 0;
@@ -971,6 +1041,9 @@ impl App {
         if self.delete_confirm.active {
             return self.handle_delete_confirm_key(code, root);
         }
+        if self.status_picker.active {
+            return self.handle_status_picker_key(code, root, config);
+        }
         if self.search_mode {
             return self.handle_search_key(code, modifiers);
         }
@@ -998,6 +1071,26 @@ impl App {
         match code {
             KeyCode::Enter => { let _ = self.confirm_delete(root); }
             KeyCode::Esc => self.close_delete_confirm(),
+            _ => {}
+        }
+    }
+
+    fn handle_status_picker_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.status_picker.selected < 4 {
+                    self.status_picker.selected += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.status_picker.selected > 0 {
+                    self.status_picker.selected -= 1;
+                }
+            }
+            KeyCode::Enter => {
+                let _ = self.confirm_status_change(root, config);
+            }
+            KeyCode::Esc => self.close_status_picker(),
             _ => {}
         }
     }
@@ -1130,6 +1223,9 @@ impl App {
                 }
                 KeyCode::Char('w') => {
                     self.open_warnings();
+                }
+                KeyCode::Char('s') => {
+                    self.open_status_picker();
                 }
                 _ => {}
             }
@@ -1266,6 +1362,7 @@ impl App {
             (KeyCode::Char('G'), _) => self.move_to_bottom(),
             (KeyCode::Char('`'), _) => self.cycle_mode(),
             (KeyCode::Char('w'), _) => self.open_warnings(),
+            (KeyCode::Char('s'), _) => self.open_status_picker(),
             _ => {}
         }
     }
@@ -1351,6 +1448,7 @@ mod tests {
             selected_relation: 0,
             create_form: CreateForm::new(),
             delete_confirm: DeleteConfirm::new(),
+            status_picker: StatusPicker::new(),
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
