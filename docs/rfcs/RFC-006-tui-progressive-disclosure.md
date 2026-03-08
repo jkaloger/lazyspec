@@ -1,13 +1,14 @@
 ---
 title: TUI Progressive Disclosure
 type: rfc
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-05
 tags: [tui, design]
 related:
   - implements: docs/rfcs/RFC-001-my-first-rfc.md
 ---
+
 
 ## Problem
 

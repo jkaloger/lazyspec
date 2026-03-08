@@ -1,7 +1,7 @@
 ---
 title: YAGNI Dead Code Removal
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-06
 tags:
@@ -9,6 +9,7 @@ tags:
 related:
 - implements: docs/rfcs/RFC-012-architecture-review-yagni-dry-cleanup.md
 ---
+
 
 
 ## Context

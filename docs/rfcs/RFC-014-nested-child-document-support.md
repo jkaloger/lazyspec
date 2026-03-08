@@ -1,13 +1,14 @@
 ---
 title: Nested child document support
 type: rfc
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-07
 tags: []
 related:
 - related-to: docs/rfcs/RFC-010-subfolder-document-support.md
 ---
+
 
 
 ## Summary

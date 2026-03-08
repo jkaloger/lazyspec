@@ -1,13 +1,14 @@
 ---
 title: TUI expandable tree nodes
 type: iteration
-status: draft
+status: accepted
 author: agent
 date: 2026-03-08
 tags: []
 related:
 - implements: docs/stories/STORY-042-tui-expandable-tree-nodes.md
 ---
+
 
 
 ## Changes

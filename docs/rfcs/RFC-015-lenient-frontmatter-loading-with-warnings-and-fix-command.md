@@ -1,7 +1,7 @@
 ---
 title: "Lenient frontmatter loading with warnings and fix command"
 type: rfc
-status: draft
+status: accepted
 author: "jkaloger"
 date: 2026-03-08
 tags:
@@ -11,6 +11,7 @@ tags:
 related:
   - related to: docs/rfcs/RFC-008-project-health-awareness.md
 ---
+
 
 ## Problem
 

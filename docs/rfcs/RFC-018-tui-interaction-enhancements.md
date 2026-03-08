@@ -1,7 +1,7 @@
 ---
 title: TUI Interaction Enhancements
 type: rfc
-status: draft
+status: accepted
 author: "@jkaloger"
 date: 2026-03-08
 tags:
@@ -10,6 +10,7 @@ related:
   - related-to: docs/rfcs/RFC-006-tui-progressive-disclosure.md
   - related-to: docs/rfcs/RFC-011-tui-ux-refinements.md
 ---
+
 
 ## Problem
 

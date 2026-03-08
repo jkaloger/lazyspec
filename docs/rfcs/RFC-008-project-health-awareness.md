@@ -1,13 +1,14 @@
 ---
 title: Project Health Awareness
 type: rfc
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-05
 tags: [cli, validation, health]
 related:
 - related-to: docs/rfcs/RFC-007-agent-native-cli.md
 ---
+
 
 ## Summary
 
