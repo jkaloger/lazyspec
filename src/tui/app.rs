@@ -209,6 +209,8 @@ pub enum PreviewTab {
     Relations,
 }
 
+pub const SCROLL_PADDING: usize = 2;
+
 pub struct App {
     pub store: Store,
     pub selected_type: usize,
@@ -242,6 +244,9 @@ pub struct App {
     pub warnings_selected: usize,
     pub fix_request: bool,
     pub fix_result: Option<String>,
+    pub doc_list_offset: usize,
+    pub doc_list_height: usize,
+    pub fullscreen_height: usize,
 }
 
 impl App {
@@ -288,6 +293,9 @@ impl App {
             warnings_selected: 0,
             fix_request: false,
             fix_result: None,
+            doc_list_offset: 0,
+            doc_list_height: 0,
+            fullscreen_height: 0,
         };
         app.build_doc_tree();
         app
@@ -570,17 +578,37 @@ impl App {
             .len()
     }
 
+    pub fn adjust_viewport(&mut self, doc_count: usize) {
+        let visible = self.doc_list_height;
+        if visible == 0 || doc_count == 0 {
+            return;
+        }
+
+        if self.selected_doc < self.doc_list_offset + SCROLL_PADDING {
+            self.doc_list_offset = self.selected_doc.saturating_sub(SCROLL_PADDING);
+        }
+
+        if visible > SCROLL_PADDING && self.selected_doc >= self.doc_list_offset + visible - SCROLL_PADDING {
+            self.doc_list_offset = self.selected_doc + SCROLL_PADDING + 1 - visible;
+        }
+
+        let max_offset = doc_count.saturating_sub(visible);
+        self.doc_list_offset = self.doc_list_offset.min(max_offset);
+    }
+
     pub fn move_down(&mut self) {
         let count = self.doc_tree.len();
         if count > 0 && self.selected_doc < count - 1 {
             self.selected_doc += 1;
         }
+        self.adjust_viewport(self.doc_tree.len());
     }
 
     pub fn move_up(&mut self) {
         if self.selected_doc > 0 {
             self.selected_doc -= 1;
         }
+        self.adjust_viewport(self.doc_tree.len());
     }
 
     pub fn clamp_selected_doc(&mut self) {
@@ -594,6 +622,7 @@ impl App {
 
     pub fn move_to_top(&mut self) {
         self.selected_doc = 0;
+        self.doc_list_offset = 0;
     }
 
     pub fn enter_fullscreen(&mut self) {
@@ -616,10 +645,26 @@ impl App {
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
     }
 
+    pub fn half_page_down(&mut self, list_len: usize) {
+        if list_len == 0 {
+            return;
+        }
+        let jump = self.doc_list_height / 2;
+        self.selected_doc = (self.selected_doc + jump).min(list_len - 1);
+        self.adjust_viewport(list_len);
+    }
+
+    pub fn half_page_up(&mut self, list_len: usize) {
+        let jump = self.doc_list_height / 2;
+        self.selected_doc = self.selected_doc.saturating_sub(jump);
+        self.adjust_viewport(list_len);
+    }
+
     pub fn move_to_bottom(&mut self) {
         let count = self.doc_tree.len();
         if count > 0 {
             self.selected_doc = count - 1;
+            self.doc_list_offset = count.saturating_sub(self.doc_list_height);
         }
     }
 
@@ -930,7 +975,7 @@ impl App {
             return self.handle_search_key(code, modifiers);
         }
         if self.fullscreen_doc {
-            return self.handle_fullscreen_key(code);
+            return self.handle_fullscreen_key(code, modifiers);
         }
         self.handle_normal_key(code, modifiers, root);
     }
@@ -981,19 +1026,39 @@ impl App {
         }
     }
 
-    fn handle_fullscreen_key(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::Esc | KeyCode::Char('q') => self.exit_fullscreen(),
-            KeyCode::Char('j') | KeyCode::Down => self.scroll_down(),
-            KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
-            KeyCode::Char('g') => self.scroll_offset = 0,
-            KeyCode::Char('G') => self.scroll_offset = u16::MAX / 2,
+    fn handle_fullscreen_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        match (code, modifiers) {
+            (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => self.exit_fullscreen(),
+            (KeyCode::Char('j'), _) | (KeyCode::Down, _) => self.scroll_down(),
+            (KeyCode::Char('k'), _) | (KeyCode::Up, _) => self.scroll_up(),
+            (KeyCode::Char('g'), _) => self.scroll_offset = 0,
+            (KeyCode::Char('G'), _) => self.scroll_offset = u16::MAX / 2,
+            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                self.scroll_offset = self.scroll_offset.saturating_add(self.fullscreen_height as u16 / 2);
+            }
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(self.fullscreen_height as u16 / 2);
+            }
             _ => {}
         }
     }
 
     fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path) {
         if self.view_mode == ViewMode::Filters {
+            if modifiers.contains(KeyModifiers::CONTROL) {
+                match code {
+                    KeyCode::Char('d') => {
+                        let count = self.filtered_docs().len();
+                        self.half_page_down(count);
+                    }
+                    KeyCode::Char('u') => {
+                        let count = self.filtered_docs().len();
+                        self.half_page_up(count);
+                    }
+                    _ => {}
+                }
+                return;
+            }
             match code {
                 KeyCode::Tab => {
                     self.filter_focused = self.filter_focused.next();
@@ -1015,11 +1080,15 @@ impl App {
                     if count > 0 && self.selected_doc < count - 1 {
                         self.selected_doc += 1;
                     }
+                    let count = self.filtered_docs().len();
+                    self.adjust_viewport(count);
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
                     if self.selected_doc > 0 {
                         self.selected_doc -= 1;
                     }
+                    let count = self.filtered_docs().len();
+                    self.adjust_viewport(count);
                 }
                 KeyCode::Enter => {
                     if self.preview_tab == PreviewTab::Relations {
@@ -1033,11 +1102,13 @@ impl App {
                 }
                 KeyCode::Char('g') => {
                     self.selected_doc = 0;
+                    self.doc_list_offset = 0;
                 }
                 KeyCode::Char('G') => {
                     let count = self.filtered_docs().len();
                     if count > 0 {
                         self.selected_doc = count - 1;
+                        self.doc_list_offset = count.saturating_sub(self.doc_list_height);
                     }
                 }
                 KeyCode::Char('e') => {
@@ -1121,6 +1192,14 @@ impl App {
             }
             (KeyCode::Char('/'), _) => self.enter_search(),
             (KeyCode::Char('n'), _) => self.open_create_form(),
+            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                let count = self.doc_tree.len();
+                self.half_page_down(count);
+            }
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                let count = self.doc_tree.len();
+                self.half_page_up(count);
+            }
             (KeyCode::Char('d'), _) if self.selected_doc_meta().is_some() => {
                 self.open_delete_confirm();
             }
@@ -1223,5 +1302,250 @@ impl App {
             results.push((rel_type, doc.path.clone()));
         }
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::store::Store;
+
+    fn make_dummy_node(index: usize) -> DocListNode {
+        DocListNode {
+            path: PathBuf::from(format!("docs/rfcs/RFC-{:03}.md", index)),
+            id: format!("RFC-{:03}", index),
+            title: format!("Doc {}", index),
+            doc_type: DocType::new("rfc"),
+            status: Status::Draft,
+            depth: 0,
+            is_parent: false,
+            is_virtual: false,
+        }
+    }
+
+    fn make_test_app(doc_count: usize) -> App {
+        let store = Store {
+            root: PathBuf::from("."),
+            docs: HashMap::new(),
+            forward_links: HashMap::new(),
+            reverse_links: HashMap::new(),
+            children: HashMap::new(),
+            parent_of: HashMap::new(),
+            parse_errors: Vec::new(),
+        };
+
+        let app = App {
+            store,
+            selected_type: 0,
+            selected_doc: 0,
+            doc_types: vec![DocType::new("rfc")],
+            should_quit: false,
+            fullscreen_doc: false,
+            scroll_offset: 0,
+            search_mode: false,
+            search_query: String::new(),
+            search_results: Vec::new(),
+            search_selected: 0,
+            show_help: false,
+            preview_tab: PreviewTab::Preview,
+            selected_relation: 0,
+            create_form: CreateForm::new(),
+            delete_confirm: DeleteConfirm::new(),
+            view_mode: ViewMode::Types,
+            graph_nodes: Vec::new(),
+            graph_selected: 0,
+            editor_request: None,
+            filter_focused: FilterField::Status,
+            filter_status: None,
+            filter_tag: None,
+            available_tags: Vec::new(),
+            type_icons: HashMap::new(),
+            type_plurals: HashMap::new(),
+            expanded_parents: HashSet::new(),
+            doc_tree: (0..doc_count).map(make_dummy_node).collect(),
+            show_warnings: false,
+            warnings_selected: 0,
+            fix_request: false,
+            fix_result: None,
+            doc_list_offset: 0,
+            doc_list_height: 0,
+            fullscreen_height: 0,
+        };
+        app
+    }
+
+    #[test]
+    fn viewport_adjusts_down_with_padding() {
+        let mut app = make_test_app(20);
+        app.doc_list_height = 10;
+
+        for _ in 0..7 {
+            app.move_down();
+        }
+        assert_eq!(app.selected_doc, 7);
+        assert_eq!(app.doc_list_offset, 0, "selection at 7, still within viewport");
+
+        app.move_down();
+        assert_eq!(app.selected_doc, 8);
+        assert_eq!(app.doc_list_offset, 1, "viewport should scroll to maintain 2-row bottom padding");
+    }
+
+    #[test]
+    fn viewport_adjusts_up_with_padding() {
+        let mut app = make_test_app(20);
+        app.doc_list_height = 10;
+        app.doc_list_offset = 5;
+        app.selected_doc = 7;
+
+        app.move_up();
+        assert_eq!(app.selected_doc, 6);
+        assert_eq!(app.doc_list_offset, 4);
+
+        app.move_up();
+        assert_eq!(app.selected_doc, 5);
+        assert_eq!(app.doc_list_offset, 3);
+    }
+
+    #[test]
+    fn sticky_viewport_on_scroll_up() {
+        let mut app = make_test_app(20);
+        app.doc_list_height = 10;
+        app.doc_list_offset = 5;
+        app.selected_doc = 12;
+
+        app.move_up();
+        assert_eq!(app.selected_doc, 11);
+        assert_eq!(app.doc_list_offset, 5, "viewport stays put while selection is in interior");
+
+        app.move_up();
+        assert_eq!(app.selected_doc, 10);
+        assert_eq!(app.doc_list_offset, 5);
+
+        app.move_up();
+        assert_eq!(app.selected_doc, 9);
+        assert_eq!(app.doc_list_offset, 5);
+
+        app.move_up();
+        assert_eq!(app.selected_doc, 8);
+        assert_eq!(app.doc_list_offset, 5);
+
+        app.move_up();
+        assert_eq!(app.selected_doc, 7);
+        assert_eq!(app.doc_list_offset, 5, "selection at padding boundary, offset still 5");
+
+        app.move_up();
+        assert_eq!(app.selected_doc, 6);
+        assert_eq!(app.doc_list_offset, 4, "crossed padding boundary, viewport adjusts");
+    }
+
+    #[test]
+    fn padding_clamped_at_boundaries() {
+        let mut app = make_test_app(5);
+        app.doc_list_height = 10;
+
+        app.move_up();
+        assert_eq!(app.selected_doc, 0);
+        assert_eq!(app.doc_list_offset, 0);
+
+        app.selected_doc = 4;
+        app.move_down();
+        assert_eq!(app.selected_doc, 4, "can't go past the last item");
+        assert_eq!(app.doc_list_offset, 0, "offset stays 0 when list fits in viewport");
+    }
+
+    #[test]
+    fn move_to_top_resets_offset() {
+        let mut app = make_test_app(20);
+        app.doc_list_height = 10;
+        app.selected_doc = 15;
+        app.doc_list_offset = 8;
+
+        app.move_to_top();
+        assert_eq!(app.selected_doc, 0);
+        assert_eq!(app.doc_list_offset, 0);
+    }
+
+    #[test]
+    fn move_to_bottom_sets_max_offset() {
+        let mut app = make_test_app(20);
+        app.doc_list_height = 10;
+
+        app.move_to_bottom();
+        assert_eq!(app.selected_doc, 19);
+        assert_eq!(app.doc_list_offset, 10);
+    }
+
+    #[test]
+    fn half_page_down_moves_by_half_height() {
+        let mut app = make_test_app(20);
+        app.doc_list_height = 10;
+        app.selected_doc = 0;
+
+        app.half_page_down(20);
+        assert_eq!(app.selected_doc, 5);
+        // viewport should adjust: selected_doc(5) + SCROLL_PADDING(2) + 1 - visible(10) = -2, so offset stays 0
+        assert_eq!(app.doc_list_offset, 0);
+    }
+
+    #[test]
+    fn half_page_up_moves_by_half_height() {
+        let mut app = make_test_app(20);
+        app.doc_list_height = 10;
+        app.selected_doc = 15;
+        app.doc_list_offset = 8;
+
+        app.half_page_up(20);
+        assert_eq!(app.selected_doc, 10);
+    }
+
+    #[test]
+    fn fullscreen_half_page_scroll() {
+        let mut app = make_test_app(5);
+        app.fullscreen_height = 20;
+        app.scroll_offset = 0;
+
+        app.handle_fullscreen_key(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(app.scroll_offset, 10);
+
+        app.handle_fullscreen_key(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn fullscreen_half_page_underflow() {
+        let mut app = make_test_app(5);
+        app.fullscreen_height = 20;
+        app.scroll_offset = 3;
+
+        app.handle_fullscreen_key(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(app.scroll_offset, 0, "should saturate at 0");
+    }
+
+    #[test]
+    fn modal_blocks_fullscreen_half_page() {
+        let mut app = make_test_app(5);
+        app.fullscreen_doc = true;
+        app.fullscreen_height = 20;
+        app.scroll_offset = 0;
+        app.create_form.active = true;
+
+        let root = std::path::PathBuf::from(".");
+        let config = Config::default();
+        app.handle_key(KeyCode::Char('d'), KeyModifiers::CONTROL, &root, &config);
+        assert_eq!(app.scroll_offset, 0, "modal should block Ctrl-D from reaching fullscreen");
+    }
+
+    #[test]
+    fn half_page_clamps_at_boundaries() {
+        let mut app = make_test_app(20);
+        app.doc_list_height = 10;
+        app.selected_doc = 18;
+
+        app.half_page_down(20);
+        assert_eq!(app.selected_doc, 19);
+
+        app.selected_doc = 2;
+        app.half_page_up(20);
+        assert_eq!(app.selected_doc, 0);
     }
 }

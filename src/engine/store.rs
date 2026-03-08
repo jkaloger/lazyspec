@@ -20,13 +20,13 @@ pub struct Filter {
 }
 
 pub struct Store {
-    root: PathBuf,
+    pub(crate) root: PathBuf,
     pub(crate) docs: HashMap<PathBuf, DocMeta>,
-    forward_links: HashMap<PathBuf, Vec<(RelationType, PathBuf)>>,
+    pub(crate) forward_links: HashMap<PathBuf, Vec<(RelationType, PathBuf)>>,
     pub(crate) reverse_links: HashMap<PathBuf, Vec<(RelationType, PathBuf)>>,
     pub(crate) children: HashMap<PathBuf, Vec<PathBuf>>,
     pub(crate) parent_of: HashMap<PathBuf, PathBuf>,
-    parse_errors: Vec<ParseError>,
+    pub(crate) parse_errors: Vec<ParseError>,
 }
 
 impl Store {

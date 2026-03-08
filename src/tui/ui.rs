@@ -49,7 +49,7 @@ fn display_name(path: &std::path::Path) -> &str {
     }
 }
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     if app.fullscreen_doc {
         draw_fullscreen(f, app);
         if app.show_warnings {
@@ -267,7 +267,8 @@ fn doc_row_for_node(app: &App, node: &DocListNode, index: usize, dim: bool) -> R
     Row::new(cells).style(style)
 }
 
-fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
+fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect) {
+    app.doc_list_height = area.height.saturating_sub(2) as usize;
     let relations_focused = app.preview_tab == PreviewTab::Relations;
     let dim = relations_focused;
 
@@ -302,7 +303,9 @@ fn draw_doc_list(f: &mut Frame, app: &App, area: Rect) {
         )
         .row_highlight_style(highlight_style);
 
-    let mut state = TableState::default().with_selected(Some(app.selected_doc));
+    let mut state = TableState::default()
+        .with_selected(Some(app.selected_doc))
+        .with_offset(app.doc_list_offset);
     f.render_stateful_widget(table, area, &mut state);
 }
 
@@ -495,8 +498,9 @@ fn draw_relations_content(f: &mut Frame, app: &App, area: Rect, block: Block, do
     f.render_stateful_widget(list, area, &mut state);
 }
 
-fn draw_fullscreen(f: &mut Frame, app: &App) {
+fn draw_fullscreen(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    app.fullscreen_height = area.height.saturating_sub(2) as usize;
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -825,7 +829,7 @@ fn draw_search_overlay(f: &mut Frame, app: &App) {
     f.render_stateful_widget(list, layout[1], &mut state);
 }
 
-fn draw_filters_mode(f: &mut Frame, app: &App, area: Rect) {
+fn draw_filters_mode(f: &mut Frame, app: &mut App, area: Rect) {
     let main = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
@@ -886,6 +890,7 @@ fn draw_filters_mode(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(filter_paragraph, main[0]);
 
     // Right panel: doc list
+    app.doc_list_height = right[0].height.saturating_sub(2) as usize;
     let filtered = app.filtered_docs();
     let filtered_count = filtered.len();
     let total_count = app.store.all_docs().len();
@@ -932,7 +937,9 @@ fn draw_filters_mode(f: &mut Frame, app: &App, area: Rect) {
         )
         .row_highlight_style(highlight_style);
 
-    let mut state = TableState::default().with_selected(Some(app.selected_doc));
+    let mut state = TableState::default()
+        .with_selected(Some(app.selected_doc))
+        .with_offset(app.doc_list_offset);
     f.render_stateful_widget(table, right[0], &mut state);
 
     // Right panel: preview
