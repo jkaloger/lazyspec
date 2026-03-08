@@ -76,6 +76,25 @@ fn status_human_grouped_by_type() {
 }
 
 #[test]
+fn status_json_includes_parse_errors() {
+    let fixture = common::TestFixture::new();
+    fixture.write_rfc("RFC-001-good.md", "Good RFC", "draft");
+    fixture.write_doc(
+        "docs/rfcs/RFC-002-broken.md",
+        "---\ntitle: \"Broken\"\ntype: rfc\nauthor: test\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::status::run_json(&store, &fixture.config());
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    let parse_errors = parsed["parse_errors"].as_array().unwrap();
+    assert!(!parse_errors.is_empty());
+    assert!(parse_errors[0]["path"].is_string());
+    assert!(parse_errors[0]["error"].is_string());
+}
+
+#[test]
 fn status_empty_project() {
     let fixture = common::TestFixture::new();
 
