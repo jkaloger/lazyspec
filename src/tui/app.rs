@@ -810,9 +810,74 @@ impl App {
         self.selected_relation = 0;
     }
 
+    pub fn relation_items(&self, doc: &DocMeta) -> Vec<PathBuf> {
+        let mut items = Vec::new();
+
+        // Chain: walk Implements links upward from doc
+        let mut chain = Vec::new();
+        let mut current_path = doc.path.clone();
+        loop {
+            let current_doc = match self.store.get(&current_path) {
+                Some(d) => d,
+                None => break,
+            };
+            let implements_target = current_doc.related.iter().find_map(|r| {
+                if r.rel_type == RelationType::Implements {
+                    // resolve target path via forward_links
+                    if let Some(fwd) = self.store.forward_links.get(&current_doc.path) {
+                        for (rel, target) in fwd {
+                            if *rel == RelationType::Implements {
+                                return Some(target.clone());
+                            }
+                        }
+                    }
+                    None
+                } else {
+                    None
+                }
+            });
+            match implements_target {
+                Some(parent) => {
+                    chain.push(parent.clone());
+                    current_path = parent;
+                }
+                None => break,
+            }
+        }
+        chain.reverse();
+        items.extend(chain);
+
+        // Children: docs that implement this doc (reverse Implements)
+        if let Some(rev) = self.store.reverse_links.get(&doc.path) {
+            for (rel, source) in rev {
+                if *rel == RelationType::Implements {
+                    items.push(source.clone());
+                }
+            }
+        }
+
+        // Related: forward and reverse RelatedTo links
+        if let Some(fwd) = self.store.forward_links.get(&doc.path) {
+            for (rel, target) in fwd {
+                if *rel == RelationType::RelatedTo {
+                    items.push(target.clone());
+                }
+            }
+        }
+        if let Some(rev) = self.store.reverse_links.get(&doc.path) {
+            for (rel, source) in rev {
+                if *rel == RelationType::RelatedTo {
+                    items.push(source.clone());
+                }
+            }
+        }
+
+        items
+    }
+
     pub fn relation_count(&self) -> usize {
         match self.selected_doc_meta() {
-            Some(doc) => self.store.related_to(&doc.path).len(),
+            Some(doc) => self.relation_items(doc).len(),
             None => 0,
         }
     }
@@ -835,9 +900,9 @@ impl App {
             Some(d) => d,
             None => return,
         };
-        let relations = self.store.related_to(&doc.path);
-        let target = match relations.get(self.selected_relation) {
-            Some((_, path)) => (*path).clone(),
+        let items = self.relation_items(doc);
+        let target = match items.get(self.selected_relation) {
+            Some(path) => path.clone(),
             None => return,
         };
 
