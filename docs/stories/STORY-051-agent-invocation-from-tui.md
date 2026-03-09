@@ -1,7 +1,7 @@
 ---
 title: Agent invocation from TUI
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-08
 tags:
@@ -11,6 +11,7 @@ tags:
 related:
 - implements: docs/rfcs/RFC-016-init-agents-from-tui.md
 ---
+
 
 
 ## Context

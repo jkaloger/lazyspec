@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod app;
 pub mod ui;
 
@@ -88,6 +89,8 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 app.handle_key(code, modifiers, &root, config);
             }
         }
+
+        app.agent_spawner.poll_finished();
 
         if let Some(path) = app.editor_request.take() {
             run_editor(&mut terminal, &path)?;

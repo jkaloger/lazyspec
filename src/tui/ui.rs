@@ -801,6 +801,42 @@ fn draw_agent_dialog(f: &mut Frame, app: &App) {
     let area = f.area();
     let dialog = &app.agent_dialog;
 
+    if let Some(ref buffer) = dialog.text_input {
+        let popup_width = (area.width * 50 / 100).max(30).min(area.width.saturating_sub(4));
+        let popup_height = 6u16.min(area.height.saturating_sub(4));
+        let x = (area.width.saturating_sub(popup_width)) / 2;
+        let y = (area.height.saturating_sub(popup_height)) / 2;
+        let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+        f.render_widget(Clear, popup_area);
+
+        let title = format!(" Custom Prompt — {} ", dialog.doc_title);
+        let lines = vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  > ", Style::default().fg(Color::Cyan)),
+                Span::raw(format!("{}_", buffer)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  Enter", Style::default().fg(Color::DarkGray)),
+                Span::raw(" submit  "),
+                Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+                Span::raw(" back"),
+            ]),
+        ];
+
+        let paragraph = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(title),
+        );
+        f.render_widget(paragraph, popup_area);
+        return;
+    }
+
     let action_count = dialog.actions.len() as u16;
     let content_height = action_count + 2; // border chrome
     let popup_width = (area.width * 40 / 100).max(20).min(area.width.saturating_sub(4));

@@ -1,6 +1,7 @@
 use crate::engine::config::Config;
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, RelationType, Status};
 use crate::engine::store::{Filter, Store};
+use crate::tui::agent::AgentSpawner;
 use anyhow::{anyhow, Result};
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::{HashMap, HashSet};
@@ -197,6 +198,7 @@ pub struct AgentDialog {
     pub actions: Vec<String>,
     pub doc_path: PathBuf,
     pub doc_title: String,
+    pub text_input: Option<String>,
 }
 
 impl AgentDialog {
@@ -207,6 +209,7 @@ impl AgentDialog {
             actions: Vec::new(),
             doc_path: PathBuf::new(),
             doc_title: String::new(),
+            text_input: None,
         }
     }
 }
@@ -266,6 +269,7 @@ pub struct App {
     pub delete_confirm: DeleteConfirm,
     pub status_picker: StatusPicker,
     pub agent_dialog: AgentDialog,
+    pub agent_spawner: AgentSpawner,
     pub view_mode: ViewMode,
     pub graph_nodes: Vec<GraphNode>,
     pub graph_selected: usize,
@@ -317,6 +321,7 @@ impl App {
             delete_confirm: DeleteConfirm::new(),
             status_picker: StatusPicker::new(),
             agent_dialog: AgentDialog::new(),
+            agent_spawner: AgentSpawner::new(),
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
@@ -1067,7 +1072,7 @@ impl App {
             return self.handle_status_picker_key(code, root, config);
         }
         if self.agent_dialog.active {
-            return self.handle_agent_dialog_key(code);
+            return self.handle_agent_dialog_key(code, config);
         }
         if self.search_mode {
             return self.handle_search_key(code, modifiers);
@@ -1120,7 +1125,12 @@ impl App {
         }
     }
 
-    fn handle_agent_dialog_key(&mut self, code: KeyCode) {
+    fn handle_agent_dialog_key(&mut self, code: KeyCode, config: &Config) {
+        if self.agent_dialog.text_input.is_some() {
+            self.handle_agent_text_input_key(code);
+            return;
+        }
+
         match code {
             KeyCode::Esc => {
                 self.agent_dialog.active = false;
@@ -1139,8 +1149,80 @@ impl App {
                 self.agent_dialog.selected_index = (self.agent_dialog.selected_index + 1) % self.agent_dialog.actions.len();
             }
             KeyCode::Enter => {
-                // Stub: close the dialog. Group B will add action execution.
+                let action = self.agent_dialog.actions
+                    .get(self.agent_dialog.selected_index)
+                    .cloned()
+                    .unwrap_or_default();
+                let doc_path = self.agent_dialog.doc_path.clone();
+
+                if action == "Custom prompt" {
+                    self.agent_dialog.text_input = Some(String::new());
+                    return;
+                }
+
                 self.agent_dialog.active = false;
+
+                if action == "Expand document" {
+                    let full_path = self.store.root.join(&doc_path);
+                    if let Ok(content) = std::fs::read_to_string(&full_path) {
+                        let prompt = crate::tui::agent::build_expand_prompt(&content);
+                        let _ = self.agent_spawner.spawn(&prompt, &full_path);
+                    }
+                } else if action == "Create children" {
+                    if let Some(doc) = self.store.get(&doc_path) {
+                        let doc_type_str = doc.doc_type.to_string();
+                        let child_type = config.rules.iter().find_map(|rule| {
+                            match rule {
+                                crate::engine::config::ValidationRule::ParentChild { parent, child, .. }
+                                    if parent == &doc_type_str => Some(child.clone()),
+                                _ => None,
+                            }
+                        });
+                        if let Some(child_type) = child_type {
+                            let full_path = self.store.root.join(&doc_path);
+                            if let Ok(content) = std::fs::read_to_string(&full_path) {
+                                let prompt = crate::tui::agent::build_create_children_prompt(&content, &child_type);
+                                let _ = self.agent_spawner.spawn(&prompt, &full_path);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_agent_text_input_key(&mut self, code: KeyCode) {
+        let buffer = match self.agent_dialog.text_input.as_mut() {
+            Some(b) => b,
+            None => return,
+        };
+
+        match code {
+            KeyCode::Esc => {
+                self.agent_dialog.text_input = None;
+            }
+            KeyCode::Enter => {
+                let prompt = buffer.clone();
+                let full_path = self.store.root.join(&self.agent_dialog.doc_path);
+                self.agent_dialog.active = false;
+                self.agent_dialog.text_input = None;
+
+                if !prompt.is_empty() {
+                    if let Ok(content) = std::fs::read_to_string(&full_path) {
+                        let full_prompt = format!(
+                            "Here is the document:\n\n{}\n\nUser request: {}",
+                            content, prompt
+                        );
+                        let _ = self.agent_spawner.spawn(&full_prompt, &full_path);
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                buffer.pop();
+            }
+            KeyCode::Char(c) => {
+                buffer.push(c);
             }
             _ => {}
         }
@@ -1438,6 +1520,7 @@ impl App {
                         actions,
                         doc_path,
                         doc_title,
+                        text_input: None,
                     };
                 }
             }
@@ -1528,6 +1611,7 @@ mod tests {
             delete_confirm: DeleteConfirm::new(),
             status_picker: StatusPicker::new(),
             agent_dialog: AgentDialog::new(),
+            agent_spawner: AgentSpawner::new(),
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
