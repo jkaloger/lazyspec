@@ -451,9 +451,9 @@ fn draw_relations_content(f: &mut Frame, app: &App, area: Rect, block: Block, do
         return;
     };
 
-    let relations = app.store.related_to(&doc.path);
+    let all_items = app.relation_items(doc);
 
-    if relations.is_empty() {
+    if all_items.is_empty() {
         let paragraph = Paragraph::new(" No relations.")
             .block(block)
             .wrap(Wrap { trim: false });
@@ -461,59 +461,123 @@ fn draw_relations_content(f: &mut Frame, app: &App, area: Rect, block: Block, do
         return;
     }
 
+    // Build the three sections using the same logic as relation_items
+    // Chain: walk Implements upward
+    let mut chain_paths = Vec::new();
+    {
+        let mut current_path = doc.path.clone();
+        loop {
+            let current_doc = match app.store.get(&current_path) {
+                Some(d) => d,
+                None => break,
+            };
+            let implements_target = current_doc.related.iter().find_map(|r| {
+                if r.rel_type == RelationType::Implements {
+                    if let Some(fwd) = app.store.forward_links.get(&current_doc.path) {
+                        for (rel, target) in fwd {
+                            if *rel == RelationType::Implements {
+                                return Some(target.clone());
+                            }
+                        }
+                    }
+                    None
+                } else {
+                    None
+                }
+            });
+            match implements_target {
+                Some(parent) => {
+                    chain_paths.push(parent.clone());
+                    current_path = parent;
+                }
+                None => break,
+            }
+        }
+        chain_paths.reverse();
+    }
+
+    // Children: reverse Implements
+    let mut children_paths = Vec::new();
+    if let Some(rev) = app.store.reverse_links.get(&doc.path) {
+        for (rel, source) in rev {
+            if *rel == RelationType::Implements {
+                children_paths.push(source.clone());
+            }
+        }
+    }
+
+    // Related: forward + reverse RelatedTo
+    let mut related_paths = Vec::new();
+    if let Some(fwd) = app.store.forward_links.get(&doc.path) {
+        for (rel, target) in fwd {
+            if *rel == RelationType::RelatedTo {
+                related_paths.push(target.clone());
+            }
+        }
+    }
+    if let Some(rev) = app.store.reverse_links.get(&doc.path) {
+        for (rel, source) in rev {
+            if *rel == RelationType::RelatedTo {
+                related_paths.push(source.clone());
+            }
+        }
+    }
+
     let mut items: Vec<ListItem> = Vec::new();
     let mut flat_index = 0usize;
     let mut list_index = 0usize;
     let mut selected_flat_index = 0usize;
 
-    let type_order = [
-        RelationType::Implements,
-        RelationType::Supersedes,
-        RelationType::Blocks,
-        RelationType::RelatedTo,
-    ];
-
-    for rel_type in &type_order {
-        let matching: Vec<_> = relations
-            .iter()
-            .filter(|(rt, _)| *rt == rel_type)
-            .collect();
-
-        if matching.is_empty() {
-            continue;
-        }
-
-        items.push(ListItem::new(Line::from(Span::styled(
-            format!("  {}", rel_type),
+    let section_header = |label: &str| -> ListItem {
+        ListItem::new(Line::from(Span::styled(
+            format!("  {}", label),
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
-        ))));
+        )))
+    };
+
+    let render_item = |path: &std::path::Path| -> ListItem {
+        let (title, doc_type_str, status_str, status_clr) =
+            if let Some(target_doc) = app.store.get(path) {
+                (
+                    target_doc.title.clone(),
+                    format!("{}", target_doc.doc_type),
+                    format!("{}", target_doc.status),
+                    status_color(&target_doc.status),
+                )
+            } else {
+                let name = display_name(path);
+                (name.to_string(), "?".to_string(), "missing".to_string(), Color::Red)
+            };
+
+        ListItem::new(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(format!("{:<35} ", title), Style::default()),
+            Span::styled(format!("{} ", doc_type_str), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("[{}]", status_str), Style::default().fg(status_clr)),
+        ]))
+    };
+
+    let sections: Vec<(&str, &Vec<std::path::PathBuf>)> = vec![
+        ("chain", &chain_paths),
+        ("children", &children_paths),
+        ("related", &related_paths),
+    ];
+
+    for (label, paths) in &sections {
+        if paths.is_empty() {
+            continue;
+        }
+
+        items.push(section_header(label));
         list_index += 1;
 
-        for (_, target_path) in &matching {
+        for path in *paths {
             if flat_index == app.selected_relation {
                 selected_flat_index = list_index;
             }
-
-            let (title, status_str, status_clr) =
-                if let Some(target_doc) = app.store.get(target_path) {
-                    (
-                        target_doc.title.as_str(),
-                        format!("{}", target_doc.status),
-                        status_color(&target_doc.status),
-                    )
-                } else {
-                    let name = display_name(target_path);
-                    (name, "missing".to_string(), Color::Red)
-                };
-
-            items.push(ListItem::new(Line::from(vec![
-                Span::raw("    "),
-                Span::styled(format!("{:<35} ", title), Style::default()),
-                Span::styled(status_str, Style::default().fg(status_clr)),
-            ])));
-
+            items.push(render_item(path));
             flat_index += 1;
             list_index += 1;
         }
