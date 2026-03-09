@@ -1,6 +1,8 @@
 use crate::engine::config::Config;
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, RelationType, Status};
 use crate::engine::store::{Filter, Store};
+#[cfg(feature = "agent")]
+use crate::tui::agent::{load_all_records, AgentSpawner, AgentStatus};
 use anyhow::{anyhow, Result};
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::{HashMap, HashSet};
@@ -191,12 +193,38 @@ impl StatusPicker {
     }
 }
 
+#[cfg(feature = "agent")]
+pub struct AgentDialog {
+    pub active: bool,
+    pub selected_index: usize,
+    pub actions: Vec<String>,
+    pub doc_path: PathBuf,
+    pub doc_title: String,
+    pub text_input: Option<String>,
+}
+
+#[cfg(feature = "agent")]
+impl AgentDialog {
+    pub fn new() -> Self {
+        AgentDialog {
+            active: false,
+            selected_index: 0,
+            actions: Vec::new(),
+            doc_path: PathBuf::new(),
+            doc_title: String::new(),
+            text_input: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ViewMode {
     Types,
     Filters,
     Metrics,
     Graph,
+    #[cfg(feature = "agent")]
+    Agents,
 }
 
 impl ViewMode {
@@ -205,7 +233,12 @@ impl ViewMode {
             ViewMode::Types => ViewMode::Filters,
             ViewMode::Filters => ViewMode::Metrics,
             ViewMode::Metrics => ViewMode::Graph,
+            #[cfg(feature = "agent")]
+            ViewMode::Graph => ViewMode::Agents,
+            #[cfg(not(feature = "agent"))]
             ViewMode::Graph => ViewMode::Types,
+            #[cfg(feature = "agent")]
+            ViewMode::Agents => ViewMode::Types,
         }
     }
 
@@ -215,6 +248,8 @@ impl ViewMode {
             ViewMode::Filters => "Filters",
             ViewMode::Metrics => "Metrics",
             ViewMode::Graph => "Graph",
+            #[cfg(feature = "agent")]
+            ViewMode::Agents => "Agents",
         }
     }
 }
@@ -245,6 +280,10 @@ pub struct App {
     pub create_form: CreateForm,
     pub delete_confirm: DeleteConfirm,
     pub status_picker: StatusPicker,
+    #[cfg(feature = "agent")]
+    pub agent_dialog: AgentDialog,
+    #[cfg(feature = "agent")]
+    pub agent_spawner: AgentSpawner,
     pub view_mode: ViewMode,
     pub graph_nodes: Vec<GraphNode>,
     pub graph_selected: usize,
@@ -264,6 +303,10 @@ pub struct App {
     pub doc_list_offset: usize,
     pub doc_list_height: usize,
     pub fullscreen_height: usize,
+    #[cfg(feature = "agent")]
+    pub agent_selected_index: usize,
+    #[cfg(feature = "agent")]
+    pub resume_request: Option<String>,
 }
 
 impl App {
@@ -295,6 +338,10 @@ impl App {
             create_form: CreateForm::new(),
             delete_confirm: DeleteConfirm::new(),
             status_picker: StatusPicker::new(),
+            #[cfg(feature = "agent")]
+            agent_dialog: AgentDialog::new(),
+            #[cfg(feature = "agent")]
+            agent_spawner: AgentSpawner::new(),
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
@@ -314,6 +361,10 @@ impl App {
             doc_list_offset: 0,
             doc_list_height: 0,
             fullscreen_height: 0,
+            #[cfg(feature = "agent")]
+            agent_selected_index: 0,
+            #[cfg(feature = "agent")]
+            resume_request: None,
         };
         app.build_doc_tree();
         app
@@ -330,6 +381,13 @@ impl App {
         if self.view_mode == ViewMode::Filters {
             self.enter_filters_mode();
             self.selected_doc = 0;
+        }
+        #[cfg(feature = "agent")]
+        if self.view_mode == ViewMode::Agents {
+            if let Ok(records) = load_all_records(None) {
+                self.agent_spawner.records = records;
+            }
+            self.agent_selected_index = 0;
         }
     }
 
@@ -1044,13 +1102,17 @@ impl App {
         if self.status_picker.active {
             return self.handle_status_picker_key(code, root, config);
         }
+        #[cfg(feature = "agent")]
+        if self.agent_dialog.active {
+            return self.handle_agent_dialog_key(code, config);
+        }
         if self.search_mode {
             return self.handle_search_key(code, modifiers);
         }
         if self.fullscreen_doc {
             return self.handle_fullscreen_key(code, modifiers);
         }
-        self.handle_normal_key(code, modifiers, root);
+        self.handle_normal_key(code, modifiers, root, config);
     }
 
     fn handle_create_form_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
@@ -1091,6 +1153,114 @@ impl App {
                 let _ = self.confirm_status_change(root, config);
             }
             KeyCode::Esc => self.close_status_picker(),
+            _ => {}
+        }
+    }
+
+    #[cfg(feature = "agent")]
+    fn handle_agent_dialog_key(&mut self, code: KeyCode, config: &Config) {
+        if self.agent_dialog.text_input.is_some() {
+            self.handle_agent_text_input_key(code);
+            return;
+        }
+
+        match code {
+            KeyCode::Esc => {
+                self.agent_dialog.active = false;
+            }
+            KeyCode::Up => {
+                if self.agent_dialog.selected_index > 0 {
+                    self.agent_dialog.selected_index -= 1;
+                } else {
+                    self.agent_dialog.selected_index = self.agent_dialog.actions.len().saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if self.agent_dialog.actions.is_empty() {
+                    return;
+                }
+                self.agent_dialog.selected_index = (self.agent_dialog.selected_index + 1) % self.agent_dialog.actions.len();
+            }
+            KeyCode::Enter => {
+                let action = self.agent_dialog.actions
+                    .get(self.agent_dialog.selected_index)
+                    .cloned()
+                    .unwrap_or_default();
+                let doc_path = self.agent_dialog.doc_path.clone();
+
+                if action == "Custom prompt" {
+                    self.agent_dialog.text_input = Some(String::new());
+                    return;
+                }
+
+                self.agent_dialog.active = false;
+
+                let doc_title = self.agent_dialog.doc_title.clone();
+
+                if action == "Expand document" {
+                    let full_path = self.store.root.join(&doc_path);
+                    if let Ok(content) = std::fs::read_to_string(&full_path) {
+                        let prompt = crate::tui::agent::build_expand_prompt(&content, &full_path);
+                        let _ = self.agent_spawner.spawn(&prompt, &full_path, &doc_title, &action);
+                    }
+                } else if action == "Create children" {
+                    if let Some(doc) = self.store.get(&doc_path) {
+                        let doc_type_str = doc.doc_type.to_string();
+                        let child_type = config.rules.iter().find_map(|rule| {
+                            match rule {
+                                crate::engine::config::ValidationRule::ParentChild { parent, child, .. }
+                                    if parent == &doc_type_str => Some(child.clone()),
+                                _ => None,
+                            }
+                        });
+                        if let Some(child_type) = child_type {
+                            let full_path = self.store.root.join(&doc_path);
+                            if let Ok(content) = std::fs::read_to_string(&full_path) {
+                                let prompt = crate::tui::agent::build_create_children_prompt(&content, &child_type);
+                                let _ = self.agent_spawner.spawn(&prompt, &full_path, &doc_title, &action);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[cfg(feature = "agent")]
+    fn handle_agent_text_input_key(&mut self, code: KeyCode) {
+        let buffer = match self.agent_dialog.text_input.as_mut() {
+            Some(b) => b,
+            None => return,
+        };
+
+        match code {
+            KeyCode::Esc => {
+                self.agent_dialog.text_input = None;
+            }
+            KeyCode::Enter => {
+                let prompt = buffer.clone();
+                let full_path = self.store.root.join(&self.agent_dialog.doc_path);
+                self.agent_dialog.active = false;
+                self.agent_dialog.text_input = None;
+
+                if !prompt.is_empty() {
+                    let doc_title = self.agent_dialog.doc_title.clone();
+                    if let Ok(content) = std::fs::read_to_string(&full_path) {
+                        let full_prompt = format!(
+                            "Here is the document:\n\n{}\n\nUser request: {}",
+                            content, prompt
+                        );
+                        let _ = self.agent_spawner.spawn(&full_prompt, &full_path, &doc_title, "Custom prompt");
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                buffer.pop();
+            }
+            KeyCode::Char(c) => {
+                buffer.push(c);
+            }
             _ => {}
         }
     }
@@ -1136,7 +1306,60 @@ impl App {
         }
     }
 
-    fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path) {
+    #[cfg(feature = "agent")]
+    fn handle_agents_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        let record_count = self.agent_spawner.records.len();
+
+        if modifiers.contains(KeyModifiers::CONTROL) {
+            match code {
+                KeyCode::Char('d') => {
+                    let jump = self.doc_list_height / 2;
+                    self.agent_selected_index = (self.agent_selected_index + jump)
+                        .min(record_count.saturating_sub(1));
+                }
+                KeyCode::Char('u') => {
+                    let jump = self.doc_list_height / 2;
+                    self.agent_selected_index = self.agent_selected_index.saturating_sub(jump);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.agent_selected_index = (self.agent_selected_index + 1)
+                    .min(record_count.saturating_sub(1));
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.agent_selected_index = self.agent_selected_index.saturating_sub(1);
+            }
+            KeyCode::Char('e') => {
+                if record_count > 0 {
+                    let doc_path = &self.agent_spawner.records[self.agent_selected_index].doc_path;
+                    self.editor_request = Some(self.store.root.join(doc_path));
+                }
+            }
+            KeyCode::Char('r') => {
+                if record_count > 0 {
+                    let record = &self.agent_spawner.records[self.agent_selected_index];
+                    if record.status != AgentStatus::Running {
+                        self.resume_request = Some(record.session_id.clone());
+                    }
+                }
+            }
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+            }
+            KeyCode::Char('`') => {
+                self.cycle_mode();
+            }
+            _ => {}
+        }
+    }
+
+    #[allow(unused_variables)]
+    fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path, config: &Config) {
         if self.view_mode == ViewMode::Filters {
             if modifiers.contains(KeyModifiers::CONTROL) {
                 match code {
@@ -1229,6 +1452,12 @@ impl App {
                 }
                 _ => {}
             }
+            return;
+        }
+
+        #[cfg(feature = "agent")]
+        if self.view_mode == ViewMode::Agents {
+            self.handle_agents_key(code, modifiers);
             return;
         }
 
@@ -1363,6 +1592,35 @@ impl App {
             (KeyCode::Char('`'), _) => self.cycle_mode(),
             (KeyCode::Char('w'), _) => self.open_warnings(),
             (KeyCode::Char('s'), _) => self.open_status_picker(),
+            #[cfg(feature = "agent")]
+            (KeyCode::Char('a'), _) => {
+                if let Some(doc) = self.selected_doc_meta() {
+                    let doc_type_str = doc.doc_type.to_string();
+                    let doc_path = doc.path.clone();
+                    let doc_title = doc.title.clone();
+
+                    let has_children = config.rules.iter().any(|rule| {
+                        matches!(rule, crate::engine::config::ValidationRule::ParentChild { parent, .. } if parent == &doc_type_str)
+                    });
+
+                    let mut actions = vec![
+                        "Expand document".to_string(),
+                        "Custom prompt".to_string(),
+                    ];
+                    if has_children {
+                        actions.push("Create children".to_string());
+                    }
+
+                    self.agent_dialog = AgentDialog {
+                        active: true,
+                        selected_index: 0,
+                        actions,
+                        doc_path,
+                        doc_title,
+                        text_input: None,
+                    };
+                }
+            }
             _ => {}
         }
     }
@@ -1449,6 +1707,10 @@ mod tests {
             create_form: CreateForm::new(),
             delete_confirm: DeleteConfirm::new(),
             status_picker: StatusPicker::new(),
+            #[cfg(feature = "agent")]
+            agent_dialog: AgentDialog::new(),
+            #[cfg(feature = "agent")]
+            agent_spawner: AgentSpawner::new(),
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
@@ -1468,6 +1730,10 @@ mod tests {
             doc_list_offset: 0,
             doc_list_height: 0,
             fullscreen_height: 0,
+            #[cfg(feature = "agent")]
+            agent_selected_index: 0,
+            #[cfg(feature = "agent")]
+            resume_request: None,
         };
         app
     }

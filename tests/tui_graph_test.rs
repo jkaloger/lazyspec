@@ -148,8 +148,13 @@ fn test_graph_rebuilds_on_mode_switch() {
 
     let first_count = app.graph_nodes.len();
 
-    // Cycle away: Graph -> Types
+    // Cycle away: Graph -> Agents -> Types (or Graph -> Types without agent feature)
     app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    #[cfg(feature = "agent")]
+    {
+        assert_eq!(app.view_mode, ViewMode::Agents);
+        app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    }
     assert_eq!(app.view_mode, ViewMode::Types);
 
     // Cycle back: Types -> Filters -> Metrics -> Graph

@@ -7,6 +7,8 @@ use ratatui::{
 };
 
 use crate::engine::document::{DocMeta, RelationType, Status};
+#[cfg(feature = "agent")]
+use crate::tui::agent::AgentStatus;
 use crate::tui::app::{App, DocListNode, FilterField, FormField, PreviewTab, ViewMode};
 
 fn status_color(status: &Status) -> Color {
@@ -133,6 +135,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ViewMode::Filters => draw_filters_mode(f, app, outer[1]),
         ViewMode::Metrics => draw_metrics_skeleton(f, outer[1]),
         ViewMode::Graph => draw_graph(f, app, outer[1]),
+        #[cfg(feature = "agent")]
+        ViewMode::Agents => draw_agents_screen(f, app, outer[1]),
     }
 
     if app.delete_confirm.active {
@@ -141,6 +145,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     if app.status_picker.active {
         draw_status_picker(f, app);
+    }
+
+    #[cfg(feature = "agent")]
+    if app.agent_dialog.active {
+        draw_agent_dialog(f, app);
     }
 
     if app.show_warnings {
@@ -793,6 +802,79 @@ fn draw_status_picker(f: &mut Frame, app: &App) {
     f.render_widget(paragraph, popup_area);
 }
 
+#[cfg(feature = "agent")]
+fn draw_agent_dialog(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let dialog = &app.agent_dialog;
+
+    if let Some(ref buffer) = dialog.text_input {
+        let popup_width = (area.width * 50 / 100).max(30).min(area.width.saturating_sub(4));
+        let popup_height = 6u16.min(area.height.saturating_sub(4));
+        let x = (area.width.saturating_sub(popup_width)) / 2;
+        let y = (area.height.saturating_sub(popup_height)) / 2;
+        let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+        f.render_widget(Clear, popup_area);
+
+        let title = format!(" Custom Prompt — {} ", dialog.doc_title);
+        let lines = vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  > ", Style::default().fg(Color::Cyan)),
+                Span::raw(format!("{}_", buffer)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  Enter", Style::default().fg(Color::DarkGray)),
+                Span::raw(" submit  "),
+                Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+                Span::raw(" back"),
+            ]),
+        ];
+
+        let paragraph = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(title),
+        );
+        f.render_widget(paragraph, popup_area);
+        return;
+    }
+
+    let action_count = dialog.actions.len() as u16;
+    let content_height = action_count + 2; // border chrome
+    let popup_width = (area.width * 40 / 100).max(20).min(area.width.saturating_sub(4));
+    let popup_height = content_height.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let items: Vec<ListItem> = dialog
+        .actions
+        .iter()
+        .map(|action| ListItem::new(format!("  {}", action)))
+        .collect();
+
+    let title = format!(" Agent Actions \u{2014} {} ", dialog.doc_title);
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(title),
+        )
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+    let mut state = ListState::default().with_selected(Some(dialog.selected_index));
+    f.render_stateful_widget(list, popup_area, &mut state);
+}
+
 fn draw_warnings_panel(f: &mut Frame, app: &App) {
     let area = f.area();
     let errors = app.store.parse_errors();
@@ -1072,6 +1154,83 @@ fn draw_filters_mode(f: &mut Frame, app: &mut App, area: Rect) {
         PreviewTab::Preview => draw_preview_content(f, app, right[1], block, doc),
         PreviewTab::Relations => draw_relations_content(f, app, right[1], block, doc),
     }
+}
+
+#[cfg(feature = "agent")]
+fn draw_agents_screen(f: &mut Frame, app: &App, area: Rect) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(area);
+
+    let main_area = layout[0];
+    let footer_area = layout[1];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Agents ");
+
+    if app.agent_spawner.records.is_empty() {
+        let paragraph = Paragraph::new("No agents have been invoked yet. Press `a` on a document to start one.")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center)
+            .block(block);
+        f.render_widget(paragraph, main_area);
+    } else {
+        let rows: Vec<Row> = app
+            .agent_spawner
+            .records
+            .iter()
+            .map(|record| {
+                let (icon, color) = match record.status {
+                    AgentStatus::Running => ("●", Color::Yellow),
+                    AgentStatus::Complete => ("✔", Color::Green),
+                    AgentStatus::Failed => ("✘", Color::Red),
+                };
+                Row::new(vec![
+                    Cell::from(Span::styled(format!("  {}", icon), Style::default().fg(color))),
+                    Cell::from(Span::raw(format!("{:<14}", record.session_id.split('-').next().unwrap_or(&record.session_id)))),
+                    Cell::from(Span::raw(&*record.doc_title)),
+                    Cell::from(Span::raw(&*record.action)),
+                    Cell::from(Span::styled(&*record.started_at, Style::default().fg(Color::DarkGray))),
+                ])
+            })
+            .collect();
+
+        let widths = [
+            Constraint::Length(4),  // status icon
+            Constraint::Length(14), // session ID (short)
+            Constraint::Fill(1),   // document title
+            Constraint::Length(18), // action
+            Constraint::Min(20),   // started at
+        ];
+
+        let table = Table::new(rows, widths)
+            .block(block)
+            .header(
+                Row::new(vec!["  ", "Session", "Document", "Action", "Started"])
+                    .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+            )
+            .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+        let mut state = TableState::default().with_selected(Some(app.agent_selected_index));
+        f.render_stateful_widget(table, main_area, &mut state);
+    }
+
+    let footer = Line::from(vec![
+        Span::styled("e", Style::default().fg(Color::Cyan)),
+        Span::raw(": open document  "),
+        Span::styled("r", Style::default().fg(Color::Cyan)),
+        Span::raw(": resume session  "),
+        Span::styled("`", Style::default().fg(Color::Cyan)),
+        Span::raw(": switch view"),
+    ]);
+    f.render_widget(
+        Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
+        footer_area,
+    );
 }
 
 fn draw_metrics_skeleton(f: &mut Frame, area: Rect) {

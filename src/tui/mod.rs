@@ -1,3 +1,5 @@
+#[cfg(feature = "agent")]
+pub mod agent;
 pub mod app;
 pub mod ui;
 
@@ -89,12 +91,32 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "agent")]
+        app.agent_spawner.poll_finished();
+
         if let Some(path) = app.editor_request.take() {
             run_editor(&mut terminal, &path)?;
             let root = app.store.root().to_path_buf();
             if let Ok(relative) = path.strip_prefix(&root) {
                 let _ = app.store.reload_file(&root, relative);
             }
+        }
+
+        #[cfg(feature = "agent")]
+        if let Some(session_id) = app.resume_request.take() {
+            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+            disable_raw_mode()?;
+
+            let _ = Command::new("claude")
+                .args(["--resume", &session_id])
+                .status();
+
+            enable_raw_mode()?;
+            execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+            terminal.clear()?;
+
+            let root = app.store.root().to_path_buf();
+            app.store = Store::load(&root, config)?;
         }
 
         if app.fix_request {
