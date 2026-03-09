@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use crate::engine::document::{DocMeta, RelationType, Status};
+use crate::tui::agent::AgentStatus;
 use crate::tui::app::{App, DocListNode, FilterField, FormField, PreviewTab, ViewMode};
 
 fn status_color(status: &Status) -> Color {
@@ -133,6 +134,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ViewMode::Filters => draw_filters_mode(f, app, outer[1]),
         ViewMode::Metrics => draw_metrics_skeleton(f, outer[1]),
         ViewMode::Graph => draw_graph(f, app, outer[1]),
+        ViewMode::Agents => draw_agents_screen(f, app, outer[1]),
     }
 
     if app.delete_confirm.active {
@@ -1148,6 +1150,82 @@ fn draw_filters_mode(f: &mut Frame, app: &mut App, area: Rect) {
         PreviewTab::Preview => draw_preview_content(f, app, right[1], block, doc),
         PreviewTab::Relations => draw_relations_content(f, app, right[1], block, doc),
     }
+}
+
+fn draw_agents_screen(f: &mut Frame, app: &App, area: Rect) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(area);
+
+    let main_area = layout[0];
+    let footer_area = layout[1];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Agents ");
+
+    if app.agent_spawner.records.is_empty() {
+        let paragraph = Paragraph::new("No agents have been invoked yet. Press `a` on a document to start one.")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center)
+            .block(block);
+        f.render_widget(paragraph, main_area);
+    } else {
+        let rows: Vec<Row> = app
+            .agent_spawner
+            .records
+            .iter()
+            .map(|record| {
+                let (icon, color) = match record.status {
+                    AgentStatus::Running => ("●", Color::Yellow),
+                    AgentStatus::Complete => ("✔", Color::Green),
+                    AgentStatus::Failed => ("✘", Color::Red),
+                };
+                Row::new(vec![
+                    Cell::from(Span::styled(format!("  {}", icon), Style::default().fg(color))),
+                    Cell::from(Span::raw(format!("{:<14}", record.session_id.split('-').next().unwrap_or(&record.session_id)))),
+                    Cell::from(Span::raw(&*record.doc_title)),
+                    Cell::from(Span::raw(&*record.action)),
+                    Cell::from(Span::styled(&*record.started_at, Style::default().fg(Color::DarkGray))),
+                ])
+            })
+            .collect();
+
+        let widths = [
+            Constraint::Length(4),  // status icon
+            Constraint::Length(14), // session ID (short)
+            Constraint::Fill(1),   // document title
+            Constraint::Length(18), // action
+            Constraint::Min(20),   // started at
+        ];
+
+        let table = Table::new(rows, widths)
+            .block(block)
+            .header(
+                Row::new(vec!["  ", "Session", "Document", "Action", "Started"])
+                    .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+            )
+            .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+        let mut state = TableState::default().with_selected(Some(app.agent_selected_index));
+        f.render_stateful_widget(table, main_area, &mut state);
+    }
+
+    let footer = Line::from(vec![
+        Span::styled("e", Style::default().fg(Color::Cyan)),
+        Span::raw(": open document  "),
+        Span::styled("r", Style::default().fg(Color::Cyan)),
+        Span::raw(": resume session  "),
+        Span::styled("`", Style::default().fg(Color::Cyan)),
+        Span::raw(": switch view"),
+    ]);
+    f.render_widget(
+        Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
+        footer_area,
+    );
 }
 
 fn draw_metrics_skeleton(f: &mut Frame, area: Rect) {

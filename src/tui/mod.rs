@@ -100,6 +100,22 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             }
         }
 
+        if let Some(session_id) = app.resume_request.take() {
+            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+            disable_raw_mode()?;
+
+            let _ = Command::new("claude")
+                .args(["--resume", &session_id])
+                .status();
+
+            enable_raw_mode()?;
+            execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+            terminal.clear()?;
+
+            let root = app.store.root().to_path_buf();
+            app.store = Store::load(&root, config)?;
+        }
+
         if app.fix_request {
             app.fix_request = false;
             let root = app.store.root().to_path_buf();

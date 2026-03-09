@@ -1,7 +1,7 @@
 use crate::engine::config::Config;
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, RelationType, Status};
 use crate::engine::store::{Filter, Store};
-use crate::tui::agent::AgentSpawner;
+use crate::tui::agent::{load_all_records, AgentSpawner};
 use anyhow::{anyhow, Result};
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::{HashMap, HashSet};
@@ -220,6 +220,7 @@ pub enum ViewMode {
     Filters,
     Metrics,
     Graph,
+    Agents,
 }
 
 impl ViewMode {
@@ -228,7 +229,8 @@ impl ViewMode {
             ViewMode::Types => ViewMode::Filters,
             ViewMode::Filters => ViewMode::Metrics,
             ViewMode::Metrics => ViewMode::Graph,
-            ViewMode::Graph => ViewMode::Types,
+            ViewMode::Graph => ViewMode::Agents,
+            ViewMode::Agents => ViewMode::Types,
         }
     }
 
@@ -238,6 +240,7 @@ impl ViewMode {
             ViewMode::Filters => "Filters",
             ViewMode::Metrics => "Metrics",
             ViewMode::Graph => "Graph",
+            ViewMode::Agents => "Agents",
         }
     }
 }
@@ -289,6 +292,8 @@ pub struct App {
     pub doc_list_offset: usize,
     pub doc_list_height: usize,
     pub fullscreen_height: usize,
+    pub agent_selected_index: usize,
+    pub resume_request: Option<String>,
 }
 
 impl App {
@@ -341,6 +346,8 @@ impl App {
             doc_list_offset: 0,
             doc_list_height: 0,
             fullscreen_height: 0,
+            agent_selected_index: 0,
+            resume_request: None,
         };
         app.build_doc_tree();
         app
@@ -357,6 +364,12 @@ impl App {
         if self.view_mode == ViewMode::Filters {
             self.enter_filters_mode();
             self.selected_doc = 0;
+        }
+        if self.view_mode == ViewMode::Agents {
+            if let Ok(records) = load_all_records(None) {
+                self.agent_spawner.records = records;
+            }
+            self.agent_selected_index = 0;
         }
     }
 
@@ -1162,11 +1175,13 @@ impl App {
 
                 self.agent_dialog.active = false;
 
+                let doc_title = self.agent_dialog.doc_title.clone();
+
                 if action == "Expand document" {
                     let full_path = self.store.root.join(&doc_path);
                     if let Ok(content) = std::fs::read_to_string(&full_path) {
                         let prompt = crate::tui::agent::build_expand_prompt(&content);
-                        let _ = self.agent_spawner.spawn(&prompt, &full_path);
+                        let _ = self.agent_spawner.spawn(&prompt, &full_path, &doc_title, &action);
                     }
                 } else if action == "Create children" {
                     if let Some(doc) = self.store.get(&doc_path) {
@@ -1182,7 +1197,7 @@ impl App {
                             let full_path = self.store.root.join(&doc_path);
                             if let Ok(content) = std::fs::read_to_string(&full_path) {
                                 let prompt = crate::tui::agent::build_create_children_prompt(&content, &child_type);
-                                let _ = self.agent_spawner.spawn(&prompt, &full_path);
+                                let _ = self.agent_spawner.spawn(&prompt, &full_path, &doc_title, &action);
                             }
                         }
                     }
@@ -1209,12 +1224,13 @@ impl App {
                 self.agent_dialog.text_input = None;
 
                 if !prompt.is_empty() {
+                    let doc_title = self.agent_dialog.doc_title.clone();
                     if let Ok(content) = std::fs::read_to_string(&full_path) {
                         let full_prompt = format!(
                             "Here is the document:\n\n{}\n\nUser request: {}",
                             content, prompt
                         );
-                        let _ = self.agent_spawner.spawn(&full_prompt, &full_path);
+                        let _ = self.agent_spawner.spawn(&full_prompt, &full_path, &doc_title, "Custom prompt");
                     }
                 }
             }
@@ -1264,6 +1280,56 @@ impl App {
             }
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
                 self.scroll_offset = self.scroll_offset.saturating_sub(self.fullscreen_height as u16 / 2);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_agents_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        let record_count = self.agent_spawner.records.len();
+
+        if modifiers.contains(KeyModifiers::CONTROL) {
+            match code {
+                KeyCode::Char('d') => {
+                    let jump = self.doc_list_height / 2;
+                    self.agent_selected_index = (self.agent_selected_index + jump)
+                        .min(record_count.saturating_sub(1));
+                }
+                KeyCode::Char('u') => {
+                    let jump = self.doc_list_height / 2;
+                    self.agent_selected_index = self.agent_selected_index.saturating_sub(jump);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.agent_selected_index = (self.agent_selected_index + 1)
+                    .min(record_count.saturating_sub(1));
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.agent_selected_index = self.agent_selected_index.saturating_sub(1);
+            }
+            KeyCode::Char('e') => {
+                if record_count > 0 {
+                    let doc_path = &self.agent_spawner.records[self.agent_selected_index].doc_path;
+                    self.editor_request = Some(self.store.root.join(doc_path));
+                }
+            }
+            KeyCode::Char('r') => {
+                if record_count > 0 {
+                    self.resume_request = Some(
+                        self.agent_spawner.records[self.agent_selected_index].session_id.clone(),
+                    );
+                }
+            }
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+            }
+            KeyCode::Char('`') => {
+                self.cycle_mode();
             }
             _ => {}
         }
@@ -1362,6 +1428,11 @@ impl App {
                 }
                 _ => {}
             }
+            return;
+        }
+
+        if self.view_mode == ViewMode::Agents {
+            self.handle_agents_key(code, modifiers);
             return;
         }
 
@@ -1631,6 +1702,8 @@ mod tests {
             doc_list_offset: 0,
             doc_list_height: 0,
             fullscreen_height: 0,
+            agent_selected_index: 0,
+            resume_request: None,
         };
         app
     }

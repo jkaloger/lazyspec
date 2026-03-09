@@ -192,7 +192,7 @@ fn agent_spawner_uses_claude_command() {
     // that calling spawn with no claude binary returns an error.
     use lazyspec::tui::agent::AgentSpawner;
     let mut spawner = AgentSpawner::new();
-    let result = spawner.spawn("test prompt", std::path::Path::new("/tmp/fake.md"));
+    let result = spawner.spawn("test prompt", std::path::Path::new("/tmp/fake.md"), "Test Doc", "Expand document");
     // In a test environment without claude installed, this should error
     assert!(result.is_err() || spawner.active_count() == 1);
 }

@@ -32,7 +32,8 @@ fn test_view_mode_next_cycles() {
     assert_eq!(ViewMode::Types.next(), ViewMode::Filters);
     assert_eq!(ViewMode::Filters.next(), ViewMode::Metrics);
     assert_eq!(ViewMode::Metrics.next(), ViewMode::Graph);
-    assert_eq!(ViewMode::Graph.next(), ViewMode::Types);
+    assert_eq!(ViewMode::Graph.next(), ViewMode::Agents);
+    assert_eq!(ViewMode::Agents.next(), ViewMode::Types);
 }
 
 #[test]
