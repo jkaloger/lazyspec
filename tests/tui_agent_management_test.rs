@@ -127,15 +127,27 @@ fn test_agents_screen_navigation() {
     assert_eq!(app.agent_selected_index, 0);
 }
 
-// 6. r key sets resume_request to the selected record's session_id
+// 6. r key sets resume_request to the selected record's session_id (only for non-running agents)
 #[test]
 fn test_agents_screen_r_key_sets_resume() {
     let fixture = TestFixture::new();
-    let records = vec![sample_record("sess-resume", "Resume Doc", "docs/rfcs/r.md")];
-    let mut app = setup_agents_mode(&fixture, records);
+    let mut record = sample_record("sess-resume", "Resume Doc", "docs/rfcs/r.md");
+    record.status = AgentStatus::Complete;
+    let mut app = setup_agents_mode(&fixture, vec![record]);
 
     press(&mut app, &fixture, KeyCode::Char('r'));
     assert_eq!(app.resume_request, Some("sess-resume".to_string()));
+}
+
+// 6b. r key does NOT resume a running agent
+#[test]
+fn test_agents_screen_r_key_blocked_while_running() {
+    let fixture = TestFixture::new();
+    let records = vec![sample_record("sess-running", "Running Doc", "docs/rfcs/r.md")];
+    let mut app = setup_agents_mode(&fixture, records);
+
+    press(&mut app, &fixture, KeyCode::Char('r'));
+    assert_eq!(app.resume_request, None);
 }
 
 // 7. e key sets editor_request containing the doc's path

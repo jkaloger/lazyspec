@@ -1,7 +1,7 @@
 use crate::engine::config::Config;
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, RelationType, Status};
 use crate::engine::store::{Filter, Store};
-use crate::tui::agent::{load_all_records, AgentSpawner};
+use crate::tui::agent::{load_all_records, AgentSpawner, AgentStatus};
 use anyhow::{anyhow, Result};
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::{HashMap, HashSet};
@@ -1180,7 +1180,7 @@ impl App {
                 if action == "Expand document" {
                     let full_path = self.store.root.join(&doc_path);
                     if let Ok(content) = std::fs::read_to_string(&full_path) {
-                        let prompt = crate::tui::agent::build_expand_prompt(&content);
+                        let prompt = crate::tui::agent::build_expand_prompt(&content, &full_path);
                         let _ = self.agent_spawner.spawn(&prompt, &full_path, &doc_title, &action);
                     }
                 } else if action == "Create children" {
@@ -1320,9 +1320,10 @@ impl App {
             }
             KeyCode::Char('r') => {
                 if record_count > 0 {
-                    self.resume_request = Some(
-                        self.agent_spawner.records[self.agent_selected_index].session_id.clone(),
-                    );
+                    let record = &self.agent_spawner.records[self.agent_selected_index];
+                    if record.status != AgentStatus::Running {
+                        self.resume_request = Some(record.session_id.clone());
+                    }
                 }
             }
             KeyCode::Char('q') => {

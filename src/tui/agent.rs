@@ -105,12 +105,13 @@ Preserve traceability by including a relation back to the parent document.\n\n\
     )
 }
 
-pub fn build_expand_prompt(doc_content: &str) -> String {
+pub fn build_expand_prompt(doc_content: &str, doc_path: &Path) -> String {
     format!(
-        "You are editing a specification document. Your task is to flesh out and expand any sparse \
+        "You are editing the specification document at `{}`. Your task is to flesh out and expand any sparse \
 or incomplete sections while preserving the YAML frontmatter exactly as-is. Do not remove \
 or reorder existing content. Focus on adding detail, clarifying intent, and filling gaps. \
-Output the complete updated document.\n\n---\n\n{}",
+Use the Edit tool to modify the file in place. Do not output the document as text.\n\n---\n\n{}",
+        doc_path.display(),
         doc_content
     )
 }
@@ -140,9 +141,8 @@ impl AgentSpawner {
 
         let child = Command::new("claude")
             .args(["-p", prompt])
-            .arg(doc_path)
             .args(["--session-id", &session_id])
-            .args(["--allowedTools", "Read,Edit,Bash(lazyspec *)"])
+            .args(["--allowedTools", "Read,Edit,Write,Bash(lazyspec *)"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

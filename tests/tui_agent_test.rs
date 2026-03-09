@@ -37,9 +37,10 @@ fn select_action(app: &mut App, fixture: &TestFixture, action_name: &str) {
 #[test]
 fn expand_prompt_contains_document_content() {
     let content = "---\ntitle: \"My RFC\"\n---\n\n# Overview\nSome details here.";
-    let prompt = build_expand_prompt(content);
+    let prompt = build_expand_prompt(content, std::path::Path::new("docs/rfcs/RFC-001.md"));
     assert!(prompt.contains(content));
-    assert!(prompt.contains("expand"));
+    assert!(prompt.contains("Edit"));
+    assert!(prompt.contains("RFC-001.md"));
 }
 
 // --- AC3: Create-children derives child type from ParentChild rules ---
