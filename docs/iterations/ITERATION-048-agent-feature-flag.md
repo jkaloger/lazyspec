@@ -1,13 +1,14 @@
 ---
 title: "Agent feature flag"
 type: iteration
-status: draft
+status: accepted
 author: "agent"
 date: 2026-03-09
 tags: []
 related: []
 validate_ignore: true
 ---
+
 
 ## Summary
 

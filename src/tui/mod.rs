@@ -1,3 +1,4 @@
+#[cfg(feature = "agent")]
 pub mod agent;
 pub mod app;
 pub mod ui;
@@ -90,6 +91,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "agent")]
         app.agent_spawner.poll_finished();
 
         if let Some(path) = app.editor_request.take() {
@@ -100,6 +102,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "agent")]
         if let Some(session_id) = app.resume_request.take() {
             execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
             disable_raw_mode()?;

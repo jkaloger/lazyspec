@@ -1,3 +1,4 @@
+#![cfg(feature = "agent")]
 mod common;
 
 use common::TestFixture;

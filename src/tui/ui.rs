@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use crate::engine::document::{DocMeta, RelationType, Status};
+#[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
 use crate::tui::app::{App, DocListNode, FilterField, FormField, PreviewTab, ViewMode};
 
@@ -134,6 +135,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ViewMode::Filters => draw_filters_mode(f, app, outer[1]),
         ViewMode::Metrics => draw_metrics_skeleton(f, outer[1]),
         ViewMode::Graph => draw_graph(f, app, outer[1]),
+        #[cfg(feature = "agent")]
         ViewMode::Agents => draw_agents_screen(f, app, outer[1]),
     }
 
@@ -145,6 +147,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_status_picker(f, app);
     }
 
+    #[cfg(feature = "agent")]
     if app.agent_dialog.active {
         draw_agent_dialog(f, app);
     }
@@ -799,6 +802,7 @@ fn draw_status_picker(f: &mut Frame, app: &App) {
     f.render_widget(paragraph, popup_area);
 }
 
+#[cfg(feature = "agent")]
 fn draw_agent_dialog(f: &mut Frame, app: &App) {
     let area = f.area();
     let dialog = &app.agent_dialog;
@@ -1152,6 +1156,7 @@ fn draw_filters_mode(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+#[cfg(feature = "agent")]
 fn draw_agents_screen(f: &mut Frame, app: &App, area: Rect) {
     let layout = Layout::default()
         .direction(Direction::Vertical)

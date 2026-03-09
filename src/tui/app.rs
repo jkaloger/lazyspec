@@ -1,6 +1,7 @@
 use crate::engine::config::Config;
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, RelationType, Status};
 use crate::engine::store::{Filter, Store};
+#[cfg(feature = "agent")]
 use crate::tui::agent::{load_all_records, AgentSpawner, AgentStatus};
 use anyhow::{anyhow, Result};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -192,6 +193,7 @@ impl StatusPicker {
     }
 }
 
+#[cfg(feature = "agent")]
 pub struct AgentDialog {
     pub active: bool,
     pub selected_index: usize,
@@ -201,6 +203,7 @@ pub struct AgentDialog {
     pub text_input: Option<String>,
 }
 
+#[cfg(feature = "agent")]
 impl AgentDialog {
     pub fn new() -> Self {
         AgentDialog {
@@ -220,6 +223,7 @@ pub enum ViewMode {
     Filters,
     Metrics,
     Graph,
+    #[cfg(feature = "agent")]
     Agents,
 }
 
@@ -229,7 +233,11 @@ impl ViewMode {
             ViewMode::Types => ViewMode::Filters,
             ViewMode::Filters => ViewMode::Metrics,
             ViewMode::Metrics => ViewMode::Graph,
+            #[cfg(feature = "agent")]
             ViewMode::Graph => ViewMode::Agents,
+            #[cfg(not(feature = "agent"))]
+            ViewMode::Graph => ViewMode::Types,
+            #[cfg(feature = "agent")]
             ViewMode::Agents => ViewMode::Types,
         }
     }
@@ -240,6 +248,7 @@ impl ViewMode {
             ViewMode::Filters => "Filters",
             ViewMode::Metrics => "Metrics",
             ViewMode::Graph => "Graph",
+            #[cfg(feature = "agent")]
             ViewMode::Agents => "Agents",
         }
     }
@@ -271,7 +280,9 @@ pub struct App {
     pub create_form: CreateForm,
     pub delete_confirm: DeleteConfirm,
     pub status_picker: StatusPicker,
+    #[cfg(feature = "agent")]
     pub agent_dialog: AgentDialog,
+    #[cfg(feature = "agent")]
     pub agent_spawner: AgentSpawner,
     pub view_mode: ViewMode,
     pub graph_nodes: Vec<GraphNode>,
@@ -292,7 +303,9 @@ pub struct App {
     pub doc_list_offset: usize,
     pub doc_list_height: usize,
     pub fullscreen_height: usize,
+    #[cfg(feature = "agent")]
     pub agent_selected_index: usize,
+    #[cfg(feature = "agent")]
     pub resume_request: Option<String>,
 }
 
@@ -325,7 +338,9 @@ impl App {
             create_form: CreateForm::new(),
             delete_confirm: DeleteConfirm::new(),
             status_picker: StatusPicker::new(),
+            #[cfg(feature = "agent")]
             agent_dialog: AgentDialog::new(),
+            #[cfg(feature = "agent")]
             agent_spawner: AgentSpawner::new(),
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
@@ -346,7 +361,9 @@ impl App {
             doc_list_offset: 0,
             doc_list_height: 0,
             fullscreen_height: 0,
+            #[cfg(feature = "agent")]
             agent_selected_index: 0,
+            #[cfg(feature = "agent")]
             resume_request: None,
         };
         app.build_doc_tree();
@@ -365,6 +382,7 @@ impl App {
             self.enter_filters_mode();
             self.selected_doc = 0;
         }
+        #[cfg(feature = "agent")]
         if self.view_mode == ViewMode::Agents {
             if let Ok(records) = load_all_records(None) {
                 self.agent_spawner.records = records;
@@ -1084,6 +1102,7 @@ impl App {
         if self.status_picker.active {
             return self.handle_status_picker_key(code, root, config);
         }
+        #[cfg(feature = "agent")]
         if self.agent_dialog.active {
             return self.handle_agent_dialog_key(code, config);
         }
@@ -1138,6 +1157,7 @@ impl App {
         }
     }
 
+    #[cfg(feature = "agent")]
     fn handle_agent_dialog_key(&mut self, code: KeyCode, config: &Config) {
         if self.agent_dialog.text_input.is_some() {
             self.handle_agent_text_input_key(code);
@@ -1207,6 +1227,7 @@ impl App {
         }
     }
 
+    #[cfg(feature = "agent")]
     fn handle_agent_text_input_key(&mut self, code: KeyCode) {
         let buffer = match self.agent_dialog.text_input.as_mut() {
             Some(b) => b,
@@ -1285,6 +1306,7 @@ impl App {
         }
     }
 
+    #[cfg(feature = "agent")]
     fn handle_agents_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         let record_count = self.agent_spawner.records.len();
 
@@ -1336,6 +1358,7 @@ impl App {
         }
     }
 
+    #[allow(unused_variables)]
     fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path, config: &Config) {
         if self.view_mode == ViewMode::Filters {
             if modifiers.contains(KeyModifiers::CONTROL) {
@@ -1432,6 +1455,7 @@ impl App {
             return;
         }
 
+        #[cfg(feature = "agent")]
         if self.view_mode == ViewMode::Agents {
             self.handle_agents_key(code, modifiers);
             return;
@@ -1568,6 +1592,7 @@ impl App {
             (KeyCode::Char('`'), _) => self.cycle_mode(),
             (KeyCode::Char('w'), _) => self.open_warnings(),
             (KeyCode::Char('s'), _) => self.open_status_picker(),
+            #[cfg(feature = "agent")]
             (KeyCode::Char('a'), _) => {
                 if let Some(doc) = self.selected_doc_meta() {
                     let doc_type_str = doc.doc_type.to_string();
@@ -1682,7 +1707,9 @@ mod tests {
             create_form: CreateForm::new(),
             delete_confirm: DeleteConfirm::new(),
             status_picker: StatusPicker::new(),
+            #[cfg(feature = "agent")]
             agent_dialog: AgentDialog::new(),
+            #[cfg(feature = "agent")]
             agent_spawner: AgentSpawner::new(),
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
@@ -1703,7 +1730,9 @@ mod tests {
             doc_list_offset: 0,
             doc_list_height: 0,
             fullscreen_height: 0,
+            #[cfg(feature = "agent")]
             agent_selected_index: 0,
+            #[cfg(feature = "agent")]
             resume_request: None,
         };
         app
