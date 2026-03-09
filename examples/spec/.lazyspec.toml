@@ -1,0 +1,30 @@
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+icon = "●"
+
+[[types]]
+name = "spec"
+plural = "specs"
+dir = "docs/specs"
+prefix = "SPEC"
+icon = "◆"
+
+[[types]]
+name = "plan"
+plural = "plans"
+dir = "docs/plans"
+prefix = "PLAN"
+icon = "▲"
+
+[[types]]
+name = "adr"
+plural = "adrs"
+dir = "docs/adrs"
+prefix = "ADR"
+icon = "■"
+
+[templates]
+dir = ".lazyspec/templates"
