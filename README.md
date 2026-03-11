@@ -57,6 +57,7 @@ Most commands accept `--json` for machine-readable output.
 | Flag                    | Description                                  |
 | ----------------------- | -------------------------------------------- |
 | `-e`, `--expand-references` | Expand `@ref` directives into fenced code blocks |
+| `--max-ref-lines N`        | Max lines per expanded ref (default: 25)         |
 
 ### `@ref` syntax
 
@@ -66,9 +67,13 @@ Documents can embed references to source code using `@ref` directives. By defaul
 @ref <path>                    # entire file
 @ref <path>#<symbol>           # specific type or struct
 @ref <path>#<symbol>@<sha>     # symbol at a specific git commit
+@ref <path>#123                # line 123
+@ref <path>#123@<sha>          # line 123 at a specific git commit
 ```
 
 Expansion resolves content via `git show` (committed state, not working tree). Supported languages for symbol extraction are TypeScript (`.ts`/`.tsx`) and Rust (`.rs`).
+
+Each expanded ref includes a caption line showing the file path, short git SHA, and symbol or line info. Expanded blocks are truncated to 25 lines by default; when truncated, a trailing comment shows how many lines were omitted. Use `--max-ref-lines` to adjust the limit.
 
 **Example**
 

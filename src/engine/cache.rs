@@ -3,6 +3,8 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
+const CACHE_VERSION: u32 = 2;
+
 pub struct DiskCache {
     dir: PathBuf,
 }
@@ -29,7 +31,7 @@ impl DiskCache {
 
     fn cache_key(path: &Path, body_hash: u64) -> String {
         let path_h = Self::path_hash(path);
-        format!("{:016x}_{:016x}", path_h, body_hash)
+        format!("v{}_{:016x}_{:016x}", CACHE_VERSION, path_h, body_hash)
     }
 
     pub fn body_hash(body: &str) -> u64 {
@@ -51,11 +53,11 @@ impl DiskCache {
     }
 
     pub fn invalidate(&self, path: &Path) {
-        let prefix = format!("{:016x}_", Self::path_hash(path));
+        let path_hash_str = format!("{:016x}", Self::path_hash(path));
         if let Ok(entries) = fs::read_dir(&self.dir) {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with(&prefix) {
+                    if name.contains(&path_hash_str) {
                         let _ = fs::remove_file(entry.path());
                     }
                 }

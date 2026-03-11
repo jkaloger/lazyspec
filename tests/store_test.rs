@@ -162,7 +162,7 @@ tags: []
 
     let store = fixture.store();
     let doc = store.resolve_shorthand("RFC-012").unwrap();
-    let expanded = store.get_body_expanded(&doc.path).unwrap();
+    let expanded = store.get_body_expanded(&doc.path, 25).unwrap();
     assert!(!expanded.contains("@ref nonexistent/file.rs"), "expanded body should not contain raw @ref");
     assert!(expanded.contains("> [unresolved:"), "expanded body should contain unresolved marker");
 }

@@ -65,6 +65,9 @@ pub enum Commands {
         /// Expand @ref directives into fenced code blocks
         #[arg(short = 'e', long = "expand-references")]
         expand_references: bool,
+        /// Maximum lines per expanded @ref block
+        #[arg(long, default_value_t = 25)]
+        max_ref_lines: usize,
     },
     /// Update document frontmatter
     Update {

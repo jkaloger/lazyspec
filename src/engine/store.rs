@@ -271,9 +271,9 @@ impl Store {
         DocMeta::extract_body(&content)
     }
 
-    pub fn get_body_expanded(&self, path: &Path) -> Result<String> {
+    pub fn get_body_expanded(&self, path: &Path, max_lines: usize) -> Result<String> {
         let body = self.get_body_raw(path)?;
-        let expander = RefExpander::new(self.root.clone());
+        let expander = RefExpander::with_max_lines(self.root.clone(), max_lines);
         expander.expand(&body)
     }
 

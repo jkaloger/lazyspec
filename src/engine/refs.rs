@@ -54,16 +54,22 @@ fn is_inside_fence(ranges: &[(usize, usize)], offset: usize) -> bool {
 
 pub struct RefExpander {
     root: PathBuf,
+    max_lines: usize,
 }
 
 impl RefExpander {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self { root, max_lines: 25 }
+    }
+
+    pub fn with_max_lines(root: PathBuf, max_lines: usize) -> Self {
+        Self { root, max_lines }
     }
 
     pub fn expand(&self, content: &str) -> Result<String> {
         let re = Regex::new(REF_PATTERN)?;
         let fenced_ranges = find_fenced_code_ranges(content);
+        let head_sha = self.resolve_head_short_sha();
         let mut result = content.to_string();
         let mut offsets: Vec<(usize, usize, String)> = Vec::new();
 
@@ -76,7 +82,7 @@ impl RefExpander {
             let symbol = cap.get(2).map(|m| m.as_str());
             let sha = cap.get(3).map(|m| m.as_str());
 
-            let expanded = self.resolve_ref(path, symbol, sha)?;
+            let expanded = self.resolve_ref(path, symbol, sha, head_sha.as_deref())?;
             offsets.push((full_match.start(), full_match.end(), expanded));
         }
 
@@ -94,6 +100,7 @@ impl RefExpander {
     ) -> Result<Option<String>> {
         let re = Regex::new(REF_PATTERN)?;
         let fenced_ranges = find_fenced_code_ranges(content);
+        let head_sha = self.resolve_head_short_sha();
         let mut result = content.to_string();
         let mut offsets: Vec<(usize, usize, String)> = Vec::new();
 
@@ -109,7 +116,7 @@ impl RefExpander {
             let symbol = cap.get(2).map(|m| m.as_str());
             let sha = cap.get(3).map(|m| m.as_str());
 
-            let expanded = self.resolve_ref(path, symbol, sha)?;
+            let expanded = self.resolve_ref(path, symbol, sha, head_sha.as_deref())?;
             offsets.push((full_match.start(), full_match.end(), expanded));
         }
 
@@ -120,7 +127,26 @@ impl RefExpander {
         Ok(Some(result))
     }
 
-    fn resolve_ref(&self, path: &str, symbol: Option<&str>, sha: Option<&str>) -> Result<String> {
+    fn resolve_head_short_sha(&self) -> Option<String> {
+        let output = Command::new("git")
+            .args(&["rev-parse", "--short", "HEAD"])
+            .current_dir(&self.root)
+            .output()
+            .ok()?;
+        if output.status.success() {
+            Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            None
+        }
+    }
+
+    fn resolve_ref(
+        &self,
+        path: &str,
+        symbol: Option<&str>,
+        sha: Option<&str>,
+        head_sha: Option<&str>,
+    ) -> Result<String> {
         let rev = sha.unwrap_or("HEAD");
         let output = Command::new("git")
             .args(&["show", &format!("{}:{}", rev, path)])
@@ -138,14 +164,42 @@ impl RefExpander {
         let file_content = String::from_utf8_lossy(&output.stdout);
 
         let content = if let Some(sym) = symbol {
-            self.extract_symbol(path, sym, &file_content)
-                .unwrap_or_else(|| file_content.to_string())
+            if sym.bytes().all(|b| b.is_ascii_digit()) {
+                let line_num: usize = sym.parse().unwrap_or(0);
+                let lines: Vec<&str> = file_content.lines().collect();
+                if line_num == 0 || line_num > lines.len() {
+                    return Ok(format!("> [unresolved: {}#{}]", path, sym));
+                }
+                lines[line_num - 1..].join("\n")
+            } else {
+                self.extract_symbol(path, sym, &file_content)
+                    .unwrap_or_else(|| file_content.to_string())
+            }
         } else {
             file_content.to_string()
         };
 
+        let display_sha = sha.unwrap_or_else(|| head_sha.unwrap_or("HEAD"));
+
+        let suffix = match symbol {
+            Some(sym) if sym.bytes().all(|b| b.is_ascii_digit()) => format!(" (L{})", sym),
+            Some(sym) => format!(" ({})", sym),
+            None => String::new(),
+        };
+
+        let caption = format!("**{}** @ `{}`{}", path, display_sha, suffix);
         let lang = language_from_extension(path);
-        Ok(format!("```{}\n{}\n```", lang, content))
+
+        let lines: Vec<&str> = content.lines().collect();
+        let truncated = if lines.len() > self.max_lines {
+            let remaining = lines.len() - self.max_lines;
+            let comment = truncation_comment(lang, remaining);
+            format!("{}\n{}", lines[..self.max_lines].join("\n"), comment)
+        } else {
+            content
+        };
+
+        Ok(format!("{}\n```{}\n{}\n```", caption, lang, truncated))
     }
 
     fn extract_symbol(&self, path: &str, symbol: &str, source: &str) -> Option<String> {
@@ -155,6 +209,14 @@ impl RefExpander {
             "rs" => RustSymbolExtractor::new().extract(source, symbol),
             _ => None,
         }
+    }
+}
+
+fn truncation_comment(lang: &str, remaining: usize) -> String {
+    match lang {
+        "python" | "yaml" | "toml" => format!("# ... ({} more lines)", remaining),
+        "markdown" => format!("<!-- ... ({} more lines) -->", remaining),
+        _ => format!("// ... ({} more lines)", remaining),
     }
 }
 
@@ -187,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_expand_cancellable_returns_none_when_cancelled() {
-        let expander = RefExpander::new(std::env::current_dir().unwrap());
+        let expander = RefExpander::with_max_lines(std::env::current_dir().unwrap(), 9999);
         let cancel = AtomicBool::new(true);
         let content = "See code:\n\n@ref Cargo.toml\n";
         let result = expander.expand_cancellable(content, &cancel);
@@ -197,7 +259,7 @@ mod tests {
 
     #[test]
     fn test_expand_cancellable_returns_expanded_when_not_cancelled() {
-        let expander = RefExpander::new(std::env::current_dir().unwrap());
+        let expander = RefExpander::with_max_lines(std::env::current_dir().unwrap(), 9999);
         let cancel = AtomicBool::new(false);
         let content = "See code:\n\n@ref Cargo.toml\n";
         let result = expander.expand_cancellable(content, &cancel);
@@ -271,7 +333,7 @@ mod tests {
 
     #[test]
     fn test_expand_refs_single_ref() {
-        let expander = RefExpander::new(std::env::current_dir().unwrap());
+        let expander = RefExpander::with_max_lines(std::env::current_dir().unwrap(), 9999);
 
         let content = "See the code:\n\n@ref Cargo.toml\n";
         let result = expander.expand(content);
@@ -283,7 +345,7 @@ mod tests {
 
     #[test]
     fn test_expand_refs_with_symbol() {
-        let expander = RefExpander::new(std::env::current_dir().unwrap());
+        let expander = RefExpander::with_max_lines(std::env::current_dir().unwrap(), 9999);
 
         let content = "See struct:\n\n@ref src/engine/store.rs#Store\n";
         let result = expander.expand(content);
@@ -295,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_expand_refs_multiple_refs() {
-        let expander = RefExpander::new(std::env::current_dir().unwrap());
+        let expander = RefExpander::with_max_lines(std::env::current_dir().unwrap(), 9999);
 
         let content = "First @ref Cargo.toml then @ref src/engine/mod.rs";
         let result = expander.expand(content);
@@ -307,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_expand_refs_error_handling() {
-        let expander = RefExpander::new(std::env::current_dir().unwrap());
+        let expander = RefExpander::with_max_lines(std::env::current_dir().unwrap(), 9999);
 
         let content = "Ref: @ref nonexistent/file.rs";
         let result = expander.expand(content);

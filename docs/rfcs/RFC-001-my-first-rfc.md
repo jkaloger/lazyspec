@@ -48,6 +48,7 @@ Mutations write to disk first, then update in-memory state. Disk is always the s
 ### TUI Layout
 
 Three-panel dashboard:
+
 - Left: document type selector with counts
 - Top right: document list for selected type (title, status with color coding)
 - Bottom right: rendered markdown preview of selected document

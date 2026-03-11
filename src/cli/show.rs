@@ -17,7 +17,7 @@ fn title_box(title: &str) -> String {
     format!("{}\n{}\n{}", top, mid, bot)
 }
 
-pub fn run(store: &Store, id: &str, expand: bool) -> Result<()> {
+pub fn run(store: &Store, id: &str, expand: bool, max_ref_lines: usize) -> Result<()> {
     let doc = store
         .resolve_shorthand(id)
         .ok_or_else(|| anyhow::anyhow!("document not found: {}", id))?;
@@ -48,7 +48,7 @@ pub fn run(store: &Store, id: &str, expand: bool) -> Result<()> {
     println!("{}", separator());
 
     let body = if expand {
-        store.get_body_expanded(&doc.path)?
+        store.get_body_expanded(&doc.path, max_ref_lines)?
     } else {
         store.get_body_raw(&doc.path)?
     };
@@ -72,14 +72,14 @@ pub fn run(store: &Store, id: &str, expand: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn run_json(store: &Store, id: &str, expand: bool) -> Result<String> {
+pub fn run_json(store: &Store, id: &str, expand: bool, max_ref_lines: usize) -> Result<String> {
     let doc = store
         .resolve_shorthand(id)
         .ok_or_else(|| anyhow::anyhow!("document not found: {}", id))?;
 
     let mut json = doc_to_json_with_family(doc, store);
     let body = if expand {
-        store.get_body_expanded(&doc.path)?
+        store.get_body_expanded(&doc.path, max_ref_lines)?
     } else {
         store.get_body_raw(&doc.path)?
     };

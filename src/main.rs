@@ -29,13 +29,13 @@ fn main() -> anyhow::Result<()> {
             let store = Store::load(&cwd, &config)?;
             lazyspec::cli::list::run(&store, doc_type.as_deref(), status.as_deref(), json);
         }
-        Some(Commands::Show { id, json, expand_references }) => {
+        Some(Commands::Show { id, json, expand_references, max_ref_lines }) => {
             let store = Store::load(&cwd, &config)?;
             if json {
-                let output = lazyspec::cli::show::run_json(&store, &id, expand_references)?;
+                let output = lazyspec::cli::show::run_json(&store, &id, expand_references, max_ref_lines)?;
                 println!("{}", output);
             } else {
-                lazyspec::cli::show::run(&store, &id, expand_references)?;
+                lazyspec::cli::show::run(&store, &id, expand_references, max_ref_lines)?;
             }
         }
         Some(Commands::Update { path, status, title }) => {

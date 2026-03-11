@@ -1,13 +1,14 @@
 ---
 title: TUI async ref expansion and skill updates
 type: iteration
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-12
 tags: []
 related:
 - implements: docs/stories/STORY-058-ref-expansion-hardening-and-performance.md
 ---
+
 
 
 ## Changes
