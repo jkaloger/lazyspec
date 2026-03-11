@@ -18,6 +18,10 @@ Spec documents frequently refer to types defined in code. Today, authors copy-pa
 ## Syntax
 
 ```
+@ref src/tui/agent.rs#AgentRecord@HEAD
+```
+
+```
 @ref <path>#<symbol>
 @ref <path>#<symbol>@<sha>
 ```
