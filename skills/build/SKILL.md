@@ -148,6 +148,11 @@ To find relevant files and prior work, use the lazyspec CLI:
 
 Use lazyspec to discover related specs before grepping the codebase.
 
+Spec documents may contain `@ref` directives that reference live code:
+- Syntax: `@ref <path>[#symbol][@sha]` (e.g. `@ref src/engine/store.rs#Store`)
+- These embed type signatures and code context directly into specs
+- Run `lazyspec show -e <id>` to see a document with refs expanded inline
+
 Your job:
 1. Implement exactly what the task specifies
 2. Write tests (TDD: failing test first, then implementation)

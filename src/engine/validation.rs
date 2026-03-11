@@ -4,7 +4,10 @@ use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum ValidationIssue {
-    BrokenLink { source: PathBuf, target: PathBuf },
+    BrokenLink {
+        source: PathBuf,
+        target: PathBuf,
+    },
     MissingParentLink {
         path: PathBuf,
         rule_name: String,
@@ -16,9 +19,18 @@ pub enum ValidationIssue {
         rule_name: String,
         doc_type: String,
     },
-    SupersededParent { path: PathBuf, parent: PathBuf },
-    RejectedParent { path: PathBuf, parent: PathBuf },
-    OrphanedAcceptance { path: PathBuf, parent: PathBuf },
+    SupersededParent {
+        path: PathBuf,
+        parent: PathBuf,
+    },
+    RejectedParent {
+        path: PathBuf,
+        parent: PathBuf,
+    },
+    OrphanedAcceptance {
+        path: PathBuf,
+        parent: PathBuf,
+    },
     AllChildrenAccepted {
         parent: PathBuf,
         children: Vec<PathBuf>,
@@ -39,28 +51,80 @@ impl std::fmt::Display for ValidationIssue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ValidationIssue::BrokenLink { source, target } => {
-                write!(f, "broken link: {} -> {}", source.display(), target.display())
+                write!(
+                    f,
+                    "broken link: {} -> {}",
+                    source.display(),
+                    target.display()
+                )
             }
-            ValidationIssue::MissingParentLink { path, rule_name, child_type, parent_type } => {
-                write!(f, "missing parent link [{}]: {} ({} needs {})", rule_name, path.display(), child_type, parent_type)
+            ValidationIssue::MissingParentLink {
+                path,
+                rule_name,
+                child_type,
+                parent_type,
+            } => {
+                write!(
+                    f,
+                    "missing parent link [{}]: {} ({} needs {})",
+                    rule_name,
+                    path.display(),
+                    child_type,
+                    parent_type
+                )
             }
-            ValidationIssue::MissingRelation { path, rule_name, doc_type } => {
-                write!(f, "missing relation [{}]: {} ({} needs a relation)", rule_name, path.display(), doc_type)
+            ValidationIssue::MissingRelation {
+                path,
+                rule_name,
+                doc_type,
+            } => {
+                write!(
+                    f,
+                    "missing relation [{}]: {} ({} needs a relation)",
+                    rule_name,
+                    path.display(),
+                    doc_type
+                )
             }
             ValidationIssue::SupersededParent { path, parent } => {
-                write!(f, "implements superseded document: {} -> {}", path.display(), parent.display())
+                write!(
+                    f,
+                    "implements superseded document: {} -> {}",
+                    path.display(),
+                    parent.display()
+                )
             }
             ValidationIssue::RejectedParent { path, parent } => {
-                write!(f, "implements rejected document: {} -> {}", path.display(), parent.display())
+                write!(
+                    f,
+                    "implements rejected document: {} -> {}",
+                    path.display(),
+                    parent.display()
+                )
             }
             ValidationIssue::OrphanedAcceptance { path, parent } => {
-                write!(f, "accepted but parent not accepted: {} -> {}", path.display(), parent.display())
+                write!(
+                    f,
+                    "accepted but parent not accepted: {} -> {}",
+                    path.display(),
+                    parent.display()
+                )
             }
             ValidationIssue::AllChildrenAccepted { parent, children } => {
-                write!(f, "all children accepted but parent not accepted: {} ({} children)", parent.display(), children.len())
+                write!(
+                    f,
+                    "all children accepted but parent not accepted: {} ({} children)",
+                    parent.display(),
+                    children.len()
+                )
             }
             ValidationIssue::UpwardOrphanedAcceptance { path, parent } => {
-                write!(f, "accepted child but parent not accepted: {} -> {}", path.display(), parent.display())
+                write!(
+                    f,
+                    "accepted child but parent not accepted: {} -> {}",
+                    path.display(),
+                    parent.display()
+                )
             }
         }
     }
@@ -85,9 +149,12 @@ pub fn validate_full(store: &super::store::Store, config: &Config) -> Validation
         .rules
         .iter()
         .filter_map(|rule| match rule {
-            ValidationRule::ParentChild { parent, child, link, .. } => {
-                Some((parent.clone(), child.clone(), link.clone()))
-            }
+            ValidationRule::ParentChild {
+                parent,
+                child,
+                link,
+                ..
+            } => Some((parent.clone(), child.clone(), link.clone())),
             _ => None,
         })
         .collect();
@@ -109,7 +176,9 @@ pub fn validate_full(store: &super::store::Store, config: &Config) -> Validation
             }
 
             // Status-based checks: use hierarchy to determine parent-child link types
-            let is_hierarchy_link = hierarchy.iter().any(|(_, _, link)| rel_type_matches(&rel.rel_type, link));
+            let is_hierarchy_link = hierarchy
+                .iter()
+                .any(|(_, _, link)| rel_type_matches(&rel.rel_type, link));
             if is_hierarchy_link {
                 if let Some(parent_doc) = store.docs.get(&target) {
                     if parent_doc.status == Status::Rejected {
@@ -148,7 +217,13 @@ pub fn validate_full(store: &super::store::Store, config: &Config) -> Validation
         // Rule-driven checks
         for rule in &config.rules {
             match rule {
-                ValidationRule::ParentChild { name, child, parent, link, severity } => {
+                ValidationRule::ParentChild {
+                    name,
+                    child,
+                    parent,
+                    link,
+                    severity,
+                } => {
                     if meta.doc_type != DocType::new(child) {
                         continue;
                     }
@@ -161,24 +236,37 @@ pub fn validate_full(store: &super::store::Store, config: &Config) -> Validation
                                 .unwrap_or(false)
                     });
                     if !has_parent_link {
-                        emit_issue(&mut result, severity, ValidationIssue::MissingParentLink {
-                            path: path.clone(),
-                            rule_name: name.clone(),
-                            child_type: child.clone(),
-                            parent_type: parent.clone(),
-                        });
+                        emit_issue(
+                            &mut result,
+                            severity,
+                            ValidationIssue::MissingParentLink {
+                                path: path.clone(),
+                                rule_name: name.clone(),
+                                child_type: child.clone(),
+                                parent_type: parent.clone(),
+                            },
+                        );
                     }
                 }
-                ValidationRule::RelationExistence { name, doc_type, severity, .. } => {
+                ValidationRule::RelationExistence {
+                    name,
+                    doc_type,
+                    severity,
+                    ..
+                } => {
                     if meta.doc_type != DocType::new(doc_type) {
                         continue;
                     }
                     if meta.related.is_empty() {
-                        emit_issue(&mut result, severity, ValidationIssue::MissingRelation {
-                            path: path.clone(),
-                            rule_name: name.clone(),
-                            doc_type: doc_type.clone(),
-                        });
+                        emit_issue(
+                            &mut result,
+                            severity,
+                            ValidationIssue::MissingRelation {
+                                path: path.clone(),
+                                rule_name: name.clone(),
+                                doc_type: doc_type.clone(),
+                            },
+                        );
                     }
                 }
             }

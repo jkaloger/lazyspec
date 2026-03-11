@@ -62,7 +62,7 @@ fn show_json_includes_body() {
 #[test]
 fn show_json_output() {
     let (_fixture, store) = setup();
-    let output = lazyspec::cli::show::run_json(&store, "RFC-001").unwrap();
+    let output = lazyspec::cli::show::run_json(&store, "RFC-001", false).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     assert_eq!(parsed["title"], "Auth Redesign");

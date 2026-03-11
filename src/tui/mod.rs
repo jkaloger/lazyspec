@@ -6,9 +6,10 @@ pub mod ui;
 use app::App;
 use crate::engine::config::Config;
 use crate::engine::store::Store;
+use app::AppEvent;
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyEvent},
+    event::Event,
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -17,7 +18,6 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::path::Path;
 use std::process::Command;
-use std::sync::mpsc;
 use std::time::Duration;
 
 fn run_editor(
@@ -41,6 +41,46 @@ fn run_editor(
     Ok(())
 }
 
+fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config) {
+    match event {
+        AppEvent::Terminal(key) => {
+            app.handle_key(key.code, key.modifiers, root, config);
+        }
+        AppEvent::FileChange(event) => {
+            match event.kind {
+                EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
+                    let mut has_non_md = false;
+                    for path in &event.paths {
+                        if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                            if let Ok(relative) = path.strip_prefix(root) {
+                                let _ = app.store.reload_file(root, relative);
+                                app.expanded_body_cache.remove(relative);
+                                app.disk_cache.invalidate(relative);
+                            }
+                        } else {
+                            has_non_md = true;
+                        }
+                    }
+                    if has_non_md {
+                        app.expanded_body_cache.clear();
+                        app.disk_cache.clear();
+                    }
+                }
+                _ => {}
+            }
+        }
+        AppEvent::ExpansionResult { path, body, body_hash } => {
+            if app.expansion_in_flight.as_ref() == Some(&path) {
+                app.expansion_in_flight = None;
+            }
+            app.disk_cache.write(&path, body_hash, &body);
+            app.expanded_body_cache.insert(path, body);
+        }
+        #[cfg(feature = "agent")]
+        AppEvent::AgentFinished => {}
+    }
+}
+
 pub fn run(store: Store, config: &Config) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -50,11 +90,13 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
 
     let mut app = App::new(store, config);
 
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    app.event_tx = tx.clone();
     let root = app.store.root().to_path_buf();
+    let fs_tx = tx.clone();
     let mut _watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res {
-            let _ = tx.send(event);
+            let _ = fs_tx.send(AppEvent::FileChange(event));
         }
     })?;
 
@@ -66,33 +108,34 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         }
     }
 
+    // Dedicated terminal input thread: sends key events through the unified channel
+    let term_tx = tx.clone();
+    std::thread::spawn(move || {
+        loop {
+            if crossterm::event::poll(Duration::from_millis(50)).unwrap_or(false) {
+                if let Ok(Event::Key(key)) = crossterm::event::read() {
+                    let _ = term_tx.send(AppEvent::Terminal(key));
+                }
+            }
+        }
+    });
+
     loop {
         terminal.draw(|f| ui::draw(f, &mut app))?;
-
-        while let Ok(event) = rx.try_recv() {
-            match event.kind {
-                EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
-                    for path in &event.paths {
-                        if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                            if let Ok(relative) = path.strip_prefix(&root) {
-                                let _ = app.store.reload_file(&root, relative);
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(KeyEvent { code, modifiers, .. }) = event::read()? {
-                let root = app.store.root().to_path_buf();
-                app.handle_key(code, modifiers, &root, config);
-            }
-        }
+        app.request_expansion(&tx);
 
         #[cfg(feature = "agent")]
         app.agent_spawner.poll_finished();
+
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(event) => {
+                handle_app_event(&mut app, event, &root, config);
+                while let Ok(event) = rx.try_recv() {
+                    handle_app_event(&mut app, event, &root, config);
+                }
+            }
+            Err(_) => {}
+        }
 
         if let Some(path) = app.editor_request.take() {
             run_editor(&mut terminal, &path)?;

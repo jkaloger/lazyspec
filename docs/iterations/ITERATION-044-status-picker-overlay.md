@@ -24,13 +24,7 @@ related:
 
 Add a `StatusPicker` struct following the `DeleteConfirm` pattern:
 
-```rust
-pub struct StatusPicker {
-    pub active: bool,
-    pub selected: usize,
-    pub doc_path: PathBuf,
-}
-```
+@ref src/tui/app.rs#StatusPicker@befc187590c51657354f9801df807d4b7d7fae4e
 
 With a `new()` that defaults to `active: false, selected: 0, doc_path: PathBuf::new()`.
 

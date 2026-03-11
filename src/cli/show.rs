@@ -17,7 +17,7 @@ fn title_box(title: &str) -> String {
     format!("{}\n{}\n{}", top, mid, bot)
 }
 
-pub fn run(store: &Store, id: &str) -> Result<()> {
+pub fn run(store: &Store, id: &str, expand: bool) -> Result<()> {
     let doc = store
         .resolve_shorthand(id)
         .ok_or_else(|| anyhow::anyhow!("document not found: {}", id))?;
@@ -47,7 +47,11 @@ pub fn run(store: &Store, id: &str) -> Result<()> {
     }
     println!("{}", separator());
 
-    let body = store.get_body(&doc.path)?;
+    let body = if expand {
+        store.get_body_expanded(&doc.path)?
+    } else {
+        store.get_body_raw(&doc.path)?
+    };
     println!("{}", body);
 
     let child_paths = store.children_of(&doc.path);
@@ -68,13 +72,17 @@ pub fn run(store: &Store, id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn run_json(store: &Store, id: &str) -> Result<String> {
+pub fn run_json(store: &Store, id: &str, expand: bool) -> Result<String> {
     let doc = store
         .resolve_shorthand(id)
         .ok_or_else(|| anyhow::anyhow!("document not found: {}", id))?;
 
     let mut json = doc_to_json_with_family(doc, store);
-    let body = store.get_body(&doc.path)?;
+    let body = if expand {
+        store.get_body_expanded(&doc.path)?
+    } else {
+        store.get_body_raw(&doc.path)?
+    };
     json["body"] = serde_json::Value::String(body);
 
     Ok(serde_json::to_string_pretty(&json)?)

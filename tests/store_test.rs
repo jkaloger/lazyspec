@@ -92,6 +92,82 @@ fn store_gets_body_lazily() {
 }
 
 #[test]
+fn store_get_body_raw_returns_unexpanded_refs() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-010-refs.md",
+        r#"---
+title: "Ref Test"
+type: rfc
+status: draft
+author: test
+date: 2026-03-01
+tags: []
+---
+
+See code:
+
+@ref src/main.rs#MyStruct
+"#,
+    );
+
+    let store = fixture.store();
+    let doc = store.resolve_shorthand("RFC-010").unwrap();
+    let body = store.get_body_raw(&doc.path).unwrap();
+    assert!(body.contains("@ref src/main.rs#MyStruct"), "raw body should preserve @ref directives");
+}
+
+#[test]
+fn store_get_body_defaults_to_raw() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-011-alias.md",
+        r#"---
+title: "Alias Test"
+type: rfc
+status: draft
+author: test
+date: 2026-03-01
+tags: []
+---
+
+@ref some/file.ts
+"#,
+    );
+
+    let store = fixture.store();
+    let doc = store.resolve_shorthand("RFC-011").unwrap();
+    let raw = store.get_body_raw(&doc.path).unwrap();
+    let default = store.get_body(&doc.path).unwrap();
+    assert_eq!(raw, default, "get_body should return the same result as get_body_raw");
+}
+
+#[test]
+fn store_get_body_expanded_processes_refs() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-012-expand.md",
+        r#"---
+title: "Expand Test"
+type: rfc
+status: draft
+author: test
+date: 2026-03-01
+tags: []
+---
+
+@ref nonexistent/file.rs
+"#,
+    );
+
+    let store = fixture.store();
+    let doc = store.resolve_shorthand("RFC-012").unwrap();
+    let expanded = store.get_body_expanded(&doc.path).unwrap();
+    assert!(!expanded.contains("@ref nonexistent/file.rs"), "expanded body should not contain raw @ref");
+    assert!(expanded.contains("> [unresolved:"), "expanded body should contain unresolved marker");
+}
+
+#[test]
 fn store_resolves_related_docs() {
     let fixture = setup_fixture();
     let store = fixture.store();

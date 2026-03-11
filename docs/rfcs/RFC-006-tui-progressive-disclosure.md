@@ -205,15 +205,7 @@ In Metrics mode, validation error counts appear in the summary statistics panel.
 
 Backtick cycles through modes in order: Types -> Filters -> Metrics -> Graph -> Types. The current mode is stored as an enum on `App`:
 
-```rust
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ViewMode {
-    Types,
-    Filters,
-    Metrics,
-    Graph,
-}
-```
+@ref src/tui/app.rs#ViewMode@44b726a53d27437c23e35403bacd2d73b0054238
 
 The `draw` function dispatches to a mode-specific renderer. Each mode owns its right-side layout entirely.
 

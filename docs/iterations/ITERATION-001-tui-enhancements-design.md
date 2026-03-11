@@ -57,13 +57,7 @@ The preview panel gains two tabs: **Preview** (existing behaviour) and **Relatio
 
 ### App state additions
 
-```rust
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PreviewTab {
-    Preview,
-    Relations,
-}
-```
+@ref src/tui/app.rs#PreviewTab@7c293a004c7acbe93239d6e42bd69c5c51aa2292
 
 New fields in `App`:
 - `preview_tab: PreviewTab` (default: `Preview`)

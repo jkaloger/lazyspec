@@ -5,14 +5,13 @@ status: accepted
 author: jkaloger
 date: 2026-03-05
 tags:
-- tui
-- deletion
-- modal
+  - tui
+  - deletion
+  - modal
 related:
-- related-to: docs/rfcs/RFC-001-my-first-rfc.md
-- related-to: docs/rfcs/RFC-003-tui-document-creation.md
+  - related-to: docs/rfcs/RFC-001-my-first-rfc.md
+  - related-to: docs/rfcs/RFC-003-tui-document-creation.md
 ---
-
 
 ## Summary
 
@@ -61,7 +60,7 @@ When no documents reference the target, the "Referenced by" section is omitted.
 }
 ```
 
-`@ref src/tui/app.rs#App` gains a `delete_confirm: DeleteConfirm` field. The event loop checks `app.delete_confirm.active` as a mode, slotting in alongside `create_form.active`, `search_mode`, and `fullscreen_doc`.
+`src/tui/app.rs#App` gains a `delete_confirm: DeleteConfirm` field. The event loop checks `app.delete_confirm.active` as a mode, slotting in alongside `create_form.active`, `search_mode`, and `fullscreen_doc`.
 
 ### Deletion Flow
 

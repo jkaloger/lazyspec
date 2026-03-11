@@ -38,7 +38,7 @@ lazyspec
 | `init`                               | Initialise lazyspec in the current project                            |
 | `create <type> <title> [--author X]` | Create a document (rfc, adr, story, iteration)                        |
 | `list [type] [--status X]`           | List documents with optional filters                                  |
-| `show <id>`                          | Display a document by path or shorthand ID (e.g. `RFC-001`)           |
+| `show <id> [-e]`                     | Display a document by path or shorthand ID (e.g. `RFC-001`)           |
 | `update <path> --status X --title X` | Update document frontmatter                                           |
 | `delete <path>`                      | Delete a document                                                     |
 | `link <from> <rel> <to>`             | Add a typed relationship (implements, supersedes, blocks, related-to) |
@@ -51,6 +51,46 @@ lazyspec
 | `validate [--warnings]`              | Check document integrity and link consistency                         |
 
 Most commands accept `--json` for machine-readable output.
+
+### `show` flags
+
+| Flag                    | Description                                  |
+| ----------------------- | -------------------------------------------- |
+| `-e`, `--expand-references` | Expand `@ref` directives into fenced code blocks |
+
+### `@ref` syntax
+
+Documents can embed references to source code using `@ref` directives. By default, `lazyspec show` renders them as-is. Pass `-e` to expand them inline.
+
+```
+@ref <path>                    # entire file
+@ref <path>#<symbol>           # specific type or struct
+@ref <path>#<symbol>@<sha>     # symbol at a specific git commit
+```
+
+Expansion resolves content via `git show` (committed state, not working tree). Supported languages for symbol extraction are TypeScript (`.ts`/`.tsx`) and Rust (`.rs`).
+
+**Example**
+
+A document containing:
+
+```
+@ref src/engine/store.rs#Store
+```
+
+Renders as:
+
+````
+```rust
+pub struct Store { ... }
+```
+````
+
+Unresolvable refs render as:
+
+```
+> [unresolved: src/engine/store.rs#Store]
+```
 
 ## TUI
 

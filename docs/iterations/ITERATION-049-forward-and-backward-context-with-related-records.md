@@ -28,14 +28,7 @@ related:
 
 Change `resolve_chain` to return a struct:
 
-```rust
-pub struct ResolvedContext<'a> {
-    pub chain: Vec<&'a DocMeta>,
-    pub target_index: usize,
-    pub forward: Vec<&'a DocMeta>,
-    pub related: Vec<&'a DocMeta>,
-}
-```
+@ref src/cli/context.rs#ResolvedContext@c4c8fc626552b93f404aa57ba9ae9442b9c307ab
 
 After building the backward chain (existing logic), walk forward from the target: use `store.reverse_links` or iterate all docs to find documents that `implements` the target. These are `forward` entries.
 

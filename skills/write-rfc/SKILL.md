@@ -89,6 +89,15 @@ Use /create-story skill.shape: double_circle
    ```
    @ref src/types/user.ts#UserProfile
    ```
+   Pin a reference to a specific commit with `@sha`:
+   ```
+   @ref src/types/user.ts#UserProfile @sha abc1234
+   ```
+   This ensures the reference resolves to that exact version, even if the file changes later.
+
+   To preview how references expand, run `lazyspec show -e <id>`.
+
+   **`@ref` vs `@draft`:** Use `@ref` when the type already exists in the codebase. Use `@draft` when you're proposing a type that doesn't exist yet. If you're unsure whether something exists, search with `lazyspec search` first.
 
 5. **Identify Stories:** List the vertical slices that fall out of this RFC. Each should be independently shippable.
 
