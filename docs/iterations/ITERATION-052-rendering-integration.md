@@ -1,13 +1,14 @@
 ---
 title: Rendering integration
 type: iteration
-status: draft
+status: accepted
 author: agent
 date: 2026-03-11
 tags: []
 related:
 - implements: docs/stories/STORY-057-rendering-integration.md
 ---
+
 
 
 ## Changes
@@ -111,7 +112,9 @@ related:
 
 ## Notes
 
-- expand_refs should be non-blocking: errors render as warnings, document continues rendering
-- Use tui_markdown for rendering expanded content in CLI/TUI
-- Consider caching extracted symbols for performance on repeated refs
-- Language mapping: `.ts` -> `ts`, `.tsx` -> `ts`, `.rs` -> `rust`, `.py` -> `python`, `.js` -> `js`, `.jsx` -> `js`
+- Shipped in commit 9d2a03b
+- expand_refs module (`src/engine/expand_refs.rs`) was never created; logic went into `store.rs`
+- TUI test (`tests/tui_expand_refs_test.rs`) was never created
+- Warning format uses HTML comments instead of blockquote format from spec
+- Expansion is synchronous and runs on every TUI render frame (performance issue)
+- Debug eprintln statements left in test_mixed_resolved_and_unresolved_refs

@@ -27,28 +27,7 @@ Add a `Severity` enum with `Error` and `Warning` variants (derive `Deserialize`,
 
 Add a `ValidationRule` enum with two variants, using `#[serde(tag = "shape")]`:
 
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "shape")]
-pub enum ValidationRule {
-    #[serde(rename = "parent-child")]
-    ParentChild {
-        name: String,
-        child: String,
-        parent: String,
-        link: String,
-        severity: Severity,
-    },
-    #[serde(rename = "relation-existence")]
-    RelationExistence {
-        name: String,
-        #[serde(rename = "type")]
-        doc_type: String,
-        require: String,
-        severity: Severity,
-    },
-}
-```
+@ref src/engine/config.rs#ValidationRule@17c1f1ae4aaa0f4a54dcd276cdf3178894ca1cad
 
 Add `rules: Option<Vec<ValidationRule>>` to `RawConfig`. Add `pub rules: Vec<ValidationRule>` to `Config` (with `#[serde(skip)]` like `types`).
 

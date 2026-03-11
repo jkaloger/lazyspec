@@ -24,13 +24,7 @@ related:
 
 Add a `ParseError` struct to the store module:
 
-```rust
-#[derive(Debug, Clone)]
-pub struct ParseError {
-    pub path: PathBuf,
-    pub error: String,
-}
-```
+@ref src/engine/store.rs#ParseError@febc9353350b931358067b354a6fa96070e14c3d
 
 Add a `parse_errors: Vec<ParseError>` field to the `Store` struct.
 

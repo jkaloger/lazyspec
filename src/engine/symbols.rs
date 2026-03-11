@@ -2,9 +2,44 @@ pub trait SymbolExtractor {
     fn extract(&self, source: &str, symbol: &str) -> Option<String>;
 }
 
-use tree_sitter::Parser;
+use tree_sitter::{Parser, TreeCursor};
 use tree_sitter_rust::LANGUAGE as LANGUAGE_RUST;
 use tree_sitter_typescript::LANGUAGE_TYPESCRIPT;
+
+fn find_symbol_node(
+    cursor: &mut TreeCursor,
+    source: &str,
+    symbol: &str,
+    match_node_types: &[&str],
+) -> Option<String> {
+    let node = cursor.node();
+    let node_type = node.kind();
+
+    if match_node_types.contains(&node_type) {
+        if let Some(name_node) = node.child_by_field_name("name") {
+            let name = source.get(name_node.start_byte()..name_node.end_byte());
+            if name == Some(symbol) {
+                let start = node.start_byte();
+                let end = node.end_byte();
+                return Some(source[start..end].to_string());
+            }
+        }
+    }
+
+    if cursor.goto_first_child() {
+        loop {
+            if let Some(result) = find_symbol_node(cursor, source, symbol, match_node_types) {
+                return Some(result);
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+        cursor.goto_parent();
+    }
+
+    None
+}
 
 pub struct TypeScriptSymbolExtractor;
 
@@ -22,55 +57,12 @@ impl SymbolExtractor for TypeScriptSymbolExtractor {
         let root = tree.root_node();
 
         let mut cursor = root.walk();
-
-        fn visit_node(
-            cursor: &mut tree_sitter::TreeCursor,
-            source: &str,
-            symbol: &str,
-        ) -> Option<String> {
-            let node = cursor.node();
-            let node_type = node.kind();
-
-            if node_type == "type_alias" || node_type == "type_alias_declaration" {
-                if let Some(name_node) = node.child_by_field_name("name") {
-                    let name = source.get(name_node.start_byte()..name_node.end_byte());
-                    if name == Some(symbol) {
-                        let start = node.start_byte();
-                        let end = node.end_byte();
-                        return Some(source[start..end].to_string());
-                    }
-                }
-            } else if node_type == "interface_declaration" {
-                if let Some(name_node) = node.child_by_field_name("name") {
-                    let name = source.get(name_node.start_byte()..name_node.end_byte());
-                    if name == Some(symbol) {
-                        let start = node.start_byte();
-                        let end = node.end_byte();
-                        return Some(source[start..end].to_string());
-                    }
-                }
-            }
-
-            if cursor.goto_first_child() {
-                loop {
-                    if let Some(result) = visit_node(cursor, source, symbol) {
-                        return Some(result);
-                    }
-                    if !cursor.goto_next_sibling() {
-                        break;
-                    }
-                }
-                cursor.goto_parent();
-            }
-
-            if cursor.goto_next_sibling() {
-                return visit_node(cursor, source, symbol);
-            }
-
-            None
-        }
-
-        visit_node(&mut cursor, source, symbol)
+        find_symbol_node(
+            &mut cursor,
+            source,
+            symbol,
+            &["type_alias", "type_alias_declaration", "interface_declaration"],
+        )
     }
 }
 
@@ -96,55 +88,12 @@ impl SymbolExtractor for RustSymbolExtractor {
         let root = tree.root_node();
 
         let mut cursor = root.walk();
-
-        fn visit_node(
-            cursor: &mut tree_sitter::TreeCursor,
-            source: &str,
-            symbol: &str,
-        ) -> Option<String> {
-            let node = cursor.node();
-            let node_type = node.kind();
-
-            if node_type == "struct_item" {
-                if let Some(name_node) = node.child_by_field_name("name") {
-                    let name = source.get(name_node.start_byte()..name_node.end_byte());
-                    if name == Some(symbol) {
-                        let start = node.start_byte();
-                        let end = node.end_byte();
-                        return Some(source[start..end].to_string());
-                    }
-                }
-            } else if node_type == "enum_item" {
-                if let Some(name_node) = node.child_by_field_name("name") {
-                    let name = source.get(name_node.start_byte()..name_node.end_byte());
-                    if name == Some(symbol) {
-                        let start = node.start_byte();
-                        let end = node.end_byte();
-                        return Some(source[start..end].to_string());
-                    }
-                }
-            }
-
-            if cursor.goto_first_child() {
-                loop {
-                    if let Some(result) = visit_node(cursor, source, symbol) {
-                        return Some(result);
-                    }
-                    if !cursor.goto_next_sibling() {
-                        break;
-                    }
-                }
-                cursor.goto_parent();
-            }
-
-            if cursor.goto_next_sibling() {
-                return visit_node(cursor, source, symbol);
-            }
-
-            None
-        }
-
-        visit_node(&mut cursor, source, symbol)
+        find_symbol_node(
+            &mut cursor,
+            source,
+            symbol,
+            &["struct_item", "enum_item"],
+        )
     }
 }
 
@@ -394,6 +343,21 @@ impl Counter {
         let rust_extractor = RustSymbolExtractor::new();
         let result = rust_extractor.extract("pub struct Bar;", "Bar");
         assert!(result.is_some());
+    }
+
+    // Regression: double-advance sibling bug skipped nodes after nested modules
+    #[test]
+    fn test_no_double_advance_skips_sibling_after_module() {
+        let extractor = TypeScriptSymbolExtractor::new();
+        let source = r#"declare module "foo" {
+  interface Inner { x: number; }
+}
+interface Outer { y: string; }"#;
+        let result = extractor.extract(source, "Outer");
+        assert!(result.is_some(), "Outer should be found after a module block");
+        let extracted = result.unwrap();
+        assert!(extracted.contains("Outer"));
+        assert!(extracted.contains("y"));
     }
 
     #[test]

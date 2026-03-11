@@ -1,13 +1,14 @@
 ---
 title: Ref parsing and expansion pipeline
 type: story
-status: draft
+status: accepted
 author: agent
 date: 2026-03-11
 tags: []
 related:
   - implements: docs/rfcs/RFC-019-inline-type-references-with-ref.md
 ---
+
 
 
 ## Context
@@ -59,9 +60,10 @@ Implements the ref parsing and expansion pipeline for RFC-019. This story handle
 
 ### Out of Scope
 
-- Tree-sitter symbol extraction (delegated to story 2)
-- Actual code block content population
-- Rendering integration in CLI/TUI (delegated to story 3)
-- Error handling for unresolved refs (delegated to story 3)
+- CLI flag gating (`-e`/`--expand-references`)
+- TUI lazy loading / async expansion
+- Caching of expanded bodies
 
-(End of file - total 53 lines)
+## Implementation Notes
+
+Shipped in commit 9d2a03b alongside STORY-056 and STORY-057. All three stories were implemented simultaneously rather than sequentially as originally planned. The `expand_refs()` and `resolve_ref()` methods were added directly to `Store` in `src/engine/store.rs`.

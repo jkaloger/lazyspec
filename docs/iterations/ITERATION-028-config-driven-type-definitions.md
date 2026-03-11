@@ -53,10 +53,7 @@ cargo test config_test
 **What to implement:**
 
 Replace the `DocType` enum with:
-```rust
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-pub struct DocType(pub String);
-```
+@ref src/engine/document.rs#DocType@0d273da570db67f11754c0654003a86c599bf54e
 
 Add a `DocType::new(s: &str) -> Self` that lowercases the input. Implement `Display` to return the inner string lowercase. Implement `FromStr` to accept any string (lowercased). Implement `Deserialize` to lower-case on deserialize.
 

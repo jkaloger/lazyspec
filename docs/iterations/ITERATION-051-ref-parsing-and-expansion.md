@@ -1,13 +1,14 @@
 ---
 title: Ref parsing and expansion
 type: iteration
-status: draft
+status: accepted
 author: agent
 date: 2026-03-11
 tags: []
 related:
 - implements: docs/stories/STORY-055-ref-parsing-and-expansion-pipeline.md
 ---
+
 
 ## Changes
 
@@ -53,6 +54,7 @@ related:
 
 ## Notes
 
-- Symbol extraction is delegated to STORY-056 (next iteration)
-- Placeholder shows full file content in fenced block for now
-- Git repo root obtained from Store's root path
+- Shipped in commit 9d2a03b alongside ITERATION-050 and ITERATION-052
+- Symbol extraction was integrated in the same commit (not delegated)
+- expand_refs and resolve_ref were added as methods on Store rather than as a separate module
+- Regex in unit tests differs from production regex (known issue)

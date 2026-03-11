@@ -1,5 +1,7 @@
+use crate::engine::cache::DiskCache;
 use crate::engine::config::Config;
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, RelationType, Status};
+use crate::engine::refs::RefExpander;
 use crate::engine::store::{Filter, Store};
 #[cfg(feature = "agent")]
 use crate::tui::agent::{load_all_records, AgentSpawner, AgentStatus};
@@ -7,6 +9,16 @@ use anyhow::{anyhow, Result};
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+pub enum AppEvent {
+    Terminal(crossterm::event::KeyEvent),
+    FileChange(notify::Event),
+    ExpansionResult { path: PathBuf, body: String, body_hash: u64 },
+    #[cfg(feature = "agent")]
+    AgentFinished,
+}
 
 fn update_tags(root: &Path, relative: &Path, tags: &[String]) -> Result<()> {
     let full_path = root.join(relative);
@@ -307,6 +319,11 @@ pub struct App {
     pub agent_selected_index: usize,
     #[cfg(feature = "agent")]
     pub resume_request: Option<String>,
+    pub expanded_body_cache: HashMap<PathBuf, String>,
+    pub expansion_in_flight: Option<PathBuf>,
+    pub event_tx: crossbeam_channel::Sender<AppEvent>,
+    pub expansion_cancel: Option<Arc<AtomicBool>>,
+    pub disk_cache: DiskCache,
 }
 
 impl App {
@@ -319,6 +336,8 @@ impl App {
         let type_plurals: HashMap<String, String> = config.types.iter()
             .map(|t| (t.name.clone(), t.plural.clone()))
             .collect();
+
+        let (event_tx, _event_rx) = crossbeam_channel::unbounded();
 
         let mut app = App {
             store,
@@ -365,6 +384,11 @@ impl App {
             agent_selected_index: 0,
             #[cfg(feature = "agent")]
             resume_request: None,
+            expanded_body_cache: HashMap::new(),
+            expansion_in_flight: None,
+            event_tx,
+            expansion_cancel: None,
+            disk_cache: DiskCache::new(),
         };
         app.build_doc_tree();
         app
@@ -711,6 +735,61 @@ impl App {
     pub fn exit_fullscreen(&mut self) {
         self.fullscreen_doc = false;
         self.scroll_offset = 0;
+    }
+
+    pub fn request_expansion(&mut self, tx: &crossbeam_channel::Sender<AppEvent>) {
+        let doc_path = match self.selected_doc_meta() {
+            Some(meta) => meta.path.clone(),
+            None => return,
+        };
+
+        if self.expanded_body_cache.contains_key(&doc_path) {
+            return;
+        }
+
+        if self.expansion_in_flight.as_ref() == Some(&doc_path) {
+            return;
+        }
+
+        let body = match self.store.get_body_raw(&doc_path) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+
+        if !body.contains("@ref ") {
+            self.expanded_body_cache.insert(doc_path, body);
+            return;
+        }
+
+        let body_hash = DiskCache::body_hash(&body);
+
+        if let Some(cached) = self.disk_cache.read(&doc_path, body_hash) {
+            self.expanded_body_cache.insert(doc_path, cached);
+            return;
+        }
+
+        if let Some(cancel) = &self.expansion_cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.expansion_cancel = Some(cancel.clone());
+        self.expansion_in_flight = Some(doc_path.clone());
+
+        let root = self.store.root().to_path_buf();
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let expander = RefExpander::new(root);
+            match expander.expand_cancellable(&body, &cancel) {
+                Ok(Some(expanded)) => {
+                    let _ = tx.send(AppEvent::ExpansionResult { path: doc_path, body: expanded, body_hash });
+                }
+                Ok(None) => {} // cancelled
+                Err(_) => {
+                    let _ = tx.send(AppEvent::ExpansionResult { path: doc_path, body, body_hash });
+                }
+            }
+        });
     }
 
     pub fn scroll_down(&mut self) {
@@ -1754,6 +1833,8 @@ mod tests {
             parse_errors: Vec::new(),
         };
 
+        let (tx, _rx) = crossbeam_channel::unbounded();
+
         let app = App {
             store,
             selected_type: 0,
@@ -1799,6 +1880,11 @@ mod tests {
             agent_selected_index: 0,
             #[cfg(feature = "agent")]
             resume_request: None,
+            expanded_body_cache: HashMap::new(),
+            expansion_in_flight: None,
+            event_tx: tx,
+            expansion_cancel: None,
+            disk_cache: DiskCache::new(),
         };
         app
     }

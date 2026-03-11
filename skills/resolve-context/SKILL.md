@@ -84,7 +84,7 @@ Context complete.shape: double_circle
 
 2. **Resolve the chain:** Run `lazyspec context <id> --json` to get the full implements chain (RFC -> Story -> Iteration) in one call.
 
-3. **Read document bodies:** The context command shows frontmatter only. For documents where you need the full body (typically the Story ACs and RFC design intent), follow up with `lazyspec show <id> --json` on those specific documents.
+3. **Read document bodies:** The context command shows frontmatter only. For documents where you need the full body (typically the Story ACs and RFC design intent), follow up with `lazyspec show <id> --json` on those specific documents. Use `lazyspec show -e <id>` to expand `@ref` directives inline -- this is useful when you need to see the actual type definitions or symbols referenced in a doc rather than just the raw reference tags.
 
 4. **Check for existing work:** Run `lazyspec status --json` to get all documents, relationships, and validation results in one call. Look for existing iterations, ADRs, or related documents that cover the same ground.
 

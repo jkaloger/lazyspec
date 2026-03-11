@@ -28,16 +28,7 @@ Covers STORY-015 AC1 (tree rendering), AC2 (node display), AC3 (j/k navigation),
 
 Add a `GraphNode` struct to `app.rs`:
 
-```rust
-#[derive(Debug, Clone)]
-pub struct GraphNode {
-    pub path: PathBuf,
-    pub title: String,
-    pub doc_type: DocType,
-    pub status: Status,
-    pub depth: usize,
-}
-```
+@ref src/tui/app.rs#GraphNode@7c83c02089097d76edeecde15b648b8df2adafbf
 
 Add graph state fields to `App`:
 

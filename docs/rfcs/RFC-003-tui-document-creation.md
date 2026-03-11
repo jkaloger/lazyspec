@@ -5,13 +5,12 @@ status: accepted
 author: jkaloger
 date: 2026-03-05
 tags:
-- tui
-- creation
-- modal
+  - tui
+  - creation
+  - modal
 related:
-- related-to: docs/rfcs/RFC-001-my-first-rfc.md
+  - related-to: docs/rfcs/RFC-001-my-first-rfc.md
 ---
-
 
 ## Summary
 
@@ -52,12 +51,12 @@ The form reuses `cli::create::run()` for the actual file write. The file watcher
 
 ### Fields
 
-| Field | Required | Behaviour |
-|-------|----------|-----------|
-| Title | Yes | Free text input. Used for both frontmatter title and filename slug. |
-| Author | No | Pre-filled with default. Editable. |
-| Tags | No | Comma-separated. Parsed into a list on submission. |
-| Related | No | Accepts shorthand like `RFC-001` or full path. Relation type prefix: `implements:RFC-001`, `related-to:ADR-002`. Defaults to `related-to` if no prefix given. |
+| Field   | Required | Behaviour                                                                                                                                                     |
+| ------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Title   | Yes      | Free text input. Used for both frontmatter title and filename slug.                                                                                           |
+| Author  | No       | Pre-filled with default. Editable.                                                                                                                            |
+| Tags    | No       | Comma-separated. Parsed into a list on submission.                                                                                                            |
+| Related | No       | Accepts shorthand like `RFC-001` or full path. Relation type prefix: `implements:RFC-001`, `related-to:ADR-002`. Defaults to `related-to` if no prefix given. |
 
 ### State Model
 
@@ -76,11 +75,12 @@ A new `CreateForm` struct holds the form state:
 }
 ```
 
-`@ref src/tui/app.rs#App` gains a `create_form: CreateForm` field. The event loop checks `app.create_form.active` as a mode, similar to `search_mode` and `fullscreen_doc`.
+`src/tui/app.rs#App` gains a `create_form: CreateForm` field. The event loop checks `app.create_form.active` as a mode, similar to `search_mode` and `fullscreen_doc`.
 
 ### Validation
 
 Before writing:
+
 - Title must be non-empty
 - Related shorthand (e.g. `RFC-001`) is resolved via `store.resolve_shorthand()`. If unresolved, show an error in the form rather than failing silently.
 - Relation type prefix must be valid (`implements`, `supersedes`, `blocks`, `related-to`)
@@ -88,6 +88,7 @@ Before writing:
 ### File Creation
 
 On submit:
+
 1. Call `cli::create::run(root, config, doc_type, title, author)` to write the file
 2. If tags were provided, call `cli::update::run()` to set the tags field (or render them into the template directly)
 3. If relations were provided, call `cli::link::link()` for each relation

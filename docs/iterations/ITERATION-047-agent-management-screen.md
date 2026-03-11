@@ -25,23 +25,9 @@ Adds a persistent agent tracking system and a new TUI screen for viewing agent h
 **What to implement:**
 
 Define an `AgentRecord` struct:
-```rust
-pub struct AgentRecord {
-    pub session_id: String,    // UUID, used for claude --resume
-    pub doc_title: String,
-    pub doc_path: PathBuf,
-    pub action: String,        // "Expand document", "Create children", "Custom prompt"
-    pub status: AgentStatus,   // Running, Complete, Failed
-    pub started_at: String,    // ISO 8601
-    pub finished_at: Option<String>,
-}
+@ref src/tui/agent.rs#AgentRecord@9e60900f6d7b3a0dc4fdfa4f7aad3ec2c3ee8c92
 
-pub enum AgentStatus {
-    Running,
-    Complete,
-    Failed,
-}
-```
+@ref src/tui/agent.rs#AgentStatus@9e60900f6d7b3a0dc4fdfa4f7aad3ec2c3ee8c92
 
 Add persistence functions:
 - `agent_history_dir() -> PathBuf` -- returns `~/.lazyspec/agents/`, creating it if needed
@@ -63,12 +49,7 @@ Use `serde` for serialization. Keep it simple: one file per agent run, named by 
 **What to implement:**
 
 Replace `children: Vec<Child>` with:
-```rust
-pub struct AgentSpawner {
-    running: Vec<(String, Child)>,  // (session_id, child process)
-    pub records: Vec<AgentRecord>,  // full history, loaded on init
-}
-```
+@ref src/tui/agent.rs#AgentSpawner@9e60900f6d7b3a0dc4fdfa4f7aad3ec2c3ee8c92
 
 - `new()` calls `load_all_records()` to populate `records` on startup
 - `spawn()` generates a UUID via `uuid::Uuid::new_v4()`, passes `--session-id <uuid>` to the `claude` command, creates an `AgentRecord` with `Running` status, calls `save_record()`, pushes to both `running` and `records`

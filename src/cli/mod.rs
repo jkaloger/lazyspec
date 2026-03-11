@@ -62,6 +62,9 @@ pub enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Expand @ref directives into fenced code blocks
+        #[arg(short = 'e', long = "expand-references")]
+        expand_references: bool,
     },
     /// Update document frontmatter
     Update {

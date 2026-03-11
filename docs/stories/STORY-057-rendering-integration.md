@@ -1,13 +1,14 @@
 ---
 title: Rendering integration
 type: story
-status: draft
+status: accepted
 author: agent
 date: 2026-03-11
 tags: []
 related:
 - implements: docs/rfcs/RFC-019-inline-type-references-with-ref.md
 ---
+
 
 
 ## Context
@@ -66,5 +67,10 @@ This story integrates the ref expansion pipeline into the rendering layer, enabl
 
 ### Out of Scope
 
-- Ref directive parsing logic (story 1)
-- Tree-sitter grammar integration (story 2)
+- CLI flag gating (`-e`/`--expand-references`)
+- TUI lazy loading / async expansion
+- Caching of expanded bodies
+
+## Implementation Notes
+
+Shipped in commit 9d2a03b. Integration was done by wiring `expand_refs()` into `Store::get_body()`. The expansion runs synchronously on every call including TUI render frames. Warning format diverges from spec (uses HTML comments instead of blockquote format). Integration tests live in `tests/expand_refs_test.rs`.

@@ -48,7 +48,7 @@ fn show_parent_json_includes_children() {
     let fixture = setup_parent_with_children();
     let store = fixture.store();
 
-    let output = lazyspec::cli::show::run_json(&store, "RFC-003").unwrap();
+    let output = lazyspec::cli::show::run_json(&store, "RFC-003", false).unwrap();
     let json: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let children = json["children"].as_array().expect("children array missing");
@@ -68,7 +68,7 @@ fn show_child_json_includes_parent() {
     let fixture = setup_parent_with_children();
     let store = fixture.store();
 
-    let output = lazyspec::cli::show::run_json(&store, "RFC-003/appendix").unwrap();
+    let output = lazyspec::cli::show::run_json(&store, "RFC-003/appendix", false).unwrap();
     let json: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let parent = json["parent"].as_object().expect("parent object missing");
@@ -113,7 +113,7 @@ fn show_parent_json_no_children_field_when_none() {
     fixture.write_rfc("RFC-010-flat.md", "Flat RFC", "draft");
     let store = fixture.store();
 
-    let output = lazyspec::cli::show::run_json(&store, "RFC-010").unwrap();
+    let output = lazyspec::cli::show::run_json(&store, "RFC-010", false).unwrap();
     let json: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     assert!(json.get("children").is_none(), "children field should be absent for docs without children");

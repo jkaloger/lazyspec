@@ -1,13 +1,14 @@
 ---
 title: Tree-sitter symbol extraction
 type: iteration
-status: draft
+status: accepted
 author: agent
 date: 2026-03-11
 tags: []
 related:
 - implements: docs/stories/STORY-056-tree-sitter-symbol-extraction.md
 ---
+
 
 
 ## Changes
@@ -74,6 +75,7 @@ related:
 
 ## Notes
 
-- Tree-sitter grammars need to be initialized once and reused for performance
-- Use tree-sitter queries for efficient symbol lookup by name
-- Extract full node text including type name for accurate @ref expansion
+- Shipped in commit 9d2a03b
+- Tests are inline in the module rather than in a separate test file as originally planned
+- Tree cursor walk logic is duplicated between extractors (cleanup tracked separately)
+- Grammars are re-initialized per call rather than cached

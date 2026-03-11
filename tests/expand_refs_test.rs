@@ -90,7 +90,7 @@ See the code:
     );
 
     let store = fixture.store();
-    let result = show::run_json(&store, "RFC-001");
+    let result = show::run_json(&store, "RFC-001", true);
 
     assert!(result.is_ok());
     let output = result.unwrap();
@@ -99,8 +99,8 @@ See the code:
         "Output should contain fenced code block"
     );
     assert!(
-        output.contains("test content") || output.contains("<!-- @ref error"),
-        "Output should contain either test content or error comment"
+        output.contains("test content") || output.contains("> [unresolved:"),
+        "Output should contain either test content or unresolved blockquote"
     );
 }
 
@@ -137,7 +137,7 @@ See the code:
     );
 
     let store = fixture.store();
-    let result = show::run_json(&store, "RFC-002");
+    let result = show::run_json(&store, "RFC-002", true);
 
     assert!(result.is_ok());
     let output = result.unwrap();
@@ -169,13 +169,13 @@ See the code:
     );
 
     let store = fixture.store();
-    let result = show::run_json(&store, "RFC-003");
+    let result = show::run_json(&store, "RFC-003", true);
 
     assert!(result.is_ok());
     let output = result.unwrap();
     assert!(
-        output.contains("<!-- @ref error") || output.contains("could not load"),
-        "Output should contain error comment for nonexistent file"
+        output.contains("> [unresolved:"),
+        "Output should contain unresolved blockquote for nonexistent file"
     );
 }
 
@@ -207,7 +207,7 @@ See the code:
     );
 
     let store = fixture.store();
-    let result = show::run_json(&store, "RFC-004");
+    let result = show::run_json(&store, "RFC-004", true);
 
     assert!(result.is_ok());
     let output = result.unwrap();
@@ -239,13 +239,13 @@ See the code:
     );
 
     let store = fixture.store();
-    let result = show::run_json(&store, "RFC-005");
+    let result = show::run_json(&store, "RFC-005", true);
 
     assert!(result.is_ok());
     let output = result.unwrap();
     assert!(
-        output.contains("<!-- @ref error") || output.contains("could not load"),
-        "Output should contain error comment for invalid SHA"
+        output.contains("> [unresolved:"),
+        "Output should contain unresolved blockquote for invalid SHA"
     );
 }
 
@@ -275,7 +275,7 @@ tags: []
     );
 
     let store = fixture.store();
-    let result = show::run_json(&store, "RFC-006");
+    let result = show::run_json(&store, "RFC-006", true);
 
     assert!(result.is_ok());
     let output = result.unwrap();
@@ -309,7 +309,7 @@ tags: []
     );
 
     let store = fixture.store();
-    let result = show::run_json(&store, "RFC-007");
+    let result = show::run_json(&store, "RFC-007", true);
 
     assert!(result.is_ok());
     let output = result.unwrap();
@@ -352,39 +352,101 @@ See the code:
 
     let store = fixture.store();
 
-    // Debug: check git works from the store root
-    let git_check = std::process::Command::new("git")
-        .args(&["rev-parse", "--show-toplevel"])
-        .current_dir(store.root())
-        .output()
-        .unwrap();
-    eprintln!(
-        "Git toplevel: {:?}",
-        String::from_utf8_lossy(&git_check.stdout)
-    );
-
-    let git_check2 = std::process::Command::new("git")
-        .args(&["show", "HEAD:test.txt"])
-        .current_dir(store.root())
-        .output()
-        .unwrap();
-    eprintln!(
-        "Git show result: {:?}",
-        String::from_utf8_lossy(&git_check2.stdout)
-    );
-    eprintln!("Git show success: {:?}", git_check2.status.success());
-
-    let result = show::run_json(&store, "RFC-001");
+    let result = show::run_json(&store, "RFC-001", true);
 
     assert!(result.is_ok());
     let output = result.unwrap();
-    eprintln!("Output: {}", output);
     assert!(
         output.contains("```"),
         "Output should contain fenced code block"
     );
     assert!(
-        output.contains("test content") || output.contains("<!-- @ref error"),
-        "Output should contain either test content or error comment"
+        output.contains("test content") || output.contains("> [unresolved:"),
+        "Output should contain either test content or unresolved blockquote"
+    );
+}
+
+#[test]
+fn test_show_without_expand_flag_shows_raw_refs() {
+    let fixture = setup();
+
+    commit_file(
+        &fixture,
+        "src/user.ts",
+        "export interface User {\n  id: number;\n}",
+    );
+
+    fixture.write_doc(
+        "docs/rfcs/RFC-010-test.md",
+        r#"---
+title: "Test Raw Ref"
+type: rfc
+status: draft
+author: test
+date: 2026-03-11
+tags: []
+---
+
+See the code:
+
+@ref src/user.ts
+"#,
+    );
+
+    let store = fixture.store();
+    let result = show::run_json(&store, "RFC-010", false);
+
+    assert!(result.is_ok());
+    let output = result.unwrap();
+    assert!(
+        output.contains("@ref src/user.ts"),
+        "Output should contain raw @ref directive when expand=false, got: {}",
+        output
+    );
+    assert!(
+        !output.contains("```ts") && !output.contains("```typescript"),
+        "Output should NOT contain expanded code block when expand=false"
+    );
+}
+
+#[test]
+fn test_search_does_not_expand_refs() {
+    let fixture = setup();
+
+    commit_file(
+        &fixture,
+        "src/user.ts",
+        "export interface User {\n  id: number;\n}",
+    );
+
+    fixture.write_doc(
+        "docs/rfcs/RFC-011-test.md",
+        r#"---
+title: "Test Search Raw"
+type: rfc
+status: draft
+author: test
+date: 2026-03-11
+tags: []
+---
+
+Some context here.
+
+@ref src/user.ts
+"#,
+    );
+
+    let store = fixture.store();
+    let results = store.search("@ref");
+
+    assert!(
+        !results.is_empty(),
+        "Search for '@ref' should find the document"
+    );
+    let snippet = &results[0].snippet;
+    assert!(
+        snippet.contains("@ref"),
+        "Search snippet should contain raw @ref text, got: {}",
+        snippet
     );
 }

@@ -1,13 +1,14 @@
 ---
 title: Tree-sitter symbol extraction
 type: story
-status: draft
+status: accepted
 author: agent
 date: 2026-03-11
 tags: []
 related:
 - implements: docs/rfcs/RFC-019-inline-type-references-with-ref.md
 ---
+
 
 
 ## Context
@@ -57,7 +58,10 @@ This story implements the symbol extraction layer for `@ref` directive expansion
 
 ### Out of Scope
 
-- Ref directive parsing (story 1)
-- Integration with expand_refs pipeline
-- CLI/TUI rendering (story 3)
-- File I/O (reading from git)
+- CLI flag gating (`-e`/`--expand-references`)
+- TUI lazy loading / async expansion
+- Additional language grammars beyond TypeScript and Rust
+
+## Implementation Notes
+
+Shipped in commit 9d2a03b. The `SymbolExtractor` trait and both extractors live in `src/engine/symbol_extractor.rs`. Tests are inline in the module. Known issues: duplicated `visit_node` logic between extractors, potential double-advance sibling bug in tree cursor walk.

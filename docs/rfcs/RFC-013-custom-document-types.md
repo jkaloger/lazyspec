@@ -108,29 +108,13 @@ Status-based validation (rejected parent, superseded parent, orphaned acceptance
 
 Replace the `DocType` enum with a string newtype:
 
-```rust
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DocType(pub String);
-```
+@ref src/engine/document.rs#DocType@0d273da570db67f11754c0654003a86c599bf54e
 
 The `Config` struct changes from named directory fields to a vector of type definitions:
 
-```rust
-pub struct TypeDef {
-    pub name: String,
-    pub plural: String,
-    pub dir: String,
-    pub prefix: String,
-    pub icon: Option<String>,
-}
+@ref src/engine/config.rs#TypeDef@17c1f1ae4aaa0f4a54dcd276cdf3178894ca1cad
 
-pub struct Config {
-    pub types: Vec<TypeDef>,
-    pub rules: Vec<ValidationRule>,
-    pub templates: Templates,
-    pub naming: Naming,
-}
-```
+@ref src/engine/config.rs#Config@17c1f1ae4aaa0f4a54dcd276cdf3178894ca1cad
 
 `Config::default()` returns the current four types and two rules.
 

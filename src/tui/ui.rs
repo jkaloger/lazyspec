@@ -384,7 +384,11 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_preview_content(f: &mut Frame, app: &App, area: Rect, block: Block, doc: Option<&DocMeta>) {
     if let Some(doc) = doc {
-        let body = app.store.get_body(&doc.path).unwrap_or_default();
+        let body = if let Some(expanded) = app.expanded_body_cache.get(&doc.path) {
+            expanded.clone()
+        } else {
+            app.store.get_body_raw(&doc.path).unwrap_or_default()
+        };
 
         let mut lines = vec![
             Line::from(Span::styled(
@@ -424,6 +428,13 @@ fn draw_preview_content(f: &mut Frame, app: &App, area: Rect, block: Block, doc:
         }
 
         lines.push(Line::from(""));
+
+        if app.expansion_in_flight.as_ref() == Some(&doc.path) {
+            lines.push(Line::from(Span::styled(
+                " [expanding refs...]",
+                Style::default().fg(Color::Yellow),
+            )));
+        }
 
         let body_text = tui_markdown::from_str(&body);
         for line in body_text.lines {
@@ -624,12 +635,20 @@ fn draw_fullscreen(f: &mut Frame, app: &mut App) {
         ]);
         f.render_widget(Paragraph::new(header), layout[0]);
 
-        let body = match app.store.get_body(&doc.path) {
-            Ok(b) => b,
-            Err(_) => "Error loading document.".to_string(),
+        let body = if let Some(expanded) = app.expanded_body_cache.get(&doc.path) {
+            expanded.clone()
+        } else {
+            app.store.get_body_raw(&doc.path).unwrap_or_else(|_| "Error loading document.".to_string())
         };
 
-        let text = tui_markdown::from_str(&body);
+        let expanding = app.expansion_in_flight.as_ref() == Some(&doc.path);
+        let display_body = if expanding {
+            format!("[expanding refs...]\n\n{}", body)
+        } else {
+            body
+        };
+
+        let text = tui_markdown::from_str(&display_body);
         let content_width = layout[1].width.saturating_sub(2) as usize;
         let total_lines: usize = text.lines.iter().map(|line| {
             let line_width: usize = line.spans.iter().map(|s| s.content.len()).sum();

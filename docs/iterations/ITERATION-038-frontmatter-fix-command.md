@@ -69,13 +69,7 @@ The function should:
 
 2. For each file path, call a `fix_file(root, config, path, dry_run)` function that returns a `FixResult`:
 
-```rust
-struct FixResult {
-    path: String,
-    fields_added: Vec<String>,
-    written: bool,
-}
-```
+@ref src/cli/fix.rs#FixResult@febc9353350b931358067b354a6fa96070e14c3d
 
 3. The `fix_file` function:
    - Read the file content
