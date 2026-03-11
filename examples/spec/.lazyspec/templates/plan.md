@@ -7,6 +7,7 @@ date: {date}
 tags: []
 related: []
 ---
+<!-- Target: under 100 lines. If longer, split into multiple plans per vertical slice. -->
 
 ## Changes
 
@@ -28,8 +29,8 @@ Numbered task breakdown. Each task should be self-contained enough for a zero-co
 
 ## Test Plan
 
-For each spec contract this plan covers, describe the test that will verify it.
+Each test must map to at least one spec AC. Tag tests with the AC(s) they cover (e.g. AC1, AC3). If an AC can't be tested automatically, describe the manual verification.
 
 ## Notes
 
-Discoveries, decisions, or context gathered during planning.
+Collect discoveries, surprises, and decision rationale here. Don't scatter notes inline through the tasks.

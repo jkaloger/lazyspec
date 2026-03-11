@@ -127,6 +127,16 @@ When [action]
 Then [expected outcome]
 ```
 
+## Authoring Principles
+
+1. **ACs are the core** -- they appear early in the spec, not after pages of implementation context.
+2. **Describe behaviour, not implementation** -- "the page renders a hero header with CMS-driven content" not "create a server component at `apps/foo/page.tsx`". File paths and JSX belong in plans.
+3. **No open questions in accepted specs** -- phrases like "evaluate during implementation" are design decisions being deferred. Resolve before the spec leaves draft.
+4. **Scope is a sharp boundary** -- if someone reads only the Scope section, they know exactly what this work delivers and doesn't.
+5. **Under 100 lines** -- if a spec exceeds this, extract implementation detail into plan(s).
+6. **Data models show shape, not wiring** -- `@ref` existing types, `@draft` new types. Don't show how components consume them or where they're imported from.
+7. **Error handling and edge cases are first-class** -- these are behavioural requirements, not afterthoughts.
+
 ## Steps
 
 ### Multi-slice RFCs
@@ -174,6 +184,8 @@ Create the spec directly without subagent dispatch. This is the default path for
 | "The RFC covers it, I don't need a Spec" | RFCs describe intent. Specs lock down contracts. Different audiences. |
 | "I'll figure out the error handling during implementation" | That's a design judgment call. Lock it down in the spec. |
 | "This contract is obvious, I don't need to write it out" | Obvious to you. The implementer needs it explicit. |
+| "We can decide this during implementation" | Design decision being deferred. Resolve it now. |
+| "This spec is 150 lines but it's all necessary" | Implementation detail is leaking in. Extract to a plan. |
 
 ## Checklist
 
@@ -193,3 +205,5 @@ Before claiming this skill is complete:
 - Each contract should be independently testable
 - Keep specs focused on one vertical slice
 - Each subagent receives full RFC text, not file references
+- Specs under 100 lines. If longer, implementation detail is leaking in.
+- No open questions in accepted specs.

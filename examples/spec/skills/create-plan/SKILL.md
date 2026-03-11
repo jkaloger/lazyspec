@@ -184,6 +184,15 @@ When all contracts fit in a single plan, or for standalone plans (bug fixes, twe
 
 9. **Present to user:** Show the user the complete plan document (task breakdown, test plan, linked contracts). Ask for explicit confirmation before proceeding. Do NOT use `/build` until the user approves.
 
+## Authoring Principles
+
+1. **One plan per deliverable slice** -- a plan covers a coherent vertical slice implementable and verifiable independently. If a spec has 6 contracts spanning layout, search, and CMS, that's 2-3 plans.
+2. **Tasks are ordered and verifiable** -- each task lists files, what to implement, how to verify. Sequential execution without backtracking.
+3. **Test plans map to ACs** -- every AC should have at least one test. The mapping is explicit (e.g. "AC1, AC3"). If an AC can't be tested automatically, say so.
+4. **Implementation detail belongs here** -- file paths, code snippets, component structure, CSS classes, import paths. This is plan territory.
+5. **Notes capture discoveries** -- don't scatter rationale inline. Collect in the Notes section.
+6. **Under 100 lines** -- two focused 60-line plans are better than one sprawling 150-line plan.
+
 ## Red Flags
 
 | Red Flag | Reality |
@@ -192,6 +201,7 @@ When all contracts fit in a single plan, or for standalone plans (bug fixes, twe
 | "I'll write the tests now" | Plan the tests here, write them during build. |
 | "I'll use /build right after" | Stop. Present to the user. Wait for confirmation. |
 | "The user will probably approve" | Probably isn't confirmed. Ask. |
+| "This plan is 150 lines but it covers everything" | Split by vertical slice. Two focused plans > one sprawling plan. |
 
 ## Checklist
 
@@ -216,3 +226,4 @@ Before presenting the plan to the user:
 - Always present the plan to the user and wait for confirmation before invoking build
 - If you discover a contract needs to change, emit an ADR
 - For multi-plan specs, always get user approval of the grouping before dispatching
+- Plans under 100 lines. If longer, the slice is too big -- split it.

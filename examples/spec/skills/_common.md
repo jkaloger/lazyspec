@@ -48,3 +48,15 @@ After completing work, promote document statuses up the chain. Run `lazyspec hel
 3. If an RFC exists and all Specs under it are accepted, mark the RFC as accepted
 
 Run `lazyspec validate --json` after updates.
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| Code blocks in specs | Couples contract to implementation | Move to plan; spec references types only |
+| ACs at the bottom | Buried under implementation detail | ACs go in the top half |
+| "Evaluate during implementation" | Unresolved design decision | Decide during spec review |
+| One plan for the whole spec | Too much in flight | Split by vertical slice |
+| Tests without AC mapping | No traceability | Tag each test with AC(s) it covers |
+| Notes scattered inline | Hard to find rationale | Collect in Notes section |
+| Spec > 100 lines | Doing the plan's job | Extract implementation detail |
