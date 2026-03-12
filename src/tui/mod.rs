@@ -18,6 +18,8 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 fn run_editor(
@@ -109,9 +111,15 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     }
 
     // Dedicated terminal input thread: sends key events through the unified channel
+    let input_paused = Arc::new(AtomicBool::new(false));
     let term_tx = tx.clone();
+    let paused = input_paused.clone();
     std::thread::spawn(move || {
         loop {
+            if paused.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
             if crossterm::event::poll(Duration::from_millis(50)).unwrap_or(false) {
                 if let Ok(Event::Key(key)) = crossterm::event::read() {
                     let _ = term_tx.send(AppEvent::Terminal(key));
@@ -138,7 +146,11 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         }
 
         if let Some(path) = app.editor_request.take() {
+            input_paused.store(true, Ordering::Relaxed);
+            while rx.try_recv().is_ok() {}
             run_editor(&mut terminal, &path)?;
+            while rx.try_recv().is_ok() {}
+            input_paused.store(false, Ordering::Relaxed);
             let root = app.store.root().to_path_buf();
             if let Ok(relative) = path.strip_prefix(&root) {
                 let _ = app.store.reload_file(&root, relative);
@@ -147,17 +159,20 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
 
         #[cfg(feature = "agent")]
         if let Some(session_id) = app.resume_request.take() {
+            input_paused.store(true, Ordering::Relaxed);
+            while rx.try_recv().is_ok() {}
+
             execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
             disable_raw_mode()?;
-
             let _ = Command::new("claude")
                 .args(["--resume", &session_id])
                 .status();
-
             enable_raw_mode()?;
             execute!(terminal.backend_mut(), EnterAlternateScreen)?;
             terminal.clear()?;
 
+            while rx.try_recv().is_ok() {}
+            input_paused.store(false, Ordering::Relaxed);
             let root = app.store.root().to_path_buf();
             app.store = Store::load(&root, config)?;
         }
