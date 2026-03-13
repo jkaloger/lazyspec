@@ -170,10 +170,12 @@ impl RefExpander {
                 if line_num == 0 || line_num > lines.len() {
                     return Ok(format!("> [unresolved: {}#{}]", path, sym));
                 }
-                lines[line_num - 1..].join("\n")
+                lines[line_num - 1].to_string()
             } else {
-                self.extract_symbol(path, sym, &file_content)
-                    .unwrap_or_else(|| file_content.to_string())
+                match self.extract_symbol(path, sym, &file_content) {
+                    Some(content) => content,
+                    None => return Ok(format!("> [unresolved: {}#{}]", path, sym)),
+                }
             }
         } else {
             file_content.to_string()
@@ -377,5 +379,47 @@ mod tests {
         assert!(result.is_ok());
         let expanded = result.unwrap();
         assert!(expanded.contains("> [unresolved:"));
+    }
+
+    #[test]
+    fn test_unknown_symbol_produces_unresolved_marker() {
+        let expander = RefExpander::with_max_lines(std::env::current_dir().unwrap(), 9999);
+
+        let content = "See: @ref Cargo.toml#NonExistentSymbol";
+        let result = expander.expand(content).unwrap();
+        assert!(
+            result.contains("> [unresolved: Cargo.toml#NonExistentSymbol]"),
+            "Expected unresolved marker, got: {}",
+            result
+        );
+        // Should NOT contain the full file content
+        assert!(
+            !result.contains("[package]"),
+            "Should not dump full file content for unknown symbol"
+        );
+    }
+
+    #[test]
+    fn test_line_number_ref_returns_single_line() {
+        let expander = RefExpander::with_max_lines(std::env::current_dir().unwrap(), 9999);
+
+        // Line 1 of Cargo.toml is [package]
+        let content = "See: @ref Cargo.toml#1";
+        let result = expander.expand(content).unwrap();
+        assert!(result.contains("[package]"), "Should contain the first line");
+        // The code block should only have one line of actual content
+        // (i.e., it should NOT contain line 2+)
+        let lines_in_block: Vec<&str> = result
+            .lines()
+            .skip_while(|l| !l.starts_with("```"))
+            .skip(1) // skip opening ```
+            .take_while(|l| !l.starts_with("```"))
+            .collect();
+        assert_eq!(
+            lines_in_block.len(),
+            1,
+            "Line-number ref should return exactly one line, got: {:?}",
+            lines_in_block
+        );
     }
 }

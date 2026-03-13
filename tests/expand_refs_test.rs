@@ -213,8 +213,9 @@ See the code:
     assert!(result.is_ok());
     let output = result.unwrap();
     assert!(
-        output.contains("```"),
-        "Output should contain code block even for nonexistent symbol"
+        output.contains("> [unresolved: src/user.ts#NonExistentSymbol]"),
+        "Output should contain unresolved marker for nonexistent symbol, got: {}",
+        output
     );
 }
 
