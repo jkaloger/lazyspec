@@ -19,7 +19,7 @@ fn setup() -> (common::TestFixture, lazyspec::engine::store::Store) {
 #[test]
 fn doc_to_json_includes_full_schema() {
     let (_fixture, store) = setup();
-    let doc = store.resolve_shorthand("RFC-001").unwrap();
+    let doc = store.resolve_shorthand("RFC-001").expect("should resolve");
     let json = doc_to_json(doc);
 
     assert_eq!(json["path"], "docs/rfcs/RFC-001-auth.md");
@@ -37,7 +37,7 @@ fn doc_to_json_includes_full_schema() {
 #[test]
 fn doc_to_json_includes_related() {
     let (_fixture, store) = setup();
-    let doc = store.resolve_shorthand("STORY-001").unwrap();
+    let doc = store.resolve_shorthand("STORY-001").expect("should resolve");
     let json = doc_to_json(doc);
 
     assert_eq!(json["related"][0]["type"], "implements");
@@ -50,7 +50,7 @@ fn doc_to_json_includes_related() {
 #[test]
 fn show_json_includes_body() {
     let (_fixture, store) = setup();
-    let doc = store.resolve_shorthand("RFC-001").unwrap();
+    let doc = store.resolve_shorthand("RFC-001").expect("should resolve");
     let body = store.get_body(&doc.path).unwrap();
     let mut json = doc_to_json(doc);
     json["body"] = serde_json::Value::String(body);
@@ -110,7 +110,7 @@ fn doc_to_json_includes_validate_ignore() {
         "---\ntitle: \"Legacy Doc\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\nvalidate-ignore: true\n---\n",
     );
     let store = fixture.store();
-    let doc = store.resolve_shorthand("RFC-001").unwrap();
+    let doc = store.resolve_shorthand("RFC-001").expect("should resolve");
     let json = doc_to_json(doc);
 
     assert_eq!(json["validate_ignore"], true);
@@ -119,7 +119,7 @@ fn doc_to_json_includes_validate_ignore() {
 #[test]
 fn doc_to_json_validate_ignore_defaults_false() {
     let (_fixture, store) = setup();
-    let doc = store.resolve_shorthand("RFC-001").unwrap();
+    let doc = store.resolve_shorthand("RFC-001").expect("should resolve");
     let json = doc_to_json(doc);
 
     assert_eq!(json["validate_ignore"], false);
@@ -139,4 +139,44 @@ fn search_json_includes_full_schema() {
     assert!(first["related"].is_array());
     assert!(first["match_field"].is_string());
     assert!(first["snippet"].is_string());
+}
+
+#[test]
+fn show_json_ambiguous_id_returns_error() {
+    let fixture = common::TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-020-first.md",
+        "---\ntitle: \"First\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n\nFirst body.\n",
+    );
+    fixture.write_doc(
+        "docs/adrs/RFC-020-second.md",
+        "---\ntitle: \"Second\"\ntype: adr\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n\nSecond body.\n",
+    );
+    let store = fixture.store();
+    let output = lazyspec::cli::show::run_json(&store, "RFC-020", false, 25).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(parsed["error"], "ambiguous_id");
+    assert_eq!(parsed["id"], "RFC-020");
+    assert!(parsed["ambiguous_matches"].is_array());
+    assert_eq!(parsed["ambiguous_matches"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn show_json_full_path_works_when_shorthand_ambiguous() {
+    let fixture = common::TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-020-first.md",
+        "---\ntitle: \"First\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n\nFirst body.\n",
+    );
+    fixture.write_doc(
+        "docs/adrs/RFC-020-second.md",
+        "---\ntitle: \"Second\"\ntype: adr\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n\nSecond body.\n",
+    );
+    let store = fixture.store();
+    let output = lazyspec::cli::show::run_json(&store, "docs/rfcs/RFC-020-first.md", false, 25).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(parsed["title"], "First");
+    assert!(parsed["body"].as_str().unwrap().contains("First body."));
 }

@@ -169,6 +169,7 @@ pub struct DocListNode {
     pub depth: usize,
     pub is_parent: bool,
     pub is_virtual: bool,
+    pub has_duplicate_id: bool,
 }
 
 pub struct DeleteConfirm {
@@ -436,6 +437,14 @@ impl App {
         let mut sorted: Vec<&DocMeta> = docs.into_iter().collect();
         sorted.sort_by(|a, b| a.path.cmp(&b.path));
 
+        // Count occurrences of each ID (excluding children) to detect duplicates
+        let mut id_counts: HashMap<String, usize> = HashMap::new();
+        for doc in &sorted {
+            if self.store.parent_of(&doc.path).is_none() {
+                *id_counts.entry(doc.id.clone()).or_insert(0) += 1;
+            }
+        }
+
         let mut tree = Vec::new();
 
         for doc in &sorted {
@@ -445,6 +454,7 @@ impl App {
 
             let children = self.store.children_of(&doc.path);
             let is_parent = !children.is_empty();
+            let has_duplicate_id = id_counts.get(&doc.id).copied().unwrap_or(0) > 1;
 
             tree.push(DocListNode {
                 path: doc.path.clone(),
@@ -455,6 +465,7 @@ impl App {
                 depth: 0,
                 is_parent,
                 is_virtual: doc.virtual_doc,
+                has_duplicate_id,
             });
 
             if is_parent && self.is_expanded(&doc.path) {
@@ -474,6 +485,7 @@ impl App {
                         depth: 1,
                         is_parent: false,
                         is_virtual: child.virtual_doc,
+                        has_duplicate_id: false,
                     });
                 }
             }
@@ -1797,7 +1809,7 @@ impl App {
             };
 
             let doc = self.store.resolve_shorthand(&shorthand)
-                .ok_or_else(|| anyhow!("Cannot resolve: {}", shorthand))?;
+                .map_err(|_| anyhow!("Cannot resolve: {}", shorthand))?;
             results.push((rel_type, doc.path.clone()));
         }
         Ok(results)
@@ -1819,6 +1831,7 @@ mod tests {
             depth: 0,
             is_parent: false,
             is_virtual: false,
+            has_duplicate_id: false,
         }
     }
 

@@ -1,7 +1,7 @@
 use crate::cli::json::doc_to_json_with_family;
 use crate::cli::style::{bold, dim, styled_status};
 use crate::engine::document::{DocMeta, RelationType};
-use crate::engine::store::Store;
+use crate::engine::store::{ResolveError, Store};
 use anyhow::Result;
 use console::colors_enabled;
 use std::collections::HashSet;
@@ -17,7 +17,13 @@ pub struct ResolvedContext<'a> {
 pub fn resolve_chain<'a>(store: &'a Store, id: &str) -> Result<ResolvedContext<'a>> {
     let doc = store
         .resolve_shorthand(id)
-        .ok_or_else(|| anyhow::anyhow!("document not found: {}", id))?;
+        .map_err(|e| match e {
+            ResolveError::NotFound(id) => anyhow::anyhow!("document not found: {}", id),
+            ResolveError::Ambiguous { id, matches } => {
+                let paths: Vec<String> = matches.iter().map(|m| m.to_string_lossy().to_string()).collect();
+                anyhow::anyhow!("Ambiguous ID '{}' matches multiple documents:\n  {}\nSpecify the full path to show a specific document.", id, paths.join("\n  "))
+            }
+        })?;
 
     let mut chain = vec![doc];
 

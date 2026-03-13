@@ -303,7 +303,7 @@ impl Store {
         }
     }
 
-    pub fn resolve_shorthand(&self, id: &str) -> Option<&DocMeta> {
+    pub fn resolve_shorthand(&self, id: &str) -> Result<&DocMeta, ResolveError> {
         if let Some((parent_id, child_stem)) = id.split_once('/') {
             // Qualified: find parent first (among non-children only)
             let parent = self.docs.values().find(|d| {
@@ -321,9 +321,10 @@ impl Store {
                     d.path.file_name().and_then(|f| f.to_str())
                 };
                 name.map(|n| n.starts_with(parent_id)).unwrap_or(false)
-            })?;
+            }).ok_or_else(|| ResolveError::NotFound(id.to_string()))?;
             // Then find child within parent's children
-            let child_paths = self.children.get(&parent.path)?;
+            let child_paths = self.children.get(&parent.path)
+                .ok_or_else(|| ResolveError::NotFound(id.to_string()))?;
             child_paths.iter().find_map(|cp| {
                 let stem = cp.file_stem().and_then(|f| f.to_str())?;
                 if stem.starts_with(child_stem) {
@@ -331,10 +332,10 @@ impl Store {
                 } else {
                     None
                 }
-            })
+            }).ok_or_else(|| ResolveError::NotFound(id.to_string()))
         } else {
-            // Unqualified: existing logic but exclude children
-            self.docs.values().find(|d| {
+            // Unqualified: collect all matches, excluding children
+            let matches: Vec<&DocMeta> = self.docs.values().filter(|d| {
                 if self.parent_of.contains_key(&d.path) {
                     return false;
                 }
@@ -349,7 +350,16 @@ impl Store {
                     d.path.file_name().and_then(|f| f.to_str())
                 };
                 name.map(|n| n.starts_with(id)).unwrap_or(false)
-            })
+            }).collect();
+
+            match matches.len() {
+                0 => Err(ResolveError::NotFound(id.to_string())),
+                1 => Ok(matches[0]),
+                _ => {
+                    let paths: Vec<PathBuf> = matches.iter().map(|d| d.path.clone()).collect();
+                    Err(ResolveError::Ambiguous { id: id.to_string(), matches: paths })
+                }
+            }
         }
     }
 
@@ -474,7 +484,7 @@ impl Store {
 
 }
 
-fn extract_id_from_name(name: &str) -> String {
+pub fn extract_id_from_name(name: &str) -> String {
     let parts: Vec<&str> = name.split('-').collect();
     for (i, part) in parts.iter().enumerate() {
         if part.chars().all(|c| c.is_ascii_digit()) && !part.is_empty() {
@@ -560,6 +570,27 @@ fn title_from_folder_name(name: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[derive(Debug)]
+pub enum ResolveError {
+    NotFound(String),
+    Ambiguous { id: String, matches: Vec<PathBuf> },
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolveError::NotFound(id) => write!(f, "document not found: {}", id),
+            ResolveError::Ambiguous { id, matches } => {
+                writeln!(f, "Ambiguous ID '{}' matches multiple documents:", id)?;
+                for m in matches {
+                    writeln!(f, "  {}", m.display())?;
+                }
+                write!(f, "Specify the full path to show a specific document.")
+            }
+        }
+    }
 }
 
 #[derive(Debug)]

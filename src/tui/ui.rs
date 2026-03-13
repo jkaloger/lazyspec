@@ -273,9 +273,15 @@ fn doc_row_for_node(app: &App, node: &DocListNode, index: usize, dim: bool) -> R
         .map(|doc| doc.tags.clone())
         .unwrap_or_default();
 
+    let display_id = if node.has_duplicate_id {
+        format!("! {}", node.id)
+    } else {
+        node.id.clone()
+    };
+
     let mut cells = vec![tree_cell];
     cells.extend(doc_row_cells(
-        &node.id,
+        &display_id,
         &node.title,
         &node.status,
         &tags,

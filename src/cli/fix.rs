@@ -1,15 +1,43 @@
+use std::collections::HashMap;
 use std::path::Path;
 
+use regex::Regex;
 use serde::Serialize;
 
 use crate::engine::config::Config;
 use crate::engine::document::split_frontmatter;
-use crate::engine::store::Store;
+use crate::engine::refs::REF_PATTERN;
+use crate::engine::store::{extract_id_from_name, Store};
+use crate::engine::template::next_number;
 
 #[derive(Debug, Serialize)]
-struct FixResult {
+struct FixOutput {
+    field_fixes: Vec<FieldFixResult>,
+    conflict_fixes: Vec<ConflictFixResult>,
+}
+
+#[derive(Debug, Serialize)]
+struct FieldFixResult {
     path: String,
     fields_added: Vec<String>,
+    written: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ReferenceUpdate {
+    pub file: String,
+    pub field: String,
+    pub old_value: String,
+    pub new_value: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ConflictFixResult {
+    old_path: String,
+    new_path: String,
+    old_id: String,
+    new_id: String,
+    references_updated: Vec<ReferenceUpdate>,
     written: bool,
 }
 
@@ -23,16 +51,17 @@ pub fn run(
     dry_run: bool,
     json: bool,
 ) -> i32 {
-    let results = collect_results(root, store, config, paths, dry_run);
-    let has_fixes = results.iter().any(|r| !r.fields_added.is_empty());
+    let output = collect_all(root, store, config, paths, dry_run);
+    let has_fixes = !output.field_fixes.iter().all(|r| r.fields_added.is_empty())
+        || !output.conflict_fixes.is_empty();
 
     if json {
-        let output = serde_json::to_string_pretty(&results).unwrap();
-        println!("{}", output);
+        let json_str = serde_json::to_string_pretty(&output).unwrap();
+        println!("{}", json_str);
     } else {
-        let output = format_human(&results, dry_run);
-        if !output.is_empty() {
-            print!("{}", output);
+        let human = format_human(&output, dry_run);
+        if !human.is_empty() {
+            print!("{}", human);
         }
     }
 
@@ -46,8 +75,8 @@ pub fn run_json(
     paths: &[String],
     dry_run: bool,
 ) -> String {
-    let results = collect_results(root, store, config, paths, dry_run);
-    serde_json::to_string_pretty(&results).unwrap()
+    let output = collect_all(root, store, config, paths, dry_run);
+    serde_json::to_string_pretty(&output).unwrap()
 }
 
 pub fn run_human(
@@ -57,35 +86,58 @@ pub fn run_human(
     paths: &[String],
     dry_run: bool,
 ) -> String {
-    let results = collect_results(root, store, config, paths, dry_run);
-    format_human(&results, dry_run)
+    let output = collect_all(root, store, config, paths, dry_run);
+    format_human(&output, dry_run)
 }
 
-fn format_human(results: &[FixResult], dry_run: bool) -> String {
-    let mut output = String::new();
+fn format_human(output: &FixOutput, dry_run: bool) -> String {
+    let mut result = String::new();
 
-    for r in results {
+    for r in &output.field_fixes {
         if r.fields_added.is_empty() {
             continue;
         }
         let fields = r.fields_added.join(", ");
         if dry_run {
-            output.push_str(&format!("Would fix {} (would add: {})\n", r.path, fields));
+            result.push_str(&format!("Would fix {} (would add: {})\n", r.path, fields));
         } else {
-            output.push_str(&format!("Fixed {} (added: {})\n", r.path, fields));
+            result.push_str(&format!("Fixed {} (added: {})\n", r.path, fields));
         }
     }
 
-    output
+    for c in &output.conflict_fixes {
+        if dry_run {
+            result.push_str(&format!("Would rename {} -> {}\n", c.old_path, c.new_path));
+        } else {
+            result.push_str(&format!("Renamed {} -> {}\n", c.old_path, c.new_path));
+        }
+    }
+
+    result
 }
 
-fn collect_results(
+fn collect_all(
     root: &Path,
     store: &Store,
     config: &Config,
     paths: &[String],
     dry_run: bool,
-) -> Vec<FixResult> {
+) -> FixOutput {
+    let field_fixes = collect_field_fixes(root, store, config, paths, dry_run);
+    let conflict_fixes = collect_conflict_fixes(root, store, config, dry_run);
+    FixOutput {
+        field_fixes,
+        conflict_fixes,
+    }
+}
+
+fn collect_field_fixes(
+    root: &Path,
+    store: &Store,
+    config: &Config,
+    paths: &[String],
+    dry_run: bool,
+) -> Vec<FieldFixResult> {
     let file_paths: Vec<String> = if paths.is_empty() {
         store
             .parse_errors()
@@ -102,16 +154,18 @@ fn collect_results(
         .collect()
 }
 
-fn fix_file(root: &Path, config: &Config, path: &str, dry_run: bool) -> anyhow::Result<FixResult> {
+fn fix_file(
+    root: &Path,
+    config: &Config,
+    path: &str,
+    dry_run: bool,
+) -> anyhow::Result<FieldFixResult> {
     let full_path = root.join(path);
     let content = std::fs::read_to_string(&full_path)?;
 
     let (yaml_str, body) = match split_frontmatter(&content) {
         Ok((y, b)) => (y, b),
-        Err(_) => {
-            // No frontmatter at all: treat entire content as body
-            (String::new(), content.clone())
-        }
+        Err(_) => (String::new(), content.clone()),
     };
 
     let mut mapping = if yaml_str.is_empty() {
@@ -146,11 +200,165 @@ fn fix_file(root: &Path, config: &Config, path: &str, dry_run: bool) -> anyhow::
         false
     };
 
-    Ok(FixResult {
+    Ok(FieldFixResult {
         path: path.to_string(),
         fields_added,
         written,
     })
+}
+
+fn collect_conflict_fixes(
+    root: &Path,
+    store: &Store,
+    config: &Config,
+    dry_run: bool,
+) -> Vec<ConflictFixResult> {
+    let mut id_groups: HashMap<String, Vec<&crate::engine::document::DocMeta>> = HashMap::new();
+
+    for doc in store.all_docs() {
+        if doc.virtual_doc {
+            continue;
+        }
+        let filename = doc.path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+        let name = if filename == "index.md" {
+            doc.path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|f| f.to_str())
+                .unwrap_or("")
+        } else {
+            doc.path.file_stem().and_then(|f| f.to_str()).unwrap_or("")
+        };
+        let id = extract_id_from_name(name);
+        id_groups.entry(id).or_default().push(doc);
+    }
+
+    let mut results = Vec::new();
+
+    for (id, mut docs) in id_groups {
+        if docs.len() < 2 {
+            continue;
+        }
+
+        // Sort by date ascending; on tie, use filesystem mtime
+        docs.sort_by(|a, b| {
+            let date_cmp = a.date.cmp(&b.date);
+            if date_cmp != std::cmp::Ordering::Equal {
+                return date_cmp;
+            }
+            let mtime_a = std::fs::metadata(root.join(&a.path))
+                .and_then(|m| m.modified())
+                .ok();
+            let mtime_b = std::fs::metadata(root.join(&b.path))
+                .and_then(|m| m.modified())
+                .ok();
+            mtime_a.cmp(&mtime_b)
+        });
+
+        // First doc wins, rest are losers that need renumbering
+        for loser in &docs[1..] {
+            if let Some(mut fix) = renumber_doc(root, loser, &id, config, dry_run) {
+                let refs = cascade_references(root, store, &fix.old_path, &fix.new_path, dry_run);
+                fix.references_updated = refs;
+                results.push(fix);
+            }
+        }
+    }
+
+    results
+}
+
+fn renumber_doc(
+    root: &Path,
+    doc: &crate::engine::document::DocMeta,
+    old_id: &str,
+    config: &Config,
+    dry_run: bool,
+) -> Option<ConflictFixResult> {
+    let doc_type_prefix = old_id.split('-').next().unwrap_or("");
+
+    // Find the type dir for this prefix
+    let type_def = config.types.iter().find(|t| t.prefix.eq_ignore_ascii_case(doc_type_prefix))?;
+    let type_dir = root.join(&type_def.dir);
+
+    let new_num = next_number(&type_dir, &type_def.prefix);
+    let new_id = format!("{}-{:03}", type_def.prefix, new_num);
+
+    let filename = doc.path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+    let is_subfolder = filename == "index.md";
+
+    let old_path_str = doc.path.display().to_string();
+
+    if is_subfolder {
+        // Subfolder case: rename parent directory
+        let parent_rel = doc.path.parent()?;
+        let parent_name = parent_rel.file_name().and_then(|f| f.to_str())?;
+        let new_dir_name = parent_name.replacen(old_id, &new_id, 1);
+        let new_parent_rel = parent_rel.with_file_name(&new_dir_name);
+        let new_path_str = new_parent_rel.join("index.md").display().to_string();
+
+        let old_abs = root.join(parent_rel);
+        let new_abs = root.join(&new_parent_rel);
+
+        if !dry_run {
+            std::fs::rename(&old_abs, &new_abs).ok()?;
+            // Update frontmatter title in the renamed index.md
+            update_title_in_file(&new_abs.join("index.md"), old_id, &new_id);
+        }
+
+        Some(ConflictFixResult {
+            old_path: old_path_str,
+            new_path: new_path_str,
+            old_id: old_id.to_string(),
+            new_id,
+            references_updated: vec![],
+            written: !dry_run,
+        })
+    } else {
+        // Flat file case: rename the file
+        let stem = doc.path.file_stem().and_then(|f| f.to_str())?;
+        let new_stem = stem.replacen(old_id, &new_id, 1);
+        let new_filename = format!("{}.md", new_stem);
+        let new_rel = doc.path.with_file_name(&new_filename);
+        let new_path_str = new_rel.display().to_string();
+
+        let old_abs = root.join(&doc.path);
+        let new_abs = root.join(&new_rel);
+
+        if !dry_run {
+            std::fs::rename(&old_abs, &new_abs).ok()?;
+            update_title_in_file(&new_abs, old_id, &new_id);
+        }
+
+        Some(ConflictFixResult {
+            old_path: old_path_str,
+            new_path: new_path_str,
+            old_id: old_id.to_string(),
+            new_id,
+            references_updated: vec![],
+            written: !dry_run,
+        })
+    }
+}
+
+fn update_title_in_file(path: &Path, old_id: &str, new_id: &str) {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let (yaml_str, body) = match split_frontmatter(&content) {
+        Ok((y, b)) => (y, b),
+        Err(_) => return,
+    };
+
+    if !yaml_str.contains(old_id) {
+        return;
+    }
+
+    let new_yaml = yaml_str.replace(old_id, new_id);
+    let output = format!("---\n{}\n---\n{}", new_yaml, body);
+    let _ = std::fs::write(path, output);
 }
 
 fn default_for_field(field: &str, path: &str, config: &Config) -> serde_yaml::Value {
@@ -159,9 +367,7 @@ fn default_for_field(field: &str, path: &str, config: &Config) -> serde_yaml::Va
         "type" => serde_yaml::Value::String(type_from_path(path, config)),
         "status" => serde_yaml::Value::String("draft".to_string()),
         "author" => serde_yaml::Value::String(git_author()),
-        "date" => serde_yaml::Value::String(
-            chrono::Utc::now().format("%Y-%m-%d").to_string(),
-        ),
+        "date" => serde_yaml::Value::String(chrono::Utc::now().format("%Y-%m-%d").to_string()),
         "tags" => serde_yaml::Value::Sequence(vec![]),
         _ => serde_yaml::Value::Null,
     }
@@ -173,7 +379,6 @@ fn title_from_filename(path: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("untitled");
 
-    // Strip type prefix like "RFC-001-" or "STORY-002-"
     let stripped = strip_type_prefix(stem);
     let words: Vec<&str> = stripped.split('-').collect();
     if words.is_empty() {
@@ -199,21 +404,18 @@ fn title_from_filename(path: &str) -> String {
 }
 
 fn strip_type_prefix(stem: &str) -> &str {
-    // Match patterns like "RFC-001-", "STORY-002-", "ADR-003-", "ITERATION-001-"
     let bytes = stem.as_bytes();
     let len = bytes.len();
     let mut i = 0;
 
-    // Skip uppercase letters
     while i < len && bytes[i].is_ascii_uppercase() {
         i += 1;
     }
     if i == 0 || i >= len || bytes[i] != b'-' {
         return stem;
     }
-    i += 1; // skip first dash
+    i += 1;
 
-    // Skip digits
     let digit_start = i;
     while i < len && bytes[i].is_ascii_digit() {
         i += 1;
@@ -221,7 +423,7 @@ fn strip_type_prefix(stem: &str) -> &str {
     if i == digit_start || i >= len || bytes[i] != b'-' {
         return stem;
     }
-    i += 1; // skip second dash
+    i += 1;
 
     &stem[i..]
 }
@@ -254,4 +456,103 @@ fn git_author() -> String {
             }
         })
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Update all documents that reference `old_path` so they point to `new_path` instead.
+/// Handles both `related` frontmatter entries and `@ref` body directives.
+pub fn cascade_references(
+    root: &Path,
+    store: &Store,
+    old_path: &str,
+    new_path: &str,
+    dry_run: bool,
+) -> Vec<ReferenceUpdate> {
+    let mut updates = Vec::new();
+
+    for doc in store.all_docs() {
+        let full_path = root.join(&doc.path);
+        let content = match std::fs::read_to_string(&full_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let (yaml_str, body) = match split_frontmatter(&content) {
+            Ok((y, b)) => (y, b),
+            Err(_) => continue,
+        };
+
+        let mut file_updates: Vec<ReferenceUpdate> = Vec::new();
+        let file_str = doc.path.display().to_string();
+
+        // Check related entries
+        let mut yaml_value: serde_yaml::Value = match serde_yaml::from_str(&yaml_str) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let mut frontmatter_changed = false;
+        if let Some(related_seq) = yaml_value
+            .get_mut("related")
+            .and_then(|v| v.as_sequence_mut())
+        {
+            for entry in related_seq.iter_mut() {
+                if let Some(mapping) = entry.as_mapping_mut() {
+                    for (_key, val) in mapping.iter_mut() {
+                        if let Some(s) = val.as_str() {
+                            if s.contains(old_path) {
+                                let new_val = s.replace(old_path, new_path);
+                                file_updates.push(ReferenceUpdate {
+                                    file: file_str.clone(),
+                                    field: "related".to_string(),
+                                    old_value: s.to_string(),
+                                    new_value: new_val.clone(),
+                                });
+                                *val = serde_yaml::Value::String(new_val);
+                                frontmatter_changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check body @ref directives
+        let ref_re = Regex::new(REF_PATTERN).unwrap();
+        let mut new_body = body.clone();
+        let mut body_changed = false;
+
+        for cap in ref_re.captures_iter(&body) {
+            let full_match = cap.get(0).unwrap();
+            let match_str = full_match.as_str();
+            if match_str.contains(old_path) {
+                let replaced = match_str.replace(old_path, new_path);
+                file_updates.push(ReferenceUpdate {
+                    file: file_str.clone(),
+                    field: "body".to_string(),
+                    old_value: match_str.to_string(),
+                    new_value: replaced.clone(),
+                });
+                new_body = new_body.replace(match_str, &replaced);
+                body_changed = true;
+            }
+        }
+
+        if file_updates.is_empty() {
+            continue;
+        }
+
+        if !dry_run && (frontmatter_changed || body_changed) {
+            let final_body = if body_changed { &new_body } else { &body };
+            let new_yaml = match serde_yaml::to_string(&yaml_value) {
+                Ok(y) => y,
+                Err(_) => continue,
+            };
+            let output = format!("---\n{}---\n{}", new_yaml, final_body);
+            let _ = std::fs::write(&full_path, output);
+        }
+
+        updates.extend(file_updates);
+    }
+
+    updates
 }

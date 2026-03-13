@@ -2,7 +2,7 @@ mod common;
 
 use common::TestFixture;
 use lazyspec::engine::document::{DocType, Status};
-use lazyspec::engine::store::Filter;
+use lazyspec::engine::store::{Filter, ResolveError};
 use std::path::PathBuf;
 
 fn setup_fixture() -> TestFixture {
@@ -112,7 +112,7 @@ See code:
     );
 
     let store = fixture.store();
-    let doc = store.resolve_shorthand("RFC-010").unwrap();
+    let doc = store.resolve_shorthand("RFC-010").expect("should resolve");
     let body = store.get_body_raw(&doc.path).unwrap();
     assert!(body.contains("@ref src/main.rs#MyStruct"), "raw body should preserve @ref directives");
 }
@@ -136,7 +136,7 @@ tags: []
     );
 
     let store = fixture.store();
-    let doc = store.resolve_shorthand("RFC-011").unwrap();
+    let doc = store.resolve_shorthand("RFC-011").expect("should resolve");
     let raw = store.get_body_raw(&doc.path).unwrap();
     let default = store.get_body(&doc.path).unwrap();
     assert_eq!(raw, default, "get_body should return the same result as get_body_raw");
@@ -161,7 +161,7 @@ tags: []
     );
 
     let store = fixture.store();
-    let doc = store.resolve_shorthand("RFC-012").unwrap();
+    let doc = store.resolve_shorthand("RFC-012").expect("should resolve");
     let expanded = store.get_body_expanded(&doc.path, 25).unwrap();
     assert!(!expanded.contains("@ref nonexistent/file.rs"), "expanded body should not contain raw @ref");
     assert!(expanded.contains("> [unresolved:"), "expanded body should contain unresolved marker");
@@ -184,7 +184,7 @@ fn store_resolves_shorthand_id() {
     let store = fixture.store();
 
     let doc = store.resolve_shorthand("RFC-001");
-    assert!(doc.is_some());
+    assert!(doc.is_ok());
     assert_eq!(doc.unwrap().title, "Event Sourcing");
 }
 
@@ -331,7 +331,7 @@ tags: []
 
     let store = fixture.store();
     let doc = store.resolve_shorthand("RFC-002");
-    assert!(doc.is_some());
+    assert!(doc.is_ok());
     assert_eq!(doc.unwrap().title, "Folder Feature");
 }
 
@@ -510,7 +510,7 @@ fn store_qualified_shorthand_resolves_child() {
 
     let store = fixture.store();
     let doc = store.resolve_shorthand("RFC-003/appendix");
-    assert!(doc.is_some());
+    assert!(doc.is_ok());
     assert_eq!(doc.unwrap().title, "Appendix");
 }
 
@@ -538,7 +538,7 @@ fn store_unqualified_shorthand_skips_children() {
 
     let store = fixture.store();
     let doc = store.resolve_shorthand("notes");
-    assert!(doc.is_none());
+    assert!(doc.is_err());
 }
 
 #[test]
@@ -613,4 +613,73 @@ fn store_ignores_nested_subdirectories() {
     let store = fixture.store();
     assert_eq!(store.all_docs().len(), 1);
     assert!(store.all_docs().iter().all(|d| d.title != "Hidden"));
+}
+
+#[test]
+fn resolve_shorthand_ambiguous_returns_error() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-020-first.md",
+        "---\ntitle: \"First\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_doc(
+        "docs/adrs/RFC-020-second.md",
+        "---\ntitle: \"Second\"\ntype: adr\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    let result = store.resolve_shorthand("RFC-020");
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        ResolveError::Ambiguous { id, matches } => {
+            assert_eq!(id, "RFC-020");
+            assert_eq!(matches.len(), 2);
+        }
+        ResolveError::NotFound(_) => panic!("expected Ambiguous, got NotFound"),
+    }
+}
+
+#[test]
+fn resolve_shorthand_unique_id_still_works() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-030-unique.md", "Unique Doc", "draft");
+
+    let store = fixture.store();
+    let doc = store.resolve_shorthand("RFC-030");
+    assert!(doc.is_ok());
+    assert_eq!(doc.unwrap().title, "Unique Doc");
+}
+
+#[test]
+fn resolve_shorthand_not_found() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-exists.md", "Exists", "draft");
+
+    let store = fixture.store();
+    let result = store.resolve_shorthand("RFC-999");
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        ResolveError::NotFound(id) => assert_eq!(id, "RFC-999"),
+        ResolveError::Ambiguous { .. } => panic!("expected NotFound, got Ambiguous"),
+    }
+}
+
+#[test]
+fn list_includes_both_duplicate_docs() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-020-first.md",
+        "---\ntitle: \"First\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_doc(
+        "docs/adrs/RFC-020-second.md",
+        "---\ntitle: \"Second\"\ntype: adr\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    let all = store.all_docs();
+    assert_eq!(all.len(), 2);
+    let titles: Vec<&str> = all.iter().map(|d| d.title.as_str()).collect();
+    assert!(titles.contains(&"First"));
+    assert!(titles.contains(&"Second"));
 }
