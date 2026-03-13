@@ -966,16 +966,18 @@ fn draw_agent_dialog(f: &mut Frame, app: &App) {
 
 fn draw_warnings_panel(f: &mut Frame, app: &App) {
     let area = f.area();
-    let errors = app.store.parse_errors();
+    let parse_errors = app.store.parse_errors();
+
+    let total_count = app.total_warnings_count();
 
     let popup_width = 70.min(area.width.saturating_sub(4));
-    let content_height = if errors.is_empty() {
+    let content_height = if total_count == 0 {
         match &app.fix_result {
             Some(output) => (output.lines().count() as u16).max(1) + 2,
             None => 3,
         }
     } else {
-        (errors.len() as u16) * 2 + 2
+        (total_count as u16) * 2 + 2
     };
     let popup_height = (content_height + 2).min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(popup_width)) / 2;
@@ -990,7 +992,7 @@ fn draw_warnings_panel(f: &mut Frame, app: &App) {
         .border_style(Style::default().fg(Color::Yellow))
         .title(" Warnings (f: fix, q/w/Esc: close) ");
 
-    if errors.is_empty() {
+    if total_count == 0 {
         let message = match &app.fix_result {
             Some(output) => output.clone(),
             None => "  No warnings".to_string(),
@@ -1003,7 +1005,7 @@ fn draw_warnings_panel(f: &mut Frame, app: &App) {
         return;
     }
 
-    let items: Vec<ListItem> = errors
+    let mut items: Vec<ListItem> = parse_errors
         .iter()
         .map(|err| {
             let lines = vec![
@@ -1019,6 +1021,34 @@ fn draw_warnings_panel(f: &mut Frame, app: &App) {
             ListItem::new(lines)
         })
         .collect();
+
+    for msg in &app.validation_errors {
+        let lines = vec![
+            Line::from(Span::styled(
+                format!("  error: {}", msg),
+                Style::default().fg(Color::Red),
+            )),
+            Line::from(Span::styled(
+                "    validation error".to_string(),
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        items.push(ListItem::new(lines));
+    }
+
+    for msg in &app.validation_warnings {
+        let lines = vec![
+            Line::from(Span::styled(
+                format!("  warn: {}", msg),
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::styled(
+                "    validation warning".to_string(),
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        items.push(ListItem::new(lines));
+    }
 
     let list = List::new(items)
         .block(block)
