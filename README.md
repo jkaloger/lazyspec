@@ -19,13 +19,13 @@ Lazyspec manages project documentation as version-controlled markdown files with
 - Every command supports `--json` output for automation and agent integration.
 - Define your own types, templates, and directory layout in `.lazyspec.toml`.
 
-## install
+## Install
 
 ```sh
 cargo install --git https://github.com/jkaloger/lazyspec
 ```
 
-### from source
+### From Source
 
 ```sh
 git clone https://github.com/jkaloger/lazyspec
@@ -33,11 +33,11 @@ cd lazyspec
 cargo install --path .
 ```
 
-## usage
+## Usage
 
-### quick start
+### Quick Start
 
-initialise a new project, then launch the TUI:
+Initialise a new project, then launch the TUI:
 
 ```sh
 lazyspec init
@@ -52,7 +52,8 @@ lazyspec
 
 Running `lazyspec` with no subcommand opens the interactive dashboard. It provides fuzzy search, markdown preview, document creation, and live file watching -- documents update automatically when changed on disk.
 
-### CLI
+<details>
+<summary><h3>CLI</h3></summary>
 
 All document management is available as subcommands. Most accept `--json` for machine-readable output.
 
@@ -74,14 +75,17 @@ All document management is available as subcommands. Most accept `--json` for ma
 | `validate [--warnings]`              | Check document integrity and link consistency                         |
 | `fix [paths] [--dry-run]`            | Fix documents with broken or incomplete frontmatter                   |
 
-### `show` flags
+#### `show` Flags
 
 | Flag                        | Description                                      |
 | --------------------------- | ------------------------------------------------ |
 | `-e`, `--expand-references` | Expand `@ref` directives into fenced code blocks |
 | `--max-ref-lines N`         | Max lines per expanded ref (default: 25)         |
 
-### `@ref` syntax
+</details>
+
+<details>
+<summary><h3><code>@ref</code> Syntax</h3></summary>
 
 Documents can embed references to source code using `@ref` directives. By default, `lazyspec show` renders them as-is. Pass `-e` to expand them inline.
 
@@ -119,7 +123,10 @@ Unresolvable refs render as:
 > [unresolved: src/engine/store.rs#Store]
 ```
 
-## configuration
+</details>
+
+<details>
+<summary><h2>Configuration</h2></summary>
 
 `lazyspec init` creates a `.lazyspec.toml` in your project root with four built-in document types:
 
@@ -137,7 +144,7 @@ dir = ".lazyspec/templates"
 pattern = "{type}-{n:03}-{title}.md"
 ```
 
-### custom types
+### Custom Types
 
 Instead of `[directories]`, you can define types explicitly with `[[types]]`. This lets you rename the defaults, add new types, or set custom prefixes and icons used in the TUI.
 
@@ -157,7 +164,7 @@ prefix = "SPEC"
 icon = "◆"
 ```
 
-### validation rules
+### Validation Rules
 
 Validation rules define structural constraints between document types. Two shapes are supported:
 
@@ -181,9 +188,11 @@ require = "any-relation"
 severity = "error"
 ```
 
-### templates
+### Templates
 
 Place markdown templates in the templates directory (`.lazyspec/templates/` by default). When creating a document, lazyspec uses the template matching the document type name (e.g. `rfc.md`, `story.md`).
+
+</details>
 
 ## Development
 
