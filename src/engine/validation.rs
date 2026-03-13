@@ -1,5 +1,6 @@
 use crate::engine::config::{Config, Severity, ValidationRule};
 use crate::engine::document::{DocType, RelationType, Status};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug)]
@@ -38,6 +39,10 @@ pub enum ValidationIssue {
     UpwardOrphanedAcceptance {
         path: PathBuf,
         parent: PathBuf,
+    },
+    DuplicateId {
+        id: String,
+        paths: Vec<PathBuf>,
     },
 }
 
@@ -125,6 +130,10 @@ impl std::fmt::Display for ValidationIssue {
                     path.display(),
                     parent.display()
                 )
+            }
+            ValidationIssue::DuplicateId { id, paths } => {
+                let path_strs: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+                write!(f, "duplicate id: {} ({})", id, path_strs.join(", "))
             }
         }
     }
@@ -336,6 +345,24 @@ pub fn validate_full(store: &super::store::Store, config: &Config) -> Validation
                     }
                 }
             }
+        }
+    }
+
+    // Duplicate ID check
+    let mut id_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for (path, meta) in &store.docs {
+        if meta.validate_ignore {
+            continue;
+        }
+        if meta.id.is_empty() {
+            continue;
+        }
+        id_map.entry(meta.id.clone()).or_default().push(path.clone());
+    }
+    for (id, mut paths) in id_map {
+        if paths.len() > 1 {
+            paths.sort();
+            result.errors.push(ValidationIssue::DuplicateId { id, paths });
         }
     }
 

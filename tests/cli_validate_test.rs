@@ -1,6 +1,7 @@
 mod common;
 
 use lazyspec::engine::validation::ValidationIssue;
+use std::path::PathBuf;
 
 #[test]
 fn validate_catches_broken_link() {
@@ -86,4 +87,102 @@ fn validate_passes_linked_iteration() {
     let result = store.validate_full(&fixture.config());
 
     assert!(result.errors.is_empty());
+}
+
+#[test]
+fn validate_catches_duplicate_ids() {
+    let fixture = common::TestFixture::new();
+    fixture.write_rfc("RFC-020-foo.md", "Foo RFC", "draft");
+    fixture.write_rfc("RFC-020-bar.md", "Bar RFC", "draft");
+
+    let store = fixture.store();
+    let result = store.validate_full(&fixture.config());
+
+    let dups: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|e| matches!(e, ValidationIssue::DuplicateId { .. }))
+        .collect();
+    assert_eq!(dups.len(), 1);
+    match &dups[0] {
+        ValidationIssue::DuplicateId { id, paths } => {
+            assert_eq!(id, "RFC-020");
+            assert_eq!(paths.len(), 2);
+            assert!(paths.contains(&PathBuf::from("docs/rfcs/RFC-020-foo.md")));
+            assert!(paths.contains(&PathBuf::from("docs/rfcs/RFC-020-bar.md")));
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn validate_duplicate_id_json_output() {
+    let fixture = common::TestFixture::new();
+    fixture.write_rfc("RFC-030-alpha.md", "Alpha", "draft");
+    fixture.write_rfc("RFC-030-beta.md", "Beta", "draft");
+
+    let store = fixture.store();
+    let output = lazyspec::cli::validate::run_json(&store, &fixture.config());
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    let errors = parsed["errors"].as_array().unwrap();
+    let has_dup = errors.iter().any(|e| {
+        e.as_str()
+            .map(|s| s.starts_with("duplicate id: RFC-030"))
+            .unwrap_or(false)
+    });
+    assert!(has_dup, "JSON output should contain duplicate id error");
+}
+
+#[test]
+fn validate_duplicate_id_human_output() {
+    let fixture = common::TestFixture::new();
+    fixture.write_rfc("RFC-040-one.md", "One", "draft");
+    fixture.write_rfc("RFC-040-two.md", "Two", "draft");
+
+    let store = fixture.store();
+    let output = lazyspec::cli::validate::run_human(&store, &fixture.config(), true);
+
+    assert!(
+        output.contains("duplicate id: RFC-040"),
+        "Human output should contain duplicate id line, got: {}",
+        output
+    );
+}
+
+#[test]
+fn validate_no_duplicate_ids_when_unique() {
+    let fixture = common::TestFixture::new();
+    fixture.write_rfc("RFC-050-first.md", "First", "draft");
+    fixture.write_rfc("RFC-051-second.md", "Second", "draft");
+
+    let store = fixture.store();
+    let result = store.validate_full(&fixture.config());
+
+    let dups: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|e| matches!(e, ValidationIssue::DuplicateId { .. }))
+        .collect();
+    assert!(dups.is_empty());
+}
+
+#[test]
+fn validate_ignore_excludes_from_duplicate_check() {
+    let fixture = common::TestFixture::new();
+    fixture.write_rfc("RFC-060-real.md", "Real", "draft");
+    fixture.write_doc(
+        "docs/rfcs/RFC-060-ignored.md",
+        "---\ntitle: \"Ignored\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nvalidate-ignore: true\n---\n",
+    );
+
+    let store = fixture.store();
+    let result = store.validate_full(&fixture.config());
+
+    let dups: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|e| matches!(e, ValidationIssue::DuplicateId { .. }))
+        .collect();
+    assert!(dups.is_empty(), "validate_ignore docs should be excluded from duplicate ID check");
 }

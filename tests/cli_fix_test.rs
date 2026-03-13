@@ -138,11 +138,191 @@ fn fix_json_output() {
     );
 
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-    let arr = parsed.as_array().unwrap();
+    let obj = parsed.as_object().unwrap();
+    assert!(obj.contains_key("field_fixes"));
+    assert!(obj.contains_key("conflict_fixes"));
+    let arr = obj["field_fixes"].as_array().unwrap();
     assert_eq!(arr.len(), 1);
     assert!(arr[0]["path"].is_string());
     assert!(arr[0]["fields_added"].as_array().unwrap().len() > 0);
     assert!(arr[0]["written"].is_boolean());
+}
+
+#[test]
+fn fix_conflict_older_wins() {
+    let fixture = common::TestFixture::new();
+    // Two docs with same ID (RFC-001), different dates
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-older.md",
+        "---\ntitle: \"RFC-001 Older\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2025-01-01\ntags: []\n---\n",
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-newer.md",
+        "---\ntitle: \"RFC-001 Newer\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2026-06-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::fix::run_json(
+        fixture.root(),
+        &store,
+        &fixture.config(),
+        &[],
+        false,
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let conflicts = parsed["conflict_fixes"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 1);
+
+    let fix = &conflicts[0];
+    // The newer doc should be renamed (older wins)
+    assert!(fix["old_id"].as_str().unwrap() == "RFC-001");
+    assert!(fix["new_id"].as_str().unwrap() != "RFC-001");
+    assert!(fix["written"].as_bool().unwrap());
+
+    // The older doc should still exist at its original path
+    assert!(fixture.root().join("docs/rfcs/RFC-001-older.md").exists());
+    // The newer doc should have been renamed
+    assert!(!fixture.root().join("docs/rfcs/RFC-001-newer.md").exists());
+}
+
+#[test]
+fn fix_conflict_dry_run_no_side_effects() {
+    let fixture = common::TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-alpha.md",
+        "---\ntitle: \"RFC-001 Alpha\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2025-01-01\ntags: []\n---\n",
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-beta.md",
+        "---\ntitle: \"RFC-001 Beta\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2026-06-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::fix::run_json(
+        fixture.root(),
+        &store,
+        &fixture.config(),
+        &[],
+        true,
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let conflicts = parsed["conflict_fixes"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert!(!conflicts[0]["written"].as_bool().unwrap());
+
+    // Both files should still exist
+    assert!(fixture.root().join("docs/rfcs/RFC-001-alpha.md").exists());
+    assert!(fixture.root().join("docs/rfcs/RFC-001-beta.md").exists());
+}
+
+#[test]
+fn fix_no_conflicts_empty_array() {
+    let fixture = common::TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-unique.md",
+        "---\ntitle: \"RFC-001 Unique\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2025-01-01\ntags: []\n---\n",
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-002-other.md",
+        "---\ntitle: \"RFC-002 Other\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2025-01-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::fix::run_json(
+        fixture.root(),
+        &store,
+        &fixture.config(),
+        &[],
+        false,
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let conflicts = parsed["conflict_fixes"].as_array().unwrap();
+    assert!(conflicts.is_empty());
+}
+
+#[test]
+fn fix_conflict_subfolder_rename() {
+    let fixture = common::TestFixture::new();
+    // First RFC-001 as flat file (older)
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-flat.md",
+        "---\ntitle: \"RFC-001 Flat\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2025-01-01\ntags: []\n---\n",
+    );
+    // Second RFC-001 as subfolder (newer)
+    fixture.write_subfolder_doc(
+        "docs/rfcs/RFC-001-folder",
+        "---\ntitle: \"RFC-001 Folder\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2026-06-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::fix::run_json(
+        fixture.root(),
+        &store,
+        &fixture.config(),
+        &[],
+        false,
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let conflicts = parsed["conflict_fixes"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert!(conflicts[0]["written"].as_bool().unwrap());
+
+    // Flat file should remain
+    assert!(fixture.root().join("docs/rfcs/RFC-001-flat.md").exists());
+    // Original subfolder should be gone
+    assert!(!fixture.root().join("docs/rfcs/RFC-001-folder").exists());
+}
+
+#[test]
+fn fix_conflict_human_output_rename_message() {
+    let fixture = common::TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-first.md",
+        "---\ntitle: \"RFC-001 First\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2025-01-01\ntags: []\n---\n",
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-second.md",
+        "---\ntitle: \"RFC-001 Second\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2026-06-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::fix::run_human(
+        fixture.root(),
+        &store,
+        &fixture.config(),
+        &[],
+        false,
+    );
+
+    assert!(output.contains("Renamed"));
+}
+
+#[test]
+fn fix_conflict_human_output_dry_run_would_rename() {
+    let fixture = common::TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-first.md",
+        "---\ntitle: \"RFC-001 First\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2025-01-01\ntags: []\n---\n",
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-second.md",
+        "---\ntitle: \"RFC-001 Second\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2026-06-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::fix::run_human(
+        fixture.root(),
+        &store,
+        &fixture.config(),
+        &[],
+        true,
+    );
+
+    assert!(output.contains("Would rename"));
 }
 
 #[test]

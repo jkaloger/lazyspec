@@ -44,6 +44,6 @@ fn filter_by_tag() {
 fn resolve_shorthand_id() {
     let (_fixture, store) = setup();
     let doc = store.resolve_shorthand("RFC-001");
-    assert!(doc.is_some());
+    assert!(doc.is_ok());
     assert_eq!(doc.unwrap().title, "Auth Redesign");
 }

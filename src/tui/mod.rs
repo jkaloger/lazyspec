@@ -67,6 +67,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                         app.expanded_body_cache.clear();
                         app.disk_cache.clear();
                     }
+                    app.refresh_validation(config);
                 }
                 _ => {}
             }
@@ -91,6 +92,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(store, config);
+    app.refresh_validation(config);
 
     let (tx, rx) = crossbeam_channel::unbounded();
     app.event_tx = tx.clone();
@@ -155,6 +157,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             if let Ok(relative) = path.strip_prefix(&root) {
                 let _ = app.store.reload_file(&root, relative);
             }
+            app.refresh_validation(config);
         }
 
         #[cfg(feature = "agent")]
@@ -175,6 +178,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             input_paused.store(false, Ordering::Relaxed);
             let root = app.store.root().to_path_buf();
             app.store = Store::load(&root, config)?;
+            app.refresh_validation(config);
         }
 
         if app.fix_request {
@@ -186,6 +190,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 .collect();
             let output = crate::cli::fix::run_human(&root, &app.store, config, &paths, false);
             app.store = Store::load(&root, config)?;
+            app.refresh_validation(config);
             app.fix_result = if output.is_empty() { None } else { Some(output) };
             app.warnings_selected = 0;
         }

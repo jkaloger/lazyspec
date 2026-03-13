@@ -1,8 +1,9 @@
 use crate::cli::json::doc_to_json_with_family;
 use crate::cli::style::{bold, dim, separator, styled_status};
-use crate::engine::store::Store;
+use crate::engine::store::{ResolveError, Store};
 use anyhow::Result;
 use console::colors_enabled;
+use std::path::Path;
 
 fn title_box(title: &str) -> String {
     if !colors_enabled() {
@@ -17,10 +18,28 @@ fn title_box(title: &str) -> String {
     format!("{}\n{}\n{}", top, mid, bot)
 }
 
+fn resolve_shorthand_or_path<'a>(store: &'a Store, id: &str) -> std::result::Result<&'a crate::engine::document::DocMeta, ResolveError> {
+    if let Some(doc) = store.get(Path::new(id)) {
+        return Ok(doc);
+    }
+    store.resolve_shorthand(id)
+}
+
 pub fn run(store: &Store, id: &str, expand: bool, max_ref_lines: usize) -> Result<()> {
-    let doc = store
-        .resolve_shorthand(id)
-        .ok_or_else(|| anyhow::anyhow!("document not found: {}", id))?;
+    let doc = match resolve_shorthand_or_path(store, id) {
+        Ok(doc) => doc,
+        Err(ResolveError::Ambiguous { id, matches }) => {
+            eprintln!("Ambiguous ID '{}' matches multiple documents:", id);
+            for m in &matches {
+                eprintln!("  {}", m.display());
+            }
+            eprintln!("Specify the full path to show a specific document.");
+            return Ok(());
+        }
+        Err(ResolveError::NotFound(id)) => {
+            return Err(anyhow::anyhow!("document not found: {}", id));
+        }
+    };
 
     println!("{}", title_box(&doc.title));
     println!(
@@ -73,9 +92,21 @@ pub fn run(store: &Store, id: &str, expand: bool, max_ref_lines: usize) -> Resul
 }
 
 pub fn run_json(store: &Store, id: &str, expand: bool, max_ref_lines: usize) -> Result<String> {
-    let doc = store
-        .resolve_shorthand(id)
-        .ok_or_else(|| anyhow::anyhow!("document not found: {}", id))?;
+    let doc = match resolve_shorthand_or_path(store, id) {
+        Ok(doc) => doc,
+        Err(ResolveError::Ambiguous { id, matches }) => {
+            let paths: Vec<String> = matches.iter().map(|m| m.to_string_lossy().to_string()).collect();
+            let error = serde_json::json!({
+                "error": "ambiguous_id",
+                "id": id,
+                "ambiguous_matches": paths,
+            });
+            return Ok(serde_json::to_string_pretty(&error)?);
+        }
+        Err(ResolveError::NotFound(id)) => {
+            return Err(anyhow::anyhow!("document not found: {}", id));
+        }
+    };
 
     let mut json = doc_to_json_with_family(doc, store);
     let body = if expand {

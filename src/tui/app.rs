@@ -169,6 +169,7 @@ pub struct DocListNode {
     pub depth: usize,
     pub is_parent: bool,
     pub is_virtual: bool,
+    pub has_duplicate_id: bool,
 }
 
 pub struct DeleteConfirm {
@@ -310,6 +311,8 @@ pub struct App {
     pub doc_tree: Vec<DocListNode>,
     pub show_warnings: bool,
     pub warnings_selected: usize,
+    pub validation_errors: Vec<String>,
+    pub validation_warnings: Vec<String>,
     pub fix_request: bool,
     pub fix_result: Option<String>,
     pub doc_list_offset: usize,
@@ -375,6 +378,8 @@ impl App {
             doc_tree: Vec::new(),
             show_warnings: false,
             warnings_selected: 0,
+            validation_errors: Vec::new(),
+            validation_warnings: Vec::new(),
             fix_request: false,
             fix_result: None,
             doc_list_offset: 0,
@@ -392,6 +397,12 @@ impl App {
         };
         app.build_doc_tree();
         app
+    }
+
+    pub fn refresh_validation(&mut self, config: &Config) {
+        let result = crate::engine::validation::validate_full(&self.store, config);
+        self.validation_errors = result.errors.iter().map(|e| e.to_string()).collect();
+        self.validation_warnings = result.warnings.iter().map(|e| e.to_string()).collect();
     }
 
     pub fn cycle_mode(&mut self) {
@@ -436,6 +447,14 @@ impl App {
         let mut sorted: Vec<&DocMeta> = docs.into_iter().collect();
         sorted.sort_by(|a, b| a.path.cmp(&b.path));
 
+        // Count occurrences of each ID (excluding children) to detect duplicates
+        let mut id_counts: HashMap<String, usize> = HashMap::new();
+        for doc in &sorted {
+            if self.store.parent_of(&doc.path).is_none() {
+                *id_counts.entry(doc.id.clone()).or_insert(0) += 1;
+            }
+        }
+
         let mut tree = Vec::new();
 
         for doc in &sorted {
@@ -445,6 +464,7 @@ impl App {
 
             let children = self.store.children_of(&doc.path);
             let is_parent = !children.is_empty();
+            let has_duplicate_id = id_counts.get(&doc.id).copied().unwrap_or(0) > 1;
 
             tree.push(DocListNode {
                 path: doc.path.clone(),
@@ -455,6 +475,7 @@ impl App {
                 depth: 0,
                 is_parent,
                 is_virtual: doc.virtual_doc,
+                has_duplicate_id,
             });
 
             if is_parent && self.is_expanded(&doc.path) {
@@ -474,6 +495,7 @@ impl App {
                         depth: 1,
                         is_parent: false,
                         is_virtual: child.virtual_doc,
+                        has_duplicate_id: false,
                     });
                 }
             }
@@ -1210,8 +1232,14 @@ impl App {
         }
     }
 
+    pub fn total_warnings_count(&self) -> usize {
+        self.store.parse_errors().len()
+            + self.validation_errors.len()
+            + self.validation_warnings.len()
+    }
+
     pub fn warnings_move_down(&mut self) {
-        let len = self.store.parse_errors().len();
+        let len = self.total_warnings_count();
         if len > 0 && self.warnings_selected < len - 1 {
             self.warnings_selected += 1;
         }
@@ -1797,7 +1825,7 @@ impl App {
             };
 
             let doc = self.store.resolve_shorthand(&shorthand)
-                .ok_or_else(|| anyhow!("Cannot resolve: {}", shorthand))?;
+                .map_err(|_| anyhow!("Cannot resolve: {}", shorthand))?;
             results.push((rel_type, doc.path.clone()));
         }
         Ok(results)
@@ -1819,6 +1847,7 @@ mod tests {
             depth: 0,
             is_parent: false,
             is_virtual: false,
+            has_duplicate_id: false,
         }
     }
 
@@ -1871,6 +1900,8 @@ mod tests {
             doc_tree: (0..doc_count).map(make_dummy_node).collect(),
             show_warnings: false,
             warnings_selected: 0,
+            validation_errors: Vec::new(),
+            validation_warnings: Vec::new(),
             fix_request: false,
             fix_result: None,
             doc_list_offset: 0,
@@ -2062,5 +2093,76 @@ mod tests {
         app.selected_doc = 2;
         app.half_page_up(20);
         assert_eq!(app.selected_doc, 0);
+    }
+
+    #[test]
+    fn refresh_validation_populates_errors_for_duplicate_ids() {
+        use crate::engine::config::Config;
+        use crate::engine::document::DocMeta;
+        use chrono::Utc;
+
+        let mut store = Store {
+            root: PathBuf::from("."),
+            docs: HashMap::new(),
+            forward_links: HashMap::new(),
+            reverse_links: HashMap::new(),
+            children: HashMap::new(),
+            parent_of: HashMap::new(),
+            parse_errors: Vec::new(),
+        };
+
+        let meta_a = DocMeta {
+            path: PathBuf::from("docs/rfcs/RFC-001.md"),
+            title: "First".to_string(),
+            doc_type: DocType::new("rfc"),
+            status: Status::Draft,
+            author: "test".to_string(),
+            date: Utc::now().date_naive(),
+            tags: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            id: "RFC-001".to_string(),
+        };
+        let meta_b = DocMeta {
+            path: PathBuf::from("docs/rfcs/RFC-001-dup.md"),
+            title: "Duplicate".to_string(),
+            doc_type: DocType::new("rfc"),
+            status: Status::Draft,
+            author: "test".to_string(),
+            date: Utc::now().date_naive(),
+            tags: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            id: "RFC-001".to_string(),
+        };
+
+        store.docs.insert(meta_a.path.clone(), meta_a);
+        store.docs.insert(meta_b.path.clone(), meta_b);
+
+        let config = Config::default();
+        let mut app = make_test_app(0);
+        app.store = store;
+        app.refresh_validation(&config);
+
+        assert!(
+            !app.validation_errors.is_empty(),
+            "expected validation errors for duplicate IDs"
+        );
+        assert!(
+            app.validation_errors.iter().any(|e| e.contains("duplicate id")),
+            "expected a 'duplicate id' error, got: {:?}",
+            app.validation_errors
+        );
+    }
+
+    #[test]
+    fn total_warnings_count_includes_all_sources() {
+        let mut app = make_test_app(0);
+        app.validation_errors = vec!["err1".to_string(), "err2".to_string()];
+        app.validation_warnings = vec!["warn1".to_string()];
+
+        assert_eq!(app.total_warnings_count(), 3);
     }
 }
