@@ -92,6 +92,12 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(store, config);
+    app.git_branch = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
     app.refresh_validation(config);
 
     let (tx, rx) = crossbeam_channel::unbounded();

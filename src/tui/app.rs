@@ -298,6 +298,7 @@ pub struct App {
     #[cfg(feature = "agent")]
     pub agent_spawner: AgentSpawner,
     pub view_mode: ViewMode,
+    pub git_branch: Option<String>,
     pub graph_nodes: Vec<GraphNode>,
     pub graph_selected: usize,
     pub editor_request: Option<PathBuf>,
@@ -365,6 +366,7 @@ impl App {
             #[cfg(feature = "agent")]
             agent_spawner: AgentSpawner::new(),
             view_mode: ViewMode::Types,
+            git_branch: None,
             graph_nodes: Vec::new(),
             graph_selected: 0,
             editor_request: None,
@@ -1887,6 +1889,7 @@ mod tests {
             #[cfg(feature = "agent")]
             agent_spawner: AgentSpawner::new(),
             view_mode: ViewMode::Types,
+            git_branch: None,
             graph_nodes: Vec::new(),
             graph_selected: 0,
             editor_request: None,

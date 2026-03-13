@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap},
@@ -7,6 +7,8 @@ use ratatui::{
 };
 
 use crate::engine::document::{DocMeta, RelationType, Status};
+#[cfg(feature = "agent")]
+use ratatui::layout::Alignment;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
 use crate::tui::app::{App, DocListNode, FilterField, FormField, PreviewTab, ViewMode};
@@ -96,7 +98,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
         .split(f.area());
 
     let title = Line::from(vec![Span::styled(
@@ -107,14 +113,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     )]);
     f.render_widget(Paragraph::new(title), outer[0]);
 
-    let mode_indicator = Line::from(vec![Span::styled(
-        format!("[{}] ` to cycle ", app.view_mode.name()),
-        Style::default().fg(Color::DarkGray),
-    )]);
-    f.render_widget(
-        Paragraph::new(mode_indicator).alignment(Alignment::Right),
-        outer[0],
-    );
 
     match app.view_mode {
         ViewMode::Types => {
@@ -139,6 +137,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ViewMode::Agents => draw_agents_screen(f, app, outer[1]),
     }
 
+    draw_status_bar(f, app, outer[2]);
+
     if app.delete_confirm.active {
         draw_delete_confirm(f, app);
     }
@@ -159,6 +159,87 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_help {
         draw_help_overlay(f);
     }
+}
+
+fn extract_doc_id(path: &std::path::Path) -> String {
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let parts: Vec<&str> = stem.splitn(3, '-').collect();
+    if parts.len() >= 2 {
+        format!("{}-{}", parts[0], parts[1])
+    } else {
+        stem.to_string()
+    }
+}
+
+fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
+    let mode = app.view_mode.name();
+    let help = "? for help";
+    let sep = " │ ";
+    let width = area.width as usize;
+
+    let branch_text = app.git_branch.as_deref().unwrap_or("");
+    let branch_len = if branch_text.is_empty() { 0 } else { sep.len() + branch_text.len() };
+
+    let breadcrumb = app.selected_doc_meta().and_then(|doc| {
+        let fwd = app.store.forward_links.get(&doc.path)?;
+        let parent_path = fwd.iter().find_map(|(rel, target)| {
+            if *rel == RelationType::Implements { Some(target) } else { None }
+        })?;
+        let parent_id = extract_doc_id(parent_path);
+        let doc_id = extract_doc_id(&doc.path);
+        Some(format!("{parent_id} > {doc_id}"))
+    });
+    let breadcrumb_len = breadcrumb.as_ref().map_or(0, |b| b.len());
+
+    #[cfg(feature = "agent")]
+    let is_agents = matches!(app.view_mode, ViewMode::Agents);
+    #[cfg(not(feature = "agent"))]
+    let is_agents = false;
+
+    let agent_hints = "e: open  r: resume  backtick: switch view";
+    let right_text_len = if is_agents {
+        sep.len() + agent_hints.len() + 1
+    } else {
+        sep.len() + help.len() + 1
+    };
+    let left_part_len = format!(" {mode}{sep}").len() + branch_len;
+    let padding = width.saturating_sub(left_part_len + right_text_len + breadcrumb_len);
+
+    let mut spans = vec![
+        Span::styled(format!(" {mode}"), Style::default().fg(Color::Cyan)),
+        Span::styled(sep, Style::default().fg(Color::DarkGray)),
+    ];
+
+    if !branch_text.is_empty() {
+        spans.push(Span::styled(branch_text.to_string(), Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
+    }
+
+    let half_padding = padding / 2;
+    let remaining_padding = padding - half_padding;
+
+    if let Some(ref bc) = breadcrumb {
+        spans.push(Span::raw(" ".repeat(half_padding)));
+        spans.push(Span::styled(bc.clone(), Style::default().fg(Color::White)));
+        spans.push(Span::raw(" ".repeat(remaining_padding)));
+    } else {
+        spans.push(Span::raw(" ".repeat(padding)));
+    }
+
+    spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
+    if is_agents {
+        spans.push(Span::styled("e", Style::default().fg(Color::Cyan)));
+        spans.push(Span::styled(": open  ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled("r", Style::default().fg(Color::Cyan)));
+        spans.push(Span::styled(": resume  ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled("backtick", Style::default().fg(Color::Cyan)));
+        spans.push(Span::styled(": switch view ", Style::default().fg(Color::DarkGray)));
+    } else {
+        spans.push(Span::styled(format!("{help} "), Style::default().fg(Color::DarkGray)));
+    }
+
+    let line = Line::from(spans);
+    f.render_widget(Paragraph::new(line), area);
 }
 
 fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
@@ -1277,14 +1358,6 @@ fn draw_filters_mode(f: &mut Frame, app: &mut App, area: Rect) {
 
 #[cfg(feature = "agent")]
 fn draw_agents_screen(f: &mut Frame, app: &App, area: Rect) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
-        .split(area);
-
-    let main_area = layout[0];
-    let footer_area = layout[1];
-
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1296,7 +1369,7 @@ fn draw_agents_screen(f: &mut Frame, app: &App, area: Rect) {
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center)
             .block(block);
-        f.render_widget(paragraph, main_area);
+        f.render_widget(paragraph, area);
     } else {
         let rows: Vec<Row> = app
             .agent_spawner
@@ -1335,21 +1408,8 @@ fn draw_agents_screen(f: &mut Frame, app: &App, area: Rect) {
             .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
         let mut state = TableState::default().with_selected(Some(app.agent_selected_index));
-        f.render_stateful_widget(table, main_area, &mut state);
+        f.render_stateful_widget(table, area, &mut state);
     }
-
-    let footer = Line::from(vec![
-        Span::styled("e", Style::default().fg(Color::Cyan)),
-        Span::raw(": open document  "),
-        Span::styled("r", Style::default().fg(Color::Cyan)),
-        Span::raw(": resume session  "),
-        Span::styled("`", Style::default().fg(Color::Cyan)),
-        Span::raw(": switch view"),
-    ]);
-    f.render_widget(
-        Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
-        footer_area,
-    );
 }
 
 fn draw_metrics_skeleton(f: &mut Frame, area: Rect) {
