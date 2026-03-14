@@ -44,7 +44,7 @@ fn setup_parent_with_children() -> (TestFixture, App) {
     fixture.write_child_doc("docs/rfcs/RFC-001-parent", "child-b.md", CHILD_B_FRONTMATTER);
 
     let store = fixture.store();
-    let app = App::new(store, &fixture.config());
+    let app = App::new(store, &fixture.config(), lazyspec::tui::terminal_caps::TerminalImageProtocol::Unsupported);
     (fixture, app)
 }
 
@@ -87,7 +87,7 @@ fn test_standalone_documents_unaffected() {
     fixture.write_child_doc("docs/rfcs/RFC-001-parent", "child-a.md", CHILD_A_FRONTMATTER);
 
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config());
+    let mut app = App::new(store, &fixture.config(), lazyspec::tui::terminal_caps::TerminalImageProtocol::Unsupported);
 
     // Collapsed: parent + standalone, both at depth 0
     assert_eq!(app.doc_tree.len(), 2);
@@ -121,7 +121,7 @@ fn test_virtual_parent_rendering() {
     fixture.write_child_doc("docs/rfcs/RFC-002-virtual", "part-two.md", CHILD_B_FRONTMATTER);
 
     let store = fixture.store();
-    let app = App::new(store, &fixture.config());
+    let app = App::new(store, &fixture.config(), lazyspec::tui::terminal_caps::TerminalImageProtocol::Unsupported);
 
     // Virtual parent should exist
     assert_eq!(app.doc_tree.len(), 1);

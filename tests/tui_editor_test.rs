@@ -40,7 +40,7 @@ fn e_key_sets_editor_request_in_types_mode() {
     fixture.write_rfc("RFC-001-auth.md", "Auth RFC", "draft");
 
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config());
+    let mut app = App::new(store, &fixture.config(), lazyspec::tui::terminal_caps::TerminalImageProtocol::Unsupported);
 
     assert_eq!(app.view_mode, ViewMode::Types);
     app.handle_key(
@@ -71,7 +71,7 @@ fn e_key_sets_editor_request_in_graph_mode() {
     );
 
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config());
+    let mut app = App::new(store, &fixture.config(), lazyspec::tui::terminal_caps::TerminalImageProtocol::Unsupported);
 
     // Cycle to Graph mode: Types -> Filters -> Metrics -> Graph
     app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
@@ -97,7 +97,7 @@ fn e_key_sets_editor_request_in_graph_mode() {
 fn e_key_noop_when_no_document_selected() {
     let fixture = TestFixture::new();
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config());
+    let mut app = App::new(store, &fixture.config(), lazyspec::tui::terminal_caps::TerminalImageProtocol::Unsupported);
 
     app.handle_key(
         KeyCode::Char('e'),
@@ -118,7 +118,7 @@ fn e_key_ignored_during_create_form() {
     fixture.write_rfc("RFC-001-auth.md", "Auth RFC", "draft");
 
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config());
+    let mut app = App::new(store, &fixture.config(), lazyspec::tui::terminal_caps::TerminalImageProtocol::Unsupported);
 
     // Open the create form
     app.handle_key(

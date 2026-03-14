@@ -17,7 +17,7 @@ fn setup_app_with_docs() -> (TestFixture, App) {
     );
 
     let store = fixture.store();
-    let app = App::new(store, &fixture.config());
+    let app = App::new(store, &fixture.config(), lazyspec::tui::terminal_caps::TerminalImageProtocol::Unsupported);
     (fixture, app)
 }
 

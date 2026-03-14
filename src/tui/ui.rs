@@ -442,9 +442,39 @@ fn draw_preview_content(f: &mut Frame, app: &App, area: Rect, block: Block, doc:
             )));
         }
 
-        let body_text = tui_markdown::from_str(&body);
-        for line in body_text.lines {
-            lines.push(line);
+        let segments = super::diagram::build_preview_segments(&body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability);
+        for segment in &segments {
+            match segment {
+                super::diagram::PreviewSegment::Markdown(text) => {
+                    let md = tui_markdown::from_str(text);
+                    for line in md.lines {
+                        lines.push(line);
+                    }
+                }
+                super::diagram::PreviewSegment::DiagramImage(path) => {
+                    lines.push(Line::from(Span::styled(
+                        format!(" [diagram: {}]", path.display()),
+                        Style::default().fg(Color::Green),
+                    )));
+                }
+                super::diagram::PreviewSegment::DiagramText(text) => {
+                    for line_str in text.lines() {
+                        lines.push(Line::from(Span::raw(format!(" {}", line_str))));
+                    }
+                }
+                super::diagram::PreviewSegment::DiagramLoading => {
+                    lines.push(Line::from(Span::styled(
+                        " [rendering diagram...]",
+                        Style::default().fg(Color::Yellow),
+                    )));
+                }
+                super::diagram::PreviewSegment::DiagramError(msg) => {
+                    lines.push(Line::from(Span::styled(
+                        format!(" [diagram error: {}]", msg),
+                        Style::default().fg(Color::Red),
+                    )));
+                }
+            }
         }
 
         let paragraph = Paragraph::new(lines)
@@ -654,9 +684,44 @@ fn draw_fullscreen(f: &mut Frame, app: &mut App) {
             body
         };
 
-        let text = tui_markdown::from_str(&display_body);
+        let segments = super::diagram::build_preview_segments(&display_body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability);
+        let mut all_lines: Vec<Line> = Vec::new();
+        for segment in &segments {
+            match segment {
+                super::diagram::PreviewSegment::Markdown(text) => {
+                    let md = tui_markdown::from_str(text);
+                    for line in md.lines {
+                        all_lines.push(line);
+                    }
+                }
+                super::diagram::PreviewSegment::DiagramImage(path) => {
+                    all_lines.push(Line::from(Span::styled(
+                        format!(" [diagram: {}]", path.display()),
+                        Style::default().fg(Color::Green),
+                    )));
+                }
+                super::diagram::PreviewSegment::DiagramText(text) => {
+                    for line_str in text.lines() {
+                        all_lines.push(Line::from(Span::raw(format!(" {}", line_str))));
+                    }
+                }
+                super::diagram::PreviewSegment::DiagramLoading => {
+                    all_lines.push(Line::from(Span::styled(
+                        " [rendering diagram...]",
+                        Style::default().fg(Color::Yellow),
+                    )));
+                }
+                super::diagram::PreviewSegment::DiagramError(msg) => {
+                    all_lines.push(Line::from(Span::styled(
+                        format!(" [diagram error: {}]", msg),
+                        Style::default().fg(Color::Red),
+                    )));
+                }
+            }
+        }
+
         let content_width = layout[1].width.saturating_sub(2) as usize;
-        let total_lines: usize = text.lines.iter().map(|line| {
+        let total_lines: usize = all_lines.iter().map(|line| {
             let line_width: usize = line.spans.iter().map(|s| s.content.len()).sum();
             if content_width == 0 {
                 1
@@ -665,7 +730,7 @@ fn draw_fullscreen(f: &mut Frame, app: &mut App) {
             }
         }).sum();
 
-        let paragraph = Paragraph::new(text)
+        let paragraph = Paragraph::new(all_lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)

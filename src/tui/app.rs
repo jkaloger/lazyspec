@@ -16,6 +16,7 @@ pub enum AppEvent {
     Terminal(crossterm::event::KeyEvent),
     FileChange(notify::Event),
     ExpansionResult { path: PathBuf, body: String, body_hash: u64 },
+    DiagramRendered { source_hash: u64, entry: super::diagram::DiagramCacheEntry },
     #[cfg(feature = "agent")]
     AgentFinished,
 }
@@ -327,10 +328,13 @@ pub struct App {
     pub event_tx: crossbeam_channel::Sender<AppEvent>,
     pub expansion_cancel: Option<Arc<AtomicBool>>,
     pub disk_cache: DiskCache,
+    pub terminal_image_protocol: super::terminal_caps::TerminalImageProtocol,
+    pub tool_availability: super::diagram::ToolAvailability,
+    pub diagram_cache: super::diagram::DiagramCache,
 }
 
 impl App {
-    pub fn new(store: Store, config: &Config) -> Self {
+    pub fn new(store: Store, config: &Config, protocol: super::terminal_caps::TerminalImageProtocol) -> Self {
         let default_glyphs = ["●", "■", "▲", "◆", "★", "◎"];
         let type_icons: HashMap<String, String> = config.types.iter().enumerate().map(|(i, t)| {
             let icon = t.icon.clone().unwrap_or_else(|| default_glyphs[i % default_glyphs.len()].to_string());
@@ -394,6 +398,9 @@ impl App {
             event_tx,
             expansion_cancel: None,
             disk_cache: DiskCache::new(),
+            terminal_image_protocol: protocol,
+            tool_availability: super::diagram::ToolAvailability::detect(),
+            diagram_cache: super::diagram::DiagramCache::new(),
         };
         app.build_doc_tree();
         app
@@ -811,6 +818,48 @@ impl App {
                     let _ = tx.send(AppEvent::ExpansionResult { path: doc_path, body, body_hash });
                 }
             }
+        });
+    }
+
+    pub fn request_diagram_render(&mut self, block: &super::diagram::DiagramBlock, tx: &crossbeam_channel::Sender<AppEvent>) {
+        let hash = super::diagram::source_hash(&block.source);
+
+        if self.diagram_cache.get(hash).is_some() {
+            return;
+        }
+
+        if !self.tool_availability.is_available(&block.language) {
+            return;
+        }
+
+        self.diagram_cache.mark_rendering(hash);
+
+        let language = block.language.clone();
+        let source = block.source.clone();
+        let protocol = self.terminal_image_protocol;
+        let cache_dir = self.diagram_cache.cache_dir().to_path_buf();
+        let tx = tx.clone();
+
+        std::thread::spawn(move || {
+            let block = super::diagram::DiagramBlock {
+                language: language.clone(),
+                source,
+                byte_range: 0..0,
+            };
+
+            let entry = if protocol == super::terminal_caps::TerminalImageProtocol::Unsupported && language == super::diagram::DiagramLanguage::D2 {
+                match super::diagram::render_diagram_text(&block, &cache_dir) {
+                    Ok(text) => super::diagram::DiagramCacheEntry::Text(text),
+                    Err(err) => super::diagram::DiagramCacheEntry::Failed(err.to_string()),
+                }
+            } else {
+                match super::diagram::render_diagram(&block, &cache_dir) {
+                    Ok(path) => super::diagram::DiagramCacheEntry::Image(path),
+                    Err(err) => super::diagram::DiagramCacheEntry::Failed(err.to_string()),
+                }
+            };
+
+            let _ = tx.send(AppEvent::DiagramRendered { source_hash: hash, entry });
         });
     }
 
@@ -1916,6 +1965,9 @@ mod tests {
             event_tx: tx,
             expansion_cancel: None,
             disk_cache: DiskCache::new(),
+            terminal_image_protocol: crate::tui::terminal_caps::TerminalImageProtocol::Unsupported,
+            tool_availability: crate::tui::diagram::ToolAvailability { d2: false, mmdc: false },
+            diagram_cache: crate::tui::diagram::DiagramCache::new(),
         };
         app
     }

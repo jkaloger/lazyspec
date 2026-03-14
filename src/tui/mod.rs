@@ -1,6 +1,8 @@
 #[cfg(feature = "agent")]
 pub mod agent;
 pub mod app;
+pub mod diagram;
+pub mod terminal_caps;
 pub mod ui;
 
 use app::App;
@@ -79,6 +81,9 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
             app.disk_cache.write(&path, body_hash, &body);
             app.expanded_body_cache.insert(path, body);
         }
+        AppEvent::DiagramRendered { source_hash, entry } => {
+            app.diagram_cache.insert(source_hash, entry);
+        }
         #[cfg(feature = "agent")]
         AppEvent::AgentFinished => {}
     }
@@ -86,12 +91,13 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
 
 pub fn run(store: Store, config: &Config) -> Result<()> {
     enable_raw_mode()?;
+    let protocol = terminal_caps::probe();
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(store, config);
+    let mut app = App::new(store, config, protocol);
     app.refresh_validation(config);
 
     let (tx, rx) = crossbeam_channel::unbounded();
@@ -133,6 +139,16 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     loop {
         terminal.draw(|f| ui::draw(f, &mut app))?;
         app.request_expansion(&tx);
+
+        if let Some(meta) = app.selected_doc_meta() {
+            let body = app.expanded_body_cache.get(&meta.path)
+                .cloned()
+                .unwrap_or_else(|| app.store.get_body_raw(&meta.path).unwrap_or_default());
+            let blocks = diagram::extract_diagram_blocks(&body);
+            for block in &blocks {
+                app.request_diagram_render(block, &tx);
+            }
+        }
 
         #[cfg(feature = "agent")]
         app.agent_spawner.poll_finished();

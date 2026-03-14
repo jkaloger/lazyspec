@@ -15,7 +15,7 @@ fn test_a_key_opens_dialog() {
     let fixture = TestFixture::new();
     fixture.write_rfc("RFC-001-test.md", "Test RFC", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config());
+    let mut app = App::new(store, &fixture.config(), lazyspec::tui::terminal_caps::TerminalImageProtocol::Unsupported);
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -30,7 +30,7 @@ fn test_a_key_opens_dialog() {
 fn test_a_key_empty_list() {
     let fixture = TestFixture::new();
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config());
+    let mut app = App::new(store, &fixture.config(), lazyspec::tui::terminal_caps::TerminalImageProtocol::Unsupported);
 
     app.selected_type = 0;
     press(&mut app, &fixture, KeyCode::Char('a'));
@@ -44,7 +44,7 @@ fn test_esc_closes_dialog() {
     let fixture = TestFixture::new();
     fixture.write_rfc("RFC-001-test.md", "Test RFC", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config());
+    let mut app = App::new(store, &fixture.config(), lazyspec::tui::terminal_caps::TerminalImageProtocol::Unsupported);
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -61,7 +61,7 @@ fn test_unhandled_key_ignored() {
     let fixture = TestFixture::new();
     fixture.write_rfc("RFC-001-test.md", "Test RFC", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config());
+    let mut app = App::new(store, &fixture.config(), lazyspec::tui::terminal_caps::TerminalImageProtocol::Unsupported);
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -84,7 +84,7 @@ fn test_no_create_children_for_iteration() {
     let fixture = TestFixture::new();
     fixture.write_iteration("ITER-001-test.md", "Test Iteration", "draft", None);
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config());
+    let mut app = App::new(store, &fixture.config(), lazyspec::tui::terminal_caps::TerminalImageProtocol::Unsupported);
 
     // Find the iteration type index
     let iter_idx = app
@@ -111,7 +111,7 @@ fn test_create_children_for_rfc() {
     let fixture = TestFixture::new();
     fixture.write_rfc("RFC-001-test.md", "Test RFC", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config());
+    let mut app = App::new(store, &fixture.config(), lazyspec::tui::terminal_caps::TerminalImageProtocol::Unsupported);
 
     app.selected_type = 0;
     app.selected_doc = 0;
