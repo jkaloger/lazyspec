@@ -1,7 +1,7 @@
 ---
 title: "Fix command numbering conflict resolution"
 type: rfc
-status: draft
+status: superseded
 author: "jkaloger"
 date: 2026-03-13
 tags:
@@ -11,6 +11,7 @@ tags:
 related:
   - related to: docs/rfcs/RFC-015-lenient-frontmatter-loading-with-warnings-and-fix-command.md
 ---
+
 
 ## Problem
 

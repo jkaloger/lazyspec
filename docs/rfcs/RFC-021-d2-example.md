@@ -1,11 +1,12 @@
 ---
 title: "d2-example"
 type: rfc
-status: draft
+status: rejected
 author: "unknown"
 date: 2026-03-13
 tags: []
 ---
+
 
 ## Summary
 
