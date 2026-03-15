@@ -6,10 +6,49 @@ use ratatui::{
     Frame,
 };
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::engine::document::{DocMeta, RelationType, Status};
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
 use crate::tui::app::{App, DocListNode, FilterField, FormField, PreviewTab, ViewMode};
+
+/// Compute the number of wrapped display lines a single `Line` occupies at
+/// the given `content_width`. When the paragraph widget wraps text, each
+/// logical line may span multiple rows.
+pub fn wrapped_line_count(line: &Line, content_width: usize) -> usize {
+    if content_width == 0 {
+        return 1;
+    }
+    let line_width: usize = line.spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+    if line_width == 0 {
+        return 1;
+    }
+    (line_width + content_width - 1) / content_width
+}
+
+/// Sum wrapped line counts for a slice of lines.
+pub fn wrapped_lines_total(lines: &[Line], content_width: usize) -> usize {
+    lines.iter().map(|l| wrapped_line_count(l, content_width)).sum()
+}
+
+/// Calculate the display height (in terminal rows) for an image given its
+/// native pixel dimensions and the available panel space. The height preserves
+/// the image's aspect ratio and is clamped to 80% of `panel_height`.
+pub fn calculate_image_height(
+    image_width: u32,
+    image_height: u32,
+    available_width_cells: u16,
+    panel_height: u16,
+) -> u16 {
+    if image_width == 0 || available_width_cells == 0 {
+        return 1;
+    }
+    let ratio_height = (image_height as f64 / image_width as f64) * available_width_cells as f64;
+    let max_height = (panel_height as f64 * 0.8) as u16;
+    let clamped = (ratio_height as u16).min(max_height);
+    clamped.max(1)
+}
 
 fn status_color(status: &Status) -> Color {
     match status {
@@ -47,6 +86,22 @@ fn render_scrollbar(f: &mut Frame, area: Rect, total: usize, visible: usize, pos
         .track_style(Style::default().fg(Color::DarkGray))
         .thumb_style(Style::default().fg(Color::Cyan));
     f.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
+}
+
+fn render_image_overlay(f: &mut Frame, app: &mut App, hash: u64, path: &std::path::Path, img_area: Rect) {
+    if img_area.height == 0 {
+        return;
+    }
+    if !app.image_states.contains_key(&hash) {
+        if let Ok(dyn_img) = image::open(path) {
+            let protocol = app.picker.new_resize_protocol(dyn_img);
+            app.image_states.insert(hash, protocol);
+        }
+    }
+    if let Some(state) = app.image_states.get_mut(&hash) {
+        let widget = ratatui_image::StatefulImage::<ratatui_image::protocol::StatefulProtocol>::new();
+        f.render_stateful_widget(widget, img_area, state);
+    }
 }
 
 fn display_name(path: &std::path::Path) -> &str {
@@ -344,7 +399,7 @@ fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
+fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     let preview_title = if app.preview_tab == PreviewTab::Preview {
         Line::from(vec![
             Span::styled(
@@ -381,81 +436,167 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
         .border_style(border_style)
         .title(preview_title);
 
-    let doc = app.selected_doc_meta();
+    let doc = app.selected_doc_meta().cloned();
     match app.preview_tab {
-        PreviewTab::Preview => draw_preview_content(f, app, area, block, doc),
-        PreviewTab::Relations => draw_relations_content(f, app, area, block, doc),
+        PreviewTab::Preview => draw_preview_content(f, app, area, block, doc.as_ref()),
+        PreviewTab::Relations => draw_relations_content(f, app, area, block, doc.as_ref()),
     }
 }
 
-fn draw_preview_content(f: &mut Frame, app: &App, area: Rect, block: Block, doc: Option<&DocMeta>) {
-    if let Some(doc) = doc {
-        let body = if let Some(expanded) = app.expanded_body_cache.get(&doc.path) {
-            expanded.clone()
-        } else {
-            app.store.get_body_raw(&doc.path).unwrap_or_default()
-        };
-
-        let mut lines = vec![
-            Line::from(Span::styled(
-                format!(" {}", doc.title),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(vec![
-                Span::raw(" Type: "),
-                Span::styled(format!("{}", doc.doc_type), Style::default().fg(Color::White)),
-                Span::raw("  Status: "),
-                Span::styled(
-                    format!("{}", doc.status),
-                    Style::default().fg(status_color(&doc.status)),
-                ),
-                Span::raw("  Author: "),
-                Span::raw(&doc.author),
-            ]),
-            Line::from(vec![
-                Span::raw(format!(" Date: {}", doc.date)),
-            ]),
-        ];
-
-        if !doc.tags.is_empty() {
-            let mut tag_spans = vec![Span::raw(" Tags: ")];
-            for (idx, tag) in doc.tags.iter().enumerate() {
-                if idx > 0 {
-                    tag_spans.push(Span::raw(" "));
-                }
-                tag_spans.push(Span::styled(
-                    format!("[{}]", tag),
-                    Style::default().fg(tag_color(tag)),
-                ));
-            }
-            lines.push(Line::from(tag_spans));
-        }
-
-        lines.push(Line::from(""));
-
-        if app.expansion_in_flight.as_ref() == Some(&doc.path) {
-            lines.push(Line::from(Span::styled(
-                " [expanding refs...]",
-                Style::default().fg(Color::Yellow),
-            )));
-        }
-
-        let body_text = tui_markdown::from_str(&body);
-        for line in body_text.lines {
-            lines.push(line);
-        }
-
-        let paragraph = Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false });
-        f.render_widget(paragraph, area);
-    } else {
+fn draw_preview_content(f: &mut Frame, app: &mut App, area: Rect, block: Block, doc: Option<&DocMeta>) {
+    let Some(doc) = doc else {
         let paragraph = Paragraph::new(" No document selected.")
             .block(block)
             .wrap(Wrap { trim: false });
         f.render_widget(paragraph, area);
+        return;
+    };
+
+    let body = if let Some(expanded) = app.expanded_body_cache.get(&doc.path) {
+        expanded.clone()
+    } else {
+        app.store.get_body_raw(&doc.path).unwrap_or_default()
+    };
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!(" {}", doc.title),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::raw(" Type: "),
+            Span::styled(format!("{}", doc.doc_type), Style::default().fg(Color::White)),
+            Span::raw("  Status: "),
+            Span::styled(
+                format!("{}", doc.status),
+                Style::default().fg(status_color(&doc.status)),
+            ),
+            Span::raw("  Author: "),
+            Span::raw(&doc.author),
+        ]),
+        Line::from(vec![
+            Span::raw(format!(" Date: {}", doc.date)),
+        ]),
+    ];
+
+    if !doc.tags.is_empty() {
+        let mut tag_spans = vec![Span::raw(" Tags: ")];
+        for (idx, tag) in doc.tags.iter().enumerate() {
+            if idx > 0 {
+                tag_spans.push(Span::raw(" "));
+            }
+            tag_spans.push(Span::styled(
+                format!("[{}]", tag),
+                Style::default().fg(tag_color(tag)),
+            ));
+        }
+        lines.push(Line::from(tag_spans));
+    }
+
+    lines.push(Line::from(""));
+
+    if app.expansion_in_flight.as_ref() == Some(&doc.path) {
+        lines.push(Line::from(Span::styled(
+            " [expanding refs...]",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    // Snapshot header lines before body segments are appended (used for image Y offset)
+    let header_lines: Vec<Line> = lines.clone();
+
+    let segments = super::diagram::build_preview_segments(&body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability);
+
+    // Collect image segments with their source hashes for rendering after the paragraph
+    let mut image_segments: Vec<(u64, std::path::PathBuf)> = Vec::new();
+
+    for segment in &segments {
+        match segment {
+            super::diagram::PreviewSegment::Markdown(text) => {
+                let md = tui_markdown::from_str(text);
+                for line in md.lines {
+                    lines.push(line);
+                }
+            }
+            super::diagram::PreviewSegment::DiagramImage(path) => {
+                let hash = super::diagram::source_hash_path(path);
+                image_segments.push((hash, path.clone()));
+                let image_height = image::image_dimensions(path)
+                    .map(|(w, h)| calculate_image_height(w, h, area.width.saturating_sub(2), area.height.saturating_sub(2)))
+                    .unwrap_or(12) as usize;
+                for _ in 0..image_height {
+                    lines.push(Line::from(""));
+                }
+            }
+            super::diagram::PreviewSegment::DiagramText(text) => {
+                for line_str in text.lines() {
+                    lines.push(Line::from(Span::raw(format!(" {}", line_str))));
+                }
+            }
+            super::diagram::PreviewSegment::DiagramLoading => {
+                lines.push(Line::from(Span::styled(
+                    " [rendering diagram...]",
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+            super::diagram::PreviewSegment::DiagramError(msg) => {
+                lines.push(Line::from(Span::styled(
+                    format!(" [diagram error: {}]", msg),
+                    Style::default().fg(Color::Red),
+                )));
+            }
+        }
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    f.render_widget(paragraph, area);
+
+    // Render image overlays with wrap-aware Y positioning
+    if !image_segments.is_empty() {
+        let inner = area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+        let content_width = inner.width as usize;
+        // Start y_offset after the header lines (title, type/status/author, date,
+        // optionally tags, blank line, optionally expanding indicator).
+        let mut y_offset = wrapped_lines_total(&header_lines, content_width) as u16;
+        let segments_ref = super::diagram::build_preview_segments(&body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability);
+        for segment in &segments_ref {
+            match segment {
+                super::diagram::PreviewSegment::Markdown(text) => {
+                    let md = tui_markdown::from_str(text);
+                    y_offset += wrapped_lines_total(&md.lines, content_width) as u16;
+                }
+                super::diagram::PreviewSegment::DiagramImage(path) => {
+                    let hash = super::diagram::source_hash_path(path);
+                    let img_height = image::image_dimensions(path)
+                        .map(|(w, h)| calculate_image_height(w, h, inner.width, inner.height))
+                        .unwrap_or(12);
+                    let img_area = Rect::new(
+                        inner.x,
+                        inner.y.saturating_add(y_offset),
+                        inner.width,
+                        img_height.min(inner.bottom().saturating_sub(inner.y.saturating_add(y_offset))),
+                    );
+                    render_image_overlay(f, app, hash, path, img_area);
+                    y_offset += img_height;
+                }
+                super::diagram::PreviewSegment::DiagramText(text) => {
+                    for line_str in text.lines() {
+                        let display_line = Line::from(Span::raw(format!(" {}", line_str)));
+                        y_offset += wrapped_line_count(&display_line, content_width) as u16;
+                    }
+                }
+                super::diagram::PreviewSegment::DiagramLoading => {
+                    y_offset += 1;
+                }
+                super::diagram::PreviewSegment::DiagramError(_) => {
+                    y_offset += 1;
+                }
+            }
+        }
     }
 }
 
@@ -623,62 +764,132 @@ fn draw_fullscreen(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(area);
 
-    if let Some(doc) = app.selected_doc_meta() {
-        let header = Line::from(vec![
-            Span::styled(
-                format!(" {} ", doc.title),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" | "),
-            Span::styled(
-                format!("{}", doc.status),
-                Style::default().fg(status_color(&doc.status)),
-            ),
-            Span::raw(format!(" | {} | {} ", doc.doc_type, doc.author)),
-            Span::styled("[Esc] back", Style::default().fg(Color::DarkGray)),
-        ]);
-        f.render_widget(Paragraph::new(header), layout[0]);
+    let Some(doc) = app.selected_doc_meta() else {
+        return;
+    };
 
-        let body = if let Some(expanded) = app.expanded_body_cache.get(&doc.path) {
-            expanded.clone()
-        } else {
-            app.store.get_body_raw(&doc.path).unwrap_or_else(|_| "Error loading document.".to_string())
-        };
+    let header = Line::from(vec![
+        Span::styled(
+            format!(" {} ", doc.title),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" | "),
+        Span::styled(
+            format!("{}", doc.status),
+            Style::default().fg(status_color(&doc.status)),
+        ),
+        Span::raw(format!(" | {} | {} ", doc.doc_type, doc.author)),
+        Span::styled("[Esc] back", Style::default().fg(Color::DarkGray)),
+    ]);
+    f.render_widget(Paragraph::new(header), layout[0]);
 
-        let expanding = app.expansion_in_flight.as_ref() == Some(&doc.path);
-        let display_body = if expanding {
-            format!("[expanding refs...]\n\n{}", body)
-        } else {
-            body
-        };
+    let body = if let Some(expanded) = app.expanded_body_cache.get(&doc.path) {
+        expanded.clone()
+    } else {
+        app.store.get_body_raw(&doc.path).unwrap_or_else(|_| "Error loading document.".to_string())
+    };
 
-        let text = tui_markdown::from_str(&display_body);
-        let content_width = layout[1].width.saturating_sub(2) as usize;
-        let total_lines: usize = text.lines.iter().map(|line| {
-            let line_width: usize = line.spans.iter().map(|s| s.content.len()).sum();
-            if content_width == 0 {
-                1
-            } else {
-                (line_width / content_width) + 1
+    let expanding = app.expansion_in_flight.as_ref() == Some(&doc.path);
+    let display_body = if expanding {
+        format!("[expanding refs...]\n\n{}", body)
+    } else {
+        body
+    };
+
+    let content_width = layout[1].width.saturating_sub(2) as usize;
+    let panel_width = layout[1].width.saturating_sub(2);
+    let panel_height = layout[1].height.saturating_sub(2);
+
+    let segments = super::diagram::build_preview_segments(&display_body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability);
+    let mut all_lines: Vec<Line> = Vec::new();
+    // Store wrap-aware Y position and height for each image segment
+    let mut image_segments: Vec<(u64, std::path::PathBuf, u16, u16)> = Vec::new();
+    let mut wrapped_y: usize = 0;
+
+    for segment in &segments {
+        match segment {
+            super::diagram::PreviewSegment::Markdown(text) => {
+                let md = tui_markdown::from_str(text);
+                wrapped_y += wrapped_lines_total(&md.lines, content_width);
+                for line in md.lines {
+                    all_lines.push(line);
+                }
             }
-        }).sum();
-
-        let paragraph = Paragraph::new(text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::DarkGray)),
-            )
-            .wrap(Wrap { trim: false })
-            .scroll((app.scroll_offset, 0));
-        f.render_widget(paragraph, layout[1]);
-
-        if total_lines > app.fullscreen_height {
-            render_scrollbar(f, layout[1], total_lines, app.fullscreen_height, app.scroll_offset as usize);
+            super::diagram::PreviewSegment::DiagramImage(path) => {
+                let hash = super::diagram::source_hash_path(path);
+                let img_h = image::image_dimensions(path)
+                    .map(|(w, h)| calculate_image_height(w, h, panel_width, panel_height))
+                    .unwrap_or(15);
+                image_segments.push((hash, path.clone(), wrapped_y as u16, img_h));
+                for _ in 0..img_h {
+                    all_lines.push(Line::from(""));
+                }
+                wrapped_y += img_h as usize;
+            }
+            super::diagram::PreviewSegment::DiagramText(text) => {
+                for line_str in text.lines() {
+                    let display_line = Line::from(Span::raw(format!(" {}", line_str)));
+                    wrapped_y += wrapped_line_count(&display_line, content_width);
+                    all_lines.push(display_line);
+                }
+            }
+            super::diagram::PreviewSegment::DiagramLoading => {
+                all_lines.push(Line::from(Span::styled(
+                    " [rendering diagram...]",
+                    Style::default().fg(Color::Yellow),
+                )));
+                wrapped_y += 1;
+            }
+            super::diagram::PreviewSegment::DiagramError(msg) => {
+                all_lines.push(Line::from(Span::styled(
+                    format!(" [diagram error: {}]", msg),
+                    Style::default().fg(Color::Red),
+                )));
+                wrapped_y += 1;
+            }
         }
+    }
+
+    let total_lines = wrapped_y;
+
+    let paragraph = Paragraph::new(all_lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((app.scroll_offset, 0));
+    f.render_widget(paragraph, layout[1]);
+
+    // Render image overlays in fullscreen
+    let inner = layout[1].inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+    for (hash, path, line_y, img_h) in &image_segments {
+        // Skip images that have been scrolled past entirely
+        if *line_y + *img_h <= app.scroll_offset {
+            continue;
+        }
+        // Skip images whose top is above the viewport
+        if *line_y < app.scroll_offset {
+            continue;
+        }
+        let scrolled_y = line_y - app.scroll_offset;
+        let img_area = Rect::new(
+            inner.x,
+            inner.y.saturating_add(scrolled_y),
+            inner.width,
+            (*img_h).min(inner.bottom().saturating_sub(inner.y.saturating_add(scrolled_y))),
+        );
+        if img_area.y < inner.bottom() {
+            render_image_overlay(f, app, *hash, path, img_area);
+        }
+    }
+
+    if total_lines > app.fullscreen_height {
+        render_scrollbar(f, layout[1], total_lines, app.fullscreen_height, app.scroll_offset as usize);
     }
 }
 
@@ -1232,7 +1443,7 @@ fn draw_filters_mode(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_stateful_widget(table, right[0], &mut state);
 
     // Right panel: preview
-    let doc = app.selected_filtered_doc();
+    let doc = app.selected_filtered_doc().cloned();
     let preview_title = if app.preview_tab == PreviewTab::Preview {
         Line::from(vec![
             Span::styled(
@@ -1270,8 +1481,8 @@ fn draw_filters_mode(f: &mut Frame, app: &mut App, area: Rect) {
         .title(preview_title);
 
     match app.preview_tab {
-        PreviewTab::Preview => draw_preview_content(f, app, right[1], block, doc),
-        PreviewTab::Relations => draw_relations_content(f, app, right[1], block, doc),
+        PreviewTab::Preview => draw_preview_content(f, app, right[1], block, doc.as_ref()),
+        PreviewTab::Relations => draw_relations_content(f, app, right[1], block, doc.as_ref()),
     }
 }
 

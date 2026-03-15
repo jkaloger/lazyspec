@@ -1,6 +1,8 @@
 #[cfg(feature = "agent")]
 pub mod agent;
 pub mod app;
+pub mod diagram;
+pub mod terminal_caps;
 pub mod ui;
 
 use app::App;
@@ -79,6 +81,16 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
             app.disk_cache.write(&path, body_hash, &body);
             app.expanded_body_cache.insert(path, body);
         }
+        AppEvent::DiagramRendered { source_hash, entry } => {
+            app.diagram_cache.insert(source_hash, entry);
+        }
+        AppEvent::ProbeResult { picker, protocol, tool_availability } => {
+            app.picker = picker;
+            app.terminal_image_protocol = protocol;
+            app.tool_availability = tool_availability;
+            app.diagram_cache = diagram::DiagramCache::new();
+            app.image_states.clear();
+        }
         #[cfg(feature = "agent")]
         AppEvent::AgentFinished => {}
     }
@@ -88,14 +100,25 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    let picker = ratatui_image::picker::Picker::halfblocks();
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(store, config);
+    let mut app = App::new(store, config, picker);
     app.refresh_validation(config);
 
     let (tx, rx) = crossbeam_channel::unbounded();
     app.event_tx = tx.clone();
+
+    // Spawn background probe for terminal image protocol and diagram tool availability
+    let probe_tx = tx.clone();
+    std::thread::spawn(move || {
+        let picker = terminal_caps::create_picker();
+        let protocol = terminal_caps::TerminalImageProtocol::from(picker.protocol_type());
+        let tool_availability = diagram::ToolAvailability::detect();
+        let _ = probe_tx.send(AppEvent::ProbeResult { picker, protocol, tool_availability });
+    });
+
     let root = app.store.root().to_path_buf();
     let fs_tx = tx.clone();
     let mut _watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -133,6 +156,16 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     loop {
         terminal.draw(|f| ui::draw(f, &mut app))?;
         app.request_expansion(&tx);
+
+        if let Some(meta) = app.selected_doc_meta() {
+            let body = app.expanded_body_cache.get(&meta.path)
+                .cloned()
+                .unwrap_or_else(|| app.store.get_body_raw(&meta.path).unwrap_or_default());
+            let blocks = diagram::extract_diagram_blocks(&body);
+            for block in &blocks {
+                app.request_diagram_render(block, &tx);
+            }
+        }
 
         #[cfg(feature = "agent")]
         app.agent_spawner.poll_finished();

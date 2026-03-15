@@ -22,6 +22,9 @@ tree-sitter = "0.24"
 tree-sitter-typescript = "0.23"
 tree-sitter-rust = "0.23"
 crossbeam-channel = "0.5"
+ratatui-image = { version = "10", default-features = false, features = ["crossterm", "image-defaults"] }
+image = "0.25"
+unicode-width = "0.2"
 
 [features]
 default = []

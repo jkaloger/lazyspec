@@ -47,6 +47,7 @@ pub struct Config {
     pub directories: Directories,
     pub templates: Templates,
     pub naming: Naming,
+    pub tui: Tui,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +68,17 @@ pub struct Naming {
     pub pattern: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tui {
+    pub ascii_diagrams: bool,
+}
+
+impl Default for Tui {
+    fn default() -> Self {
+        Tui { ascii_diagrams: false }
+    }
+}
+
 #[derive(Deserialize)]
 struct RawConfig {
     types: Option<Vec<TypeDef>>,
@@ -74,6 +86,7 @@ struct RawConfig {
     directories: Option<Directories>,
     templates: Option<Templates>,
     naming: Option<Naming>,
+    tui: Option<Tui>,
 }
 
 fn default_types() -> Vec<TypeDef> {
@@ -197,6 +210,7 @@ impl Default for Config {
             naming: Naming {
                 pattern: "{type}-{n:03}-{title}.md".to_string(),
             },
+            tui: Tui::default(),
         }
     }
 }
@@ -231,6 +245,7 @@ impl Config {
             naming: raw.naming.unwrap_or(Naming {
                 pattern: "{type}-{n:03}-{title}.md".to_string(),
             }),
+            tui: raw.tui.unwrap_or_default(),
         })
     }
 

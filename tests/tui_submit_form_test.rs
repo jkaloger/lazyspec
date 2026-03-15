@@ -28,7 +28,7 @@ An existing RFC.
 
     let config = fixture.config();
     let store = fixture.store();
-    let app = App::new(store, &fixture.config());
+    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
     (fixture, app, config)
 }
 

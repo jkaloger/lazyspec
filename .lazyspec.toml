@@ -38,3 +38,6 @@ dir = ".lazyspec/templates"
 
 [naming]
 pattern = "{type}-{n:03}-{title}.md"
+
+[tui]
+ascii_diagrams = true

@@ -16,6 +16,12 @@ pub enum AppEvent {
     Terminal(crossterm::event::KeyEvent),
     FileChange(notify::Event),
     ExpansionResult { path: PathBuf, body: String, body_hash: u64 },
+    DiagramRendered { source_hash: u64, entry: super::diagram::DiagramCacheEntry },
+    ProbeResult {
+        picker: ratatui_image::picker::Picker,
+        protocol: super::terminal_caps::TerminalImageProtocol,
+        tool_availability: super::diagram::ToolAvailability,
+    },
     #[cfg(feature = "agent")]
     AgentFinished,
 }
@@ -327,10 +333,16 @@ pub struct App {
     pub event_tx: crossbeam_channel::Sender<AppEvent>,
     pub expansion_cancel: Option<Arc<AtomicBool>>,
     pub disk_cache: DiskCache,
+    pub terminal_image_protocol: super::terminal_caps::TerminalImageProtocol,
+    pub tool_availability: super::diagram::ToolAvailability,
+    pub diagram_cache: super::diagram::DiagramCache,
+    pub picker: ratatui_image::picker::Picker,
+    pub image_states: HashMap<u64, ratatui_image::protocol::StatefulProtocol>,
+    pub ascii_diagrams: bool,
 }
 
 impl App {
-    pub fn new(store: Store, config: &Config) -> Self {
+    pub fn new(store: Store, config: &Config, picker: ratatui_image::picker::Picker) -> Self {
         let default_glyphs = ["●", "■", "▲", "◆", "★", "◎"];
         let type_icons: HashMap<String, String> = config.types.iter().enumerate().map(|(i, t)| {
             let icon = t.icon.clone().unwrap_or_else(|| default_glyphs[i % default_glyphs.len()].to_string());
@@ -394,6 +406,12 @@ impl App {
             event_tx,
             expansion_cancel: None,
             disk_cache: DiskCache::new(),
+            terminal_image_protocol: super::terminal_caps::TerminalImageProtocol::Halfblocks,
+            tool_availability: super::diagram::ToolAvailability { d2: false, mmdc: false },
+            diagram_cache: super::diagram::DiagramCache::new(),
+            picker,
+            image_states: HashMap::new(),
+            ascii_diagrams: config.tui.ascii_diagrams,
         };
         app.build_doc_tree();
         app
@@ -811,6 +829,48 @@ impl App {
                     let _ = tx.send(AppEvent::ExpansionResult { path: doc_path, body, body_hash });
                 }
             }
+        });
+    }
+
+    pub fn request_diagram_render(&mut self, block: &super::diagram::DiagramBlock, tx: &crossbeam_channel::Sender<AppEvent>) {
+        let hash = super::diagram::source_hash(&block.source);
+
+        if self.diagram_cache.get(hash).is_some() {
+            return;
+        }
+
+        if !self.tool_availability.is_available(&block.language) {
+            return;
+        }
+
+        self.diagram_cache.mark_rendering(hash);
+
+        let source = block.source.clone();
+        let language = block.language.clone();
+        let cache_dir = self.diagram_cache.cache_dir().to_path_buf();
+        let tx = tx.clone();
+        let ascii = self.ascii_diagrams;
+
+        std::thread::spawn(move || {
+            let block = super::diagram::DiagramBlock {
+                language,
+                source,
+                byte_range: 0..0,
+            };
+
+            let entry = if ascii && block.language == super::diagram::DiagramLanguage::D2 {
+                match super::diagram::render_diagram_text(&block, &cache_dir) {
+                    Ok(text) => super::diagram::DiagramCacheEntry::Text(text),
+                    Err(err) => super::diagram::DiagramCacheEntry::Failed(err.to_string()),
+                }
+            } else {
+                match super::diagram::render_diagram(&block, &cache_dir) {
+                    Ok(path) => super::diagram::DiagramCacheEntry::Image(path),
+                    Err(err) => super::diagram::DiagramCacheEntry::Failed(err.to_string()),
+                }
+            };
+
+            let _ = tx.send(AppEvent::DiagramRendered { source_hash: hash, entry });
         });
     }
 
@@ -1376,27 +1436,39 @@ impl App {
                         let _ = self.agent_spawner.spawn(&prompt, &full_path, &doc_title, &action);
                     }
                 } else if action == "Create children" {
-                    if let Some(doc) = self.store.get(&doc_path) {
-                        let doc_type_str = doc.doc_type.to_string();
-                        let child_type = config.rules.iter().find_map(|rule| {
-                            match rule {
-                                crate::engine::config::ValidationRule::ParentChild { parent, child, .. }
-                                    if parent == &doc_type_str => Some(child.clone()),
-                                _ => None,
-                            }
-                        });
-                        if let Some(child_type) = child_type {
-                            let full_path = self.store.root.join(&doc_path);
-                            if let Ok(content) = std::fs::read_to_string(&full_path) {
-                                let prompt = crate::tui::agent::build_create_children_prompt(&content, &child_type);
-                                let _ = self.agent_spawner.spawn(&prompt, &full_path, &doc_title, &action);
-                            }
-                        }
-                    }
+                    self.spawn_create_children(&doc_path, &doc_title, config);
                 }
             }
             _ => {}
         }
+    }
+
+    #[cfg(feature = "agent")]
+    fn spawn_create_children(&mut self, doc_path: &Path, doc_title: &str, config: &Config) {
+        let doc = match self.store.get(doc_path) {
+            Some(d) => d,
+            None => return,
+        };
+        let doc_type_str = doc.doc_type.to_string();
+        let child_type = config.rules.iter().find_map(|rule| match rule {
+            crate::engine::config::ValidationRule::ParentChild { parent, child, .. }
+                if parent == &doc_type_str =>
+            {
+                Some(child.clone())
+            }
+            _ => None,
+        });
+        let child_type = match child_type {
+            Some(ct) => ct,
+            None => return,
+        };
+        let full_path = self.store.root.join(doc_path);
+        let content = match std::fs::read_to_string(&full_path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let prompt = crate::tui::agent::build_create_children_prompt(&content, &child_type);
+        let _ = self.agent_spawner.spawn(&prompt, &full_path, doc_title, "Create children");
     }
 
     #[cfg(feature = "agent")]
@@ -1530,154 +1602,152 @@ impl App {
         }
     }
 
-    #[allow(unused_variables)]
-    fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path, config: &Config) {
-        if self.view_mode == ViewMode::Filters {
-            if modifiers.contains(KeyModifiers::CONTROL) {
-                match code {
-                    KeyCode::Char('d') => {
-                        let count = self.filtered_docs().len();
-                        self.half_page_down(count);
-                    }
-                    KeyCode::Char('u') => {
-                        let count = self.filtered_docs().len();
-                        self.half_page_up(count);
-                    }
-                    _ => {}
-                }
-                return;
-            }
+    fn handle_filters_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path) {
+        if modifiers.contains(KeyModifiers::CONTROL) {
             match code {
-                KeyCode::Tab => {
-                    self.filter_focused = self.filter_focused.next();
-                }
-                KeyCode::BackTab => {
-                    self.filter_focused = self.filter_focused.prev();
-                }
-                KeyCode::Char('h') | KeyCode::Left => {
-                    self.cycle_filter_value_prev();
-                }
-                KeyCode::Char('l') | KeyCode::Right => {
-                    self.cycle_filter_value_next();
-                }
-                KeyCode::Enter if self.filter_focused == FilterField::ClearAction => {
-                    self.reset_filters();
-                }
-                KeyCode::Char('j') | KeyCode::Down => {
+                KeyCode::Char('d') => {
                     let count = self.filtered_docs().len();
-                    if count > 0 && self.selected_doc < count - 1 {
-                        self.selected_doc += 1;
-                    }
+                    self.half_page_down(count);
+                }
+                KeyCode::Char('u') => {
                     let count = self.filtered_docs().len();
-                    self.adjust_viewport(count);
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    if self.selected_doc > 0 {
-                        self.selected_doc -= 1;
-                    }
-                    let count = self.filtered_docs().len();
-                    self.adjust_viewport(count);
-                }
-                KeyCode::Enter => {
-                    if self.preview_tab == PreviewTab::Relations {
-                        self.navigate_to_relation();
-                    } else {
-                        if self.selected_filtered_doc().is_some() {
-                            self.fullscreen_doc = true;
-                            self.scroll_offset = 0;
-                        }
-                    }
-                }
-                KeyCode::Char('g') => {
-                    self.selected_doc = 0;
-                    self.doc_list_offset = 0;
-                }
-                KeyCode::Char('G') => {
-                    let count = self.filtered_docs().len();
-                    if count > 0 {
-                        self.selected_doc = count - 1;
-                        self.doc_list_offset = count.saturating_sub(self.doc_list_height);
-                    }
-                }
-                KeyCode::Char('e') => {
-                    if let Some(doc) = self.selected_filtered_doc() {
-                        self.editor_request = Some(root.join(&doc.path));
-                    }
-                }
-                KeyCode::Char('q') => {
-                    self.should_quit = true;
-                }
-                KeyCode::Char('`') => {
-                    self.cycle_mode();
-                }
-                KeyCode::Char('?') => {
-                    self.show_help = true;
-                }
-                KeyCode::Char('/') => {
-                    self.enter_search();
-                }
-                KeyCode::Char('w') => {
-                    self.open_warnings();
-                }
-                KeyCode::Char('s') => {
-                    self.open_status_picker();
+                    self.half_page_up(count);
                 }
                 _ => {}
             }
             return;
         }
-
-        #[cfg(feature = "agent")]
-        if self.view_mode == ViewMode::Agents {
-            self.handle_agents_key(code, modifiers);
-            return;
+        match code {
+            KeyCode::Tab => {
+                self.filter_focused = self.filter_focused.next();
+            }
+            KeyCode::BackTab => {
+                self.filter_focused = self.filter_focused.prev();
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.cycle_filter_value_prev();
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.cycle_filter_value_next();
+            }
+            KeyCode::Enter if self.filter_focused == FilterField::ClearAction => {
+                self.reset_filters();
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                let count = self.filtered_docs().len();
+                if count > 0 && self.selected_doc < count - 1 {
+                    self.selected_doc += 1;
+                }
+                let count = self.filtered_docs().len();
+                self.adjust_viewport(count);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.selected_doc > 0 {
+                    self.selected_doc -= 1;
+                }
+                let count = self.filtered_docs().len();
+                self.adjust_viewport(count);
+            }
+            KeyCode::Enter => {
+                if self.preview_tab == PreviewTab::Relations {
+                    self.navigate_to_relation();
+                } else if self.selected_filtered_doc().is_some() {
+                    self.fullscreen_doc = true;
+                    self.scroll_offset = 0;
+                }
+            }
+            KeyCode::Char('g') => {
+                self.selected_doc = 0;
+                self.doc_list_offset = 0;
+            }
+            KeyCode::Char('G') => {
+                let count = self.filtered_docs().len();
+                if count > 0 {
+                    self.selected_doc = count - 1;
+                    self.doc_list_offset = count.saturating_sub(self.doc_list_height);
+                }
+            }
+            KeyCode::Char('e') => {
+                if let Some(doc) = self.selected_filtered_doc() {
+                    self.editor_request = Some(root.join(&doc.path));
+                }
+            }
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+            }
+            KeyCode::Char('`') => {
+                self.cycle_mode();
+            }
+            KeyCode::Char('?') => {
+                self.show_help = true;
+            }
+            KeyCode::Char('/') => {
+                self.enter_search();
+            }
+            KeyCode::Char('w') => {
+                self.open_warnings();
+            }
+            KeyCode::Char('s') => {
+                self.open_status_picker();
+            }
+            _ => {}
         }
+    }
 
-        if self.view_mode == ViewMode::Graph {
-            match code {
-                KeyCode::Char('j') | KeyCode::Down => {
-                    self.graph_selected = (self.graph_selected + 1)
-                        .min(self.graph_nodes.len().saturating_sub(1));
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    self.graph_selected = self.graph_selected.saturating_sub(1);
-                }
-                KeyCode::Enter => {
-                    if let Some(node) = self.graph_nodes.get(self.graph_selected) {
-                        let path = node.path.clone();
-                        if let Some(doc) = self.store.get(&path) {
-                            let doc_type = doc.doc_type.clone();
-                            if let Some(type_idx) = self.doc_types.iter().position(|t| *t == doc_type) {
-                                self.selected_type = type_idx;
-                                self.build_doc_tree();
-                                if let Some(doc_idx) = self.doc_tree.iter().position(|n| n.path == path) {
-                                    self.selected_doc = doc_idx;
-                                }
+    fn handle_graph_key(&mut self, code: KeyCode, _modifiers: KeyModifiers, root: &Path) {
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.graph_selected = (self.graph_selected + 1)
+                    .min(self.graph_nodes.len().saturating_sub(1));
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.graph_selected = self.graph_selected.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                if let Some(node) = self.graph_nodes.get(self.graph_selected) {
+                    let path = node.path.clone();
+                    if let Some(doc) = self.store.get(&path) {
+                        let doc_type = doc.doc_type.clone();
+                        if let Some(type_idx) = self.doc_types.iter().position(|t| *t == doc_type) {
+                            self.selected_type = type_idx;
+                            self.build_doc_tree();
+                            if let Some(doc_idx) = self.doc_tree.iter().position(|n| n.path == path) {
+                                self.selected_doc = doc_idx;
                             }
                         }
-                        self.view_mode = ViewMode::Types;
                     }
+                    self.view_mode = ViewMode::Types;
                 }
-                KeyCode::Char('g') => {
-                    self.graph_selected = 0;
-                }
-                KeyCode::Char('G') => {
-                    self.graph_selected = self.graph_nodes.len().saturating_sub(1);
-                }
-                KeyCode::Char('e') => {
-                    if let Some(node) = self.graph_nodes.get(self.graph_selected) {
-                        self.editor_request = Some(root.join(&node.path));
-                    }
-                }
-                KeyCode::Char('q') => {
-                    self.should_quit = true;
-                }
-                KeyCode::Char('`') => {
-                    self.cycle_mode();
-                }
-                _ => {}
             }
-            return;
+            KeyCode::Char('g') => {
+                self.graph_selected = 0;
+            }
+            KeyCode::Char('G') => {
+                self.graph_selected = self.graph_nodes.len().saturating_sub(1);
+            }
+            KeyCode::Char('e') => {
+                if let Some(node) = self.graph_nodes.get(self.graph_selected) {
+                    self.editor_request = Some(root.join(&node.path));
+                }
+            }
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+            }
+            KeyCode::Char('`') => {
+                self.cycle_mode();
+            }
+            _ => {}
+        }
+    }
+
+    #[allow(unused_variables)]
+    fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path, config: &Config) {
+        match self.view_mode {
+            ViewMode::Filters => return self.handle_filters_key(code, modifiers, root),
+            ViewMode::Graph => return self.handle_graph_key(code, modifiers, root),
+            #[cfg(feature = "agent")]
+            ViewMode::Agents => return self.handle_agents_key(code, modifiers),
+            _ => {}
         }
 
         match (code, modifiers) {
@@ -1916,6 +1986,12 @@ mod tests {
             event_tx: tx,
             expansion_cancel: None,
             disk_cache: DiskCache::new(),
+            terminal_image_protocol: crate::tui::terminal_caps::TerminalImageProtocol::Unsupported,
+            tool_availability: crate::tui::diagram::ToolAvailability { d2: false, mmdc: false },
+            diagram_cache: crate::tui::diagram::DiagramCache::new(),
+            picker: ratatui_image::picker::Picker::halfblocks(),
+            image_states: HashMap::new(),
+            ascii_diagrams: false,
         };
         app
     }
