@@ -1,13 +1,14 @@
 ---
 title: Diagram image rendering and caching
 type: iteration
-status: draft
+status: accepted
 author: agent
 date: 2026-03-14
 tags: []
 related:
 - implements: docs/stories/STORY-063-diagram-rendering-pipeline.md
 ---
+
 
 
 ## Context
