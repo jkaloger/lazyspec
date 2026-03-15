@@ -1,13 +1,14 @@
 ---
 title: Conflict detection and renumbering
 type: iteration
-status: draft
+status: accepted
 author: agent
 date: 2026-03-13
 tags: []
 related:
 - implements: docs/stories/STORY-059-conflict-detection-and-renumbering.md
 ---
+
 
 
 ## Test Plan

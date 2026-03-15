@@ -1,13 +1,14 @@
 ---
 title: Reference cascade
 type: story
-status: draft
+status: review
 author: jkaloger
 date: 2026-03-13
 tags: []
 related:
 - implements: docs/rfcs/RFC-020-fix-command-numbering-conflict-resolution.md
 ---
+
 
 
 ## Context

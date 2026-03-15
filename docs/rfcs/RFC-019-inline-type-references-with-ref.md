@@ -1,11 +1,12 @@
 ---
 title: "Inline type references with @ref"
 type: rfc
-status: draft
+status: accepted
 author: "jkaloger"
 date: 2026-03-10
 tags: [refs, types, rendering]
 ---
+
 
 ## Summary
 

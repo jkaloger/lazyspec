@@ -1,7 +1,7 @@
 ---
 title: Diagram rendering pipeline
 type: story
-status: draft
+status: review
 author: jkaloger
 date: 2026-03-13
 tags:
@@ -11,6 +11,7 @@ tags:
 related:
 - implements: docs/rfcs/RFC-017-better-markdown-preview.md
 ---
+
 
 
 ## Context
