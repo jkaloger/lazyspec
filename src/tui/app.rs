@@ -849,6 +849,7 @@ impl App {
         let language = block.language.clone();
         let cache_dir = self.diagram_cache.cache_dir().to_path_buf();
         let tx = tx.clone();
+        let ascii = self.ascii_diagrams;
 
         std::thread::spawn(move || {
             let block = super::diagram::DiagramBlock {
@@ -857,9 +858,16 @@ impl App {
                 byte_range: 0..0,
             };
 
-            let entry = match super::diagram::render_diagram(&block, &cache_dir) {
-                Ok(path) => super::diagram::DiagramCacheEntry::Image(path),
-                Err(err) => super::diagram::DiagramCacheEntry::Failed(err.to_string()),
+            let entry = if ascii && block.language == super::diagram::DiagramLanguage::D2 {
+                match super::diagram::render_diagram_text(&block, &cache_dir) {
+                    Ok(text) => super::diagram::DiagramCacheEntry::Text(text),
+                    Err(err) => super::diagram::DiagramCacheEntry::Failed(err.to_string()),
+                }
+            } else {
+                match super::diagram::render_diagram(&block, &cache_dir) {
+                    Ok(path) => super::diagram::DiagramCacheEntry::Image(path),
+                    Err(err) => super::diagram::DiagramCacheEntry::Failed(err.to_string()),
+                }
             };
 
             let _ = tx.send(AppEvent::DiagramRendered { source_hash: hash, entry });

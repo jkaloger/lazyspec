@@ -1,7 +1,7 @@
 use lazyspec::tui::terminal_caps::TerminalImageProtocol;
 use lazyspec::tui::diagram::{
     DiagramBlock, DiagramCache, DiagramCacheEntry, DiagramLanguage, PreviewSegment, ToolAvailability,
-    build_preview_segments, extract_diagram_blocks, fallback_hint, inject_ascii_config_hints,
+    build_preview_segments, extract_diagram_blocks, fallback_hint,
     is_tool_available, render_diagram, render_diagram_text, source_hash, tool_name,
 };
 
@@ -280,25 +280,18 @@ fn test_build_segments_tool_unavailable_stays_markdown() {
 }
 
 #[test]
-fn test_ascii_config_hint_injected_after_diagram_block() {
+fn test_build_segments_with_cached_text() {
     let body = "# Title\n\n```d2\na -> b\n```\n\nMore text.\n";
-    let result = inject_ascii_config_hints(body);
-    assert!(result.contains("[diagram: ASCII mode enabled in config]"));
-    assert!(result.contains("```d2\na -> b\n```"));
-}
+    let blocks = extract_diagram_blocks(body);
+    let hash = source_hash(&blocks[0].source);
 
-#[test]
-fn test_ascii_config_hint_not_injected_without_diagrams() {
-    let body = "# Title\n\n```rust\nfn main() {}\n```\n";
-    let result = inject_ascii_config_hints(body);
-    assert!(!result.contains("[diagram: ASCII mode enabled in config]"));
-    assert_eq!(result, body);
-}
+    let mut cache = DiagramCache::new();
+    cache.insert(hash, DiagramCacheEntry::Text("  ┌───┐    ┌───┐\n  │ a │───>│ b │\n  └───┘    └───┘".to_string()));
+    let tools = ToolAvailability { d2: true, mmdc: true };
 
-#[test]
-fn test_ascii_config_hint_injected_for_each_diagram_block() {
-    let body = "```d2\na -> b\n```\n\n```mermaid\ngraph TD;\n```\n";
-    let result = inject_ascii_config_hints(body);
-    let count = result.matches("[diagram: ASCII mode enabled in config]").count();
-    assert_eq!(count, 2);
+    let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools);
+    assert_eq!(segments.len(), 3);
+    assert!(matches!(&segments[0], PreviewSegment::Markdown(_)));
+    assert!(matches!(&segments[1], PreviewSegment::DiagramText(t) if t.contains("┌───┐")));
+    assert!(matches!(&segments[2], PreviewSegment::Markdown(_)));
 }

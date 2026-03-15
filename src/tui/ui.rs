@@ -507,19 +507,6 @@ fn draw_preview_content(f: &mut Frame, app: &mut App, area: Rect, block: Block, 
     // Snapshot header lines before body segments are appended (used for image Y offset)
     let header_lines: Vec<Line> = lines.clone();
 
-    if app.ascii_diagrams {
-        let hinted = super::diagram::inject_ascii_config_hints(&body);
-        let md = tui_markdown::from_str(&hinted);
-        for line in md.lines {
-            lines.push(line);
-        }
-        let paragraph = Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false });
-        f.render_widget(paragraph, area);
-        return;
-    }
-
     let segments = super::diagram::build_preview_segments(&body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability);
 
     // Collect image segments with their source hashes for rendering after the paragraph
@@ -814,26 +801,6 @@ fn draw_fullscreen(f: &mut Frame, app: &mut App) {
     let content_width = layout[1].width.saturating_sub(2) as usize;
     let panel_width = layout[1].width.saturating_sub(2);
     let panel_height = layout[1].height.saturating_sub(2);
-
-    if app.ascii_diagrams {
-        let hinted = super::diagram::inject_ascii_config_hints(&display_body);
-        let md = tui_markdown::from_str(&hinted);
-        let total_lines = wrapped_lines_total(&md.lines, content_width);
-        let paragraph = Paragraph::new(md.lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::DarkGray)),
-            )
-            .wrap(Wrap { trim: false })
-            .scroll((app.scroll_offset, 0));
-        f.render_widget(paragraph, layout[1]);
-        if total_lines > app.fullscreen_height {
-            render_scrollbar(f, layout[1], total_lines, app.fullscreen_height, app.scroll_offset as usize);
-        }
-        return;
-    }
 
     let segments = super::diagram::build_preview_segments(&display_body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability);
     let mut all_lines: Vec<Line> = Vec::new();

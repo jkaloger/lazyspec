@@ -314,19 +314,6 @@ pub fn inject_fallback_hints(body: &str, protocol: TerminalImageProtocol, tools:
     result
 }
 
-pub fn inject_ascii_config_hints(body: &str) -> String {
-    let blocks = extract_diagram_blocks(body);
-    if blocks.is_empty() {
-        return body.to_string();
-    }
-
-    let mut result = body.to_string();
-    for block in blocks.iter().rev() {
-        let insert_pos = block.byte_range.end;
-        result.insert_str(insert_pos, "\n[diagram: ASCII mode enabled in config]");
-    }
-    result
-}
 
 pub enum DiagramCacheEntry {
     Rendering,
