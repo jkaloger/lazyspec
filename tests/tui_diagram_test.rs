@@ -1,8 +1,8 @@
 use lazyspec::tui::terminal_caps::TerminalImageProtocol;
 use lazyspec::tui::diagram::{
     DiagramBlock, DiagramCache, DiagramCacheEntry, DiagramLanguage, PreviewSegment, ToolAvailability,
-    build_preview_segments, extract_diagram_blocks, fallback_hint, is_tool_available,
-    render_diagram, render_diagram_text, source_hash, tool_name,
+    build_preview_segments, extract_diagram_blocks, fallback_hint, inject_ascii_config_hints,
+    is_tool_available, render_diagram, render_diagram_text, source_hash, tool_name,
 };
 
 #[test]
@@ -277,4 +277,28 @@ fn test_build_segments_tool_unavailable_stays_markdown() {
     let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools);
     assert_eq!(segments.len(), 1);
     assert!(matches!(&segments[0], PreviewSegment::Markdown(_)));
+}
+
+#[test]
+fn test_ascii_config_hint_injected_after_diagram_block() {
+    let body = "# Title\n\n```d2\na -> b\n```\n\nMore text.\n";
+    let result = inject_ascii_config_hints(body);
+    assert!(result.contains("[diagram: ASCII mode enabled in config]"));
+    assert!(result.contains("```d2\na -> b\n```"));
+}
+
+#[test]
+fn test_ascii_config_hint_not_injected_without_diagrams() {
+    let body = "# Title\n\n```rust\nfn main() {}\n```\n";
+    let result = inject_ascii_config_hints(body);
+    assert!(!result.contains("[diagram: ASCII mode enabled in config]"));
+    assert_eq!(result, body);
+}
+
+#[test]
+fn test_ascii_config_hint_injected_for_each_diagram_block() {
+    let body = "```d2\na -> b\n```\n\n```mermaid\ngraph TD;\n```\n";
+    let result = inject_ascii_config_hints(body);
+    let count = result.matches("[diagram: ASCII mode enabled in config]").count();
+    assert_eq!(count, 2);
 }

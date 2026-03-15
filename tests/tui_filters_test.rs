@@ -26,7 +26,7 @@ fn setup_filters_fixture() -> (TestFixture, App) {
     );
 
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), lazyspec::tui::terminal_caps::TerminalImageProtocol::Unsupported);
+    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
     (fixture, app)
 }
 

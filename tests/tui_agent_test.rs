@@ -14,7 +14,7 @@ fn press(app: &mut App, fixture: &TestFixture, key: KeyCode) {
 fn open_dialog_on_rfc(fixture: &TestFixture) -> App {
     fixture.write_rfc("RFC-001-test.md", "Test RFC", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), lazyspec::tui::terminal_caps::TerminalImageProtocol::Unsupported);
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
     app.selected_type = 0;
     app.selected_doc = 0;
     press(&mut app, fixture, KeyCode::Char('a'));

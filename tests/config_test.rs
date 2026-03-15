@@ -296,3 +296,29 @@ severity = "fatal"
     let result = Config::parse(toml_str);
     assert!(result.is_err(), "Expected parse error for invalid severity 'fatal'");
 }
+
+#[test]
+fn parse_tui_ascii_diagrams_true() {
+    let toml_str = r#"
+[tui]
+ascii_diagrams = true
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    assert!(config.tui.ascii_diagrams);
+}
+
+#[test]
+fn tui_defaults_to_ascii_diagrams_false() {
+    let toml_str = r#"
+[templates]
+dir = ".lazyspec/templates"
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    assert!(!config.tui.ascii_diagrams);
+}
+
+#[test]
+fn default_config_has_ascii_diagrams_false() {
+    let config = Config::default();
+    assert!(!config.tui.ascii_diagrams);
+}

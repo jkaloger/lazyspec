@@ -84,6 +84,13 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
         AppEvent::DiagramRendered { source_hash, entry } => {
             app.diagram_cache.insert(source_hash, entry);
         }
+        AppEvent::ProbeResult { picker, protocol, tool_availability } => {
+            app.picker = picker;
+            app.terminal_image_protocol = protocol;
+            app.tool_availability = tool_availability;
+            app.diagram_cache = diagram::DiagramCache::new();
+            app.image_states.clear();
+        }
         #[cfg(feature = "agent")]
         AppEvent::AgentFinished => {}
     }
@@ -91,17 +98,27 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
 
 pub fn run(store: Store, config: &Config) -> Result<()> {
     enable_raw_mode()?;
-    let protocol = terminal_caps::probe();
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    let picker = ratatui_image::picker::Picker::halfblocks();
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(store, config, protocol);
+    let mut app = App::new(store, config, picker);
     app.refresh_validation(config);
 
     let (tx, rx) = crossbeam_channel::unbounded();
     app.event_tx = tx.clone();
+
+    // Spawn background probe for terminal image protocol and diagram tool availability
+    let probe_tx = tx.clone();
+    std::thread::spawn(move || {
+        let picker = terminal_caps::create_picker();
+        let protocol = terminal_caps::TerminalImageProtocol::from(picker.protocol_type());
+        let tool_availability = diagram::ToolAvailability::detect();
+        let _ = probe_tx.send(AppEvent::ProbeResult { picker, protocol, tool_availability });
+    });
+
     let root = app.store.root().to_path_buf();
     let fs_tx = tx.clone();
     let mut _watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {

@@ -7,7 +7,7 @@ use lazyspec::tui::app::{App, FormField};
 fn setup_app() -> (TestFixture, App) {
     let fixture = TestFixture::new();
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), lazyspec::tui::terminal_caps::TerminalImageProtocol::Unsupported);
+    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
     (fixture, app)
 }
 

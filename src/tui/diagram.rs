@@ -138,6 +138,12 @@ pub fn source_hash(source: &str) -> u64 {
     hasher.finish()
 }
 
+pub fn source_hash_path(path: &Path) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    hasher.finish()
+}
+
 pub fn render_diagram(block: &DiagramBlock, output_dir: &Path) -> Result<PathBuf> {
     let hash = source_hash(&block.source);
     let output_path = output_dir.join(format!("{:016x}.png", hash));
@@ -151,6 +157,8 @@ pub fn render_diagram(block: &DiagramBlock, output_dir: &Path) -> Result<PathBuf
             let input_path = output_dir.join(format!("{:016x}.d2", hash));
             fs::write(&input_path, &block.source)?;
             let args = vec![
+                "--scale".to_string(),
+                "2".to_string(),
                 input_path.display().to_string(),
                 output_path.display().to_string(),
             ];
@@ -164,6 +172,8 @@ pub fn render_diagram(block: &DiagramBlock, output_dir: &Path) -> Result<PathBuf
                 input_path.display().to_string(),
                 "-o".to_string(),
                 output_path.display().to_string(),
+                "-s".to_string(),
+                "2".to_string(),
             ];
             (input_path, args)
         }
@@ -226,14 +236,8 @@ pub enum PreviewSegment {
     DiagramError(String),
 }
 
-fn should_render_block(block: &DiagramBlock, tools: &ToolAvailability, protocol: TerminalImageProtocol) -> bool {
-    if !tools.is_available(&block.language) {
-        return false;
-    }
-    if protocol != TerminalImageProtocol::Unsupported {
-        return true;
-    }
-    block.language == DiagramLanguage::D2
+fn should_render_block(block: &DiagramBlock, tools: &ToolAvailability, _protocol: TerminalImageProtocol) -> bool {
+    tools.is_available(&block.language)
 }
 
 pub fn build_preview_segments(
@@ -307,6 +311,20 @@ pub fn inject_fallback_hints(body: &str, protocol: TerminalImageProtocol, tools:
         }
     }
 
+    result
+}
+
+pub fn inject_ascii_config_hints(body: &str) -> String {
+    let blocks = extract_diagram_blocks(body);
+    if blocks.is_empty() {
+        return body.to_string();
+    }
+
+    let mut result = body.to_string();
+    for block in blocks.iter().rev() {
+        let insert_pos = block.byte_range.end;
+        result.insert_str(insert_pos, "\n[diagram: ASCII mode enabled in config]");
+    }
     result
 }
 
