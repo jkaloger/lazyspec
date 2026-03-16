@@ -245,8 +245,8 @@ pub fn build_preview_segments(
     cache: &DiagramCache,
     protocol: TerminalImageProtocol,
     tools: &ToolAvailability,
+    blocks: &[DiagramBlock],
 ) -> Vec<PreviewSegment> {
-    let blocks = extract_diagram_blocks(body);
     if blocks.is_empty() {
         return vec![PreviewSegment::Markdown(body.to_string())];
     }
@@ -256,7 +256,7 @@ pub fn build_preview_segments(
         .collect();
 
     if renderable.is_empty() {
-        let hinted = inject_fallback_hints(body, protocol, tools);
+        let hinted = inject_fallback_hints(body, protocol, tools, blocks);
         return vec![PreviewSegment::Markdown(hinted)];
     }
 
@@ -266,7 +266,8 @@ pub fn build_preview_segments(
     for block in &renderable {
         if block.byte_range.start > cursor {
             let text = &body[cursor..block.byte_range.start];
-            let hinted = inject_fallback_hints(text, protocol, tools);
+            let sub_blocks = extract_diagram_blocks(text);
+            let hinted = inject_fallback_hints(text, protocol, tools, &sub_blocks);
             if !hinted.is_empty() {
                 segments.push(PreviewSegment::Markdown(hinted));
             }
@@ -286,7 +287,8 @@ pub fn build_preview_segments(
 
     if cursor < body.len() {
         let text = &body[cursor..];
-        let hinted = inject_fallback_hints(text, protocol, tools);
+        let sub_blocks = extract_diagram_blocks(text);
+        let hinted = inject_fallback_hints(text, protocol, tools, &sub_blocks);
         if !hinted.is_empty() {
             segments.push(PreviewSegment::Markdown(hinted));
         }
@@ -295,8 +297,7 @@ pub fn build_preview_segments(
     segments
 }
 
-pub fn inject_fallback_hints(body: &str, protocol: TerminalImageProtocol, tools: &ToolAvailability) -> String {
-    let blocks = extract_diagram_blocks(body);
+pub fn inject_fallback_hints(body: &str, protocol: TerminalImageProtocol, tools: &ToolAvailability, blocks: &[DiagramBlock]) -> String {
     if blocks.is_empty() {
         return body.to_string();
     }

@@ -8,9 +8,15 @@ use crate::tui::agent::{load_all_records, AgentSpawner, AgentStatus};
 use anyhow::{anyhow, Result};
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+pub struct SearchEntry {
+    pub path: PathBuf,
+    pub searchable: String, // pre-lowercased "title\0tag1\0tag2\0path"
+}
 
 pub enum AppEvent {
     Terminal(crossterm::event::KeyEvent),
@@ -339,6 +345,9 @@ pub struct App {
     pub picker: ratatui_image::picker::Picker,
     pub image_states: HashMap<u64, ratatui_image::protocol::StatefulProtocol>,
     pub ascii_diagrams: bool,
+    pub diagram_blocks_cache: Option<(PathBuf, u64, Vec<super::diagram::DiagramBlock>)>,
+    pub filtered_docs_cache: Option<Vec<PathBuf>>,
+    pub search_index: Vec<SearchEntry>,
 }
 
 impl App {
@@ -412,7 +421,11 @@ impl App {
             picker,
             image_states: HashMap::new(),
             ascii_diagrams: config.tui.ascii_diagrams,
+            diagram_blocks_cache: None,
+            filtered_docs_cache: None,
+            search_index: Vec::new(),
         };
+        app.rebuild_search_index();
         app.build_doc_tree();
         app
     }
@@ -421,6 +434,8 @@ impl App {
         let result = crate::engine::validation::validate_full(&self.store, config);
         self.validation_errors = result.errors.iter().map(|e| e.to_string()).collect();
         self.validation_warnings = result.warnings.iter().map(|e| e.to_string()).collect();
+        self.filtered_docs_cache = None;
+        self.rebuild_search_index();
     }
 
     pub fn cycle_mode(&mut self) {
@@ -535,25 +550,62 @@ impl App {
         self.available_tags = tags;
     }
 
-    pub fn filtered_docs(&self) -> Vec<&DocMeta> {
-        let mut docs = self.store.list(&Filter {
-            doc_type: None,
-            status: self.filter_status.clone(),
-            tag: self.filter_tag.clone(),
-        });
-        docs.sort_by(|a, b| a.path.cmp(&b.path));
-        docs
+    pub fn filtered_docs(&mut self) -> Vec<&DocMeta> {
+        if self.filtered_docs_cache.is_none() {
+            let mut docs = self.store.list(&Filter {
+                doc_type: None,
+                status: self.filter_status.clone(),
+                tag: self.filter_tag.clone(),
+            });
+            docs.sort_by(|a, b| a.path.cmp(&b.path));
+            self.filtered_docs_cache = Some(docs.iter().map(|d| d.path.clone()).collect());
+        }
+        self.filtered_docs_cache
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter_map(|p| self.store.get(p))
+            .collect()
     }
 
-    pub fn selected_filtered_doc(&self) -> Option<&DocMeta> {
-        let docs = self.filtered_docs();
-        docs.get(self.selected_doc).copied()
+    pub fn filtered_docs_count(&mut self) -> usize {
+        if self.filtered_docs_cache.is_none() {
+            self.filtered_docs();
+        }
+        self.filtered_docs_cache.as_ref().map_or(0, |c| c.len())
+    }
+
+    pub fn selected_filtered_doc(&mut self) -> Option<&DocMeta> {
+        let paths = if self.filtered_docs_cache.is_none() {
+            self.filtered_docs();
+            self.filtered_docs_cache.as_ref().unwrap()
+        } else {
+            self.filtered_docs_cache.as_ref().unwrap()
+        };
+        paths.get(self.selected_doc).and_then(|p| self.store.get(p))
+    }
+
+    pub fn rebuild_search_index(&mut self) {
+        self.search_index = self.store.all_docs().iter().map(|doc| {
+            let mut searchable = doc.title.to_lowercase();
+            for tag in &doc.tags {
+                searchable.push('\0');
+                searchable.push_str(&tag.to_lowercase());
+            }
+            searchable.push('\0');
+            searchable.push_str(&doc.path.to_string_lossy().to_lowercase());
+            SearchEntry {
+                path: doc.path.clone(),
+                searchable,
+            }
+        }).collect();
     }
 
     pub fn reset_filters(&mut self) {
         self.filter_status = None;
         self.filter_tag = None;
         self.filter_focused = FilterField::Status;
+        self.filtered_docs_cache = None;
     }
 
     pub fn cycle_filter_value_next(&mut self) {
@@ -584,6 +636,7 @@ impl App {
             }
             FilterField::ClearAction => {}
         }
+        self.filtered_docs_cache = None;
     }
 
     pub fn cycle_filter_value_prev(&mut self) {
@@ -612,6 +665,7 @@ impl App {
             }
             FilterField::ClearAction => {}
         }
+        self.filtered_docs_cache = None;
     }
 
     pub fn rebuild_graph(&mut self) {
@@ -791,23 +845,6 @@ impl App {
             return;
         }
 
-        let body = match self.store.get_body_raw(&doc_path) {
-            Ok(b) => b,
-            Err(_) => return,
-        };
-
-        if !body.contains("@ref ") {
-            self.expanded_body_cache.insert(doc_path, body);
-            return;
-        }
-
-        let body_hash = DiskCache::body_hash(&body);
-
-        if let Some(cached) = self.disk_cache.read(&doc_path, body_hash) {
-            self.expanded_body_cache.insert(doc_path, cached);
-            return;
-        }
-
         if let Some(cancel) = &self.expansion_cancel {
             cancel.store(true, Ordering::Relaxed);
         }
@@ -818,7 +855,31 @@ impl App {
 
         let root = self.store.root().to_path_buf();
         let tx = tx.clone();
+        let disk_cache = self.disk_cache.clone();
         std::thread::spawn(move || {
+            let full_path = root.join(&doc_path);
+            let content = match fs::read_to_string(&full_path) {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let body = match DocMeta::extract_body(&content) {
+                Ok(b) => b,
+                Err(_) => return,
+            };
+
+            if !body.contains("@ref ") {
+                let body_hash = DiskCache::body_hash(&body);
+                let _ = tx.send(AppEvent::ExpansionResult { path: doc_path, body, body_hash });
+                return;
+            }
+
+            let body_hash = DiskCache::body_hash(&body);
+
+            if let Some(cached) = disk_cache.read(&doc_path, body_hash) {
+                let _ = tx.send(AppEvent::ExpansionResult { path: doc_path, body: cached, body_hash });
+                return;
+            }
+
             let expander = RefExpander::new(root);
             match expander.expand_cancellable(&body, &cancel) {
                 Ok(Some(expanded)) => {
@@ -927,17 +988,9 @@ impl App {
         }
 
         let query = self.search_query.to_lowercase();
-        let mut results: Vec<_> = self
-            .store
-            .all_docs()
-            .into_iter()
-            .filter(|doc| {
-                let title_match = doc.title.to_lowercase().contains(&query);
-                let tag_match = doc.tags.iter().any(|t| t.to_lowercase().contains(&query));
-                let path_match = doc.path.to_string_lossy().to_lowercase().contains(&query);
-                title_match || tag_match || path_match
-            })
-            .map(|doc| doc.path.clone())
+        let mut results: Vec<_> = self.search_index.iter()
+            .filter(|e| e.searchable.contains(&query))
+            .map(|e| e.path.clone())
             .collect();
         results.sort();
         self.search_results = results;
@@ -1170,6 +1223,8 @@ impl App {
 
         // Reload the store to pick up the new file
         let _ = self.store.reload_file(root, &relative);
+        self.filtered_docs_cache = None;
+        self.rebuild_search_index();
 
         // Navigate to the new document
         let doc_type = self.create_form.doc_type.clone();
@@ -1216,6 +1271,8 @@ impl App {
         let doc_path_str = doc_path.to_string_lossy().to_string();
         crate::cli::delete::run(root, &doc_path_str)?;
         self.store.remove_file(&doc_path);
+        self.filtered_docs_cache = None;
+        self.rebuild_search_index();
 
         self.close_delete_confirm();
         self.build_doc_tree();
@@ -1270,6 +1327,8 @@ impl App {
 
         crate::cli::update::run(root, &doc_path_str, &[("status", &status.to_string())])?;
         self.store.reload_file(root, &doc_path)?;
+        self.filtered_docs_cache = None;
+        self.rebuild_search_index();
         self.build_doc_tree();
         self.close_status_picker();
         Ok(())
@@ -1606,11 +1665,11 @@ impl App {
         if modifiers.contains(KeyModifiers::CONTROL) {
             match code {
                 KeyCode::Char('d') => {
-                    let count = self.filtered_docs().len();
+                    let count = self.filtered_docs_count();
                     self.half_page_down(count);
                 }
                 KeyCode::Char('u') => {
-                    let count = self.filtered_docs().len();
+                    let count = self.filtered_docs_count();
                     self.half_page_up(count);
                 }
                 _ => {}
@@ -1634,18 +1693,18 @@ impl App {
                 self.reset_filters();
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                let count = self.filtered_docs().len();
+                let count = self.filtered_docs_count();
                 if count > 0 && self.selected_doc < count - 1 {
                     self.selected_doc += 1;
                 }
-                let count = self.filtered_docs().len();
+                let count = self.filtered_docs_count();
                 self.adjust_viewport(count);
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if self.selected_doc > 0 {
                     self.selected_doc -= 1;
                 }
-                let count = self.filtered_docs().len();
+                let count = self.filtered_docs_count();
                 self.adjust_viewport(count);
             }
             KeyCode::Enter => {
@@ -1661,7 +1720,7 @@ impl App {
                 self.doc_list_offset = 0;
             }
             KeyCode::Char('G') => {
-                let count = self.filtered_docs().len();
+                let count = self.filtered_docs_count();
                 if count > 0 {
                     self.selected_doc = count - 1;
                     self.doc_list_offset = count.saturating_sub(self.doc_list_height);
@@ -1992,6 +2051,9 @@ mod tests {
             picker: ratatui_image::picker::Picker::halfblocks(),
             image_states: HashMap::new(),
             ascii_diagrams: false,
+            diagram_blocks_cache: None,
+            filtered_docs_cache: None,
+            search_index: Vec::new(),
         };
         app
     }

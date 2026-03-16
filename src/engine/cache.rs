@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 const CACHE_VERSION: u32 = 3;
 
+#[derive(Clone)]
 pub struct DiskCache {
     dir: PathBuf,
 }

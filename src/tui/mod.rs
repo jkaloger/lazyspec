@@ -145,10 +145,9 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 std::thread::sleep(Duration::from_millis(50));
                 continue;
             }
-            if crossterm::event::poll(Duration::from_millis(50)).unwrap_or(false) {
-                if let Ok(Event::Key(key)) = crossterm::event::read() {
-                    let _ = term_tx.send(AppEvent::Terminal(key));
-                }
+            // Blocking read - wakes immediately on keypress
+            if let Ok(Event::Key(key)) = crossterm::event::read() {
+                let _ = term_tx.send(AppEvent::Terminal(key));
             }
         }
     });
@@ -158,19 +157,26 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         app.request_expansion(&tx);
 
         if let Some(meta) = app.selected_doc_meta() {
-            let body = app.expanded_body_cache.get(&meta.path)
-                .cloned()
-                .unwrap_or_else(|| app.store.get_body_raw(&meta.path).unwrap_or_default());
-            let blocks = diagram::extract_diagram_blocks(&body);
-            for block in &blocks {
-                app.request_diagram_render(block, &tx);
+            if let Some(body) = app.expanded_body_cache.get(&meta.path) {
+                let body_hash = crate::engine::cache::DiskCache::body_hash(body);
+                let blocks = match &app.diagram_blocks_cache {
+                    Some((p, h, b)) if p == &meta.path && *h == body_hash => b.clone(),
+                    _ => {
+                        let b = diagram::extract_diagram_blocks(body);
+                        app.diagram_blocks_cache = Some((meta.path.clone(), body_hash, b.clone()));
+                        b
+                    }
+                };
+                for block in &blocks {
+                    app.request_diagram_render(block, &tx);
+                }
             }
         }
 
         #[cfg(feature = "agent")]
         app.agent_spawner.poll_finished();
 
-        match rx.recv_timeout(Duration::from_millis(100)) {
+        match rx.recv_timeout(Duration::from_millis(16)) {
             Ok(event) => {
                 handle_app_event(&mut app, event, &root, config);
                 while let Ok(event) = rx.try_recv() {
