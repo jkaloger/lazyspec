@@ -6,6 +6,7 @@ use ratatui::{
     Frame,
 };
 
+use std::path::PathBuf;
 use unicode_width::UnicodeWidthStr;
 
 use crate::engine::document::{DocMeta, RelationType, Status};
@@ -452,11 +453,9 @@ fn draw_preview_content(f: &mut Frame, app: &mut App, area: Rect, block: Block, 
         return;
     };
 
-    let body = if let Some(expanded) = app.expanded_body_cache.get(&doc.path) {
-        expanded.clone()
-    } else {
-        app.store.get_body_raw(&doc.path).unwrap_or_default()
-    };
+    let body = app.expanded_body_cache.get(&doc.path)
+        .cloned()
+        .unwrap_or_default();
 
     let mut lines = vec![
         Line::from(Span::styled(
@@ -507,7 +506,11 @@ fn draw_preview_content(f: &mut Frame, app: &mut App, area: Rect, block: Block, 
     // Snapshot header lines before body segments are appended (used for image Y offset)
     let header_lines: Vec<Line> = lines.clone();
 
-    let segments = super::diagram::build_preview_segments(&body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability);
+    let diagram_blocks = match &app.diagram_blocks_cache {
+        Some((p, _, b)) if p == &doc.path => b.clone(),
+        _ => super::diagram::extract_diagram_blocks(&body),
+    };
+    let segments = super::diagram::build_preview_segments(&body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability, &diagram_blocks);
 
     // Collect image segments with their source hashes for rendering after the paragraph
     let mut image_segments: Vec<(u64, std::path::PathBuf)> = Vec::new();
@@ -562,7 +565,7 @@ fn draw_preview_content(f: &mut Frame, app: &mut App, area: Rect, block: Block, 
         // Start y_offset after the header lines (title, type/status/author, date,
         // optionally tags, blank line, optionally expanding indicator).
         let mut y_offset = wrapped_lines_total(&header_lines, content_width) as u16;
-        let segments_ref = super::diagram::build_preview_segments(&body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability);
+        let segments_ref = super::diagram::build_preview_segments(&body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability, &diagram_blocks);
         for segment in &segments_ref {
             match segment {
                 super::diagram::PreviewSegment::Markdown(text) => {
@@ -785,11 +788,9 @@ fn draw_fullscreen(f: &mut Frame, app: &mut App) {
     ]);
     f.render_widget(Paragraph::new(header), layout[0]);
 
-    let body = if let Some(expanded) = app.expanded_body_cache.get(&doc.path) {
-        expanded.clone()
-    } else {
-        app.store.get_body_raw(&doc.path).unwrap_or_else(|_| "Error loading document.".to_string())
-    };
+    let body = app.expanded_body_cache.get(&doc.path)
+        .cloned()
+        .unwrap_or_default();
 
     let expanding = app.expansion_in_flight.as_ref() == Some(&doc.path);
     let display_body = if expanding {
@@ -802,7 +803,11 @@ fn draw_fullscreen(f: &mut Frame, app: &mut App) {
     let panel_width = layout[1].width.saturating_sub(2);
     let panel_height = layout[1].height.saturating_sub(2);
 
-    let segments = super::diagram::build_preview_segments(&display_body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability);
+    let fullscreen_blocks = match &app.diagram_blocks_cache {
+        Some((p, _, b)) if p == &doc.path => b.clone(),
+        _ => super::diagram::extract_diagram_blocks(&display_body),
+    };
+    let segments = super::diagram::build_preview_segments(&display_body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability, &fullscreen_blocks);
     let mut all_lines: Vec<Line> = Vec::new();
     // Store wrap-aware Y position and height for each image segment
     let mut image_segments: Vec<(u64, std::path::PathBuf, u16, u16)> = Vec::new();
@@ -1391,15 +1396,20 @@ fn draw_filters_mode(f: &mut Frame, app: &mut App, area: Rect) {
 
     // Right panel: doc list
     app.doc_list_height = right[0].height.saturating_sub(2) as usize;
-    let filtered = app.filtered_docs();
-    let filtered_count = filtered.len();
+    let filtered_count = app.filtered_docs_count();
     let total_count = app.store.all_docs().len();
 
     let relations_focused = app.preview_tab == PreviewTab::Relations;
     let dim = relations_focused;
 
-    let rows: Vec<Row> = filtered
+    let filtered_paths: Vec<PathBuf> = app.filtered_docs_cache
+        .as_ref()
+        .map(|c| c.clone())
+        .unwrap_or_default();
+
+    let rows: Vec<Row> = filtered_paths
         .iter()
+        .filter_map(|p| app.store.get(p))
         .map(|doc| {
             let tree_cell = Cell::new("");
             let mut cells = vec![tree_cell];

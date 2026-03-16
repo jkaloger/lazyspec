@@ -230,7 +230,8 @@ fn test_build_segments_no_diagrams() {
     let cache = DiagramCache::new();
     let tools = ToolAvailability { d2: true, mmdc: true };
 
-    let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools);
+    let blocks = extract_diagram_blocks(body);
+    let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools, &blocks);
     assert_eq!(segments.len(), 1);
     assert!(matches!(&segments[0], PreviewSegment::Markdown(t) if t == body));
 }
@@ -248,7 +249,7 @@ fn test_build_segments_with_cached_image() {
     cache.insert(hash, DiagramCacheEntry::Image(img_path.clone()));
     let tools = ToolAvailability { d2: true, mmdc: true };
 
-    let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools);
+    let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools, &blocks);
     assert_eq!(segments.len(), 3);
     assert!(matches!(&segments[0], PreviewSegment::Markdown(_)));
     assert!(matches!(&segments[1], PreviewSegment::DiagramImage(p) if p == &img_path));
@@ -261,7 +262,8 @@ fn test_build_segments_loading_when_uncached() {
     let cache = DiagramCache::new();
     let tools = ToolAvailability { d2: true, mmdc: true };
 
-    let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools);
+    let blocks = extract_diagram_blocks(body);
+    let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools, &blocks);
     assert_eq!(segments.len(), 3);
     assert!(matches!(&segments[0], PreviewSegment::Markdown(_)));
     assert!(matches!(&segments[1], PreviewSegment::DiagramLoading));
@@ -274,7 +276,8 @@ fn test_build_segments_tool_unavailable_stays_markdown() {
     let cache = DiagramCache::new();
     let tools = ToolAvailability { d2: false, mmdc: false };
 
-    let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools);
+    let blocks = extract_diagram_blocks(body);
+    let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools, &blocks);
     assert_eq!(segments.len(), 1);
     assert!(matches!(&segments[0], PreviewSegment::Markdown(_)));
 }
@@ -289,7 +292,7 @@ fn test_build_segments_with_cached_text() {
     cache.insert(hash, DiagramCacheEntry::Text("  ┌───┐    ┌───┐\n  │ a │───>│ b │\n  └───┘    └───┘".to_string()));
     let tools = ToolAvailability { d2: true, mmdc: true };
 
-    let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools);
+    let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools, &blocks);
     assert_eq!(segments.len(), 3);
     assert!(matches!(&segments[0], PreviewSegment::Markdown(_)));
     assert!(matches!(&segments[1], PreviewSegment::DiagramText(t) if t.contains("┌───┐")));
