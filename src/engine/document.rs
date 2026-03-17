@@ -235,8 +235,8 @@ impl DocMeta {
         Ok(body.trim_start_matches('\n').to_string())
     }
 
-    pub fn sort_by_date_desc(a: &DocMeta, b: &DocMeta) -> std::cmp::Ordering {
-        b.date.cmp(&a.date).then_with(|| a.path.cmp(&b.path))
+    pub fn sort_by_date(a: &DocMeta, b: &DocMeta) -> std::cmp::Ordering {
+        a.date.cmp(&b.date).then_with(|| a.path.cmp(&b.path))
     }
 }
 
@@ -262,33 +262,33 @@ mod tests {
     }
 
     #[test]
-    fn sort_by_date_desc_newer_first() {
+    fn sort_by_date_oldest_first() {
         let old = make_doc("2025-01-01", "a.md");
         let new = make_doc("2026-03-17", "b.md");
-        let mut docs = vec![old, new];
-        docs.sort_by(DocMeta::sort_by_date_desc);
-        assert_eq!(docs[0].date, NaiveDate::from_ymd_opt(2026, 3, 17).unwrap());
-        assert_eq!(docs[1].date, NaiveDate::from_ymd_opt(2025, 1, 1).unwrap());
+        let mut docs = vec![new, old];
+        docs.sort_by(DocMeta::sort_by_date);
+        assert_eq!(docs[0].date, NaiveDate::from_ymd_opt(2025, 1, 1).unwrap());
+        assert_eq!(docs[1].date, NaiveDate::from_ymd_opt(2026, 3, 17).unwrap());
     }
 
     #[test]
-    fn sort_by_date_desc_same_date_tiebreak_by_path() {
+    fn sort_by_date_same_date_tiebreak_by_path() {
         let a = make_doc("2026-01-01", "aaa.md");
         let b = make_doc("2026-01-01", "zzz.md");
         let mut docs = vec![b, a];
-        docs.sort_by(DocMeta::sort_by_date_desc);
+        docs.sort_by(DocMeta::sort_by_date);
         assert_eq!(docs[0].path, PathBuf::from("aaa.md"));
         assert_eq!(docs[1].path, PathBuf::from("zzz.md"));
     }
 
     #[test]
-    fn sort_by_date_desc_single_and_empty() {
+    fn sort_by_date_single_and_empty() {
         let mut empty: Vec<DocMeta> = vec![];
-        empty.sort_by(DocMeta::sort_by_date_desc);
+        empty.sort_by(DocMeta::sort_by_date);
         assert!(empty.is_empty());
 
         let mut single = vec![make_doc("2026-01-01", "only.md")];
-        single.sort_by(DocMeta::sort_by_date_desc);
+        single.sort_by(DocMeta::sort_by_date);
         assert_eq!(single.len(), 1);
     }
 }

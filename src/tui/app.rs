@@ -478,7 +478,7 @@ impl App {
         });
 
         let mut sorted: Vec<&DocMeta> = docs.into_iter().collect();
-        sorted.sort_by(|a, b| DocMeta::sort_by_date_desc(a, b));
+        sorted.sort_by(|a, b| DocMeta::sort_by_date(a, b));
 
         // Count occurrences of each ID (excluding children) to detect duplicates
         let mut id_counts: HashMap<String, usize> = HashMap::new();
@@ -516,7 +516,7 @@ impl App {
                     .iter()
                     .filter_map(|cp| self.store.get(cp))
                     .collect();
-                child_docs.sort_by(|a, b| DocMeta::sort_by_date_desc(a, b));
+                child_docs.sort_by(|a, b| DocMeta::sort_by_date(a, b));
 
                 for child in child_docs {
                     tree.push(DocListNode {
@@ -557,7 +557,7 @@ impl App {
                 status: self.filter_status.clone(),
                 tag: self.filter_tag.clone(),
             });
-            docs.sort_by(|a, b| DocMeta::sort_by_date_desc(a, b));
+            docs.sort_by(|a, b| DocMeta::sort_by_date(a, b));
             self.filtered_docs_cache = Some(docs.iter().map(|d| d.path.clone()).collect());
         }
         self.filtered_docs_cache
@@ -753,7 +753,7 @@ impl App {
             doc_type: Some(self.current_type().clone()),
             ..Default::default()
         });
-        docs.sort_by(|a, b| DocMeta::sort_by_date_desc(a, b));
+        docs.sort_by(|a, b| DocMeta::sort_by_date(a, b));
         docs
     }
 

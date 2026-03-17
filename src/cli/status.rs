@@ -33,7 +33,7 @@ pub fn run_human(store: &Store) -> String {
         return String::new();
     }
 
-    all_docs.sort_by(|a, b| DocMeta::sort_by_date_desc(a, b));
+    all_docs.sort_by(|a, b| DocMeta::sort_by_date(a, b));
 
     let mut output = String::new();
     let type_order = [
