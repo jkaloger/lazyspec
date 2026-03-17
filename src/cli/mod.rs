@@ -14,7 +14,13 @@ pub mod search;
 pub mod validate;
 pub mod fix;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Debug, Clone, ValueEnum)]
+pub enum RenumberFormat {
+    Sqids,
+    Incremental,
+}
 
 #[derive(Parser)]
 #[command(name = "lazyspec", about = "Manage project stories, RFCs, ADRs, and iterations")]
@@ -161,6 +167,12 @@ pub enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Renumber all documents to the given format
+        #[arg(long)]
+        renumber: Option<RenumberFormat>,
+        /// Filter to a single document type (e.g. rfc, story)
+        #[arg(long = "type")]
+        doc_type: Option<String>,
     },
     /// Validate all documents
     Validate {

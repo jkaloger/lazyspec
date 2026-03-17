@@ -1,5 +1,5 @@
 use crate::cli::json::doc_to_json;
-use crate::engine::config::Config;
+use crate::engine::config::{Config, NumberingStrategy};
 use crate::engine::document::DocMeta;
 use crate::engine::template;
 use anyhow::{anyhow, Result};
@@ -22,8 +22,16 @@ pub fn run(
     let target_dir = root.join(dir);
     fs::create_dir_all(&target_dir)?;
 
+    let numbering = match type_def.numbering {
+        NumberingStrategy::Sqids => {
+            let sqids_config = config.sqids.as_ref()
+                .ok_or_else(|| anyhow!("type '{}' uses sqids numbering but no [numbering.sqids] config found", doc_type))?;
+            Some((&type_def.numbering, sqids_config))
+        }
+        NumberingStrategy::Incremental => None,
+    };
     let filename =
-        template::resolve_filename(&config.naming.pattern, doc_type, title, &target_dir);
+        template::resolve_filename(&config.naming.pattern, doc_type, title, &target_dir, numbering);
     let target_path = target_dir.join(&filename);
 
     let template_path = root

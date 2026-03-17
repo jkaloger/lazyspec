@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -29,6 +29,25 @@ pub enum ValidationRule {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NumberingStrategy {
+    #[default]
+    Incremental,
+    Sqids,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SqidsConfig {
+    pub salt: String,
+    #[serde(default = "default_sqids_min_length")]
+    pub min_length: u8,
+}
+
+fn default_sqids_min_length() -> u8 {
+    3
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TypeDef {
     pub name: String,
@@ -36,6 +55,8 @@ pub struct TypeDef {
     pub dir: String,
     pub prefix: String,
     pub icon: Option<String>,
+    #[serde(default)]
+    pub numbering: NumberingStrategy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +69,8 @@ pub struct Config {
     pub templates: Templates,
     pub naming: Naming,
     pub tui: Tui,
+    #[serde(skip)]
+    pub sqids: Option<SqidsConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +103,11 @@ impl Default for Tui {
 }
 
 #[derive(Deserialize)]
+struct RawNumbering {
+    sqids: Option<SqidsConfig>,
+}
+
+#[derive(Deserialize)]
 struct RawConfig {
     types: Option<Vec<TypeDef>>,
     rules: Option<Vec<ValidationRule>>,
@@ -87,6 +115,7 @@ struct RawConfig {
     templates: Option<Templates>,
     naming: Option<Naming>,
     tui: Option<Tui>,
+    numbering: Option<RawNumbering>,
 }
 
 fn default_types() -> Vec<TypeDef> {
@@ -97,6 +126,7 @@ fn default_types() -> Vec<TypeDef> {
             dir: "docs/rfcs".to_string(),
             prefix: "RFC".to_string(),
             icon: Some("●".to_string()),
+            numbering: NumberingStrategy::default(),
         },
         TypeDef {
             name: "story".to_string(),
@@ -104,6 +134,7 @@ fn default_types() -> Vec<TypeDef> {
             dir: "docs/stories".to_string(),
             prefix: "STORY".to_string(),
             icon: Some("▲".to_string()),
+            numbering: NumberingStrategy::default(),
         },
         TypeDef {
             name: "iteration".to_string(),
@@ -111,6 +142,7 @@ fn default_types() -> Vec<TypeDef> {
             dir: "docs/iterations".to_string(),
             prefix: "ITERATION".to_string(),
             icon: Some("◆".to_string()),
+            numbering: NumberingStrategy::default(),
         },
         TypeDef {
             name: "adr".to_string(),
@@ -118,6 +150,7 @@ fn default_types() -> Vec<TypeDef> {
             dir: "docs/adrs".to_string(),
             prefix: "ADR".to_string(),
             icon: Some("■".to_string()),
+            numbering: NumberingStrategy::default(),
         },
     ]
 }
@@ -171,6 +204,7 @@ fn types_from_directories(dirs: &Directories) -> Vec<TypeDef> {
             dir: dirs.rfcs.clone(),
             prefix: "RFC".to_string(),
             icon: Some("●".to_string()),
+            numbering: NumberingStrategy::default(),
         },
         TypeDef {
             name: "story".to_string(),
@@ -178,6 +212,7 @@ fn types_from_directories(dirs: &Directories) -> Vec<TypeDef> {
             dir: dirs.stories.clone(),
             prefix: "STORY".to_string(),
             icon: Some("▲".to_string()),
+            numbering: NumberingStrategy::default(),
         },
         TypeDef {
             name: "iteration".to_string(),
@@ -185,6 +220,7 @@ fn types_from_directories(dirs: &Directories) -> Vec<TypeDef> {
             dir: dirs.iterations.clone(),
             prefix: "ITERATION".to_string(),
             icon: Some("◆".to_string()),
+            numbering: NumberingStrategy::default(),
         },
         TypeDef {
             name: "adr".to_string(),
@@ -192,6 +228,7 @@ fn types_from_directories(dirs: &Directories) -> Vec<TypeDef> {
             dir: dirs.adrs.clone(),
             prefix: "ADR".to_string(),
             icon: Some("■".to_string()),
+            numbering: NumberingStrategy::default(),
         },
     ]
 }
@@ -211,6 +248,7 @@ impl Default for Config {
                 pattern: "{type}-{n:03}-{title}.md".to_string(),
             },
             tui: Tui::default(),
+            sqids: None,
         }
     }
 }
@@ -235,6 +273,21 @@ impl Config {
 
         let rules = raw.rules.unwrap_or_else(default_rules);
 
+        let any_sqids = types.iter().any(|t| t.numbering == NumberingStrategy::Sqids);
+        let sqids = raw.numbering.and_then(|n| n.sqids);
+
+        if any_sqids {
+            let Some(ref sqids_cfg) = sqids else {
+                bail!("numbering = \"sqids\" requires a [numbering.sqids] section with a non-empty salt");
+            };
+            if sqids_cfg.salt.is_empty() {
+                bail!("numbering.sqids.salt must not be empty");
+            }
+            if sqids_cfg.min_length < 1 || sqids_cfg.min_length > 10 {
+                bail!("numbering.sqids.min_length must be between 1 and 10, got {}", sqids_cfg.min_length);
+            }
+        }
+
         Ok(Config {
             types,
             rules,
@@ -246,6 +299,7 @@ impl Config {
                 pattern: "{type}-{n:03}-{title}.md".to_string(),
             }),
             tui: raw.tui.unwrap_or_default(),
+            sqids,
         })
     }
 

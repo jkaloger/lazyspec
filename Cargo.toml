@@ -25,6 +25,7 @@ crossbeam-channel = "0.5"
 ratatui-image = { version = "10", default-features = false, features = ["crossterm", "image-defaults"] }
 image = "0.25"
 unicode-width = "0.2"
+sqids = "0.4"
 
 [features]
 default = []
