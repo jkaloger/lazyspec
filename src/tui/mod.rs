@@ -2,6 +2,7 @@
 pub mod agent;
 pub mod app;
 pub mod diagram;
+pub mod perf_log;
 pub mod terminal_caps;
 pub mod ui;
 
@@ -22,7 +23,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn run_editor(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -147,13 +148,22 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             }
             // Blocking read - wakes immediately on keypress
             if let Ok(Event::Key(key)) = crossterm::event::read() {
+                perf_log::log(&format!("input_thread: read key {:?}", key.code));
                 let _ = term_tx.send(AppEvent::Terminal(key));
+                perf_log::log("input_thread: sent to channel");
             }
         }
     });
 
+    let mut loop_count: u64 = 0;
     loop {
+        let loop_start = Instant::now();
+
+        let t = Instant::now();
         terminal.draw(|f| ui::draw(f, &mut app))?;
+        perf_log::log_duration("draw", t);
+
+        let t = Instant::now();
         app.request_expansion(&tx);
 
         if let Some(meta) = app.selected_doc_meta() {
@@ -172,19 +182,34 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 }
             }
         }
+        perf_log::log_duration("between_frames", t);
 
         #[cfg(feature = "agent")]
         app.agent_spawner.poll_finished();
 
+        let t = Instant::now();
         match rx.recv_timeout(Duration::from_millis(16)) {
             Ok(event) => {
+                perf_log::log_duration("recv_wait", t);
+                let t2 = Instant::now();
+                let mut event_count = 1u32;
                 handle_app_event(&mut app, event, &root, config);
                 while let Ok(event) = rx.try_recv() {
+                    event_count += 1;
                     handle_app_event(&mut app, event, &root, config);
                 }
+                perf_log::log_duration(&format!("handle_events({})", event_count), t2);
             }
-            Err(_) => {}
+            Err(_) => {
+                perf_log::log_duration("recv_timeout", t);
+            }
         }
+
+        loop_count += 1;
+        if perf_log::enabled() && loop_count % 60 == 0 {
+            perf_log::log(&format!("--- loop #{} ---", loop_count));
+        }
+        perf_log::log_duration("loop_total", loop_start);
 
         if let Some(path) = app.editor_request.take() {
             input_paused.store(true, Ordering::Relaxed);
