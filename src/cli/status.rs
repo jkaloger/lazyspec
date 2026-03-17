@@ -1,7 +1,7 @@
 use crate::cli::json::doc_to_json;
 use crate::cli::style::type_header;
 use crate::engine::config::Config;
-use crate::engine::document::DocType;
+use crate::engine::document::{DocMeta, DocType};
 use crate::engine::store::Store;
 use crate::cli::style::doc_card;
 
@@ -33,7 +33,7 @@ pub fn run_human(store: &Store) -> String {
         return String::new();
     }
 
-    all_docs.sort_by(|a, b| a.path.cmp(&b.path));
+    all_docs.sort_by(|a, b| DocMeta::sort_by_date_desc(a, b));
 
     let mut output = String::new();
     let type_order = [

@@ -234,4 +234,61 @@ impl DocMeta {
         let (_, body) = split_frontmatter(content)?;
         Ok(body.trim_start_matches('\n').to_string())
     }
+
+    pub fn sort_by_date_desc(a: &DocMeta, b: &DocMeta) -> std::cmp::Ordering {
+        b.date.cmp(&a.date).then_with(|| a.path.cmp(&b.path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    fn make_doc(date: &str, path: &str) -> DocMeta {
+        DocMeta {
+            path: PathBuf::from(path),
+            title: String::new(),
+            doc_type: DocType::new("rfc"),
+            status: Status::Draft,
+            author: String::new(),
+            date: NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
+            tags: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            id: String::new(),
+        }
+    }
+
+    #[test]
+    fn sort_by_date_desc_newer_first() {
+        let old = make_doc("2025-01-01", "a.md");
+        let new = make_doc("2026-03-17", "b.md");
+        let mut docs = vec![old, new];
+        docs.sort_by(DocMeta::sort_by_date_desc);
+        assert_eq!(docs[0].date, NaiveDate::from_ymd_opt(2026, 3, 17).unwrap());
+        assert_eq!(docs[1].date, NaiveDate::from_ymd_opt(2025, 1, 1).unwrap());
+    }
+
+    #[test]
+    fn sort_by_date_desc_same_date_tiebreak_by_path() {
+        let a = make_doc("2026-01-01", "aaa.md");
+        let b = make_doc("2026-01-01", "zzz.md");
+        let mut docs = vec![b, a];
+        docs.sort_by(DocMeta::sort_by_date_desc);
+        assert_eq!(docs[0].path, PathBuf::from("aaa.md"));
+        assert_eq!(docs[1].path, PathBuf::from("zzz.md"));
+    }
+
+    #[test]
+    fn sort_by_date_desc_single_and_empty() {
+        let mut empty: Vec<DocMeta> = vec![];
+        empty.sort_by(DocMeta::sort_by_date_desc);
+        assert!(empty.is_empty());
+
+        let mut single = vec![make_doc("2026-01-01", "only.md")];
+        single.sort_by(DocMeta::sort_by_date_desc);
+        assert_eq!(single.len(), 1);
+    }
 }
