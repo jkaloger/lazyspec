@@ -2,7 +2,7 @@ mod common;
 
 use common::TestFixture;
 use lazyspec::engine::document::{DocType, Status};
-use lazyspec::engine::store::{Filter, ResolveError};
+use lazyspec::engine::store::{extract_id_from_name, Filter, ResolveError};
 use std::path::PathBuf;
 
 fn setup_fixture() -> TestFixture {
@@ -682,4 +682,95 @@ fn list_includes_both_duplicate_docs() {
     let titles: Vec<&str> = all.iter().map(|d| d.title.as_str()).collect();
     assert!(titles.contains(&"First"));
     assert!(titles.contains(&"Second"));
+}
+
+// --- Mixed-format ID resolution tests (AC-1 through AC-7) ---
+
+fn setup_mixed_fixture() -> TestFixture {
+    let fixture = TestFixture::new();
+
+    fixture.write_doc(
+        "docs/rfcs/RFC-022-foo.md",
+        "---\ntitle: \"Foo\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    fixture.write_doc(
+        "docs/rfcs/RFC-k3f-bar.md",
+        "---\ntitle: \"Bar\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    fixture.write_subfolder_doc(
+        "docs/rfcs/RFC-a1b-folder-doc",
+        "---\ntitle: \"Folder Doc\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    fixture
+}
+
+#[test]
+fn extract_id_from_name_numeric() {
+    // AC-1
+    assert_eq!(extract_id_from_name("RFC-022-some-title.md"), "RFC-022");
+}
+
+#[test]
+fn extract_id_from_name_sqids() {
+    // AC-2
+    assert_eq!(extract_id_from_name("RFC-k3f-some-title.md"), "RFC-k3f");
+}
+
+#[test]
+fn extract_id_from_name_story_sqids() {
+    // AC-5
+    assert_eq!(extract_id_from_name("STORY-a2b-some-title.md"), "STORY-a2b");
+}
+
+#[test]
+fn resolve_shorthand_numeric_in_mixed_dir() {
+    // AC-3
+    let fixture = setup_mixed_fixture();
+    let store = fixture.store();
+
+    let doc = store.resolve_shorthand("RFC-022");
+    assert!(doc.is_ok());
+    assert_eq!(doc.unwrap().title, "Foo");
+}
+
+#[test]
+fn resolve_shorthand_sqids_in_mixed_dir() {
+    // AC-4
+    let fixture = setup_mixed_fixture();
+    let store = fixture.store();
+
+    let doc = store.resolve_shorthand("RFC-k3f");
+    assert!(doc.is_ok());
+    assert_eq!(doc.unwrap().title, "Bar");
+}
+
+#[test]
+fn resolve_shorthand_nonexistent_returns_not_found() {
+    // AC-6
+    let fixture = setup_mixed_fixture();
+    let store = fixture.store();
+
+    let result = store.resolve_shorthand("RFC-zzz");
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        ResolveError::NotFound(id) => assert_eq!(id, "RFC-zzz"),
+        ResolveError::Ambiguous { .. } => panic!("expected NotFound, got Ambiguous"),
+    }
+}
+
+#[test]
+fn extract_id_folder_based_sqids_via_store_load() {
+    // AC-7: extract_id on RFC-a1b-folder-doc/index.md returns RFC-a1b
+    // Since extract_id is private, we verify indirectly through doc.id after loading.
+    let fixture = setup_mixed_fixture();
+    let store = fixture.store();
+
+    let doc = store.resolve_shorthand("RFC-a1b");
+    assert!(doc.is_ok());
+    let doc = doc.unwrap();
+    assert_eq!(doc.title, "Folder Doc");
+    assert_eq!(doc.id, "RFC-a1b");
 }

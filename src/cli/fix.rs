@@ -1,19 +1,46 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use regex::Regex;
 use serde::Serialize;
 
-use crate::engine::config::Config;
+use crate::cli::RenumberFormat;
+use crate::engine::config::{Config, NumberingStrategy, SqidsConfig};
 use crate::engine::document::split_frontmatter;
 use crate::engine::refs::REF_PATTERN;
 use crate::engine::store::{extract_id_from_name, Store};
-use crate::engine::template::next_number;
+use crate::engine::template::{next_number, next_sqids_id, shuffle_alphabet};
 
 #[derive(Debug, Serialize)]
 struct FixOutput {
     field_fixes: Vec<FieldFixResult>,
     conflict_fixes: Vec<ConflictFixResult>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct RenumberFixResult {
+    pub old_path: String,
+    pub new_path: String,
+    pub old_id: String,
+    pub new_id: String,
+    pub references_updated: Vec<ReferenceUpdate>,
+    pub written: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ExternalReference {
+    pub file: String,
+    pub old_name: String,
+    pub line: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct RenumberOutput {
+    format: String,
+    doc_type: Option<String>,
+    dry_run: bool,
+    changes: Vec<RenumberFixResult>,
+    external_references: Vec<ExternalReference>,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,6 +95,439 @@ pub fn run(
     if has_fixes { 0 } else { 1 }
 }
 
+fn collect_renumber_output(
+    root: &Path,
+    store: &Store,
+    config: &Config,
+    format: &RenumberFormat,
+    doc_type: Option<&str>,
+    dry_run: bool,
+) -> RenumberOutput {
+    let format_str = match format {
+        RenumberFormat::Sqids => "sqids",
+        RenumberFormat::Incremental => "incremental",
+    };
+
+    let changes = collect_renumber_fixes(root, store, config, format, doc_type, dry_run);
+    let external_references = scan_external_references(root, store, config, &changes);
+
+    RenumberOutput {
+        format: format_str.to_string(),
+        doc_type: doc_type.map(|s| s.to_string()),
+        dry_run,
+        changes,
+        external_references,
+    }
+}
+
+pub fn run_renumber(
+    root: &Path,
+    store: &Store,
+    config: &Config,
+    format: &RenumberFormat,
+    doc_type: Option<&str>,
+    dry_run: bool,
+    json: bool,
+) -> i32 {
+    let output = collect_renumber_output(root, store, config, format, doc_type, dry_run);
+
+    if json {
+        let wrapper = serde_json::json!({ "renumber": output });
+        println!("{}", serde_json::to_string_pretty(&wrapper).unwrap());
+    } else {
+        for c in &output.changes {
+            if dry_run {
+                println!("Would rename {} -> {}", c.old_path, c.new_path);
+            } else {
+                println!("Renamed {} -> {}", c.old_path, c.new_path);
+            }
+            for r in &c.references_updated {
+                if dry_run {
+                    println!("  Would update ref in {}: {} -> {}", r.file, r.old_value, r.new_value);
+                } else {
+                    println!("  Updated ref in {}: {} -> {}", r.file, r.old_value, r.new_value);
+                }
+            }
+        }
+        if output.changes.is_empty() {
+            let type_filter = doc_type.map(|t| format!(" (type: {})", t)).unwrap_or_default();
+            println!("No documents to renumber{}", type_filter);
+        }
+        if !output.external_references.is_empty() {
+            println!(
+                "Warning: {} external references found that could not be auto-updated",
+                output.external_references.len()
+            );
+            for ext in &output.external_references {
+                println!("  {}:{} references {}", ext.file, ext.line, ext.old_name);
+            }
+        }
+    }
+
+    0
+}
+
+fn is_incremental_id(id_segment: &str) -> bool {
+    !id_segment.is_empty() && id_segment.chars().all(|c| c.is_ascii_digit())
+}
+
+fn build_sqids_encoder(sqids_config: &SqidsConfig) -> sqids::Sqids {
+    let alphabet = shuffle_alphabet(&sqids_config.salt);
+    sqids::Sqids::builder()
+        .alphabet(alphabet)
+        .min_length(sqids_config.min_length)
+        .blocklist(HashSet::new())
+        .build()
+        .expect("valid sqids config")
+}
+
+fn collect_renumber_fixes(
+    root: &Path,
+    store: &Store,
+    config: &Config,
+    format: &RenumberFormat,
+    doc_type_filter: Option<&str>,
+    dry_run: bool,
+) -> Vec<RenumberFixResult> {
+    let target_types: Vec<&crate::engine::config::TypeDef> = config
+        .types
+        .iter()
+        .filter(|t| {
+            if let Some(filter) = doc_type_filter {
+                t.name.eq_ignore_ascii_case(filter) || t.prefix.eq_ignore_ascii_case(filter)
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    let mut all_renames: Vec<RenumberFixResult> = Vec::new();
+
+    for type_def in &target_types {
+        let prefix = &type_def.prefix;
+
+        // Collect docs belonging to this type
+        let mut type_docs: Vec<&crate::engine::document::DocMeta> = store
+            .all_docs()
+            .into_iter()
+            .filter(|d| {
+                if d.virtual_doc {
+                    return false;
+                }
+                let filename = d.path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+                let name = if filename == "index.md" {
+                    d.path
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .and_then(|f| f.to_str())
+                        .unwrap_or("")
+                } else {
+                    d.path.file_stem().and_then(|f| f.to_str()).unwrap_or("")
+                };
+                name.starts_with(&format!("{}-", prefix))
+            })
+            .collect();
+
+        // Sort alphabetically by filename for stable ordering
+        type_docs.sort_by(|a, b| a.path.cmp(&b.path));
+
+        match format {
+            RenumberFormat::Sqids => {
+                let sqids_config = match config.sqids.as_ref() {
+                    Some(c) => c,
+                    None => continue,
+                };
+                let encoder = build_sqids_encoder(sqids_config);
+
+                for doc in &type_docs {
+                    let name = doc_display_name(doc);
+                    let id = extract_id_from_name(&name);
+                    let id_segment = id.strip_prefix(&format!("{}-", prefix)).unwrap_or("");
+
+                    // Already sqids format -- skip (AC-7)
+                    if !is_incremental_id(id_segment) {
+                        continue;
+                    }
+
+                    let numeric: u64 = id_segment.parse().unwrap_or(0);
+                    let sqid = encoder.encode(&[numeric]).expect("sqids encode").to_lowercase();
+                    let new_id = format!("{}-{}", prefix, sqid);
+
+                    if let Some(rename) = build_rename(root, doc, &id, &new_id, dry_run) {
+                        all_renames.push(rename);
+                    }
+                }
+            }
+            RenumberFormat::Incremental => {
+                // Find the max existing incremental ID to avoid collisions
+                let max_existing: u32 = type_docs
+                    .iter()
+                    .filter_map(|d| {
+                        let name = doc_display_name(d);
+                        let id = extract_id_from_name(&name);
+                        let id_segment = id.strip_prefix(&format!("{}-", prefix)).unwrap_or("");
+                        if is_incremental_id(id_segment) {
+                            id_segment.parse::<u32>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .max()
+                    .unwrap_or(0);
+
+                // Filter to only docs currently in sqids format
+                let sqids_docs: Vec<&&crate::engine::document::DocMeta> = type_docs
+                    .iter()
+                    .filter(|d| {
+                        let name = doc_display_name(d);
+                        let id = extract_id_from_name(&name);
+                        let id_segment = id.strip_prefix(&format!("{}-", prefix)).unwrap_or("");
+                        !is_incremental_id(id_segment)
+                    })
+                    .collect();
+
+                for (i, doc) in sqids_docs.iter().enumerate() {
+                    let name = doc_display_name(doc);
+                    let id = extract_id_from_name(&name);
+
+                    let new_num = max_existing + (i as u32) + 1;
+                    let new_id = format!("{}-{:03}", prefix, new_num);
+
+                    // Already incremental -- skip (AC-7, though we filtered above)
+                    if id == new_id {
+                        continue;
+                    }
+
+                    if let Some(rename) = build_rename(root, doc, &id, &new_id, dry_run) {
+                        all_renames.push(rename);
+                    }
+                }
+            }
+        }
+    }
+
+    // Second pass: cascade references using the old->new path map
+    if !all_renames.is_empty() {
+        let path_map: HashMap<String, String> = all_renames
+            .iter()
+            .map(|r| (r.old_path.clone(), r.new_path.clone()))
+            .collect();
+
+        for rename in &mut all_renames {
+            let refs = cascade_references(root, store, &rename.old_path, &rename.new_path, dry_run);
+            rename.references_updated = refs;
+        }
+
+        // Also update references that point between renamed docs
+        // (cascade_references handles individual old->new, but if doc A references doc B
+        // and both are renamed, we need to update A's new location too)
+        if !dry_run {
+            for rename in &all_renames {
+                let new_abs = root.join(&rename.new_path);
+                let content = match std::fs::read_to_string(&new_abs) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+                let mut updated = content.clone();
+                for (old_p, new_p) in &path_map {
+                    if old_p == &rename.old_path {
+                        continue;
+                    }
+                    updated = updated.replace(old_p.as_str(), new_p.as_str());
+                }
+                if updated != content {
+                    let _ = std::fs::write(&new_abs, &updated);
+                }
+            }
+        }
+    }
+
+    all_renames
+}
+
+pub fn scan_external_references(
+    root: &Path,
+    store: &Store,
+    config: &Config,
+    changes: &[RenumberFixResult],
+) -> Vec<ExternalReference> {
+    if changes.is_empty() {
+        return vec![];
+    }
+
+    // Collect old filenames from changes (just the filename, not the full path)
+    let old_names: Vec<String> = changes
+        .iter()
+        .map(|c| {
+            Path::new(&c.old_path)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or(&c.old_path)
+                .to_string()
+        })
+        .collect();
+
+    // Build set of managed directories so we can skip them
+    let managed_dirs: HashSet<String> = config.types.iter().map(|t| t.dir.clone()).collect();
+
+    // Build set of store-managed file paths (relative)
+    let managed_paths: HashSet<String> = store
+        .all_docs()
+        .iter()
+        .map(|d| d.path.display().to_string())
+        .collect();
+
+    let mut refs = Vec::new();
+    scan_dir_for_references(root, root, &managed_dirs, &managed_paths, &old_names, &mut refs);
+    refs
+}
+
+fn scan_dir_for_references(
+    root: &Path,
+    dir: &Path,
+    managed_dirs: &HashSet<String>,
+    managed_paths: &HashSet<String>,
+    old_names: &[String],
+    refs: &mut Vec<ExternalReference>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    const NOISE_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv", "dist", "build", ".hg"];
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if NOISE_DIRS.contains(&name) {
+                    continue;
+                }
+            }
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            let rel_str = rel.display().to_string();
+            if managed_dirs.contains(&rel_str) {
+                continue;
+            }
+            scan_dir_for_references(root, &path, managed_dirs, managed_paths, old_names, refs);
+            continue;
+        }
+
+        let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+        let is_scannable = filename.ends_with(".md")
+            || filename.ends_with(".wiki")
+            || filename.starts_with("README");
+
+        if !is_scannable {
+            continue;
+        }
+
+        // Skip store-managed files
+        let rel = path.strip_prefix(root).unwrap_or(&path);
+        let rel_str = rel.display().to_string();
+        if managed_paths.contains(&rel_str) {
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        for (line_num, line) in content.lines().enumerate() {
+            for old_name in old_names {
+                if line.contains(old_name.as_str()) {
+                    refs.push(ExternalReference {
+                        file: rel_str.clone(),
+                        old_name: old_name.clone(),
+                        line: line_num + 1,
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn doc_display_name(doc: &crate::engine::document::DocMeta) -> String {
+    let filename = doc.path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+    if filename == "index.md" {
+        doc.path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|f| f.to_str())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        doc.path
+            .file_stem()
+            .and_then(|f| f.to_str())
+            .unwrap_or("")
+            .to_string()
+    }
+}
+
+fn build_rename(
+    root: &Path,
+    doc: &crate::engine::document::DocMeta,
+    old_id: &str,
+    new_id: &str,
+    dry_run: bool,
+) -> Option<RenumberFixResult> {
+    let filename = doc.path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+    let is_subfolder = filename == "index.md";
+    let old_path_str = doc.path.display().to_string();
+
+    if is_subfolder {
+        let parent_rel = doc.path.parent()?;
+        let parent_name = parent_rel.file_name().and_then(|f| f.to_str())?;
+        let new_dir_name = parent_name.replacen(old_id, new_id, 1);
+        let new_parent_rel = parent_rel.with_file_name(&new_dir_name);
+        let new_path_str = new_parent_rel.join("index.md").display().to_string();
+
+        let old_abs = root.join(parent_rel);
+        let new_abs = root.join(&new_parent_rel);
+
+        if !dry_run {
+            std::fs::rename(&old_abs, &new_abs).ok()?;
+            update_title_in_file(&new_abs.join("index.md"), old_id, new_id);
+        }
+
+        Some(RenumberFixResult {
+            old_path: old_path_str,
+            new_path: new_path_str,
+            old_id: old_id.to_string(),
+            new_id: new_id.to_string(),
+            references_updated: vec![],
+            written: !dry_run,
+        })
+    } else {
+        let stem = doc.path.file_stem().and_then(|f| f.to_str())?;
+        let new_stem = stem.replacen(old_id, new_id, 1);
+        let new_filename = format!("{}.md", new_stem);
+        let new_rel = doc.path.with_file_name(&new_filename);
+        let new_path_str = new_rel.display().to_string();
+
+        let old_abs = root.join(&doc.path);
+        let new_abs = root.join(&new_rel);
+
+        if !dry_run {
+            std::fs::rename(&old_abs, &new_abs).ok()?;
+            update_title_in_file(&new_abs, old_id, new_id);
+        }
+
+        Some(RenumberFixResult {
+            old_path: old_path_str,
+            new_path: new_path_str,
+            old_id: old_id.to_string(),
+            new_id: new_id.to_string(),
+            references_updated: vec![],
+            written: !dry_run,
+        })
+    }
+}
+
 pub fn run_json(
     root: &Path,
     store: &Store,
@@ -77,6 +537,19 @@ pub fn run_json(
 ) -> String {
     let output = collect_all(root, store, config, paths, dry_run);
     serde_json::to_string_pretty(&output).unwrap()
+}
+
+pub fn run_renumber_json(
+    root: &Path,
+    store: &Store,
+    config: &Config,
+    format: &RenumberFormat,
+    doc_type: Option<&str>,
+    dry_run: bool,
+) -> String {
+    let output = collect_renumber_output(root, store, config, format, doc_type, dry_run);
+    let wrapper = serde_json::json!({ "renumber": output });
+    serde_json::to_string_pretty(&wrapper).unwrap()
 }
 
 pub fn run_human(
@@ -281,8 +754,17 @@ fn renumber_doc(
     let type_def = config.types.iter().find(|t| t.prefix.eq_ignore_ascii_case(doc_type_prefix))?;
     let type_dir = root.join(&type_def.dir);
 
-    let new_num = next_number(&type_dir, &type_def.prefix);
-    let new_id = format!("{}-{:03}", type_def.prefix, new_num);
+    let new_id = match type_def.numbering {
+        NumberingStrategy::Sqids => {
+            let sqids_config = config.sqids.as_ref()?;
+            let sqid = next_sqids_id(&type_dir, &type_def.prefix, sqids_config);
+            format!("{}-{}", type_def.prefix, sqid)
+        }
+        NumberingStrategy::Incremental => {
+            let new_num = next_number(&type_dir, &type_def.prefix);
+            format!("{}-{:03}", type_def.prefix, new_num)
+        }
+    };
 
     let filename = doc.path.file_name().and_then(|f| f.to_str()).unwrap_or("");
     let is_subfolder = filename == "index.md";

@@ -1,4 +1,4 @@
-use lazyspec::engine::config::{Config, Severity, ValidationRule};
+use lazyspec::engine::config::{Config, NumberingStrategy, Severity, ValidationRule};
 
 #[test]
 fn parse_config_from_toml() {
@@ -321,4 +321,133 @@ dir = ".lazyspec/templates"
 fn default_config_has_ascii_diagrams_false() {
     let config = Config::default();
     assert!(!config.tui.ascii_diagrams);
+}
+
+// --- Numbering / Sqids config tests ---
+
+#[test]
+fn absent_numbering_defaults_to_incremental() {
+    let toml_str = r#"
+[templates]
+dir = ".lazyspec/templates"
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    for t in &config.types {
+        assert_eq!(t.numbering, NumberingStrategy::Incremental);
+    }
+}
+
+#[test]
+fn valid_sqids_config_parses() {
+    let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+numbering = "sqids"
+
+[numbering.sqids]
+salt = "my-secret-salt"
+min_length = 5
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    let rfc = config.type_by_name("rfc").unwrap();
+    assert_eq!(rfc.numbering, NumberingStrategy::Sqids);
+    let sqids_cfg = config.sqids.unwrap();
+    assert_eq!(sqids_cfg.salt, "my-secret-salt");
+    assert_eq!(sqids_cfg.min_length, 5);
+}
+
+#[test]
+fn sqids_config_defaults_min_length_to_3() {
+    let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+numbering = "sqids"
+
+[numbering.sqids]
+salt = "my-salt"
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    let sqids_cfg = config.sqids.unwrap();
+    assert_eq!(sqids_cfg.min_length, 3);
+}
+
+#[test]
+fn sqids_missing_salt_fails() {
+    let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+numbering = "sqids"
+"#;
+    let result = Config::parse(toml_str);
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("salt"), "Error should mention salt, got: {msg}");
+}
+
+#[test]
+fn sqids_empty_salt_fails() {
+    let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+numbering = "sqids"
+
+[numbering.sqids]
+salt = ""
+"#;
+    let result = Config::parse(toml_str);
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("salt"), "Error should mention salt, got: {msg}");
+}
+
+#[test]
+fn sqids_min_length_zero_fails() {
+    let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+numbering = "sqids"
+
+[numbering.sqids]
+salt = "my-salt"
+min_length = 0
+"#;
+    let result = Config::parse(toml_str);
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("min_length"), "Error should mention min_length, got: {msg}");
+}
+
+#[test]
+fn sqids_min_length_eleven_fails() {
+    let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+numbering = "sqids"
+
+[numbering.sqids]
+salt = "my-salt"
+min_length = 11
+"#;
+    let result = Config::parse(toml_str);
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("min_length"), "Error should mention min_length, got: {msg}");
 }

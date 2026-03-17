@@ -1,7 +1,7 @@
 ---
 title: "Sqids Document Numbering"
 type: rfc
-status: draft
+status: accepted
 author: "jkaloger"
 date: 2026-03-15
 tags:
@@ -12,6 +12,7 @@ related:
   - related to: docs/rfcs/RFC-020-fix-command-numbering-conflict-resolution.md
   - related to: docs/rfcs/RFC-013-custom-document-types.md
 ---
+
 
 ## Problem
 

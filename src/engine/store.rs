@@ -487,7 +487,7 @@ impl Store {
 pub fn extract_id_from_name(name: &str) -> String {
     let parts: Vec<&str> = name.split('-').collect();
     for (i, part) in parts.iter().enumerate() {
-        if part.chars().all(|c| c.is_ascii_digit()) && !part.is_empty() {
+        if !part.is_empty() && !part.chars().all(|c| c.is_ascii_uppercase()) {
             return parts[..=i].join("-");
         }
     }
@@ -533,11 +533,11 @@ fn strip_type_prefix(name: &str) -> &str {
     }
     i += 1;
 
-    let digit_start = i;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
+    let id_start = i;
+    while i < bytes.len() && bytes[i].is_ascii_alphanumeric() && !bytes[i].is_ascii_uppercase() {
         i += 1;
     }
-    if i == digit_start || i >= bytes.len() || bytes[i] != b'-' {
+    if i == id_start || i >= bytes.len() || bytes[i] != b'-' {
         return name;
     }
     i += 1;
