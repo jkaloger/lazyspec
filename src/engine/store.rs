@@ -478,7 +478,7 @@ impl Store {
             }
         }
 
-        results.sort_by(|a, b| a.doc.path.cmp(&b.doc.path));
+        results.sort_by(|a, b| DocMeta::sort_by_date(&a.doc, &b.doc));
         results
     }
 

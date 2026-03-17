@@ -1,5 +1,6 @@
 use crate::cli::json::doc_to_json_with_family;
 use crate::cli::style::{dim, doc_card};
+use crate::engine::document::DocMeta;
 use crate::engine::store::{Filter, Store};
 
 fn build_filter(doc_type: Option<&str>, status: Option<&str>) -> Filter {
@@ -11,7 +12,8 @@ fn build_filter(doc_type: Option<&str>, status: Option<&str>) -> Filter {
 }
 
 pub fn run(store: &Store, doc_type: Option<&str>, status: Option<&str>, json: bool) {
-    let docs = store.list(&build_filter(doc_type, status));
+    let mut docs = store.list(&build_filter(doc_type, status));
+    docs.sort_by(|a, b| DocMeta::sort_by_date(a, b));
 
     if json {
         let output = json_output(&docs, store);
@@ -33,7 +35,8 @@ pub fn run(store: &Store, doc_type: Option<&str>, status: Option<&str>, json: bo
 }
 
 pub fn run_json(store: &Store, doc_type: Option<&str>, status: Option<&str>) -> String {
-    let docs = store.list(&build_filter(doc_type, status));
+    let mut docs = store.list(&build_filter(doc_type, status));
+    docs.sort_by(|a, b| DocMeta::sort_by_date(a, b));
     json_output(&docs, store)
 }
 
