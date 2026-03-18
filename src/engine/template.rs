@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::engine::config::{NumberingStrategy, SqidsConfig};
 
@@ -22,19 +23,6 @@ pub fn slugify(title: &str) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("-")
-}
-
-fn count_prefixed_files(dir: &Path, prefix: &str) -> u32 {
-    let mut count = 0u32;
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if name.to_string_lossy().starts_with(prefix) {
-                count += 1;
-            }
-        }
-    }
-    count
 }
 
 pub fn next_number(dir: &Path, prefix: &str) -> u32 {
@@ -92,8 +80,11 @@ pub fn next_sqids_id(dir: &Path, prefix: &str, sqids_config: &SqidsConfig) -> St
         .build()
         .expect("valid sqids config");
 
-    let count = count_prefixed_files(dir, prefix);
-    let mut input = (count + 1) as u64;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before unix epoch")
+        .as_secs();
+    let mut input = ts;
 
     loop {
         let id = sqids.encode(&[input]).expect("sqids encode");
@@ -203,17 +194,15 @@ mod tests {
             min_length: 3,
         };
 
-        // Generate the first ID (for input=1 since dir is empty)
+        // Generate the first ID (derived from the current Unix timestamp)
         let first_id = next_sqids_id(dir.path(), "RFC", &config);
 
-        // Create a file that would collide with the first candidate
-        // (next call will see count=0 again if no prefix files, so we create one
-        // that matches the first_id to force a collision)
+        // Plant a file that matches the first ID to force a collision
         let colliding_filename = format!("RFC-{}-something.md", first_id);
         fs::write(dir.path().join(&colliding_filename), "").unwrap();
 
-        // Now there's 1 file with prefix RFC, so count=1, input=2
-        // The second ID should differ from the first
+        // The second call uses the current timestamp, hits the collision,
+        // and the retry loop increments the input to produce a different ID
         let second_id = next_sqids_id(dir.path(), "RFC", &config);
         assert_ne!(first_id, second_id, "should retry on collision");
     }
@@ -226,28 +215,20 @@ mod tests {
             min_length: 3,
         };
 
-        // Pre-create a file so count=1
-        fs::write(dir.path().join("RFC-placeholder.md"), "").unwrap();
+        // Generate the first ID (based on current timestamp)
+        let first_id = next_sqids_id(dir.path(), "RFC", &config);
 
-        // The function will try input=2; get an ID for that
-        let alphabet = shuffle_alphabet(&config.salt);
-        let sqids = sqids::Sqids::builder()
-            .alphabet(alphabet)
-            .min_length(config.min_length)
-            .blocklist(HashSet::new())
-            .build()
-            .unwrap();
-        let candidate_for_2 = sqids.encode(&[2]).unwrap().to_lowercase();
-
-        // Create a file that collides with that candidate
-        let colliding = format!("RFC-{}-blocker.md", candidate_for_2);
+        // Create a file that collides with the first candidate
+        let colliding = format!("RFC-{}-blocker.md", first_id);
         fs::write(dir.path().join(&colliding), "").unwrap();
 
-        // Now count=2, input=3. The candidate for 3 should be returned
-        // (assuming no further collision)
-        let id = next_sqids_id(dir.path(), "RFC", &config);
-        let expected = sqids.encode(&[3]).unwrap().to_lowercase();
-        assert_eq!(id, expected, "should skip colliding ID and use next");
+        // The next call uses the same timestamp, hits the collision,
+        // increments input, and returns a different ID
+        let second_id = next_sqids_id(dir.path(), "RFC", &config);
+        assert_ne!(
+            first_id, second_id,
+            "should skip colliding ID and use next"
+        );
     }
 
     #[test]

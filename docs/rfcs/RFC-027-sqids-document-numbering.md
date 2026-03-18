@@ -71,8 +71,8 @@ When `numbering` is omitted or set to `"incremental"`, the existing `next_number
 With sqids numbering, `next_number` changes behavior:
 
 1. Scan the directory for existing documents (same as today)
-2. Count the total number of documents (not the max number)
-3. Encode `count + 1` through sqids to produce the ID
+2. Use the current Unix timestamp (seconds precision) as the sqids input
+3. Encode the timestamp through sqids to produce the ID
 4. Verify the generated filename doesn't already exist (handle hash collisions)
 5. If collision, increment the input and try again
 
@@ -169,7 +169,7 @@ The command prints a summary of external references it found but couldn't update
 | Aspect | Incremental | Sqids |
 |--------|-------------|-------|
 | Readability | High (`RFC-022` is obvious) | Medium (`RFC-k3f` is opaque) |
-| Conflict risk | High in distributed workflows | Near zero |
+| Conflict risk | High in distributed workflows | Negligible (requires same-second create) |
 | Ordering | Implicit (higher number = newer) | None (IDs don't sort chronologically) |
 | Information leakage | Reveals document count | Obscured |
 | Reversibility | Trivial | Requires sqids config |
