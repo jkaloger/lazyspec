@@ -166,13 +166,13 @@ The command prints a summary of external references it found but couldn't update
 
 ### Trade-offs
 
-| Aspect | Incremental | Sqids |
-|--------|-------------|-------|
-| Readability | High (`RFC-022` is obvious) | Medium (`RFC-k3f` is opaque) |
-| Conflict risk | High in distributed workflows | Negligible (requires same-second create) |
-| Ordering | Implicit (higher number = newer) | None (IDs don't sort chronologically) |
-| Information leakage | Reveals document count | Obscured |
-| Reversibility | Trivial | Requires sqids config |
+| Aspect             | Incremental                    | Sqids                                    |
+|--------------------|--------------------------------|------------------------------------------|
+| Readability        | High (`RFC-022` is obvious)    | Medium (`RFC-k3f` is opaque)             |
+| Conflict risk      | High in distributed workflows  | Negligible (requires same-second create) |
+| Ordering           | Implicit (higher number = newer)| None (IDs don't sort chronologically)   |
+| Information leakage| Reveals document count         | Obscured                                 |
+| Reversibility      | Trivial                        | Requires sqids config                    |
 
 Teams that value readable, ordered IDs should stick with incremental. Teams that value conflict-free distributed creation should use sqids.
 
