@@ -1,6 +1,8 @@
 mod common;
 
 use std::fs;
+use lazyspec::engine::config::SqidsConfig;
+use lazyspec::engine::template::next_sqids_id;
 
 fn sqids_config(salt: &str, min_length: u8) -> lazyspec::engine::config::Config {
     let toml = format!(
@@ -234,29 +236,27 @@ fn create_retries_on_collision() {
 fn create_handles_preexisting_colliding_file() {
     let fixture = common::TestFixture::new();
     let root = fixture.root();
-    let config = sqids_config("collision-pre-existing", 3);
+    let rfcs_dir = root.join("docs/rfcs");
 
-    // First, generate what the first ID would be by creating and removing
-    let path1 =
-        lazyspec::cli::create::run(root, &config, "rfc", "Probe", "author").unwrap();
-    let name1 = path1.file_name().unwrap().to_str().unwrap().to_string();
-    let id1: String = name1.split('-').nth(1).unwrap().to_string();
+    let sqids_cfg = SqidsConfig {
+        salt: "collision-pre-existing".to_string(),
+        min_length: 3,
+    };
 
-    // Remove it and recreate a file with the same ID prefix but different slug
-    // to simulate a collision scenario
-    fs::remove_file(&path1).unwrap();
-    let colliding = format!("RFC-{}-pre-existing.md", id1);
-    fs::write(root.join("docs/rfcs").join(&colliding), "---\ntitle: \"X\"\ntype: rfc\nstatus: draft\nauthor: \"a\"\ndate: 2026-01-01\ntags: []\n---\n").unwrap();
+    // Get the timestamp-derived ID that next_sqids_id would produce right now
+    let first_id = next_sqids_id(&rfcs_dir, "RFC", &sqids_cfg);
 
-    // Now create should detect the collision and use the next ID
-    let path2 =
-        lazyspec::cli::create::run(root, &config, "rfc", "After Collision", "author").unwrap();
-    let name2 = path2.file_name().unwrap().to_str().unwrap();
-    let id2 = name2.split('-').nth(1).unwrap();
+    // Plant a file with that ID prefix so the next call collides
+    let colliding = format!("RFC-{}-pre-existing.md", first_id);
+    fs::write(rfcs_dir.join(&colliding), "placeholder").unwrap();
+
+    // Call again immediately (same second) -- the collision-retry loop
+    // should detect the planted file and increment the input
+    let second_id = next_sqids_id(&rfcs_dir, "RFC", &sqids_cfg);
 
     assert_ne!(
-        id1, id2,
-        "should have retried past the colliding ID: {id1} vs {id2}"
+        first_id, second_id,
+        "should have retried past the colliding ID: {first_id} vs {second_id}"
     );
 }
 

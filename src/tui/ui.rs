@@ -250,7 +250,7 @@ fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
 fn doc_table_widths() -> [Constraint; 5] {
     [
         Constraint::Length(4),  // tree
-        Constraint::Length(14), // ID
+        Constraint::Length(18), // ID
         Constraint::Fill(1),   // title
         Constraint::Length(12), // status
         Constraint::Min(20),   // tags
@@ -269,7 +269,7 @@ fn doc_row_cells(
     let normal_style = Style::default();
 
     let id_style = if dim { dim_style } else { normal_style };
-    let id_cell = Cell::new(Span::styled(format!("{:<14}", id), id_style));
+    let id_cell = Cell::new(Span::styled(format!("{:<18}", id), id_style));
 
     let title_text = if is_virtual {
         format!("{} (virtual)", title)
