@@ -14,6 +14,11 @@ use crate::engine::document::{DocMeta, RelationType, Status};
 use crate::tui::agent::AgentStatus;
 use crate::tui::app::{App, DocListNode, FilterField, FormField, PreviewTab, ViewMode};
 
+fn render_markdown_to_lines(text: &str, max_width: u16) -> Vec<Line<'static>> {
+    let segments = super::gfm::extract_gfm_segments(text);
+    super::gfm::render_gfm_segments(&segments, max_width)
+}
+
 /// Compute the number of wrapped display lines a single `Line` occupies at
 /// the given `content_width`. When the paragraph widget wraps text, each
 /// logical line may span multiple rows.
@@ -518,8 +523,8 @@ fn draw_preview_content(f: &mut Frame, app: &mut App, area: Rect, block: Block, 
     for segment in &segments {
         match segment {
             super::diagram::PreviewSegment::Markdown(text) => {
-                let md = tui_markdown::from_str(text);
-                for line in md.lines {
+                let gfm_lines = render_markdown_to_lines(text, area.width.saturating_sub(2));
+                for line in gfm_lines {
                     lines.push(line);
                 }
             }
@@ -569,8 +574,8 @@ fn draw_preview_content(f: &mut Frame, app: &mut App, area: Rect, block: Block, 
         for segment in &segments_ref {
             match segment {
                 super::diagram::PreviewSegment::Markdown(text) => {
-                    let md = tui_markdown::from_str(text);
-                    y_offset += wrapped_lines_total(&md.lines, content_width) as u16;
+                    let gfm_lines = render_markdown_to_lines(text, area.width.saturating_sub(2));
+                    y_offset += wrapped_lines_total(&gfm_lines, content_width) as u16;
                 }
                 super::diagram::PreviewSegment::DiagramImage(path) => {
                     let hash = super::diagram::source_hash_path(path);
@@ -816,9 +821,9 @@ fn draw_fullscreen(f: &mut Frame, app: &mut App) {
     for segment in &segments {
         match segment {
             super::diagram::PreviewSegment::Markdown(text) => {
-                let md = tui_markdown::from_str(text);
-                wrapped_y += wrapped_lines_total(&md.lines, content_width);
-                for line in md.lines {
+                let gfm_lines = render_markdown_to_lines(text, panel_width);
+                wrapped_y += wrapped_lines_total(&gfm_lines, content_width);
+                for line in gfm_lines {
                     all_lines.push(line);
                 }
             }

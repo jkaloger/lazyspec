@@ -26,6 +26,7 @@ ratatui-image = { version = "10", default-features = false, features = ["crosste
 image = "0.25"
 unicode-width = "0.2"
 sqids = "0.4"
+pulldown-cmark = "0.13"
 
 [features]
 default = []
