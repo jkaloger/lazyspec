@@ -2,6 +2,7 @@
 pub mod agent;
 pub mod app;
 pub mod diagram;
+pub mod gfm;
 pub mod perf_log;
 pub mod terminal_caps;
 pub mod ui;

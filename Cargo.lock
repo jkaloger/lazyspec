@@ -1392,6 +1392,7 @@ dependencies = [
  "crossterm 0.28.1",
  "image",
  "notify",
+ "pulldown-cmark",
  "ratatui",
  "ratatui-image",
  "regex",
