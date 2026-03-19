@@ -420,7 +420,7 @@ pub fn render_gfm_segments(segments: &[GfmSegment], max_width: u16) -> Vec<Line<
                         .into_iter()
                         .map(|s| Span::styled(s.content.to_string(), s.style))
                         .collect();
-                    lines.push(Line::from(owned_spans));
+                    lines.push(Line::from(owned_spans).style(line.style));
                 }
             }
             GfmSegment::Table(table) => {
@@ -669,5 +669,32 @@ More text at the end.
         let fn2_text: String = lines[2].spans.iter().map(|s| s.content.to_string()).collect();
         assert!(fn2_text.contains("[^abc]:"));
         assert!(fn2_text.contains("Another footnote."));
+    }
+
+    #[test]
+    fn test_line_level_styles_preserved() {
+        let input = "# Heading 1\n\n## Heading 2\n\nBody text.\n";
+
+        let direct = tui_markdown::from_str(input);
+        let segments = extract_gfm_segments(input);
+        let gfm_lines = render_gfm_segments(&segments, 80);
+
+        assert_eq!(direct.lines.len(), gfm_lines.len(), "line count mismatch");
+
+        for (i, (d, g)) in direct.lines.iter().zip(gfm_lines.iter()).enumerate() {
+            assert_eq!(
+                d.style, g.style,
+                "line-level style mismatch at line {i}: direct={:?} gfm={:?}",
+                d.style, g.style
+            );
+        }
+
+        // H1 line should carry the DefaultStyleSheet heading style
+        let h1_style = gfm_lines[0].style;
+        assert!(
+            h1_style.add_modifier.contains(Modifier::BOLD),
+            "H1 should be bold, got {:?}",
+            h1_style
+        );
     }
 }
