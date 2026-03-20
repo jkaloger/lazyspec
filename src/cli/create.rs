@@ -1,6 +1,7 @@
 use crate::cli::json::doc_to_json;
 use crate::engine::config::{Config, NumberingStrategy, ReservedFormat};
 use crate::engine::document::DocMeta;
+use crate::engine::reservation;
 use crate::engine::template;
 use anyhow::{anyhow, Result};
 use chrono::Local;
@@ -31,15 +32,25 @@ pub fn run(
         NumberingStrategy::Reserved => {
             let reserved_cfg = config.reserved.as_ref()
                 .ok_or_else(|| anyhow!("type '{}' uses reserved numbering but no [numbering.reserved] config found", doc_type))?;
+            let num = reservation::reserve_next(
+                root,
+                &reserved_cfg.remote,
+                &type_def.prefix.to_uppercase(),
+                reserved_cfg.max_retries,
+            )?;
             let id = match reserved_cfg.format {
-                ReservedFormat::Incremental => {
-                    let n = template::next_number(&target_dir, &type_def.prefix.to_uppercase());
-                    format!("{:03}", n)
-                }
+                ReservedFormat::Incremental => format!("{:03}", num),
                 ReservedFormat::Sqids => {
                     let sqids_config = config.sqids.as_ref()
                         .ok_or_else(|| anyhow!("reserved format 'sqids' requires [numbering.sqids] config"))?;
-                    template::next_sqids_id(&target_dir, &type_def.prefix.to_uppercase(), sqids_config)
+                    let alphabet = template::shuffle_alphabet(&sqids_config.salt);
+                    let sqids = sqids::Sqids::builder()
+                        .alphabet(alphabet)
+                        .min_length(sqids_config.min_length)
+                        .blocklist(std::collections::HashSet::new())
+                        .build()
+                        .expect("valid sqids config");
+                    sqids.encode(&[num as u64]).expect("sqids encode").to_lowercase()
                 }
             };
             (None, Some(id))
