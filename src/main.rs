@@ -16,17 +16,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Some(Commands::Completions { shell }) = &cli.command {
-        let bin = std::env::args_os()
-            .next()
-            .and_then(|s| {
-                let p = std::path::PathBuf::from(s);
-                if p.components().count() > 1 {
-                    std::env::current_dir().ok().map(|cwd| cwd.join(&p).to_string_lossy().into_owned())
-                } else {
-                    Some(p.to_string_lossy().into_owned())
-                }
-            })
-            .unwrap_or_else(|| "lazyspec".to_string());
+        let bin = "lazyspec";
         let shell_name = match shell {
             clap_complete::Shell::Bash => "bash",
             clap_complete::Shell::Zsh => "zsh",
