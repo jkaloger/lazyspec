@@ -1,7 +1,9 @@
 mod common;
 
 use common::TestFixture;
-use lazyspec::engine::reservation::reserve_next;
+use lazyspec::engine::config::{ReservedConfig, ReservedFormat};
+use lazyspec::engine::reservation::{list_reservations, reserve_next};
+use lazyspec::engine::store::Store;
 use std::process::Command;
 
 fn seed_ref_on_bare(bare_path: &std::path::Path, prefix: &str, num: u32) {
@@ -186,4 +188,164 @@ exit 1
             "local ref for candidate {n} should have been cleaned up"
         );
     }
+}
+
+fn config_with_reserved() -> lazyspec::engine::config::Config {
+    let mut config = lazyspec::engine::config::Config::default();
+    config.reserved = Some(ReservedConfig {
+        remote: "origin".to_string(),
+        format: ReservedFormat::Incremental,
+        max_retries: 5,
+    });
+    config
+}
+
+// AC-1: list displays all reservation refs with correct type, number, and ref path
+#[test]
+fn list_shows_all_reservations() {
+    let (fixture, bare) = TestFixture::with_git_remote();
+
+    seed_ref_on_bare(bare.path(), "RFC", 1);
+    seed_ref_on_bare(bare.path(), "RFC", 3);
+    seed_ref_on_bare(bare.path(), "STORY", 5);
+
+    let reservations = list_reservations(fixture.root(), "origin").unwrap();
+
+    assert_eq!(reservations.len(), 3, "should return all 3 refs");
+
+    let has = |prefix: &str, number: u32| {
+        reservations.iter().any(|r| {
+            r.prefix == prefix
+                && r.number == number
+                && r.ref_path == format!("refs/reservations/{prefix}/{number}")
+        })
+    };
+
+    assert!(has("RFC", 1), "should contain RFC/1");
+    assert!(has("RFC", 3), "should contain RFC/3");
+    assert!(has("STORY", 5), "should contain STORY/5");
+}
+
+// AC-2: list --json outputs structured JSON with prefix, number, ref_path keys
+#[test]
+fn list_json_output_is_structured() {
+    let (fixture, bare) = TestFixture::with_git_remote();
+
+    seed_ref_on_bare(bare.path(), "RFC", 1);
+    seed_ref_on_bare(bare.path(), "RFC", 3);
+    seed_ref_on_bare(bare.path(), "STORY", 5);
+
+    let reservations = list_reservations(fixture.root(), "origin").unwrap();
+    let json_str = serde_json::to_string_pretty(&reservations).unwrap();
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
+
+    assert_eq!(parsed.len(), 3);
+    for entry in &parsed {
+        assert!(entry.get("prefix").is_some(), "entry missing 'prefix' key");
+        assert!(entry.get("number").is_some(), "entry missing 'number' key");
+        assert!(
+            entry.get("ref_path").is_some(),
+            "entry missing 'ref_path' key"
+        );
+    }
+}
+
+// AC-3: prune deletes refs when matching documents exist locally
+#[test]
+fn prune_deletes_refs_with_matching_documents() {
+    let (fixture, bare) = TestFixture::with_git_remote();
+    let config = config_with_reserved();
+
+    seed_ref_on_bare(bare.path(), "RFC", 42);
+    fixture.write_rfc("RFC-042-some-title.md", "Some Title", "draft");
+
+    let store = Store::load(fixture.root(), &config).unwrap();
+    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, false, false).unwrap();
+
+    assert!(
+        !ref_exists_on_remote(fixture.root(), "origin", "refs/reservations/RFC/42"),
+        "ref should be deleted after prune"
+    );
+}
+
+// AC-4: prune flags orphans (no matching doc) without deleting
+#[test]
+fn prune_flags_orphans_without_deleting() {
+    let (fixture, bare) = TestFixture::with_git_remote();
+    let config = config_with_reserved();
+
+    seed_ref_on_bare(bare.path(), "RFC", 99);
+
+    let store = Store::load(fixture.root(), &config).unwrap();
+    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, false, false).unwrap();
+
+    assert!(
+        ref_exists_on_remote(fixture.root(), "origin", "refs/reservations/RFC/99"),
+        "orphan ref should not be deleted"
+    );
+}
+
+// AC-5: prune --dry-run does not delete refs
+#[test]
+fn prune_dry_run_does_not_delete() {
+    let (fixture, bare) = TestFixture::with_git_remote();
+    let config = config_with_reserved();
+
+    seed_ref_on_bare(bare.path(), "RFC", 42);
+    fixture.write_rfc("RFC-042-some-title.md", "Some Title", "draft");
+
+    let store = Store::load(fixture.root(), &config).unwrap();
+    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, true, false).unwrap();
+
+    assert!(
+        ref_exists_on_remote(fixture.root(), "origin", "refs/reservations/RFC/42"),
+        "ref should still exist after dry-run prune"
+    );
+}
+
+// AC-6: prune --json outputs structured JSON with pruned and orphaned arrays
+#[test]
+fn prune_json_output_is_structured() {
+    let (fixture, bare) = TestFixture::with_git_remote();
+
+    seed_ref_on_bare(bare.path(), "RFC", 42);
+    seed_ref_on_bare(bare.path(), "RFC", 99);
+    fixture.write_rfc("RFC-042-some-title.md", "Some Title", "draft");
+
+    // Write .lazyspec.toml with reserved numbering so the binary can load config
+    let toml_content = r#"
+[numbering.reserved]
+remote = "origin"
+format = "incremental"
+max_retries = 5
+"#;
+    std::fs::write(fixture.root().join(".lazyspec.toml"), toml_content).unwrap();
+
+    let binary = env!("CARGO_BIN_EXE_lazyspec");
+    let output = Command::new(binary)
+        .args(["reservations", "prune", "--json"])
+        .current_dir(fixture.root())
+        .output()
+        .expect("failed to run lazyspec");
+
+    assert!(output.status.success(), "prune --json should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("output should be valid JSON: {e}\nstdout: {stdout}"));
+
+    let pruned = parsed.get("pruned").expect("missing 'pruned' key");
+    let orphaned = parsed.get("orphaned").expect("missing 'orphaned' key");
+    let errors = parsed.get("errors").expect("missing 'errors' key");
+
+    let pruned_arr = pruned.as_array().expect("'pruned' should be an array");
+    let orphaned_arr = orphaned.as_array().expect("'orphaned' should be an array");
+    let errors_arr = errors.as_array().expect("'errors' should be an array");
+
+    assert_eq!(pruned_arr.len(), 1, "should have 1 pruned ref");
+    assert_eq!(orphaned_arr.len(), 1, "should have 1 orphaned ref");
+    assert_eq!(errors_arr.len(), 0, "should have no errors");
+
+    assert_eq!(pruned_arr[0]["number"], 42);
+    assert_eq!(orphaned_arr[0]["number"], 99);
 }

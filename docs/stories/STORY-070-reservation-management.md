@@ -1,13 +1,14 @@
 ---
 title: Reservation management
 type: story
-status: draft
+status: accepted
 author: agent
 date: 2026-03-20
 tags: []
 related:
 - implements: docs/rfcs/RFC-028-git-based-document-number-reservation.md
 ---
+
 
 
 ## Context

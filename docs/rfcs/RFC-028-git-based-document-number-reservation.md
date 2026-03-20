@@ -1,7 +1,7 @@
 ---
 title: Git-Based Document Number Reservation
 type: rfc
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-20
 tags:
@@ -11,6 +11,7 @@ tags:
 related:
 - related-to: docs/rfcs/RFC-027-sqids-document-numbering.md
 ---
+
 
 
 ## Problem

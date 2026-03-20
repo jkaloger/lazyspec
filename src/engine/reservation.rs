@@ -1,6 +1,73 @@
 use anyhow::{anyhow, bail, Result};
+use serde::Serialize;
 use std::path::Path;
 use std::process::Command;
+
+#[derive(Serialize)]
+pub struct Reservation {
+    pub prefix: String,
+    pub number: u32,
+    pub ref_path: String,
+}
+
+pub fn list_reservations(repo_root: &Path, remote: &str) -> Result<Vec<Reservation>> {
+    let output = Command::new("git")
+        .args(["ls-remote", "--refs", remote, "refs/reservations/*"])
+        .current_dir(repo_root)
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let lower = stderr.to_lowercase();
+        if lower.contains("could not read")
+            || lower.contains("fatal:")
+            || lower.contains("connection")
+            || lower.contains("timeout")
+            || lower.contains("auth")
+            || lower.contains("resolve host")
+        {
+            bail!(
+                "Remote '{}' is unreachable: {}",
+                remote,
+                stderr.trim()
+            );
+        }
+        bail!("git ls-remote failed: {}", stderr.trim());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let reservations = stdout
+        .lines()
+        .filter_map(|line| {
+            let refname = line.split_whitespace().nth(1)?;
+            let rest = refname.strip_prefix("refs/reservations/")?;
+            let (prefix, num_str) = rest.rsplit_once('/')?;
+            let number = num_str.parse::<u32>().ok()?;
+            Some(Reservation {
+                prefix: prefix.to_string(),
+                number,
+                ref_path: refname.to_string(),
+            })
+        })
+        .collect();
+
+    Ok(reservations)
+}
+
+pub fn delete_remote_ref(repo_root: &Path, remote: &str, ref_path: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["push", remote, "--delete", ref_path])
+        .current_dir(repo_root)
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git push --delete failed: {}", stderr.trim());
+    }
+
+    Ok(())
+}
 
 fn ls_remote(repo_root: &Path, remote: &str, prefix: &str) -> Result<Vec<u32>> {
     let pattern = format!("refs/reservations/{prefix}/*");
