@@ -37,6 +37,7 @@ pub fn run(
                 &reserved_cfg.remote,
                 &type_def.prefix.to_uppercase(),
                 reserved_cfg.max_retries,
+                &target_dir,
             )?;
             let id = match reserved_cfg.format {
                 ReservedFormat::Incremental => format!("{:03}", num),

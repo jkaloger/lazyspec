@@ -58,7 +58,7 @@ fn local_ref_exists(repo_root: &std::path::Path, prefix: &str, num: u32) -> bool
 fn successful_reservation_returns_1_and_pushes_ref() {
     let (fixture, _bare) = TestFixture::with_git_remote();
 
-    let result = reserve_next(fixture.root(), "origin", "RFC", 5).unwrap();
+    let result = reserve_next(fixture.root(), "origin", "RFC", 5, fixture.root()).unwrap();
     assert_eq!(result, 1);
 
     assert!(
@@ -73,7 +73,7 @@ fn increments_from_existing_refs() {
 
     seed_ref_on_bare(bare.path(), "RFC", 3);
 
-    let result = reserve_next(fixture.root(), "origin", "RFC", 5).unwrap();
+    let result = reserve_next(fixture.root(), "origin", "RFC", 5, fixture.root()).unwrap();
     assert_eq!(result, 4);
 
     assert!(ref_exists_on_remote(
@@ -108,7 +108,7 @@ exit 0
     );
     install_pre_receive_hook(bare.path(), &script);
 
-    let result = reserve_next(fixture.root(), "origin", "RFC", 5).unwrap();
+    let result = reserve_next(fixture.root(), "origin", "RFC", 5, fixture.root()).unwrap();
 
     // First attempt (candidate=1) rejected, cleanup + increment to 2, second attempt succeeds
     assert_eq!(result, 2);
@@ -125,7 +125,7 @@ exit 1
 "#;
     install_pre_receive_hook(bare.path(), script);
 
-    let result = reserve_next(fixture.root(), "origin", "RFC", 3);
+    let result = reserve_next(fixture.root(), "origin", "RFC", 3, fixture.root());
     assert!(result.is_err());
 
     let err_msg = result.unwrap_err().to_string();
@@ -139,7 +139,7 @@ exit 1
 fn unreachable_remote_fails_with_hint() {
     let (fixture, _bare) = TestFixture::with_git_remote();
 
-    let result = reserve_next(fixture.root(), "nonexistent_remote", "RFC", 5);
+    let result = reserve_next(fixture.root(), "nonexistent_remote", "RFC", 5, fixture.root());
     assert!(result.is_err());
 
     let err_msg = result.unwrap_err().to_string();
@@ -178,7 +178,7 @@ exit 1
 "#;
     install_pre_receive_hook(bare.path(), script);
 
-    let _ = reserve_next(fixture.root(), "origin", "RFC", 3);
+    let _ = reserve_next(fixture.root(), "origin", "RFC", 3, fixture.root());
 
     // After exhausting retries, no dangling local refs should remain
     // Candidates tried: 1, 2, 3
@@ -348,4 +348,36 @@ max_retries = 5
 
     assert_eq!(pruned_arr[0]["number"], 42);
     assert_eq!(orphaned_arr[0]["number"], 99);
+}
+
+#[test]
+fn local_files_seed_higher_candidate() {
+    let (fixture, bare) = TestFixture::with_git_remote();
+
+    // Remote has RFC/3
+    seed_ref_on_bare(bare.path(), "RFC", 3);
+
+    // Local dir has RFC-010-something.md (local max = 10)
+    let docs_dir = fixture.root().join("docs_rfcs");
+    std::fs::create_dir_all(&docs_dir).unwrap();
+    std::fs::write(docs_dir.join("RFC-010-something.md"), "").unwrap();
+
+    let result = reserve_next(fixture.root(), "origin", "RFC", 5, &docs_dir).unwrap();
+    assert_eq!(result, 11, "should start from local max (10) + 1, not remote max (3) + 1");
+}
+
+#[test]
+fn remote_wins_when_higher_than_local() {
+    let (fixture, bare) = TestFixture::with_git_remote();
+
+    // Remote has RFC/20
+    seed_ref_on_bare(bare.path(), "RFC", 20);
+
+    // Local dir has RFC-005-something.md (local max = 5)
+    let docs_dir = fixture.root().join("docs_rfcs");
+    std::fs::create_dir_all(&docs_dir).unwrap();
+    std::fs::write(docs_dir.join("RFC-005-something.md"), "").unwrap();
+
+    let result = reserve_next(fixture.root(), "origin", "RFC", 5, &docs_dir).unwrap();
+    assert_eq!(result, 21, "should start from remote max (20) + 1, not local max (5) + 1");
 }

@@ -1,3 +1,4 @@
+use crate::engine::template;
 use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
 use std::path::Path;
@@ -179,10 +180,13 @@ pub fn reserve_next(
     remote: &str,
     prefix: &str,
     max_retries: u8,
+    docs_dir: &Path,
 ) -> Result<u32> {
-    let existing = ls_remote(repo_root, remote, prefix)?;
-    let max_existing = existing.iter().copied().max().unwrap_or(0);
-    let mut candidate = max_existing + 1;
+    let remote_existing = ls_remote(repo_root, remote, prefix)?;
+    let remote_max = remote_existing.iter().copied().max().unwrap_or(0);
+    let local_max = template::next_number(docs_dir, prefix).saturating_sub(1);
+    let base = remote_max.max(local_max);
+    let mut candidate = base + 1;
 
     for attempt in 0..max_retries {
         create_local_ref(repo_root, prefix, candidate)?;
@@ -209,7 +213,7 @@ pub fn reserve_next(
          (tried numbers {} through {})",
         prefix,
         max_retries,
-        max_existing + 1,
-        max_existing + max_retries as u32
+        base + 1,
+        base + max_retries as u32
     )
 }

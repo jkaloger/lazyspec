@@ -91,6 +91,8 @@ All document management is available as subcommands. Most accept `--json` for ma
 | `unignore <path>`                    | Remove validation skip from a document                                |
 | `validate [--warnings]`              | Check document integrity and link consistency                         |
 | `fix [paths] [--dry-run]`            | Fix documents with broken or incomplete frontmatter                   |
+| `reservations list`                  | Show all reservation refs on the remote                               |
+| `reservations prune [--dry-run]`     | Remove refs for documents that already exist locally                  |
 
 #### `show` Flags
 
@@ -204,6 +206,32 @@ type = "adr"
 require = "any-relation"
 severity = "error"
 ```
+
+### Numbering
+
+Document numbers are assigned automatically during `create`. Three strategies are available per type:
+
+| Strategy      | Behaviour |
+|---------------|-----------|
+| `incremental` | Next sequential integer from existing files (default) |
+| `sqids`       | Short hash-like IDs derived from a timestamp, configured via `[numbering.sqids]` |
+| `reserved`    | Reserves numbers on a git remote before creating files, preventing distributed collisions |
+
+Reserved numbering uses git custom refs (`refs/reservations/*`) to coordinate across branches. It wraps either incremental or sqids formatting with an atomic push-based lock, so two people never get the same number.
+
+```toml
+[[types]]
+name = "rfc"
+prefix = "RFC"
+numbering = "reserved"
+
+[numbering.reserved]
+remote = "origin"        # default
+format = "incremental"   # or "sqids"
+max_retries = 5          # push retry attempts before failing
+```
+
+If the remote is unreachable, `create` fails rather than silently falling back. Use `lazyspec reservations prune` to clean up refs for documents that have been created.
 
 ### Templates
 
