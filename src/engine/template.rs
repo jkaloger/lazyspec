@@ -103,6 +103,7 @@ pub fn resolve_filename(
     title: &str,
     dir: &Path,
     numbering: Option<(&NumberingStrategy, &SqidsConfig)>,
+    pre_computed_id: Option<&str>,
 ) -> String {
     let slug = slugify(title);
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -118,18 +119,23 @@ pub fn resolve_filename(
         return filename;
     }
 
-    match numbering {
-        Some((NumberingStrategy::Sqids, sqids_config)) => {
-            let id = next_sqids_id(dir, &type_upper, sqids_config);
-            filename = filename.replace("{n:03}", &id);
-            filename = filename.replace("{n}", &id);
-        }
-        _ => {
-            let n = next_number(dir, &type_upper);
-            if filename.contains("{n:03}") {
-                filename = filename.replace("{n:03}", &format!("{:03}", n));
-            } else if filename.contains("{n}") {
-                filename = filename.replace("{n}", &n.to_string());
+    if let Some(id) = pre_computed_id {
+        filename = filename.replace("{n:03}", id);
+        filename = filename.replace("{n}", id);
+    } else {
+        match numbering {
+            Some((NumberingStrategy::Sqids, sqids_config)) => {
+                let id = next_sqids_id(dir, &type_upper, sqids_config);
+                filename = filename.replace("{n:03}", &id);
+                filename = filename.replace("{n}", &id);
+            }
+            _ => {
+                let n = next_number(dir, &type_upper);
+                if filename.contains("{n:03}") {
+                    filename = filename.replace("{n:03}", &format!("{:03}", n));
+                } else if filename.contains("{n}") {
+                    filename = filename.replace("{n}", &n.to_string());
+                }
             }
         }
     }
@@ -244,6 +250,7 @@ mod tests {
             "My Feature",
             dir.path(),
             Some((&NumberingStrategy::Sqids, &config)),
+            None,
         );
         assert!(filename.starts_with("RFC-"), "got: {}", filename);
         assert!(filename.ends_with("-my-feature.md"), "got: {}", filename);
@@ -264,6 +271,7 @@ mod tests {
             "rfc",
             "Test",
             dir.path(),
+            None,
             None,
         );
         assert!(
@@ -286,6 +294,7 @@ mod tests {
             "Test",
             dir.path(),
             Some((&NumberingStrategy::Incremental, &config)),
+            None,
         );
         assert!(
             filename.starts_with("RFC-001-"),

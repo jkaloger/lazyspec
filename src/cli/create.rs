@@ -1,5 +1,5 @@
 use crate::cli::json::doc_to_json;
-use crate::engine::config::{Config, NumberingStrategy};
+use crate::engine::config::{Config, NumberingStrategy, ReservedFormat};
 use crate::engine::document::DocMeta;
 use crate::engine::template;
 use anyhow::{anyhow, Result};
@@ -22,16 +22,34 @@ pub fn run(
     let target_dir = root.join(dir);
     fs::create_dir_all(&target_dir)?;
 
-    let numbering = match type_def.numbering {
+    let (numbering, pre_computed_id) = match type_def.numbering {
         NumberingStrategy::Sqids => {
             let sqids_config = config.sqids.as_ref()
                 .ok_or_else(|| anyhow!("type '{}' uses sqids numbering but no [numbering.sqids] config found", doc_type))?;
-            Some((&type_def.numbering, sqids_config))
+            (Some((&type_def.numbering, sqids_config)), None)
         }
-        NumberingStrategy::Incremental => None,
+        NumberingStrategy::Reserved => {
+            let reserved_cfg = config.reserved.as_ref()
+                .ok_or_else(|| anyhow!("type '{}' uses reserved numbering but no [numbering.reserved] config found", doc_type))?;
+            let id = match reserved_cfg.format {
+                ReservedFormat::Incremental => {
+                    let n = template::next_number(&target_dir, &type_def.prefix.to_uppercase());
+                    format!("{:03}", n)
+                }
+                ReservedFormat::Sqids => {
+                    let sqids_config = config.sqids.as_ref()
+                        .ok_or_else(|| anyhow!("reserved format 'sqids' requires [numbering.sqids] config"))?;
+                    template::next_sqids_id(&target_dir, &type_def.prefix.to_uppercase(), sqids_config)
+                }
+            };
+            (None, Some(id))
+        }
+        NumberingStrategy::Incremental => (None, None),
     };
-    let filename =
-        template::resolve_filename(&config.naming.pattern, doc_type, title, &target_dir, numbering);
+    let filename = template::resolve_filename(
+        &config.naming.pattern, doc_type, title, &target_dir, numbering,
+        pre_computed_id.as_deref(),
+    );
     let target_path = target_dir.join(&filename);
 
     let template_path = root

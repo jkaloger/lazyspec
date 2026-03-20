@@ -1,4 +1,4 @@
-use lazyspec::engine::config::{Config, NumberingStrategy, Severity, ValidationRule};
+use lazyspec::engine::config::{Config, NumberingStrategy, ReservedFormat, Severity, ValidationRule};
 
 #[test]
 fn parse_config_from_toml() {
@@ -450,4 +450,121 @@ min_length = 11
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("min_length"), "Error should mention min_length, got: {msg}");
+}
+
+// --- Numbering / Reserved config tests ---
+
+#[test]
+fn valid_reserved_config_parses() {
+    let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+numbering = "reserved"
+
+[numbering.reserved]
+remote = "upstream"
+format = "incremental"
+max_retries = 3
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    let rfc = config.type_by_name("rfc").unwrap();
+    assert_eq!(rfc.numbering, NumberingStrategy::Reserved);
+    let reserved_cfg = config.reserved.unwrap();
+    assert_eq!(reserved_cfg.remote, "upstream");
+    assert_eq!(reserved_cfg.format, ReservedFormat::Incremental);
+    assert_eq!(reserved_cfg.max_retries, 3);
+}
+
+#[test]
+fn reserved_config_defaults() {
+    let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+numbering = "reserved"
+
+[numbering.reserved]
+format = "incremental"
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    let reserved_cfg = config.reserved.unwrap();
+    assert_eq!(reserved_cfg.remote, "origin");
+    assert_eq!(reserved_cfg.max_retries, 5);
+}
+
+#[test]
+fn reserved_sqids_format_requires_sqids_config() {
+    let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+numbering = "reserved"
+
+[numbering.reserved]
+format = "sqids"
+"#;
+    let result = Config::parse(toml_str);
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("sqids"), "Error should mention sqids, got: {msg}");
+}
+
+#[test]
+fn reserved_incremental_format_no_sqids_needed() {
+    let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+numbering = "reserved"
+
+[numbering.reserved]
+format = "incremental"
+"#;
+    let config = Config::parse(toml_str);
+    assert!(config.is_ok());
+}
+
+#[test]
+fn reserved_empty_remote_fails() {
+    let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+numbering = "reserved"
+
+[numbering.reserved]
+remote = ""
+format = "incremental"
+"#;
+    let result = Config::parse(toml_str);
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("remote"), "Error should mention remote, got: {msg}");
+}
+
+#[test]
+fn reserved_missing_section_fails() {
+    let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+numbering = "reserved"
+"#;
+    let result = Config::parse(toml_str);
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("reserved"), "Error should mention reserved, got: {msg}");
 }
