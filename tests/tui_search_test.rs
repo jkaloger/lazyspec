@@ -25,7 +25,9 @@ fn setup_app_with_docs() -> (TestFixture, App) {
     );
 
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let config = fixture.config();
+    let mut app = App::new(store, &config, ratatui_image::picker::Picker::halfblocks());
+    app.refresh_validation(&config);
     (fixture, app)
 }
 

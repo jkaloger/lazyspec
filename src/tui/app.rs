@@ -425,7 +425,6 @@ impl App {
             filtered_docs_cache: None,
             search_index: Vec::new(),
         };
-        app.rebuild_search_index();
         app.build_doc_tree();
         app
     }
