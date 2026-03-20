@@ -14,6 +14,7 @@ pub fn run(
     doc_type: &str,
     title: &str,
     author: &str,
+    on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<PathBuf> {
     let type_def = config.type_by_name(doc_type)
         .ok_or_else(|| anyhow!("unknown doc type: '{}'. valid types: {}", doc_type,
@@ -38,7 +39,7 @@ pub fn run(
                 &type_def.prefix.to_uppercase(),
                 reserved_cfg.max_retries,
                 &target_dir,
-                |_| {},
+                &on_progress,
             )?;
             let id = match reserved_cfg.format {
                 ReservedFormat::Incremental => format!("{:03}", num),
@@ -94,8 +95,9 @@ pub fn run_json(
     doc_type: &str,
     title: &str,
     author: &str,
+    on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<String> {
-    let path = run(root, config, doc_type, title, author)?;
+    let path = run(root, config, doc_type, title, author, on_progress)?;
     let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
 
     let content = fs::read_to_string(&path)?;

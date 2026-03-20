@@ -979,19 +979,34 @@ fn draw_create_form(f: &mut Frame, app: &App) {
     lines.push(Line::from(""));
 
     for (label, value, field) in &fields {
-        let is_focused = form.focused_field == *field;
-        let label_style = if is_focused {
+        let is_focused = form.focused_field == *field && !form.loading;
+        let label_style = if form.loading {
+            Style::default().fg(Color::DarkGray)
+        } else if is_focused {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
 
+        let value_style = if form.loading {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default()
+        };
+
         let cursor = if is_focused { "_" } else { "" };
         lines.push(Line::from(vec![
             Span::styled(format!("  {:<10}", format!("{}:", label)), label_style),
-            Span::raw(format!("{}{}", value, cursor)),
+            Span::styled(format!("{}{}", value, cursor), value_style),
         ]));
         lines.push(Line::from(""));
+    }
+
+    if let Some(ref msg) = form.status_message {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", msg),
+            Style::default().fg(Color::Yellow),
+        )));
     }
 
     if let Some(ref err) = form.error {

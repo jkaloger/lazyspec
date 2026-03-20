@@ -54,10 +54,10 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Init) | Some(Commands::Completions { .. }) => unreachable!(),
         Some(Commands::Create { doc_type, title, author, json }) => {
             if json {
-                let output = lazyspec::cli::create::run_json(&cwd, &config, &doc_type, &title, &author)?;
+                let output = lazyspec::cli::create::run_json(&cwd, &config, &doc_type, &title, &author, |_| {})?;
                 println!("{}", output);
             } else {
-                let path = lazyspec::cli::create::run(&cwd, &config, &doc_type, &title, &author)?;
+                let path = lazyspec::cli::create::run(&cwd, &config, &doc_type, &title, &author, |_| {})?;
                 println!("{}", path.display());
             }
         }
