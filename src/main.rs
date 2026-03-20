@@ -1,9 +1,12 @@
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::CompleteEnv;
 use lazyspec::cli::{Cli, Commands};
 use lazyspec::engine::config::Config;
 use lazyspec::engine::store::Store;
 
 fn main() -> anyhow::Result<()> {
+    CompleteEnv::with_factory(Cli::command).complete();
+
     let cli = Cli::parse();
     let cwd = std::env::current_dir()?;
 
@@ -12,10 +15,42 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if let Some(Commands::Completions { shell }) = &cli.command {
+        let bin = "lazyspec";
+        let shell_name = match shell {
+            clap_complete::Shell::Bash => "bash",
+            clap_complete::Shell::Zsh => "zsh",
+            clap_complete::Shell::Fish => "fish",
+            clap_complete::Shell::Elvish => "elvish",
+            clap_complete::Shell::PowerShell => "powershell",
+            _ => {
+                eprintln!("Unsupported shell for dynamic completions");
+                std::process::exit(1);
+            }
+        };
+        use clap_complete::env::EnvCompleter;
+        let shells: &[&dyn EnvCompleter] = &[
+            &clap_complete::env::Zsh,
+            &clap_complete::env::Bash,
+            &clap_complete::env::Fish,
+        ];
+        let env_shell = shells.iter().find(|s| s.is(shell_name));
+        match env_shell {
+            Some(s) => {
+                s.write_registration("COMPLETE", "lazyspec", &bin, &bin, &mut std::io::stdout())?;
+            }
+            None => {
+                // Fallback to static generation for shells without dynamic support
+                clap_complete::generate(*shell, &mut Cli::command(), "lazyspec", &mut std::io::stdout());
+            }
+        }
+        return Ok(());
+    }
+
     let config = Config::load(&cwd)?;
 
     match cli.command {
-        Some(Commands::Init) => unreachable!(),
+        Some(Commands::Init) | Some(Commands::Completions { .. }) => unreachable!(),
         Some(Commands::Create { doc_type, title, author, json }) => {
             if json {
                 let output = lazyspec::cli::create::run_json(&cwd, &config, &doc_type, &title, &author)?;
@@ -39,6 +74,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Update { path, status, title }) => {
+            let store = Store::load(&cwd, &config)?;
             let mut updates = Vec::new();
             if let Some(ref s) = status {
                 updates.push(("status", s.as_str()));
@@ -46,28 +82,41 @@ fn main() -> anyhow::Result<()> {
             if let Some(ref t) = title {
                 updates.push(("title", t.as_str()));
             }
-            lazyspec::cli::update::run(&cwd, &path, &updates)?;
-            println!("Updated {}", path);
+            let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
+            lazyspec::cli::update::run(&cwd, &store, &path, &updates)?;
+            println!("Updated {}", resolved.display());
         }
         Some(Commands::Delete { path }) => {
-            lazyspec::cli::delete::run(&cwd, &path)?;
-            println!("Deleted {}", path);
+            let store = Store::load(&cwd, &config)?;
+            let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
+            lazyspec::cli::delete::run(&cwd, &store, &path)?;
+            println!("Deleted {}", resolved.display());
         }
         Some(Commands::Link { from, rel_type, to }) => {
-            lazyspec::cli::link::link(&cwd, &from, &rel_type, &to)?;
-            println!("Linked {} --{}--> {}", from, rel_type, to);
+            let store = Store::load(&cwd, &config)?;
+            lazyspec::cli::link::link(&cwd, &store, &from, &rel_type, &to)?;
+            let resolved_from = lazyspec::cli::resolve::resolve_to_path(&store, &from)?;
+            let resolved_to = lazyspec::cli::resolve::resolve_to_path(&store, &to)?;
+            println!("Linked {} --{}--> {}", resolved_from.display(), rel_type, resolved_to.display());
         }
         Some(Commands::Unlink { from, rel_type, to }) => {
-            lazyspec::cli::link::unlink(&cwd, &from, &rel_type, &to)?;
-            println!("Unlinked {} --{}--> {}", from, rel_type, to);
+            let store = Store::load(&cwd, &config)?;
+            lazyspec::cli::link::unlink(&cwd, &store, &from, &rel_type, &to)?;
+            let resolved_from = lazyspec::cli::resolve::resolve_to_path(&store, &from)?;
+            let resolved_to = lazyspec::cli::resolve::resolve_to_path(&store, &to)?;
+            println!("Unlinked {} --{}--> {}", resolved_from.display(), rel_type, resolved_to.display());
         }
         Some(Commands::Ignore { path }) => {
-            lazyspec::cli::ignore::ignore(&cwd, &path)?;
-            println!("Ignoring {}", path);
+            let store = Store::load(&cwd, &config)?;
+            let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
+            lazyspec::cli::ignore::ignore(&cwd, &store, &path)?;
+            println!("Ignoring {}", resolved.display());
         }
         Some(Commands::Unignore { path }) => {
-            lazyspec::cli::ignore::unignore(&cwd, &path)?;
-            println!("Unignoring {}", path);
+            let store = Store::load(&cwd, &config)?;
+            let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
+            lazyspec::cli::ignore::unignore(&cwd, &store, &path)?;
+            println!("Unignoring {}", resolved.display());
         }
         Some(Commands::Search { query, doc_type, json }) => {
             let store = Store::load(&cwd, &config)?;

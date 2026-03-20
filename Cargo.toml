@@ -7,6 +7,7 @@ edition = "2021"
 ratatui = "0.30"
 crossterm = "0.28"
 clap = { version = "4", features = ["derive"] }
+clap_complete = { version = "4", features = ["unstable-dynamic"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 tui-markdown = "0.3"

@@ -1,10 +1,13 @@
+use crate::cli::resolve::resolve_to_path;
 use crate::engine::document::split_frontmatter;
+use crate::engine::store::Store;
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
 
-pub fn run(root: &Path, doc_path: &str, updates: &[(&str, &str)]) -> Result<()> {
-    let full_path = root.join(doc_path);
+pub fn run(root: &Path, store: &Store, doc_path: &str, updates: &[(&str, &str)]) -> Result<()> {
+    let resolved = resolve_to_path(store, doc_path)?;
+    let full_path = root.join(&resolved);
     let content = fs::read_to_string(&full_path)?;
 
     let (yaml, body) = split_frontmatter(&content)?;

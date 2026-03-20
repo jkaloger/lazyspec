@@ -593,6 +593,8 @@ impl std::fmt::Display for ResolveError {
     }
 }
 
+impl std::error::Error for ResolveError {}
+
 #[derive(Debug)]
 pub struct SearchResult<'a> {
     pub doc: &'a DocMeta,

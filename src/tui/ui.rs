@@ -208,6 +208,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_status_picker(f, app);
     }
 
+    if app.link_editor.active {
+        draw_link_editor(f, app);
+    }
+
     #[cfg(feature = "agent")]
     if app.agent_dialog.active {
         draw_agent_dialog(f, app);
@@ -907,7 +911,7 @@ fn draw_help_overlay(f: &mut Frame) {
     let area = f.area();
 
     let popup_width = 50.min(area.width.saturating_sub(4));
-    let popup_height = 20.min(area.height.saturating_sub(4));
+    let popup_height = 24.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(popup_width)) / 2;
     let y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -930,6 +934,10 @@ fn draw_help_overlay(f: &mut Frame) {
         Line::from("  G         Jump to bottom"),
         Line::from("  q         Quit"),
         Line::from("  ?         Toggle this help"),
+        Line::from(""),
+        Line::from(Span::styled("Relations", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from("  r         Add relation"),
         Line::from(""),
         Line::from(Span::styled("Fullscreen", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
         Line::from(""),
@@ -1108,6 +1116,85 @@ fn draw_status_picker(f: &mut Frame, app: &App) {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Cyan))
             .title(" Status "),
+    );
+    f.render_widget(paragraph, popup_area);
+}
+
+fn draw_link_editor(f: &mut Frame, app: &App) {
+    use crate::tui::app::REL_TYPES;
+
+    let area = f.area();
+    let editor = &app.link_editor;
+
+    let popup_width = 40u16.min(area.width.saturating_sub(4));
+    let popup_height = 16u16.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let rel_label = REL_TYPES
+        .get(editor.rel_type_index)
+        .unwrap_or(&"implements");
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    lines.push(Line::from(vec![
+        Span::styled("  Type: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("< {} >", rel_label),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    lines.push(Line::from(vec![
+        Span::styled("  Find: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(format!("{}_", editor.query)),
+    ]));
+
+    lines.push(Line::from(""));
+
+    let max_results = (popup_height as usize).saturating_sub(6);
+    for (i, path) in editor.results.iter().take(max_results).enumerate() {
+        let label = app
+            .store
+            .get(path)
+            .map(|d| format!("{}: {}", d.id.to_uppercase(), d.title))
+            .unwrap_or_else(|| path.display().to_string());
+
+        let prefix = if i == editor.selected { "> " } else { "  " };
+        let style = if i == editor.selected {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(format!("{}{}", prefix, label), style)));
+    }
+
+    if editor.results.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (no matches)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  Tab", Style::default().fg(Color::DarkGray)),
+        Span::raw(" type  "),
+        Span::styled("Enter", Style::default().fg(Color::DarkGray)),
+        Span::raw(" link  "),
+        Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+        Span::raw(" cancel"),
+    ]));
+
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" Add Relation "),
     );
     f.render_widget(paragraph, popup_area);
 }

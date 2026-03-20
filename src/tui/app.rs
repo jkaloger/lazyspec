@@ -218,6 +218,30 @@ impl StatusPicker {
     }
 }
 
+pub const REL_TYPES: [&str; 4] = ["implements", "supersedes", "blocks", "related-to"];
+
+pub struct LinkEditor {
+    pub active: bool,
+    pub doc_path: PathBuf,
+    pub rel_type_index: usize,
+    pub query: String,
+    pub results: Vec<PathBuf>,
+    pub selected: usize,
+}
+
+impl LinkEditor {
+    pub fn new() -> Self {
+        LinkEditor {
+            active: false,
+            doc_path: PathBuf::new(),
+            rel_type_index: 0,
+            query: String::new(),
+            results: Vec::new(),
+            selected: 0,
+        }
+    }
+}
+
 #[cfg(feature = "agent")]
 pub struct AgentDialog {
     pub active: bool,
@@ -305,6 +329,7 @@ pub struct App {
     pub create_form: CreateForm,
     pub delete_confirm: DeleteConfirm,
     pub status_picker: StatusPicker,
+    pub link_editor: LinkEditor,
     #[cfg(feature = "agent")]
     pub agent_dialog: AgentDialog,
     #[cfg(feature = "agent")]
@@ -381,6 +406,7 @@ impl App {
             create_form: CreateForm::new(),
             delete_confirm: DeleteConfirm::new(),
             status_picker: StatusPicker::new(),
+            link_editor: LinkEditor::new(),
             #[cfg(feature = "agent")]
             agent_dialog: AgentDialog::new(),
             #[cfg(feature = "agent")]
@@ -1216,12 +1242,15 @@ impl App {
             update_tags(root, &relative, &tags)?;
         }
 
+        // Reload the store before applying relations so the new doc is resolvable
+        let _ = self.store.reload_file(root, &relative);
+
         // Apply relations
         for (rel_type, target_path) in &relations {
-            crate::cli::link::link(root, &relative_str, rel_type, &target_path.to_string_lossy())?;
+            crate::cli::link::link(root, &self.store, &relative_str, rel_type, &target_path.to_string_lossy())?;
         }
 
-        // Reload the store to pick up the new file
+        // Reload again to pick up the relation changes
         let _ = self.store.reload_file(root, &relative);
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
@@ -1269,7 +1298,7 @@ impl App {
     pub fn confirm_delete(&mut self, root: &Path) -> Result<()> {
         let doc_path = self.delete_confirm.doc_path.clone();
         let doc_path_str = doc_path.to_string_lossy().to_string();
-        crate::cli::delete::run(root, &doc_path_str)?;
+        crate::cli::delete::run(root, &self.store, &doc_path_str)?;
         self.store.remove_file(&doc_path);
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
@@ -1325,12 +1354,122 @@ impl App {
         let doc_path = self.status_picker.doc_path.clone();
         let doc_path_str = doc_path.to_string_lossy().to_string();
 
-        crate::cli::update::run(root, &doc_path_str, &[("status", &status.to_string())])?;
+        crate::cli::update::run(root, &self.store, &doc_path_str, &[("status", &status.to_string())])?;
         self.store.reload_file(root, &doc_path)?;
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
         self.build_doc_tree();
         self.close_status_picker();
+        Ok(())
+    }
+
+    pub fn open_link_editor(&mut self) {
+        let doc = if self.view_mode == ViewMode::Filters {
+            match self.selected_filtered_doc() {
+                Some(d) => d,
+                None => return,
+            }
+        } else {
+            match self.selected_doc_meta() {
+                Some(d) => d,
+                None => return,
+            }
+        };
+
+        let path = doc.path.clone();
+
+        self.link_editor.active = true;
+        self.link_editor.doc_path = path;
+        self.link_editor.rel_type_index = 0;
+        self.link_editor.query = String::new();
+        self.link_editor.selected = 0;
+        self.update_link_search();
+    }
+
+    pub fn close_link_editor(&mut self) {
+        self.link_editor.active = false;
+        self.link_editor.doc_path = PathBuf::new();
+        self.link_editor.rel_type_index = 0;
+        self.link_editor.query = String::new();
+        self.link_editor.results = Vec::new();
+        self.link_editor.selected = 0;
+    }
+
+    pub fn update_link_search(&mut self) {
+        let query = self.link_editor.query.to_lowercase();
+        let doc_path = self.link_editor.doc_path.clone();
+
+        let mut candidates: Vec<(String, PathBuf)> = self
+            .store
+            .all_docs()
+            .iter()
+            .filter(|d| d.path != doc_path)
+            .filter(|d| {
+                if query.is_empty() {
+                    return true;
+                }
+                let display = format!("{}: {}", d.id.to_uppercase(), d.title).to_lowercase();
+                display.contains(&query)
+            })
+            .map(|d| {
+                let display = format!("{}: {}", d.id.to_uppercase(), d.title);
+                (display, d.path.clone())
+            })
+            .collect();
+
+        candidates.sort_by(|a, b| a.0.cmp(&b.0));
+
+        self.link_editor.results = candidates.into_iter().map(|(_, path)| path).collect();
+        if self.link_editor.selected >= self.link_editor.results.len() {
+            self.link_editor.selected = self.link_editor.results.len().saturating_sub(1);
+        }
+    }
+
+    fn handle_link_editor_key(&mut self, code: KeyCode, root: &Path) {
+        match code {
+            KeyCode::Esc => self.close_link_editor(),
+            KeyCode::Tab => {
+                self.link_editor.rel_type_index = (self.link_editor.rel_type_index + 1) % REL_TYPES.len();
+            }
+            KeyCode::Enter => {
+                if !self.link_editor.results.is_empty() {
+                    let _ = self.confirm_link(root);
+                }
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if !self.link_editor.results.is_empty() {
+                    let max = self.link_editor.results.len() - 1;
+                    self.link_editor.selected = (self.link_editor.selected + 1).min(max);
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.link_editor.selected = self.link_editor.selected.saturating_sub(1);
+            }
+            KeyCode::Backspace => {
+                self.link_editor.query.pop();
+                self.update_link_search();
+            }
+            KeyCode::Char(c) => {
+                self.link_editor.query.push(c);
+                self.update_link_search();
+            }
+            _ => {}
+        }
+    }
+
+    fn confirm_link(&mut self, root: &Path) -> Result<()> {
+        let selected = self.link_editor.selected;
+        let target_path = self.link_editor.results[selected].clone();
+        let from = self.link_editor.doc_path.to_string_lossy().to_string();
+        let to = target_path.to_string_lossy().to_string();
+        let rel_type = REL_TYPES[self.link_editor.rel_type_index];
+
+        crate::cli::link::link(root, &self.store, &from, rel_type, &to)?;
+        self.store.reload_file(root, &self.link_editor.doc_path.clone())?;
+        self.filtered_docs_cache = None;
+        self.rebuild_search_index();
+        self.build_doc_tree();
+        self.close_link_editor();
         Ok(())
     }
 
@@ -1392,6 +1531,9 @@ impl App {
         }
         if self.status_picker.active {
             return self.handle_status_picker_key(code, root, config);
+        }
+        if self.link_editor.active {
+            return self.handle_link_editor_key(code, root);
         }
         #[cfg(feature = "agent")]
         if self.agent_dialog.active {
@@ -1893,6 +2035,9 @@ impl App {
             (KeyCode::Char('`'), _) => self.cycle_mode(),
             (KeyCode::Char('w'), _) => self.open_warnings(),
             (KeyCode::Char('s'), _) => self.open_status_picker(),
+            (KeyCode::Char('r'), _) if self.preview_tab == PreviewTab::Relations => {
+                self.open_link_editor();
+            }
             #[cfg(feature = "agent")]
             (KeyCode::Char('a'), _) => {
                 if let Some(doc) = self.selected_doc_meta() {
@@ -2011,6 +2156,7 @@ mod tests {
             create_form: CreateForm::new(),
             delete_confirm: DeleteConfirm::new(),
             status_picker: StatusPicker::new(),
+            link_editor: LinkEditor::new(),
             #[cfg(feature = "agent")]
             agent_dialog: AgentDialog::new(),
             #[cfg(feature = "agent")]
