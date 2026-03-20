@@ -11,7 +11,27 @@ pub struct Reservation {
     pub ref_path: String,
 }
 
-pub fn list_reservations(repo_root: &Path, remote: &str) -> Result<Vec<Reservation>> {
+#[derive(Debug, Clone)]
+pub enum ReservationProgress {
+    QueryingRemote,
+    PushAttempt { attempt: u8, max: u8, candidate: u32 },
+    PushRejected { candidate: u32 },
+    Reserved { number: u32 },
+}
+
+#[derive(Debug, Clone)]
+pub enum PruneProgress {
+    QueryingRemote,
+    Deleting { current: usize, total: usize, ref_path: String },
+    Done { pruned: usize, orphaned: usize },
+}
+
+pub fn list_reservations(
+    repo_root: &Path,
+    remote: &str,
+    on_progress: impl Fn(ReservationProgress),
+) -> Result<Vec<Reservation>> {
+    on_progress(ReservationProgress::QueryingRemote);
     let output = Command::new("git")
         .args(["ls-remote", "--refs", remote, "refs/reservations/*"])
         .current_dir(repo_root)
@@ -181,7 +201,9 @@ pub fn reserve_next(
     prefix: &str,
     max_retries: u8,
     docs_dir: &Path,
+    on_progress: impl Fn(ReservationProgress),
 ) -> Result<u32> {
+    on_progress(ReservationProgress::QueryingRemote);
     let remote_existing = ls_remote(repo_root, remote, prefix)?;
     let remote_max = remote_existing.iter().copied().max().unwrap_or(0);
     let local_max = template::next_number(docs_dir, prefix).saturating_sub(1);
@@ -191,9 +213,18 @@ pub fn reserve_next(
     for attempt in 0..max_retries {
         create_local_ref(repo_root, prefix, candidate)?;
 
+        on_progress(ReservationProgress::PushAttempt {
+            attempt: attempt as u8 + 1,
+            max: max_retries,
+            candidate,
+        });
         match push_ref(repo_root, remote, prefix, candidate) {
-            Ok(true) => return Ok(candidate),
+            Ok(true) => {
+                on_progress(ReservationProgress::Reserved { number: candidate });
+                return Ok(candidate);
+            }
             Ok(false) => {
+                on_progress(ReservationProgress::PushRejected { candidate });
                 cleanup_local_ref(repo_root, prefix, candidate)?;
                 candidate += 1;
             }

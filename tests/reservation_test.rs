@@ -58,7 +58,7 @@ fn local_ref_exists(repo_root: &std::path::Path, prefix: &str, num: u32) -> bool
 fn successful_reservation_returns_1_and_pushes_ref() {
     let (fixture, _bare) = TestFixture::with_git_remote();
 
-    let result = reserve_next(fixture.root(), "origin", "RFC", 5, fixture.root()).unwrap();
+    let result = reserve_next(fixture.root(), "origin", "RFC", 5, fixture.root(), |_| {}).unwrap();
     assert_eq!(result, 1);
 
     assert!(
@@ -73,7 +73,7 @@ fn increments_from_existing_refs() {
 
     seed_ref_on_bare(bare.path(), "RFC", 3);
 
-    let result = reserve_next(fixture.root(), "origin", "RFC", 5, fixture.root()).unwrap();
+    let result = reserve_next(fixture.root(), "origin", "RFC", 5, fixture.root(), |_| {}).unwrap();
     assert_eq!(result, 4);
 
     assert!(ref_exists_on_remote(
@@ -108,7 +108,7 @@ exit 0
     );
     install_pre_receive_hook(bare.path(), &script);
 
-    let result = reserve_next(fixture.root(), "origin", "RFC", 5, fixture.root()).unwrap();
+    let result = reserve_next(fixture.root(), "origin", "RFC", 5, fixture.root(), |_| {}).unwrap();
 
     // First attempt (candidate=1) rejected, cleanup + increment to 2, second attempt succeeds
     assert_eq!(result, 2);
@@ -125,7 +125,7 @@ exit 1
 "#;
     install_pre_receive_hook(bare.path(), script);
 
-    let result = reserve_next(fixture.root(), "origin", "RFC", 3, fixture.root());
+    let result = reserve_next(fixture.root(), "origin", "RFC", 3, fixture.root(), |_| {});
     assert!(result.is_err());
 
     let err_msg = result.unwrap_err().to_string();
@@ -139,7 +139,7 @@ exit 1
 fn unreachable_remote_fails_with_hint() {
     let (fixture, _bare) = TestFixture::with_git_remote();
 
-    let result = reserve_next(fixture.root(), "nonexistent_remote", "RFC", 5, fixture.root());
+    let result = reserve_next(fixture.root(), "nonexistent_remote", "RFC", 5, fixture.root(), |_| {});
     assert!(result.is_err());
 
     let err_msg = result.unwrap_err().to_string();
@@ -178,7 +178,7 @@ exit 1
 "#;
     install_pre_receive_hook(bare.path(), script);
 
-    let _ = reserve_next(fixture.root(), "origin", "RFC", 3, fixture.root());
+    let _ = reserve_next(fixture.root(), "origin", "RFC", 3, fixture.root(), |_| {});
 
     // After exhausting retries, no dangling local refs should remain
     // Candidates tried: 1, 2, 3
@@ -209,7 +209,7 @@ fn list_shows_all_reservations() {
     seed_ref_on_bare(bare.path(), "RFC", 3);
     seed_ref_on_bare(bare.path(), "STORY", 5);
 
-    let reservations = list_reservations(fixture.root(), "origin").unwrap();
+    let reservations = list_reservations(fixture.root(), "origin", |_| {}).unwrap();
 
     assert_eq!(reservations.len(), 3, "should return all 3 refs");
 
@@ -235,7 +235,7 @@ fn list_json_output_is_structured() {
     seed_ref_on_bare(bare.path(), "RFC", 3);
     seed_ref_on_bare(bare.path(), "STORY", 5);
 
-    let reservations = list_reservations(fixture.root(), "origin").unwrap();
+    let reservations = list_reservations(fixture.root(), "origin", |_| {}).unwrap();
     let json_str = serde_json::to_string_pretty(&reservations).unwrap();
     let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
 
@@ -260,7 +260,7 @@ fn prune_deletes_refs_with_matching_documents() {
     fixture.write_rfc("RFC-042-some-title.md", "Some Title", "draft");
 
     let store = Store::load(fixture.root(), &config).unwrap();
-    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, false, false).unwrap();
+    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, false, false, |_| {}).unwrap();
 
     assert!(
         !ref_exists_on_remote(fixture.root(), "origin", "refs/reservations/RFC/42"),
@@ -277,7 +277,7 @@ fn prune_flags_orphans_without_deleting() {
     seed_ref_on_bare(bare.path(), "RFC", 99);
 
     let store = Store::load(fixture.root(), &config).unwrap();
-    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, false, false).unwrap();
+    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, false, false, |_| {}).unwrap();
 
     assert!(
         ref_exists_on_remote(fixture.root(), "origin", "refs/reservations/RFC/99"),
@@ -295,7 +295,7 @@ fn prune_dry_run_does_not_delete() {
     fixture.write_rfc("RFC-042-some-title.md", "Some Title", "draft");
 
     let store = Store::load(fixture.root(), &config).unwrap();
-    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, true, false).unwrap();
+    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, true, false, |_| {}).unwrap();
 
     assert!(
         ref_exists_on_remote(fixture.root(), "origin", "refs/reservations/RFC/42"),
@@ -362,7 +362,7 @@ fn local_files_seed_higher_candidate() {
     std::fs::create_dir_all(&docs_dir).unwrap();
     std::fs::write(docs_dir.join("RFC-010-something.md"), "").unwrap();
 
-    let result = reserve_next(fixture.root(), "origin", "RFC", 5, &docs_dir).unwrap();
+    let result = reserve_next(fixture.root(), "origin", "RFC", 5, &docs_dir, |_| {}).unwrap();
     assert_eq!(result, 11, "should start from local max (10) + 1, not remote max (3) + 1");
 }
 
@@ -378,6 +378,6 @@ fn remote_wins_when_higher_than_local() {
     std::fs::create_dir_all(&docs_dir).unwrap();
     std::fs::write(docs_dir.join("RFC-005-something.md"), "").unwrap();
 
-    let result = reserve_next(fixture.root(), "origin", "RFC", 5, &docs_dir).unwrap();
+    let result = reserve_next(fixture.root(), "origin", "RFC", 5, &docs_dir, |_| {}).unwrap();
     assert_eq!(result, 21, "should start from remote max (20) + 1, not local max (5) + 1");
 }

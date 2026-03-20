@@ -174,7 +174,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 ReservationsCommand::Prune { dry_run, json } => {
                     let store = Store::load(&cwd, &config)?;
-                    lazyspec::cli::reservations::run_prune(&cwd, &config, &store, dry_run, json)?;
+                    lazyspec::cli::reservations::run_prune(&cwd, &config, &store, dry_run, json, |_| {})?;
                 }
             }
         }
