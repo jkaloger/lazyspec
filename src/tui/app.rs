@@ -1,7 +1,8 @@
 use crate::engine::cache::DiskCache;
-use crate::engine::config::Config;
+use crate::engine::config::{Config, NumberingStrategy};
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, RelationType, Status};
 use crate::engine::refs::RefExpander;
+use crate::engine::reservation::ReservationProgress;
 use crate::engine::store::{Filter, Store};
 #[cfg(feature = "agent")]
 use crate::tui::agent::{load_all_records, AgentSpawner, AgentStatus};
@@ -18,6 +19,11 @@ pub struct SearchEntry {
     pub searchable: String, // pre-lowercased "title\0tag1\0tag2\0path"
 }
 
+pub struct CreateResult {
+    pub path: PathBuf,
+    pub doc_type: DocType,
+}
+
 pub enum AppEvent {
     Terminal(crossterm::event::KeyEvent),
     FileChange(notify::Event),
@@ -28,6 +34,9 @@ pub enum AppEvent {
         protocol: super::terminal_caps::TerminalImageProtocol,
         tool_availability: super::diagram::ToolAvailability,
     },
+    CreateStarted,
+    CreateProgress { message: String },
+    CreateComplete { result: Result<CreateResult, String> },
     #[cfg(feature = "agent")]
     AgentFinished,
 }
@@ -126,6 +135,8 @@ pub struct CreateForm {
     pub tags: String,
     pub related: String,
     pub error: Option<String>,
+    pub loading: bool,
+    pub status_message: Option<String>,
 }
 
 impl CreateForm {
@@ -139,6 +150,8 @@ impl CreateForm {
             tags: String::new(),
             related: String::new(),
             error: None,
+            loading: false,
+            status_message: None,
         }
     }
 
@@ -150,6 +163,8 @@ impl CreateForm {
         self.tags.clear();
         self.related.clear();
         self.error = None;
+        self.loading = false;
+        self.status_message = None;
     }
 
     fn focused_value_mut(&mut self) -> &mut String {
@@ -1214,12 +1229,11 @@ impl App {
         let doc_type_str = self.create_form.doc_type.to_string().to_lowercase();
 
         let author = if self.create_form.author.trim().is_empty() {
-            "unknown"
+            "unknown".to_string()
         } else {
-            self.create_form.author.trim()
+            self.create_form.author.trim().to_string()
         };
 
-        // Validate relations before creating anything
         let relations = match self.parse_relations() {
             Ok(r) => r,
             Err(e) => {
@@ -1228,12 +1242,99 @@ impl App {
             }
         };
 
-        let path = crate::cli::create::run(root, config, &doc_type_str, &title, author)?;
+        let tags_str = self.create_form.tags.trim().to_string();
+
+        let type_def = config.type_by_name(&doc_type_str);
+        let is_reserved = type_def
+            .map(|td| matches!(td.numbering, NumberingStrategy::Reserved))
+            .unwrap_or(false);
+
+        if is_reserved {
+            let root = root.to_path_buf();
+            let config = config.clone();
+            let doc_type_str = doc_type_str.clone();
+            let title = title.clone();
+            let author = author.clone();
+            let tags_str = tags_str.clone();
+            let relations = relations.clone();
+            let tx = self.event_tx.clone();
+            let doc_type = self.create_form.doc_type.clone();
+
+            self.create_form.loading = true;
+            self.create_form.status_message = Some("Reserving...".to_string());
+            let _ = self.event_tx.send(AppEvent::CreateStarted);
+
+            std::thread::spawn(move || {
+                let progress_tx = tx.clone();
+                let result = (|| -> Result<CreateResult, String> {
+                    let path = crate::cli::create::run(
+                        &root,
+                        &config,
+                        &doc_type_str,
+                        &title,
+                        &author,
+                        |p| {
+                            let message = match &p {
+                                ReservationProgress::QueryingRemote => {
+                                    "Querying remote for latest tag...".to_string()
+                                }
+                                ReservationProgress::PushAttempt { attempt, max, candidate } => {
+                                    format!("Push attempt {}/{} for candidate {}...", attempt, max, candidate)
+                                }
+                                ReservationProgress::PushRejected { candidate } => {
+                                    format!("Push rejected for candidate {}, retrying...", candidate)
+                                }
+                                ReservationProgress::Reserved { number } => {
+                                    format!("Reserved number {}", number)
+                                }
+                            };
+                            let _ = progress_tx.send(AppEvent::CreateProgress { message });
+                        },
+                    )
+                    .map_err(|e| e.to_string())?;
+
+                    let relative = path.strip_prefix(&root).unwrap_or(&path).to_path_buf();
+                    let relative_str = relative.to_string_lossy().to_string();
+
+                    if !tags_str.is_empty() {
+                        let tags: Vec<String> = tags_str
+                            .split(',')
+                            .map(|t| t.trim().to_string())
+                            .filter(|t| !t.is_empty())
+                            .collect();
+                        update_tags(&root, &relative, &tags).map_err(|e| e.to_string())?;
+                    }
+
+                    if !relations.is_empty() {
+                        let store = Store::load(&root, &config).map_err(|e| e.to_string())?;
+                        for (rel_type, target_path) in &relations {
+                            crate::cli::link::link(
+                                &root,
+                                &store,
+                                &relative_str,
+                                rel_type,
+                                &target_path.to_string_lossy(),
+                            )
+                            .map_err(|e| e.to_string())?;
+                        }
+                    }
+
+                    Ok(CreateResult {
+                        path: relative,
+                        doc_type,
+                    })
+                })();
+
+                let _ = tx.send(AppEvent::CreateComplete { result });
+            });
+
+            return Ok(());
+        }
+
+        let path = crate::cli::create::run(root, config, &doc_type_str, &title, &author, |_| {})?;
         let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
         let relative_str = relative.to_string_lossy().to_string();
 
-        // Apply tags
-        let tags_str = self.create_form.tags.trim().to_string();
         if !tags_str.is_empty() {
             let tags: Vec<String> = tags_str.split(',')
                 .map(|t| t.trim().to_string())
@@ -1255,7 +1356,6 @@ impl App {
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
 
-        // Navigate to the new document
         let doc_type = self.create_form.doc_type.clone();
         if let Some(type_idx) = self.doc_types.iter().position(|t| *t == doc_type) {
             self.selected_type = type_idx;
@@ -1549,6 +1649,12 @@ impl App {
     }
 
     fn handle_create_form_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
+        if self.create_form.loading {
+            if code == KeyCode::Esc {
+                self.close_create_form();
+            }
+            return;
+        }
         match code {
             KeyCode::Esc => self.close_create_form(),
             KeyCode::Enter => {

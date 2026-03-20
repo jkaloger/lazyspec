@@ -764,6 +764,9 @@ fn renumber_doc(
             let new_num = next_number(&type_dir, &type_def.prefix);
             format!("{}-{:03}", type_def.prefix, new_num)
         }
+        NumberingStrategy::Reserved => {
+            return None;
+        }
     };
 
     let filename = doc.path.file_name().and_then(|f| f.to_str()).unwrap_or("");

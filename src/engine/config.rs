@@ -35,6 +35,7 @@ pub enum NumberingStrategy {
     #[default]
     Incremental,
     Sqids,
+    Reserved,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -46,6 +47,30 @@ pub struct SqidsConfig {
 
 fn default_sqids_min_length() -> u8 {
     3
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReservedFormat {
+    Incremental,
+    Sqids,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReservedConfig {
+    #[serde(default = "default_reserved_remote")]
+    pub remote: String,
+    pub format: ReservedFormat,
+    #[serde(default = "default_reserved_max_retries")]
+    pub max_retries: u8,
+}
+
+fn default_reserved_remote() -> String {
+    "origin".to_string()
+}
+
+fn default_reserved_max_retries() -> u8 {
+    5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -71,6 +96,8 @@ pub struct Config {
     pub tui: Tui,
     #[serde(skip)]
     pub sqids: Option<SqidsConfig>,
+    #[serde(skip)]
+    pub reserved: Option<ReservedConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +132,7 @@ impl Default for Tui {
 #[derive(Deserialize)]
 struct RawNumbering {
     sqids: Option<SqidsConfig>,
+    reserved: Option<ReservedConfig>,
 }
 
 #[derive(Deserialize)]
@@ -249,6 +277,7 @@ impl Default for Config {
             },
             tui: Tui::default(),
             sqids: None,
+            reserved: None,
         }
     }
 }
@@ -274,7 +303,10 @@ impl Config {
         let rules = raw.rules.unwrap_or_else(default_rules);
 
         let any_sqids = types.iter().any(|t| t.numbering == NumberingStrategy::Sqids);
-        let sqids = raw.numbering.and_then(|n| n.sqids);
+        let (sqids, reserved) = match raw.numbering {
+            Some(n) => (n.sqids, n.reserved),
+            None => (None, None),
+        };
 
         if any_sqids {
             let Some(ref sqids_cfg) = sqids else {
@@ -285,6 +317,27 @@ impl Config {
             }
             if sqids_cfg.min_length < 1 || sqids_cfg.min_length > 10 {
                 bail!("numbering.sqids.min_length must be between 1 and 10, got {}", sqids_cfg.min_length);
+            }
+        }
+
+        let any_reserved = types.iter().any(|t| t.numbering == NumberingStrategy::Reserved);
+        if any_reserved {
+            let Some(ref reserved_cfg) = reserved else {
+                bail!("numbering = \"reserved\" requires a [numbering.reserved] section");
+            };
+            if reserved_cfg.remote.is_empty() {
+                bail!("numbering.reserved.remote must not be empty");
+            }
+            if reserved_cfg.format == ReservedFormat::Sqids {
+                let Some(ref sqids_cfg) = sqids else {
+                    bail!("numbering.reserved.format = \"sqids\" requires a [numbering.sqids] section with a non-empty salt");
+                };
+                if sqids_cfg.salt.is_empty() {
+                    bail!("numbering.reserved.format = \"sqids\" requires a non-empty numbering.sqids.salt");
+                }
+                if sqids_cfg.min_length < 1 || sqids_cfg.min_length > 10 {
+                    bail!("numbering.sqids.min_length must be between 1 and 10, got {}", sqids_cfg.min_length);
+                }
             }
         }
 
@@ -300,6 +353,7 @@ impl Config {
             }),
             tui: raw.tui.unwrap_or_default(),
             sqids,
+            reserved,
         })
     }
 

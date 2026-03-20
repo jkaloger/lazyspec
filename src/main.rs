@@ -1,5 +1,6 @@
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
+use lazyspec::cli::reservations::ReservationsCommand;
 use lazyspec::cli::{Cli, Commands};
 use lazyspec::engine::config::Config;
 use lazyspec::engine::store::Store;
@@ -53,10 +54,10 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Init) | Some(Commands::Completions { .. }) => unreachable!(),
         Some(Commands::Create { doc_type, title, author, json }) => {
             if json {
-                let output = lazyspec::cli::create::run_json(&cwd, &config, &doc_type, &title, &author)?;
+                let output = lazyspec::cli::create::run_json(&cwd, &config, &doc_type, &title, &author, |_| {})?;
                 println!("{}", output);
             } else {
-                let path = lazyspec::cli::create::run(&cwd, &config, &doc_type, &title, &author)?;
+                let path = lazyspec::cli::create::run(&cwd, &config, &doc_type, &title, &author, |_| {})?;
                 println!("{}", path.display());
             }
         }
@@ -164,6 +165,17 @@ fn main() -> anyhow::Result<()> {
             let exit_code = lazyspec::cli::validate::run_full(&store, &config, json, warnings);
             if exit_code != 0 {
                 std::process::exit(exit_code);
+            }
+        }
+        Some(Commands::Reservations { command }) => {
+            match command {
+                ReservationsCommand::List { json } => {
+                    lazyspec::cli::reservations::run_list(&cwd, &config, json)?;
+                }
+                ReservationsCommand::Prune { dry_run, json } => {
+                    let store = Store::load(&cwd, &config)?;
+                    lazyspec::cli::reservations::run_prune(&cwd, &config, &store, dry_run, json, |_| {})?;
+                }
             }
         }
         None => {

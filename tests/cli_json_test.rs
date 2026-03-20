@@ -79,7 +79,7 @@ fn create_json_output() {
 
     let config = fixture.config();
     let output =
-        lazyspec::cli::create::run_json(fixture.root(), &config, "rfc", "New Feature", "jkaloger").unwrap();
+        lazyspec::cli::create::run_json(fixture.root(), &config, "rfc", "New Feature", "jkaloger", |_| {}).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     assert_eq!(parsed["title"], "New Feature");

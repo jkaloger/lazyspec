@@ -93,6 +93,38 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
             app.diagram_cache = diagram::DiagramCache::new();
             app.image_states.clear();
         }
+        AppEvent::CreateStarted => {}
+        AppEvent::CreateProgress { message } => {
+            if app.create_form.active && app.create_form.loading {
+                app.create_form.status_message = Some(message);
+            }
+        }
+        AppEvent::CreateComplete { result } => {
+            if !app.create_form.active {
+                return;
+            }
+            match result {
+                Ok(create_result) => {
+                    let _ = app.store.reload_file(root, &create_result.path);
+                    app.filtered_docs_cache = None;
+                    app.rebuild_search_index();
+                    if let Some(type_idx) = app.doc_types.iter().position(|t| *t == create_result.doc_type) {
+                        app.selected_type = type_idx;
+                        app.build_doc_tree();
+                        if let Some(doc_idx) = app.doc_tree.iter().position(|n| n.path == create_result.path) {
+                            app.selected_doc = doc_idx;
+                        }
+                    }
+                    app.close_create_form();
+                    app.refresh_validation(config);
+                }
+                Err(msg) => {
+                    app.create_form.loading = false;
+                    app.create_form.error = Some(msg);
+                    app.create_form.status_message = None;
+                }
+            }
+        }
         #[cfg(feature = "agent")]
         AppEvent::AgentFinished => {}
     }

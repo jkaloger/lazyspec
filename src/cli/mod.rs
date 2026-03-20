@@ -15,7 +15,9 @@ pub mod update;
 pub mod search;
 pub mod validate;
 pub mod fix;
+pub mod reservations;
 
+use crate::cli::reservations::ReservationsCommand;
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::engine::ArgValueCompleter;
 
@@ -191,5 +193,10 @@ pub enum Commands {
         /// Show warnings in addition to errors
         #[arg(long)]
         warnings: bool,
+    },
+    /// Manage reservation refs
+    Reservations {
+        #[command(subcommand)]
+        command: ReservationsCommand,
     },
 }

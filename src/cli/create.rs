@@ -1,6 +1,7 @@
 use crate::cli::json::doc_to_json;
-use crate::engine::config::{Config, NumberingStrategy};
+use crate::engine::config::{Config, NumberingStrategy, ReservedFormat};
 use crate::engine::document::DocMeta;
+use crate::engine::reservation;
 use crate::engine::template;
 use anyhow::{anyhow, Result};
 use chrono::Local;
@@ -13,6 +14,7 @@ pub fn run(
     doc_type: &str,
     title: &str,
     author: &str,
+    on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<PathBuf> {
     let type_def = config.type_by_name(doc_type)
         .ok_or_else(|| anyhow!("unknown doc type: '{}'. valid types: {}", doc_type,
@@ -22,16 +24,46 @@ pub fn run(
     let target_dir = root.join(dir);
     fs::create_dir_all(&target_dir)?;
 
-    let numbering = match type_def.numbering {
+    let (numbering, pre_computed_id) = match type_def.numbering {
         NumberingStrategy::Sqids => {
             let sqids_config = config.sqids.as_ref()
                 .ok_or_else(|| anyhow!("type '{}' uses sqids numbering but no [numbering.sqids] config found", doc_type))?;
-            Some((&type_def.numbering, sqids_config))
+            (Some((&type_def.numbering, sqids_config)), None)
         }
-        NumberingStrategy::Incremental => None,
+        NumberingStrategy::Reserved => {
+            let reserved_cfg = config.reserved.as_ref()
+                .ok_or_else(|| anyhow!("type '{}' uses reserved numbering but no [numbering.reserved] config found", doc_type))?;
+            let num = reservation::reserve_next(
+                root,
+                &reserved_cfg.remote,
+                &type_def.prefix.to_uppercase(),
+                reserved_cfg.max_retries,
+                &target_dir,
+                &on_progress,
+            )?;
+            let id = match reserved_cfg.format {
+                ReservedFormat::Incremental => format!("{:03}", num),
+                ReservedFormat::Sqids => {
+                    let sqids_config = config.sqids.as_ref()
+                        .ok_or_else(|| anyhow!("reserved format 'sqids' requires [numbering.sqids] config"))?;
+                    let alphabet = template::shuffle_alphabet(&sqids_config.salt);
+                    let sqids = sqids::Sqids::builder()
+                        .alphabet(alphabet)
+                        .min_length(sqids_config.min_length)
+                        .blocklist(std::collections::HashSet::new())
+                        .build()
+                        .expect("valid sqids config");
+                    sqids.encode(&[num as u64]).expect("sqids encode").to_lowercase()
+                }
+            };
+            (None, Some(id))
+        }
+        NumberingStrategy::Incremental => (None, None),
     };
-    let filename =
-        template::resolve_filename(&config.naming.pattern, doc_type, title, &target_dir, numbering);
+    let filename = template::resolve_filename(
+        &config.naming.pattern, doc_type, title, &target_dir, numbering,
+        pre_computed_id.as_deref(),
+    );
     let target_path = target_dir.join(&filename);
 
     let template_path = root
@@ -63,8 +95,9 @@ pub fn run_json(
     doc_type: &str,
     title: &str,
     author: &str,
+    on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<String> {
-    let path = run(root, config, doc_type, title, author)?;
+    let path = run(root, config, doc_type, title, author, on_progress)?;
     let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
 
     let content = fs::read_to_string(&path)?;

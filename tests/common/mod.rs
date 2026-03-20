@@ -1,8 +1,9 @@
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 
 use lazyspec::engine::config::Config;
 use lazyspec::engine::store::Store;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use tempfile::TempDir;
 
 pub struct TestFixture {
@@ -114,5 +115,56 @@ impl TestFixture {
             title, status, related
         );
         self.write_doc(&format!("docs/adrs/{}", filename), &content)
+    }
+
+    pub fn with_git_remote() -> (Self, TempDir) {
+        let fixture = Self::new();
+        let bare_dir = TempDir::new().unwrap();
+
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(bare_dir.path())
+            .output()
+            .expect("git init --bare");
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(fixture.root())
+            .output()
+            .expect("git init");
+
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(fixture.root())
+            .output()
+            .expect("git config email");
+
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(fixture.root())
+            .output()
+            .expect("git config name");
+
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(fixture.root())
+            .output()
+            .expect("git commit");
+
+        let bare_path = bare_dir.path().to_str().unwrap().to_string();
+        Command::new("git")
+            .args(["remote", "add", "origin", &bare_path])
+            .current_dir(fixture.root())
+            .output()
+            .expect("git remote add origin");
+
+        // Push initial commit so the remote has a valid HEAD
+        Command::new("git")
+            .args(["push", "origin", "HEAD"])
+            .current_dir(fixture.root())
+            .output()
+            .expect("git push initial");
+
+        (fixture, bare_dir)
     }
 }
