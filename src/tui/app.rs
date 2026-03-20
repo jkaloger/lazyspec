@@ -1216,12 +1216,15 @@ impl App {
             update_tags(root, &relative, &tags)?;
         }
 
+        // Reload the store before applying relations so the new doc is resolvable
+        let _ = self.store.reload_file(root, &relative);
+
         // Apply relations
         for (rel_type, target_path) in &relations {
-            crate::cli::link::link(root, &relative_str, rel_type, &target_path.to_string_lossy())?;
+            crate::cli::link::link(root, &self.store, &relative_str, rel_type, &target_path.to_string_lossy())?;
         }
 
-        // Reload the store to pick up the new file
+        // Reload again to pick up the relation changes
         let _ = self.store.reload_file(root, &relative);
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
@@ -1269,7 +1272,7 @@ impl App {
     pub fn confirm_delete(&mut self, root: &Path) -> Result<()> {
         let doc_path = self.delete_confirm.doc_path.clone();
         let doc_path_str = doc_path.to_string_lossy().to_string();
-        crate::cli::delete::run(root, &doc_path_str)?;
+        crate::cli::delete::run(root, &self.store, &doc_path_str)?;
         self.store.remove_file(&doc_path);
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
@@ -1325,7 +1328,7 @@ impl App {
         let doc_path = self.status_picker.doc_path.clone();
         let doc_path_str = doc_path.to_string_lossy().to_string();
 
-        crate::cli::update::run(root, &doc_path_str, &[("status", &status.to_string())])?;
+        crate::cli::update::run(root, &self.store, &doc_path_str, &[("status", &status.to_string())])?;
         self.store.reload_file(root, &doc_path)?;
         self.filtered_docs_cache = None;
         self.rebuild_search_index();

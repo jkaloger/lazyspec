@@ -8,6 +8,7 @@ pub mod json;
 pub mod ignore;
 pub mod link;
 pub mod list;
+pub mod resolve;
 pub mod show;
 pub mod update;
 pub mod search;

@@ -39,6 +39,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Update { path, status, title }) => {
+            let store = Store::load(&cwd, &config)?;
             let mut updates = Vec::new();
             if let Some(ref s) = status {
                 updates.push(("status", s.as_str()));
@@ -46,28 +47,41 @@ fn main() -> anyhow::Result<()> {
             if let Some(ref t) = title {
                 updates.push(("title", t.as_str()));
             }
-            lazyspec::cli::update::run(&cwd, &path, &updates)?;
-            println!("Updated {}", path);
+            let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
+            lazyspec::cli::update::run(&cwd, &store, &path, &updates)?;
+            println!("Updated {}", resolved.display());
         }
         Some(Commands::Delete { path }) => {
-            lazyspec::cli::delete::run(&cwd, &path)?;
-            println!("Deleted {}", path);
+            let store = Store::load(&cwd, &config)?;
+            let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
+            lazyspec::cli::delete::run(&cwd, &store, &path)?;
+            println!("Deleted {}", resolved.display());
         }
         Some(Commands::Link { from, rel_type, to }) => {
-            lazyspec::cli::link::link(&cwd, &from, &rel_type, &to)?;
-            println!("Linked {} --{}--> {}", from, rel_type, to);
+            let store = Store::load(&cwd, &config)?;
+            lazyspec::cli::link::link(&cwd, &store, &from, &rel_type, &to)?;
+            let resolved_from = lazyspec::cli::resolve::resolve_to_path(&store, &from)?;
+            let resolved_to = lazyspec::cli::resolve::resolve_to_path(&store, &to)?;
+            println!("Linked {} --{}--> {}", resolved_from.display(), rel_type, resolved_to.display());
         }
         Some(Commands::Unlink { from, rel_type, to }) => {
-            lazyspec::cli::link::unlink(&cwd, &from, &rel_type, &to)?;
-            println!("Unlinked {} --{}--> {}", from, rel_type, to);
+            let store = Store::load(&cwd, &config)?;
+            lazyspec::cli::link::unlink(&cwd, &store, &from, &rel_type, &to)?;
+            let resolved_from = lazyspec::cli::resolve::resolve_to_path(&store, &from)?;
+            let resolved_to = lazyspec::cli::resolve::resolve_to_path(&store, &to)?;
+            println!("Unlinked {} --{}--> {}", resolved_from.display(), rel_type, resolved_to.display());
         }
         Some(Commands::Ignore { path }) => {
-            lazyspec::cli::ignore::ignore(&cwd, &path)?;
-            println!("Ignoring {}", path);
+            let store = Store::load(&cwd, &config)?;
+            let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
+            lazyspec::cli::ignore::ignore(&cwd, &store, &path)?;
+            println!("Ignoring {}", resolved.display());
         }
         Some(Commands::Unignore { path }) => {
-            lazyspec::cli::ignore::unignore(&cwd, &path)?;
-            println!("Unignoring {}", path);
+            let store = Store::load(&cwd, &config)?;
+            let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
+            lazyspec::cli::ignore::unignore(&cwd, &store, &path)?;
+            println!("Unignoring {}", resolved.display());
         }
         Some(Commands::Search { query, doc_type, json }) => {
             let store = Store::load(&cwd, &config)?;

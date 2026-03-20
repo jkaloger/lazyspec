@@ -1,9 +1,9 @@
 use crate::cli::json::doc_to_json_with_family;
+use crate::cli::resolve::resolve_shorthand_or_path;
 use crate::cli::style::{bold, dim, separator, styled_status};
 use crate::engine::store::{ResolveError, Store};
 use anyhow::Result;
 use console::colors_enabled;
-use std::path::Path;
 
 fn title_box(title: &str) -> String {
     if !colors_enabled() {
@@ -16,13 +16,6 @@ fn title_box(title: &str) -> String {
     let mid = format!("\u{2502}{}\u{2502}", bold(&padded));
     let bot = format!("\u{2570}{}\u{256f}", "\u{2500}".repeat(width));
     format!("{}\n{}\n{}", top, mid, bot)
-}
-
-fn resolve_shorthand_or_path<'a>(store: &'a Store, id: &str) -> std::result::Result<&'a crate::engine::document::DocMeta, ResolveError> {
-    if let Some(doc) = store.get(Path::new(id)) {
-        return Ok(doc);
-    }
-    store.resolve_shorthand(id)
 }
 
 pub fn run(store: &Store, id: &str, expand: bool, max_ref_lines: usize) -> Result<()> {
