@@ -29,7 +29,7 @@ diagrams: "request_diagram_render()" {
   desc: "Queue diagram renders for visible blocks"
 }
 
-recv: "rx.recv_timeout(100ms)" {
+recv: "rx.recv_timeout(16ms)" {
   shape: diamond
 }
 
@@ -38,7 +38,8 @@ handle: "handle_app_event()" {
   file: "FileChange -> reload_file() + refresh_validation()"
   expansion: "ExpansionResult -> cache + insert"
   diagram: "DiagramRendered -> diagram_cache.insert()"
-  probe: "ProbeResult -> update protocol + tools"
+  probe: "ToolAvailabilityResult -> update tool availability"
+  validation: "ValidationRequest -> refresh_validation()"
 }
 
 editor_check: "editor_request?" {

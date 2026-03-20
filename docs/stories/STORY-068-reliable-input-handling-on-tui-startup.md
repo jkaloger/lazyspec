@@ -1,13 +1,14 @@
 ---
 title: Reliable input handling on TUI startup
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-19
 tags: []
 related:
 - related-to: docs/audits/AUDIT-005-tui-startup-performance.md
 ---
+
 
 
 ## Context

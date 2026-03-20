@@ -1,13 +1,14 @@
 ---
 title: Defer validation and deduplicate search index build
 type: iteration
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-19
 tags: []
 related:
 - implements: docs/stories/STORY-069-reduce-time-to-first-frame-on-tui-startup.md
 ---
+
 
 
 ## Task Breakdown

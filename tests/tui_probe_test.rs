@@ -26,8 +26,9 @@ fn app_new_returns_within_100ms_with_halfblock_picker() {
 }
 
 #[test]
-fn probe_result_updates_app_state() {
+fn tool_availability_result_updates_app_state() {
     use lazyspec::tui::diagram::ToolAvailability;
+    use lazyspec::tui::app::AppEvent;
 
     let fixture = TestFixture::new();
     let store = fixture.store();
@@ -36,27 +37,21 @@ fn probe_result_updates_app_state() {
     assert_eq!(app.terminal_image_protocol, TerminalImageProtocol::Halfblocks);
     assert!(!app.tool_availability.d2);
 
-    // Verify the probe channel architecture works: spawn a thread that sends a ProbeResult,
+    // Verify the channel architecture works: spawn a thread that sends a ToolAvailabilityResult,
     // then receive and apply it.
-    use lazyspec::tui::app::AppEvent;
-
     let (tx, rx) = crossbeam_channel::unbounded::<AppEvent>();
     std::thread::spawn(move || {
-        let probe_picker = ratatui_image::picker::Picker::halfblocks();
-        let _ = tx.send(AppEvent::ProbeResult {
-            picker: probe_picker,
-            protocol: TerminalImageProtocol::Sixel,
+        let _ = tx.send(AppEvent::ToolAvailabilityResult {
             tool_availability: ToolAvailability { d2: true, mmdc: false },
         });
     });
 
     let event = rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
     match event {
-        AppEvent::ProbeResult { protocol, tool_availability, .. } => {
-            assert_eq!(protocol, TerminalImageProtocol::Sixel);
+        AppEvent::ToolAvailabilityResult { tool_availability } => {
             assert!(tool_availability.d2);
             assert!(!tool_availability.mmdc);
         }
-        _ => panic!("expected ProbeResult event"),
+        _ => panic!("expected ToolAvailabilityResult event"),
     }
 }

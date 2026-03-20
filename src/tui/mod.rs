@@ -23,7 +23,7 @@ use std::io;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 fn run_editor(
@@ -86,12 +86,11 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
         AppEvent::DiagramRendered { source_hash, entry } => {
             app.diagram_cache.insert(source_hash, entry);
         }
-        AppEvent::ProbeResult { picker, protocol, tool_availability } => {
-            app.picker = picker;
-            app.terminal_image_protocol = protocol;
+        AppEvent::ToolAvailabilityResult { tool_availability } => {
             app.tool_availability = tool_availability;
-            app.diagram_cache = diagram::DiagramCache::new();
-            app.image_states.clear();
+        }
+        AppEvent::ValidationRequest => {
+            app.refresh_validation(config);
         }
         #[cfg(feature = "agent")]
         AppEvent::AgentFinished => {}
@@ -102,23 +101,30 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
-    let picker = ratatui_image::picker::Picker::halfblocks();
+
+    // Probe terminal image protocol synchronously while stdin is uncontested
+    let picker = terminal_caps::create_picker();
+    let protocol = terminal_caps::TerminalImageProtocol::from(picker.protocol_type());
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(store, config, picker);
-    app.refresh_validation(config);
+    app.terminal_image_protocol = protocol;
 
     let (tx, rx) = crossbeam_channel::unbounded();
     app.event_tx = tx.clone();
 
-    // Spawn background probe for terminal image protocol and diagram tool availability
+    // Queue validation as the first event so the first frame renders before validation runs
+    let _ = tx.send(AppEvent::ValidationRequest);
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    // Spawn background probe for diagram tool availability (no stdin reads)
     let probe_tx = tx.clone();
-    std::thread::spawn(move || {
-        let picker = terminal_caps::create_picker();
-        let protocol = terminal_caps::TerminalImageProtocol::from(picker.protocol_type());
+    let probe_handle = std::thread::spawn(move || {
         let tool_availability = diagram::ToolAvailability::detect();
-        let _ = probe_tx.send(AppEvent::ProbeResult { picker, protocol, tool_availability });
+        let _ = probe_tx.send(AppEvent::ToolAvailabilityResult { tool_availability });
     });
 
     let root = app.store.root().to_path_buf();
@@ -139,22 +145,36 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
 
     // Dedicated terminal input thread: sends key events through the unified channel
     let input_paused = Arc::new(AtomicBool::new(false));
+    let input_ready = Arc::new(Barrier::new(2));
     let term_tx = tx.clone();
     let paused = input_paused.clone();
-    std::thread::spawn(move || {
+    let input_shutdown = shutdown.clone();
+    let ready = input_ready.clone();
+    let input_handle = std::thread::spawn(move || {
+        ready.wait();
         loop {
+            if input_shutdown.load(Ordering::Relaxed) {
+                break;
+            }
             if paused.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(50));
                 continue;
             }
-            // Blocking read - wakes immediately on keypress
-            if let Ok(Event::Key(key)) = crossterm::event::read() {
-                perf_log::log(&format!("input_thread: read key {:?}", key.code));
-                let _ = term_tx.send(AppEvent::Terminal(key));
-                perf_log::log("input_thread: sent to channel");
+            match crossterm::event::poll(Duration::from_millis(50)) {
+                Ok(true) => {
+                    if let Ok(Event::Key(key)) = crossterm::event::read() {
+                        perf_log::log(&format!("input_thread: read key {:?}", key.code));
+                        let _ = term_tx.send(AppEvent::Terminal(key));
+                        perf_log::log("input_thread: sent to channel");
+                    }
+                }
+                Ok(false) => {}
+                Err(_) => break,
             }
         }
     });
+
+    input_ready.wait();
 
     let mut loop_count: u64 = 0;
     loop {
@@ -264,6 +284,10 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             break;
         }
     }
+
+    shutdown.store(true, Ordering::Relaxed);
+    let _ = probe_handle.join();
+    let _ = input_handle.join();
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;

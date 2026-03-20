@@ -23,11 +23,10 @@ pub enum AppEvent {
     FileChange(notify::Event),
     ExpansionResult { path: PathBuf, body: String, body_hash: u64 },
     DiagramRendered { source_hash: u64, entry: super::diagram::DiagramCacheEntry },
-    ProbeResult {
-        picker: ratatui_image::picker::Picker,
-        protocol: super::terminal_caps::TerminalImageProtocol,
+    ToolAvailabilityResult {
         tool_availability: super::diagram::ToolAvailability,
     },
+    ValidationRequest,
     #[cfg(feature = "agent")]
     AgentFinished,
 }

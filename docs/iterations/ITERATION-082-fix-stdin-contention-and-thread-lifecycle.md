@@ -1,13 +1,14 @@
 ---
 title: Fix stdin contention and thread lifecycle
 type: iteration
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-19
 tags: []
 related:
 - implements: docs/stories/STORY-068-reliable-input-handling-on-tui-startup.md
 ---
+
 
 
 ## Task Breakdown

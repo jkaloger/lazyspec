@@ -11,7 +11,9 @@ related:
 
 # Threading Model
 
-The TUI runs three threads plus optional background workers:
+The TUI runs three threads plus optional background workers. Terminal protocol
+detection (`Picker::from_query_stdio()`) runs synchronously at startup before
+any threads are spawned, ensuring no stdin contention:
 
 @ref src/tui/mod.rs#run
 
@@ -39,9 +41,8 @@ watcher_thread: "File Watcher Thread" {
   dirs: "watches type directories"
 }
 
-probe_thread: "Probe Thread (one-shot)" {
+probe_thread: "Tool Availability Thread (one-shot)" {
   style.fill: "#f3e5f5"
-  picker: "detect terminal protocol"
   tools: "check d2/mmdc availability"
 }
 
@@ -57,9 +58,9 @@ channel: "crossbeam_channel\n(unbounded)" {
 
 input_thread -> channel: "AppEvent::Terminal"
 watcher_thread -> channel: "AppEvent::FileChange"
-probe_thread -> channel: "AppEvent::ProbeResult"
+probe_thread -> channel: "AppEvent::ToolAvailabilityResult"
 expansion_worker -> channel: "AppEvent::ExpansionResult"
-channel -> main_thread: "recv_timeout(100ms)"
+channel -> main_thread: "recv_timeout(16ms)"
 ```
 
 ## Event Types
