@@ -1,13 +1,14 @@
 ---
 title: Shell Completions
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-20
 tags: []
 related:
 - implements: docs/rfcs/RFC-028-document-reference-ergonomics.md
 ---
+
 
 
 ## Context

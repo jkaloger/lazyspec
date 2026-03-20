@@ -1,9 +1,12 @@
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::CompleteEnv;
 use lazyspec::cli::{Cli, Commands};
 use lazyspec::engine::config::Config;
 use lazyspec::engine::store::Store;
 
 fn main() -> anyhow::Result<()> {
+    CompleteEnv::with_factory(Cli::command).complete();
+
     let cli = Cli::parse();
     let cwd = std::env::current_dir()?;
 
@@ -12,10 +15,52 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if let Some(Commands::Completions { shell }) = &cli.command {
+        let bin = std::env::args_os()
+            .next()
+            .and_then(|s| {
+                let p = std::path::PathBuf::from(s);
+                if p.components().count() > 1 {
+                    std::env::current_dir().ok().map(|cwd| cwd.join(&p).to_string_lossy().into_owned())
+                } else {
+                    Some(p.to_string_lossy().into_owned())
+                }
+            })
+            .unwrap_or_else(|| "lazyspec".to_string());
+        let shell_name = match shell {
+            clap_complete::Shell::Bash => "bash",
+            clap_complete::Shell::Zsh => "zsh",
+            clap_complete::Shell::Fish => "fish",
+            clap_complete::Shell::Elvish => "elvish",
+            clap_complete::Shell::PowerShell => "powershell",
+            _ => {
+                eprintln!("Unsupported shell for dynamic completions");
+                std::process::exit(1);
+            }
+        };
+        use clap_complete::env::EnvCompleter;
+        let shells: &[&dyn EnvCompleter] = &[
+            &clap_complete::env::Zsh,
+            &clap_complete::env::Bash,
+            &clap_complete::env::Fish,
+        ];
+        let env_shell = shells.iter().find(|s| s.is(shell_name));
+        match env_shell {
+            Some(s) => {
+                s.write_registration("COMPLETE", "lazyspec", &bin, &bin, &mut std::io::stdout())?;
+            }
+            None => {
+                // Fallback to static generation for shells without dynamic support
+                clap_complete::generate(*shell, &mut Cli::command(), "lazyspec", &mut std::io::stdout());
+            }
+        }
+        return Ok(());
+    }
+
     let config = Config::load(&cwd)?;
 
     match cli.command {
-        Some(Commands::Init) => unreachable!(),
+        Some(Commands::Init) | Some(Commands::Completions { .. }) => unreachable!(),
         Some(Commands::Create { doc_type, title, author, json }) => {
             if json {
                 let output = lazyspec::cli::create::run_json(&cwd, &config, &doc_type, &title, &author)?;

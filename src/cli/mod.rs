@@ -1,3 +1,4 @@
+pub mod completions;
 pub mod context;
 pub mod style;
 pub mod create;
@@ -16,6 +17,7 @@ pub mod validate;
 pub mod fix;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use clap_complete::engine::ArgValueCompleter;
 
 #[derive(Debug, Clone, ValueEnum)]
 pub enum RenumberFormat {
@@ -64,7 +66,7 @@ pub enum Commands {
     /// Show a document
     Show {
         /// Document path or shorthand ID (e.g. RFC-001)
-        #[arg()]
+        #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         id: String,
         /// Output as JSON
         #[arg(long)]
@@ -79,7 +81,7 @@ pub enum Commands {
     /// Update document frontmatter
     Update {
         /// Document path
-        #[arg()]
+        #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         path: String,
         /// Set status
         #[arg(long)]
@@ -91,31 +93,31 @@ pub enum Commands {
     /// Delete a document
     Delete {
         /// Document path
-        #[arg()]
+        #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         path: String,
     },
     /// Add a relationship between documents
     Link {
         /// Source document path
-        #[arg()]
+        #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         from: String,
         /// Relationship type (implements, supersedes, blocks, related-to)
-        #[arg()]
+        #[arg(add = ArgValueCompleter::new(completions::complete_rel_type))]
         rel_type: String,
         /// Target document path
-        #[arg()]
+        #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         to: String,
     },
     /// Remove a relationship between documents
     Unlink {
         /// Source document path
-        #[arg()]
+        #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         from: String,
         /// Relationship type
-        #[arg()]
+        #[arg(add = ArgValueCompleter::new(completions::complete_rel_type))]
         rel_type: String,
         /// Target document path
-        #[arg()]
+        #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         to: String,
     },
     /// Search across all documents
@@ -139,7 +141,7 @@ pub enum Commands {
     /// Show the full document chain (RFC -> Story -> Iteration)
     Context {
         /// Document path or shorthand ID (e.g. ITERATION-001)
-        #[arg()]
+        #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         id: String,
         /// Output as JSON
         #[arg(long)]
@@ -148,13 +150,13 @@ pub enum Commands {
     /// Mark a document to skip validation
     Ignore {
         /// Document path
-        #[arg()]
+        #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         path: String,
     },
     /// Remove validation skip from a document
     Unignore {
         /// Document path
-        #[arg()]
+        #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         path: String,
     },
     /// Fix documents with broken or incomplete frontmatter
@@ -174,6 +176,12 @@ pub enum Commands {
         /// Filter to a single document type (e.g. rfc, story)
         #[arg(long = "type")]
         doc_type: Option<String>,
+    },
+    /// Generate shell completion scripts
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
     },
     /// Validate all documents
     Validate {

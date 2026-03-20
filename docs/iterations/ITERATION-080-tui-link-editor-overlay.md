@@ -1,13 +1,14 @@
 ---
 title: TUI Link Editor Overlay
 type: iteration
-status: draft
+status: accepted
 author: agent
 date: 2026-03-20
 tags: []
 related:
 - implements: docs/stories/STORY-069-tui-link-editor.md
 ---
+
 
 
 Covers AC1-6, AC9-10 from STORY-069. AC7-8 (delete link with confirmation) deferred to a follow-up iteration.

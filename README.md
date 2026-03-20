@@ -33,6 +33,23 @@ cd lazyspec
 cargo install --path .
 ```
 
+### Shell Completions
+
+Generate and source a completion script for your shell:
+
+```sh
+# zsh
+source <(lazyspec completions zsh)
+
+# bash
+source <(lazyspec completions bash)
+
+# fish
+lazyspec completions fish | source
+```
+
+Add the appropriate line to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.) to load completions on startup. Completions include subcommands, flags, document IDs, and relationship types.
+
 ## Usage
 
 ### Quick Start
