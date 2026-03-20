@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-20
 tags: []
 related:
-- implements: docs/rfcs/RFC-028-git-based-document-number-reservation.md
+- implements: docs/rfcs/RFC-030-git-based-document-number-reservation.md
 ---
+
 
 
 

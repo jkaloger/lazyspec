@@ -1,13 +1,18 @@
 ---
-title: "Async git operations with progress feedback"
+title: Async git operations with progress feedback
 type: rfc
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-20
-tags: [reservation, threading, cli, tui]
+tags:
+- reservation
+- threading
+- cli
+- tui
 related:
-- related-to: docs/rfcs/RFC-028-git-based-document-number-reservation.md
+- related-to: docs/rfcs/RFC-030-git-based-document-number-reservation.md
 ---
+
 
 
 ## Problem
