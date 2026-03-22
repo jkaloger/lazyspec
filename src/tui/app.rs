@@ -1,6 +1,7 @@
 use crate::engine::cache::DiskCache;
 use crate::engine::config::{Config, NumberingStrategy};
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, RelationType, Status};
+use crate::engine::git_status::GitStatusCache;
 use crate::engine::refs::RefExpander;
 use crate::engine::reservation::ReservationProgress;
 use crate::engine::store::{Filter, Store};
@@ -388,6 +389,7 @@ pub struct App {
     pub diagram_blocks_cache: Option<(PathBuf, u64, Vec<super::diagram::DiagramBlock>)>,
     pub filtered_docs_cache: Option<Vec<PathBuf>>,
     pub search_index: Vec<SearchEntry>,
+    pub git_status_cache: GitStatusCache,
 }
 
 impl App {
@@ -402,6 +404,7 @@ impl App {
             .collect();
 
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
+        let git_status_cache = GitStatusCache::new(store.root());
 
         let mut app = App {
             store,
@@ -465,6 +468,7 @@ impl App {
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
             search_index: Vec::new(),
+            git_status_cache,
         };
         app.rebuild_search_index();
         app.build_doc_tree();
@@ -2306,6 +2310,7 @@ mod tests {
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
             search_index: Vec::new(),
+            git_status_cache: GitStatusCache::new(Path::new(".")),
         };
         app
     }

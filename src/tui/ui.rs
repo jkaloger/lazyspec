@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use unicode_width::UnicodeWidthStr;
 
 use crate::engine::document::{DocMeta, RelationType, Status};
+use crate::engine::git_status::GitFileStatus;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
 use crate::tui::app::{App, DocListNode, FilterField, FormField, PreviewTab, ViewMode};
@@ -124,6 +125,7 @@ fn display_name(path: &std::path::Path) -> &str {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    app.git_status_cache.refresh();
     if app.fullscreen_doc {
         draw_fullscreen(f, app);
         if app.show_warnings {
@@ -256,8 +258,9 @@ fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
-fn doc_table_widths() -> [Constraint; 5] {
+fn doc_table_widths() -> [Constraint; 6] {
     [
+        Constraint::Length(1),  // gutter
         Constraint::Length(4),  // tree
         Constraint::Length(18), // ID
         Constraint::Fill(1),   // title
@@ -332,6 +335,12 @@ fn doc_row_for_node(app: &App, node: &DocListNode, index: usize, dim: bool) -> R
     };
     let tree_cell = Cell::new(Span::styled(tree_text, Style::default().fg(Color::DarkGray)));
 
+    let gutter_cell = match app.git_status_cache.get(&node.path) {
+        Some(GitFileStatus::New) => Cell::from("┃").style(Style::default().fg(Color::Green)),
+        Some(GitFileStatus::Modified) => Cell::from("┃").style(Style::default().fg(Color::Yellow)),
+        None => Cell::from(" "),
+    };
+
     let tags = app
         .store
         .get(&node.path)
@@ -344,7 +353,7 @@ fn doc_row_for_node(app: &App, node: &DocListNode, index: usize, dim: bool) -> R
         node.id.clone()
     };
 
-    let mut cells = vec![tree_cell];
+    let mut cells = vec![gutter_cell, tree_cell];
     cells.extend(doc_row_cells(
         &display_id,
         &node.title,
@@ -1420,7 +1429,17 @@ fn draw_search_overlay(f: &mut Frame, app: &App) {
                 ),
                 None => ("?", "?".to_string(), Color::White),
             };
+            let gutter_span = match app.git_status_cache.get(path) {
+                Some(GitFileStatus::New) => {
+                    Span::styled("┃", Style::default().fg(Color::Green))
+                }
+                Some(GitFileStatus::Modified) => {
+                    Span::styled("┃", Style::default().fg(Color::Yellow))
+                }
+                None => Span::raw(" "),
+            };
             let line = Line::from(vec![
+                gutter_span,
                 Span::raw(format!("  {:<40} ", title)),
                 Span::styled(status_str, Style::default().fg(status_clr)),
             ]);
@@ -1518,8 +1537,13 @@ fn draw_filters_mode(f: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .filter_map(|p| app.store.get(p))
         .map(|doc| {
+            let gutter_cell = match app.git_status_cache.get(&doc.path) {
+                Some(GitFileStatus::New) => Cell::from("┃").style(Style::default().fg(Color::Green)),
+                Some(GitFileStatus::Modified) => Cell::from("┃").style(Style::default().fg(Color::Yellow)),
+                None => Cell::from(" "),
+            };
             let tree_cell = Cell::new("");
-            let mut cells = vec![tree_cell];
+            let mut cells = vec![gutter_cell, tree_cell];
             cells.extend(doc_row_cells(&doc.id, &doc.title, &doc.status, &doc.tags, doc.virtual_doc, dim));
             let style = if dim {
                 Style::default().fg(Color::DarkGray)

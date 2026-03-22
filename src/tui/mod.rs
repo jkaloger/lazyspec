@@ -72,6 +72,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                         app.disk_cache.clear();
                     }
                     app.refresh_validation(config);
+                    app.git_status_cache.invalidate();
                 }
                 _ => {}
             }
@@ -117,6 +118,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                     }
                     app.close_create_form();
                     app.refresh_validation(config);
+                    app.git_status_cache.invalidate();
                 }
                 Err(msg) => {
                     app.create_form.loading = false;
