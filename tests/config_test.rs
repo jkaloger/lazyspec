@@ -17,25 +17,25 @@ pattern = "{type}-{n:03}-{title}.md"
 "#;
 
     let config = Config::parse(toml_str).unwrap();
-    assert_eq!(config.directories.rfcs, "docs/rfcs");
-    assert_eq!(config.naming.pattern, "{type}-{n:03}-{title}.md");
+    assert_eq!(config.filesystem.directories.rfcs, "docs/rfcs");
+    assert_eq!(config.documents.naming.pattern, "{type}-{n:03}-{title}.md");
 }
 
 #[test]
 fn default_config() {
     let config = Config::default();
-    assert_eq!(config.directories.rfcs, "docs/rfcs");
-    assert_eq!(config.directories.adrs, "docs/adrs");
-    assert_eq!(config.directories.stories, "docs/stories");
-    assert_eq!(config.directories.iterations, "docs/iterations");
-    assert_eq!(config.templates.dir, ".lazyspec/templates");
-    assert_eq!(config.naming.pattern, "{type}-{n:03}-{title}.md");
+    assert_eq!(config.filesystem.directories.rfcs, "docs/rfcs");
+    assert_eq!(config.filesystem.directories.adrs, "docs/adrs");
+    assert_eq!(config.filesystem.directories.stories, "docs/stories");
+    assert_eq!(config.filesystem.directories.iterations, "docs/iterations");
+    assert_eq!(config.filesystem.templates.dir, ".lazyspec/templates");
+    assert_eq!(config.documents.naming.pattern, "{type}-{n:03}-{title}.md");
 }
 
 #[test]
 fn default_config_has_four_type_defs() {
     let config = Config::default();
-    assert_eq!(config.types.len(), 4);
+    assert_eq!(config.documents.types.len(), 4);
 
     let rfc = config.type_by_name("rfc").unwrap();
     assert_eq!(rfc.plural, "rfcs");
@@ -86,7 +86,7 @@ pattern = "{type}-{n:03}-{title}.md"
 "#;
 
     let config = Config::parse(toml_str).unwrap();
-    assert_eq!(config.types.len(), 2);
+    assert_eq!(config.documents.types.len(), 2);
 
     let rfc = config.type_by_name("rfc").unwrap();
     assert_eq!(rfc.dir, "specs/rfcs");
@@ -114,11 +114,11 @@ pattern = "{type}-{n:03}-{title}.md"
 "#;
 
     let config = Config::parse(toml_str).unwrap();
-    assert_eq!(config.types.len(), 4);
+    assert_eq!(config.documents.types.len(), 4);
 
     let rfc = config.type_by_name("rfc").unwrap();
     assert_eq!(rfc.dir, "custom/rfcs");
-    assert_eq!(config.directories.rfcs, "custom/rfcs");
+    assert_eq!(config.filesystem.directories.rfcs, "custom/rfcs");
 }
 
 #[test]
@@ -132,9 +132,9 @@ pattern = "{type}-{n:03}-{title}.md"
 "#;
 
     let config = Config::parse(toml_str).unwrap();
-    assert_eq!(config.types.len(), 4);
+    assert_eq!(config.documents.types.len(), 4);
     assert_eq!(config.type_by_name("rfc").unwrap().dir, "docs/rfcs");
-    assert_eq!(config.directories.rfcs, "docs/rfcs");
+    assert_eq!(config.filesystem.directories.rfcs, "docs/rfcs");
 }
 
 #[test]
@@ -304,7 +304,7 @@ fn parse_tui_ascii_diagrams_true() {
 ascii_diagrams = true
 "#;
     let config = Config::parse(toml_str).unwrap();
-    assert!(config.tui.ascii_diagrams);
+    assert!(config.ui.ascii_diagrams);
 }
 
 #[test]
@@ -314,13 +314,13 @@ fn tui_defaults_to_ascii_diagrams_false() {
 dir = ".lazyspec/templates"
 "#;
     let config = Config::parse(toml_str).unwrap();
-    assert!(!config.tui.ascii_diagrams);
+    assert!(!config.ui.ascii_diagrams);
 }
 
 #[test]
 fn default_config_has_ascii_diagrams_false() {
     let config = Config::default();
-    assert!(!config.tui.ascii_diagrams);
+    assert!(!config.ui.ascii_diagrams);
 }
 
 // --- Numbering / Sqids config tests ---
@@ -332,7 +332,7 @@ fn absent_numbering_defaults_to_incremental() {
 dir = ".lazyspec/templates"
 "#;
     let config = Config::parse(toml_str).unwrap();
-    for t in &config.types {
+    for t in &config.documents.types {
         assert_eq!(t.numbering, NumberingStrategy::Incremental);
     }
 }
@@ -354,7 +354,7 @@ min_length = 5
     let config = Config::parse(toml_str).unwrap();
     let rfc = config.type_by_name("rfc").unwrap();
     assert_eq!(rfc.numbering, NumberingStrategy::Sqids);
-    let sqids_cfg = config.sqids.unwrap();
+    let sqids_cfg = config.documents.sqids.unwrap();
     assert_eq!(sqids_cfg.salt, "my-secret-salt");
     assert_eq!(sqids_cfg.min_length, 5);
 }
@@ -373,7 +373,7 @@ numbering = "sqids"
 salt = "my-salt"
 "#;
     let config = Config::parse(toml_str).unwrap();
-    let sqids_cfg = config.sqids.unwrap();
+    let sqids_cfg = config.documents.sqids.unwrap();
     assert_eq!(sqids_cfg.min_length, 3);
 }
 
@@ -472,7 +472,7 @@ max_retries = 3
     let config = Config::parse(toml_str).unwrap();
     let rfc = config.type_by_name("rfc").unwrap();
     assert_eq!(rfc.numbering, NumberingStrategy::Reserved);
-    let reserved_cfg = config.reserved.unwrap();
+    let reserved_cfg = config.documents.reserved.unwrap();
     assert_eq!(reserved_cfg.remote, "upstream");
     assert_eq!(reserved_cfg.format, ReservedFormat::Incremental);
     assert_eq!(reserved_cfg.max_retries, 3);
@@ -492,7 +492,7 @@ numbering = "reserved"
 format = "incremental"
 "#;
     let config = Config::parse(toml_str).unwrap();
-    let reserved_cfg = config.reserved.unwrap();
+    let reserved_cfg = config.documents.reserved.unwrap();
     assert_eq!(reserved_cfg.remote, "origin");
     assert_eq!(reserved_cfg.max_retries, 5);
 }

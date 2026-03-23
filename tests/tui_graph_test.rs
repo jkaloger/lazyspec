@@ -173,7 +173,7 @@ fn test_graph_rebuilds_on_mode_switch() {
 fn custom_types_populate_doc_types_and_icons() {
     let fixture = TestFixture::new();
     let mut config = fixture.config();
-    config.types = vec![
+    config.documents.types = vec![
         TypeDef {
             name: "epic".into(),
             plural: "epics".into(),

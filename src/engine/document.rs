@@ -68,13 +68,24 @@ pub enum RelationType {
     RelatedTo,
 }
 
+impl RelationType {
+    pub const ALL: [RelationType; 4] = [
+        RelationType::Implements,
+        RelationType::Supersedes,
+        RelationType::Blocks,
+        RelationType::RelatedTo,
+    ];
+
+    pub const ALL_STRS: [&str; 4] = ["implements", "supersedes", "blocks", "related-to"];
+}
+
 impl fmt::Display for RelationType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RelationType::Implements => write!(f, "implements"),
             RelationType::Supersedes => write!(f, "supersedes"),
             RelationType::Blocks => write!(f, "blocks"),
-            RelationType::RelatedTo => write!(f, "related to"),
+            RelationType::RelatedTo => write!(f, "related-to"),
         }
     }
 }
@@ -233,6 +244,10 @@ impl DocMeta {
     pub fn extract_body(content: &str) -> Result<String> {
         let (_, body) = split_frontmatter(content)?;
         Ok(body.trim_start_matches('\n').to_string())
+    }
+
+    pub fn display_name(&self) -> &str {
+        &self.id
     }
 
     pub fn sort_by_date(a: &DocMeta, b: &DocMeta) -> std::cmp::Ordering {

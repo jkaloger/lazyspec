@@ -234,7 +234,7 @@ impl StatusPicker {
     }
 }
 
-pub const REL_TYPES: [&str; 4] = ["implements", "supersedes", "blocks", "related-to"];
+pub const REL_TYPES: [&str; 4] = RelationType::ALL_STRS;
 
 pub struct LinkEditor {
     pub active: bool,
@@ -392,14 +392,54 @@ pub struct App {
     pub git_status_cache: GitStatusCache,
 }
 
+fn traverse_dependency_chain(
+    store: &Store,
+    path: &Path,
+    depth: usize,
+    nodes: &mut Vec<GraphNode>,
+    visited: &mut HashSet<PathBuf>,
+) {
+    if !visited.insert(path.to_path_buf()) {
+        return;
+    }
+
+    let Some(doc) = store.get(path) else {
+        return;
+    };
+
+    nodes.push(GraphNode {
+        path: doc.path.clone(),
+        title: doc.title.clone(),
+        doc_type: doc.doc_type.clone(),
+        status: doc.status.clone(),
+        depth,
+    });
+
+    let mut children: Vec<&PathBuf> = store
+        .referenced_by(path)
+        .into_iter()
+        .filter(|(rel, _)| **rel == RelationType::Implements)
+        .map(|(_, p)| p)
+        .collect();
+    children.sort_by(|a, b| {
+        let a_title = store.get(a).map(|d| d.title.as_str()).unwrap_or("");
+        let b_title = store.get(b).map(|d| d.title.as_str()).unwrap_or("");
+        a_title.cmp(b_title)
+    });
+
+    for child_path in children {
+        traverse_dependency_chain(store, child_path, depth + 1, nodes, visited);
+    }
+}
+
 impl App {
     pub fn new(store: Store, config: &Config, picker: ratatui_image::picker::Picker) -> Self {
         let default_glyphs = ["●", "■", "▲", "◆", "★", "◎"];
-        let type_icons: HashMap<String, String> = config.types.iter().enumerate().map(|(i, t)| {
+        let type_icons: HashMap<String, String> = config.documents.types.iter().enumerate().map(|(i, t)| {
             let icon = t.icon.clone().unwrap_or_else(|| default_glyphs[i % default_glyphs.len()].to_string());
             (t.name.clone(), icon)
         }).collect();
-        let type_plurals: HashMap<String, String> = config.types.iter()
+        let type_plurals: HashMap<String, String> = config.documents.types.iter()
             .map(|t| (t.name.clone(), t.plural.clone()))
             .collect();
 
@@ -410,7 +450,7 @@ impl App {
             store,
             selected_type: 0,
             selected_doc: 0,
-            doc_types: config.types.iter().map(|t| DocType::new(&t.name)).collect(),
+            doc_types: config.documents.types.iter().map(|t| DocType::new(&t.name)).collect(),
             should_quit: false,
             fullscreen_doc: false,
             scroll_offset: 0,
@@ -464,7 +504,7 @@ impl App {
             diagram_cache: super::diagram::DiagramCache::new(),
             picker,
             image_states: HashMap::new(),
-            ascii_diagrams: config.tui.ascii_diagrams,
+            ascii_diagrams: config.ui.ascii_diagrams,
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
             search_index: Vec::new(),
@@ -606,8 +646,8 @@ impl App {
             self.filtered_docs_cache = Some(docs.iter().map(|d| d.path.clone()).collect());
         }
         self.filtered_docs_cache
-            .as_ref()
-            .unwrap()
+            .as_deref()
+            .unwrap_or_default()
             .iter()
             .filter_map(|p| self.store.get(p))
             .collect()
@@ -621,13 +661,14 @@ impl App {
     }
 
     pub fn selected_filtered_doc(&mut self) -> Option<&DocMeta> {
-        let paths = if self.filtered_docs_cache.is_none() {
+        if self.filtered_docs_cache.is_none() {
             self.filtered_docs();
-            self.filtered_docs_cache.as_ref().unwrap()
-        } else {
-            self.filtered_docs_cache.as_ref().unwrap()
-        };
-        paths.get(self.selected_doc).and_then(|p| self.store.get(p))
+        }
+        self.filtered_docs_cache
+            .as_deref()
+            .unwrap_or_default()
+            .get(self.selected_doc)
+            .and_then(|p| self.store.get(p))
     }
 
     pub fn rebuild_search_index(&mut self) {
@@ -714,12 +755,8 @@ impl App {
     }
 
     pub fn rebuild_graph(&mut self) {
-        use std::collections::HashSet;
-
         let all_docs = self.store.all_docs();
 
-        // Find root documents: those with no outgoing Implements links
-        // (i.e., docs that don't implement anything else)
         let mut roots: Vec<&DocMeta> = all_docs
             .iter()
             .filter(|doc| {
@@ -735,54 +772,8 @@ impl App {
         let mut nodes = Vec::new();
         let mut visited = HashSet::new();
 
-        fn walk(
-            store: &crate::engine::store::Store,
-            path: &Path,
-            depth: usize,
-            nodes: &mut Vec<GraphNode>,
-            visited: &mut HashSet<PathBuf>,
-        ) {
-            if !visited.insert(path.to_path_buf()) {
-                return;
-            }
-
-            let doc = match store.get(path) {
-                Some(d) => d,
-                None => return,
-            };
-
-            nodes.push(GraphNode {
-                path: doc.path.clone(),
-                title: doc.title.clone(),
-                doc_type: doc.doc_type.clone(),
-                status: doc.status.clone(),
-                depth,
-            });
-
-            // Children are docs whose forward `implements` link points to this doc.
-            // referenced_by returns reverse links: docs that reference this path.
-            // Filter for Implements to get docs that implement this one.
-            let mut children: Vec<&PathBuf> = store
-                .referenced_by(path)
-                .into_iter()
-                .filter(|(rel, _)| **rel == RelationType::Implements)
-                .map(|(_, p)| p)
-                .collect();
-            children.sort_by(|a, b| {
-                let a_doc = store.get(a);
-                let b_doc = store.get(b);
-                let a_title = a_doc.map(|d| d.title.as_str()).unwrap_or("");
-                let b_title = b_doc.map(|d| d.title.as_str()).unwrap_or("");
-                a_title.cmp(b_title)
-            });
-
-            for child_path in children {
-                walk(store, child_path, depth + 1, nodes, visited);
-            }
-        }
-
         for root in &roots {
-            walk(&self.store, &root.path, 0, &mut nodes, &mut visited);
+            traverse_dependency_chain(&self.store, &root.path, 0, &mut nodes, &mut visited);
         }
 
         self.graph_nodes = nodes;
@@ -2082,8 +2073,9 @@ impl App {
                 self.open_delete_confirm();
             }
             (KeyCode::Char('e'), _) if self.selected_doc_meta().is_some() => {
-                let doc = self.selected_doc_meta().unwrap();
-                self.editor_request = Some(root.join(&doc.path));
+                if let Some(doc) = self.selected_doc_meta() {
+                    self.editor_request = Some(root.join(&doc.path));
+                }
             }
             (KeyCode::Enter, _) => {
                 if self.preview_tab == PreviewTab::Relations {

@@ -311,7 +311,7 @@ fn renumber_detects_external_references() {
     }];
 
     let ext_refs =
-        lazyspec::cli::fix::scan_external_references(fixture.root(), &store, &config, &changes);
+        lazyspec::cli::fix::renumber::scan_external_references(fixture.root(), &store, &config, &changes);
 
     assert_eq!(ext_refs.len(), 1);
     assert_eq!(ext_refs[0].file, "README.md");
@@ -343,7 +343,7 @@ fn renumber_external_refs_skips_managed_files() {
     }];
 
     let ext_refs =
-        lazyspec::cli::fix::scan_external_references(fixture.root(), &store, &config, &changes);
+        lazyspec::cli::fix::renumber::scan_external_references(fixture.root(), &store, &config, &changes);
 
     // Managed store files should not appear in external references
     assert!(
@@ -522,7 +522,7 @@ fn renumber_external_refs_skips_noise_dirs() {
     }];
 
     let ext_refs =
-        lazyspec::cli::fix::scan_external_references(fixture.root(), &store, &config, &changes);
+        lazyspec::cli::fix::renumber::scan_external_references(fixture.root(), &store, &config, &changes);
 
     assert!(
         ext_refs.is_empty(),

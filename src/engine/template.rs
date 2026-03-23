@@ -71,27 +71,24 @@ fn file_exists_with_prefix(dir: &Path, prefix: &str) -> bool {
     false
 }
 
-pub fn next_sqids_id(dir: &Path, prefix: &str, sqids_config: &SqidsConfig) -> String {
+pub fn next_sqids_id(dir: &Path, prefix: &str, sqids_config: &SqidsConfig) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let alphabet = shuffle_alphabet(&sqids_config.salt);
     let sqids = sqids::Sqids::builder()
         .alphabet(alphabet)
         .min_length(sqids_config.min_length)
         .blocklist(HashSet::new())
-        .build()
-        .expect("valid sqids config");
+        .build()?;
 
     let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before unix epoch")
+        .duration_since(UNIX_EPOCH)?
         .as_secs();
     let mut input = ts;
 
     loop {
-        let id = sqids.encode(&[input]).expect("sqids encode");
-        let id = id.to_lowercase();
+        let id = sqids.encode(&[input])?.to_lowercase();
         let candidate_prefix = format!("{}-{}", prefix, id);
         if !file_exists_with_prefix(dir, &candidate_prefix) {
-            return id;
+            return Ok(id);
         }
         input += 1;
     }
@@ -104,7 +101,7 @@ pub fn resolve_filename(
     dir: &Path,
     numbering: Option<(&NumberingStrategy, &SqidsConfig)>,
     pre_computed_id: Option<&str>,
-) -> String {
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let slug = slugify(title);
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
     let type_upper = doc_type.to_uppercase();
@@ -116,7 +113,7 @@ pub fn resolve_filename(
 
     let has_number_placeholder = filename.contains("{n:03}") || filename.contains("{n}");
     if !has_number_placeholder {
-        return filename;
+        return Ok(filename);
     }
 
     if let Some(id) = pre_computed_id {
@@ -125,7 +122,7 @@ pub fn resolve_filename(
     } else {
         match numbering {
             Some((NumberingStrategy::Sqids, sqids_config)) => {
-                let id = next_sqids_id(dir, &type_upper, sqids_config);
+                let id = next_sqids_id(dir, &type_upper, sqids_config)?;
                 filename = filename.replace("{n:03}", &id);
                 filename = filename.replace("{n}", &id);
             }
@@ -140,7 +137,7 @@ pub fn resolve_filename(
         }
     }
 
-    filename
+    Ok(filename)
 }
 
 #[cfg(test)]
@@ -156,7 +153,7 @@ mod tests {
             salt: "test-salt".to_string(),
             min_length: 3,
         };
-        let id = next_sqids_id(dir.path(), "RFC", &config);
+        let id = next_sqids_id(dir.path(), "RFC", &config).unwrap();
         assert_eq!(id, id.to_lowercase(), "sqids ID should be lowercase");
     }
 
@@ -167,7 +164,7 @@ mod tests {
             salt: "test-salt".to_string(),
             min_length: 6,
         };
-        let id = next_sqids_id(dir.path(), "RFC", &config);
+        let id = next_sqids_id(dir.path(), "RFC", &config).unwrap();
         assert!(
             id.len() >= 6,
             "expected min_length 6, got {} (id: {})",
@@ -187,8 +184,8 @@ mod tests {
             salt: "salt-beta".to_string(),
             min_length: 3,
         };
-        let id_a = next_sqids_id(dir.path(), "RFC", &config_a);
-        let id_b = next_sqids_id(dir.path(), "RFC", &config_b);
+        let id_a = next_sqids_id(dir.path(), "RFC", &config_a).unwrap();
+        let id_b = next_sqids_id(dir.path(), "RFC", &config_b).unwrap();
         assert_ne!(id_a, id_b, "different salts should produce different IDs");
     }
 
@@ -201,7 +198,7 @@ mod tests {
         };
 
         // Generate the first ID (derived from the current Unix timestamp)
-        let first_id = next_sqids_id(dir.path(), "RFC", &config);
+        let first_id = next_sqids_id(dir.path(), "RFC", &config).unwrap();
 
         // Plant a file that matches the first ID to force a collision
         let colliding_filename = format!("RFC-{}-something.md", first_id);
@@ -209,7 +206,7 @@ mod tests {
 
         // The second call uses the current timestamp, hits the collision,
         // and the retry loop increments the input to produce a different ID
-        let second_id = next_sqids_id(dir.path(), "RFC", &config);
+        let second_id = next_sqids_id(dir.path(), "RFC", &config).unwrap();
         assert_ne!(first_id, second_id, "should retry on collision");
     }
 
@@ -222,7 +219,7 @@ mod tests {
         };
 
         // Generate the first ID (based on current timestamp)
-        let first_id = next_sqids_id(dir.path(), "RFC", &config);
+        let first_id = next_sqids_id(dir.path(), "RFC", &config).unwrap();
 
         // Create a file that collides with the first candidate
         let colliding = format!("RFC-{}-blocker.md", first_id);
@@ -230,7 +227,7 @@ mod tests {
 
         // The next call uses the same timestamp, hits the collision,
         // increments input, and returns a different ID
-        let second_id = next_sqids_id(dir.path(), "RFC", &config);
+        let second_id = next_sqids_id(dir.path(), "RFC", &config).unwrap();
         assert_ne!(
             first_id, second_id,
             "should skip colliding ID and use next"
@@ -251,7 +248,7 @@ mod tests {
             dir.path(),
             Some((&NumberingStrategy::Sqids, &config)),
             None,
-        );
+        ).unwrap();
         assert!(filename.starts_with("RFC-"), "got: {}", filename);
         assert!(filename.ends_with("-my-feature.md"), "got: {}", filename);
         // The middle part should be the sqids ID, not zero-padded
@@ -273,7 +270,7 @@ mod tests {
             dir.path(),
             None,
             None,
-        );
+        ).unwrap();
         assert!(
             filename.starts_with("RFC-001-"),
             "incremental should still work, got: {}",
@@ -295,7 +292,7 @@ mod tests {
             dir.path(),
             Some((&NumberingStrategy::Incremental, &config)),
             None,
-        );
+        ).unwrap();
         assert!(
             filename.starts_with("RFC-001-"),
             "explicit incremental should use numbers, got: {}",

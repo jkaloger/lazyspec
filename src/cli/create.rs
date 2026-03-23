@@ -18,7 +18,7 @@ pub fn run(
 ) -> Result<PathBuf> {
     let type_def = config.type_by_name(doc_type)
         .ok_or_else(|| anyhow!("unknown doc type: '{}'. valid types: {}", doc_type,
-            config.types.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ")))?;
+            config.documents.types.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ")))?;
     let dir = &type_def.dir;
 
     let target_dir = root.join(dir);
@@ -26,12 +26,12 @@ pub fn run(
 
     let (numbering, pre_computed_id) = match type_def.numbering {
         NumberingStrategy::Sqids => {
-            let sqids_config = config.sqids.as_ref()
+            let sqids_config = config.documents.sqids.as_ref()
                 .ok_or_else(|| anyhow!("type '{}' uses sqids numbering but no [numbering.sqids] config found", doc_type))?;
             (Some((&type_def.numbering, sqids_config)), None)
         }
         NumberingStrategy::Reserved => {
-            let reserved_cfg = config.reserved.as_ref()
+            let reserved_cfg = config.documents.reserved.as_ref()
                 .ok_or_else(|| anyhow!("type '{}' uses reserved numbering but no [numbering.reserved] config found", doc_type))?;
             let num = reservation::reserve_next(
                 root,
@@ -44,16 +44,15 @@ pub fn run(
             let id = match reserved_cfg.format {
                 ReservedFormat::Incremental => format!("{:03}", num),
                 ReservedFormat::Sqids => {
-                    let sqids_config = config.sqids.as_ref()
+                    let sqids_config = config.documents.sqids.as_ref()
                         .ok_or_else(|| anyhow!("reserved format 'sqids' requires [numbering.sqids] config"))?;
                     let alphabet = template::shuffle_alphabet(&sqids_config.salt);
                     let sqids = sqids::Sqids::builder()
                         .alphabet(alphabet)
                         .min_length(sqids_config.min_length)
                         .blocklist(std::collections::HashSet::new())
-                        .build()
-                        .expect("valid sqids config");
-                    sqids.encode(&[num as u64]).expect("sqids encode").to_lowercase()
+                        .build()?;
+                    sqids.encode(&[num as u64])?.to_lowercase()
                 }
             };
             (None, Some(id))
@@ -61,13 +60,13 @@ pub fn run(
         NumberingStrategy::Incremental => (None, None),
     };
     let filename = template::resolve_filename(
-        &config.naming.pattern, doc_type, title, &target_dir, numbering,
+        &config.documents.naming.pattern, doc_type, title, &target_dir, numbering,
         pre_computed_id.as_deref(),
-    );
+    ).map_err(|e| anyhow!("{}", e))?;
     let target_path = target_dir.join(&filename);
 
     let template_path = root
-        .join(&config.templates.dir)
+        .join(&config.filesystem.templates.dir)
         .join(format!("{}.md", doc_type.to_lowercase()));
     let template_content = if template_path.exists() {
         fs::read_to_string(&template_path)?

@@ -244,7 +244,7 @@ fn create_handles_preexisting_colliding_file() {
     };
 
     // Get the timestamp-derived ID that next_sqids_id would produce right now
-    let first_id = next_sqids_id(&rfcs_dir, "RFC", &sqids_cfg);
+    let first_id = next_sqids_id(&rfcs_dir, "RFC", &sqids_cfg).unwrap();
 
     // Plant a file with that ID prefix so the next call collides
     let colliding = format!("RFC-{}-pre-existing.md", first_id);
@@ -252,7 +252,7 @@ fn create_handles_preexisting_colliding_file() {
 
     // Call again immediately (same second) -- the collision-retry loop
     // should detect the planted file and increment the input
-    let second_id = next_sqids_id(&rfcs_dir, "RFC", &sqids_cfg);
+    let second_id = next_sqids_id(&rfcs_dir, "RFC", &sqids_cfg).unwrap();
 
     assert_ne!(
         first_id, second_id,

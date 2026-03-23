@@ -1,7 +1,7 @@
 mod common;
 
 use common::TestFixture;
-use lazyspec::cli::fix::cascade_references;
+use lazyspec::cli::fix::renumber::cascade_references;
 use lazyspec::engine::document::DocMeta;
 use std::fs;
 

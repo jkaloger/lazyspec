@@ -163,7 +163,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         }
     })?;
 
-    let dirs: Vec<&str> = config.types.iter().map(|t| t.dir.as_str()).collect();
+    let dirs: Vec<&str> = config.documents.types.iter().map(|t| t.dir.as_str()).collect();
     for dir in &dirs {
         let full = root.join(dir);
         if full.exists() {

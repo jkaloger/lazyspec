@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod config;
 pub mod document;
+pub mod fs;
 pub mod git_status;
 pub mod refs;
 pub mod reservation;

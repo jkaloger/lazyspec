@@ -85,19 +85,37 @@ pub struct TypeDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Config {
+pub struct DocumentConfig {
     #[serde(skip)]
     pub types: Vec<TypeDef>,
-    #[serde(skip)]
-    pub rules: Vec<ValidationRule>,
-    pub directories: Directories,
-    pub templates: Templates,
     pub naming: Naming,
-    pub tui: Tui,
     #[serde(skip)]
     pub sqids: Option<SqidsConfig>,
     #[serde(skip)]
     pub reserved: Option<ReservedConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilesystemConfig {
+    pub directories: Directories,
+    pub templates: Templates,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UiConfig {
+    pub ascii_diagrams: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    #[serde(flatten)]
+    pub documents: DocumentConfig,
+    #[serde(flatten)]
+    pub filesystem: FilesystemConfig,
+    #[serde(rename = "tui")]
+    pub ui: UiConfig,
+    #[serde(skip)]
+    pub rules: Vec<ValidationRule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,17 +136,6 @@ pub struct Naming {
     pub pattern: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Tui {
-    pub ascii_diagrams: bool,
-}
-
-impl Default for Tui {
-    fn default() -> Self {
-        Tui { ascii_diagrams: false }
-    }
-}
-
 #[derive(Deserialize)]
 struct RawNumbering {
     sqids: Option<SqidsConfig>,
@@ -142,44 +149,31 @@ struct RawConfig {
     directories: Option<Directories>,
     templates: Option<Templates>,
     naming: Option<Naming>,
-    tui: Option<Tui>,
+    tui: Option<UiConfig>,
     numbering: Option<RawNumbering>,
+}
+
+fn build_type_def(name: &str, dir: &str, prefix: &str, icon: &str) -> TypeDef {
+    let plural = match name {
+        "story" => "stories".to_string(),
+        _ => format!("{}s", name),
+    };
+    TypeDef {
+        name: name.to_string(),
+        plural,
+        dir: dir.to_string(),
+        prefix: prefix.to_string(),
+        icon: Some(icon.to_string()),
+        numbering: NumberingStrategy::default(),
+    }
 }
 
 fn default_types() -> Vec<TypeDef> {
     vec![
-        TypeDef {
-            name: "rfc".to_string(),
-            plural: "rfcs".to_string(),
-            dir: "docs/rfcs".to_string(),
-            prefix: "RFC".to_string(),
-            icon: Some("●".to_string()),
-            numbering: NumberingStrategy::default(),
-        },
-        TypeDef {
-            name: "story".to_string(),
-            plural: "stories".to_string(),
-            dir: "docs/stories".to_string(),
-            prefix: "STORY".to_string(),
-            icon: Some("▲".to_string()),
-            numbering: NumberingStrategy::default(),
-        },
-        TypeDef {
-            name: "iteration".to_string(),
-            plural: "iterations".to_string(),
-            dir: "docs/iterations".to_string(),
-            prefix: "ITERATION".to_string(),
-            icon: Some("◆".to_string()),
-            numbering: NumberingStrategy::default(),
-        },
-        TypeDef {
-            name: "adr".to_string(),
-            plural: "adrs".to_string(),
-            dir: "docs/adrs".to_string(),
-            prefix: "ADR".to_string(),
-            icon: Some("■".to_string()),
-            numbering: NumberingStrategy::default(),
-        },
+        build_type_def("rfc", "docs/rfcs", "RFC", "●"),
+        build_type_def("story", "docs/stories", "STORY", "▲"),
+        build_type_def("iteration", "docs/iterations", "ITERATION", "◆"),
+        build_type_def("adr", "docs/adrs", "ADR", "■"),
     ]
 }
 
@@ -226,38 +220,10 @@ fn directories_from_types(types: &[TypeDef]) -> Directories {
 
 fn types_from_directories(dirs: &Directories) -> Vec<TypeDef> {
     vec![
-        TypeDef {
-            name: "rfc".to_string(),
-            plural: "rfcs".to_string(),
-            dir: dirs.rfcs.clone(),
-            prefix: "RFC".to_string(),
-            icon: Some("●".to_string()),
-            numbering: NumberingStrategy::default(),
-        },
-        TypeDef {
-            name: "story".to_string(),
-            plural: "stories".to_string(),
-            dir: dirs.stories.clone(),
-            prefix: "STORY".to_string(),
-            icon: Some("▲".to_string()),
-            numbering: NumberingStrategy::default(),
-        },
-        TypeDef {
-            name: "iteration".to_string(),
-            plural: "iterations".to_string(),
-            dir: dirs.iterations.clone(),
-            prefix: "ITERATION".to_string(),
-            icon: Some("◆".to_string()),
-            numbering: NumberingStrategy::default(),
-        },
-        TypeDef {
-            name: "adr".to_string(),
-            plural: "adrs".to_string(),
-            dir: dirs.adrs.clone(),
-            prefix: "ADR".to_string(),
-            icon: Some("■".to_string()),
-            numbering: NumberingStrategy::default(),
-        },
+        build_type_def("rfc", &dirs.rfcs, "RFC", "●"),
+        build_type_def("story", &dirs.stories, "STORY", "▲"),
+        build_type_def("iteration", &dirs.iterations, "ITERATION", "◆"),
+        build_type_def("adr", &dirs.adrs, "ADR", "■"),
     ]
 }
 
@@ -266,18 +232,22 @@ impl Default for Config {
         let types = default_types();
         let directories = directories_from_types(&types);
         Config {
-            types,
+            documents: DocumentConfig {
+                types,
+                naming: Naming {
+                    pattern: "{type}-{n:03}-{title}.md".to_string(),
+                },
+                sqids: None,
+                reserved: None,
+            },
+            filesystem: FilesystemConfig {
+                directories,
+                templates: Templates {
+                    dir: ".lazyspec/templates".to_string(),
+                },
+            },
+            ui: UiConfig::default(),
             rules: default_rules(),
-            directories,
-            templates: Templates {
-                dir: ".lazyspec/templates".to_string(),
-            },
-            naming: Naming {
-                pattern: "{type}-{n:03}-{title}.md".to_string(),
-            },
-            tui: Tui::default(),
-            sqids: None,
-            reserved: None,
         }
     }
 }
@@ -302,7 +272,9 @@ impl Config {
 
         let rules = raw.rules.unwrap_or_else(default_rules);
 
-        let any_sqids = types.iter().any(|t| t.numbering == NumberingStrategy::Sqids);
+        let any_sqids = types
+            .iter()
+            .any(|t| t.numbering == NumberingStrategy::Sqids);
         let (sqids, reserved) = match raw.numbering {
             Some(n) => (n.sqids, n.reserved),
             None => (None, None),
@@ -316,11 +288,16 @@ impl Config {
                 bail!("numbering.sqids.salt must not be empty");
             }
             if sqids_cfg.min_length < 1 || sqids_cfg.min_length > 10 {
-                bail!("numbering.sqids.min_length must be between 1 and 10, got {}", sqids_cfg.min_length);
+                bail!(
+                    "numbering.sqids.min_length must be between 1 and 10, got {}",
+                    sqids_cfg.min_length
+                );
             }
         }
 
-        let any_reserved = types.iter().any(|t| t.numbering == NumberingStrategy::Reserved);
+        let any_reserved = types
+            .iter()
+            .any(|t| t.numbering == NumberingStrategy::Reserved);
         if any_reserved {
             let Some(ref reserved_cfg) = reserved else {
                 bail!("numbering = \"reserved\" requires a [numbering.reserved] section");
@@ -336,24 +313,31 @@ impl Config {
                     bail!("numbering.reserved.format = \"sqids\" requires a non-empty numbering.sqids.salt");
                 }
                 if sqids_cfg.min_length < 1 || sqids_cfg.min_length > 10 {
-                    bail!("numbering.sqids.min_length must be between 1 and 10, got {}", sqids_cfg.min_length);
+                    bail!(
+                        "numbering.sqids.min_length must be between 1 and 10, got {}",
+                        sqids_cfg.min_length
+                    );
                 }
             }
         }
 
         Ok(Config {
-            types,
+            documents: DocumentConfig {
+                types,
+                naming: raw.naming.unwrap_or(Naming {
+                    pattern: "{type}-{n:03}-{title}.md".to_string(),
+                }),
+                sqids,
+                reserved,
+            },
+            filesystem: FilesystemConfig {
+                directories,
+                templates: raw.templates.unwrap_or(Templates {
+                    dir: ".lazyspec/templates".to_string(),
+                }),
+            },
+            ui: raw.tui.unwrap_or_default(),
             rules,
-            directories,
-            templates: raw.templates.unwrap_or(Templates {
-                dir: ".lazyspec/templates".to_string(),
-            }),
-            naming: raw.naming.unwrap_or(Naming {
-                pattern: "{type}-{n:03}-{title}.md".to_string(),
-            }),
-            tui: raw.tui.unwrap_or_default(),
-            sqids,
-            reserved,
         })
     }
 
@@ -371,6 +355,6 @@ impl Config {
     }
 
     pub fn type_by_name(&self, name: &str) -> Option<&TypeDef> {
-        self.types.iter().find(|t| t.name == name)
+        self.documents.types.iter().find(|t| t.name == name)
     }
 }
