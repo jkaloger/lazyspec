@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use lazyspec::engine::config::TypeDef;
 use lazyspec::engine::document::DocType;
 use lazyspec::engine::store::Store;
-use lazyspec::tui::app::{App, ViewMode};
+use lazyspec::tui::state::{App, ViewMode};
 
 fn setup_graph_fixture() -> (TestFixture, App) {
     let fixture = TestFixture::new();
@@ -33,7 +33,7 @@ fn setup_graph_fixture() -> (TestFixture, App) {
     );
 
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
     (fixture, app)
 }
 
@@ -173,7 +173,7 @@ fn test_graph_rebuilds_on_mode_switch() {
 fn custom_types_populate_doc_types_and_icons() {
     let fixture = TestFixture::new();
     let mut config = fixture.config();
-    config.types = vec![
+    config.documents.types = vec![
         TypeDef {
             name: "epic".into(),
             plural: "epics".into(),
@@ -192,7 +192,7 @@ fn custom_types_populate_doc_types_and_icons() {
         },
     ];
     let store = Store::load(fixture.root(), &config).unwrap();
-    let app = App::new(store, &config, ratatui_image::picker::Picker::halfblocks());
+    let app = App::new(store, &config, ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     assert_eq!(app.doc_types.len(), 2);
     assert_eq!(app.doc_types[0], DocType::new("epic"));

@@ -5,7 +5,7 @@ use common::TestFixture;
 use crossterm::event::{KeyCode, KeyModifiers};
 use lazyspec::engine::config::{Config, ValidationRule};
 use lazyspec::tui::agent::{build_create_children_prompt, build_expand_prompt};
-use lazyspec::tui::app::App;
+use lazyspec::tui::state::App;
 
 fn press(app: &mut App, fixture: &TestFixture, key: KeyCode) {
     app.handle_key(key, KeyModifiers::NONE, fixture.root(), &fixture.config());
@@ -14,7 +14,7 @@ fn press(app: &mut App, fixture: &TestFixture, key: KeyCode) {
 fn open_dialog_on_rfc(fixture: &TestFixture) -> App {
     fixture.write_rfc("RFC-001-test.md", "Test RFC", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
     app.selected_type = 0;
     app.selected_doc = 0;
     press(&mut app, fixture, KeyCode::Char('a'));

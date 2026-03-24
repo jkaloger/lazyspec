@@ -87,7 +87,7 @@ fn store_gets_body_lazily() {
 
     let docs = store.all_docs();
     let rfc = docs.iter().find(|d| d.doc_type == DocType::new(DocType::RFC)).unwrap();
-    let body = store.get_body(&rfc.path).unwrap();
+    let body = store.get_body(&rfc.path, &lazyspec::engine::fs::RealFileSystem).unwrap();
     assert!(body.contains("Event sourcing proposal."));
 }
 
@@ -113,7 +113,7 @@ See code:
 
     let store = fixture.store();
     let doc = store.resolve_shorthand("RFC-010").expect("should resolve");
-    let body = store.get_body_raw(&doc.path).unwrap();
+    let body = store.get_body_raw(&doc.path, &lazyspec::engine::fs::RealFileSystem).unwrap();
     assert!(body.contains("@ref src/main.rs#MyStruct"), "raw body should preserve @ref directives");
 }
 
@@ -137,8 +137,8 @@ tags: []
 
     let store = fixture.store();
     let doc = store.resolve_shorthand("RFC-011").expect("should resolve");
-    let raw = store.get_body_raw(&doc.path).unwrap();
-    let default = store.get_body(&doc.path).unwrap();
+    let raw = store.get_body_raw(&doc.path, &lazyspec::engine::fs::RealFileSystem).unwrap();
+    let default = store.get_body(&doc.path, &lazyspec::engine::fs::RealFileSystem).unwrap();
     assert_eq!(raw, default, "get_body should return the same result as get_body_raw");
 }
 
@@ -162,7 +162,7 @@ tags: []
 
     let store = fixture.store();
     let doc = store.resolve_shorthand("RFC-012").expect("should resolve");
-    let expanded = store.get_body_expanded(&doc.path, 25).unwrap();
+    let expanded = store.get_body_expanded(&doc.path, 25, &lazyspec::engine::fs::RealFileSystem).unwrap();
     assert!(!expanded.contains("@ref nonexistent/file.rs"), "expanded body should not contain raw @ref");
     assert!(expanded.contains("> [unresolved:"), "expanded body should contain unresolved marker");
 }
@@ -207,7 +207,7 @@ fn store_search_matches_title() {
     let fixture = setup_fixture();
     let store = fixture.store();
 
-    let results = store.search("Event");
+    let results = store.search("Event", &lazyspec::engine::fs::RealFileSystem);
     assert_eq!(results.len(), 2);
     assert!(results.iter().any(|r| r.doc.title == "Event Sourcing"));
     assert!(results.iter().any(|r| r.doc.title == "Adopt Event Sourcing"));
@@ -218,7 +218,7 @@ fn store_search_matches_body() {
     let fixture = setup_fixture();
     let store = fixture.store();
 
-    let results = store.search("proposal");
+    let results = store.search("proposal", &lazyspec::engine::fs::RealFileSystem);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].doc.title, "Event Sourcing");
 }
@@ -228,7 +228,7 @@ fn store_search_matches_tags() {
     let fixture = setup_fixture();
     let store = fixture.store();
 
-    let results = store.search("events");
+    let results = store.search("events", &lazyspec::engine::fs::RealFileSystem);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].doc.title, "Adopt Event Sourcing");
 }
@@ -238,7 +238,7 @@ fn store_search_is_case_insensitive() {
     let fixture = setup_fixture();
     let store = fixture.store();
 
-    let results = store.search("event sourcing");
+    let results = store.search("event sourcing", &lazyspec::engine::fs::RealFileSystem);
     assert!(!results.is_empty());
 }
 
@@ -247,7 +247,7 @@ fn store_search_no_results() {
     let fixture = setup_fixture();
     let store = fixture.store();
 
-    let results = store.search("nonexistent_xyz");
+    let results = store.search("nonexistent_xyz", &lazyspec::engine::fs::RealFileSystem);
     assert!(results.is_empty());
 }
 
@@ -388,7 +388,7 @@ tags: []
     );
 
     let store = fixture.store();
-    let results = store.search("Unique Folder");
+    let results = store.search("Unique Folder", &lazyspec::engine::fs::RealFileSystem);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].doc.title, "Unique Folder Feature");
 }

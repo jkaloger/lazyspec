@@ -72,7 +72,7 @@ fn create_with_date_pattern() {
     .unwrap();
 
     let mut config = fixture.config();
-    config.naming.pattern = "{date}-{title}.md".to_string();
+    config.documents.naming.pattern = "{date}-{title}.md".to_string();
 
     let path = lazyspec::cli::create::run(root, &config, "rfc", "My Feature", "a", |_| {}).unwrap();
 

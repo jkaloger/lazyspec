@@ -1,8 +1,9 @@
 mod common;
 
 use common::TestFixture;
-use lazyspec::cli::fix::cascade_references;
+use lazyspec::cli::fix::renumber::cascade_references;
 use lazyspec::engine::document::DocMeta;
+use lazyspec::engine::fs::RealFileSystem;
 use std::fs;
 
 fn fixture_with_related() -> TestFixture {
@@ -31,6 +32,7 @@ fn cascade_updates_related_frontmatter() {
         "docs/rfcs/RFC-020-foo.md",
         "docs/rfcs/RFC-021-foo.md",
         false,
+        &RealFileSystem,
     );
 
     assert!(!updates.is_empty());
@@ -62,6 +64,7 @@ fn cascade_updates_body_ref_directive() {
         "docs/rfcs/RFC-020-foo.md",
         "docs/rfcs/RFC-021-foo.md",
         false,
+        &RealFileSystem,
     );
 
     let body_update = updates.iter().find(|u| u.field == "body").unwrap();
@@ -100,6 +103,7 @@ fn cascade_subfolder_rename_updates_child_references() {
         "docs/rfcs/RFC-020-foo/",
         "docs/rfcs/RFC-021-foo/",
         false,
+        &RealFileSystem,
     );
 
     assert!(updates.len() >= 2);
@@ -129,6 +133,7 @@ fn cascade_dry_run_returns_updates_without_modifying_files() {
         "docs/rfcs/RFC-020-foo.md",
         "docs/rfcs/RFC-021-foo.md",
         true,
+        &RealFileSystem,
     );
 
     assert!(!updates.is_empty());
@@ -154,6 +159,7 @@ fn cascade_no_references_returns_empty_vec() {
         "docs/rfcs/RFC-999-nonexistent.md",
         "docs/rfcs/RFC-998-nonexistent.md",
         false,
+        &RealFileSystem,
     );
 
     assert!(updates.is_empty());

@@ -123,7 +123,27 @@ fn relation_type_display() {
     assert_eq!(format!("{}", RelationType::Implements), "implements");
     assert_eq!(format!("{}", RelationType::Supersedes), "supersedes");
     assert_eq!(format!("{}", RelationType::Blocks), "blocks");
-    assert_eq!(format!("{}", RelationType::RelatedTo), "related to");
+    assert_eq!(format!("{}", RelationType::RelatedTo), "related-to");
+}
+
+#[test]
+fn relation_type_fromstr_display_roundtrip() {
+    use lazyspec::engine::document::RelationType;
+    for canonical in RelationType::ALL_STRS {
+        let parsed: RelationType = canonical.parse().unwrap();
+        assert_eq!(parsed.to_string(), canonical);
+    }
+}
+
+#[test]
+fn relation_type_fromstr_rejects_unknown() {
+    assert!("garbage".parse::<RelationType>().is_err());
+}
+
+#[test]
+fn relation_type_fromstr_accepts_space_variant() {
+    let rt: RelationType = "related to".parse().unwrap();
+    assert_eq!(rt, RelationType::RelatedTo);
 }
 
 #[test]

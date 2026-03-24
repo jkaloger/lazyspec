@@ -1,10 +1,12 @@
+mod links;
+mod loader;
+
 use crate::engine::config::Config;
 use crate::engine::document::{DocMeta, DocType, RelationType, Status};
+use crate::engine::fs::{FileSystem, RealFileSystem};
 use crate::engine::refs::RefExpander;
 use anyhow::Result;
-use chrono::Utc;
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -32,191 +34,33 @@ pub struct Store {
 
 impl Store {
     pub fn load(root: &Path, config: &Config) -> Result<Self> {
+        Self::load_with_fs(root, config, &RealFileSystem)
+    }
+
+    pub fn load_with_fs(root: &Path, config: &Config, fs: &dyn FileSystem) -> Result<Self> {
         let mut docs = HashMap::new();
         let mut children: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
         let mut parent_of: HashMap<PathBuf, PathBuf> = HashMap::new();
         let mut parse_errors: Vec<ParseError> = Vec::new();
 
-        for type_def in &config.types {
+        for type_def in &config.documents.types {
             let full_path = root.join(&type_def.dir);
-            if !full_path.exists() {
+            if !fs.exists(&full_path) {
                 continue;
             }
-            for entry in fs::read_dir(&full_path)? {
-                let entry = entry?;
-                let path = entry.path();
-
-                if entry.file_type()?.is_dir() {
-                    let index_path = path.join("index.md");
-                    if index_path.exists() {
-                        let content = fs::read_to_string(&index_path)?;
-                        let parent_relative = index_path
-                            .strip_prefix(root)
-                            .unwrap_or(&index_path)
-                            .to_path_buf();
-                        match DocMeta::parse(&content) {
-                            Ok(mut meta) => {
-                                meta.path = parent_relative.clone();
-                                meta.id = extract_id(&meta.path);
-                                docs.insert(meta.path.clone(), meta);
-                            }
-                            Err(e) => {
-                                parse_errors.push(ParseError {
-                                    path: parent_relative.clone(),
-                                    error: e.to_string(),
-                                });
-                            }
-                        }
-
-                        let mut child_paths = Vec::new();
-                        for child_entry in fs::read_dir(&path)? {
-                            let child_entry = child_entry?;
-                            if child_entry.file_type()?.is_dir() {
-                                continue;
-                            }
-                            let child_path = child_entry.path();
-                            if child_path.file_name().and_then(|f| f.to_str()) == Some("index.md") {
-                                continue;
-                            }
-                            if child_path.extension().and_then(|e| e.to_str()) != Some("md") {
-                                continue;
-                            }
-                            let child_content = fs::read_to_string(&child_path)?;
-                            let child_relative = child_path
-                                .strip_prefix(root)
-                                .unwrap_or(&child_path)
-                                .to_path_buf();
-                            match DocMeta::parse(&child_content) {
-                                Ok(mut child_meta) => {
-                                    child_meta.path = child_relative.clone();
-                                    child_meta.id = extract_id(&child_meta.path);
-                                    parent_of
-                                        .insert(child_relative.clone(), parent_relative.clone());
-                                    child_paths.push(child_relative.clone());
-                                    docs.insert(child_meta.path.clone(), child_meta);
-                                }
-                                Err(e) => {
-                                    parse_errors.push(ParseError {
-                                        path: child_relative,
-                                        error: e.to_string(),
-                                    });
-                                }
-                            }
-                        }
-                        if !child_paths.is_empty() {
-                            children.insert(parent_relative, child_paths);
-                        }
-                    } else {
-                        let mut child_paths = Vec::new();
-                        for child_entry in fs::read_dir(&path)? {
-                            let child_entry = child_entry?;
-                            if child_entry.file_type()?.is_dir() {
-                                continue;
-                            }
-                            let child_path = child_entry.path();
-                            if child_path.extension().and_then(|e| e.to_str()) != Some("md") {
-                                continue;
-                            }
-                            let child_content = fs::read_to_string(&child_path)?;
-                            let child_relative = child_path
-                                .strip_prefix(root)
-                                .unwrap_or(&child_path)
-                                .to_path_buf();
-                            match DocMeta::parse(&child_content) {
-                                Ok(mut child_meta) => {
-                                    child_meta.path = child_relative.clone();
-                                    child_meta.id = extract_id(&child_meta.path);
-                                    child_paths.push(child_relative.clone());
-                                    docs.insert(child_meta.path.clone(), child_meta);
-                                }
-                                Err(e) => {
-                                    parse_errors.push(ParseError {
-                                        path: child_relative,
-                                        error: e.to_string(),
-                                    });
-                                }
-                            }
-                        }
-
-                        if !child_paths.is_empty() {
-                            let folder_name =
-                                path.file_name().and_then(|f| f.to_str()).unwrap_or("");
-                            let folder_relative = path.strip_prefix(root).unwrap_or(&path);
-                            let parent_relative = folder_relative.join(".virtual");
-
-                            let all_accepted = child_paths.iter().all(|cp| {
-                                docs.get(cp)
-                                    .map(|d| d.status == Status::Accepted)
-                                    .unwrap_or(false)
-                            });
-
-                            let virtual_id = extract_id(&parent_relative);
-                            let virtual_meta = DocMeta {
-                                path: parent_relative.clone(),
-                                title: title_from_folder_name(folder_name),
-                                doc_type: DocType::new(&type_def.name),
-                                status: if all_accepted {
-                                    Status::Accepted
-                                } else {
-                                    Status::Draft
-                                },
-                                author: "".to_string(),
-                                date: Utc::now().date_naive(),
-                                tags: vec![],
-                                related: vec![],
-                                validate_ignore: false,
-                                virtual_doc: true,
-                                id: virtual_id,
-                            };
-                            docs.insert(parent_relative.clone(), virtual_meta);
-
-                            for cp in &child_paths {
-                                parent_of.insert(cp.clone(), parent_relative.clone());
-                            }
-                            children.insert(parent_relative, child_paths);
-                        }
-                    }
-
-                    continue;
-                }
-
-                if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                    continue;
-                }
-                let content = fs::read_to_string(&path)?;
-                let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-                match DocMeta::parse(&content) {
-                    Ok(mut meta) => {
-                        meta.path = relative;
-                        meta.id = extract_id(&meta.path);
-                        docs.insert(meta.path.clone(), meta);
-                    }
-                    Err(e) => {
-                        parse_errors.push(ParseError {
-                            path: relative,
-                            error: e.to_string(),
-                        });
-                    }
-                }
-            }
+            loader::load_type_directory(
+                root,
+                &full_path,
+                type_def,
+                &mut docs,
+                &mut children,
+                &mut parent_of,
+                &mut parse_errors,
+                fs,
+            )?;
         }
 
-        let mut forward_links: HashMap<PathBuf, Vec<(RelationType, PathBuf)>> = HashMap::new();
-        let mut reverse_links: HashMap<PathBuf, Vec<(RelationType, PathBuf)>> = HashMap::new();
-
-        for (path, meta) in &docs {
-            for rel in &meta.related {
-                let target = PathBuf::from(&rel.target);
-                forward_links
-                    .entry(path.clone())
-                    .or_default()
-                    .push((rel.rel_type.clone(), target.clone()));
-                reverse_links
-                    .entry(target)
-                    .or_default()
-                    .push((rel.rel_type.clone(), path.clone()));
-            }
-        }
+        let (forward_links, reverse_links) = Self::build_links(&docs);
 
         Ok(Store {
             root: root.to_path_buf(),
@@ -265,113 +109,70 @@ impl Store {
         self.docs.get(path)
     }
 
-    pub fn get_body_raw(&self, path: &Path) -> Result<String> {
+    pub fn get_body_raw(&self, path: &Path, fs: &dyn FileSystem) -> Result<String> {
         let full_path = self.root.join(path);
-        let content = fs::read_to_string(&full_path)?;
+        let content = fs.read_to_string(&full_path)?;
         DocMeta::extract_body(&content)
     }
 
-    pub fn get_body_expanded(&self, path: &Path, max_lines: usize) -> Result<String> {
-        let body = self.get_body_raw(path)?;
+    pub fn get_body_expanded(&self, path: &Path, max_lines: usize, fs: &dyn FileSystem) -> Result<String> {
+        let body = self.get_body_raw(path, fs)?;
         let expander = RefExpander::with_max_lines(self.root.clone(), max_lines);
         expander.expand(&body)
     }
 
-    pub fn get_body(&self, path: &Path) -> Result<String> {
-        self.get_body_raw(path)
-    }
-
-    pub fn related_to(&self, path: &Path) -> Vec<(&RelationType, &PathBuf)> {
-        let mut results = Vec::new();
-        if let Some(fwd) = self.forward_links.get(path) {
-            for (rel, target) in fwd {
-                results.push((rel, target));
-            }
-        }
-        if let Some(rev) = self.reverse_links.get(path) {
-            for (rel, source) in rev {
-                results.push((rel, source));
-            }
-        }
-        results
-    }
-
-    pub fn referenced_by(&self, path: &Path) -> Vec<(&RelationType, &PathBuf)> {
-        match self.reverse_links.get(path) {
-            Some(rev) => rev.iter().map(|(rel, src)| (rel, src)).collect(),
-            None => Vec::new(),
-        }
+    pub fn get_body(&self, path: &Path, fs: &dyn FileSystem) -> Result<String> {
+        self.get_body_raw(path, fs)
     }
 
     pub fn resolve_shorthand(&self, id: &str) -> Result<&DocMeta, ResolveError> {
-        if let Some((parent_id, child_stem)) = id.split_once('/') {
-            // Qualified: find parent first (among non-children only)
-            let parent = self.docs.values().find(|d| {
-                if self.parent_of.contains_key(&d.path) {
-                    return false;
-                }
-                let name = if d.path.file_name().and_then(|f| f.to_str()) == Some("index.md")
-                    || d.path.file_name().and_then(|f| f.to_str()) == Some(".virtual")
-                {
-                    d.path
-                        .parent()
-                        .and_then(|p| p.file_name())
-                        .and_then(|f| f.to_str())
-                } else {
-                    d.path.file_name().and_then(|f| f.to_str())
-                };
-                name.map(|n| n.starts_with(parent_id)).unwrap_or(false)
-            }).ok_or_else(|| ResolveError::NotFound(id.to_string()))?;
-            // Then find child within parent's children
-            let child_paths = self.children.get(&parent.path)
-                .ok_or_else(|| ResolveError::NotFound(id.to_string()))?;
-            child_paths.iter().find_map(|cp| {
-                let stem = cp.file_stem().and_then(|f| f.to_str())?;
-                if stem.starts_with(child_stem) {
-                    self.docs.get(cp)
-                } else {
-                    None
-                }
-            }).ok_or_else(|| ResolveError::NotFound(id.to_string()))
-        } else {
-            // Unqualified: collect all matches, excluding children
-            let matches: Vec<&DocMeta> = self.docs.values().filter(|d| {
-                if self.parent_of.contains_key(&d.path) {
-                    return false;
-                }
-                let name = if d.path.file_name().and_then(|f| f.to_str()) == Some("index.md")
-                    || d.path.file_name().and_then(|f| f.to_str()) == Some(".virtual")
-                {
-                    d.path
-                        .parent()
-                        .and_then(|p| p.file_name())
-                        .and_then(|f| f.to_str())
-                } else {
-                    d.path.file_name().and_then(|f| f.to_str())
-                };
-                name.map(|n| n.starts_with(id)).unwrap_or(false)
-            }).collect();
+        let Some((parent_id, child_stem)) = id.split_once('/') else {
+            return self.resolve_unqualified(id);
+        };
 
-            match matches.len() {
-                0 => Err(ResolveError::NotFound(id.to_string())),
-                1 => Ok(matches[0]),
-                _ => {
-                    let paths: Vec<PathBuf> = matches.iter().map(|d| d.path.clone()).collect();
-                    Err(ResolveError::Ambiguous { id: id.to_string(), matches: paths })
-                }
+        let parent = self.docs.values().find(|d| {
+            !self.parent_of.contains_key(&d.path)
+                && canonical_name(&d.path)
+                    .map(|n| n.starts_with(parent_id))
+                    .unwrap_or(false)
+        }).ok_or_else(|| ResolveError::NotFound(id.to_string()))?;
+
+        let child_paths = self.children.get(&parent.path)
+            .ok_or_else(|| ResolveError::NotFound(id.to_string()))?;
+
+        child_paths.iter().find_map(|cp| {
+            let stem = cp.file_stem().and_then(|f| f.to_str())?;
+            if stem.starts_with(child_stem) { self.docs.get(cp) } else { None }
+        }).ok_or_else(|| ResolveError::NotFound(id.to_string()))
+    }
+
+    fn resolve_unqualified(&self, id: &str) -> Result<&DocMeta, ResolveError> {
+        let matches: Vec<&DocMeta> = self.docs.values().filter(|d| {
+            !self.parent_of.contains_key(&d.path)
+                && canonical_name(&d.path)
+                    .map(|n| n.starts_with(id))
+                    .unwrap_or(false)
+        }).collect();
+
+        match matches.len() {
+            0 => Err(ResolveError::NotFound(id.to_string())),
+            1 => Ok(matches[0]),
+            _ => {
+                let paths: Vec<PathBuf> = matches.iter().map(|d| d.path.clone()).collect();
+                Err(ResolveError::Ambiguous { id: id.to_string(), matches: paths })
             }
         }
     }
 
-    pub fn reload_file(&mut self, root: &Path, relative_path: &Path) -> Result<()> {
+    pub fn reload_file(&mut self, root: &Path, relative_path: &Path, fs: &dyn FileSystem) -> Result<()> {
         let full_path = root.join(relative_path);
-        if !full_path.exists() {
+        if !fs.exists(&full_path) {
             self.docs.remove(relative_path);
             self.rebuild_links();
             return Ok(());
         }
 
-        let content = std::fs::read_to_string(&full_path)?;
+        let content = fs.read_to_string(&full_path)?;
         match DocMeta::parse(&content) {
             Ok(mut meta) => {
                 meta.path = relative_path.to_path_buf();
@@ -397,24 +198,6 @@ impl Store {
         self.rebuild_links();
     }
 
-    fn rebuild_links(&mut self) {
-        self.forward_links.clear();
-        self.reverse_links.clear();
-        for (path, meta) in &self.docs {
-            for rel in &meta.related {
-                let target = PathBuf::from(&rel.target);
-                self.forward_links
-                    .entry(path.clone())
-                    .or_default()
-                    .push((rel.rel_type.clone(), target.clone()));
-                self.reverse_links
-                    .entry(target)
-                    .or_default()
-                    .push((rel.rel_type.clone(), path.clone()));
-            }
-        }
-    }
-
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -431,7 +214,7 @@ impl Store {
         crate::engine::validation::validate_full(self, config)
     }
 
-    pub fn search(&self, query: &str) -> Vec<SearchResult<'_>> {
+    pub fn search(&self, query: &str, fs: &dyn FileSystem) -> Vec<SearchResult<'_>> {
         let query_lower = query.to_lowercase();
         let mut results = Vec::new();
 
@@ -463,7 +246,7 @@ impl Store {
                 continue;
             }
 
-            if let Ok(body) = self.get_body_raw(&meta.path) {
+            if let Ok(body) = self.get_body_raw(&meta.path, fs) {
                 let body_lower = body.to_lowercase();
                 if let Some(pos) = body_lower.find(&query_lower) {
                     let start = body.floor_char_boundary(pos.saturating_sub(40));
@@ -481,7 +264,14 @@ impl Store {
         results.sort_by(|a, b| DocMeta::sort_by_date(&a.doc, &b.doc));
         results
     }
+}
 
+fn canonical_name(path: &Path) -> Option<&str> {
+    let file_name = path.file_name().and_then(|f| f.to_str())?;
+    if file_name == "index.md" || file_name == ".virtual" {
+        return path.parent().and_then(|p| p.file_name()).and_then(|f| f.to_str());
+    }
+    Some(file_name)
 }
 
 pub fn extract_id_from_name(name: &str) -> String {
@@ -507,13 +297,10 @@ fn extract_id(path: &Path) -> String {
         return extract_id_from_name(folder);
     }
 
-    // Check if this is a child document (depth > 1 from type dir means it's inside a parent folder)
-    // A child has a parent folder that itself has a TYPE-NNN pattern
     if let Some(parent) = path.parent() {
         let parent_name = parent.file_name().and_then(|f| f.to_str()).unwrap_or("");
         let parent_id = extract_id_from_name(parent_name);
         if parent_id != parent_name {
-            // Parent has a TYPE-NNN pattern, so this is a child document
             return stem.to_string();
         }
     }
@@ -521,7 +308,7 @@ fn extract_id(path: &Path) -> String {
     extract_id_from_name(stem)
 }
 
-fn strip_type_prefix(name: &str) -> &str {
+fn strip_type_prefix_sqids(name: &str) -> &str {
     let bytes = name.as_bytes();
     let mut i = 0;
 
@@ -546,7 +333,7 @@ fn strip_type_prefix(name: &str) -> &str {
 }
 
 fn title_from_folder_name(name: &str) -> String {
-    let stripped = strip_type_prefix(name);
+    let stripped = strip_type_prefix_sqids(name);
     stripped
         .split('-')
         .filter(|w| !w.is_empty())
@@ -602,3 +389,137 @@ pub struct SearchResult<'a> {
     pub snippet: String,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::config::Config;
+    use crate::engine::fs::FileSystem;
+    use std::collections::HashMap as StdHashMap;
+    use std::sync::Mutex;
+
+    struct InMemoryFileSystem {
+        files: Mutex<StdHashMap<PathBuf, String>>,
+        dirs: Mutex<Vec<PathBuf>>,
+    }
+
+    impl InMemoryFileSystem {
+        fn new() -> Self {
+            Self {
+                files: Mutex::new(StdHashMap::new()),
+                dirs: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn add_file(&self, path: impl Into<PathBuf>, content: &str) {
+            self.files.lock().unwrap().insert(path.into(), content.to_string());
+        }
+
+        fn add_dir(&self, path: impl Into<PathBuf>) {
+            self.dirs.lock().unwrap().push(path.into());
+        }
+    }
+
+    impl FileSystem for InMemoryFileSystem {
+        fn read_to_string(&self, path: &Path) -> Result<String> {
+            self.files
+                .lock()
+                .unwrap()
+                .get(path)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("file not found: {}", path.display()))
+        }
+
+        fn write(&self, path: &Path, contents: &str) -> Result<()> {
+            self.files.lock().unwrap().insert(path.to_path_buf(), contents.to_string());
+            Ok(())
+        }
+
+        fn rename(&self, _from: &Path, _to: &Path) -> Result<()> {
+            unimplemented!("rename not needed for load tests")
+        }
+
+        fn read_dir(&self, path: &Path) -> Result<Vec<PathBuf>> {
+            let files = self.files.lock().unwrap();
+            let dirs = self.dirs.lock().unwrap();
+
+            let mut entries: Vec<PathBuf> = files
+                .keys()
+                .filter(|p| p.parent() == Some(path))
+                .cloned()
+                .collect();
+
+            for d in dirs.iter() {
+                if d.parent() == Some(path) {
+                    entries.push(d.clone());
+                }
+            }
+
+            Ok(entries)
+        }
+
+        fn exists(&self, path: &Path) -> bool {
+            let files = self.files.lock().unwrap();
+            let dirs = self.dirs.lock().unwrap();
+            files.contains_key(path) || dirs.contains(&path.to_path_buf())
+        }
+
+        fn create_dir_all(&self, path: &Path) -> Result<()> {
+            self.dirs.lock().unwrap().push(path.to_path_buf());
+            Ok(())
+        }
+
+        fn is_dir(&self, path: &Path) -> bool {
+            self.dirs.lock().unwrap().contains(&path.to_path_buf())
+        }
+    }
+
+    #[test]
+    fn test_load_with_in_memory_filesystem() {
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+
+        let rfc_dir = root.join("docs/rfcs");
+        fs.add_dir(rfc_dir.clone());
+
+        let rfc1_path = rfc_dir.join("RFC-001-first.md");
+        fs.add_file(&rfc1_path, concat!(
+            "---\n",
+            "title: \"First RFC\"\n",
+            "type: rfc\n",
+            "status: draft\n",
+            "author: \"test\"\n",
+            "date: 2026-01-01\n",
+            "tags: []\n",
+            "---\n",
+            "Body of first RFC.\n",
+        ));
+
+        let rfc2_path = rfc_dir.join("RFC-002-second.md");
+        fs.add_file(&rfc2_path, concat!(
+            "---\n",
+            "title: \"Second RFC\"\n",
+            "type: rfc\n",
+            "status: accepted\n",
+            "author: \"test\"\n",
+            "date: 2026-01-02\n",
+            "tags: [\"important\"]\n",
+            "---\n",
+            "Body of second RFC.\n",
+        ));
+
+        let config = Config::default();
+        let store = Store::load_with_fs(&root, &config, &fs).unwrap();
+
+        assert_eq!(store.docs.len(), 2);
+
+        let doc1 = store.get(&PathBuf::from("docs/rfcs/RFC-001-first.md"));
+        assert!(doc1.is_some());
+        assert_eq!(doc1.unwrap().title, "First RFC");
+        assert_eq!(doc1.unwrap().id, "RFC-001");
+
+        let doc2 = store.get(&PathBuf::from("docs/rfcs/RFC-002-second.md"));
+        assert!(doc2.is_some());
+        assert_eq!(doc2.unwrap().title, "Second RFC");
+        assert_eq!(doc2.unwrap().id, "RFC-002");
+    }
+}

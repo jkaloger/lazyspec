@@ -162,7 +162,7 @@ fn pre_computed_id_passthrough() {
         dir.path(),
         None,
         Some("042"),
-    );
+    ).unwrap();
 
     assert_eq!(filename, "RFC-042-my-feature.md");
 }
@@ -192,7 +192,7 @@ exit 1
 
 fn config_with_reserved() -> lazyspec::engine::config::Config {
     let mut config = lazyspec::engine::config::Config::default();
-    config.reserved = Some(ReservedConfig {
+    config.documents.reserved = Some(ReservedConfig {
         remote: "origin".to_string(),
         format: ReservedFormat::Incremental,
         max_retries: 5,

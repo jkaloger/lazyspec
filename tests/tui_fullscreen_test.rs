@@ -1,12 +1,12 @@
 mod common;
 
 use common::TestFixture;
-use lazyspec::tui::app::App;
+use lazyspec::tui::state::App;
 
 fn setup_app() -> (TestFixture, App) {
     let fixture = TestFixture::new();
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
     (fixture, app)
 }
 
@@ -27,7 +27,7 @@ fn setup_app_with_docs() -> (TestFixture, App) {
     );
 
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
     (fixture, app)
 }
 

@@ -2,13 +2,13 @@ mod common;
 
 use common::TestFixture;
 use crossterm::event::{KeyCode, KeyModifiers};
-use lazyspec::tui::app::{App, PreviewTab};
+use lazyspec::tui::state::{App, PreviewTab};
 
 fn setup_app_with_rfc(title: &str, status: &str) -> (TestFixture, App) {
     let fixture = TestFixture::new();
     fixture.write_rfc("RFC-001-test.md", title, status);
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
     (fixture, app)
 }
 
@@ -37,7 +37,7 @@ fn test_open_link_editor_on_relations_tab() {
 fn test_open_link_editor_no_doc_selected_noop() {
     let fixture = TestFixture::new();
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     app.preview_tab = PreviewTab::Relations;
     app.open_link_editor();
@@ -115,7 +115,7 @@ fn test_open_link_editor_results_exclude_self() {
     fixture.write_rfc("RFC-001-source.md", "Source RFC", "draft");
     fixture.write_rfc("RFC-002-target.md", "Target RFC", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -151,7 +151,7 @@ fn test_typing_filters_results() {
     fixture.write_rfc("RFC-002-beta.md", "Beta Feature", "draft");
     fixture.write_story("STORY-001-gamma.md", "Gamma Story", "draft", None);
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     // Select RFC-001 as the source document
     app.selected_type = 0;
@@ -184,7 +184,7 @@ fn test_backspace_updates_filter() {
     fixture.write_rfc("RFC-002-beta.md", "Beta Feature", "draft");
     fixture.write_rfc("RFC-003-gamma.md", "Gamma Feature", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -216,7 +216,7 @@ fn test_search_case_insensitive() {
     fixture.write_rfc("RFC-001-source.md", "Source Doc", "draft");
     fixture.write_rfc("RFC-002-target.md", "Target Doc", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -237,7 +237,7 @@ fn test_display_format_type_nnn_colon_title() {
     fixture.write_rfc("RFC-001-source.md", "Source Doc", "draft");
     fixture.write_rfc("RFC-028-doc-ref-ergonomics.md", "Document Reference Ergonomics", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -258,7 +258,7 @@ fn test_self_excluded_after_search() {
     fixture.write_rfc("RFC-001-source.md", "Source Doc", "draft");
     fixture.write_rfc("RFC-002-target.md", "Target Doc", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -285,7 +285,7 @@ fn test_jk_navigation() {
     fixture.write_rfc("RFC-003-beta.md", "Beta", "draft");
     fixture.write_rfc("RFC-004-gamma.md", "Gamma", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -320,7 +320,7 @@ fn test_arrow_navigation() {
     fixture.write_rfc("RFC-002-alpha.md", "Alpha", "draft");
     fixture.write_rfc("RFC-003-beta.md", "Beta", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -341,7 +341,7 @@ fn test_navigation_clamps_to_bounds() {
     fixture.write_rfc("RFC-001-source.md", "Source Doc", "draft");
     fixture.write_rfc("RFC-002-only.md", "Only Target", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -363,7 +363,7 @@ fn test_selected_clamps_on_filter() {
     fixture.write_rfc("RFC-003-beta.md", "Beta", "draft");
     fixture.write_rfc("RFC-004-gamma.md", "Gamma", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -391,7 +391,7 @@ fn test_results_sorted_by_display_string() {
     fixture.write_rfc("RFC-001-alpha.md", "Alpha", "draft");
     fixture.write_rfc("RFC-002-beta.md", "Beta", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     // Select RFC-003 as source
     app.selected_type = 0;
@@ -450,7 +450,7 @@ fn test_enter_creates_link_and_closes() {
     fixture.write_rfc("RFC-001-source.md", "Source RFC", "draft");
     fixture.write_rfc("RFC-002-target.md", "Target RFC", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -500,7 +500,7 @@ fn test_enter_with_tab_writes_correct_rel_type() {
     fixture.write_rfc("RFC-001-source.md", "Source RFC", "draft");
     fixture.write_rfc("RFC-002-target.md", "Target RFC", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     app.selected_type = 0;
     app.selected_doc = 0;

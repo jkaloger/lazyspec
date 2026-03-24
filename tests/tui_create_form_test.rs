@@ -2,12 +2,12 @@ mod common;
 
 use common::TestFixture;
 use lazyspec::engine::document::DocType;
-use lazyspec::tui::app::{App, FormField};
+use lazyspec::tui::state::{App, FormField};
 
 fn setup_app() -> (TestFixture, App) {
     let fixture = TestFixture::new();
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
     (fixture, app)
 }
 

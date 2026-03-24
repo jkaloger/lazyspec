@@ -1,3 +1,4 @@
+use crate::engine::fs::FileSystem;
 use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -68,13 +69,24 @@ pub enum RelationType {
     RelatedTo,
 }
 
+impl RelationType {
+    pub const ALL: [RelationType; 4] = [
+        RelationType::Implements,
+        RelationType::Supersedes,
+        RelationType::Blocks,
+        RelationType::RelatedTo,
+    ];
+
+    pub const ALL_STRS: [&str; 4] = ["implements", "supersedes", "blocks", "related-to"];
+}
+
 impl fmt::Display for RelationType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RelationType::Implements => write!(f, "implements"),
             RelationType::Supersedes => write!(f, "supersedes"),
             RelationType::Blocks => write!(f, "blocks"),
-            RelationType::RelatedTo => write!(f, "related to"),
+            RelationType::RelatedTo => write!(f, "related-to"),
         }
     }
 }
@@ -149,17 +161,17 @@ struct RawFrontmatter {
     validate_ignore: bool,
 }
 
-pub fn rewrite_frontmatter<F>(path: &Path, mutate: F) -> Result<()>
+pub fn rewrite_frontmatter<F>(path: &Path, fs: &dyn FileSystem, mutate: F) -> Result<()>
 where
     F: FnOnce(&mut serde_yaml::Value) -> Result<()>,
 {
-    let content = std::fs::read_to_string(path)?;
+    let content = fs.read_to_string(path)?;
     let (yaml, body) = split_frontmatter(&content)?;
     let mut value: serde_yaml::Value = serde_yaml::from_str(&yaml)?;
     mutate(&mut value)?;
     let new_yaml = serde_yaml::to_string(&value)?;
     let output = format!("---\n{}---\n{}", new_yaml, body);
-    std::fs::write(path, output)?;
+    fs.write(path, &output)?;
     Ok(())
 }
 
@@ -233,6 +245,10 @@ impl DocMeta {
     pub fn extract_body(content: &str) -> Result<String> {
         let (_, body) = split_frontmatter(content)?;
         Ok(body.trim_start_matches('\n').to_string())
+    }
+
+    pub fn display_name(&self) -> &str {
+        &self.id
     }
 
     pub fn sort_by_date(a: &DocMeta, b: &DocMeta) -> std::cmp::Ordering {

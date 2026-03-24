@@ -1,15 +1,16 @@
 use crate::cli::resolve::resolve_to_path;
 use crate::engine::document::rewrite_frontmatter;
+use crate::engine::fs::FileSystem;
 use crate::engine::store::Store;
 use anyhow::Result;
 use std::path::Path;
 
-pub fn link(root: &Path, store: &Store, from: &str, rel_type: &str, to: &str) -> Result<()> {
+pub fn link(root: &Path, store: &Store, from: &str, rel_type: &str, to: &str, fs: &dyn FileSystem) -> Result<()> {
     let resolved_from = resolve_to_path(store, from)?;
     let resolved_to = resolve_to_path(store, to)?;
     let full_path = root.join(&resolved_from);
     let to_str = resolved_to.to_string_lossy().to_string();
-    rewrite_frontmatter(&full_path, |doc| {
+    rewrite_frontmatter(&full_path, fs, |doc| {
         if doc.get("related").is_none() {
             doc["related"] = serde_yaml::Value::Sequence(vec![]);
         }
@@ -26,12 +27,12 @@ pub fn link(root: &Path, store: &Store, from: &str, rel_type: &str, to: &str) ->
     })
 }
 
-pub fn unlink(root: &Path, store: &Store, from: &str, rel_type: &str, to: &str) -> Result<()> {
+pub fn unlink(root: &Path, store: &Store, from: &str, rel_type: &str, to: &str, fs: &dyn FileSystem) -> Result<()> {
     let resolved_from = resolve_to_path(store, from)?;
     let resolved_to = resolve_to_path(store, to)?;
     let full_path = root.join(&resolved_from);
     let to_str = resolved_to.to_string_lossy().to_string();
-    rewrite_frontmatter(&full_path, |doc| {
+    rewrite_frontmatter(&full_path, fs, |doc| {
         if let Some(related) = doc.get_mut("related").and_then(|r| r.as_sequence_mut()) {
             related.retain(|entry| {
                 if let Some(map) = entry.as_mapping() {

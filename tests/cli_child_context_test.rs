@@ -103,7 +103,7 @@ fn search_matches_child_independently() {
     let fixture = setup_parent_with_children_and_story();
     let store = fixture.store();
 
-    let output = lazyspec::cli::search::run_json(&store, "unique-child-term-xyz", None);
+    let output = lazyspec::cli::search::run_json(&store, "unique-child-term-xyz", None, &lazyspec::engine::fs::RealFileSystem);
     let results: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
 
     assert!(
@@ -127,7 +127,7 @@ fn search_does_not_include_parent_for_child_match() {
     let fixture = setup_parent_with_children_and_story();
     let store = fixture.store();
 
-    let output = lazyspec::cli::search::run_json(&store, "unique-child-term-xyz", None);
+    let output = lazyspec::cli::search::run_json(&store, "unique-child-term-xyz", None, &lazyspec::engine::fs::RealFileSystem);
     let results: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
 
     let titles: Vec<&str> = results

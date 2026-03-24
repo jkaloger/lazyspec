@@ -1,7 +1,7 @@
 mod common;
 
 use ratatui::text::{Line, Span};
-use lazyspec::tui::ui::{wrapped_line_count, wrapped_lines_total};
+use lazyspec::tui::views::{wrapped_line_count, wrapped_lines_total};
 
 #[test]
 fn wrapped_line_count_short_line_fits_in_one_row() {

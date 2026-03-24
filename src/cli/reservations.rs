@@ -25,7 +25,7 @@ pub enum ReservationsCommand {
 }
 
 pub fn run_list(repo_root: &Path, config: &Config, json: bool) -> Result<()> {
-    let Some(reserved_config) = config.reserved.as_ref() else {
+    let Some(reserved_config) = config.documents.reserved.as_ref() else {
         bail!("reserved numbering is not configured");
     };
 
@@ -74,23 +74,20 @@ impl From<&Reservation> for PruneEntry {
     }
 }
 
-fn format_number(number: u32, config: &Config) -> String {
-    let reserved_config = config.reserved.as_ref().unwrap();
+fn format_number(number: u32, config: &Config) -> Option<String> {
+    let reserved_config = config.documents.reserved.as_ref()?;
     match reserved_config.format {
-        ReservedFormat::Incremental => format!("{:03}", number),
+        ReservedFormat::Incremental => Some(format!("{:03}", number)),
         ReservedFormat::Sqids => {
-            let sqids_config = config.sqids.as_ref().unwrap();
+            let sqids_config = config.documents.sqids.as_ref()?;
             let alphabet = shuffle_alphabet(&sqids_config.salt);
             let sqids = sqids::Sqids::builder()
                 .alphabet(alphabet)
                 .min_length(sqids_config.min_length)
                 .blocklist(HashSet::new())
                 .build()
-                .expect("valid sqids config");
-            sqids
-                .encode(&[number as u64])
-                .expect("sqids encode")
-                .to_lowercase()
+                .ok()?;
+            Some(sqids.encode(&[number as u64]).ok()?.to_lowercase())
         }
     }
 }
@@ -112,7 +109,7 @@ pub fn run_prune(
     json: bool,
     on_progress: impl Fn(PruneProgress),
 ) -> Result<()> {
-    let Some(reserved_config) = config.reserved.as_ref() else {
+    let Some(reserved_config) = config.documents.reserved.as_ref() else {
         bail!("reserved numbering is not configured");
     };
 
@@ -122,7 +119,7 @@ pub fn run_prune(
     let prunable: Vec<_> = reservations
         .iter()
         .filter(|r| {
-            let formatted = format_number(r.number, config);
+            let Some(formatted) = format_number(r.number, config) else { return false };
             has_local_document(store, &r.prefix, &formatted)
         })
         .collect();
@@ -133,7 +130,9 @@ pub fn run_prune(
     let mut errors = Vec::new();
 
     for r in &reservations {
-        let formatted = format_number(r.number, config);
+        let Some(formatted) = format_number(r.number, config) else {
+            continue;
+        };
         if has_local_document(store, &r.prefix, &formatted) {
             if dry_run {
                 if !json {

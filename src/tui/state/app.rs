@@ -1,17 +1,21 @@
+use super::forms::{CreateForm, DeleteConfirm, LinkEditor, REL_TYPES, StatusPicker};
+#[cfg(feature = "agent")]
+use super::forms::AgentDialog;
+use super::graph::traverse_dependency_chain;
+
 use crate::engine::cache::DiskCache;
 use crate::engine::config::{Config, NumberingStrategy};
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, RelationType, Status};
-use crate::engine::refs::RefExpander;
+use crate::engine::fs::FileSystem;
+use crate::engine::git_status::GitStatusCache;
 use crate::engine::reservation::ReservationProgress;
 use crate::engine::store::{Filter, Store};
 #[cfg(feature = "agent")]
-use crate::tui::agent::{load_all_records, AgentSpawner, AgentStatus};
+use crate::tui::agent::{load_all_records, AgentSpawner};
 use anyhow::{anyhow, Result};
-use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 pub struct SearchEntry {
@@ -28,11 +32,11 @@ pub enum AppEvent {
     Terminal(crossterm::event::KeyEvent),
     FileChange(notify::Event),
     ExpansionResult { path: PathBuf, body: String, body_hash: u64 },
-    DiagramRendered { source_hash: u64, entry: super::diagram::DiagramCacheEntry },
+    DiagramRendered { source_hash: u64, entry: crate::tui::content::diagram::DiagramCacheEntry },
     ProbeResult {
         picker: ratatui_image::picker::Picker,
-        protocol: super::terminal_caps::TerminalImageProtocol,
-        tool_availability: super::diagram::ToolAvailability,
+        protocol: crate::tui::infra::terminal_caps::TerminalImageProtocol,
+        tool_availability: crate::tui::content::diagram::ToolAvailability,
     },
     CreateStarted,
     CreateProgress { message: String },
@@ -41,9 +45,9 @@ pub enum AppEvent {
     AgentFinished,
 }
 
-fn update_tags(root: &Path, relative: &Path, tags: &[String]) -> Result<()> {
+fn update_tags(root: &Path, relative: &Path, tags: &[String], fs: &dyn FileSystem) -> Result<()> {
     let full_path = root.join(relative);
-    rewrite_frontmatter(&full_path, |doc| {
+    rewrite_frontmatter(&full_path, fs, |doc| {
         let tag_values: Vec<serde_yaml::Value> = tags.iter()
             .map(|t| serde_yaml::Value::String(t.clone()))
             .collect();
@@ -74,14 +78,6 @@ pub fn resolve_editor() -> String {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum FormField {
-    Title,
-    Author,
-    Tags,
-    Related,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FilterField {
     Status,
     Tag,
@@ -106,77 +102,6 @@ impl FilterField {
     }
 }
 
-impl FormField {
-    fn next(self) -> Self {
-        match self {
-            FormField::Title => FormField::Author,
-            FormField::Author => FormField::Tags,
-            FormField::Tags => FormField::Related,
-            FormField::Related => FormField::Title,
-        }
-    }
-
-    fn prev(self) -> Self {
-        match self {
-            FormField::Title => FormField::Related,
-            FormField::Author => FormField::Title,
-            FormField::Tags => FormField::Author,
-            FormField::Related => FormField::Tags,
-        }
-    }
-}
-
-pub struct CreateForm {
-    pub active: bool,
-    pub doc_type: DocType,
-    pub focused_field: FormField,
-    pub title: String,
-    pub author: String,
-    pub tags: String,
-    pub related: String,
-    pub error: Option<String>,
-    pub loading: bool,
-    pub status_message: Option<String>,
-}
-
-impl CreateForm {
-    pub fn new() -> Self {
-        CreateForm {
-            active: false,
-            doc_type: DocType::new(DocType::RFC),
-            focused_field: FormField::Title,
-            title: String::new(),
-            author: String::new(),
-            tags: String::new(),
-            related: String::new(),
-            error: None,
-            loading: false,
-            status_message: None,
-        }
-    }
-
-    fn reset(&mut self) {
-        self.active = false;
-        self.focused_field = FormField::Title;
-        self.title.clear();
-        self.author.clear();
-        self.tags.clear();
-        self.related.clear();
-        self.error = None;
-        self.loading = false;
-        self.status_message = None;
-    }
-
-    fn focused_value_mut(&mut self) -> &mut String {
-        match self.focused_field {
-            FormField::Title => &mut self.title,
-            FormField::Author => &mut self.author,
-            FormField::Tags => &mut self.tags,
-            FormField::Related => &mut self.related,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct GraphNode {
     pub path: PathBuf,
@@ -197,88 +122,6 @@ pub struct DocListNode {
     pub is_parent: bool,
     pub is_virtual: bool,
     pub has_duplicate_id: bool,
-}
-
-pub struct DeleteConfirm {
-    pub active: bool,
-    pub doc_path: PathBuf,
-    pub doc_title: String,
-    pub references: Vec<(String, PathBuf)>,
-}
-
-impl DeleteConfirm {
-    pub fn new() -> Self {
-        DeleteConfirm {
-            active: false,
-            doc_path: PathBuf::new(),
-            doc_title: String::new(),
-            references: Vec::new(),
-        }
-    }
-}
-
-pub struct StatusPicker {
-    pub active: bool,
-    pub selected: usize,
-    pub doc_path: PathBuf,
-}
-
-impl StatusPicker {
-    pub fn new() -> Self {
-        StatusPicker {
-            active: false,
-            selected: 0,
-            doc_path: PathBuf::new(),
-        }
-    }
-}
-
-pub const REL_TYPES: [&str; 4] = ["implements", "supersedes", "blocks", "related-to"];
-
-pub struct LinkEditor {
-    pub active: bool,
-    pub doc_path: PathBuf,
-    pub rel_type_index: usize,
-    pub query: String,
-    pub results: Vec<PathBuf>,
-    pub selected: usize,
-}
-
-impl LinkEditor {
-    pub fn new() -> Self {
-        LinkEditor {
-            active: false,
-            doc_path: PathBuf::new(),
-            rel_type_index: 0,
-            query: String::new(),
-            results: Vec::new(),
-            selected: 0,
-        }
-    }
-}
-
-#[cfg(feature = "agent")]
-pub struct AgentDialog {
-    pub active: bool,
-    pub selected_index: usize,
-    pub actions: Vec<String>,
-    pub doc_path: PathBuf,
-    pub doc_title: String,
-    pub text_input: Option<String>,
-}
-
-#[cfg(feature = "agent")]
-impl AgentDialog {
-    pub fn new() -> Self {
-        AgentDialog {
-            active: false,
-            selected_index: 0,
-            actions: Vec::new(),
-            doc_path: PathBuf::new(),
-            doc_title: String::new(),
-            text_input: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -327,6 +170,7 @@ pub enum PreviewTab {
 pub const SCROLL_PADDING: usize = 2;
 
 pub struct App {
+    pub fs: Box<dyn FileSystem>,
     pub store: Store,
     pub selected_type: usize,
     pub selected_doc: usize,
@@ -379,35 +223,38 @@ pub struct App {
     pub event_tx: crossbeam_channel::Sender<AppEvent>,
     pub expansion_cancel: Option<Arc<AtomicBool>>,
     pub disk_cache: DiskCache,
-    pub terminal_image_protocol: super::terminal_caps::TerminalImageProtocol,
-    pub tool_availability: super::diagram::ToolAvailability,
-    pub diagram_cache: super::diagram::DiagramCache,
+    pub terminal_image_protocol: crate::tui::infra::terminal_caps::TerminalImageProtocol,
+    pub tool_availability: crate::tui::content::diagram::ToolAvailability,
+    pub diagram_cache: crate::tui::content::diagram::DiagramCache,
     pub picker: ratatui_image::picker::Picker,
     pub image_states: HashMap<u64, ratatui_image::protocol::StatefulProtocol>,
     pub ascii_diagrams: bool,
-    pub diagram_blocks_cache: Option<(PathBuf, u64, Vec<super::diagram::DiagramBlock>)>,
+    pub diagram_blocks_cache: Option<(PathBuf, u64, Vec<crate::tui::content::diagram::DiagramBlock>)>,
     pub filtered_docs_cache: Option<Vec<PathBuf>>,
     pub search_index: Vec<SearchEntry>,
+    pub git_status_cache: GitStatusCache,
 }
 
 impl App {
-    pub fn new(store: Store, config: &Config, picker: ratatui_image::picker::Picker) -> Self {
+    pub fn new(store: Store, config: &Config, picker: ratatui_image::picker::Picker, fs: Box<dyn FileSystem>) -> Self {
         let default_glyphs = ["●", "■", "▲", "◆", "★", "◎"];
-        let type_icons: HashMap<String, String> = config.types.iter().enumerate().map(|(i, t)| {
+        let type_icons: HashMap<String, String> = config.documents.types.iter().enumerate().map(|(i, t)| {
             let icon = t.icon.clone().unwrap_or_else(|| default_glyphs[i % default_glyphs.len()].to_string());
             (t.name.clone(), icon)
         }).collect();
-        let type_plurals: HashMap<String, String> = config.types.iter()
+        let type_plurals: HashMap<String, String> = config.documents.types.iter()
             .map(|t| (t.name.clone(), t.plural.clone()))
             .collect();
 
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
+        let git_status_cache = GitStatusCache::new(store.root());
 
         let mut app = App {
+            fs,
             store,
             selected_type: 0,
             selected_doc: 0,
-            doc_types: config.types.iter().map(|t| DocType::new(&t.name)).collect(),
+            doc_types: config.documents.types.iter().map(|t| DocType::new(&t.name)).collect(),
             should_quit: false,
             fullscreen_doc: false,
             scroll_offset: 0,
@@ -456,15 +303,16 @@ impl App {
             event_tx,
             expansion_cancel: None,
             disk_cache: DiskCache::new(),
-            terminal_image_protocol: super::terminal_caps::TerminalImageProtocol::Halfblocks,
-            tool_availability: super::diagram::ToolAvailability { d2: false, mmdc: false },
-            diagram_cache: super::diagram::DiagramCache::new(),
+            terminal_image_protocol: crate::tui::infra::terminal_caps::TerminalImageProtocol::Halfblocks,
+            tool_availability: crate::tui::content::diagram::ToolAvailability { d2: false, mmdc: false },
+            diagram_cache: crate::tui::content::diagram::DiagramCache::new(),
             picker,
             image_states: HashMap::new(),
-            ascii_diagrams: config.tui.ascii_diagrams,
+            ascii_diagrams: config.ui.ascii_diagrams,
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
             search_index: Vec::new(),
+            git_status_cache,
         };
         app.rebuild_search_index();
         app.build_doc_tree();
@@ -591,41 +439,6 @@ impl App {
         self.available_tags = tags;
     }
 
-    pub fn filtered_docs(&mut self) -> Vec<&DocMeta> {
-        if self.filtered_docs_cache.is_none() {
-            let mut docs = self.store.list(&Filter {
-                doc_type: None,
-                status: self.filter_status.clone(),
-                tag: self.filter_tag.clone(),
-            });
-            docs.sort_by(|a, b| DocMeta::sort_by_date(a, b));
-            self.filtered_docs_cache = Some(docs.iter().map(|d| d.path.clone()).collect());
-        }
-        self.filtered_docs_cache
-            .as_ref()
-            .unwrap()
-            .iter()
-            .filter_map(|p| self.store.get(p))
-            .collect()
-    }
-
-    pub fn filtered_docs_count(&mut self) -> usize {
-        if self.filtered_docs_cache.is_none() {
-            self.filtered_docs();
-        }
-        self.filtered_docs_cache.as_ref().map_or(0, |c| c.len())
-    }
-
-    pub fn selected_filtered_doc(&mut self) -> Option<&DocMeta> {
-        let paths = if self.filtered_docs_cache.is_none() {
-            self.filtered_docs();
-            self.filtered_docs_cache.as_ref().unwrap()
-        } else {
-            self.filtered_docs_cache.as_ref().unwrap()
-        };
-        paths.get(self.selected_doc).and_then(|p| self.store.get(p))
-    }
-
     pub fn rebuild_search_index(&mut self) {
         self.search_index = self.store.all_docs().iter().map(|doc| {
             let mut searchable = doc.title.to_lowercase();
@@ -710,12 +523,8 @@ impl App {
     }
 
     pub fn rebuild_graph(&mut self) {
-        use std::collections::HashSet;
-
         let all_docs = self.store.all_docs();
 
-        // Find root documents: those with no outgoing Implements links
-        // (i.e., docs that don't implement anything else)
         let mut roots: Vec<&DocMeta> = all_docs
             .iter()
             .filter(|doc| {
@@ -731,54 +540,8 @@ impl App {
         let mut nodes = Vec::new();
         let mut visited = HashSet::new();
 
-        fn walk(
-            store: &crate::engine::store::Store,
-            path: &Path,
-            depth: usize,
-            nodes: &mut Vec<GraphNode>,
-            visited: &mut HashSet<PathBuf>,
-        ) {
-            if !visited.insert(path.to_path_buf()) {
-                return;
-            }
-
-            let doc = match store.get(path) {
-                Some(d) => d,
-                None => return,
-            };
-
-            nodes.push(GraphNode {
-                path: doc.path.clone(),
-                title: doc.title.clone(),
-                doc_type: doc.doc_type.clone(),
-                status: doc.status.clone(),
-                depth,
-            });
-
-            // Children are docs whose forward `implements` link points to this doc.
-            // referenced_by returns reverse links: docs that reference this path.
-            // Filter for Implements to get docs that implement this one.
-            let mut children: Vec<&PathBuf> = store
-                .referenced_by(path)
-                .into_iter()
-                .filter(|(rel, _)| **rel == RelationType::Implements)
-                .map(|(_, p)| p)
-                .collect();
-            children.sort_by(|a, b| {
-                let a_doc = store.get(a);
-                let b_doc = store.get(b);
-                let a_title = a_doc.map(|d| d.title.as_str()).unwrap_or("");
-                let b_title = b_doc.map(|d| d.title.as_str()).unwrap_or("");
-                a_title.cmp(b_title)
-            });
-
-            for child_path in children {
-                walk(store, child_path, depth + 1, nodes, visited);
-            }
-        }
-
         for root in &roots {
-            walk(&self.store, &root.path, 0, &mut nodes, &mut visited);
+            traverse_dependency_chain(&self.store, &root.path, 0, &mut nodes, &mut visited);
         }
 
         self.graph_nodes = nodes;
@@ -870,110 +633,6 @@ impl App {
     pub fn exit_fullscreen(&mut self) {
         self.fullscreen_doc = false;
         self.scroll_offset = 0;
-    }
-
-    pub fn request_expansion(&mut self, tx: &crossbeam_channel::Sender<AppEvent>) {
-        let doc_path = match self.selected_doc_meta() {
-            Some(meta) => meta.path.clone(),
-            None => return,
-        };
-
-        if self.expanded_body_cache.contains_key(&doc_path) {
-            return;
-        }
-
-        if self.expansion_in_flight.as_ref() == Some(&doc_path) {
-            return;
-        }
-
-        if let Some(cancel) = &self.expansion_cancel {
-            cancel.store(true, Ordering::Relaxed);
-        }
-
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.expansion_cancel = Some(cancel.clone());
-        self.expansion_in_flight = Some(doc_path.clone());
-
-        let root = self.store.root().to_path_buf();
-        let tx = tx.clone();
-        let disk_cache = self.disk_cache.clone();
-        std::thread::spawn(move || {
-            let full_path = root.join(&doc_path);
-            let content = match fs::read_to_string(&full_path) {
-                Ok(c) => c,
-                Err(_) => return,
-            };
-            let body = match DocMeta::extract_body(&content) {
-                Ok(b) => b,
-                Err(_) => return,
-            };
-
-            if !body.contains("@ref ") {
-                let body_hash = DiskCache::body_hash(&body);
-                let _ = tx.send(AppEvent::ExpansionResult { path: doc_path, body, body_hash });
-                return;
-            }
-
-            let body_hash = DiskCache::body_hash(&body);
-
-            if let Some(cached) = disk_cache.read(&doc_path, body_hash) {
-                let _ = tx.send(AppEvent::ExpansionResult { path: doc_path, body: cached, body_hash });
-                return;
-            }
-
-            let expander = RefExpander::new(root);
-            match expander.expand_cancellable(&body, &cancel) {
-                Ok(Some(expanded)) => {
-                    let _ = tx.send(AppEvent::ExpansionResult { path: doc_path, body: expanded, body_hash });
-                }
-                Ok(None) => {} // cancelled
-                Err(_) => {
-                    let _ = tx.send(AppEvent::ExpansionResult { path: doc_path, body, body_hash });
-                }
-            }
-        });
-    }
-
-    pub fn request_diagram_render(&mut self, block: &super::diagram::DiagramBlock, tx: &crossbeam_channel::Sender<AppEvent>) {
-        let hash = super::diagram::source_hash(&block.source);
-
-        if self.diagram_cache.get(hash).is_some() {
-            return;
-        }
-
-        if !self.tool_availability.is_available(&block.language) {
-            return;
-        }
-
-        self.diagram_cache.mark_rendering(hash);
-
-        let source = block.source.clone();
-        let language = block.language.clone();
-        let cache_dir = self.diagram_cache.cache_dir().to_path_buf();
-        let tx = tx.clone();
-        let ascii = self.ascii_diagrams;
-
-        std::thread::spawn(move || {
-            let block = super::diagram::DiagramBlock {
-                language,
-                source,
-                byte_range: 0..0,
-            };
-
-            let entry = if ascii && block.language == super::diagram::DiagramLanguage::D2 {
-                match super::diagram::render_diagram_text(&block, &cache_dir) {
-                    Ok(text) => super::diagram::DiagramCacheEntry::Text(text),
-                    Err(err) => super::diagram::DiagramCacheEntry::Failed(err.to_string()),
-                }
-            } else {
-                match super::diagram::render_diagram(&block, &cache_dir) {
-                    Ok(path) => super::diagram::DiagramCacheEntry::Image(path),
-                    Err(err) => super::diagram::DiagramCacheEntry::Failed(err.to_string()),
-                }
-            };
-
-            let _ = tx.send(AppEvent::DiagramRendered { source_hash: hash, entry });
-        });
     }
 
     pub fn scroll_down(&mut self) {
@@ -1265,6 +924,7 @@ impl App {
             let _ = self.event_tx.send(AppEvent::CreateStarted);
 
             std::thread::spawn(move || {
+                let thread_fs = crate::engine::fs::RealFileSystem;
                 let progress_tx = tx.clone();
                 let result = (|| -> Result<CreateResult, String> {
                     let path = crate::cli::create::run(
@@ -1302,7 +962,7 @@ impl App {
                             .map(|t| t.trim().to_string())
                             .filter(|t| !t.is_empty())
                             .collect();
-                        update_tags(&root, &relative, &tags).map_err(|e| e.to_string())?;
+                        update_tags(&root, &relative, &tags, &thread_fs).map_err(|e| e.to_string())?;
                     }
 
                     if !relations.is_empty() {
@@ -1314,6 +974,7 @@ impl App {
                                 &relative_str,
                                 rel_type,
                                 &target_path.to_string_lossy(),
+                                &thread_fs,
                             )
                             .map_err(|e| e.to_string())?;
                         }
@@ -1340,19 +1001,19 @@ impl App {
                 .map(|t| t.trim().to_string())
                 .filter(|t| !t.is_empty())
                 .collect();
-            update_tags(root, &relative, &tags)?;
+            update_tags(root, &relative, &tags, &*self.fs)?;
         }
 
         // Reload the store before applying relations so the new doc is resolvable
-        let _ = self.store.reload_file(root, &relative);
+        let _ = self.store.reload_file(root, &relative, &*self.fs);
 
         // Apply relations
         for (rel_type, target_path) in &relations {
-            crate::cli::link::link(root, &self.store, &relative_str, rel_type, &target_path.to_string_lossy())?;
+            crate::cli::link::link(root, &self.store, &relative_str, rel_type, &target_path.to_string_lossy(), &*self.fs)?;
         }
 
         // Reload again to pick up the relation changes
-        let _ = self.store.reload_file(root, &relative);
+        let _ = self.store.reload_file(root, &relative, &*self.fs);
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
 
@@ -1455,7 +1116,7 @@ impl App {
         let doc_path_str = doc_path.to_string_lossy().to_string();
 
         crate::cli::update::run(root, &self.store, &doc_path_str, &[("status", &status.to_string())])?;
-        self.store.reload_file(root, &doc_path)?;
+        self.store.reload_file(root, &doc_path, &*self.fs)?;
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
         self.build_doc_tree();
@@ -1525,47 +1186,15 @@ impl App {
         }
     }
 
-    fn handle_link_editor_key(&mut self, code: KeyCode, root: &Path) {
-        match code {
-            KeyCode::Esc => self.close_link_editor(),
-            KeyCode::Tab => {
-                self.link_editor.rel_type_index = (self.link_editor.rel_type_index + 1) % REL_TYPES.len();
-            }
-            KeyCode::Enter => {
-                if !self.link_editor.results.is_empty() {
-                    let _ = self.confirm_link(root);
-                }
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                if !self.link_editor.results.is_empty() {
-                    let max = self.link_editor.results.len() - 1;
-                    self.link_editor.selected = (self.link_editor.selected + 1).min(max);
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.link_editor.selected = self.link_editor.selected.saturating_sub(1);
-            }
-            KeyCode::Backspace => {
-                self.link_editor.query.pop();
-                self.update_link_search();
-            }
-            KeyCode::Char(c) => {
-                self.link_editor.query.push(c);
-                self.update_link_search();
-            }
-            _ => {}
-        }
-    }
-
-    fn confirm_link(&mut self, root: &Path) -> Result<()> {
+    pub(crate) fn confirm_link(&mut self, root: &Path) -> Result<()> {
         let selected = self.link_editor.selected;
         let target_path = self.link_editor.results[selected].clone();
         let from = self.link_editor.doc_path.to_string_lossy().to_string();
         let to = target_path.to_string_lossy().to_string();
         let rel_type = REL_TYPES[self.link_editor.rel_type_index];
 
-        crate::cli::link::link(root, &self.store, &from, rel_type, &to)?;
-        self.store.reload_file(root, &self.link_editor.doc_path.clone())?;
+        crate::cli::link::link(root, &self.store, &from, rel_type, &to, &*self.fs)?;
+        self.store.reload_file(root, &self.link_editor.doc_path.clone(), &*self.fs)?;
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
         self.build_doc_tree();
@@ -1603,579 +1232,6 @@ impl App {
         }
     }
 
-    fn handle_warnings_key(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::Esc | KeyCode::Char('w') | KeyCode::Char('q') => self.close_warnings(),
-            KeyCode::Char('f') => {
-                self.fix_request = true;
-            }
-            KeyCode::Char('j') | KeyCode::Down => self.warnings_move_down(),
-            KeyCode::Char('k') | KeyCode::Up => self.warnings_move_up(),
-            _ => {}
-        }
-    }
-
-    pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path, config: &Config) {
-        if self.show_help {
-            self.show_help = false;
-            return;
-        }
-        if self.show_warnings {
-            return self.handle_warnings_key(code);
-        }
-        if self.create_form.active {
-            return self.handle_create_form_key(code, root, config);
-        }
-        if self.delete_confirm.active {
-            return self.handle_delete_confirm_key(code, root);
-        }
-        if self.status_picker.active {
-            return self.handle_status_picker_key(code, root, config);
-        }
-        if self.link_editor.active {
-            return self.handle_link_editor_key(code, root);
-        }
-        #[cfg(feature = "agent")]
-        if self.agent_dialog.active {
-            return self.handle_agent_dialog_key(code, config);
-        }
-        if self.search_mode {
-            return self.handle_search_key(code, modifiers);
-        }
-        if self.fullscreen_doc {
-            return self.handle_fullscreen_key(code, modifiers);
-        }
-        self.handle_normal_key(code, modifiers, root, config);
-    }
-
-    fn handle_create_form_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
-        if self.create_form.loading {
-            if code == KeyCode::Esc {
-                self.close_create_form();
-            }
-            return;
-        }
-        match code {
-            KeyCode::Esc => self.close_create_form(),
-            KeyCode::Enter => {
-                let _ = self.submit_create_form(root, config);
-            }
-            KeyCode::Tab => self.form_next_field(),
-            KeyCode::BackTab => self.form_prev_field(),
-            KeyCode::Backspace => self.form_backspace(),
-            KeyCode::Char(c) => self.form_type_char(c),
-            _ => {}
-        }
-    }
-
-    fn handle_delete_confirm_key(&mut self, code: KeyCode, root: &Path) {
-        match code {
-            KeyCode::Enter => { let _ = self.confirm_delete(root); }
-            KeyCode::Esc => self.close_delete_confirm(),
-            _ => {}
-        }
-    }
-
-    fn handle_status_picker_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
-        match code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                if self.status_picker.selected < 4 {
-                    self.status_picker.selected += 1;
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if self.status_picker.selected > 0 {
-                    self.status_picker.selected -= 1;
-                }
-            }
-            KeyCode::Enter => {
-                let _ = self.confirm_status_change(root, config);
-            }
-            KeyCode::Esc => self.close_status_picker(),
-            _ => {}
-        }
-    }
-
-    #[cfg(feature = "agent")]
-    fn handle_agent_dialog_key(&mut self, code: KeyCode, config: &Config) {
-        if self.agent_dialog.text_input.is_some() {
-            self.handle_agent_text_input_key(code);
-            return;
-        }
-
-        match code {
-            KeyCode::Esc => {
-                self.agent_dialog.active = false;
-            }
-            KeyCode::Up => {
-                if self.agent_dialog.selected_index > 0 {
-                    self.agent_dialog.selected_index -= 1;
-                } else {
-                    self.agent_dialog.selected_index = self.agent_dialog.actions.len().saturating_sub(1);
-                }
-            }
-            KeyCode::Down => {
-                if self.agent_dialog.actions.is_empty() {
-                    return;
-                }
-                self.agent_dialog.selected_index = (self.agent_dialog.selected_index + 1) % self.agent_dialog.actions.len();
-            }
-            KeyCode::Enter => {
-                let action = self.agent_dialog.actions
-                    .get(self.agent_dialog.selected_index)
-                    .cloned()
-                    .unwrap_or_default();
-                let doc_path = self.agent_dialog.doc_path.clone();
-
-                if action == "Custom prompt" {
-                    self.agent_dialog.text_input = Some(String::new());
-                    return;
-                }
-
-                self.agent_dialog.active = false;
-
-                let doc_title = self.agent_dialog.doc_title.clone();
-
-                if action == "Expand document" {
-                    let full_path = self.store.root.join(&doc_path);
-                    if let Ok(content) = std::fs::read_to_string(&full_path) {
-                        let prompt = crate::tui::agent::build_expand_prompt(&content, &full_path);
-                        let _ = self.agent_spawner.spawn(&prompt, &full_path, &doc_title, &action);
-                    }
-                } else if action == "Create children" {
-                    self.spawn_create_children(&doc_path, &doc_title, config);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    #[cfg(feature = "agent")]
-    fn spawn_create_children(&mut self, doc_path: &Path, doc_title: &str, config: &Config) {
-        let doc = match self.store.get(doc_path) {
-            Some(d) => d,
-            None => return,
-        };
-        let doc_type_str = doc.doc_type.to_string();
-        let child_type = config.rules.iter().find_map(|rule| match rule {
-            crate::engine::config::ValidationRule::ParentChild { parent, child, .. }
-                if parent == &doc_type_str =>
-            {
-                Some(child.clone())
-            }
-            _ => None,
-        });
-        let child_type = match child_type {
-            Some(ct) => ct,
-            None => return,
-        };
-        let full_path = self.store.root.join(doc_path);
-        let content = match std::fs::read_to_string(&full_path) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let prompt = crate::tui::agent::build_create_children_prompt(&content, &child_type);
-        let _ = self.agent_spawner.spawn(&prompt, &full_path, doc_title, "Create children");
-    }
-
-    #[cfg(feature = "agent")]
-    fn handle_agent_text_input_key(&mut self, code: KeyCode) {
-        let buffer = match self.agent_dialog.text_input.as_mut() {
-            Some(b) => b,
-            None => return,
-        };
-
-        match code {
-            KeyCode::Esc => {
-                self.agent_dialog.text_input = None;
-            }
-            KeyCode::Enter => {
-                let prompt = buffer.clone();
-                let full_path = self.store.root.join(&self.agent_dialog.doc_path);
-                self.agent_dialog.active = false;
-                self.agent_dialog.text_input = None;
-
-                if !prompt.is_empty() {
-                    let doc_title = self.agent_dialog.doc_title.clone();
-                    if let Ok(content) = std::fs::read_to_string(&full_path) {
-                        let full_prompt = format!(
-                            "Here is the document:\n\n{}\n\nUser request: {}",
-                            content, prompt
-                        );
-                        let _ = self.agent_spawner.spawn(&full_prompt, &full_path, &doc_title, "Custom prompt");
-                    }
-                }
-            }
-            KeyCode::Backspace => {
-                buffer.pop();
-            }
-            KeyCode::Char(c) => {
-                buffer.push(c);
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_search_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        match code {
-            KeyCode::Esc => self.exit_search(),
-            KeyCode::Enter => self.select_search_result(),
-            KeyCode::Backspace => {
-                self.search_query.pop();
-                self.update_search();
-            }
-            KeyCode::Up => self.search_move_up(),
-            KeyCode::Down => self.search_move_down(),
-            KeyCode::Char(c) => {
-                if modifiers.contains(KeyModifiers::CONTROL) && c == 'k' {
-                    self.search_move_up();
-                } else if modifiers.contains(KeyModifiers::CONTROL) && c == 'j' {
-                    self.search_move_down();
-                } else {
-                    self.search_query.push(c);
-                    self.update_search();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_fullscreen_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        match (code, modifiers) {
-            (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => self.exit_fullscreen(),
-            (KeyCode::Char('j'), _) | (KeyCode::Down, _) => self.scroll_down(),
-            (KeyCode::Char('k'), _) | (KeyCode::Up, _) => self.scroll_up(),
-            (KeyCode::Char('g'), _) => self.scroll_offset = 0,
-            (KeyCode::Char('G'), _) => self.scroll_offset = u16::MAX / 2,
-            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                self.scroll_offset = self.scroll_offset.saturating_add(self.fullscreen_height as u16 / 2);
-            }
-            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(self.fullscreen_height as u16 / 2);
-            }
-            _ => {}
-        }
-    }
-
-    #[cfg(feature = "agent")]
-    fn handle_agents_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        let record_count = self.agent_spawner.records.len();
-
-        if modifiers.contains(KeyModifiers::CONTROL) {
-            match code {
-                KeyCode::Char('d') => {
-                    let jump = self.doc_list_height / 2;
-                    self.agent_selected_index = (self.agent_selected_index + jump)
-                        .min(record_count.saturating_sub(1));
-                }
-                KeyCode::Char('u') => {
-                    let jump = self.doc_list_height / 2;
-                    self.agent_selected_index = self.agent_selected_index.saturating_sub(jump);
-                }
-                _ => {}
-            }
-            return;
-        }
-
-        match code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.agent_selected_index = (self.agent_selected_index + 1)
-                    .min(record_count.saturating_sub(1));
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.agent_selected_index = self.agent_selected_index.saturating_sub(1);
-            }
-            KeyCode::Char('e') => {
-                if record_count > 0 {
-                    let doc_path = &self.agent_spawner.records[self.agent_selected_index].doc_path;
-                    self.editor_request = Some(self.store.root.join(doc_path));
-                }
-            }
-            KeyCode::Char('r') => {
-                if record_count > 0 {
-                    let record = &self.agent_spawner.records[self.agent_selected_index];
-                    if record.status != AgentStatus::Running {
-                        self.resume_request = Some(record.session_id.clone());
-                    }
-                }
-            }
-            KeyCode::Char('q') => {
-                self.should_quit = true;
-            }
-            KeyCode::Char('`') => {
-                self.cycle_mode();
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_filters_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path) {
-        if modifiers.contains(KeyModifiers::CONTROL) {
-            match code {
-                KeyCode::Char('d') => {
-                    let count = self.filtered_docs_count();
-                    self.half_page_down(count);
-                }
-                KeyCode::Char('u') => {
-                    let count = self.filtered_docs_count();
-                    self.half_page_up(count);
-                }
-                _ => {}
-            }
-            return;
-        }
-        match code {
-            KeyCode::Tab => {
-                self.filter_focused = self.filter_focused.next();
-            }
-            KeyCode::BackTab => {
-                self.filter_focused = self.filter_focused.prev();
-            }
-            KeyCode::Char('h') | KeyCode::Left => {
-                self.cycle_filter_value_prev();
-            }
-            KeyCode::Char('l') | KeyCode::Right => {
-                self.cycle_filter_value_next();
-            }
-            KeyCode::Enter if self.filter_focused == FilterField::ClearAction => {
-                self.reset_filters();
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                let count = self.filtered_docs_count();
-                if count > 0 && self.selected_doc < count - 1 {
-                    self.selected_doc += 1;
-                }
-                let count = self.filtered_docs_count();
-                self.adjust_viewport(count);
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if self.selected_doc > 0 {
-                    self.selected_doc -= 1;
-                }
-                let count = self.filtered_docs_count();
-                self.adjust_viewport(count);
-            }
-            KeyCode::Enter => {
-                if self.preview_tab == PreviewTab::Relations {
-                    self.navigate_to_relation();
-                } else if self.selected_filtered_doc().is_some() {
-                    self.fullscreen_doc = true;
-                    self.scroll_offset = 0;
-                }
-            }
-            KeyCode::Char('g') => {
-                self.selected_doc = 0;
-                self.doc_list_offset = 0;
-            }
-            KeyCode::Char('G') => {
-                let count = self.filtered_docs_count();
-                if count > 0 {
-                    self.selected_doc = count - 1;
-                    self.doc_list_offset = count.saturating_sub(self.doc_list_height);
-                }
-            }
-            KeyCode::Char('e') => {
-                if let Some(doc) = self.selected_filtered_doc() {
-                    self.editor_request = Some(root.join(&doc.path));
-                }
-            }
-            KeyCode::Char('q') => {
-                self.should_quit = true;
-            }
-            KeyCode::Char('`') => {
-                self.cycle_mode();
-            }
-            KeyCode::Char('?') => {
-                self.show_help = true;
-            }
-            KeyCode::Char('/') => {
-                self.enter_search();
-            }
-            KeyCode::Char('w') => {
-                self.open_warnings();
-            }
-            KeyCode::Char('s') => {
-                self.open_status_picker();
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_graph_key(&mut self, code: KeyCode, _modifiers: KeyModifiers, root: &Path) {
-        match code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.graph_selected = (self.graph_selected + 1)
-                    .min(self.graph_nodes.len().saturating_sub(1));
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.graph_selected = self.graph_selected.saturating_sub(1);
-            }
-            KeyCode::Enter => {
-                if let Some(node) = self.graph_nodes.get(self.graph_selected) {
-                    let path = node.path.clone();
-                    if let Some(doc) = self.store.get(&path) {
-                        let doc_type = doc.doc_type.clone();
-                        if let Some(type_idx) = self.doc_types.iter().position(|t| *t == doc_type) {
-                            self.selected_type = type_idx;
-                            self.build_doc_tree();
-                            if let Some(doc_idx) = self.doc_tree.iter().position(|n| n.path == path) {
-                                self.selected_doc = doc_idx;
-                            }
-                        }
-                    }
-                    self.view_mode = ViewMode::Types;
-                }
-            }
-            KeyCode::Char('g') => {
-                self.graph_selected = 0;
-            }
-            KeyCode::Char('G') => {
-                self.graph_selected = self.graph_nodes.len().saturating_sub(1);
-            }
-            KeyCode::Char('e') => {
-                if let Some(node) = self.graph_nodes.get(self.graph_selected) {
-                    self.editor_request = Some(root.join(&node.path));
-                }
-            }
-            KeyCode::Char('q') => {
-                self.should_quit = true;
-            }
-            KeyCode::Char('`') => {
-                self.cycle_mode();
-            }
-            _ => {}
-        }
-    }
-
-    #[allow(unused_variables)]
-    fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path, config: &Config) {
-        match self.view_mode {
-            ViewMode::Filters => return self.handle_filters_key(code, modifiers, root),
-            ViewMode::Graph => return self.handle_graph_key(code, modifiers, root),
-            #[cfg(feature = "agent")]
-            ViewMode::Agents => return self.handle_agents_key(code, modifiers),
-            _ => {}
-        }
-
-        match (code, modifiers) {
-            (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-            }
-            (KeyCode::Char('?'), _) => {
-                self.show_help = true;
-            }
-            (KeyCode::Char('/'), _) => self.enter_search(),
-            (KeyCode::Char('n'), _) => self.open_create_form(),
-            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                let count = self.doc_tree.len();
-                self.half_page_down(count);
-            }
-            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                let count = self.doc_tree.len();
-                self.half_page_up(count);
-            }
-            (KeyCode::Char('d'), _) if self.selected_doc_meta().is_some() => {
-                self.open_delete_confirm();
-            }
-            (KeyCode::Char('e'), _) if self.selected_doc_meta().is_some() => {
-                let doc = self.selected_doc_meta().unwrap();
-                self.editor_request = Some(root.join(&doc.path));
-            }
-            (KeyCode::Enter, _) => {
-                if self.preview_tab == PreviewTab::Relations {
-                    self.navigate_to_relation();
-                } else {
-                    self.enter_fullscreen();
-                }
-            }
-            (KeyCode::Char('j') | KeyCode::Down, _) => {
-                if self.preview_tab == PreviewTab::Relations {
-                    self.move_relation_down();
-                } else {
-                    self.move_down();
-                }
-            }
-            (KeyCode::Char('k') | KeyCode::Up, _) => {
-                if self.preview_tab == PreviewTab::Relations {
-                    self.move_relation_up();
-                } else {
-                    self.move_up();
-                }
-            }
-            (KeyCode::Char('l') | KeyCode::Right, _) => {
-                self.move_type_next();
-            }
-            (KeyCode::Char('h') | KeyCode::Left, _) => {
-                self.move_type_prev();
-            }
-            (KeyCode::Char(' '), _) => {
-                let node = self.doc_tree.get(self.selected_doc).cloned();
-                if let Some(ref n) = node {
-                    if n.is_parent && !self.is_expanded(&n.path) {
-                        let path = n.path.clone();
-                        self.toggle_expanded(&path);
-                    } else if n.is_parent && self.is_expanded(&n.path) {
-                        let path = n.path.clone();
-                        self.toggle_expanded(&path);
-                        self.clamp_selected_doc();
-                    } else if n.depth > 0 {
-                        let mut parent_idx = self.selected_doc;
-                        for i in (0..self.selected_doc).rev() {
-                            if self.doc_tree[i].depth == 0 {
-                                parent_idx = i;
-                                break;
-                            }
-                        }
-                        self.selected_doc = parent_idx;
-                        let path = self.doc_tree[parent_idx].path.clone();
-                        if self.is_expanded(&path) {
-                            self.toggle_expanded(&path);
-                            self.clamp_selected_doc();
-                        }
-                    }
-                }
-            }
-            (KeyCode::Tab, _) => self.toggle_preview_tab(),
-            (KeyCode::Char('g'), _) => self.move_to_top(),
-            (KeyCode::Char('G'), _) => self.move_to_bottom(),
-            (KeyCode::Char('`'), _) => self.cycle_mode(),
-            (KeyCode::Char('w'), _) => self.open_warnings(),
-            (KeyCode::Char('s'), _) => self.open_status_picker(),
-            (KeyCode::Char('r'), _) if self.preview_tab == PreviewTab::Relations => {
-                self.open_link_editor();
-            }
-            #[cfg(feature = "agent")]
-            (KeyCode::Char('a'), _) => {
-                if let Some(doc) = self.selected_doc_meta() {
-                    let doc_type_str = doc.doc_type.to_string();
-                    let doc_path = doc.path.clone();
-                    let doc_title = doc.title.clone();
-
-                    let has_children = config.rules.iter().any(|rule| {
-                        matches!(rule, crate::engine::config::ValidationRule::ParentChild { parent, .. } if parent == &doc_type_str)
-                    });
-
-                    let mut actions = vec![
-                        "Expand document".to_string(),
-                        "Custom prompt".to_string(),
-                    ];
-                    if has_children {
-                        actions.push("Create children".to_string());
-                    }
-
-                    self.agent_dialog = AgentDialog {
-                        active: true,
-                        selected_index: 0,
-                        actions,
-                        doc_path,
-                        doc_title,
-                        text_input: None,
-                    };
-                }
-            }
-            _ => {}
-        }
-    }
 
     pub fn search_move_up(&mut self) {
         if self.search_selected > 0 {
@@ -2216,6 +1272,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::engine::store::Store;
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     fn make_dummy_node(index: usize) -> DocListNode {
         DocListNode {
@@ -2245,6 +1302,7 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
 
         let app = App {
+            fs: Box::new(crate::engine::fs::RealFileSystem),
             store,
             selected_type: 0,
             selected_doc: 0,
@@ -2297,15 +1355,16 @@ mod tests {
             event_tx: tx,
             expansion_cancel: None,
             disk_cache: DiskCache::new(),
-            terminal_image_protocol: crate::tui::terminal_caps::TerminalImageProtocol::Unsupported,
-            tool_availability: crate::tui::diagram::ToolAvailability { d2: false, mmdc: false },
-            diagram_cache: crate::tui::diagram::DiagramCache::new(),
+            terminal_image_protocol: crate::tui::infra::terminal_caps::TerminalImageProtocol::Unsupported,
+            tool_availability: crate::tui::content::diagram::ToolAvailability { d2: false, mmdc: false },
+            diagram_cache: crate::tui::content::diagram::DiagramCache::new(),
             picker: ratatui_image::picker::Picker::halfblocks(),
             image_states: HashMap::new(),
             ascii_diagrams: false,
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
             search_index: Vec::new(),
+            git_status_cache: GitStatusCache::new(Path::new(".")),
         };
         app
     }

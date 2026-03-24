@@ -2,7 +2,7 @@ mod common;
 
 use common::TestFixture;
 use crossterm::event::{KeyCode, KeyModifiers};
-use lazyspec::tui::app::{resolve_editor_from, App, ViewMode};
+use lazyspec::tui::state::{resolve_editor_from, App, ViewMode};
 
 #[test]
 fn editor_env_set() {
@@ -40,7 +40,7 @@ fn e_key_sets_editor_request_in_types_mode() {
     fixture.write_rfc("RFC-001-auth.md", "Auth RFC", "draft");
 
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     assert_eq!(app.view_mode, ViewMode::Types);
     app.handle_key(
@@ -71,7 +71,7 @@ fn e_key_sets_editor_request_in_graph_mode() {
     );
 
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     // Cycle to Graph mode: Types -> Filters -> Metrics -> Graph
     app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
@@ -97,7 +97,7 @@ fn e_key_sets_editor_request_in_graph_mode() {
 fn e_key_noop_when_no_document_selected() {
     let fixture = TestFixture::new();
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     app.handle_key(
         KeyCode::Char('e'),
@@ -118,7 +118,7 @@ fn e_key_ignored_during_create_form() {
     fixture.write_rfc("RFC-001-auth.md", "Auth RFC", "draft");
 
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     // Open the create form
     app.handle_key(

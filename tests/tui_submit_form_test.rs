@@ -3,7 +3,7 @@ mod common;
 use common::TestFixture;
 use lazyspec::engine::config::Config;
 use lazyspec::engine::document::{DocMeta, DocType};
-use lazyspec::tui::app::App;
+use lazyspec::tui::state::App;
 use std::fs;
 
 fn setup_app_with_rfc() -> (TestFixture, App, Config) {
@@ -28,7 +28,7 @@ An existing RFC.
 
     let config = fixture.config();
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
     (fixture, app, config)
 }
 

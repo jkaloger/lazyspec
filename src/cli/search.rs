@@ -1,6 +1,7 @@
 use crate::cli::json::doc_to_json;
 use crate::cli::style::{dim, doc_card};
 use crate::engine::document::DocType;
+use crate::engine::fs::FileSystem;
 use crate::engine::store::{SearchResult, Store};
 
 fn filter_results<'a>(results: &mut Vec<SearchResult<'a>>, doc_type: Option<&str>) {
@@ -24,8 +25,8 @@ fn json_output(results: &[SearchResult]) -> String {
     serde_json::to_string_pretty(&items).unwrap()
 }
 
-pub fn run(store: &Store, query: &str, doc_type: Option<&str>, json: bool) {
-    let mut results = store.search(query);
+pub fn run(store: &Store, query: &str, doc_type: Option<&str>, json: bool, fs: &dyn FileSystem) {
+    let mut results = store.search(query, fs);
     filter_results(&mut results, doc_type);
 
     if json {
@@ -47,8 +48,8 @@ pub fn run(store: &Store, query: &str, doc_type: Option<&str>, json: bool) {
     }
 }
 
-pub fn run_json(store: &Store, query: &str, doc_type: Option<&str>) -> String {
-    let mut results = store.search(query);
+pub fn run_json(store: &Store, query: &str, doc_type: Option<&str>, fs: &dyn FileSystem) -> String {
+    let mut results = store.search(query, fs);
     filter_results(&mut results, doc_type);
     json_output(&results)
 }

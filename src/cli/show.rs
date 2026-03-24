@@ -1,6 +1,7 @@
 use crate::cli::json::doc_to_json_with_family;
 use crate::cli::resolve::resolve_shorthand_or_path;
 use crate::cli::style::{bold, dim, separator, styled_status};
+use crate::engine::fs::FileSystem;
 use crate::engine::store::{ResolveError, Store};
 use anyhow::Result;
 use console::colors_enabled;
@@ -18,7 +19,7 @@ fn title_box(title: &str) -> String {
     format!("{}\n{}\n{}", top, mid, bot)
 }
 
-pub fn run(store: &Store, id: &str, expand: bool, max_ref_lines: usize) -> Result<()> {
+pub fn run(store: &Store, id: &str, expand: bool, max_ref_lines: usize, fs: &dyn FileSystem) -> Result<()> {
     let doc = match resolve_shorthand_or_path(store, id) {
         Ok(doc) => doc,
         Err(ResolveError::Ambiguous { id, matches }) => {
@@ -60,9 +61,9 @@ pub fn run(store: &Store, id: &str, expand: bool, max_ref_lines: usize) -> Resul
     println!("{}", separator());
 
     let body = if expand {
-        store.get_body_expanded(&doc.path, max_ref_lines)?
+        store.get_body_expanded(&doc.path, max_ref_lines, fs)?
     } else {
-        store.get_body_raw(&doc.path)?
+        store.get_body_raw(&doc.path, fs)?
     };
     println!("{}", body);
 
@@ -84,7 +85,7 @@ pub fn run(store: &Store, id: &str, expand: bool, max_ref_lines: usize) -> Resul
     Ok(())
 }
 
-pub fn run_json(store: &Store, id: &str, expand: bool, max_ref_lines: usize) -> Result<String> {
+pub fn run_json(store: &Store, id: &str, expand: bool, max_ref_lines: usize, fs: &dyn FileSystem) -> Result<String> {
     let doc = match resolve_shorthand_or_path(store, id) {
         Ok(doc) => doc,
         Err(ResolveError::Ambiguous { id, matches }) => {
@@ -103,9 +104,9 @@ pub fn run_json(store: &Store, id: &str, expand: bool, max_ref_lines: usize) -> 
 
     let mut json = doc_to_json_with_family(doc, store);
     let body = if expand {
-        store.get_body_expanded(&doc.path, max_ref_lines)?
+        store.get_body_expanded(&doc.path, max_ref_lines, fs)?
     } else {
-        store.get_body_raw(&doc.path)?
+        store.get_body_raw(&doc.path, fs)?
     };
     json["body"] = serde_json::Value::String(body);
 

@@ -6,7 +6,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use lazyspec::tui::agent::{
     load_all_records, save_record, update_record_status, AgentRecord, AgentStatus,
 };
-use lazyspec::tui::app::{App, ViewMode};
+use lazyspec::tui::state::{App, ViewMode};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -31,7 +31,7 @@ fn sample_record(session_id: &str, title: &str, doc_path: &str) -> AgentRecord {
 /// then clear and populate records as needed.
 fn setup_agents_mode(fixture: &TestFixture, records: Vec<AgentRecord>) -> App {
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
     app.view_mode = ViewMode::Agents;
     app.agent_spawner.records = records;
     app.agent_selected_index = 0;

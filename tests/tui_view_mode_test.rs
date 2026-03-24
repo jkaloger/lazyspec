@@ -2,7 +2,7 @@ mod common;
 
 use common::TestFixture;
 use crossterm::event::{KeyCode, KeyModifiers};
-use lazyspec::tui::app::{App, PreviewTab, ViewMode};
+use lazyspec::tui::state::{App, PreviewTab, ViewMode};
 
 fn setup_app_with_docs() -> (TestFixture, App) {
     let fixture = TestFixture::new();
@@ -17,7 +17,7 @@ fn setup_app_with_docs() -> (TestFixture, App) {
     );
 
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
     (fixture, app)
 }
 

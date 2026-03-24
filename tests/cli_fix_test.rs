@@ -1,6 +1,7 @@
 mod common;
 
 use lazyspec::engine::document::{DocMeta, split_frontmatter};
+use lazyspec::engine::fs::RealFileSystem;
 
 #[test]
 fn fix_fills_missing_fields() {
@@ -17,6 +18,7 @@ fn fix_fills_missing_fields() {
         &fixture.config(),
         &vec!["docs/rfcs/RFC-broken.md".to_string()],
         false,
+        &RealFileSystem,
     );
 
     let content = std::fs::read_to_string(fixture.root().join("docs/rfcs/RFC-broken.md")).unwrap();
@@ -63,6 +65,7 @@ fn fix_preserves_body() {
         &fixture.config(),
         &vec!["docs/rfcs/RFC-body.md".to_string()],
         false,
+        &RealFileSystem,
     );
 
     let content = std::fs::read_to_string(fixture.root().join("docs/rfcs/RFC-body.md")).unwrap();
@@ -84,6 +87,7 @@ fn fix_dry_run_does_not_write() {
         &fixture.config(),
         &vec!["docs/rfcs/RFC-dry.md".to_string()],
         true,
+        &RealFileSystem,
     );
 
     assert!(output.contains("Would fix"));
@@ -112,6 +116,7 @@ fn fix_all_broken_docs() {
         &fixture.config(),
         &vec![],
         false,
+        &RealFileSystem,
     );
 
     let content_a = std::fs::read_to_string(fixture.root().join("docs/rfcs/RFC-a.md")).unwrap();
@@ -135,6 +140,7 @@ fn fix_json_output() {
         &fixture.config(),
         &vec!["docs/rfcs/RFC-json.md".to_string()],
         false,
+        &RealFileSystem,
     );
 
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -168,6 +174,7 @@ fn fix_conflict_older_wins() {
         &fixture.config(),
         &[],
         false,
+        &RealFileSystem,
     );
 
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -205,6 +212,7 @@ fn fix_conflict_dry_run_no_side_effects() {
         &fixture.config(),
         &[],
         true,
+        &RealFileSystem,
     );
 
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -236,6 +244,7 @@ fn fix_no_conflicts_empty_array() {
         &fixture.config(),
         &[],
         false,
+        &RealFileSystem,
     );
 
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -264,6 +273,7 @@ fn fix_conflict_subfolder_rename() {
         &fixture.config(),
         &[],
         false,
+        &RealFileSystem,
     );
 
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -296,6 +306,7 @@ fn fix_conflict_human_output_rename_message() {
         &fixture.config(),
         &[],
         false,
+        &RealFileSystem,
     );
 
     assert!(output.contains("Renamed"));
@@ -320,6 +331,7 @@ fn fix_conflict_human_output_dry_run_would_rename() {
         &fixture.config(),
         &[],
         true,
+        &RealFileSystem,
     );
 
     assert!(output.contains("Would rename"));
@@ -340,6 +352,7 @@ fn fix_infers_type_from_directory() {
         &fixture.config(),
         &vec!["docs/rfcs/RFC-notype.md".to_string()],
         false,
+        &RealFileSystem,
     );
 
     let content = std::fs::read_to_string(fixture.root().join("docs/rfcs/RFC-notype.md")).unwrap();

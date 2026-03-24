@@ -1,16 +1,10 @@
-#[cfg(feature = "agent")]
-pub mod agent;
-pub mod app;
-pub mod diagram;
-pub mod gfm;
-pub mod perf_log;
-pub mod terminal_caps;
-pub mod ui;
-
-use app::App;
+use crate::tui::state::App;
+use crate::tui::state::AppEvent;
+use crate::tui::content;
+use crate::tui::infra::{perf_log, terminal_caps};
+use crate::tui::views;
 use crate::engine::config::Config;
 use crate::engine::store::Store;
-use app::AppEvent;
 use anyhow::Result;
 use crossterm::{
     event::Event,
@@ -33,7 +27,7 @@ fn run_editor(
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     disable_raw_mode()?;
 
-    let editor = app::resolve_editor();
+    let editor = crate::tui::state::resolve_editor();
     let status = Command::new(&editor).arg(path).status();
 
     enable_raw_mode()?;
@@ -59,7 +53,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                     for path in &event.paths {
                         if path.extension().and_then(|e| e.to_str()) == Some("md") {
                             if let Ok(relative) = path.strip_prefix(root) {
-                                let _ = app.store.reload_file(root, relative);
+                                let _ = app.store.reload_file(root, relative, &*app.fs);
                                 app.expanded_body_cache.remove(relative);
                                 app.disk_cache.invalidate(relative);
                             }
@@ -72,6 +66,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                         app.disk_cache.clear();
                     }
                     app.refresh_validation(config);
+                    app.git_status_cache.invalidate();
                 }
                 _ => {}
             }
@@ -90,7 +85,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
             app.picker = picker;
             app.terminal_image_protocol = protocol;
             app.tool_availability = tool_availability;
-            app.diagram_cache = diagram::DiagramCache::new();
+            app.diagram_cache = content::diagram::DiagramCache::new();
             app.image_states.clear();
         }
         AppEvent::CreateStarted => {}
@@ -105,7 +100,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
             }
             match result {
                 Ok(create_result) => {
-                    let _ = app.store.reload_file(root, &create_result.path);
+                    let _ = app.store.reload_file(root, &create_result.path, &*app.fs);
                     app.filtered_docs_cache = None;
                     app.rebuild_search_index();
                     if let Some(type_idx) = app.doc_types.iter().position(|t| *t == create_result.doc_type) {
@@ -117,6 +112,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                     }
                     app.close_create_form();
                     app.refresh_validation(config);
+                    app.git_status_cache.invalidate();
                 }
                 Err(msg) => {
                     app.create_form.loading = false;
@@ -138,7 +134,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(store, config, picker);
+    let mut app = App::new(store, config, picker, Box::new(crate::engine::fs::RealFileSystem));
     app.refresh_validation(config);
 
     let (tx, rx) = crossbeam_channel::unbounded();
@@ -149,7 +145,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     std::thread::spawn(move || {
         let picker = terminal_caps::create_picker();
         let protocol = terminal_caps::TerminalImageProtocol::from(picker.protocol_type());
-        let tool_availability = diagram::ToolAvailability::detect();
+        let tool_availability = content::diagram::ToolAvailability::detect();
         let _ = probe_tx.send(AppEvent::ProbeResult { picker, protocol, tool_availability });
     });
 
@@ -161,7 +157,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         }
     })?;
 
-    let dirs: Vec<&str> = config.types.iter().map(|t| t.dir.as_str()).collect();
+    let dirs: Vec<&str> = config.documents.types.iter().map(|t| t.dir.as_str()).collect();
     for dir in &dirs {
         let full = root.join(dir);
         if full.exists() {
@@ -193,7 +189,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         let loop_start = Instant::now();
 
         let t = Instant::now();
-        terminal.draw(|f| ui::draw(f, &mut app))?;
+        terminal.draw(|f| views::draw(f, &mut app))?;
         perf_log::log_duration("draw", t);
 
         let t = Instant::now();
@@ -205,7 +201,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 let blocks = match &app.diagram_blocks_cache {
                     Some((p, h, b)) if p == &meta.path && *h == body_hash => b.clone(),
                     _ => {
-                        let b = diagram::extract_diagram_blocks(body);
+                        let b = content::diagram::extract_diagram_blocks(body);
                         app.diagram_blocks_cache = Some((meta.path.clone(), body_hash, b.clone()));
                         b
                     }
@@ -252,7 +248,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             input_paused.store(false, Ordering::Relaxed);
             let root = app.store.root().to_path_buf();
             if let Ok(relative) = path.strip_prefix(&root) {
-                let _ = app.store.reload_file(&root, relative);
+                let _ = app.store.reload_file(&root, relative, &*app.fs);
             }
             app.refresh_validation(config);
         }
@@ -285,7 +281,8 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 .iter()
                 .map(|e| e.path.to_string_lossy().to_string())
                 .collect();
-            let output = crate::cli::fix::run_human(&root, &app.store, config, &paths, false);
+            let fs = crate::engine::fs::RealFileSystem;
+            let output = crate::cli::fix::run_human(&root, &app.store, config, &paths, false, &fs);
             app.store = Store::load(&root, config)?;
             app.refresh_validation(config);
             app.fix_result = if output.is_empty() { None } else { Some(output) };

@@ -10,7 +10,7 @@ fn ignore_adds_validate_ignore_field() {
     fixture.write_rfc("RFC-001-auth.md", "Auth", "draft");
     let store = fixture.store();
 
-    lazyspec::cli::ignore::ignore(fixture.root(), &store, "docs/rfcs/RFC-001-auth.md").unwrap();
+    lazyspec::cli::ignore::ignore(fixture.root(), &store, "docs/rfcs/RFC-001-auth.md", &lazyspec::engine::fs::RealFileSystem).unwrap();
 
     let content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-auth.md")).unwrap();
     let meta = DocMeta::parse(&content).unwrap();
@@ -26,7 +26,7 @@ fn unignore_removes_validate_ignore_field() {
     );
     let store = fixture.store();
 
-    lazyspec::cli::ignore::unignore(fixture.root(), &store, "docs/rfcs/RFC-001-auth.md").unwrap();
+    lazyspec::cli::ignore::unignore(fixture.root(), &store, "docs/rfcs/RFC-001-auth.md", &lazyspec::engine::fs::RealFileSystem).unwrap();
 
     let content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-auth.md")).unwrap();
     let meta = DocMeta::parse(&content).unwrap();
@@ -39,10 +39,10 @@ fn ignore_is_idempotent() {
     fixture.write_rfc("RFC-001-auth.md", "Auth", "draft");
     let store = fixture.store();
 
-    lazyspec::cli::ignore::ignore(fixture.root(), &store, "docs/rfcs/RFC-001-auth.md").unwrap();
+    lazyspec::cli::ignore::ignore(fixture.root(), &store, "docs/rfcs/RFC-001-auth.md", &lazyspec::engine::fs::RealFileSystem).unwrap();
     // Reload store after mutation
     let store = fixture.store();
-    lazyspec::cli::ignore::ignore(fixture.root(), &store, "docs/rfcs/RFC-001-auth.md").unwrap();
+    lazyspec::cli::ignore::ignore(fixture.root(), &store, "docs/rfcs/RFC-001-auth.md", &lazyspec::engine::fs::RealFileSystem).unwrap();
 
     let content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-auth.md")).unwrap();
     let meta = DocMeta::parse(&content).unwrap();
@@ -55,7 +55,7 @@ fn unignore_on_document_without_field_succeeds() {
     fixture.write_rfc("RFC-001-auth.md", "Auth", "draft");
     let store = fixture.store();
 
-    lazyspec::cli::ignore::unignore(fixture.root(), &store, "docs/rfcs/RFC-001-auth.md").unwrap();
+    lazyspec::cli::ignore::unignore(fixture.root(), &store, "docs/rfcs/RFC-001-auth.md", &lazyspec::engine::fs::RealFileSystem).unwrap();
 
     let content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-auth.md")).unwrap();
     let meta = DocMeta::parse(&content).unwrap();
@@ -81,7 +81,7 @@ fn ignore_then_validate_skips_document() {
 
     // Ignore the document
     let store = fixture.store();
-    lazyspec::cli::ignore::ignore(fixture.root(), &store, "docs/iterations/ITERATION-001-sprint.md")
+    lazyspec::cli::ignore::ignore(fixture.root(), &store, "docs/iterations/ITERATION-001-sprint.md", &lazyspec::engine::fs::RealFileSystem)
         .unwrap();
 
     // Reload store and validate again
@@ -103,7 +103,7 @@ fn ignore_with_shorthand_id() {
     fixture.write_rfc("RFC-001-auth.md", "Auth", "draft");
     let store = fixture.store();
 
-    lazyspec::cli::ignore::ignore(fixture.root(), &store, "RFC-001").unwrap();
+    lazyspec::cli::ignore::ignore(fixture.root(), &store, "RFC-001", &lazyspec::engine::fs::RealFileSystem).unwrap();
 
     let content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-auth.md")).unwrap();
     let meta = DocMeta::parse(&content).unwrap();
@@ -116,10 +116,10 @@ fn unignore_with_shorthand_id() {
     fixture.write_rfc("RFC-001-auth.md", "Auth", "draft");
     let store = fixture.store();
 
-    lazyspec::cli::ignore::ignore(fixture.root(), &store, "docs/rfcs/RFC-001-auth.md").unwrap();
+    lazyspec::cli::ignore::ignore(fixture.root(), &store, "docs/rfcs/RFC-001-auth.md", &lazyspec::engine::fs::RealFileSystem).unwrap();
 
     let store = fixture.store();
-    lazyspec::cli::ignore::unignore(fixture.root(), &store, "RFC-001").unwrap();
+    lazyspec::cli::ignore::unignore(fixture.root(), &store, "RFC-001", &lazyspec::engine::fs::RealFileSystem).unwrap();
 
     let content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-auth.md")).unwrap();
     let meta = DocMeta::parse(&content).unwrap();
