@@ -18,6 +18,7 @@ impl TestFixture {
         std::fs::create_dir_all(root.join("docs/adrs")).unwrap();
         std::fs::create_dir_all(root.join("docs/stories")).unwrap();
         std::fs::create_dir_all(root.join("docs/iterations")).unwrap();
+        std::fs::create_dir_all(root.join("docs/specs")).unwrap();
         Self { dir }
     }
 

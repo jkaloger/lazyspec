@@ -1,7 +1,8 @@
 use crate::engine::config::{Config, Severity, ValidationRule as ConfigRule};
-use crate::engine::document::{DocType, Status};
-use std::collections::HashMap;
+use crate::engine::document::{DocMeta, DocType, Status};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 #[derive(Debug)]
 pub enum ValidationIssue {
@@ -43,6 +44,11 @@ pub enum ValidationIssue {
     DuplicateId {
         id: String,
         paths: Vec<PathBuf>,
+    },
+    InvalidAcSlug {
+        path: PathBuf,
+        slug: String,
+        reason: String,
     },
 }
 
@@ -142,6 +148,15 @@ impl std::fmt::Display for ValidationIssue {
                 let path_strs: Vec<String> =
                     paths.iter().map(|p| p.display().to_string()).collect();
                 write!(f, "duplicate id: {} ({})", id, path_strs.join(", "))
+            }
+            ValidationIssue::InvalidAcSlug { path, slug, reason } => {
+                write!(
+                    f,
+                    "invalid AC slug in {}: \"{}\" ({})",
+                    path.display(),
+                    slug,
+                    reason
+                )
             }
         }
     }
@@ -454,12 +469,116 @@ impl Checker for DuplicateIdRule {
     }
 }
 
+pub struct AcSlugFormatRule;
+
+static AC_HEADING_PREFIX: &str = "### AC:";
+static AC_SLUG_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^[a-z0-9]+(-[a-z0-9]+)*$").unwrap());
+
+impl AcSlugFormatRule {
+    fn is_spec_story(path: &std::path::Path, store: &super::store::Store) -> bool {
+        let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+        if filename != "story.md" {
+            return false;
+        }
+        let Some(parent_path) = store.parent_of(path) else {
+            return false;
+        };
+        let Some(parent_doc) = store.get(parent_path) else {
+            return false;
+        };
+        parent_doc.doc_type == DocType::new(DocType::SPEC)
+    }
+
+    fn read_body(path: &std::path::Path, store: &super::store::Store) -> Option<String> {
+        let full_path = store.root().join(path);
+        let content = std::fs::read_to_string(&full_path).ok()?;
+        DocMeta::extract_body(&content).ok()
+    }
+
+    fn validate_slugs(path: &std::path::Path, body: &str) -> Vec<(Severity, ValidationIssue)> {
+        let slug_re = &*AC_SLUG_RE;
+        let mut issues = Vec::new();
+        let mut seen_slugs = HashSet::new();
+
+        for line in body.lines() {
+            let Some(rest) = line.strip_prefix(AC_HEADING_PREFIX) else {
+                continue;
+            };
+            let slug = rest.trim();
+
+            if slug.is_empty() {
+                issues.push((
+                    Severity::Warning,
+                    ValidationIssue::InvalidAcSlug {
+                        path: path.to_path_buf(),
+                        slug: String::new(),
+                        reason: "empty AC slug".to_string(),
+                    },
+                ));
+                continue;
+            }
+
+            if !seen_slugs.insert(slug.to_string()) {
+                issues.push((
+                    Severity::Warning,
+                    ValidationIssue::InvalidAcSlug {
+                        path: path.to_path_buf(),
+                        slug: slug.to_string(),
+                        reason: "duplicate AC slug".to_string(),
+                    },
+                ));
+                continue;
+            }
+
+            if !slug_re.is_match(slug) {
+                issues.push((
+                    Severity::Warning,
+                    ValidationIssue::InvalidAcSlug {
+                        path: path.to_path_buf(),
+                        slug: slug.to_string(),
+                        reason: "slug must be lowercase kebab-case (a-z0-9 separated by hyphens)".to_string(),
+                    },
+                ));
+            }
+        }
+
+        issues
+    }
+}
+
+impl Checker for AcSlugFormatRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        _config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        let mut issues = Vec::new();
+
+        for (path, meta) in &store.docs {
+            if meta.validate_ignore {
+                continue;
+            }
+            if !Self::is_spec_story(path, store) {
+                continue;
+            }
+            let Some(body) = Self::read_body(path, store) else {
+                continue;
+            };
+            issues.extend(Self::validate_slugs(path, &body));
+        }
+
+        issues
+    }
+}
+
 fn default_checkers() -> Vec<Box<dyn Checker>> {
     vec![
         Box::new(BrokenLinkRule),
         Box::new(ParentLinkRule),
         Box::new(StatusConsistencyRule),
         Box::new(DuplicateIdRule),
+        Box::new(AcSlugFormatRule),
     ]
 }
 

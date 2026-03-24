@@ -40,6 +40,13 @@ dir = "docs/architecture"
 prefix = "ARCH"
 icon = "🏛"
 
+[[types]]
+name = "spec"
+plural = "specs"
+dir = "docs/specs"
+prefix = "SPEC"
+icon = "📋"
+
 [templates]
 dir = ".lazyspec/templates"
 
