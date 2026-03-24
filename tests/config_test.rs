@@ -554,6 +554,34 @@ format = "incremental"
 }
 
 #[test]
+fn ref_count_ceiling_defaults_to_15() {
+    let toml_str = r#"
+[templates]
+dir = ".lazyspec/templates"
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    assert_eq!(config.ref_count_ceiling, 15);
+}
+
+#[test]
+fn ref_count_ceiling_configurable() {
+    let toml_str = r#"
+ref_count_ceiling = 20
+
+[templates]
+dir = ".lazyspec/templates"
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    assert_eq!(config.ref_count_ceiling, 20);
+}
+
+#[test]
+fn default_config_has_ref_count_ceiling_15() {
+    let config = Config::default();
+    assert_eq!(config.ref_count_ceiling, 15);
+}
+
+#[test]
 fn reserved_missing_section_fails() {
     let toml_str = r#"
 [[types]]

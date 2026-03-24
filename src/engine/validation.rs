@@ -50,6 +50,19 @@ pub enum ValidationIssue {
         slug: String,
         reason: String,
     },
+    RefCountExceeded {
+        path: PathBuf,
+        count: usize,
+        ceiling: usize,
+    },
+    CrossModuleRefs {
+        path: PathBuf,
+        module_count: usize,
+    },
+    OrphanRef {
+        path: PathBuf,
+        ref_target: String,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -156,6 +169,35 @@ impl std::fmt::Display for ValidationIssue {
                     path.display(),
                     slug,
                     reason
+                )
+            }
+            ValidationIssue::RefCountExceeded {
+                path,
+                count,
+                ceiling,
+            } => {
+                write!(
+                    f,
+                    "spec {} has {} @ref targets (ceiling {}); consider splitting",
+                    path.display(),
+                    count,
+                    ceiling
+                )
+            }
+            ValidationIssue::CrossModuleRefs { path, module_count } => {
+                write!(
+                    f,
+                    "spec {} refs span {} modules; may cover a cross-cutting concern",
+                    path.display(),
+                    module_count
+                )
+            }
+            ValidationIssue::OrphanRef { path, ref_target } => {
+                write!(
+                    f,
+                    "orphan ref in {}: @ref {} target does not exist",
+                    path.display(),
+                    ref_target
                 )
             }
         }
@@ -572,6 +614,137 @@ impl Checker for AcSlugFormatRule {
     }
 }
 
+pub struct RefScopeRule;
+
+static REF_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(super::refs::REF_PATTERN).unwrap());
+
+impl RefScopeRule {
+    fn is_spec_index(path: &std::path::Path, meta: &DocMeta, store: &super::store::Store) -> bool {
+        if meta.doc_type != DocType::new(DocType::SPEC) {
+            return false;
+        }
+        let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+        filename == "index.md" || store.parent_of(path).is_none()
+    }
+
+    fn module_prefix(ref_path: &str) -> Option<String> {
+        let parts: Vec<&str> = ref_path.split('/').collect();
+        if parts.len() >= 2 {
+            Some(format!("{}/{}", parts[0], parts[1]))
+        } else {
+            None
+        }
+    }
+}
+
+impl Checker for RefScopeRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        let mut issues = Vec::new();
+
+        for (path, meta) in &store.docs {
+            if meta.validate_ignore {
+                continue;
+            }
+            if !Self::is_spec_index(path, meta, store) {
+                continue;
+            }
+            let full_path = store.root().join(path);
+            let Ok(content) = std::fs::read_to_string(&full_path) else {
+                continue;
+            };
+            let Ok(body) = DocMeta::extract_body(&content) else {
+                continue;
+            };
+
+            let ref_re = &*REF_RE;
+            let ref_paths: HashSet<String> = ref_re
+                .captures_iter(&body)
+                .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+                .collect();
+
+            let count = ref_paths.len();
+            if count > config.ref_count_ceiling {
+                issues.push((
+                    Severity::Warning,
+                    ValidationIssue::RefCountExceeded {
+                        path: path.clone(),
+                        count,
+                        ceiling: config.ref_count_ceiling,
+                    },
+                ));
+            }
+
+            let modules: HashSet<String> = ref_paths
+                .iter()
+                .filter_map(|p| Self::module_prefix(p))
+                .collect();
+
+            if modules.len() > 3 {
+                issues.push((
+                    Severity::Warning,
+                    ValidationIssue::CrossModuleRefs {
+                        path: path.clone(),
+                        module_count: modules.len(),
+                    },
+                ));
+            }
+        }
+
+        issues
+    }
+}
+
+pub struct OrphanRefRule;
+
+impl Checker for OrphanRefRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        _config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        let mut issues = Vec::new();
+
+        for (path, meta) in &store.docs {
+            if meta.validate_ignore {
+                continue;
+            }
+            if !RefScopeRule::is_spec_index(path, meta, store) {
+                continue;
+            }
+            let full_path = store.root().join(path);
+            let Ok(content) = std::fs::read_to_string(&full_path) else {
+                continue;
+            };
+            let Ok(body) = DocMeta::extract_body(&content) else {
+                continue;
+            };
+
+            let ref_re = &*REF_RE;
+            for cap in ref_re.captures_iter(&body) {
+                let Some(ref_path) = cap.get(1).map(|m| m.as_str()) else {
+                    continue;
+                };
+                if !store.root().join(ref_path).exists() {
+                    issues.push((
+                        Severity::Warning,
+                        ValidationIssue::OrphanRef {
+                            path: path.clone(),
+                            ref_target: ref_path.to_string(),
+                        },
+                    ));
+                }
+            }
+        }
+
+        issues
+    }
+}
+
 fn default_checkers() -> Vec<Box<dyn Checker>> {
     vec![
         Box::new(BrokenLinkRule),
@@ -579,6 +752,8 @@ fn default_checkers() -> Vec<Box<dyn Checker>> {
         Box::new(StatusConsistencyRule),
         Box::new(DuplicateIdRule),
         Box::new(AcSlugFormatRule),
+        Box::new(RefScopeRule),
+        Box::new(OrphanRefRule),
     ]
 }
 

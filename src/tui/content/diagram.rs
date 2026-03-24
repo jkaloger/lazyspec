@@ -159,7 +159,7 @@ pub fn render_diagram(block: &DiagramBlock, output_dir: &Path) -> Result<PathBuf
         }
     };
 
-    let result = Command::new(tool_name(&block.language))
+    let result = Command::new("d2")
         .args(&args)
         .output();
 
@@ -168,12 +168,7 @@ pub fn render_diagram(block: &DiagramBlock, output_dir: &Path) -> Result<PathBuf
     let output = result?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "{} failed (exit {}): {}",
-            tool_name(&block.language),
-            output.status,
-            stderr.trim()
-        );
+        bail!("d2 failed (exit {}): {}", output.status, stderr.trim());
     }
 
     Ok(output_path)

@@ -82,6 +82,8 @@ pub struct TypeDef {
     pub icon: Option<String>,
     #[serde(default)]
     pub numbering: NumberingStrategy,
+    #[serde(default)]
+    pub subdirectory: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +118,8 @@ pub struct Config {
     pub ui: UiConfig,
     #[serde(skip)]
     pub rules: Vec<ValidationRule>,
+    #[serde(skip)]
+    pub ref_count_ceiling: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +155,8 @@ struct RawConfig {
     naming: Option<Naming>,
     tui: Option<UiConfig>,
     numbering: Option<RawNumbering>,
+    #[serde(default)]
+    ref_count_ceiling: Option<usize>,
 }
 
 fn build_type_def(name: &str, dir: &str, prefix: &str, icon: &str) -> TypeDef {
@@ -165,6 +171,7 @@ fn build_type_def(name: &str, dir: &str, prefix: &str, icon: &str) -> TypeDef {
         prefix: prefix.to_string(),
         icon: Some(icon.to_string()),
         numbering: NumberingStrategy::default(),
+        subdirectory: false,
     }
 }
 
@@ -174,7 +181,11 @@ fn default_types() -> Vec<TypeDef> {
         build_type_def("story", "docs/stories", "STORY", "▲"),
         build_type_def("iteration", "docs/iterations", "ITERATION", "◆"),
         build_type_def("adr", "docs/adrs", "ADR", "■"),
-        build_type_def("spec", "docs/specs", "SPEC", "📋"),
+        {
+            let mut spec = build_type_def("spec", "docs/specs", "SPEC", "📋");
+            spec.subdirectory = true;
+            spec
+        },
     ]
 }
 
@@ -249,6 +260,7 @@ impl Default for Config {
             },
             ui: UiConfig::default(),
             rules: default_rules(),
+            ref_count_ceiling: 15,
         }
     }
 }
@@ -322,6 +334,8 @@ impl Config {
             }
         }
 
+        let ref_count_ceiling = raw.ref_count_ceiling.unwrap_or(15);
+
         Ok(Config {
             documents: DocumentConfig {
                 types,
@@ -339,6 +353,7 @@ impl Config {
             },
             ui: raw.tui.unwrap_or_default(),
             rules,
+            ref_count_ceiling,
         })
     }
 

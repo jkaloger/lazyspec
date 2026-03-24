@@ -185,6 +185,7 @@ fn custom_types_populate_doc_types_and_icons() {
             prefix: "EPIC".into(),
             icon: Some("⚡".into()),
             numbering: Default::default(),
+            subdirectory: false,
         },
         TypeDef {
             name: "task".into(),
@@ -193,6 +194,7 @@ fn custom_types_populate_doc_types_and_icons() {
             prefix: "TASK".into(),
             icon: None,
             numbering: Default::default(),
+            subdirectory: false,
         },
     ];
     let store = Store::load(fixture.root(), &config).unwrap();

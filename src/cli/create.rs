@@ -63,17 +63,6 @@ pub fn run(
         &config.documents.naming.pattern, doc_type, title, &target_dir, numbering,
         pre_computed_id.as_deref(),
     ).map_err(|e| anyhow!("{}", e))?;
-    let target_path = target_dir.join(&filename);
-
-    let template_path = root
-        .join(&config.filesystem.templates.dir)
-        .join(format!("{}.md", doc_type.to_lowercase()));
-    let template_content = if template_path.exists() {
-        fs::read_to_string(&template_path)?
-    } else {
-        default_template(doc_type)
-    };
-
     let date = Local::now().format("%Y-%m-%d").to_string();
     let vars = vec![
         ("title", title),
@@ -81,8 +70,26 @@ pub fn run(
         ("date", date.as_str()),
         ("type", doc_type),
     ];
-    let content = template::render_template(&template_content, &vars);
 
+    if type_def.subdirectory {
+        let dir_name = filename.trim_end_matches(".md");
+        let spec_dir = target_dir.join(dir_name);
+        fs::create_dir_all(&spec_dir)?;
+
+        let index_template = load_template(root, config, doc_type);
+        let index_content = template::render_template(&index_template, &vars);
+        let index_path = spec_dir.join("index.md");
+        fs::write(&index_path, index_content)?;
+
+        let story_content = template::render_template(&story_template(doc_type), &vars);
+        fs::write(spec_dir.join("story.md"), story_content)?;
+
+        return Ok(index_path);
+    }
+
+    let target_path = target_dir.join(&filename);
+    let template_content = load_template(root, config, doc_type);
+    let content = template::render_template(&template_content, &vars);
     fs::write(&target_path, content)?;
 
     Ok(target_path)
@@ -105,6 +112,41 @@ pub fn run_json(
 
     let json = doc_to_json(&meta);
     Ok(serde_json::to_string_pretty(&json)?)
+}
+
+fn load_template(root: &Path, config: &Config, doc_type: &str) -> String {
+    let template_path = root
+        .join(&config.filesystem.templates.dir)
+        .join(format!("{}.md", doc_type.to_lowercase()));
+    if template_path.exists() {
+        fs::read_to_string(&template_path).unwrap_or_else(|_| default_template(doc_type))
+    } else {
+        default_template(doc_type)
+    }
+}
+
+fn story_template(doc_type: &str) -> String {
+    format!(
+        r#"---
+title: "{{title}}"
+type: {}
+status: draft
+author: "{{author}}"
+date: {{date}}
+tags: []
+related: []
+---
+
+## Acceptance Criteria
+
+### AC: example-criterion
+
+Given a precondition
+When an action is taken
+Then an expected outcome occurs
+"#,
+        doc_type.to_lowercase()
+    )
 }
 
 fn default_template(doc_type: &str) -> String {
@@ -164,6 +206,23 @@ related: []
 TODO
 "#
         .to_string(),
+
+        "spec" => format!(
+            r#"---
+title: "{{title}}"
+type: spec
+status: draft
+author: "{{author}}"
+date: {{date}}
+tags: []
+related: []
+---
+
+## Summary
+
+TODO
+"#
+        ),
 
         _ => format!(
             r#"---
