@@ -12,7 +12,7 @@ related:
 
 ## TL;DR
 
-Specs are collections of acceptance criteria (AC) pinned to code via `@ref` directives. Five signals -- symbol drift, test drift, test failure, AC mutation, scope change -- independently inform whether those AC are still true. When signals converge, a human re-certifies. Blob hashes (`@{blob:hash}`) replace commit SHAs for pinning, surviving squash merges and GC. story.md is a pure AC list; all `@ref` directives live in index.md. Certification is one commit, not two.
+Specs are collections of acceptance criteria (AC) pinned to code via `@ref` directives. Five signals -- symbol drift, test drift, test failure, AC mutation, scope change -- independently inform whether those AC are still true. When signals converge, a human re-certifies. Blob hashes (`@{blob:hash}`) replace commit SHAs for pinning, surviving squash merges and GC. Symbol-level hashes use AST normalization (stripping comments and whitespace) to avoid phantom drift from formatting changes. story.md is a pure AC list with stable slug identifiers per criterion; all `@ref` directives live in index.md. Per-AC content hashing enables granular drift reporting ("AC3 changed" rather than "story.md changed"). Certification is one commit, not two.
 
 ## Summary
 
@@ -85,8 +85,8 @@ The system collects five signal types, all of equal weight, all feeding the same
 | Symbol drift | `@ref` impl targets in `index.md`   | Implementation code changed since baseline | The AC is violated                          |
 | Test drift   | `@ref` test targets in `index.md`   | The test code changed since baseline       | The AC is no longer verified                |
 | Test failure | Test runner execution               | A referenced test does not pass            | The spec is wrong (the test might be wrong) |
-| AC mutation  | `story.md` content hash             | The behavioural claims changed             | The code needs to change                    |
-| Scope change | AC added or removed from `story.md` | The contract surface grew or shrank        | Previous certifications are meaningless     |
+| AC mutation  | Per-AC content hash in `story.md`   | A specific AC's prose changed              | The code needs to change                    |
+| Scope change | AC slugs added/removed in `story.md`| The contract surface grew or shrank        | Previous certifications are meaningless     |
 
 Signals compose. A single drifted symbol in a spec with 5 stable refs and passing tests is low urgency -- something changed, but everything else looks fine. Three drifted symbols, a changed test, and a failing test is high urgency -- the ground has shifted under multiple AC simultaneously.
 
@@ -167,24 +167,26 @@ author: jkaloger
 date: 2026-03-24
 ---
 
-### AC1: Expired sessions are rejected
+### AC: expired-sessions-rejected
 
 Given a session older than the configured TTL
 When the engine evaluates it
 Then it returns a SessionExpired error
 
-### AC2: Refresh extends TTL
+### AC: refresh-extends-ttl
 
 Given a valid, non-expired session
 When refresh is called
 Then the session's expiry is extended by TTL
 
-### AC3: Revoked sessions are immediate
+### AC: revoked-sessions-immediate
 
 Given an active session
 When the session is explicitly revoked
 Then subsequent requests with that session token are rejected
 ```
+
+Each AC has a stable slug identifier (`### AC: <slug>`). These IDs are immutable -- renaming or renumbering them changes the contract identity. Sequential numbering (`AC1`, `AC2`) is deliberately avoided because deletions cause renumbering cascades that confuse drift tracking.
 
 story.md is the human-readable contract. It answers "what should be true?" without coupling to specific test functions or code locations. The correlation between AC and signals (which tests exercise which claims, which symbols are relevant to which AC) is a human judgment made during certification, not a structural pairing enforced by the tooling.
 
@@ -192,13 +194,22 @@ The story.md is a sub-document of the spec (both have `type: spec`), not a stand
 
 #### story.md lifecycle
 
-story.md changes are tracked through content hashing, not through `@ref` directives. At certification time, `lazyspec certify` computes a hash of story.md's content and stores it as `story_hash` in the index frontmatter. Subsequent drift detection compares the current story.md content against this hash.
+story.md changes are tracked through per-AC content hashing, not through `@ref` directives. At certification time, `lazyspec certify` parses each `### AC: <slug>` section in story.md, hashes the text of each AC individually, and stores the results as `story_hashes` in the index frontmatter. Subsequent drift detection compares the current AC content against these per-AC hashes.
 
-This catches three scenarios the `@ref`-only model misses:
+```yaml
+story_hashes:
+  expired-sessions-rejected: "sha256:aabb1122..."
+  refresh-extends-ttl: "sha256:ccdd3344..."
+  revoked-sessions-immediate: "sha256:eeff5566..."
+```
 
-- AC added: story.md hash changes, spec is flagged as uncertified (the contract grew)
-- AC removed: story.md hash changes, spec is flagged as uncertified (a claim was withdrawn)
-- AC prose changed: story.md hash changes, spec is flagged as uncertified (the claim shifted)
+Per-AC hashing enables precise drift reporting. Rather than "story.md changed," the system can report exactly which AC changed and distinguish three categories:
+
+- AC added: a new slug appears that has no stored hash. The contract grew.
+- AC removed: a stored slug has no matching section in story.md. A claim was withdrawn.
+- AC modified: a slug exists in both but the hashes differ. The claim shifted.
+
+These categories carry different urgency. An added AC expands the contract surface and may not invalidate existing certification of other AC. A removed AC shrinks it. A modified AC directly questions whether the previous certification of that specific claim still holds. `lazyspec drift` reports each category distinctly.
 
 A `status: draft` spec suppresses the story_hash check, allowing AC to be written and revised freely during development. The hash check activates when the spec reaches `status: accepted` and has been certified at least once.
 
@@ -242,27 +253,51 @@ Blob hashes avoid this entirely. A blob hash identifies a specific piece of _con
 
 #### How blob pinning works
 
-For symbol-level refs, the blob hash is computed from the tree-sitter-extracted symbol content:
+For symbol-level refs, the blob hash is computed from the _normalized_ tree-sitter-extracted symbol content:
 
 1. Extract the symbol from the source file using tree-sitter
-2. Hash the extracted bytes: `echo -n "<symbol content>" | git hash-object --stdin`
-3. Store as `@ref path#symbol@{blob:a1b2c3}`
+2. Normalize the AST: walk the extracted node tree, strip comment nodes and collapse whitespace. This produces a canonical representation that is insensitive to formatting changes (`cargo fmt`, adding doc comments, adjusting indentation)
+3. Hash the normalized bytes: `echo -n "<normalized content>" | git hash-object --stdin`
+4. Store as `@ref path#symbol@{blob:a1b2c3}`
 
 For whole-file refs, the blob hash is the file's git object ID:
 
 1. `git hash-object path/to/file` (computable from the working tree, before commit)
 2. Store as `@ref path@{blob:d4e5f6}`
 
+Whole-file refs are _not_ normalized -- they hash raw file content. This is intentional: for config files and schemas, whitespace and comment changes may be meaningful.
+
 Drift detection compares the stored blob hash against the current state:
 
 1. Extract the symbol (or read the file) at HEAD
-2. Hash the result
+2. Normalize (for symbol refs) and hash the result
 3. If hashes differ: DRIFTED. If the symbol cannot be found: ORPHANED. If identical: CURRENT.
 
 To show _what_ changed (not just _that_ it changed), `git diff <old-blob> <new-blob>` produces a content diff between the two blob objects. This works because both blobs exist in the object store -- the old one persists as long as the content appears anywhere in reachable history.
 
+#### Semantic hashing and normalization
+
+Symbol-level blob hashes use AST normalization to avoid phantom drift from formatting changes. The normalization pipeline:
+
+1. Parse the extracted symbol bytes with tree-sitter
+2. Walk the concrete syntax tree, filtering out node types: `comment`, `line_comment`, `block_comment`, `doc_comment`
+3. Collapse contiguous whitespace (including newlines) to a single space
+4. Hash the resulting byte sequence
+
+This means `cargo fmt`, adding a `///` doc comment, or adjusting line breaks does _not_ change the blob hash. Only structural changes to the code (new parameters, changed types, different logic) produce drift.
+
+The tradeoff: comments that carry semantic weight (e.g., `// SAFETY:` blocks in unsafe Rust, `// TODO:` markers) are invisible to drift detection. For specs where comment content is part of the contract, normalization can be disabled per-spec or per-language in `.lazyspec.toml`:
+
+```toml
+[certification]
+normalize = true  # default
+
+[certification.overrides."docs/specs/SPEC-007-unsafe-invariants"]
+normalize = false  # hash raw bytes, comments included
+```
+
 > [!WARNING]
-> Blob hash stability depends on tree-sitter extraction consistency. If a tree-sitter grammar update changes how symbols are parsed (e.g. attribute node boundaries shift), all stored hashes for that language become stale, producing phantom drift across every spec. Mitigate this by pinning tree-sitter grammar versions in `Cargo.toml` and treating grammar bumps as certification-invalidating events that require a re-pinning pass (`lazyspec pin --all`).
+> Blob hash stability depends on tree-sitter extraction consistency. If a tree-sitter grammar update changes how symbols are parsed (e.g. attribute node boundaries shift), all stored hashes for that language become stale, producing phantom drift across every spec. Mitigate this by pinning tree-sitter grammar versions in `Cargo.toml` and treating grammar bumps as certification-invalidating events that require a re-pinning pass (`lazyspec pin --all`). Normalization reduces (but does not eliminate) this risk, since minor grammar changes that only affect whitespace classification are absorbed.
 
 Whole-file blob hashing is sensitive to _any_ change in the file, including unrelated ones. If a spec pins `@ref .lazyspec.toml@{blob:abc123}` and a developer adds an unrelated config key, the blob hash changes and the spec reports drift. Mitigations: keep config files that specs pin small and focused. Structured file targeting (e.g. JSONPath or jq-style selectors) is out of scope for this RFC but remains a natural future extension.
 
@@ -359,9 +394,13 @@ This reuses the existing tree-sitter symbol extraction from the `@ref` expansion
 
 #### AC mutation and scope change
 
-Drift detection compares the current story.md content hash against the `story_hash` stored in frontmatter at certification time. Any change -- added AC, removed AC, modified prose -- produces a mismatch, flagging the spec as needing re-certification.
+Drift detection parses each `### AC: <slug>` section in story.md, hashes the text of each AC individually, and compares against the `story_hashes` map stored in frontmatter at certification time. This produces per-AC granularity:
 
-This is deliberately coarse-grained. The system doesn't track which specific AC changed; it signals that the contract surface moved. The human reviewer determines what changed and whether it matters.
+- A slug present in `story_hashes` but missing from story.md: AC removed (scope shrank)
+- A slug present in story.md but missing from `story_hashes`: AC added (scope grew)
+- A slug present in both but with different hashes: AC modified (claim shifted)
+
+Each category carries different urgency. A modified AC directly questions the previous certification of that claim. An added AC expands the contract without necessarily invalidating existing certifications. A removed AC may indicate an intentional scope reduction or an accidental deletion -- both worth flagging.
 
 #### Test failure
 
@@ -401,7 +440,7 @@ SPEC-002: Data Model
       src/engine/store.rs#Store::load@{blob:c3d4} — CURRENT
       src/engine/session.rs#SessionManager::create@{blob:e5f6} — CURRENT
     test drift: 0 of 2 test refs changed
-    story.md: UNCHANGED
+    story.md: 3 of 3 AC unchanged
   urgency: low (single symbol drift, tests stable)
 ```
 
@@ -415,7 +454,9 @@ SPEC-005: Search Algorithm
     symbol drift: 3 of 4 impl refs changed
     test drift: 1 of 2 test refs changed
     test failure: tests/search_test.rs#test_ranked_results — FAILING
-    story.md: CHANGED (AC added since certification)
+    story.md:
+      AC added: optimize-empty-query (new, uncertified)
+      AC modified: ranked-results (hash mismatch)
   urgency: high (multiple signals converging)
 ```
 
@@ -432,19 +473,23 @@ type: spec
 status: accepted
 certified_by: jkaloger
 certified_date: 2026-03-20
-story_hash: "sha256:aabb1122..."
+story_hashes:
+  expired-sessions-rejected: "sha256:aabb1122..."
+  refresh-extends-ttl: "sha256:ccdd3344..."
+  revoked-sessions-immediate: "sha256:eeff5566..."
 ---
 ```
 
-The `story_hash` field captures the content hash of `story.md` at certification time. If `story.md` changes after certification, the hash mismatch signals that the contract surface has moved and re-certification is needed.
+The `story_hashes` map captures the content hash of each AC at certification time. Drift detection compares each AC's current content against its stored hash, enabling per-AC change reporting.
 
 #### The `lazyspec certify` command
 
 1. Resolves all `@ref` targets in the spec at HEAD to verify they're resolvable
-2. Pins any unpinned refs to HEAD by computing their blob hashes and writing `@{blob:hash}` into the directives
-3. If a test runner is configured, runs the test functions referenced by `@ref` test targets and verifies they pass
-4. If all checks pass, writes `certified_by`, `certified_date`, and `story_hash` to the spec's frontmatter
-5. If any test fails, reports the failure and refuses to certify
+2. Pins any unpinned refs to HEAD by computing their normalized blob hashes and writing `@{blob:hash}` into the directives
+3. Parses each `### AC: <slug>` section in story.md and computes per-AC content hashes
+4. If a test runner is configured, runs the test functions referenced by `@ref` test targets and verifies they pass
+5. If all checks pass, writes `certified_by`, `certified_date`, and `story_hashes` to the spec's frontmatter
+6. If any test fails, reports the failure and refuses to certify
 
 The command mutates the file on disk but does not commit. The developer reviews the diff and commits as part of their normal workflow.
 
