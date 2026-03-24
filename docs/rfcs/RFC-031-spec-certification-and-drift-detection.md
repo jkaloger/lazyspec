@@ -23,7 +23,7 @@ This RFC introduces two changes:
 1. Evolve the `arch` document type into `spec` -- a persistent contract type whose scope is defined by its `@ref` directives and whose behavioural claims are defined by acceptance criteria in `story.md`
 2. Add a multi-signal drift detection system and human-driven certification workflow that together answer one question: are the spec's AC still true?
 
-The central thesis: the code is the specification. Specs they _describe_ what code does for users, pinned to the implementation and tests that prove it. When the code changes, the spec is stale. Certification means "this description is verified accurate" -- backed by converging signals, not just a human's word.
+The central thesis: the code is the specification. Specs _describe_ what code does for users, pinned to the implementation and tests that prove it. When the code changes, the spec is stale. Certification means "this description is verified accurate" -- backed by converging signals, not just a human's word.
 
 ## Problem
 
@@ -125,7 +125,7 @@ Concrete guidance on granularity:
 | One CLI flag               | Document validation pipeline (rules, diagnostics, reporting) | "The CLI"         |
 | A config field             | @ref expansion (parsing, resolution, caching, rendering)     | "All of lazyspec" |
 
-The test: if you certify a spec and one of its symbols changes, should you care? If the answer is "probably not, it's unrelated" -- the spec is too broad and should be split. If you find yourself certifying three specs every time you touch one function -- the specs are too narrow and should be merged.
+The heuristic: if you certify a spec and one of its symbols changes, should you care? If the answer is "probably not, it's unrelated" -- the spec is too broad and should be split. If you find yourself certifying three specs every time you touch one function -- the specs are too narrow and should be merged.
 
 Specs can cover different kinds of things:
 
@@ -803,7 +803,7 @@ Existing Story documents are superseded. For each Story:
 
 Stories don't need to be deleted immediately. They can remain as historical artifacts with `status: superseded`. `lazyspec validate` should warn about iterations still linked to superseded Stories, prompting re-linking to specs.
 
-A `lazyspec migrate` command handles this, or it can be documented as a manual process for the initial migration.
+A `lazyspec migrate` command handles this. Alternatively, the initial migration can be performed manually given the small number of existing documents.
 
 ## Stories
 
