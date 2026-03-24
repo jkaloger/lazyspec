@@ -1,13 +1,14 @@
 ---
 title: TUI Nesting Flattening and Naming
 type: iteration
-status: draft
+status: accepted
 author: unknown
 date: 2026-03-23
 tags: []
 related:
 - implements: docs/stories/STORY-081-tui-nesting-naming-and-module-splits.md
 ---
+
 
 
 Covers RFC-032 streams 2d, 2e, 4a, and 4c. Flattens the GFM extraction and preview rendering pipelines, and renames TUI functions whose names don't reflect their scope. No behaviour changes.

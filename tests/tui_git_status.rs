@@ -26,6 +26,7 @@ fn make_app(fixture: &TestFixture) -> App {
         store,
         &fixture.config(),
         ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
     )
 }
 

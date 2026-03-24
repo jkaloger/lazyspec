@@ -1,6 +1,7 @@
 mod common;
 
 use lazyspec::cli::RenumberFormat;
+use lazyspec::engine::fs::RealFileSystem;
 
 fn sqids_config() -> lazyspec::engine::config::Config {
     let toml = r#"
@@ -68,6 +69,7 @@ fn renumber_incremental_to_sqids() {
         None,
         false,
         false,
+        &RealFileSystem,
     );
     assert_eq!(exit_code, 0);
 
@@ -112,6 +114,7 @@ fn renumber_sqids_to_incremental() {
         None,
         false,
         false,
+        &RealFileSystem,
     );
     assert_eq!(exit_code, 0);
 
@@ -146,6 +149,7 @@ fn renumber_type_filter() {
         Some("rfc"),
         false,
         false,
+        &RealFileSystem,
     );
 
     // RFC should have been renamed
@@ -174,6 +178,7 @@ fn renumber_dry_run_no_side_effects() {
         None,
         true,
         false,
+        &RealFileSystem,
     );
 
     // Files should still exist at original paths
@@ -200,6 +205,7 @@ fn renumber_skips_already_converted_sqids() {
         None,
         false,
         false,
+        &RealFileSystem,
     );
 
     // File should still exist unchanged
@@ -224,6 +230,7 @@ fn renumber_skips_already_converted_incremental() {
         None,
         false,
         false,
+        &RealFileSystem,
     );
 
     // File should still exist unchanged (nothing to convert)
@@ -250,6 +257,7 @@ fn renumber_json_output() {
         None,
         true,
         true,
+        &RealFileSystem,
     );
     assert_eq!(exit_code, 0);
 }
@@ -276,6 +284,7 @@ fn renumber_updates_related_references() {
         Some("rfc"),
         false,
         false,
+        &RealFileSystem,
     );
 
     // The story file should have its related path updated
@@ -311,7 +320,7 @@ fn renumber_detects_external_references() {
     }];
 
     let ext_refs =
-        lazyspec::cli::fix::renumber::scan_external_references(fixture.root(), &store, &config, &changes);
+        lazyspec::cli::fix::renumber::scan_external_references(fixture.root(), &store, &config, &changes, &RealFileSystem);
 
     assert_eq!(ext_refs.len(), 1);
     assert_eq!(ext_refs[0].file, "README.md");
@@ -343,7 +352,7 @@ fn renumber_external_refs_skips_managed_files() {
     }];
 
     let ext_refs =
-        lazyspec::cli::fix::renumber::scan_external_references(fixture.root(), &store, &config, &changes);
+        lazyspec::cli::fix::renumber::scan_external_references(fixture.root(), &store, &config, &changes, &RealFileSystem);
 
     // Managed store files should not appear in external references
     assert!(
@@ -375,6 +384,7 @@ fn renumber_json_output_structure() {
         &RenumberFormat::Sqids,
         Some("rfc"),
         true,
+        &RealFileSystem,
     );
 
     let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -422,6 +432,7 @@ fn renumber_sqids_to_incremental_avoids_collision() {
         None,
         false,
         false,
+        &RealFileSystem,
     );
 
     // RFC-001 should still exist untouched (it's already incremental)
@@ -461,6 +472,7 @@ fn renumber_mixed_formats_only_converts_needed() {
         None,
         false,
         false,
+        &RealFileSystem,
     );
 
     // The sqids one should still exist unchanged
@@ -522,7 +534,7 @@ fn renumber_external_refs_skips_noise_dirs() {
     }];
 
     let ext_refs =
-        lazyspec::cli::fix::renumber::scan_external_references(fixture.root(), &store, &config, &changes);
+        lazyspec::cli::fix::renumber::scan_external_references(fixture.root(), &store, &config, &changes, &RealFileSystem);
 
     assert!(
         ext_refs.is_empty(),

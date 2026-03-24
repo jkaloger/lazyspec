@@ -1,13 +1,14 @@
 ---
 title: Engine Safety and Error Propagation
 type: iteration
-status: draft
+status: accepted
 author: unknown
 date: 2026-03-23
 tags: []
 related:
 - implements: docs/stories/STORY-079-engine-safety-and-error-propagation.md
 ---
+
 
 
 ## Changes

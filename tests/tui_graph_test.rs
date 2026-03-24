@@ -33,7 +33,7 @@ fn setup_graph_fixture() -> (TestFixture, App) {
     );
 
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
     (fixture, app)
 }
 
@@ -192,7 +192,7 @@ fn custom_types_populate_doc_types_and_icons() {
         },
     ];
     let store = Store::load(fixture.root(), &config).unwrap();
-    let app = App::new(store, &config, ratatui_image::picker::Picker::halfblocks());
+    let app = App::new(store, &config, ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     assert_eq!(app.doc_types.len(), 2);
     assert_eq!(app.doc_types[0], DocType::new("epic"));

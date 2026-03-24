@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use crate::cli::RenumberFormat;
 use crate::engine::config::Config;
+use crate::engine::fs::FileSystem;
 use crate::engine::store::Store;
 
 use conflicts::collect_conflict_fixes;
@@ -80,8 +81,9 @@ pub fn run(
     paths: &[String],
     dry_run: bool,
     json: bool,
+    fs: &dyn FileSystem,
 ) -> i32 {
-    let output = plan_field_and_conflict_fixes(root, store, config, paths, dry_run);
+    let output = plan_field_and_conflict_fixes(root, store, config, paths, dry_run, fs);
     let has_fixes = !output.field_fixes.iter().all(|r| r.fields_added.is_empty())
         || !output.conflict_fixes.is_empty();
 
@@ -106,8 +108,9 @@ pub fn run_renumber(
     doc_type: Option<&str>,
     dry_run: bool,
     json: bool,
+    fs: &dyn FileSystem,
 ) -> i32 {
-    let output = collect_renumber_output(root, store, config, format, doc_type, dry_run);
+    let output = collect_renumber_output(root, store, config, format, doc_type, dry_run, fs);
 
     if json {
         let wrapper = serde_json::json!({ "renumber": output });
@@ -151,8 +154,9 @@ pub fn run_json(
     config: &Config,
     paths: &[String],
     dry_run: bool,
+    fs: &dyn FileSystem,
 ) -> String {
-    let output = plan_field_and_conflict_fixes(root, store, config, paths, dry_run);
+    let output = plan_field_and_conflict_fixes(root, store, config, paths, dry_run, fs);
     serde_json::to_string_pretty(&output).unwrap()
 }
 
@@ -163,8 +167,9 @@ pub fn run_renumber_json(
     format: &RenumberFormat,
     doc_type: Option<&str>,
     dry_run: bool,
+    fs: &dyn FileSystem,
 ) -> String {
-    let output = collect_renumber_output(root, store, config, format, doc_type, dry_run);
+    let output = collect_renumber_output(root, store, config, format, doc_type, dry_run, fs);
     let wrapper = serde_json::json!({ "renumber": output });
     serde_json::to_string_pretty(&wrapper).unwrap()
 }
@@ -175,8 +180,9 @@ pub fn run_human(
     config: &Config,
     paths: &[String],
     dry_run: bool,
+    fs: &dyn FileSystem,
 ) -> String {
-    let output = plan_field_and_conflict_fixes(root, store, config, paths, dry_run);
+    let output = plan_field_and_conflict_fixes(root, store, config, paths, dry_run, fs);
     format_human(&output, dry_run)
 }
 
@@ -186,9 +192,10 @@ fn plan_field_and_conflict_fixes(
     config: &Config,
     paths: &[String],
     dry_run: bool,
+    fs: &dyn FileSystem,
 ) -> FixOutput {
-    let field_fixes = collect_field_fixes(root, store, config, paths, dry_run);
-    let conflict_fixes = collect_conflict_fixes(root, store, config, dry_run);
+    let field_fixes = collect_field_fixes(root, store, config, paths, dry_run, fs);
+    let conflict_fixes = collect_conflict_fixes(root, store, config, dry_run, fs);
     FixOutput {
         field_fixes,
         conflict_fixes,

@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::engine::config::Config;
 use crate::engine::document::split_frontmatter;
+use crate::engine::fs::FileSystem;
 use crate::engine::store::Store;
 
 use super::FieldFixResult;
@@ -14,6 +15,7 @@ pub(super) fn collect_field_fixes(
     config: &Config,
     paths: &[String],
     dry_run: bool,
+    fs: &dyn FileSystem,
 ) -> Vec<FieldFixResult> {
     let file_paths: Vec<String> = if paths.is_empty() {
         store
@@ -27,7 +29,7 @@ pub(super) fn collect_field_fixes(
 
     file_paths
         .iter()
-        .filter_map(|p| fix_file(root, config, p, dry_run).ok())
+        .filter_map(|p| fix_file(root, config, p, dry_run, fs).ok())
         .collect()
 }
 
@@ -36,9 +38,10 @@ fn fix_file(
     config: &Config,
     path: &str,
     dry_run: bool,
+    fs: &dyn FileSystem,
 ) -> anyhow::Result<FieldFixResult> {
     let full_path = root.join(path);
-    let content = std::fs::read_to_string(&full_path)?;
+    let content = fs.read_to_string(&full_path)?;
 
     let (yaml_str, body) = match split_frontmatter(&content) {
         Ok((y, b)) => (y, b),
@@ -71,7 +74,7 @@ fn fix_file(
     let written = if !dry_run && !fields_added.is_empty() {
         let new_yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(mapping))?;
         let output = format!("---\n{}---\n{}", new_yaml, body);
-        std::fs::write(&full_path, output)?;
+        fs.write(&full_path, &output)?;
         true
     } else {
         false

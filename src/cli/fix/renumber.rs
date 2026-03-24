@@ -6,6 +6,7 @@ use regex::Regex;
 use crate::cli::RenumberFormat;
 use crate::engine::config::{Config, SqidsConfig};
 use crate::engine::document::split_frontmatter;
+use crate::engine::fs::FileSystem;
 use crate::engine::refs::REF_PATTERN;
 use crate::engine::store::Store;
 use crate::engine::template::shuffle_alphabet;
@@ -19,14 +20,15 @@ pub(super) fn collect_renumber_output(
     format: &RenumberFormat,
     doc_type: Option<&str>,
     dry_run: bool,
+    fs: &dyn FileSystem,
 ) -> RenumberOutput {
     let format_str = match format {
         RenumberFormat::Sqids => "sqids",
         RenumberFormat::Incremental => "incremental",
     };
 
-    let changes = plan_renumbering(root, store, config, format, doc_type, dry_run);
-    let external_references = scan_external_references(root, store, config, &changes);
+    let changes = plan_renumbering(root, store, config, format, doc_type, dry_run, fs);
+    let external_references = scan_external_references(root, store, config, &changes, fs);
 
     RenumberOutput {
         format: format_str.to_string(),
@@ -57,6 +59,7 @@ fn plan_renumbering(
     format: &RenumberFormat,
     doc_type_filter: Option<&str>,
     dry_run: bool,
+    fs: &dyn FileSystem,
 ) -> Vec<RenumberFixResult> {
     let target_types: Vec<&crate::engine::config::TypeDef> = config
         .documents
@@ -115,7 +118,7 @@ fn plan_renumbering(
                     };
                     let new_id = format!("{}-{}", prefix, sqid);
 
-                    if let Some(rename) = build_rename(root, doc, id, &new_id, dry_run) {
+                    if let Some(rename) = build_rename(root, doc, id, &new_id, dry_run, fs) {
                         all_renames.push(rename);
                     }
                 }
@@ -154,7 +157,7 @@ fn plan_renumbering(
                         continue;
                     }
 
-                    if let Some(rename) = build_rename(root, doc, id, &new_id, dry_run) {
+                    if let Some(rename) = build_rename(root, doc, id, &new_id, dry_run, fs) {
                         all_renames.push(rename);
                     }
                 }
@@ -169,14 +172,14 @@ fn plan_renumbering(
             .collect();
 
         for rename in &mut all_renames {
-            let refs = cascade_references(root, store, &rename.old_path, &rename.new_path, dry_run);
+            let refs = cascade_references(root, store, &rename.old_path, &rename.new_path, dry_run, fs);
             rename.references_updated = refs;
         }
 
         if !dry_run {
             for rename in &all_renames {
                 let new_abs = root.join(&rename.new_path);
-                let content = match std::fs::read_to_string(&new_abs) {
+                let content = match fs.read_to_string(&new_abs) {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
@@ -189,7 +192,7 @@ fn plan_renumbering(
                     updated = updated.replace(old_p.as_str(), new_p.as_str());
                 }
                 if updated != content {
-                    let _ = std::fs::write(&new_abs, &updated);
+                    let _ = fs.write(&new_abs, &updated);
                 }
             }
         }
@@ -203,6 +206,7 @@ pub fn scan_external_references(
     store: &Store,
     config: &Config,
     changes: &[RenumberFixResult],
+    fs: &dyn FileSystem,
 ) -> Vec<ExternalReference> {
     if changes.is_empty() {
         return vec![];
@@ -228,7 +232,7 @@ pub fn scan_external_references(
         .collect();
 
     let mut refs = Vec::new();
-    scan_dir_for_references(root, root, &managed_dirs, &managed_paths, &old_names, &mut refs);
+    scan_dir_for_references(root, root, &managed_dirs, &managed_paths, &old_names, &mut refs, fs);
     refs
 }
 
@@ -239,17 +243,17 @@ fn scan_dir_for_references(
     managed_paths: &HashSet<String>,
     old_names: &[String],
     refs: &mut Vec<ExternalReference>,
+    fs: &dyn FileSystem,
 ) {
-    let entries = match std::fs::read_dir(dir) {
+    let entries = match fs.read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
     };
 
     const NOISE_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv", "dist", "build", ".hg"];
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
+    for path in entries {
+        if fs.is_dir(&path) {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if NOISE_DIRS.contains(&name) {
                     continue;
@@ -260,7 +264,7 @@ fn scan_dir_for_references(
             if managed_dirs.contains(&rel_str) {
                 continue;
             }
-            scan_dir_for_references(root, &path, managed_dirs, managed_paths, old_names, refs);
+            scan_dir_for_references(root, &path, managed_dirs, managed_paths, old_names, refs, fs);
             continue;
         }
 
@@ -279,7 +283,7 @@ fn scan_dir_for_references(
             continue;
         }
 
-        let content = match std::fs::read_to_string(&path) {
+        let content = match fs.read_to_string(&path) {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -304,6 +308,7 @@ fn build_rename(
     old_id: &str,
     new_id: &str,
     dry_run: bool,
+    fs: &dyn FileSystem,
 ) -> Option<RenumberFixResult> {
     let filename = doc.path.file_name().and_then(|f| f.to_str()).unwrap_or("");
     let is_subfolder = filename == "index.md";
@@ -320,8 +325,8 @@ fn build_rename(
         let new_abs = root.join(&new_parent_rel);
 
         if !dry_run {
-            std::fs::rename(&old_abs, &new_abs).ok()?;
-            update_title_in_file(&new_abs.join("index.md"), old_id, new_id);
+            fs.rename(&old_abs, &new_abs).ok()?;
+            update_title_in_file(&new_abs.join("index.md"), old_id, new_id, fs);
         }
 
         Some(RenumberFixResult {
@@ -343,8 +348,8 @@ fn build_rename(
         let new_abs = root.join(&new_rel);
 
         if !dry_run {
-            std::fs::rename(&old_abs, &new_abs).ok()?;
-            update_title_in_file(&new_abs, old_id, new_id);
+            fs.rename(&old_abs, &new_abs).ok()?;
+            update_title_in_file(&new_abs, old_id, new_id, fs);
         }
 
         Some(RenumberFixResult {
@@ -358,8 +363,8 @@ fn build_rename(
     }
 }
 
-fn update_title_in_file(path: &Path, old_id: &str, new_id: &str) {
-    let content = match std::fs::read_to_string(path) {
+fn update_title_in_file(path: &Path, old_id: &str, new_id: &str, fs: &dyn FileSystem) {
+    let content = match fs.read_to_string(path) {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -375,7 +380,7 @@ fn update_title_in_file(path: &Path, old_id: &str, new_id: &str) {
 
     let new_yaml = yaml_str.replace(old_id, new_id);
     let output = format!("---\n{}\n---\n{}", new_yaml, body);
-    let _ = std::fs::write(path, output);
+    let _ = fs.write(path, &output);
 }
 
 pub fn cascade_references(
@@ -384,12 +389,13 @@ pub fn cascade_references(
     old_path: &str,
     new_path: &str,
     dry_run: bool,
+    fs: &dyn FileSystem,
 ) -> Vec<ReferenceUpdate> {
     let mut updates = Vec::new();
 
     for doc in store.all_docs() {
         let full_path = root.join(&doc.path);
-        let content = match std::fs::read_to_string(&full_path) {
+        let content = match fs.read_to_string(&full_path) {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -464,7 +470,7 @@ pub fn cascade_references(
                 Err(_) => continue,
             };
             let output = format!("---\n{}---\n{}", new_yaml, final_body);
-            let _ = std::fs::write(&full_path, output);
+            let _ = fs.write(&full_path, &output);
         }
 
         updates.extend(file_updates);

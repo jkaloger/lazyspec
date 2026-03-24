@@ -9,7 +9,7 @@ fn setup_app_with_rfc(title: &str, status: &str) -> (TestFixture, App) {
     let fixture = TestFixture::new();
     fixture.write_rfc("RFC-001-test.md", title, status);
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
     (fixture, app)
 }
 
@@ -148,7 +148,7 @@ fn test_cancel_status_picker_no_changes() {
 fn test_status_picker_on_empty_list_noop() {
     let fixture = TestFixture::new();
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     app.selected_type = 0;
     app.open_status_picker();
@@ -162,7 +162,7 @@ fn test_status_picker_in_filters_mode() {
     let fixture = TestFixture::new();
     fixture.write_rfc("RFC-001-filtered.md", "Filtered RFC", "review");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     enter_filters_mode(&mut app, &fixture);
     assert_eq!(app.view_mode, ViewMode::Filters);

@@ -109,20 +109,20 @@ impl Store {
         self.docs.get(path)
     }
 
-    pub fn get_body_raw(&self, path: &Path) -> Result<String> {
+    pub fn get_body_raw(&self, path: &Path, fs: &dyn FileSystem) -> Result<String> {
         let full_path = self.root.join(path);
-        let content = std::fs::read_to_string(&full_path)?;
+        let content = fs.read_to_string(&full_path)?;
         DocMeta::extract_body(&content)
     }
 
-    pub fn get_body_expanded(&self, path: &Path, max_lines: usize) -> Result<String> {
-        let body = self.get_body_raw(path)?;
+    pub fn get_body_expanded(&self, path: &Path, max_lines: usize, fs: &dyn FileSystem) -> Result<String> {
+        let body = self.get_body_raw(path, fs)?;
         let expander = RefExpander::with_max_lines(self.root.clone(), max_lines);
         expander.expand(&body)
     }
 
-    pub fn get_body(&self, path: &Path) -> Result<String> {
-        self.get_body_raw(path)
+    pub fn get_body(&self, path: &Path, fs: &dyn FileSystem) -> Result<String> {
+        self.get_body_raw(path, fs)
     }
 
     pub fn resolve_shorthand(&self, id: &str) -> Result<&DocMeta, ResolveError> {
@@ -164,15 +164,15 @@ impl Store {
         }
     }
 
-    pub fn reload_file(&mut self, root: &Path, relative_path: &Path) -> Result<()> {
+    pub fn reload_file(&mut self, root: &Path, relative_path: &Path, fs: &dyn FileSystem) -> Result<()> {
         let full_path = root.join(relative_path);
-        if !full_path.exists() {
+        if !fs.exists(&full_path) {
             self.docs.remove(relative_path);
             self.rebuild_links();
             return Ok(());
         }
 
-        let content = std::fs::read_to_string(&full_path)?;
+        let content = fs.read_to_string(&full_path)?;
         match DocMeta::parse(&content) {
             Ok(mut meta) => {
                 meta.path = relative_path.to_path_buf();
@@ -214,7 +214,7 @@ impl Store {
         crate::engine::validation::validate_full(self, config)
     }
 
-    pub fn search(&self, query: &str) -> Vec<SearchResult<'_>> {
+    pub fn search(&self, query: &str, fs: &dyn FileSystem) -> Vec<SearchResult<'_>> {
         let query_lower = query.to_lowercase();
         let mut results = Vec::new();
 
@@ -246,7 +246,7 @@ impl Store {
                 continue;
             }
 
-            if let Ok(body) = self.get_body_raw(&meta.path) {
+            if let Ok(body) = self.get_body_raw(&meta.path, fs) {
                 let body_lower = body.to_lowercase();
                 if let Some(pos) = body_lower.find(&query_lower) {
                     let start = body.floor_char_boundary(pos.saturating_sub(40));

@@ -1,13 +1,14 @@
 ---
 title: SOLID Refactors - Filesystem Abstraction
 type: iteration
-status: draft
+status: accepted
 author: unknown
 date: 2026-03-23
 tags: []
 related:
 - implements: docs/stories/STORY-084-solid-refactors.md
 ---
+
 
 
 ## Context

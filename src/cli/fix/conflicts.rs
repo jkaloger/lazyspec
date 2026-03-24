@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::engine::config::{Config, NumberingStrategy};
 use crate::engine::document::split_frontmatter;
+use crate::engine::fs::FileSystem;
 use crate::engine::store::{extract_id_from_name, Store};
 use crate::engine::template::{next_number, next_sqids_id};
 
@@ -14,6 +15,7 @@ pub(super) fn collect_conflict_fixes(
     store: &Store,
     config: &Config,
     dry_run: bool,
+    fs: &dyn FileSystem,
 ) -> Vec<ConflictFixResult> {
     let mut id_groups: HashMap<String, Vec<&crate::engine::document::DocMeta>> = HashMap::new();
 
@@ -57,8 +59,8 @@ pub(super) fn collect_conflict_fixes(
         });
 
         for loser in &docs[1..] {
-            if let Some(mut fix) = renumber_doc(root, loser, &id, config, dry_run) {
-                let refs = cascade_references(root, store, &fix.old_path, &fix.new_path, dry_run);
+            if let Some(mut fix) = renumber_doc(root, loser, &id, config, dry_run, fs) {
+                let refs = cascade_references(root, store, &fix.old_path, &fix.new_path, dry_run, fs);
                 fix.references_updated = refs;
                 results.push(fix);
             }
@@ -74,6 +76,7 @@ fn renumber_doc(
     old_id: &str,
     config: &Config,
     dry_run: bool,
+    fs: &dyn FileSystem,
 ) -> Option<ConflictFixResult> {
     let doc_type_prefix = old_id.split('-').next().unwrap_or("");
 
@@ -111,8 +114,8 @@ fn renumber_doc(
         let new_abs = root.join(&new_parent_rel);
 
         if !dry_run {
-            std::fs::rename(&old_abs, &new_abs).ok()?;
-            update_title_in_file(&new_abs.join("index.md"), old_id, &new_id);
+            fs.rename(&old_abs, &new_abs).ok()?;
+            update_title_in_file(&new_abs.join("index.md"), old_id, &new_id, fs);
         }
 
         Some(ConflictFixResult {
@@ -134,8 +137,8 @@ fn renumber_doc(
         let new_abs = root.join(&new_rel);
 
         if !dry_run {
-            std::fs::rename(&old_abs, &new_abs).ok()?;
-            update_title_in_file(&new_abs, old_id, &new_id);
+            fs.rename(&old_abs, &new_abs).ok()?;
+            update_title_in_file(&new_abs, old_id, &new_id, fs);
         }
 
         Some(ConflictFixResult {
@@ -149,8 +152,8 @@ fn renumber_doc(
     }
 }
 
-fn update_title_in_file(path: &Path, old_id: &str, new_id: &str) {
-    let content = match std::fs::read_to_string(path) {
+fn update_title_in_file(path: &Path, old_id: &str, new_id: &str, fs: &dyn FileSystem) {
+    let content = match fs.read_to_string(path) {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -166,5 +169,5 @@ fn update_title_in_file(path: &Path, old_id: &str, new_id: &str) {
 
     let new_yaml = yaml_str.replace(old_id, new_id);
     let output = format!("---\n{}\n---\n{}", new_yaml, body);
-    let _ = std::fs::write(path, output);
+    let _ = fs.write(path, &output);
 }

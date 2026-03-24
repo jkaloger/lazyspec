@@ -11,7 +11,8 @@ fn mutates_frontmatter_and_preserves_body() -> Result<()> {
         "---\ntitle: Test\nstatus: draft\n---\nBody content\n"
     )?;
 
-    rewrite_frontmatter(file.path(), |value| {
+    let fs = lazyspec::engine::fs::RealFileSystem;
+    rewrite_frontmatter(file.path(), &fs, |value| {
         value["status"] = serde_yaml::Value::String("accepted".to_string());
         Ok(())
     })?;

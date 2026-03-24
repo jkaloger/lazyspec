@@ -1,3 +1,4 @@
+use crate::engine::fs::FileSystem;
 use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -160,17 +161,17 @@ struct RawFrontmatter {
     validate_ignore: bool,
 }
 
-pub fn rewrite_frontmatter<F>(path: &Path, mutate: F) -> Result<()>
+pub fn rewrite_frontmatter<F>(path: &Path, fs: &dyn FileSystem, mutate: F) -> Result<()>
 where
     F: FnOnce(&mut serde_yaml::Value) -> Result<()>,
 {
-    let content = std::fs::read_to_string(path)?;
+    let content = fs.read_to_string(path)?;
     let (yaml, body) = split_frontmatter(&content)?;
     let mut value: serde_yaml::Value = serde_yaml::from_str(&yaml)?;
     mutate(&mut value)?;
     let new_yaml = serde_yaml::to_string(&value)?;
     let output = format!("---\n{}---\n{}", new_yaml, body);
-    std::fs::write(path, output)?;
+    fs.write(path, &output)?;
     Ok(())
 }
 

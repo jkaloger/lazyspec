@@ -3,6 +3,7 @@ use clap_complete::CompleteEnv;
 use lazyspec::cli::reservations::ReservationsCommand;
 use lazyspec::cli::{Cli, Commands};
 use lazyspec::engine::config::Config;
+use lazyspec::engine::fs::RealFileSystem;
 use lazyspec::engine::store::Store;
 
 fn main() -> anyhow::Result<()> {
@@ -48,7 +49,8 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let config = Config::load(&cwd)?;
+    let fs = RealFileSystem;
+    let config = Config::load(&cwd, &fs)?;
 
     match cli.command {
         Some(Commands::Init) | Some(Commands::Completions { .. }) => unreachable!(),
@@ -68,10 +70,10 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Show { id, json, expand_references, max_ref_lines }) => {
             let store = Store::load(&cwd, &config)?;
             if json {
-                let output = lazyspec::cli::show::run_json(&store, &id, expand_references, max_ref_lines)?;
+                let output = lazyspec::cli::show::run_json(&store, &id, expand_references, max_ref_lines, &fs)?;
                 println!("{}", output);
             } else {
-                lazyspec::cli::show::run(&store, &id, expand_references, max_ref_lines)?;
+                lazyspec::cli::show::run(&store, &id, expand_references, max_ref_lines, &fs)?;
             }
         }
         Some(Commands::Update { path, status, title }) => {
@@ -95,14 +97,14 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Link { from, rel_type, to }) => {
             let store = Store::load(&cwd, &config)?;
-            lazyspec::cli::link::link(&cwd, &store, &from, &rel_type, &to)?;
+            lazyspec::cli::link::link(&cwd, &store, &from, &rel_type, &to, &fs)?;
             let resolved_from = lazyspec::cli::resolve::resolve_to_path(&store, &from)?;
             let resolved_to = lazyspec::cli::resolve::resolve_to_path(&store, &to)?;
             println!("Linked {} --{}--> {}", resolved_from.display(), rel_type, resolved_to.display());
         }
         Some(Commands::Unlink { from, rel_type, to }) => {
             let store = Store::load(&cwd, &config)?;
-            lazyspec::cli::link::unlink(&cwd, &store, &from, &rel_type, &to)?;
+            lazyspec::cli::link::unlink(&cwd, &store, &from, &rel_type, &to, &fs)?;
             let resolved_from = lazyspec::cli::resolve::resolve_to_path(&store, &from)?;
             let resolved_to = lazyspec::cli::resolve::resolve_to_path(&store, &to)?;
             println!("Unlinked {} --{}--> {}", resolved_from.display(), rel_type, resolved_to.display());
@@ -110,18 +112,18 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Ignore { path }) => {
             let store = Store::load(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
-            lazyspec::cli::ignore::ignore(&cwd, &store, &path)?;
+            lazyspec::cli::ignore::ignore(&cwd, &store, &path, &fs)?;
             println!("Ignoring {}", resolved.display());
         }
         Some(Commands::Unignore { path }) => {
             let store = Store::load(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
-            lazyspec::cli::ignore::unignore(&cwd, &store, &path)?;
+            lazyspec::cli::ignore::unignore(&cwd, &store, &path, &fs)?;
             println!("Unignoring {}", resolved.display());
         }
         Some(Commands::Search { query, doc_type, json }) => {
             let store = Store::load(&cwd, &config)?;
-            lazyspec::cli::search::run(&store, &query, doc_type.as_deref(), json);
+            lazyspec::cli::search::run(&store, &query, doc_type.as_deref(), json, &fs);
         }
         Some(Commands::Status { json }) => {
             let store = Store::load(&cwd, &config)?;
@@ -148,13 +150,14 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Fix { paths, dry_run, json, renumber, doc_type }) => {
             let store = Store::load(&cwd, &config)?;
+            let fs = lazyspec::engine::fs::RealFileSystem;
             if let Some(format) = renumber {
-                let exit_code = lazyspec::cli::fix::run_renumber(&cwd, &store, &config, &format, doc_type.as_deref(), dry_run, json);
+                let exit_code = lazyspec::cli::fix::run_renumber(&cwd, &store, &config, &format, doc_type.as_deref(), dry_run, json, &fs);
                 if exit_code != 0 {
                     std::process::exit(exit_code);
                 }
             } else {
-                let exit_code = lazyspec::cli::fix::run(&cwd, &store, &config, &paths, dry_run, json);
+                let exit_code = lazyspec::cli::fix::run(&cwd, &store, &config, &paths, dry_run, json, &fs);
                 if exit_code != 0 {
                     std::process::exit(exit_code);
                 }

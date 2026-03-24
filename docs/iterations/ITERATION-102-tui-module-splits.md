@@ -1,13 +1,14 @@
 ---
 title: TUI Module Splits
 type: iteration
-status: draft
+status: accepted
 author: unknown
 date: 2026-03-23
 tags: []
 related:
 - implements: docs/stories/STORY-081-tui-nesting-naming-and-module-splits.md
 ---
+
 
 
 Covers RFC-032 streams 5a, 5b, and 5c. Splits the three largest TUI source files into focused sub-modules. All public items are re-exported so call sites outside each module require no changes. Should follow ITERATION-101 so splits are applied against already-renamed functions.

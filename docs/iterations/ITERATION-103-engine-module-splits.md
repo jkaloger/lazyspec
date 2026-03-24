@@ -1,13 +1,14 @@
 ---
 title: Engine Module Splits
 type: iteration
-status: draft
+status: accepted
 author: unknown
 date: 2026-03-23
 tags: []
 related:
 - implements: docs/stories/STORY-083-engine-module-splits.md
 ---
+
 
 
 ## Context

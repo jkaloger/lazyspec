@@ -12,7 +12,7 @@ fn app_new_returns_within_100ms_with_halfblock_picker() {
     let picker = ratatui_image::picker::Picker::halfblocks();
 
     let start = Instant::now();
-    let app = App::new(store, &fixture.config(), picker);
+    let app = App::new(store, &fixture.config(), picker, Box::new(lazyspec::engine::fs::RealFileSystem));
     let elapsed = start.elapsed();
 
     assert!(
@@ -31,7 +31,7 @@ fn probe_result_updates_app_state() {
 
     let fixture = TestFixture::new();
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks());
+    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
     assert_eq!(app.terminal_image_protocol, TerminalImageProtocol::Halfblocks);
     assert!(!app.tool_availability.d2);

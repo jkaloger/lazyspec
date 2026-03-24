@@ -59,7 +59,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                     for path in &event.paths {
                         if path.extension().and_then(|e| e.to_str()) == Some("md") {
                             if let Ok(relative) = path.strip_prefix(root) {
-                                let _ = app.store.reload_file(root, relative);
+                                let _ = app.store.reload_file(root, relative, &*app.fs);
                                 app.expanded_body_cache.remove(relative);
                                 app.disk_cache.invalidate(relative);
                             }
@@ -106,7 +106,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
             }
             match result {
                 Ok(create_result) => {
-                    let _ = app.store.reload_file(root, &create_result.path);
+                    let _ = app.store.reload_file(root, &create_result.path, &*app.fs);
                     app.filtered_docs_cache = None;
                     app.rebuild_search_index();
                     if let Some(type_idx) = app.doc_types.iter().position(|t| *t == create_result.doc_type) {
@@ -140,7 +140,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(store, config, picker);
+    let mut app = App::new(store, config, picker, Box::new(crate::engine::fs::RealFileSystem));
     app.refresh_validation(config);
 
     let (tx, rx) = crossbeam_channel::unbounded();
@@ -254,7 +254,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             input_paused.store(false, Ordering::Relaxed);
             let root = app.store.root().to_path_buf();
             if let Ok(relative) = path.strip_prefix(&root) {
-                let _ = app.store.reload_file(&root, relative);
+                let _ = app.store.reload_file(&root, relative, &*app.fs);
             }
             app.refresh_validation(config);
         }
@@ -287,7 +287,8 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 .iter()
                 .map(|e| e.path.to_string_lossy().to_string())
                 .collect();
-            let output = crate::cli::fix::run_human(&root, &app.store, config, &paths, false);
+            let fs = crate::engine::fs::RealFileSystem;
+            let output = crate::cli::fix::run_human(&root, &app.store, config, &paths, false, &fs);
             app.store = Store::load(&root, config)?;
             app.refresh_validation(config);
             app.fix_result = if output.is_empty() { None } else { Some(output) };

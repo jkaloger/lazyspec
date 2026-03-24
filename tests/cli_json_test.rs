@@ -51,7 +51,7 @@ fn doc_to_json_includes_related() {
 fn show_json_includes_body() {
     let (_fixture, store) = setup();
     let doc = store.resolve_shorthand("RFC-001").expect("should resolve");
-    let body = store.get_body(&doc.path).unwrap();
+    let body = store.get_body(&doc.path, &lazyspec::engine::fs::RealFileSystem).unwrap();
     let mut json = doc_to_json(doc);
     json["body"] = serde_json::Value::String(body);
 
@@ -62,7 +62,7 @@ fn show_json_includes_body() {
 #[test]
 fn show_json_output() {
     let (_fixture, store) = setup();
-    let output = lazyspec::cli::show::run_json(&store, "RFC-001", false, 25).unwrap();
+    let output = lazyspec::cli::show::run_json(&store, "RFC-001", false, 25, &lazyspec::engine::fs::RealFileSystem).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     assert_eq!(parsed["title"], "Auth Redesign");
@@ -128,7 +128,7 @@ fn doc_to_json_validate_ignore_defaults_false() {
 #[test]
 fn search_json_includes_full_schema() {
     let (_fixture, store) = setup();
-    let output = lazyspec::cli::search::run_json(&store, "Auth", None);
+    let output = lazyspec::cli::search::run_json(&store, "Auth", None, &lazyspec::engine::fs::RealFileSystem);
     let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
 
     assert!(!parsed.is_empty());
@@ -153,7 +153,7 @@ fn show_json_ambiguous_id_returns_error() {
         "---\ntitle: \"Second\"\ntype: adr\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n\nSecond body.\n",
     );
     let store = fixture.store();
-    let output = lazyspec::cli::show::run_json(&store, "RFC-020", false, 25).unwrap();
+    let output = lazyspec::cli::show::run_json(&store, "RFC-020", false, 25, &lazyspec::engine::fs::RealFileSystem).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     assert_eq!(parsed["error"], "ambiguous_id");
@@ -174,7 +174,7 @@ fn show_json_full_path_works_when_shorthand_ambiguous() {
         "---\ntitle: \"Second\"\ntype: adr\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n\nSecond body.\n",
     );
     let store = fixture.store();
-    let output = lazyspec::cli::show::run_json(&store, "docs/rfcs/RFC-020-first.md", false, 25).unwrap();
+    let output = lazyspec::cli::show::run_json(&store, "docs/rfcs/RFC-020-first.md", false, 25, &lazyspec::engine::fs::RealFileSystem).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     assert_eq!(parsed["title"], "First");

@@ -17,7 +17,8 @@ pub fn complete_doc_id(current: &OsStr) -> Vec<CompletionCandidate> {
 
 pub fn complete_doc_id_in(root: &Path, current: &OsStr) -> Vec<CompletionCandidate> {
     let current_str = current.to_str().unwrap_or("");
-    let config = match Config::load(root) {
+    let fs = crate::engine::fs::RealFileSystem;
+    let config = match Config::load(root, &fs) {
         Ok(c) => c,
         Err(_) => return vec![],
     };

@@ -341,10 +341,10 @@ impl Config {
         })
     }
 
-    pub fn load(project_root: &std::path::Path) -> Result<Self> {
+    pub fn load(project_root: &std::path::Path, fs: &dyn crate::engine::fs::FileSystem) -> Result<Self> {
         let path = project_root.join(".lazyspec.toml");
-        if path.exists() {
-            let content = std::fs::read_to_string(&path)?;
+        if fs.exists(&path) {
+            let content = fs.read_to_string(&path)?;
             return Self::parse(&content);
         }
         Ok(Self::default())

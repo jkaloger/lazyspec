@@ -176,7 +176,7 @@ impl App {
 
                 if action == "Expand document" {
                     let full_path = self.store.root.join(&doc_path);
-                    if let Ok(content) = std::fs::read_to_string(&full_path) {
+                    if let Ok(content) = self.fs.read_to_string(&full_path) {
                         let prompt = crate::tui::agent::build_expand_prompt(&content, &full_path);
                         let _ = self.agent_spawner.spawn(&prompt, &full_path, &doc_title, &action);
                     }
@@ -208,7 +208,7 @@ impl App {
             None => return,
         };
         let full_path = self.store.root.join(doc_path);
-        let content = match std::fs::read_to_string(&full_path) {
+        let content = match self.fs.read_to_string(&full_path) {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -235,7 +235,7 @@ impl App {
 
                 if !prompt.is_empty() {
                     let doc_title = self.agent_dialog.doc_title.clone();
-                    if let Ok(content) = std::fs::read_to_string(&full_path) {
+                    if let Ok(content) = self.fs.read_to_string(&full_path) {
                         let full_prompt = format!(
                             "Here is the document:\n\n{}\n\nUser request: {}",
                             content, prompt
