@@ -3,7 +3,7 @@ mod common;
 use common::TestFixture;
 use crossterm::event::{KeyCode, KeyModifiers};
 use lazyspec::engine::document::Status;
-use lazyspec::tui::app::{App, ViewMode};
+use lazyspec::tui::state::{App, ViewMode};
 
 fn setup_app_with_rfc(title: &str, status: &str) -> (TestFixture, App) {
     let fixture = TestFixture::new();

@@ -2,7 +2,7 @@ mod common;
 
 use common::TestFixture;
 use crossterm::event::{KeyCode, KeyModifiers};
-use lazyspec::tui::app::App;
+use lazyspec::tui::state::App;
 
 fn setup_app_with_parse_errors() -> (TestFixture, App) {
     let fixture = TestFixture::new();

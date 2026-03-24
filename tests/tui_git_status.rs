@@ -2,7 +2,7 @@ mod common;
 
 use common::TestFixture;
 use lazyspec::engine::git_status::{parse_porcelain_line, GitFileStatus, GitStatusCache};
-use lazyspec::tui::app::App;
+use lazyspec::tui::state::App;
 use std::path::PathBuf;
 use std::process::Command;
 

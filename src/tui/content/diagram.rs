@@ -8,7 +8,7 @@ use std::process::Command;
 
 use anyhow::{bail, Result};
 
-use super::terminal_caps::TerminalImageProtocol;
+use crate::tui::infra::terminal_caps::TerminalImageProtocol;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiagramLanguage {

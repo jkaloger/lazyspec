@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::engine::document::Status;
 use crate::engine::git_status::GitFileStatus;
-use crate::tui::app::{App, FormField};
+use crate::tui::state::{App, FormField};
 
 use super::colors::status_color;
 
@@ -241,7 +241,7 @@ pub fn draw_status_picker(f: &mut Frame, app: &App) {
 }
 
 pub fn draw_link_editor(f: &mut Frame, app: &App) {
-    use crate::tui::app::REL_TYPES;
+    use crate::tui::state::forms::REL_TYPES;
 
     let area = f.area();
     let editor = &app.link_editor;

@@ -3,7 +3,7 @@ mod common;
 use common::TestFixture;
 use crossterm::event::{KeyCode, KeyModifiers};
 use lazyspec::engine::document::Status;
-use lazyspec::tui::app::{App, FilterField, ViewMode};
+use lazyspec::tui::state::{App, FilterField, ViewMode};
 
 fn setup_filters_fixture() -> (TestFixture, App) {
     let fixture = TestFixture::new();

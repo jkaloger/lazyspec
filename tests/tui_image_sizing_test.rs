@@ -1,6 +1,6 @@
 mod common;
 
-use lazyspec::tui::ui::calculate_image_height;
+use lazyspec::tui::views::calculate_image_height;
 
 #[test]
 fn square_image_matches_available_width() {

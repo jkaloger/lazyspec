@@ -2,7 +2,7 @@ mod common;
 
 use common::TestFixture;
 use lazyspec::engine::document::DocType;
-use lazyspec::tui::app::{App, FormField};
+use lazyspec::tui::state::{App, FormField};
 
 fn setup_app() -> (TestFixture, App) {
     let fixture = TestFixture::new();

@@ -1,16 +1,10 @@
-#[cfg(feature = "agent")]
-pub mod agent;
-pub mod app;
-pub mod diagram;
-pub mod gfm;
-pub mod perf_log;
-pub mod terminal_caps;
-pub mod ui;
-
-use app::App;
+use crate::tui::state::App;
+use crate::tui::state::AppEvent;
+use crate::tui::content;
+use crate::tui::infra::{perf_log, terminal_caps};
+use crate::tui::views;
 use crate::engine::config::Config;
 use crate::engine::store::Store;
-use app::AppEvent;
 use anyhow::Result;
 use crossterm::{
     event::Event,
@@ -33,7 +27,7 @@ fn run_editor(
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     disable_raw_mode()?;
 
-    let editor = app::resolve_editor();
+    let editor = crate::tui::state::resolve_editor();
     let status = Command::new(&editor).arg(path).status();
 
     enable_raw_mode()?;
@@ -91,7 +85,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
             app.picker = picker;
             app.terminal_image_protocol = protocol;
             app.tool_availability = tool_availability;
-            app.diagram_cache = diagram::DiagramCache::new();
+            app.diagram_cache = content::diagram::DiagramCache::new();
             app.image_states.clear();
         }
         AppEvent::CreateStarted => {}
@@ -151,7 +145,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     std::thread::spawn(move || {
         let picker = terminal_caps::create_picker();
         let protocol = terminal_caps::TerminalImageProtocol::from(picker.protocol_type());
-        let tool_availability = diagram::ToolAvailability::detect();
+        let tool_availability = content::diagram::ToolAvailability::detect();
         let _ = probe_tx.send(AppEvent::ProbeResult { picker, protocol, tool_availability });
     });
 
@@ -195,7 +189,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         let loop_start = Instant::now();
 
         let t = Instant::now();
-        terminal.draw(|f| ui::draw(f, &mut app))?;
+        terminal.draw(|f| views::draw(f, &mut app))?;
         perf_log::log_duration("draw", t);
 
         let t = Instant::now();
@@ -207,7 +201,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 let blocks = match &app.diagram_blocks_cache {
                     Some((p, h, b)) if p == &meta.path && *h == body_hash => b.clone(),
                     _ => {
-                        let b = diagram::extract_diagram_blocks(body);
+                        let b = content::diagram::extract_diagram_blocks(body);
                         app.diagram_blocks_cache = Some((meta.path.clone(), body_hash, b.clone()));
                         b
                     }

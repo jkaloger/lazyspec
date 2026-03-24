@@ -5,7 +5,7 @@ use common::TestFixture;
 use crossterm::event::{KeyCode, KeyModifiers};
 use lazyspec::engine::config::{Config, ValidationRule};
 use lazyspec::tui::agent::{build_create_children_prompt, build_expand_prompt};
-use lazyspec::tui::app::App;
+use lazyspec::tui::state::App;
 
 fn press(app: &mut App, fixture: &TestFixture, key: KeyCode) {
     app.handle_key(key, KeyModifiers::NONE, fixture.root(), &fixture.config());

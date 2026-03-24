@@ -12,14 +12,14 @@ use crate::engine::document::{DocMeta, RelationType, Status};
 use crate::engine::git_status::GitFileStatus;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
-use crate::tui::app::{App, DocListNode, FilterField, PreviewTab};
+use crate::tui::state::{App, DocListNode, FilterField, PreviewTab};
 
 use super::colors::{status_color, tag_color};
 use super::layout::{calculate_image_height, wrapped_line_count, wrapped_lines_total};
 
 fn render_markdown_to_lines(text: &str, max_width: u16) -> Vec<Line<'static>> {
-    let segments = crate::tui::gfm::extract_gfm_segments(text);
-    crate::tui::gfm::render_gfm_segments(&segments, max_width)
+    let segments = crate::tui::content::gfm::extract_gfm_segments(text);
+    crate::tui::content::gfm::render_gfm_segments(&segments, max_width)
 }
 
 fn render_scrollbar(f: &mut Frame, area: Rect, total: usize, visible: usize, position: usize) {
@@ -56,7 +56,7 @@ struct SegmentLines {
 }
 
 fn render_markdown_segment(
-    segments: &[crate::tui::diagram::PreviewSegment],
+    segments: &[crate::tui::content::diagram::PreviewSegment],
     panel_width: u16,
     panel_height: u16,
     content_width: usize,
@@ -67,13 +67,13 @@ fn render_markdown_segment(
 
     for segment in segments {
         match segment {
-            crate::tui::diagram::PreviewSegment::Markdown(text) => {
+            crate::tui::content::diagram::PreviewSegment::Markdown(text) => {
                 let gfm_lines = render_markdown_to_lines(text, panel_width);
                 wrapped_height += wrapped_lines_total(&gfm_lines, content_width);
                 lines.extend(gfm_lines);
             }
-            crate::tui::diagram::PreviewSegment::DiagramImage(path) => {
-                let hash = crate::tui::diagram::source_hash_path(path);
+            crate::tui::content::diagram::PreviewSegment::DiagramImage(path) => {
+                let hash = crate::tui::content::diagram::source_hash_path(path);
                 let img_height = image::image_dimensions(path)
                     .map(|(w, h)| calculate_image_height(w, h, panel_width, panel_height))
                     .unwrap_or(12);
@@ -83,21 +83,21 @@ fn render_markdown_segment(
                 }
                 wrapped_height += img_height as usize;
             }
-            crate::tui::diagram::PreviewSegment::DiagramText(text) => {
+            crate::tui::content::diagram::PreviewSegment::DiagramText(text) => {
                 for line_str in text.lines() {
                     let display_line = Line::from(Span::raw(format!(" {}", line_str)));
                     wrapped_height += wrapped_line_count(&display_line, content_width);
                     lines.push(display_line);
                 }
             }
-            crate::tui::diagram::PreviewSegment::DiagramLoading => {
+            crate::tui::content::diagram::PreviewSegment::DiagramLoading => {
                 lines.push(Line::from(Span::styled(
                     " [rendering diagram...]",
                     Style::default().fg(Color::Yellow),
                 )));
                 wrapped_height += 1;
             }
-            crate::tui::diagram::PreviewSegment::DiagramError(msg) => {
+            crate::tui::content::diagram::PreviewSegment::DiagramError(msg) => {
                 lines.push(Line::from(Span::styled(
                     format!(" [diagram error: {}]", msg),
                     Style::default().fg(Color::Red),
@@ -113,7 +113,7 @@ fn render_markdown_segment(
 fn render_diagram_overlays(
     f: &mut Frame,
     app: &mut App,
-    segments: &[crate::tui::diagram::PreviewSegment],
+    segments: &[crate::tui::content::diagram::PreviewSegment],
     inner: Rect,
     panel_width: u16,
     header_y_offset: u16,
@@ -124,12 +124,12 @@ fn render_diagram_overlays(
 
     for segment in segments {
         match segment {
-            crate::tui::diagram::PreviewSegment::Markdown(text) => {
+            crate::tui::content::diagram::PreviewSegment::Markdown(text) => {
                 let gfm_lines = render_markdown_to_lines(text, panel_width);
                 y_offset += wrapped_lines_total(&gfm_lines, content_width) as u16;
             }
-            crate::tui::diagram::PreviewSegment::DiagramImage(path) => {
-                let hash = crate::tui::diagram::source_hash_path(path);
+            crate::tui::content::diagram::PreviewSegment::DiagramImage(path) => {
+                let hash = crate::tui::content::diagram::source_hash_path(path);
                 let img_height = image::image_dimensions(path)
                     .map(|(w, h)| calculate_image_height(w, h, inner.width, inner.height))
                     .unwrap_or(12);
@@ -148,16 +148,16 @@ fn render_diagram_overlays(
                 }
                 y_offset += img_height;
             }
-            crate::tui::diagram::PreviewSegment::DiagramText(text) => {
+            crate::tui::content::diagram::PreviewSegment::DiagramText(text) => {
                 for line_str in text.lines() {
                     let display_line = Line::from(Span::raw(format!(" {}", line_str)));
                     y_offset += wrapped_line_count(&display_line, content_width) as u16;
                 }
             }
-            crate::tui::diagram::PreviewSegment::DiagramLoading => {
+            crate::tui::content::diagram::PreviewSegment::DiagramLoading => {
                 y_offset += 1;
             }
-            crate::tui::diagram::PreviewSegment::DiagramError(_) => {
+            crate::tui::content::diagram::PreviewSegment::DiagramError(_) => {
                 y_offset += 1;
             }
         }
@@ -473,11 +473,11 @@ pub fn render_document_preview(f: &mut Frame, app: &mut App, area: Rect, block: 
 
     let diagram_blocks = match &app.diagram_blocks_cache {
         Some((p, _, b)) if p == &doc.path => b.clone(),
-        _ => crate::tui::diagram::extract_diagram_blocks(&body),
+        _ => crate::tui::content::diagram::extract_diagram_blocks(&body),
     };
     let panel_width = area.width.saturating_sub(2);
     let panel_height = area.height.saturating_sub(2);
-    let segments = crate::tui::diagram::build_preview_segments(&body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability, &diagram_blocks);
+    let segments = crate::tui::content::diagram::build_preview_segments(&body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability, &diagram_blocks);
 
     let content_width = area.width.saturating_sub(2) as usize;
     let segment_lines = render_markdown_segment(&segments, panel_width, panel_height, content_width);
@@ -492,7 +492,7 @@ pub fn render_document_preview(f: &mut Frame, app: &mut App, area: Rect, block: 
     if has_images {
         let inner = area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
         let header_y = wrapped_lines_total(&header_lines, inner.width as usize) as u16;
-        let segments_ref = crate::tui::diagram::build_preview_segments(&body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability, &diagram_blocks);
+        let segments_ref = crate::tui::content::diagram::build_preview_segments(&body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability, &diagram_blocks);
         render_diagram_overlays(f, app, &segments_ref, inner, panel_width, header_y, 0);
     }
 }
@@ -695,9 +695,9 @@ pub fn render_fullscreen_document(f: &mut Frame, app: &mut App) {
 
     let fullscreen_blocks = match &app.diagram_blocks_cache {
         Some((p, _, b)) if p == &doc.path => b.clone(),
-        _ => crate::tui::diagram::extract_diagram_blocks(&display_body),
+        _ => crate::tui::content::diagram::extract_diagram_blocks(&display_body),
     };
-    let segments = crate::tui::diagram::build_preview_segments(&display_body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability, &fullscreen_blocks);
+    let segments = crate::tui::content::diagram::build_preview_segments(&display_body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability, &fullscreen_blocks);
 
     let segment_lines = render_markdown_segment(&segments, panel_width, panel_height, content_width);
     let total_lines = segment_lines.wrapped_height;

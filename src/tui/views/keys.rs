@@ -5,8 +5,8 @@ use std::path::Path;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
 
-use super::forms::REL_TYPES;
-use super::{App, FilterField, PreviewTab, ViewMode};
+use crate::tui::state::forms::REL_TYPES;
+use crate::tui::state::{App, FilterField, PreviewTab, ViewMode};
 
 impl App {
     pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path, config: &Config) {
@@ -90,7 +90,7 @@ impl App {
         }
     }
 
-    pub(super) fn handle_link_editor_key(&mut self, code: KeyCode, root: &Path) {
+    pub(crate) fn handle_link_editor_key(&mut self, code: KeyCode, root: &Path) {
         match code {
             KeyCode::Esc => self.close_link_editor(),
             KeyCode::Tab => {
@@ -278,7 +278,7 @@ impl App {
         }
     }
 
-    pub(super) fn handle_fullscreen_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+    pub(crate) fn handle_fullscreen_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         match (code, modifiers) {
             (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => self.exit_fullscreen(),
             (KeyCode::Char('j'), _) | (KeyCode::Down, _) => self.scroll_down(),
@@ -602,7 +602,7 @@ impl App {
                         actions.push("Create children".to_string());
                     }
 
-                    self.agent_dialog = super::forms::AgentDialog {
+                    self.agent_dialog = crate::tui::state::forms::AgentDialog {
                         active: true,
                         selected_index: 0,
                         actions,

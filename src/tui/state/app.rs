@@ -1,12 +1,7 @@
-mod cache;
-mod forms;
-mod graph;
-mod keys;
-
-pub use forms::{CreateForm, DeleteConfirm, FormField, LinkEditor, REL_TYPES, StatusPicker};
+use super::forms::{CreateForm, DeleteConfirm, LinkEditor, REL_TYPES, StatusPicker};
 #[cfg(feature = "agent")]
-pub use forms::AgentDialog;
-pub use graph::traverse_dependency_chain;
+use super::forms::AgentDialog;
+use super::graph::traverse_dependency_chain;
 
 use crate::engine::cache::DiskCache;
 use crate::engine::config::{Config, NumberingStrategy};
@@ -37,11 +32,11 @@ pub enum AppEvent {
     Terminal(crossterm::event::KeyEvent),
     FileChange(notify::Event),
     ExpansionResult { path: PathBuf, body: String, body_hash: u64 },
-    DiagramRendered { source_hash: u64, entry: super::diagram::DiagramCacheEntry },
+    DiagramRendered { source_hash: u64, entry: crate::tui::content::diagram::DiagramCacheEntry },
     ProbeResult {
         picker: ratatui_image::picker::Picker,
-        protocol: super::terminal_caps::TerminalImageProtocol,
-        tool_availability: super::diagram::ToolAvailability,
+        protocol: crate::tui::infra::terminal_caps::TerminalImageProtocol,
+        tool_availability: crate::tui::content::diagram::ToolAvailability,
     },
     CreateStarted,
     CreateProgress { message: String },
@@ -228,13 +223,13 @@ pub struct App {
     pub event_tx: crossbeam_channel::Sender<AppEvent>,
     pub expansion_cancel: Option<Arc<AtomicBool>>,
     pub disk_cache: DiskCache,
-    pub terminal_image_protocol: super::terminal_caps::TerminalImageProtocol,
-    pub tool_availability: super::diagram::ToolAvailability,
-    pub diagram_cache: super::diagram::DiagramCache,
+    pub terminal_image_protocol: crate::tui::infra::terminal_caps::TerminalImageProtocol,
+    pub tool_availability: crate::tui::content::diagram::ToolAvailability,
+    pub diagram_cache: crate::tui::content::diagram::DiagramCache,
     pub picker: ratatui_image::picker::Picker,
     pub image_states: HashMap<u64, ratatui_image::protocol::StatefulProtocol>,
     pub ascii_diagrams: bool,
-    pub diagram_blocks_cache: Option<(PathBuf, u64, Vec<super::diagram::DiagramBlock>)>,
+    pub diagram_blocks_cache: Option<(PathBuf, u64, Vec<crate::tui::content::diagram::DiagramBlock>)>,
     pub filtered_docs_cache: Option<Vec<PathBuf>>,
     pub search_index: Vec<SearchEntry>,
     pub git_status_cache: GitStatusCache,
@@ -308,9 +303,9 @@ impl App {
             event_tx,
             expansion_cancel: None,
             disk_cache: DiskCache::new(),
-            terminal_image_protocol: super::terminal_caps::TerminalImageProtocol::Halfblocks,
-            tool_availability: super::diagram::ToolAvailability { d2: false, mmdc: false },
-            diagram_cache: super::diagram::DiagramCache::new(),
+            terminal_image_protocol: crate::tui::infra::terminal_caps::TerminalImageProtocol::Halfblocks,
+            tool_availability: crate::tui::content::diagram::ToolAvailability { d2: false, mmdc: false },
+            diagram_cache: crate::tui::content::diagram::DiagramCache::new(),
             picker,
             image_states: HashMap::new(),
             ascii_diagrams: config.ui.ascii_diagrams,
@@ -1191,7 +1186,7 @@ impl App {
         }
     }
 
-    fn confirm_link(&mut self, root: &Path) -> Result<()> {
+    pub(crate) fn confirm_link(&mut self, root: &Path) -> Result<()> {
         let selected = self.link_editor.selected;
         let target_path = self.link_editor.results[selected].clone();
         let from = self.link_editor.doc_path.to_string_lossy().to_string();
@@ -1360,9 +1355,9 @@ mod tests {
             event_tx: tx,
             expansion_cancel: None,
             disk_cache: DiskCache::new(),
-            terminal_image_protocol: crate::tui::terminal_caps::TerminalImageProtocol::Unsupported,
-            tool_availability: crate::tui::diagram::ToolAvailability { d2: false, mmdc: false },
-            diagram_cache: crate::tui::diagram::DiagramCache::new(),
+            terminal_image_protocol: crate::tui::infra::terminal_caps::TerminalImageProtocol::Unsupported,
+            tool_availability: crate::tui::content::diagram::ToolAvailability { d2: false, mmdc: false },
+            diagram_cache: crate::tui::content::diagram::DiagramCache::new(),
             picker: ratatui_image::picker::Picker::halfblocks(),
             image_states: HashMap::new(),
             ascii_diagrams: false,

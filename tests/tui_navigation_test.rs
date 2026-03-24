@@ -1,7 +1,7 @@
 mod common;
 
 use common::TestFixture;
-use lazyspec::tui::app::App;
+use lazyspec::tui::state::App;
 
 fn setup_app() -> (TestFixture, App) {
     let fixture = TestFixture::new();

@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use lazyspec::engine::config::TypeDef;
 use lazyspec::engine::document::DocType;
 use lazyspec::engine::store::Store;
-use lazyspec::tui::app::{App, ViewMode};
+use lazyspec::tui::state::{App, ViewMode};
 
 fn setup_graph_fixture() -> (TestFixture, App) {
     let fixture = TestFixture::new();

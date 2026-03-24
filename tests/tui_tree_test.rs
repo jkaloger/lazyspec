@@ -1,7 +1,7 @@
 mod common;
 
 use common::TestFixture;
-use lazyspec::tui::app::App;
+use lazyspec::tui::state::App;
 
 const PARENT_FRONTMATTER: &str = "\
 ---

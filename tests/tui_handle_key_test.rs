@@ -2,7 +2,7 @@ mod common;
 
 use common::TestFixture;
 use crossterm::event::{KeyCode, KeyModifiers};
-use lazyspec::tui::app::{App, PreviewTab};
+use lazyspec::tui::state::{App, PreviewTab};
 use std::path::PathBuf;
 
 fn setup_app_with_docs() -> (TestFixture, App) {

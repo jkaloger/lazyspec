@@ -1,5 +1,5 @@
-use lazyspec::tui::terminal_caps::TerminalImageProtocol;
-use lazyspec::tui::diagram::{
+use lazyspec::tui::infra::terminal_caps::TerminalImageProtocol;
+use lazyspec::tui::content::diagram::{
     DiagramBlock, DiagramCache, DiagramCacheEntry, DiagramLanguage, PreviewSegment, ToolAvailability,
     build_preview_segments, extract_diagram_blocks, fallback_hint,
     is_tool_available, render_diagram, render_diagram_text, source_hash, tool_name,

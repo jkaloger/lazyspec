@@ -2,7 +2,7 @@ mod common;
 
 use common::TestFixture;
 use crossterm::event::{KeyCode, KeyModifiers};
-use lazyspec::tui::app::{resolve_editor_from, App, ViewMode};
+use lazyspec::tui::state::{resolve_editor_from, App, ViewMode};
 
 #[test]
 fn editor_env_set() {

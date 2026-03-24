@@ -6,7 +6,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use lazyspec::tui::agent::{
     load_all_records, save_record, update_record_status, AgentRecord, AgentStatus,
 };
-use lazyspec::tui::app::{App, ViewMode};
+use lazyspec::tui::state::{App, ViewMode};
 use std::path::PathBuf;
 use tempfile::TempDir;
 

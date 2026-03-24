@@ -1,7 +1,7 @@
 mod common;
 
 use common::TestFixture;
-use lazyspec::tui::app::{App, PreviewTab};
+use lazyspec::tui::state::{App, PreviewTab};
 
 fn setup_app_with_relations() -> (TestFixture, App) {
     let fixture = TestFixture::new();

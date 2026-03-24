@@ -1,4 +1,5 @@
 mod colors;
+pub mod keys;
 mod layout;
 mod overlays;
 mod panels;
@@ -14,7 +15,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::tui::app::{App, ViewMode};
+use crate::tui::state::{App, ViewMode};
 
 use overlays::{
     draw_create_form, draw_help_overlay, draw_delete_confirm, draw_link_editor,

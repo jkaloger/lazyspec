@@ -1,8 +1,8 @@
 mod common;
 
 use common::TestFixture;
-use lazyspec::tui::app::App;
-use lazyspec::tui::terminal_caps::TerminalImageProtocol;
+use lazyspec::tui::state::App;
+use lazyspec::tui::infra::terminal_caps::TerminalImageProtocol;
 use std::time::Instant;
 
 #[test]
@@ -27,7 +27,7 @@ fn app_new_returns_within_100ms_with_halfblock_picker() {
 
 #[test]
 fn probe_result_updates_app_state() {
-    use lazyspec::tui::diagram::ToolAvailability;
+    use lazyspec::tui::content::diagram::ToolAvailability;
 
     let fixture = TestFixture::new();
     let store = fixture.store();
@@ -38,7 +38,7 @@ fn probe_result_updates_app_state() {
 
     // Verify the probe channel architecture works: spawn a thread that sends a ProbeResult,
     // then receive and apply it.
-    use lazyspec::tui::app::AppEvent;
+    use lazyspec::tui::state::AppEvent;
 
     let (tx, rx) = crossbeam_channel::unbounded::<AppEvent>();
     std::thread::spawn(move || {

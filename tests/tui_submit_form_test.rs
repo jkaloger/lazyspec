@@ -3,7 +3,7 @@ mod common;
 use common::TestFixture;
 use lazyspec::engine::config::Config;
 use lazyspec::engine::document::{DocMeta, DocType};
-use lazyspec::tui::app::App;
+use lazyspec::tui::state::App;
 use std::fs;
 
 fn setup_app_with_rfc() -> (TestFixture, App, Config) {
