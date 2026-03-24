@@ -4,7 +4,7 @@ type: spec
 status: draft
 author: "jkaloger"
 date: 2026-03-25
-tags: []
+tags: [cli, fix, frontmatter, conflicts]
 related:
   - related-to: "docs/stories/STORY-045-frontmatter-fix-command.md"
   - related-to: "docs/stories/STORY-059-conflict-detection-and-renumbering.md"

@@ -4,7 +4,7 @@ type: spec
 status: draft
 author: "jkaloger"
 date: 2026-03-25
-tags: []
+tags: [cli, creation, templates]
 related:
   - related-to: docs/stories/STORY-007-document-creation-on-submit.md
   - related-to: docs/stories/STORY-043-cli-create-for-folder-based-documents.md

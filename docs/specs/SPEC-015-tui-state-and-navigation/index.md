@@ -39,7 +39,7 @@ Viewport adjustment uses a constant `SCROLL_PADDING` of 2 lines. When the select
 
 @ref src/tui/state/app.rs#ViewMode
 
-The `ViewMode` enum defines the available screen layouts: `Types`, `Filters`, `Metrics`, `Graph`, and (when the `agent` feature is enabled) `Agents`. The backtick key cycles through modes in that order via `cycle_mode`, which calls `ViewMode::next()`.
+The `ViewMode` enum defines the available screen layouts: `Types`, `Filters`, `Metrics`, `Graph`, and (when the `agent` feature is enabled) `Agents`. The backtick key cycles through modes in that order via `cycle_mode`, which calls `ViewMode::next()`. The `Graph` and `Filters` views are covered in SPEC-020 and SPEC-021 respectively.
 
 Mode transitions carry side effects. When entering `Graph` mode, `rebuild_graph` is called to construct the dependency tree. When entering `Filters` mode, the available tag set is computed from the store and `selected_doc` resets to 0. When leaving `Filters` mode, active filters are cleared.
 
@@ -86,16 +86,3 @@ In Types mode, navigation follows a flat two-axis model. `h`/`l` (or arrow keys)
 
 Fullscreen mode uses a separate `scroll_offset` (u16) with `j`/`k` for line-by-line scrolling, `g`/`G` for top/bottom, and `Ctrl-d`/`Ctrl-u` for half-page jumps based on `fullscreen_height`.
 
-## Dependency Graph
-
-@ref src/tui/state/graph.rs#traverse_dependency_chain
-
-Graph mode visualizes the `implements` relationship chain. `rebuild_graph` identifies root documents (those that do not implement anything), sorts them by type then title, and passes each to `traverse_dependency_chain`. This function performs a DFS, tracking visited paths in a `HashSet` to prevent cycles. At each node it pushes a `GraphNode` (path, title, type, status, depth), then recurses into documents that reference the current node via `Implements` relationships. Children at each level are sorted alphabetically by title.
-
-@ref src/tui/state/app.rs#GraphNode
-
-Pressing Enter on a graph node navigates back to Types mode, switching to the appropriate document type and selecting the corresponding entry in the doc tree.
-
-## Filter State
-
-In Filters mode, `FilterField` cycles between `Status`, `Tag`, and `ClearAction` using Tab/BackTab. `h`/`l` cycle through the available values for the focused filter field. The filtered document list is cached in `filtered_docs_cache` and invalidated on store changes. `j`/`k` navigate the filtered results independently of the Types-mode selection.

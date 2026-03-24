@@ -4,7 +4,7 @@ type: spec
 status: draft
 author: "jkaloger"
 date: 2026-03-25
-tags: []
+tags: [cli, status, validation]
 related:
   - related-to: "docs/stories/STORY-020-status-command.md"
   - related-to: "docs/stories/STORY-022-expanded-validation.md"

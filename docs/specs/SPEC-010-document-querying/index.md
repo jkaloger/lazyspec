@@ -4,7 +4,7 @@ type: spec
 status: draft
 author: "jkaloger"
 date: 2026-03-25
-tags: []
+tags: [cli, querying, search]
 related: []
 ---
 

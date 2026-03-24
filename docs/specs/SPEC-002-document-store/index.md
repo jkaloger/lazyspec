@@ -4,7 +4,7 @@ type: spec
 status: draft
 author: "jkaloger"
 date: 2026-03-25
-tags: []
+tags: [engine, store, links]
 related:
   - related-to: "docs/stories/STORY-001-document-model-and-store.md"
   - related-to: "docs/stories/STORY-040-child-document-discovery.md"

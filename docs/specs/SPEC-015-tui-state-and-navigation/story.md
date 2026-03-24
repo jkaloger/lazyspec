@@ -71,26 +71,3 @@ Given a document is open in fullscreen mode
 When the user presses j or k
 Then scroll_offset changes by 1, and Ctrl-d/Ctrl-u jumps by half of fullscreen_height
 
-### AC: graph-dfs-no-cycles
-
-Given the document store contains a circular implements chain (A implements B, B implements A)
-When the graph is rebuilt
-Then each document appears at most once in graph_nodes due to the visited set
-
-### AC: graph-enter-navigates-to-types
-
-Given the user is in Graph mode with a node selected
-When the user presses Enter
-Then the view switches to Types mode, the correct document type is selected, and the corresponding document is highlighted in the tree
-
-### AC: search-mode-consumes-input
-
-Given search mode is active
-When the user types characters
-Then the characters append to search_query and results update, rather than triggering normal-mode keybindings
-
-### AC: filter-field-cycling
-
-Given the TUI is in Filters mode with the Status field focused
-When the user presses Tab
-Then focus moves to Tag, and pressing Tab again moves to ClearAction, then back to Status
