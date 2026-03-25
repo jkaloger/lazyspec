@@ -50,6 +50,22 @@ lazyspec completions fish | source
 
 Add the appropriate line to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.) to load completions on startup. Completions include subcommands, flags, document IDs, and relationship types.
 
+## Skills
+
+Lazyspec includes a set of agent skills that enforce its workflow:
+
+| Skill              | Purpose                                                              |
+| ------------------ | -------------------------------------------------------------------- |
+| `plan-work`        | Detect existing artifacts and determine the right entry point       |
+| `write-rfc`        | Propose a design with intent, interface sketches, and identify stories |
+| `create-story`     | Create stories with acceptance criteria linked to an RFC             |
+| `resolve-context`  | Gather full document chain (RFC -> Story -> Iteration) before work  |
+| `create-iteration` | Plan an iteration with task breakdown and test plan                 |
+| `build`            | Implement tasks from an iteration with subagent dispatch             |
+| `review-iteration` | Two-stage review -- AC compliance first, then code quality           |
+| `create-audit`     | Criteria-based review (health check, security, accessibility, etc.)  |
+
+
 ## Usage
 
 ### Quick Start
