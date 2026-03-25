@@ -22,7 +22,6 @@ fn app_new_returns_within_100ms_with_halfblock_picker() {
     );
     assert_eq!(app.terminal_image_protocol, TerminalImageProtocol::Halfblocks);
     assert!(!app.tool_availability.d2);
-    assert!(!app.tool_availability.mmdc);
 }
 
 #[test]
@@ -46,7 +45,7 @@ fn probe_result_updates_app_state() {
         let _ = tx.send(AppEvent::ProbeResult {
             picker: probe_picker,
             protocol: TerminalImageProtocol::Sixel,
-            tool_availability: ToolAvailability { d2: true, mmdc: false },
+            tool_availability: ToolAvailability { d2: true },
         });
     });
 
@@ -55,7 +54,6 @@ fn probe_result_updates_app_state() {
         AppEvent::ProbeResult { protocol, tool_availability, .. } => {
             assert_eq!(protocol, TerminalImageProtocol::Sixel);
             assert!(tool_availability.d2);
-            assert!(!tool_availability.mmdc);
         }
         _ => panic!("expected ProbeResult event"),
     }
