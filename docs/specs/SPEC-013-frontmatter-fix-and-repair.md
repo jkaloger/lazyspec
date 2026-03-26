@@ -11,7 +11,6 @@ related:
   - related-to: "docs/stories/STORY-060-reference-cascade.md"
   - related-to: "docs/stories/STORY-061-graceful-degradation-for-duplicate-ids.md"
   - related-to: "docs/stories/STORY-062-validation-diagnostic-for-duplicate-ids.md"
-  - related-to: "docs/architecture/ARCH-003-engine/validation.md"
 ---
 
 ## Summary

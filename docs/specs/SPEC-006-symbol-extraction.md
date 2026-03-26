@@ -6,7 +6,6 @@ author: "jkaloger"
 date: 2026-03-25
 tags: [engine, tree-sitter, symbols]
 related:
-  - implements: "docs/architecture/ARCH-003-engine/symbol-extraction.md"
   - implements: "docs/stories/STORY-056-tree-sitter-symbol-extraction.md"
 ---
 

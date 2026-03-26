@@ -6,7 +6,6 @@ author: "jkaloger"
 date: 2026-03-25
 tags: [tui, state, navigation]
 related:
-  - implements: docs/architecture/ARCH-005-tui/app-state.md
   - related-to: docs/stories/STORY-009-flat-navigation-model.md
   - related-to: docs/stories/STORY-012-mode-system-and-view-switching.md
   - related-to: docs/stories/STORY-042-tui-expandable-tree-nodes.md

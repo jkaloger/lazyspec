@@ -6,7 +6,6 @@ author: "jkaloger"
 date: 2026-03-25
 tags: [tui, overlays, forms]
 related:
-  - related-to: docs/architecture/ARCH-005-tui/app-state.md
   - related-to: docs/stories/STORY-006-create-form-ui-and-input-handling.md
   - related-to: docs/stories/STORY-007-document-creation-on-submit.md
   - related-to: docs/stories/STORY-008-delete-confirmation-dialog.md

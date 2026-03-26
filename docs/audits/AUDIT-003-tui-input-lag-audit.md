@@ -5,9 +5,7 @@ status: draft
 author: jkaloger
 date: 2026-03-16
 tags: []
-related:
-- related-to: docs/architecture/ARCH-005-tui/threading-model.md
-- related-to: docs/architecture/ARCH-005-tui/index.md
+related: []
 ---
 
 

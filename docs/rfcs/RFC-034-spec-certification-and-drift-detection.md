@@ -27,7 +27,7 @@ The central thesis: the code is the specification. Specs _describe_ what code do
 
 ## Problem
 
-Architecture documents in lazyspec are static. Once written and accepted, they sit in `docs/architecture/` with no connection to reality. A developer can change `SessionManager::create` in ways that contradict ARCH-003's description of the engine, and nothing surfaces this. The document stays "accepted" while the code moves on.
+Architecture documents in lazyspec were static. Once written and accepted, they sat in the repository with no connection to reality. A developer could change `SessionManager::create` in ways that contradicted the architecture description of the engine, and nothing surfaced this. The document stayed "accepted" while the code moved on.
 
 The `@ref` directive system (RFC-019) already creates machine-readable links between documents and code symbols. Today these links are used for rendering -- expanding `@ref src/engine/document.rs#DocMeta` into a code block. But they also represent a spec's _scope_: the set of symbols it makes claims about. This scope is the foundation for drift detection.
 
@@ -105,7 +105,7 @@ Certification status is binary at the spec level: a spec is either certified (ha
 
 ### Spec Type (evolving from `arch`)
 
-The `arch` document type becomes `spec`. Existing architecture documents (ARCH-001 through ARCH-005) migrate to SPEC-001 through SPEC-005. The directory structure moves from `docs/architecture/` to `docs/specs/`.
+The `arch` document type becomes `spec`. Existing architecture documents migrate to `docs/specs/` as SPEC-001 through SPEC-005.
 
 A spec is a document that describes how a part of the system works _right now_, verified by the code and tests it references. What distinguishes it from an RFC is persistence and verifiability: an RFC captures design thinking at a point in time, while a spec describes the current steady state and can prove it through deterministic signals. An RFC might produce or modify specs; the spec outlives the RFC.
 
@@ -829,7 +829,7 @@ Two migrations are needed:
 #### Arch to Spec
 
 1. `type: arch` in frontmatter becomes `type: spec`
-2. Files move from `docs/architecture/` to `docs/specs/` (directory structure is preserved)
+2. Files move to `docs/specs/` (directory structure is preserved)
 3. Document IDs change from ARCH-XXX to SPEC-XXX
 4. Relationships pointing to arch documents update their targets
 5. Each migrated spec should have at least one linked Story with AC (can be created during the first certification pass)

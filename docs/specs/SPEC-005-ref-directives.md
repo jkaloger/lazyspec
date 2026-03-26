@@ -9,9 +9,6 @@ tags:
 - engine
 - expansion
 related:
-- related-to: docs/architecture/ARCH-002-data-model/ref-directives.md
-- related-to: docs/architecture/ARCH-003-engine/ref-expansion.md
-- related-to: docs/architecture/ARCH-003-engine/cache-and-template.md
 - related-to: docs/stories/STORY-055-ref-parsing-and-expansion-pipeline.md
 - related-to: docs/stories/STORY-057-rendering-integration.md
 - related-to: docs/stories/STORY-058-ref-expansion-hardening-and-performance.md

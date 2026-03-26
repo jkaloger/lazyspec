@@ -6,8 +6,6 @@ author: "jkaloger"
 date: 2026-03-25
 tags: [tui, threading, lifecycle]
 related:
-  - implements: docs/architecture/ARCH-005-tui/threading-model.md
-  - implements: docs/architecture/ARCH-005-tui/event-loop.md
   - related-to: docs/stories/STORY-003-tui-dashboard.md
   - related-to: docs/stories/STORY-073-tui-async-document-creation.md
 ---

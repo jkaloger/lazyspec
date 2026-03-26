@@ -48,7 +48,7 @@ Then each criterion uses the heading format `### AC: <slug>` where slug is a sta
 
 ### AC: arch-to-spec-migration
 
-Given the existing architecture documents ARCH-001 through ARCH-005 in `docs/architecture/`
+Given the existing architecture documents ARCH-001 through ARCH-005
 When the migration is performed
 Then they become SPEC-001 through SPEC-005 in `docs/specs/`, with `type: spec` in frontmatter and the flat file layout
 

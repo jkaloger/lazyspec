@@ -6,7 +6,6 @@ author: "jkaloger"
 date: 2026-03-25
 tags: [cli, json, styling, completions]
 related:
-  - related-to: "docs/architecture/ARCH-004-cli/index.md"
   - related-to: "docs/stories/STORY-002-cli-commands.md"
   - related-to: "docs/stories/STORY-021-json-everywhere.md"
   - related-to: "docs/stories/STORY-023-styled-cli-output.md"
