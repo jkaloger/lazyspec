@@ -518,18 +518,8 @@ static AC_SLUG_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^[a-z0-9]+(-[a-z0-9]+)*$").unwrap());
 
 impl AcSlugFormatRule {
-    fn is_spec_story(path: &std::path::Path, store: &super::store::Store) -> bool {
-        let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
-        if filename != "story.md" {
-            return false;
-        }
-        let Some(parent_path) = store.parent_of(path) else {
-            return false;
-        };
-        let Some(parent_doc) = store.get(parent_path) else {
-            return false;
-        };
-        parent_doc.doc_type == DocType::new(DocType::SPEC)
+    fn is_spec_doc(meta: &DocMeta) -> bool {
+        meta.doc_type == DocType::new(DocType::SPEC)
     }
 
     fn read_body(path: &std::path::Path, store: &super::store::Store) -> Option<String> {
@@ -601,7 +591,7 @@ impl Checker for AcSlugFormatRule {
             if meta.validate_ignore {
                 continue;
             }
-            if !Self::is_spec_story(path, store) {
+            if !Self::is_spec_doc(meta) {
                 continue;
             }
             let Some(body) = Self::read_body(path, store) else {
@@ -620,12 +610,8 @@ static REF_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(super::refs::REF_PATTERN).unwrap());
 
 impl RefScopeRule {
-    fn is_spec_index(path: &std::path::Path, meta: &DocMeta, store: &super::store::Store) -> bool {
-        if meta.doc_type != DocType::new(DocType::SPEC) {
-            return false;
-        }
-        let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
-        filename == "index.md" || store.parent_of(path).is_none()
+    fn is_spec(meta: &DocMeta) -> bool {
+        meta.doc_type == DocType::new(DocType::SPEC)
     }
 
     fn module_prefix(ref_path: &str) -> Option<String> {
@@ -650,7 +636,7 @@ impl Checker for RefScopeRule {
             if meta.validate_ignore {
                 continue;
             }
-            if !Self::is_spec_index(path, meta, store) {
+            if !Self::is_spec(meta) {
                 continue;
             }
             let full_path = store.root().join(path);
@@ -713,7 +699,7 @@ impl Checker for OrphanRefRule {
             if meta.validate_ignore {
                 continue;
             }
-            if !RefScopeRule::is_spec_index(path, meta, store) {
+            if !RefScopeRule::is_spec(meta) {
                 continue;
             }
             let full_path = store.root().join(path);

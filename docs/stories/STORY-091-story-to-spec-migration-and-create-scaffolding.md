@@ -20,7 +20,7 @@ RFC-034 introduces the `spec` document type as a persistent, certifiable contrac
 
 Given `lazyspec create spec` is invoked with a title
 When the spec is created
-Then it produces a spec document at `docs/specs/SPEC-NNN-slug.md` (flat file) with `type: spec` frontmatter, or `docs/specs/SPEC-NNN-slug/index.md` (directory) if the user specifies `--dir`
+Then it produces a spec document at `docs/specs/SPEC-NNN-slug.md` with `type: spec` frontmatter
 
 ### AC: create-spec-accepts-type
 
@@ -44,7 +44,7 @@ Then a warning is emitted indicating the spec has no linked stories providing ac
 
 ### In Scope
 
-- `lazyspec create spec` producing a flat file or directory spec document
+- `lazyspec create spec` producing a flat file spec document
 - `spec` as a valid document type for `lazyspec create`
 - Story-to-spec linking via existing `implements` relationship
 - `lazyspec validate` warning for specs with no linked stories

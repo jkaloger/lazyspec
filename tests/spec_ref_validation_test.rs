@@ -45,7 +45,7 @@ fn ref_count_below_ceiling_no_warning() {
         })
         .collect();
     let content = spec_index_with_refs(&refs);
-    fixture.write_subfolder_doc("docs/specs/SPEC-001-test", &content);
+    fixture.write_doc("docs/specs/SPEC-001-test.md", &content);
 
     let warnings = warning_messages(&fixture);
     let ref_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("@ref targets")).collect();
@@ -62,7 +62,7 @@ fn ref_count_above_ceiling_produces_warning() {
     let paths: Vec<String> = (0..16).map(|i| format!("src/engine/file{}.rs", i)).collect();
     let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
     let content = spec_index_with_refs(&refs);
-    fixture.write_subfolder_doc("docs/specs/SPEC-002-test", &content);
+    fixture.write_doc("docs/specs/SPEC-002-test.md", &content);
 
     let warnings = warning_messages(&fixture);
     let ref_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("@ref targets")).collect();
@@ -85,7 +85,7 @@ fn configurable_ceiling_overrides_default() {
     let paths: Vec<String> = (0..6).map(|i| format!("src/engine/file{}.rs", i)).collect();
     let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
     let content = spec_index_with_refs(&refs);
-    fixture.write_subfolder_doc("docs/specs/SPEC-003-test", &content);
+    fixture.write_doc("docs/specs/SPEC-003-test.md", &content);
 
     // ceiling=5 should trigger
     let mut config_low = Config::default();
@@ -121,7 +121,7 @@ fn refs_in_three_or_fewer_modules_no_warning() {
         "src/tui/app.rs",
     ];
     let content = spec_index_with_refs(refs);
-    fixture.write_subfolder_doc("docs/specs/SPEC-004-test", &content);
+    fixture.write_doc("docs/specs/SPEC-004-test.md", &content);
 
     let warnings = warning_messages(&fixture);
     let cross_warnings: Vec<_> = warnings
@@ -145,7 +145,7 @@ fn refs_spanning_more_than_three_modules_produces_advisory() {
         "src/utils/helpers.rs",
     ];
     let content = spec_index_with_refs(refs);
-    fixture.write_subfolder_doc("docs/specs/SPEC-005-test", &content);
+    fixture.write_doc("docs/specs/SPEC-005-test.md", &content);
 
     let warnings = warning_messages(&fixture);
     let cross_warnings: Vec<_> = warnings
@@ -192,7 +192,7 @@ fn non_spec_documents_skip_ref_validation() {
 fn orphan_ref_produces_warning() {
     let fixture = TestFixture::new();
     let content = spec_index_with_refs(&["src/nonexistent.rs"]);
-    fixture.write_subfolder_doc("docs/specs/SPEC-010-orphan", &content);
+    fixture.write_doc("docs/specs/SPEC-010-orphan.md", &content);
 
     let warnings = warning_messages(&fixture);
     let orphan_warnings: Vec<_> = warnings
@@ -221,7 +221,7 @@ fn valid_ref_produces_no_orphan_warning() {
     std::fs::write(target_dir.join("real.rs"), "fn main() {}").unwrap();
 
     let content = spec_index_with_refs(&["src/engine/real.rs"]);
-    fixture.write_subfolder_doc("docs/specs/SPEC-011-valid", &content);
+    fixture.write_doc("docs/specs/SPEC-011-valid.md", &content);
 
     let warnings = warning_messages(&fixture);
     let orphan_warnings: Vec<_> = warnings

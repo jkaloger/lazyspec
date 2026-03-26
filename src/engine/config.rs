@@ -221,11 +221,7 @@ fn default_types() -> Vec<TypeDef> {
         build_type_def("story", "docs/stories", "STORY", "▲"),
         build_type_def("iteration", "docs/iterations", "ITERATION", "◆"),
         build_type_def("adr", "docs/adrs", "ADR", "■"),
-        {
-            let mut spec = build_type_def("spec", "docs/specs", "SPEC", "📋");
-            spec.subdirectory = true;
-            spec
-        },
+        build_type_def("spec", "docs/specs", "SPEC", "📋"),
     ]
 }
 

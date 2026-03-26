@@ -32,7 +32,7 @@ Then the engine recognises it as a valid document type alongside rfc, story, ite
 
 Given a spec document is created or migrated
 When it is stored on disk
-Then it follows either a flat file layout (`docs/specs/SPEC-NNN-slug.md`) or a directory layout (`docs/specs/SPEC-NNN-slug/index.md`) at the user's choice
+Then it follows the flat file layout (`docs/specs/SPEC-NNN-slug.md`)
 
 ### AC: spec-linked-stories
 
@@ -50,7 +50,7 @@ Then each criterion uses the heading format `### AC: <slug>` where slug is a sta
 
 Given the existing architecture documents ARCH-001 through ARCH-005 in `docs/architecture/`
 When the migration is performed
-Then they become SPEC-001 through SPEC-005 in `docs/specs/`, with `type: spec` in frontmatter and the new directory structure preserved
+Then they become SPEC-001 through SPEC-005 in `docs/specs/`, with `type: spec` in frontmatter and the flat file layout
 
 ### AC: validate-ref-count-ceiling
 
@@ -81,7 +81,7 @@ Then the configured ceiling is used instead of the default 15
 ### In Scope
 
 - `spec` as a new document type in the engine's type registry
-- Document layout: flat file (`docs/specs/SPEC-NNN-slug.md`) or directory (`docs/specs/SPEC-NNN-slug/index.md`)
+- Document layout: flat file (`docs/specs/SPEC-NNN-slug.md`)
 - `### AC: <slug>` heading format for acceptance criteria in linked Story documents
 - Stories link to specs via `implements` relationships (existing relationship model)
 - Migration of ARCH-001 through ARCH-005 to SPEC-001 through SPEC-005

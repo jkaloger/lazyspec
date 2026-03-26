@@ -138,11 +138,11 @@ Specs should not try to cover user-facing workflows end-to-end. A workflow like 
 
 ### Spec Structure
 
-A spec is either a flat file or a directory with an `index.md`, following the existing document conventions. The user chooses whichever layout suits the spec's complexity.
+A spec is a flat file following the existing document conventions.
 
 ```
-docs/specs/SPEC-001-validation.md           ← flat file (simple specs)
-docs/specs/SPEC-002-data-model/index.md     ← directory with index (complex specs with child docs)
+docs/specs/SPEC-001-validation.md
+docs/specs/SPEC-002-data-model.md
 ```
 
 The spec contains prose description, `@ref` directives (both implementation and test targets), and any diagrams or tables that describe the system's behaviour. Certification metadata (`certified_by`, `certified_date`, `story_hashes`) lives in the spec's frontmatter.
@@ -289,7 +289,7 @@ The tradeoff: comments that carry semantic weight (e.g., `// SAFETY:` blocks in 
 [certification]
 normalize = true  # default
 
-[certification.overrides."docs/specs/SPEC-007-unsafe-invariants"]
+[certification.overrides."docs/specs/SPEC-007-unsafe-invariants.md"]
 normalize = false  # hash raw bytes, comments included
 ```
 
