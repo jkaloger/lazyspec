@@ -86,7 +86,11 @@ impl GitStatusCache {
     }
 
     pub fn get(&self, path: &Path) -> Option<&GitFileStatus> {
-        self.statuses.as_ref()?.get(path)
+        let map = self.statuses.as_ref()?;
+        map.get(path).or_else(|| {
+            let relative = path.strip_prefix(&self.repo_root).ok()?;
+            map.get(relative)
+        })
     }
 }
 

@@ -35,7 +35,7 @@ fn default_config() {
 #[test]
 fn default_config_has_four_type_defs() {
     let config = Config::default();
-    assert_eq!(config.documents.types.len(), 4);
+    assert_eq!(config.documents.types.len(), 5);
 
     let rfc = config.type_by_name("rfc").unwrap();
     assert_eq!(rfc.plural, "rfcs");
@@ -132,7 +132,7 @@ pattern = "{type}-{n:03}-{title}.md"
 "#;
 
     let config = Config::parse(toml_str).unwrap();
-    assert_eq!(config.documents.types.len(), 4);
+    assert_eq!(config.documents.types.len(), 5);
     assert_eq!(config.type_by_name("rfc").unwrap().dir, "docs/rfcs");
     assert_eq!(config.filesystem.directories.rfcs, "docs/rfcs");
 }
@@ -551,6 +551,34 @@ format = "incremental"
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("remote"), "Error should mention remote, got: {msg}");
+}
+
+#[test]
+fn ref_count_ceiling_defaults_to_15() {
+    let toml_str = r#"
+[templates]
+dir = ".lazyspec/templates"
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    assert_eq!(config.ref_count_ceiling, 15);
+}
+
+#[test]
+fn ref_count_ceiling_configurable() {
+    let toml_str = r#"
+ref_count_ceiling = 20
+
+[templates]
+dir = ".lazyspec/templates"
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    assert_eq!(config.ref_count_ceiling, 20);
+}
+
+#[test]
+fn default_config_has_ref_count_ceiling_15() {
+    let config = Config::default();
+    assert_eq!(config.ref_count_ceiling, 15);
 }
 
 #[test]

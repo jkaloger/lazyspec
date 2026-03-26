@@ -13,6 +13,7 @@ impl DocType {
     pub const STORY: &str = "story";
     pub const ITERATION: &str = "iteration";
     pub const ADR: &str = "adr";
+    pub const SPEC: &str = "spec";
 
     pub fn new(s: &str) -> Self {
         DocType(s.to_lowercase())

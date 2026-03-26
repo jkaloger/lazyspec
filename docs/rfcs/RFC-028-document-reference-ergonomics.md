@@ -11,7 +11,6 @@ tags:
 related:
   - related to: docs/rfcs/RFC-018-tui-interaction-enhancements.md
   - related to: docs/rfcs/RFC-027-sqids-document-numbering.md
-  - related to: docs/architecture/ARCH-004-cli/index.md
 ---
 
 

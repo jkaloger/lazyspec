@@ -62,7 +62,7 @@ impl Store {
 
         let (forward_links, reverse_links) = Self::build_links(&docs);
 
-        Ok(Store {
+        let mut store = Store {
             root: root.to_path_buf(),
             docs,
             forward_links,
@@ -70,7 +70,10 @@ impl Store {
             children,
             parent_of,
             parse_errors,
-        })
+        };
+        store.propagate_parent_links();
+
+        Ok(store)
     }
 
     pub fn all_docs(&self) -> Vec<&DocMeta> {
@@ -208,6 +211,14 @@ impl Store {
 
     pub fn parent_of(&self, path: &Path) -> Option<&PathBuf> {
         self.parent_of.get(path)
+    }
+
+    pub fn forward_links_for(&self, path: &Path) -> &[(RelationType, PathBuf)] {
+        self.forward_links.get(path).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    pub fn reverse_links_for(&self, path: &Path) -> &[(RelationType, PathBuf)] {
+        self.reverse_links.get(path).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     pub fn validate_full(&self, config: &Config) -> crate::engine::validation::ValidationResult {

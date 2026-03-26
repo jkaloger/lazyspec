@@ -1,4 +1,11 @@
 [[types]]
+name = "spec"
+plural = "specs"
+dir = "docs/specs"
+prefix = "SPEC"
+icon = "📋"
+
+[[types]]
 name = "rfc"
 plural = "rfcs"
 dir = "docs/rfcs"
@@ -32,13 +39,6 @@ plural = "audits"
 dir = "docs/audits"
 prefix = "AUDIT"
 icon = "🔍"
-
-[[types]]
-name = "arch"
-plural = "architecture"
-dir = "docs/architecture"
-prefix = "ARCH"
-icon = "🏛"
 
 [templates]
 dir = ".lazyspec/templates"

@@ -1,7 +1,8 @@
 use crate::engine::config::{Config, Severity, ValidationRule as ConfigRule};
-use crate::engine::document::{DocType, Status};
-use std::collections::HashMap;
+use crate::engine::document::{DocMeta, DocType, Status};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 #[derive(Debug)]
 pub enum ValidationIssue {
@@ -43,6 +44,24 @@ pub enum ValidationIssue {
     DuplicateId {
         id: String,
         paths: Vec<PathBuf>,
+    },
+    InvalidAcSlug {
+        path: PathBuf,
+        slug: String,
+        reason: String,
+    },
+    RefCountExceeded {
+        path: PathBuf,
+        count: usize,
+        ceiling: usize,
+    },
+    CrossModuleRefs {
+        path: PathBuf,
+        module_count: usize,
+    },
+    OrphanRef {
+        path: PathBuf,
+        ref_target: String,
     },
 }
 
@@ -142,6 +161,44 @@ impl std::fmt::Display for ValidationIssue {
                 let path_strs: Vec<String> =
                     paths.iter().map(|p| p.display().to_string()).collect();
                 write!(f, "duplicate id: {} ({})", id, path_strs.join(", "))
+            }
+            ValidationIssue::InvalidAcSlug { path, slug, reason } => {
+                write!(
+                    f,
+                    "invalid AC slug in {}: \"{}\" ({})",
+                    path.display(),
+                    slug,
+                    reason
+                )
+            }
+            ValidationIssue::RefCountExceeded {
+                path,
+                count,
+                ceiling,
+            } => {
+                write!(
+                    f,
+                    "spec {} has {} @ref targets (ceiling {}); consider splitting",
+                    path.display(),
+                    count,
+                    ceiling
+                )
+            }
+            ValidationIssue::CrossModuleRefs { path, module_count } => {
+                write!(
+                    f,
+                    "spec {} refs span {} modules; may cover a cross-cutting concern",
+                    path.display(),
+                    module_count
+                )
+            }
+            ValidationIssue::OrphanRef { path, ref_target } => {
+                write!(
+                    f,
+                    "orphan ref in {}: @ref {} target does not exist",
+                    path.display(),
+                    ref_target
+                )
             }
         }
     }
@@ -454,12 +511,235 @@ impl Checker for DuplicateIdRule {
     }
 }
 
+pub struct AcSlugFormatRule;
+
+static AC_HEADING_PREFIX: &str = "### AC:";
+static AC_SLUG_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^[a-z0-9]+(-[a-z0-9]+)*$").unwrap());
+
+impl AcSlugFormatRule {
+    fn is_spec_doc(meta: &DocMeta) -> bool {
+        meta.doc_type == DocType::new(DocType::SPEC)
+    }
+
+    fn read_body(path: &std::path::Path, store: &super::store::Store) -> Option<String> {
+        let full_path = store.root().join(path);
+        let content = std::fs::read_to_string(&full_path).ok()?;
+        DocMeta::extract_body(&content).ok()
+    }
+
+    fn validate_slugs(path: &std::path::Path, body: &str) -> Vec<(Severity, ValidationIssue)> {
+        let slug_re = &*AC_SLUG_RE;
+        let mut issues = Vec::new();
+        let mut seen_slugs = HashSet::new();
+
+        for line in body.lines() {
+            let Some(rest) = line.strip_prefix(AC_HEADING_PREFIX) else {
+                continue;
+            };
+            let slug = rest.trim();
+
+            if slug.is_empty() {
+                issues.push((
+                    Severity::Warning,
+                    ValidationIssue::InvalidAcSlug {
+                        path: path.to_path_buf(),
+                        slug: String::new(),
+                        reason: "empty AC slug".to_string(),
+                    },
+                ));
+                continue;
+            }
+
+            if !seen_slugs.insert(slug.to_string()) {
+                issues.push((
+                    Severity::Warning,
+                    ValidationIssue::InvalidAcSlug {
+                        path: path.to_path_buf(),
+                        slug: slug.to_string(),
+                        reason: "duplicate AC slug".to_string(),
+                    },
+                ));
+                continue;
+            }
+
+            if !slug_re.is_match(slug) {
+                issues.push((
+                    Severity::Warning,
+                    ValidationIssue::InvalidAcSlug {
+                        path: path.to_path_buf(),
+                        slug: slug.to_string(),
+                        reason: "slug must be lowercase kebab-case (a-z0-9 separated by hyphens)".to_string(),
+                    },
+                ));
+            }
+        }
+
+        issues
+    }
+}
+
+impl Checker for AcSlugFormatRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        _config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        let mut issues = Vec::new();
+
+        for (path, meta) in &store.docs {
+            if meta.validate_ignore {
+                continue;
+            }
+            if !Self::is_spec_doc(meta) {
+                continue;
+            }
+            let Some(body) = Self::read_body(path, store) else {
+                continue;
+            };
+            issues.extend(Self::validate_slugs(path, &body));
+        }
+
+        issues
+    }
+}
+
+pub struct RefScopeRule;
+
+static REF_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(super::refs::REF_PATTERN).unwrap());
+
+impl RefScopeRule {
+    fn is_spec(meta: &DocMeta) -> bool {
+        meta.doc_type == DocType::new(DocType::SPEC)
+    }
+
+    fn module_prefix(ref_path: &str) -> Option<String> {
+        let parts: Vec<&str> = ref_path.split('/').collect();
+        if parts.len() >= 2 {
+            Some(format!("{}/{}", parts[0], parts[1]))
+        } else {
+            None
+        }
+    }
+}
+
+impl Checker for RefScopeRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        let mut issues = Vec::new();
+
+        for (path, meta) in &store.docs {
+            if meta.validate_ignore {
+                continue;
+            }
+            if !Self::is_spec(meta) {
+                continue;
+            }
+            let full_path = store.root().join(path);
+            let Ok(content) = std::fs::read_to_string(&full_path) else {
+                continue;
+            };
+            let Ok(body) = DocMeta::extract_body(&content) else {
+                continue;
+            };
+
+            let ref_re = &*REF_RE;
+            let ref_paths: HashSet<String> = ref_re
+                .captures_iter(&body)
+                .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+                .collect();
+
+            let count = ref_paths.len();
+            if count > config.ref_count_ceiling {
+                issues.push((
+                    Severity::Warning,
+                    ValidationIssue::RefCountExceeded {
+                        path: path.clone(),
+                        count,
+                        ceiling: config.ref_count_ceiling,
+                    },
+                ));
+            }
+
+            let modules: HashSet<String> = ref_paths
+                .iter()
+                .filter_map(|p| Self::module_prefix(p))
+                .collect();
+
+            if modules.len() > 3 {
+                issues.push((
+                    Severity::Warning,
+                    ValidationIssue::CrossModuleRefs {
+                        path: path.clone(),
+                        module_count: modules.len(),
+                    },
+                ));
+            }
+        }
+
+        issues
+    }
+}
+
+pub struct OrphanRefRule;
+
+impl Checker for OrphanRefRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        _config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        let mut issues = Vec::new();
+
+        for (path, meta) in &store.docs {
+            if meta.validate_ignore {
+                continue;
+            }
+            if !RefScopeRule::is_spec(meta) {
+                continue;
+            }
+            let full_path = store.root().join(path);
+            let Ok(content) = std::fs::read_to_string(&full_path) else {
+                continue;
+            };
+            let Ok(body) = DocMeta::extract_body(&content) else {
+                continue;
+            };
+
+            let ref_re = &*REF_RE;
+            for cap in ref_re.captures_iter(&body) {
+                let Some(ref_path) = cap.get(1).map(|m| m.as_str()) else {
+                    continue;
+                };
+                if !store.root().join(ref_path).exists() {
+                    issues.push((
+                        Severity::Warning,
+                        ValidationIssue::OrphanRef {
+                            path: path.clone(),
+                            ref_target: ref_path.to_string(),
+                        },
+                    ));
+                }
+            }
+        }
+
+        issues
+    }
+}
+
 fn default_checkers() -> Vec<Box<dyn Checker>> {
     vec![
         Box::new(BrokenLinkRule),
         Box::new(ParentLinkRule),
         Box::new(StatusConsistencyRule),
         Box::new(DuplicateIdRule),
+        Box::new(AcSlugFormatRule),
+        Box::new(RefScopeRule),
+        Box::new(OrphanRefRule),
     ]
 }
 

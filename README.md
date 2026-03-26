@@ -110,6 +110,7 @@ All document management is available as subcommands. Most accept `--json` for ma
 | `unignore <path>`                    | Remove validation skip from a document                                |
 | `validate [--warnings]`              | Check document integrity and link consistency                         |
 | `fix [paths] [--dry-run]`            | Fix documents with broken or incomplete frontmatter                   |
+| `pin <id>`                           | Pin blob hashes onto `@ref` directives in a document                  |
 | `reservations list`                  | Show all reservation refs on the remote                               |
 | `reservations prune [--dry-run]`     | Remove refs for documents that already exist locally                  |
 

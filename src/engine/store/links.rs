@@ -27,6 +27,24 @@ impl Store {
         }
     }
 
+    pub(super) fn propagate_parent_links(&mut self) {
+        for (child_path, parent_path) in &self.parent_of {
+            let Some(parent_links) = self.forward_links.get(parent_path).cloned() else {
+                continue;
+            };
+            for (rel_type, target) in &parent_links {
+                self.forward_links
+                    .entry(child_path.clone())
+                    .or_default()
+                    .push((rel_type.clone(), target.clone()));
+                self.reverse_links
+                    .entry(target.clone())
+                    .or_default()
+                    .push((rel_type.clone(), child_path.clone()));
+            }
+        }
+    }
+
     pub(super) fn rebuild_links(&mut self) {
         self.forward_links.clear();
         self.reverse_links.clear();
@@ -43,6 +61,7 @@ impl Store {
                     .push((rel.rel_type.clone(), path.clone()));
             }
         }
+        self.propagate_parent_links();
     }
 
     pub(super) fn build_links(

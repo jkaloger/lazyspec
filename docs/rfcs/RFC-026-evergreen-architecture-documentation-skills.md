@@ -29,7 +29,7 @@ Create Claude Code skills that keep architecture documentation in sync with the 
 1. **Reactive**: After significant code changes, diff the architecture docs against the actual module structure and flag stale sections.
 2. **Generative**: When a new module or significant feature lands, generate draft architecture documentation or propose updates to existing docs.
 
-These skills are designed for lazyspec's own `docs/architecture/` structure but should be general enough for any project using lazyspec-style ARCH documents.
+These skills are designed for lazyspec's own spec documents but should be general enough for any project using lazyspec-style spec documents.
 
 ## Design
 
