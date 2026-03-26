@@ -1,6 +1,7 @@
 mod conflicts;
 mod fields;
 mod output;
+mod relations;
 pub mod renumber;
 
 use std::path::Path;
@@ -15,12 +16,21 @@ use crate::engine::store::Store;
 use conflicts::collect_conflict_fixes;
 use fields::collect_field_fixes;
 use output::format_human;
+use relations::collect_relation_fixes;
 use renumber::collect_renumber_output;
 
 #[derive(Debug, Serialize)]
 struct FixOutput {
     field_fixes: Vec<FieldFixResult>,
     conflict_fixes: Vec<ConflictFixResult>,
+    relation_fixes: Vec<RelationFixResult>,
+}
+
+#[derive(Debug, Serialize)]
+struct RelationFixResult {
+    path: String,
+    replacements: Vec<(String, String)>,
+    written: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -85,7 +95,8 @@ pub fn run(
 ) -> i32 {
     let output = plan_field_and_conflict_fixes(root, store, config, paths, dry_run, fs);
     let has_fixes = !output.field_fixes.iter().all(|r| r.fields_added.is_empty())
-        || !output.conflict_fixes.is_empty();
+        || !output.conflict_fixes.is_empty()
+        || !output.relation_fixes.is_empty();
 
     if json {
         let json_str = serde_json::to_string_pretty(&output).unwrap();
@@ -196,8 +207,10 @@ fn plan_field_and_conflict_fixes(
 ) -> FixOutput {
     let field_fixes = collect_field_fixes(root, store, config, paths, dry_run, fs);
     let conflict_fixes = collect_conflict_fixes(root, store, config, dry_run, fs);
+    let relation_fixes = collect_relation_fixes(root, store, dry_run, fs);
     FixOutput {
         field_fixes,
         conflict_fixes,
+        relation_fixes,
     }
 }

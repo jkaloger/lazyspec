@@ -364,3 +364,136 @@ fn fix_infers_type_from_directory() {
         &serde_yaml::Value::String("rfc".into()),
     );
 }
+
+#[test]
+fn fix_migrates_path_targets_to_ids() {
+    let fixture = common::TestFixture::new();
+
+    // Create an RFC that will be the target
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-target.md",
+        "---\ntitle: \"RFC-001 Target\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    // Create a story that references the RFC by path
+    fixture.write_doc(
+        "docs/stories/STORY-001-impl.md",
+        "---\ntitle: \"STORY-001 Impl\"\ntype: story\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-target.md\n---\n",
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::fix::run_json(
+        fixture.root(),
+        &store,
+        &fixture.config(),
+        &[],
+        false,
+        &RealFileSystem,
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let relation_fixes = parsed["relation_fixes"].as_array().unwrap();
+    assert_eq!(relation_fixes.len(), 1);
+    assert_eq!(relation_fixes[0]["path"].as_str().unwrap(), "docs/stories/STORY-001-impl.md");
+    assert!(relation_fixes[0]["written"].as_bool().unwrap());
+
+    // Verify the file was actually updated
+    let content = std::fs::read_to_string(fixture.root().join("docs/stories/STORY-001-impl.md")).unwrap();
+    let (yaml_str, _) = split_frontmatter(&content).unwrap();
+    // The path target should now be an ID
+    assert!(!yaml_str.contains("docs/rfcs/RFC-001-target.md"));
+    assert!(yaml_str.contains("RFC-001"));
+}
+
+#[test]
+fn fix_migrates_path_targets_dry_run() {
+    let fixture = common::TestFixture::new();
+
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-target.md",
+        "---\ntitle: \"RFC-001 Target\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    fixture.write_doc(
+        "docs/stories/STORY-001-ref.md",
+        "---\ntitle: \"STORY-001 Ref\"\ntype: story\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-target.md\n---\n",
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::fix::run_json(
+        fixture.root(),
+        &store,
+        &fixture.config(),
+        &[],
+        true,
+        &RealFileSystem,
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let relation_fixes = parsed["relation_fixes"].as_array().unwrap();
+    assert_eq!(relation_fixes.len(), 1);
+    assert!(!relation_fixes[0]["written"].as_bool().unwrap());
+
+    // File should still have path target
+    let content = std::fs::read_to_string(fixture.root().join("docs/stories/STORY-001-ref.md")).unwrap();
+    assert!(content.contains("docs/rfcs/RFC-001-target.md"));
+}
+
+#[test]
+fn fix_no_relation_fixes_when_already_ids() {
+    let fixture = common::TestFixture::new();
+
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-target.md",
+        "---\ntitle: \"RFC-001 Target\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    // Story already references by ID
+    fixture.write_doc(
+        "docs/stories/STORY-001-good.md",
+        "---\ntitle: \"STORY-001 Good\"\ntype: story\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: RFC-001\n---\n",
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::fix::run_json(
+        fixture.root(),
+        &store,
+        &fixture.config(),
+        &[],
+        false,
+        &RealFileSystem,
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let relation_fixes = parsed["relation_fixes"].as_array().unwrap();
+    assert!(relation_fixes.is_empty());
+}
+
+#[test]
+fn fix_human_output_relation_migration() {
+    let fixture = common::TestFixture::new();
+
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-target.md",
+        "---\ntitle: \"RFC-001 Target\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    fixture.write_doc(
+        "docs/stories/STORY-001-human.md",
+        "---\ntitle: \"STORY-001 Human\"\ntype: story\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-target.md\n---\n",
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::fix::run_human(
+        fixture.root(),
+        &store,
+        &fixture.config(),
+        &[],
+        false,
+        &RealFileSystem,
+    );
+
+    assert!(output.contains("Migrated relation"));
+    assert!(output.contains("docs/rfcs/RFC-001-target.md"));
+    assert!(output.contains("RFC-001"));
+}

@@ -471,7 +471,7 @@ fn test_enter_creates_link_and_closes() {
     let source = store.get(&std::path::PathBuf::from("docs/rfcs/RFC-001-source.md")).unwrap();
     assert!(!source.related.is_empty(), "source should have a relation after Enter");
     assert_eq!(source.related[0].rel_type, lazyspec::engine::document::RelationType::Implements);
-    assert_eq!(source.related[0].target, "docs/rfcs/RFC-002-target.md");
+    assert_eq!(source.related[0].target, "RFC-002");
 }
 
 // AC5: Enter with empty results is a no-op

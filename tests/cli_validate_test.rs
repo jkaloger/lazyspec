@@ -186,3 +186,70 @@ fn validate_ignore_excludes_from_duplicate_check() {
         .collect();
     assert!(dups.is_empty(), "validate_ignore docs should be excluded from duplicate ID check");
 }
+
+#[test]
+fn validate_broken_link_with_nonexistent_id() {
+    let fixture = common::TestFixture::new();
+    fixture.write_doc(
+        "docs/adrs/ADR-001-bad-id.md",
+        "---\ntitle: \"Bad ID Link\"\ntype: adr\nstatus: draft\nauthor: a\ndate: 2026-01-01\ntags: []\nrelated:\n  - implements: RFC-999\n---\n",
+    );
+
+    let store = fixture.store();
+    let result = store.validate_full(&fixture.config());
+
+    let broken: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|e| matches!(e, ValidationIssue::BrokenLink { .. }))
+        .collect();
+    assert_eq!(broken.len(), 1, "expected exactly one BrokenLink error");
+    match &broken[0] {
+        ValidationIssue::BrokenLink { source, target } => {
+            assert!(source.ends_with("ADR-001-bad-id.md"));
+            assert_eq!(target, "RFC-999", "broken link target should be the unresolved ID");
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn validate_valid_id_link_is_not_broken() {
+    let fixture = common::TestFixture::new();
+    fixture.write_rfc("RFC-001-feature.md", "Feature", "draft");
+    fixture.write_doc(
+        "docs/adrs/ADR-001-linked.md",
+        "---\ntitle: \"Linked ADR\"\ntype: adr\nstatus: draft\nauthor: a\ndate: 2026-01-01\ntags: []\nrelated:\n  - implements: RFC-001\n---\n",
+    );
+
+    let store = fixture.store();
+    let result = store.validate_full(&fixture.config());
+
+    let broken: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|e| matches!(e, ValidationIssue::BrokenLink { .. }))
+        .collect();
+    assert!(broken.is_empty(), "valid ID link should not produce BrokenLink error, got: {:?}", broken);
+}
+
+#[test]
+fn validate_broken_link_with_nonexistent_id_in_json_output() {
+    let fixture = common::TestFixture::new();
+    fixture.write_doc(
+        "docs/adrs/ADR-001-bad-id.md",
+        "---\ntitle: \"Bad ID Link\"\ntype: adr\nstatus: draft\nauthor: a\ndate: 2026-01-01\ntags: []\nrelated:\n  - implements: RFC-999\n---\n",
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::validate::run_json(&store, &fixture.config());
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    let errors = parsed["errors"].as_array().unwrap();
+    let has_broken = errors.iter().any(|e| {
+        e.as_str()
+            .map(|s| s.contains("RFC-999"))
+            .unwrap_or(false)
+    });
+    assert!(has_broken, "JSON output should contain broken link error with unresolved ID RFC-999, got: {:?}", errors);
+}

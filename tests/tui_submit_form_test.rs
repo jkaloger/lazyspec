@@ -137,7 +137,7 @@ fn test_submit_applies_relations() {
         .collect();
     let content = fs::read_to_string(stories[0].path()).unwrap();
     assert!(content.contains("implements"));
-    assert!(content.contains("docs/rfcs/RFC-001-existing.md"));
+    assert!(content.contains("RFC-001"));
 }
 
 // AC4: Relation without prefix defaults to related-to
@@ -166,7 +166,7 @@ fn test_submit_relation_defaults_to_related_to() {
         .collect();
     let content = fs::read_to_string(stories[0].path()).unwrap();
     assert!(content.contains("related-to"));
-    assert!(content.contains("docs/rfcs/RFC-001-existing.md"));
+    assert!(content.contains("RFC-001"));
 }
 
 // AC5: Empty title shows error, no file created

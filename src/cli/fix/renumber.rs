@@ -166,17 +166,17 @@ fn plan_renumbering(
     }
 
     if !all_renames.is_empty() {
-        let path_map: HashMap<String, String> = all_renames
-            .iter()
-            .map(|r| (r.old_path.clone(), r.new_path.clone()))
-            .collect();
-
         for rename in &mut all_renames {
-            let refs = cascade_references(root, store, &rename.old_path, &rename.new_path, dry_run, fs);
+            let refs = cascade_references(root, store, &rename.old_id, &rename.new_id, dry_run, fs);
             rename.references_updated = refs;
         }
 
         if !dry_run {
+            let id_map: HashMap<String, String> = all_renames
+                .iter()
+                .map(|r| (r.old_id.clone(), r.new_id.clone()))
+                .collect();
+
             for rename in &all_renames {
                 let new_abs = root.join(&rename.new_path);
                 let content = match fs.read_to_string(&new_abs) {
@@ -185,11 +185,11 @@ fn plan_renumbering(
                 };
 
                 let mut updated = content.clone();
-                for (old_p, new_p) in &path_map {
-                    if old_p == &rename.old_path {
+                for (old_id, new_id) in &id_map {
+                    if old_id == &rename.old_id {
                         continue;
                     }
-                    updated = updated.replace(old_p.as_str(), new_p.as_str());
+                    updated = updated.replace(old_id.as_str(), new_id.as_str());
                 }
                 if updated != content {
                     let _ = fs.write(&new_abs, &updated);
@@ -386,8 +386,8 @@ fn update_title_in_file(path: &Path, old_id: &str, new_id: &str, fs: &dyn FileSy
 pub fn cascade_references(
     root: &Path,
     store: &Store,
-    old_path: &str,
-    new_path: &str,
+    old_id: &str,
+    new_id: &str,
     dry_run: bool,
     fs: &dyn FileSystem,
 ) -> Vec<ReferenceUpdate> {
@@ -422,8 +422,8 @@ pub fn cascade_references(
                 if let Some(mapping) = entry.as_mapping_mut() {
                     for (_key, val) in mapping.iter_mut() {
                         if let Some(s) = val.as_str() {
-                            if s.contains(old_path) {
-                                let new_val = s.replace(old_path, new_path);
+                            if s.contains(old_id) {
+                                let new_val = s.replace(old_id, new_id);
                                 file_updates.push(ReferenceUpdate {
                                     file: file_str.clone(),
                                     field: "related".to_string(),
@@ -446,8 +446,8 @@ pub fn cascade_references(
         for cap in ref_re.captures_iter(&body) {
             let full_match = cap.get(0).unwrap();
             let match_str = full_match.as_str();
-            if match_str.contains(old_path) {
-                let replaced = match_str.replace(old_path, new_path);
+            if match_str.contains(old_id) {
+                let replaced = match_str.replace(old_id, new_id);
                 file_updates.push(ReferenceUpdate {
                     file: file_str.clone(),
                     field: "body".to_string(),
