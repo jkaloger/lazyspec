@@ -23,7 +23,7 @@ This story covers the skill file changes only. It assumes the `spec` document ty
 
 - **Given** the `.claude/skills/` directory
   **When** the `/write-spec` skill is invoked
-  **Then** a `write-spec/SKILL.md` file exists with instructions that guide through: identifying scope, writing `index.md` with `@ref` directives and prose, writing `story.md` with given/when/then AC only (no `@ref`), and validating that all refs resolve
+  **Then** a `write-spec/SKILL.md` file exists with instructions that guide through: identifying scope, writing the spec document with `@ref` directives and prose, creating or updating linked Story documents with given/when/then AC (via `implements` relationships), and validating that all refs resolve
 
 ### AC: write-spec-encourages-tight-scope
 
@@ -65,7 +65,7 @@ This story covers the skill file changes only. It assumes the `spec` document ty
 
 - **Given** the existing `/create-iteration` skill
   **When** the skill is updated for spec support
-  **Then** the skill accepts a spec (not just a story) as a parent, reads AC from the spec's `story.md`, and links the iteration via `implements`
+  **Then** the skill accepts a spec (not just a story) as a parent, reads AC from the spec's linked stories, and links the iteration via `implements`
 
 ### AC: build-checks-affected-specs
 

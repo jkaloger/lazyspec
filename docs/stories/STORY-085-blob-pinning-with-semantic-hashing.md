@@ -123,4 +123,4 @@ Then the bytes are passed to `git hash-object --stdin` and the resulting SHA is 
 - Certification workflow, `lazyspec certify`, or frontmatter mutation (Story 4)
 - The `affects` relationship type or coverage advisories (Story 5)
 - Test execution integration
-- Per-AC content hashing in `story.md` (Story 3/4 concern)
+- Per-AC content hashing in linked stories (Story 3/4 concern)

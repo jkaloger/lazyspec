@@ -12,7 +12,7 @@ related:
 
 ## TL;DR
 
-Specs are collections of acceptance criteria (AC) pinned to code via `@ref` directives. Five signals -- symbol drift, test drift, test failure, AC mutation, scope change -- independently inform whether those AC are still true. When signals converge, a human re-certifies. Blob hashes (`@{blob:hash}`) replace commit SHAs for pinning, surviving squash merges and GC. Symbol-level hashes use AST normalization (stripping comments and whitespace) to avoid phantom drift from formatting changes. story.md is a pure AC list with stable slug identifiers per criterion; all `@ref` directives live in index.md. Per-AC content hashing enables granular drift reporting ("AC3 changed" rather than "story.md changed"). Certification is one commit, not two.
+Specs are collections of acceptance criteria (AC) pinned to code via `@ref` directives. Five signals -- symbol drift, test drift, test failure, AC mutation, scope change -- independently inform whether those AC are still true. When signals converge, a human re-certifies. Blob hashes (`@{blob:hash}`) replace commit SHAs for pinning, surviving squash merges and GC. Symbol-level hashes use AST normalization (stripping comments and whitespace) to avoid phantom drift from formatting changes. Stories remain standalone documents linked to specs via `implements` relationships; each story's AC use stable slug identifiers (`### AC: <slug>`) and per-AC content hashing enables granular drift reporting ("AC3 changed" rather than "the whole story changed"). Certification is one commit, not two.
 
 ## Summary
 
@@ -20,7 +20,7 @@ Lazyspec documents today serve a delivery pipeline: RFCs propose, Stories scope,
 
 This RFC introduces two changes:
 
-1. Evolve the `arch` document type into `spec` -- a persistent contract type whose scope is defined by its `@ref` directives and whose behavioural claims are defined by acceptance criteria in `story.md`
+1. Evolve the `arch` document type into `spec` -- a persistent contract type whose scope is defined by its `@ref` directives and whose behavioural claims are defined by acceptance criteria in linked Story documents
 2. Add a multi-signal drift detection system and human-driven certification workflow that together answer one question: are the spec's AC still true?
 
 The central thesis: the code is the specification. Specs _describe_ what code does for users, pinned to the implementation and tests that prove it. When the code changes, the spec is stale. Certification means "this description is verified accurate" -- backed by converging signals, not just a human's word.
@@ -82,11 +82,11 @@ The system collects five signal types, all of equal weight, all feeding the same
 
 | Signal       | Source                              | What it means                              | What it doesn't mean                        |
 | ------------ | ----------------------------------- | ------------------------------------------ | ------------------------------------------- |
-| Symbol drift | `@ref` impl targets in `index.md`   | Implementation code changed since baseline | The AC is violated                          |
-| Test drift   | `@ref` test targets in `index.md`   | The test code changed since baseline       | The AC is no longer verified                |
+| Symbol drift | `@ref` impl targets in the spec     | Implementation code changed since baseline | The AC is violated                          |
+| Test drift   | `@ref` test targets in the spec     | The test code changed since baseline       | The AC is no longer verified                |
 | Test failure | Test runner execution               | A referenced test does not pass            | The spec is wrong (the test might be wrong) |
-| AC mutation  | Per-AC content hash in `story.md`   | A specific AC's prose changed              | The code needs to change                    |
-| Scope change | AC slugs added/removed in `story.md`| The contract surface grew or shrank        | Previous certifications are meaningless     |
+| AC mutation  | Per-AC content hash in linked stories | A specific AC's prose changed              | The code needs to change                    |
+| Scope change | AC slugs added/removed in linked stories | The contract surface grew or shrank   | Previous certifications are meaningless     |
 
 Signals compose. A single drifted symbol in a spec with 5 stable refs and passing tests is low urgency -- something changed, but everything else looks fine. Three drifted symbols, a changed test, and a failing test is high urgency -- the ground has shifted under multiple AC simultaneously.
 
@@ -96,10 +96,10 @@ The system deliberately avoids language that implies any single signal = violati
 
 A spec is a certifiable contract. Every spec must have:
 
-1. At least one blob-pinned `@ref` directive in its index targeting implementation symbols, defining the spec's scope in code
-2. A `story.md` sub-document with given/when/then acceptance criteria, defining behavioural claims
+1. At least one blob-pinned `@ref` directive targeting implementation symbols, defining the spec's scope in code
+2. At least one linked Story document (via `implements` relationship) with given/when/then acceptance criteria, defining behavioural claims
 
-Test `@ref` directives in `index.md` are strongly recommended but not required for certification. A spec with implementation refs and AC but no test refs is certifiable -- it just lacks the test-failure signal, reducing the system's ability to detect conformance gaps automatically. `lazyspec validate` warns about specs with no test refs.
+Test `@ref` directives are strongly recommended but not required for certification. A spec with implementation refs and AC but no test refs is certifiable -- it just lacks the test-failure signal, reducing the system's ability to detect conformance gaps automatically. `lazyspec validate` warns about specs with no test refs.
 
 Certification status is binary at the spec level: a spec is either certified (has `certified_by` and `certified_date` in frontmatter) or uncertified. Binary certification forces the spec owner to consider the whole contract when certifying, rather than cherry-picking easy AC and deferring hard ones.
 
@@ -111,7 +111,7 @@ A spec is a document that describes how a part of the system works _right now_, 
 
 A spec's scope is defined by its `@ref` directives. A spec that references `src/engine/document.rs#DocMeta` and `src/engine/store.rs#Store::load` is declaring that it makes claims about those symbols. This is not a new mechanism -- `@ref` already exists. The change is in treating `@ref` as a scope declaration, not just a rendering convenience.
 
-A spec's behavioural claims are defined by its `story.md` sub-document. Each criterion is a given/when/then statement that describes observable behaviour tied to the symbols in scope. The AC are the contract; `@ref` directives tell you where to look when something changes.
+A spec's behavioural claims are defined by linked Story documents. Each Story contains given/when/then acceptance criteria that describe observable behaviour tied to the symbols in scope. The AC are the contract; `@ref` directives tell you where to look when something changes. Stories link to specs via `implements` relationships, following the same relationship model used throughout lazyspec.
 
 ### Spec Scope
 
@@ -138,33 +138,30 @@ Specs should not try to cover user-facing workflows end-to-end. A workflow like 
 
 ### Spec Structure
 
-A spec is a directory containing two files, following the same nested document pattern used by architecture documents today:
+A spec is either a flat file or a directory with an `index.md`, following the existing document conventions. The user chooses whichever layout suits the spec's complexity.
 
 ```
-docs/specs/SPEC-001-validation/
-├── index.md    ← the spec itself (type: spec, @ref directives, prose)
-└── story.md    ← acceptance criteria (type: spec, given/when/then only)
+docs/specs/SPEC-001-validation.md           ← flat file (simple specs)
+docs/specs/SPEC-002-data-model/index.md     ← directory with index (complex specs with child docs)
 ```
 
-#### `index.md` -- scope and prose
+The spec contains prose description, `@ref` directives (both implementation and test targets), and any diagrams or tables that describe the system's behaviour. Certification metadata (`certified_by`, `certified_date`, `story_hashes`) lives in the spec's frontmatter.
 
-The index contains the spec's prose description, `@ref` directives (both implementation and test targets), and any diagrams or tables that describe the system's behaviour. This is the stable part of the spec -- it changes when the system's architecture changes.
+All `@ref` directives live in the spec document. This keeps the machine-readable scope in one place.
 
-Certification metadata (`certified_by`, `certified_date`, `story_hash`) lives in the index frontmatter.
+#### Linked Stories -- acceptance criteria
 
-All `@ref` directives live in `index.md`, including references to test functions. This keeps the machine-readable scope in one place and keeps `story.md` purely human-readable.
-
-#### `story.md` -- acceptance criteria
-
-The story contains given/when/then criteria that define behavioural claims. Nothing else. No `@ref` directives, no frontmatter beyond the standard lazyspec header.
+Stories are standalone documents that link to specs via `implements` relationships. Each Story contains given/when/then acceptance criteria that define behavioural claims about the spec's scope. Nothing else -- no `@ref` directives, no implementation details.
 
 ```markdown
 ---
 title: "Session Lifecycle"
-type: spec
+type: story
 status: draft
 author: jkaloger
 date: 2026-03-24
+related:
+  - implements: "docs/specs/SPEC-007-session-lifecycle.md"
 ---
 
 ### AC: expired-sessions-rejected
@@ -188,13 +185,13 @@ Then subsequent requests with that session token are rejected
 
 Each AC has a stable slug identifier (`### AC: <slug>`). These IDs are immutable -- renaming or renumbering them changes the contract identity. Sequential numbering (`AC1`, `AC2`) is deliberately avoided because deletions cause renumbering cascades that confuse drift tracking.
 
-story.md is the human-readable contract. It answers "what should be true?" without coupling to specific test functions or code locations. The correlation between AC and signals (which tests exercise which claims, which symbols are relevant to which AC) is a human judgment made during certification, not a structural pairing enforced by the tooling.
+Stories are the human-readable contract. They answer "what should be true?" without coupling to specific test functions or code locations. The correlation between AC and signals (which tests exercise which claims, which symbols are relevant to which AC) is a human judgment made during certification, not a structural pairing enforced by the tooling.
 
-The story.md is a sub-document of the spec (both have `type: spec`), not a standalone document type. It inherits the spec's relationships and appears as part of the spec in `lazyspec status`.
+Multiple Stories can link to the same spec when the contract surface is large enough to warrant grouping AC by concern. `lazyspec status` reconstructs which stories implement a spec from the relationship graph.
 
-#### story.md lifecycle
+#### AC lifecycle and hashing
 
-story.md changes are tracked through per-AC content hashing, not through `@ref` directives. At certification time, `lazyspec certify` parses each `### AC: <slug>` section in story.md, hashes the text of each AC individually, and stores the results as `story_hashes` in the index frontmatter. Subsequent drift detection compares the current AC content against these per-AC hashes.
+AC changes in linked stories are tracked through per-AC content hashing. At certification time, `lazyspec certify` collects all stories linked to the spec, parses each `### AC: <slug>` section, hashes the text of each AC individually, and stores the results as `story_hashes` in the spec's frontmatter. Subsequent drift detection compares the current AC content against these per-AC hashes.
 
 ```yaml
 story_hashes:
@@ -203,10 +200,10 @@ story_hashes:
   revoked-sessions-immediate: "sha256:eeff5566..."
 ```
 
-Per-AC hashing enables precise drift reporting. Rather than "story.md changed," the system can report exactly which AC changed and distinguish three categories:
+Per-AC hashing enables precise drift reporting. Rather than "a story changed," the system can report exactly which AC changed and distinguish three categories:
 
 - AC added: a new slug appears that has no stored hash. The contract grew.
-- AC removed: a stored slug has no matching section in story.md. A claim was withdrawn.
+- AC removed: a stored slug has no matching section in any linked story. A claim was withdrawn.
 - AC modified: a slug exists in both but the hashes differ. The claim shifted.
 
 These categories carry different urgency. An added AC expands the contract surface and may not invalidate existing certification of other AC. A removed AC shrinks it. A modified AC directly questions whether the previous certification of that specific claim still holds. `lazyspec drift` reports each category distinctly.
@@ -332,7 +329,7 @@ Every spec with blob-pinned `@ref` directives gets automatic drift detection. Th
 
 #### Symbol and test drift
 
-For each pinned ref in `index.md`:
+For each pinned ref in the spec:
 
 1. Extract the symbol at HEAD using tree-sitter (or read the whole file for file-level refs)
 2. Hash the result
@@ -394,10 +391,10 @@ This reuses the existing tree-sitter symbol extraction from the `@ref` expansion
 
 #### AC mutation and scope change
 
-Drift detection parses each `### AC: <slug>` section in story.md, hashes the text of each AC individually, and compares against the `story_hashes` map stored in frontmatter at certification time. This produces per-AC granularity:
+Drift detection collects all stories linked to the spec, parses each `### AC: <slug>` section, hashes the text of each AC individually, and compares against the `story_hashes` map stored in frontmatter at certification time. This produces per-AC granularity:
 
-- A slug present in `story_hashes` but missing from story.md: AC removed (scope shrank)
-- A slug present in story.md but missing from `story_hashes`: AC added (scope grew)
+- A slug present in `story_hashes` but missing from any linked story: AC removed (scope shrank)
+- A slug present in a linked story but missing from `story_hashes`: AC added (scope grew)
 - A slug present in both but with different hashes: AC modified (claim shifted)
 
 Each category carries different urgency. A modified AC directly questions the previous certification of that claim. An added AC expands the contract without necessarily invalidating existing certifications. A removed AC may indicate an intentional scope reduction or an accidental deletion -- both worth flagging.
@@ -440,7 +437,7 @@ SPEC-002: Data Model
       src/engine/store.rs#Store::load@{blob:c3d4} — CURRENT
       src/engine/session.rs#SessionManager::create@{blob:e5f6} — CURRENT
     test drift: 0 of 2 test refs changed
-    story.md: 3 of 3 AC unchanged
+    AC mutation: 3 of 3 AC unchanged (across linked stories)
   urgency: low (single symbol drift, tests stable)
 ```
 
@@ -454,7 +451,7 @@ SPEC-005: Search Algorithm
     symbol drift: 3 of 4 impl refs changed
     test drift: 1 of 2 test refs changed
     test failure: tests/search_test.rs#test_ranked_results — FAILING
-    story.md:
+    AC mutation:
       AC added: optimize-empty-query (new, uncertified)
       AC modified: ranked-results (hash mismatch)
   urgency: high (multiple signals converging)
@@ -464,7 +461,7 @@ SPEC-005: Search Algorithm
 
 Drift detection tells you signals fired. Certification is the human response: "I have reviewed the signals, confirmed the AC are still accurate, and the system agrees -- tests pass and symbols resolve."
 
-Certification is stored in the spec's `index.md` frontmatter:
+Certification is stored in the spec's frontmatter:
 
 ```yaml
 ---
@@ -486,9 +483,9 @@ The `story_hashes` map captures the content hash of each AC at certification tim
 
 1. Resolves all `@ref` targets in the spec at HEAD to verify they're resolvable
 2. Pins any unpinned refs to HEAD by computing their normalized blob hashes and writing `@{blob:hash}` into the directives
-3. Parses each `### AC: <slug>` section in story.md and computes per-AC content hashes
+3. Collects all stories linked to the spec, parses each `### AC: <slug>` section, and computes per-AC content hashes
 4. If a test runner is configured, runs the test functions referenced by `@ref` test targets and verifies they pass
-5. If all checks pass, writes `certified_by`, `certified_date`, and `story_hashes` to the spec's frontmatter
+5. If all checks pass, writes `certified_by`, `certified_date`, and `story_hashes` to the spec's frontmatter (hashes collected across all linked stories)
 6. If any test fails, reports the failure and refuses to certify
 
 The command mutates the file on disk but does not commit. The developer reviews the diff and commits as part of their normal workflow.
@@ -631,16 +628,17 @@ Validation rules change accordingly:
 
 The complete document set after this RFC:
 
-| Type        | Purpose                                     | Persistence                          | Certifiable                |
-| ----------- | ------------------------------------------- | ------------------------------------ | -------------------------- |
-| `spec`      | Behavioural contract (index.md + story.md)  | Persistent, evolves over time        | Yes (requires `@ref` + AC) |
-| `rfc`       | Design rationale, proposes changes          | Point-in-time, may become superseded | No                         |
-| `iteration` | Task breakdown, unit of implementation work | Ephemeral, accepted when done        | No                         |
-| `audit`     | Conformance review, documents findings      | Point-in-time snapshot               | No                         |
-| `adr`       | Architecture decision record                | Point-in-time, records a decision    | No                         |
+| Type        | Purpose                                           | Persistence                          | Certifiable                |
+| ----------- | ------------------------------------------------- | ------------------------------------ | -------------------------- |
+| `spec`      | Behavioural contract (`@ref` scope + linked AC)   | Persistent, evolves over time        | Yes (requires `@ref` + AC) |
+| `story`     | Acceptance criteria linked to a spec              | Persistent, evolves with the spec    | No (AC feed into spec certification) |
+| `rfc`       | Design rationale, proposes changes                | Point-in-time, may become superseded | No                         |
+| `iteration` | Task breakdown, unit of implementation work       | Ephemeral, accepted when done        | No                         |
+| `audit`     | Conformance review, documents findings            | Point-in-time snapshot               | No                         |
+| `adr`       | Architecture decision record                      | Point-in-time, records a decision    | No                         |
 
 > [!NOTE]
-> The standalone `story` document type is superseded. Stories become `story.md` sub-documents within spec directories. Existing Story documents should be migrated: their AC move into the relevant spec's `story.md`, and their iterations re-link to the spec via `implements`.
+> Stories remain a standalone document type. They link to specs via `implements` relationships and provide the AC that define a spec's behavioural contract. A structured format for stories may be explored in the future.
 
 The overall workflow with certification:
 
@@ -719,9 +717,9 @@ Certification introduces three new skills and modifies several existing ones.
 Creates or updates spec documents. The skill guides agents through:
 
 1. Identifying the scope of the spec (which modules, which symbols)
-2. Writing the `index.md` with prose descriptions, `@ref` directives for both implementation symbols and test functions, and diagrams
-3. Writing the `story.md` with given/when/then acceptance criteria only (no `@ref` directives)
-4. Validating that all refs in `index.md` resolve and symbols exist
+2. Writing the spec document with prose descriptions, `@ref` directives for both implementation symbols and test functions, and diagrams
+3. Creating or updating linked Story documents with given/when/then acceptance criteria (linked via `implements`)
+4. Validating that all `@ref` directives resolve and symbols exist
 
 The skill should encourage specs that are _scoped tightly enough to certify_. Agents writing specs should prefer `@ref` over prose when describing code structure. Prose describes intent and invariants; `@ref` pins the actual implementation.
 
@@ -779,7 +777,7 @@ After build completion, the build skill should:
 
 The review skill's AC compliance check should also verify spec conformance:
 
-- If the iteration `implements` a spec, check that the spec's `@ref` targets still resolve after the iteration's changes
+- If the iteration `implements` a spec, check that the spec's `@ref` targets still resolve after the iteration's changes and that linked story AC are still consistent
 - If the iteration introduced drift in a spec it `affects`, flag this in the review
 - This doesn't block the review -- drift is expected during active development. But it surfaces the certification debt early.
 
@@ -820,7 +818,7 @@ Changes to existing commands:
 - `lazyspec status --unexpected-only` filters to show only unexpected signals
 - `lazyspec status` gains a coverage advisories section
 - `lazyspec drift --file <path>` shows which specs reference symbols in the given file (reverse index lookup)
-- `lazyspec validate` gains errors for: specs missing `@ref` directives in `index.md`, specs missing `story.md`, orphaned refs. Gains warnings for: specs with no test refs, specs exceeding the ref count limit, cross-module ref spread, fully-drifted specs, story_hash mismatch on accepted specs
+- `lazyspec validate` gains errors for: specs missing `@ref` directives, specs with no linked stories, orphaned refs. Gains warnings for: specs with no test refs, specs exceeding the ref count limit, cross-module ref spread, fully-drifted specs, story_hash mismatch on accepted specs
 - `lazyspec validate --strict` (for CI) additionally runs referenced tests and fails on test failures or story_hash mismatch
 - `lazyspec create` accepts `spec` as a document type (replacing `arch`)
 
@@ -834,29 +832,20 @@ Two migrations are needed:
 2. Files move from `docs/architecture/` to `docs/specs/` (directory structure is preserved)
 3. Document IDs change from ARCH-XXX to SPEC-XXX
 4. Relationships pointing to arch documents update their targets
-5. Each migrated spec needs a `story.md` added to its directory (initially empty, to be filled in during the first certification pass)
+5. Each migrated spec should have at least one linked Story with AC (can be created during the first certification pass)
 
-#### Story to Spec
+#### Story linking
 
-Existing Story documents are superseded. For each Story:
+Existing Story documents remain as-is. Stories that describe acceptance criteria for a spec's scope should be linked to the spec via `implements` relationships. Existing iterations that implement a spec can link directly to the spec -- they don't need to go through a story.
 
-1. Identify the spec the Story's work relates to (create a new spec if none exists)
-2. Migrate the Story's acceptance criteria into the spec's `story.md` (stripping any `@ref` directives -- story.md is AC only)
-3. Move any test `@ref` directives from the Story into the spec's `index.md`
-4. Re-link the Story's iterations to the spec via `implements`
-5. Mark the Story as `status: superseded`
-
-Stories don't need to be deleted immediately. They can remain as historical artifacts with `status: superseded`. `lazyspec validate` should warn about iterations still linked to superseded Stories, prompting re-linking to specs.
-
-A `lazyspec migrate` command handles this. Alternatively, the initial migration can be performed manually given the small number of existing documents.
+For stories that predate specs, adding the `implements` relationship to the relevant spec is sufficient. No migration of AC content is needed.
 
 ## Stories
 
 1. Spec type and migration -- evolve `arch` to `spec`, migrate existing documents, update CLI and validation
-2. Spec nested structure -- implement index.md + story.md directory layout with story.md as pure AC, migrate existing Story AC into spec story.md files, re-link iterations to specs
-3. Blob-pinned drift detection -- implement `@{blob:hash}` ref format, compute blob hashes from tree-sitter extraction, compare against HEAD, surface in `lazyspec status`
-4. Signal model and output -- collect all five signal types per spec, present with convergence-based urgency, expected/unexpected tagging
-5. Explicit certification -- `lazyspec certify` writes certification metadata and story_hash to frontmatter, single-commit workflow via blob hashing
-6. Scope constraints and coverage advisories -- ref count limits, orphan ref detection, cross-module advisories, qualitative coverage signals
-7. Relationship model extensions -- add `affects` relationship type, `implements` for iteration-to-spec, supersede Story document type, update validation rules
-8. Agent skills for certification -- `/write-spec`, `/certify-spec`, `/audit-cert` skills, plus modifications to `/plan-work`, `/create-audit`, `/build`, `/review-iteration`
+2. Blob-pinned drift detection -- implement `@{blob:hash}` ref format, compute blob hashes from tree-sitter extraction, compare against HEAD, surface in `lazyspec status`
+3. Signal model and output -- collect all five signal types per spec (including AC mutation from linked stories), present with convergence-based urgency, expected/unexpected tagging
+4. Explicit certification -- `lazyspec certify` collects AC from linked stories, writes certification metadata and story_hashes to frontmatter, single-commit workflow via blob hashing
+5. Scope constraints and coverage advisories -- ref count limits, orphan ref detection, cross-module advisories, qualitative coverage signals
+6. Relationship model extensions -- add `affects` relationship type, `implements` for iteration-to-spec and story-to-spec, update validation rules
+7. Agent skills for certification -- `/write-spec`, `/certify-spec`, `/audit-cert` skills, plus modifications to `/plan-work`, `/create-audit`, `/build`, `/review-iteration`

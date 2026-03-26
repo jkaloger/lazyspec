@@ -16,9 +16,9 @@ related:
 
 ## Context
 
-Lazyspec's architecture documents (`arch` type) are static. Once accepted, nothing connects them to the codebase or detects when reality diverges from what they describe. RFC-031 introduces the `spec` document type as the replacement: a persistent, certifiable contract whose scope is defined by `@ref` directives and whose behavioural claims live in a `story.md` sub-document with stable acceptance criteria identifiers.
+Lazyspec's architecture documents (`arch` type) are static. Once accepted, nothing connects them to the codebase or detects when reality diverges from what they describe. RFC-034 introduces the `spec` document type as the replacement: a persistent, certifiable contract whose scope is defined by `@ref` directives and whose behavioural claims are defined by acceptance criteria in linked Story documents.
 
-This story covers introducing the `spec` type to the engine, establishing its directory structure and AC format, migrating existing ARCH documents, and adding validation rules that keep spec scope honest.
+This story covers introducing the `spec` type to the engine, establishing its document structure, migrating existing ARCH documents, and adding validation rules that keep spec scope honest.
 
 ## Acceptance Criteria
 
@@ -28,21 +28,21 @@ Given the lazyspec engine's document type registry
 When a document with `type: spec` is loaded
 Then the engine recognises it as a valid document type alongside rfc, story, iteration, adr, audit, and arch
 
-### AC: spec-directory-structure
+### AC: spec-document-structure
 
 Given a spec document is created or migrated
 When it is stored on disk
-Then it follows the structure `docs/specs/SPEC-NNN-slug/index.md` with an optional `story.md` sub-document in the same directory
+Then it follows either a flat file layout (`docs/specs/SPEC-NNN-slug.md`) or a directory layout (`docs/specs/SPEC-NNN-slug/index.md`) at the user's choice
 
-### AC: story-sub-document
+### AC: spec-linked-stories
 
-Given a spec directory contains both `index.md` and `story.md`
-When the engine loads the spec
-Then `story.md` is treated as a sub-document of the spec, both with `type: spec`, and it inherits the parent spec's relationships
+Given a spec document exists
+When Stories with `implements` relationships targeting the spec are loaded
+Then the engine recognises the linked stories as the spec's acceptance criteria source for certification and drift detection
 
 ### AC: ac-slug-format
 
-Given a `story.md` file for a spec
+Given a Story linked to a spec
 When acceptance criteria are defined
 Then each criterion uses the heading format `### AC: <slug>` where slug is a stable, human-readable identifier (not a sequential number)
 
@@ -54,7 +54,7 @@ Then they become SPEC-001 through SPEC-005 in `docs/specs/`, with `type: spec` i
 
 ### AC: validate-ref-count-ceiling
 
-Given a spec document with `@ref` directives in its `index.md`
+Given a spec document with `@ref` directives
 When `lazyspec validate` runs and the spec has more than the configured ceiling (default 15) of `@ref` targets
 Then a warning is emitted indicating the spec may be too broad and should be split
 
@@ -81,17 +81,17 @@ Then the configured ceiling is used instead of the default 15
 ### In Scope
 
 - `spec` as a new document type in the engine's type registry
-- Directory layout: `docs/specs/SPEC-NNN-slug/index.md` + `story.md`
-- `### AC: <slug>` heading format for acceptance criteria in `story.md`
-- `story.md` as a sub-document of the spec (both `type: spec`), inheriting relationships
+- Document layout: flat file (`docs/specs/SPEC-NNN-slug.md`) or directory (`docs/specs/SPEC-NNN-slug/index.md`)
+- `### AC: <slug>` heading format for acceptance criteria in linked Story documents
+- Stories link to specs via `implements` relationships (existing relationship model)
 - Migration of ARCH-001 through ARCH-005 to SPEC-001 through SPEC-005
-- `lazyspec validate` warnings: ref count ceiling (default 15, configurable), cross-module advisory (>3 modules), orphan ref check
+- `lazyspec validate` warnings: ref count ceiling (default 15, configurable), cross-module advisory (>3 modules), orphan ref check, specs with no linked stories
 
 ### Out of Scope
 
-- Blob pinning and `@{blob:hash}` syntax (Story 2)
-- Semantic hashing / AST normalization (Story 2)
-- Drift detection signals and `lazyspec drift` command (Story 3)
-- Certification workflow and `lazyspec certify` (Story 4)
-- `affects` relationship type and coverage advisories (Story 5)
-- `certified_by`, `certified_date`, `story_hashes` frontmatter fields (Story 4)
+- Blob pinning and `@{blob:hash}` syntax (STORY-085)
+- Semantic hashing / AST normalization (STORY-085)
+- Drift detection signals and `lazyspec drift` command (STORY-087)
+- Certification workflow and `lazyspec certify` (STORY-086)
+- `affects` relationship type and coverage advisories (STORY-089)
+- `certified_by`, `certified_date`, `story_hashes` frontmatter fields (STORY-086)

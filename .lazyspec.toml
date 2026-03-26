@@ -46,7 +46,6 @@ plural = "specs"
 dir = "docs/specs"
 prefix = "SPEC"
 icon = "📋"
-subdirectory = true
 
 [templates]
 dir = ".lazyspec/templates"

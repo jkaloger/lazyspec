@@ -21,7 +21,7 @@ This story covers the `certify` command itself, the frontmatter it writes, test 
 
 ### AC: certify-resolves-refs
 
-Given a spec with `@ref` directives in its `index.md`
+Given a spec with `@ref` directives
 When `lazyspec certify <spec-id>` is run
 Then all `@ref` targets are resolved at HEAD, and any unresolvable ref causes certification to fail with an error identifying the broken ref
 
@@ -29,19 +29,19 @@ Then all `@ref` targets are resolved at HEAD, and any unresolvable ref causes ce
 
 Given a spec with unpinned `@ref` directives (no `@{blob:hash}` suffix)
 When `lazyspec certify <spec-id>` is run
-Then each unpinned ref is pinned by computing its normalized blob hash from the working tree and writing `@{blob:hash}` into the directive in `index.md`
+Then each unpinned ref is pinned by computing its normalized blob hash from the working tree and writing `@{blob:hash}` into the directive
 
 ### AC: certify-computes-story-hashes
 
-Given a spec whose `story.md` contains `### AC: <slug>` sections
+Given a spec with linked Story documents containing `### AC: <slug>` sections
 When `lazyspec certify <spec-id>` is run
-Then a content hash is computed for each AC section and stored as a `story_hashes` map (slug to hash) in the spec's `index.md` frontmatter
+Then AC are collected from all linked stories, a content hash is computed for each AC section, and stored as a `story_hashes` map (slug to hash) in the spec's frontmatter
 
 ### AC: certify-writes-frontmatter
 
 Given all refs resolve, all pins are current, and tests pass (or are skipped)
 When `lazyspec certify <spec-id>` completes successfully
-Then `certified_by`, `certified_date`, and `story_hashes` are written to the spec's `index.md` frontmatter, and the file is mutated on disk without committing
+Then `certified_by`, `certified_date`, and `story_hashes` are written to the spec's frontmatter, and the file is mutated on disk without committing
 
 ### AC: certify-runs-tests
 
@@ -90,7 +90,7 @@ Then validation reports the spec's certification as stale and fails
 ### In Scope
 
 - `lazyspec certify <spec-id>` command implementation
-- Ref resolution, unpinned ref pinning (normalized blob hash computation), per-AC content hashing
+- Ref resolution, unpinned ref pinning (normalized blob hash computation), per-AC content hashing across linked stories
 - Frontmatter fields: `certified_by`, `certified_date`, `story_hashes`
 - Test runner integration via `.lazyspec.toml` configuration
 - `--skip-tests` flag with warning

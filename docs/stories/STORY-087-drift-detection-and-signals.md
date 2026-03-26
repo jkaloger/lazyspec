@@ -16,7 +16,7 @@ related:
 
 ## Context
 
-Specs pin themselves to code via `@ref` directives with blob hashes, and define behavioural claims via acceptance criteria in `story.md`. When code, tests, or AC change after certification, the system needs to detect this and surface it. This story covers the signal collection and drift reporting machinery that answers: "has anything changed since this spec was last certified?"
+Specs pin themselves to code via `@ref` directives with blob hashes, and define behavioural claims via acceptance criteria in linked Story documents. When code, tests, or AC change after certification, the system needs to detect this and surface it. This story covers the signal collection and drift reporting machinery that answers: "has anything changed since this spec was last certified?"
 
 Five signal types feed the same question: symbol drift, test drift, test failure, AC mutation, and scope change. No single signal is a verdict. They gain meaning through convergence, and the system presents them per-spec for human triage.
 
@@ -26,26 +26,26 @@ Drift during active development (where an in-progress iteration `implements` or 
 
 ### AC: symbol-drift-detection
 
-Given a spec with blob-pinned `@ref` implementation targets in `index.md`
+Given a spec with blob-pinned `@ref` implementation targets
 When `lazyspec drift <spec-id>` is run
 Then each pinned impl ref is classified as CURRENT (hash matches), DRIFTED (symbol exists but hash differs), or ORPHANED (symbol not found at HEAD)
 
 ### AC: test-drift-detection
 
-Given a spec with blob-pinned `@ref` test targets in `index.md`
+Given a spec with blob-pinned `@ref` test targets
 When `lazyspec drift <spec-id>` is run
 Then each pinned test ref is classified as CURRENT, DRIFTED, or ORPHANED, independently from impl refs
 
 ### AC: ac-mutation-detection
 
-Given a certified spec with `story_hashes` in its index frontmatter
+Given a certified spec with `story_hashes` in its frontmatter
 When `lazyspec drift <spec-id>` is run
-Then each `### AC: <slug>` section in `story.md` is hashed and compared against the stored hash, reporting per-AC whether content is unchanged, modified, added, or removed
+Then each `### AC: <slug>` section across all linked stories is hashed and compared against the stored hash, reporting per-AC whether content is unchanged, modified, added, or removed
 
 ### AC: scope-change-detection
 
 Given a certified spec with `story_hashes` recording AC slugs at certification time
-When an AC slug is added to or removed from `story.md`
+When an AC slug is added to or removed from a linked story
 Then `lazyspec drift` reports the added or removed slugs as scope changes distinct from content modifications
 
 ### AC: test-failure-signal
