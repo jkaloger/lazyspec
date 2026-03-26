@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-10
 tags: []
 related:
-- implements: docs/stories/STORY-054-forward-and-backward-context-with-related-records.md
+- implements: STORY-054
 ---
+
 
 
 

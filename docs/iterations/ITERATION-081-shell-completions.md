@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-20
 tags: []
 related:
-- implements: docs/stories/STORY-070-shell-completions.md
+- implements: STORY-070
 ---
+
 
 
 

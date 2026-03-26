@@ -1,18 +1,22 @@
 ---
-title: "TUI Document Operations"
+title: TUI Document Operations
 type: spec
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-25
-tags: [tui, overlays, forms]
+tags:
+- tui
+- overlays
+- forms
 related:
-  - related-to: docs/stories/STORY-006-create-form-ui-and-input-handling.md
-  - related-to: docs/stories/STORY-007-document-creation-on-submit.md
-  - related-to: docs/stories/STORY-008-delete-confirmation-dialog.md
-  - related-to: docs/stories/STORY-016-status-picker.md
-  - related-to: docs/stories/STORY-046-tui-warnings-panel.md
-  - related-to: docs/stories/STORY-073-tui-async-document-creation.md
+- related-to: STORY-006
+- related-to: STORY-007
+- related-to: STORY-008
+- related-to: STORY-016
+- related-to: STORY-046
+- related-to: STORY-073
 ---
+
 
 ## Summary
 

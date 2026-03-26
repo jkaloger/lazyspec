@@ -1,17 +1,18 @@
 ---
-title: "GitHub Actions CI/CD"
+title: GitHub Actions CI/CD
 type: rfc
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-15
 tags:
-  - ci
-  - cd
-  - github-actions
-  - releases
+- ci
+- cd
+- github-actions
+- releases
 related:
-  - related to: docs/rfcs/RFC-009-codebase-quality-baseline.md
+- related to: RFC-009
 ---
+
 
 ## Problem
 

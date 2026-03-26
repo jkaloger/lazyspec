@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-06
 tags: []
 related:
-- implements: docs/stories/STORY-031-subfolder-document-discovery.md
+- implements: STORY-031
 ---
+
 
 
 

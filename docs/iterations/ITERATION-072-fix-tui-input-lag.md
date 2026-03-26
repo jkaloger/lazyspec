@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-16
 tags: []
 related:
-- related-to: docs/audits/AUDIT-003-tui-input-lag-audit.md
+- related-to: AUDIT-003
 ---
+
 
 
 

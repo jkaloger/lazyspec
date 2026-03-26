@@ -6,8 +6,9 @@ author: unknown
 date: 2026-03-23
 tags: []
 related:
-- implements: docs/stories/STORY-080-dry-consolidation.md
+- implements: STORY-080
 ---
+
 
 
 

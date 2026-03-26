@@ -4,10 +4,14 @@ type: story
 status: accepted
 author: agent
 date: 2026-03-05
-tags: [refactor, quality, testing]
+tags:
+- refactor
+- quality
+- testing
 related:
-- implements: docs/rfcs/RFC-009-codebase-quality-baseline.md
+- implements: RFC-009
 ---
+
 
 
 

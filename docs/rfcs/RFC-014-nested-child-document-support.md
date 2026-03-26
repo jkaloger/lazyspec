@@ -6,8 +6,9 @@ author: jkaloger
 date: 2026-03-07
 tags: []
 related:
-- related-to: docs/rfcs/RFC-010-subfolder-document-support.md
+- related-to: RFC-010
 ---
+
 
 
 

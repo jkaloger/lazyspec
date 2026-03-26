@@ -9,8 +9,9 @@ tags:
 - deletion
 - modal
 related:
-- implements: docs/stories/STORY-008-delete-confirmation-dialog.md
+- implements: STORY-008
 ---
+
 
 
 ## Task Breakdown

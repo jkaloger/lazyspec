@@ -1,14 +1,18 @@
 ---
-title: "TUI Lifecycle and Threading"
+title: TUI Lifecycle and Threading
 type: spec
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-25
-tags: [tui, threading, lifecycle]
+tags:
+- tui
+- threading
+- lifecycle
 related:
-  - related-to: docs/stories/STORY-003-tui-dashboard.md
-  - related-to: docs/stories/STORY-073-tui-async-document-creation.md
+- related-to: STORY-003
+- related-to: STORY-073
 ---
+
 
 ## Summary
 

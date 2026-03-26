@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-19
 tags: []
 related:
-- implements: docs/stories/STORY-067-gfm-extensions-for-markdown-preview.md
+- implements: STORY-067
 ---
+
 
 ## Context
 

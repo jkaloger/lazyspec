@@ -1,17 +1,22 @@
 ---
-title: "Frontmatter Fix and Repair"
+title: Frontmatter Fix and Repair
 type: spec
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-25
-tags: [cli, fix, frontmatter, conflicts]
+tags:
+- cli
+- fix
+- frontmatter
+- conflicts
 related:
-  - related-to: "docs/stories/STORY-045-frontmatter-fix-command.md"
-  - related-to: "docs/stories/STORY-059-conflict-detection-and-renumbering.md"
-  - related-to: "docs/stories/STORY-060-reference-cascade.md"
-  - related-to: "docs/stories/STORY-061-graceful-degradation-for-duplicate-ids.md"
-  - related-to: "docs/stories/STORY-062-validation-diagnostic-for-duplicate-ids.md"
+- related-to: STORY-045
+- related-to: STORY-059
+- related-to: STORY-060
+- related-to: STORY-061
+- related-to: STORY-062
 ---
+
 
 ## Summary
 

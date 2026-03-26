@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-08
 tags: []
 related:
-- implements: docs/stories/STORY-047-table-widget-for-document-list.md
+- implements: STORY-047
 ---
+
 
 
 

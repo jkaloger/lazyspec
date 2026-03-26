@@ -6,8 +6,9 @@ author: jkaloger
 date: 2026-03-08
 tags: []
 related:
-- implements: docs/rfcs/RFC-018-tui-interaction-enhancements.md
+- implements: RFC-018
 ---
+
 
 
 

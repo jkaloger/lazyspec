@@ -1,17 +1,21 @@
 ---
-title: "Document Creation"
+title: Document Creation
 type: spec
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-25
-tags: [cli, creation, templates]
+tags:
+- cli
+- creation
+- templates
 related:
-  - related-to: docs/stories/STORY-007-document-creation-on-submit.md
-  - related-to: docs/stories/STORY-043-cli-create-for-folder-based-documents.md
-  - related-to: docs/stories/STORY-064-sqids-numbering-and-config.md
-  - related-to: docs/stories/STORY-074-core-reservation-mechanism.md
-  - related-to: docs/stories/STORY-076-reservation-management.md
+- related-to: STORY-007
+- related-to: STORY-043
+- related-to: STORY-064
+- related-to: STORY-074
+- related-to: STORY-076
 ---
+
 
 ## Summary
 

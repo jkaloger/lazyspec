@@ -1,14 +1,17 @@
 ---
-title: "Git Status Integration"
+title: Git Status Integration
 type: spec
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-25
-tags: [tui, git]
+tags:
+- tui
+- git
 related:
-  - related-to: docs/stories/STORY-077-git-status-gutter-in-main-document-list.md
-  - related-to: docs/stories/STORY-078-git-status-gutter-in-search-and-filtered-views.md
+- related-to: STORY-077
+- related-to: STORY-078
 ---
+
 
 ## Summary
 

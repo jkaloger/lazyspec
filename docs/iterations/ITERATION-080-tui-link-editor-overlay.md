@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-20
 tags: []
 related:
-- implements: docs/stories/STORY-069-tui-link-editor.md
+- implements: STORY-069
 ---
+
 
 
 

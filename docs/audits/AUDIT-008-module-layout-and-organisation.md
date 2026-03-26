@@ -6,8 +6,9 @@ author: jkaloger
 date: 2026-03-24
 tags: []
 related:
-- related-to: docs/rfcs/RFC-032-code-quality-remediation-audit-007-findings.md
+- related-to: RFC-032
 ---
+
 
 
 ## Scope

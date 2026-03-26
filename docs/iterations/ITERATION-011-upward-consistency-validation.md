@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-05
 tags: []
 related:
-- implements: docs/stories/STORY-024-upward-consistency-validation.md
+- implements: STORY-024
 ---
+
 
 
 

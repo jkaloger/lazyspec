@@ -1,14 +1,17 @@
 ---
-title: "AI-Driven Workflow Implementation"
+title: AI-Driven Workflow Implementation
 type: iteration
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-05
-tags: [implementation, ai-workflow]
+tags:
+- implementation
+- ai-workflow
 related:
-  - implements: docs/stories/STORY-004-story-iteration-types.md
-  - implements: docs/stories/STORY-005-agent-workflow-skills.md
+- implements: STORY-004
+- implements: STORY-005
 ---
+
 
 # AI-Driven Workflow Implementation Plan
 

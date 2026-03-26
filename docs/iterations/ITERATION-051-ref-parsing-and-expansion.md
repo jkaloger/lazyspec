@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-11
 tags: []
 related:
-- implements: docs/stories/STORY-055-ref-parsing-and-expansion-pipeline.md
+- implements: STORY-055
 ---
+
 
 
 ## Changes

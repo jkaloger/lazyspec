@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-07
 tags: []
 related:
-- implements: docs/stories/STORY-038-config-driven-validation-rules.md
+- implements: STORY-038
 ---
+
 
 
 

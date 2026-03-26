@@ -6,8 +6,9 @@ author: jkaloger
 date: 2026-03-05
 tags: []
 related:
-- implements: docs/rfcs/RFC-005-tui-flat-navigation-model.md
+- implements: RFC-005
 ---
+
 
 
 

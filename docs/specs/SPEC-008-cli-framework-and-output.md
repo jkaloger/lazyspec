@@ -1,17 +1,22 @@
 ---
-title: "CLI Framework and Output"
+title: CLI Framework and Output
 type: spec
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-25
-tags: [cli, json, styling, completions]
+tags:
+- cli
+- json
+- styling
+- completions
 related:
-  - related-to: "docs/stories/STORY-002-cli-commands.md"
-  - related-to: "docs/stories/STORY-021-json-everywhere.md"
-  - related-to: "docs/stories/STORY-023-styled-cli-output.md"
-  - related-to: "docs/stories/STORY-068-universal-id-resolution.md"
-  - related-to: "docs/stories/STORY-070-shell-completions.md"
+- related-to: STORY-002
+- related-to: STORY-021
+- related-to: STORY-023
+- related-to: STORY-068
+- related-to: STORY-070
 ---
+
 
 ## Summary
 

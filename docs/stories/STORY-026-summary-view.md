@@ -4,10 +4,14 @@ type: story
 status: draft
 author: jkaloger
 date: 2026-03-05
-tags: [cli, status, health]
+tags:
+- cli
+- status
+- health
 related:
-- implements: docs/rfcs/RFC-008-project-health-awareness.md
+- implements: RFC-008
 ---
+
 
 
 ## Context

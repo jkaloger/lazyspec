@@ -1,18 +1,19 @@
 ---
-title: "Spec-kit and OpenSpec Document Support"
+title: Spec-kit and OpenSpec Document Support
 type: rfc
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-15
 tags:
-  - formats
-  - interop
-  - spec-kit
-  - openspec
+- formats
+- interop
+- spec-kit
+- openspec
 related:
-  - related to: docs/rfcs/RFC-013-custom-document-types.md
-  - related to: docs/rfcs/RFC-002-ai-driven-workflow.md
+- related to: RFC-013
+- related to: RFC-002
 ---
+
 
 ## Problem
 

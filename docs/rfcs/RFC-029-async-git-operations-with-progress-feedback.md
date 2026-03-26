@@ -10,8 +10,9 @@ tags:
 - cli
 - tui
 related:
-- related-to: docs/rfcs/RFC-030-git-based-document-number-reservation.md
+- related-to: RFC-030
 ---
+
 
 
 

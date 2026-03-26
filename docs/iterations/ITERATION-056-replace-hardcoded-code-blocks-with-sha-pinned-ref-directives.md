@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-12
 tags: []
 related:
-- related-to: docs/rfcs/RFC-019-inline-type-references-with-ref.md
+- related-to: RFC-019
 ---
+
 
 
 

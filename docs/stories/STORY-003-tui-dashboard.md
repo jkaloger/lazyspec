@@ -1,13 +1,17 @@
 ---
-title: "TUI Dashboard"
+title: TUI Dashboard
 type: story
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-04
-tags: [tui, ratatui, dashboard]
+tags:
+- tui
+- ratatui
+- dashboard
 related:
-  - implements: docs/rfcs/RFC-001-my-first-rfc.md
+- implements: RFC-001
 ---
+
 
 ## Context
 

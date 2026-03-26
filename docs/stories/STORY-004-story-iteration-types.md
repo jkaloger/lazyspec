@@ -1,13 +1,17 @@
 ---
-title: "Story and Iteration Document Types"
+title: Story and Iteration Document Types
 type: story
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-05
-tags: [document-types, search, validation]
+tags:
+- document-types
+- search
+- validation
 related:
-  - implements: docs/rfcs/RFC-002-ai-driven-workflow.md
+- implements: RFC-002
 ---
+
 
 ## Context
 

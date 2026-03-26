@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-11
 tags: []
 related:
-- implements: docs/stories/STORY-056-tree-sitter-symbol-extraction.md
+- implements: STORY-056
 ---
+
 
 
 

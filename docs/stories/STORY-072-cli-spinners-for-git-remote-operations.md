@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-20
 tags: []
 related:
-- implements: docs/rfcs/RFC-029-async-git-operations-with-progress-feedback.md
+- implements: RFC-029
 ---
+
 
 
 ## Context

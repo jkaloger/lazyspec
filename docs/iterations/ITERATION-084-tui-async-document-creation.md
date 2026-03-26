@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-20
 tags: []
 related:
-- implements: docs/stories/STORY-073-tui-async-document-creation.md
+- implements: STORY-073
 ---
+
 
 
 

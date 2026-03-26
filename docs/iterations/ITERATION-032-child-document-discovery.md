@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-08
 tags: []
 related:
-- implements: docs/stories/STORY-040-child-document-discovery.md
+- implements: STORY-040
 ---
+
 
 
 

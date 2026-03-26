@@ -6,8 +6,9 @@ author: jkaloger
 date: 2026-03-24
 tags: []
 related:
-- blocks: docs/iterations/ITERATION-107-root-file-module-pattern-migration.md
+- blocks: ITERATION-107
 ---
+
 
 
 

@@ -1,13 +1,15 @@
 ---
-title: "Metrics Mode"
+title: Metrics Mode
 type: story
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-05
-tags: [tui]
+tags:
+- tui
 related:
-  - implements: docs/rfcs/RFC-006-tui-progressive-disclosure.md
+- implements: RFC-006
 ---
+
 
 ## Context
 

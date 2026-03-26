@@ -5,12 +5,13 @@ status: accepted
 author: jkaloger
 date: 2026-03-05
 tags:
-  - tui
-  - creation
-  - modal
+- tui
+- creation
+- modal
 related:
-  - related-to: docs/rfcs/RFC-001-my-first-rfc.md
+- related-to: RFC-001
 ---
+
 
 ## Summary
 

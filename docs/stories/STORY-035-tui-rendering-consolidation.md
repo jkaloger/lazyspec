@@ -8,8 +8,9 @@ tags:
 - refactor
 - tui
 related:
-- implements: docs/rfcs/RFC-012-architecture-review-yagni-dry-cleanup.md
+- implements: RFC-012
 ---
+
 
 
 ## Context

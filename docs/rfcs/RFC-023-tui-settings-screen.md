@@ -1,17 +1,18 @@
 ---
-title: "TUI Settings Screen"
+title: TUI Settings Screen
 type: rfc
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-15
 tags:
-  - tui
-  - config
-  - settings
+- tui
+- config
+- settings
 related:
-  - related to: docs/rfcs/RFC-013-custom-document-types.md
-  - related to: docs/rfcs/RFC-018-tui-interaction-enhancements.md
+- related to: RFC-013
+- related to: RFC-018
 ---
+
 
 ## Problem
 

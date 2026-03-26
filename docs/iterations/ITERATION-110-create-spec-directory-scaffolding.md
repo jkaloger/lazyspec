@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-24
 tags: []
 related:
-- implements: docs/stories/STORY-091-story-to-spec-migration-and-create-scaffolding.md
+- implements: STORY-091
 ---
+
 
 
 

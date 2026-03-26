@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-23
 tags: []
 related:
-- related-to: docs/rfcs/RFC-031-git-status-gutter-in-tui.md
+- related-to: RFC-031
 ---
+
 
 
 

@@ -1,13 +1,16 @@
 ---
-title: "Frontmatter-Only Indexing"
+title: Frontmatter-Only Indexing
 type: adr
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-04
-tags: [performance, store]
+tags:
+- performance
+- store
 related:
-  - related-to: docs/rfcs/RFC-001-my-first-rfc.md
+- related-to: RFC-001
 ---
+
 
 ## Context
 

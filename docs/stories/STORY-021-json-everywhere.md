@@ -9,8 +9,9 @@ tags:
 - agents
 - json
 related:
-- implements: docs/rfcs/RFC-007-agent-native-cli.md
+- implements: RFC-007
 ---
+
 
 
 ## Context

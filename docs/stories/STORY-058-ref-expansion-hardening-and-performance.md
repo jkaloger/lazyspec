@@ -6,8 +6,9 @@ author: jkaloger
 date: 2026-03-12
 tags: []
 related:
-- implements: docs/rfcs/RFC-019-inline-type-references-with-ref.md
+- implements: RFC-019
 ---
+
 
 
 

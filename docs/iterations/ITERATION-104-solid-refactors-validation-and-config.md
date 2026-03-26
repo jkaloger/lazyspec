@@ -6,8 +6,9 @@ author: unknown
 date: 2026-03-23
 tags: []
 related:
-- implements: docs/stories/STORY-084-solid-refactors.md
+- implements: STORY-084
 ---
+
 
 
 ## Context

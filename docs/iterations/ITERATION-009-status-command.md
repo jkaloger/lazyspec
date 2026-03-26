@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-05
 tags: []
 related:
-- implements: docs/stories/STORY-020-status-command.md
+- implements: STORY-020
 ---
+
 
 
 

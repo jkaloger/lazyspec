@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-13
 tags: []
 related:
-- implements: docs/stories/STORY-060-reference-cascade.md
+- implements: STORY-060
 ---
+
 
 
 ## Test Plan

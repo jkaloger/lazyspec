@@ -1,14 +1,19 @@
 ---
-title: "Spec Certification and Drift Detection"
+title: Spec Certification and Drift Detection
 type: rfc
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-24
-tags: [certification, specs, drift-detection, architecture]
+tags:
+- certification
+- specs
+- drift-detection
+- architecture
 related:
-  - related-to: "docs/rfcs/RFC-019-inline-type-references-with-ref.md"
-  - related-to: "docs/rfcs/RFC-001-my-first-rfc.md"
+- related-to: RFC-019
+- related-to: RFC-001
 ---
+
 
 ## TL;DR
 

@@ -1,14 +1,18 @@
 ---
-title: "Document Context Chain"
+title: Document Context Chain
 type: spec
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-25
-tags: [cli, context, relationships]
+tags:
+- cli
+- context
+- relationships
 related:
-  - related-to: "docs/stories/STORY-019-context-command.md"
-  - related-to: "docs/stories/STORY-054-forward-and-backward-context-with-related-records.md"
+- related-to: STORY-019
+- related-to: STORY-054
 ---
+
 
 ## Summary
 

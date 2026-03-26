@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-24
 tags: []
 related:
-- implements: docs/stories/STORY-088-spec-document-type-and-migration.md
+- implements: STORY-088
 ---
+
 
 
 

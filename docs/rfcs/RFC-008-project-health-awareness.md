@@ -4,10 +4,14 @@ type: rfc
 status: accepted
 author: jkaloger
 date: 2026-03-05
-tags: [cli, validation, health]
+tags:
+- cli
+- validation
+- health
 related:
-- related-to: docs/rfcs/RFC-007-agent-native-cli.md
+- related-to: RFC-007
 ---
+
 
 
 ## Summary

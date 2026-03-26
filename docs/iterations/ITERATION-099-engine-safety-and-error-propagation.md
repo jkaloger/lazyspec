@@ -6,8 +6,9 @@ author: unknown
 date: 2026-03-23
 tags: []
 related:
-- implements: docs/stories/STORY-079-engine-safety-and-error-propagation.md
+- implements: STORY-079
 ---
+
 
 
 

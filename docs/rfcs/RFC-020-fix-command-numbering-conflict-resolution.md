@@ -1,16 +1,17 @@
 ---
-title: "Fix command numbering conflict resolution"
+title: Fix command numbering conflict resolution
 type: rfc
 status: superseded
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-13
 tags:
-  - cli
-  - fix
-  - distributed
+- cli
+- fix
+- distributed
 related:
-  - related to: docs/rfcs/RFC-015-lenient-frontmatter-loading-with-warnings-and-fix-command.md
+- related to: RFC-015
 ---
+
 
 
 ## Problem

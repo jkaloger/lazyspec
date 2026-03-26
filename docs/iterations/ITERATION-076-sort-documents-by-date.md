@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-17
 tags: []
 related:
-- implements: docs/stories/STORY-064-sqids-numbering-and-config.md
+- implements: STORY-064
 ---
+
 
 
 

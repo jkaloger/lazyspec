@@ -8,8 +8,9 @@ tags:
 - tui
 - ux
 related:
-- implements: docs/rfcs/RFC-011-tui-ux-refinements.md
+- implements: RFC-011
 ---
+
 
 
 ## Context

@@ -8,8 +8,9 @@ tags:
 - refactor
 - architecture
 related:
-- related-to: docs/rfcs/RFC-009-codebase-quality-baseline.md
+- related-to: RFC-009
 ---
+
 
 
 

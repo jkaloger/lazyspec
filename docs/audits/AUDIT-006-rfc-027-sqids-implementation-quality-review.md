@@ -1,14 +1,15 @@
 ---
-title: "RFC-027 sqids implementation quality review"
+title: RFC-027 sqids implementation quality review
 type: audit
 status: draft
-author: "agent"
+author: agent
 date: 2026-03-17
 tags: []
 related:
-- related-to: docs/rfcs/RFC-027-sqids-document-numbering.md
-- related-to: docs/iterations/ITERATION-074-fix-numbering-format-conversion.md
+- related-to: RFC-027
+- related-to: ITERATION-074
 ---
+
 
 ## Scope
 

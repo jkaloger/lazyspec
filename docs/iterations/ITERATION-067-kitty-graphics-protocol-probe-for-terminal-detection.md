@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-13
 tags: []
 related:
-- implements: docs/stories/STORY-063-diagram-rendering-pipeline.md
+- implements: STORY-063
 ---
+
 
 
 
