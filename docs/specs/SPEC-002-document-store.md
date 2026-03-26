@@ -1,16 +1,20 @@
 ---
-title: "Document Store"
+title: Document Store
 type: spec
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-25
-tags: [engine, store, links]
+tags:
+- engine
+- store
+- links
 related:
-  - related-to: "docs/stories/STORY-001-document-model-and-store.md"
-  - related-to: "docs/stories/STORY-040-child-document-discovery.md"
-  - related-to: "docs/stories/STORY-044-store-parse-error-collection.md"
-  - related-to: "docs/stories/STORY-068-universal-id-resolution.md"
+- related-to: STORY-001
+- related-to: STORY-040
+- related-to: STORY-044
+- related-to: STORY-068
 ---
+
 
 ## Summary
 

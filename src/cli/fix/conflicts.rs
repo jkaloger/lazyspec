@@ -60,7 +60,7 @@ pub(super) fn collect_conflict_fixes(
 
         for loser in &docs[1..] {
             if let Some(mut fix) = renumber_doc(root, loser, &id, config, dry_run, fs) {
-                let refs = cascade_references(root, store, &fix.old_path, &fix.new_path, dry_run, fs);
+                let refs = cascade_references(root, store, &fix.old_id, &fix.new_id, dry_run, fs);
                 fix.references_updated = refs;
                 results.push(fix);
             }

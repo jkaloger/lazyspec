@@ -1,13 +1,17 @@
 ---
-title: "Document Creation on Submit"
+title: Document Creation on Submit
 type: story
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-05
-tags: [tui, creation, engine]
+tags:
+- tui
+- creation
+- engine
 related:
-  - implements: docs/rfcs/RFC-003-tui-document-creation.md
+- implements: RFC-003
 ---
+
 
 ## Context
 

@@ -4,10 +4,14 @@ type: spec
 status: draft
 author: jkaloger
 date: 2026-03-25
-tags: [tui, filters, querying]
+tags:
+- tui
+- filters
+- querying
 related:
-- related-to: docs/stories/STORY-013-filters-mode.md
+- related-to: STORY-013
 ---
+
 
 
 ## Summary

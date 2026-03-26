@@ -1,13 +1,16 @@
 ---
-title: "CLI Commands"
+title: CLI Commands
 type: story
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-04
-tags: [cli, commands]
+tags:
+- cli
+- commands
 related:
-  - implements: docs/rfcs/RFC-001-my-first-rfc.md
+- implements: RFC-001
 ---
+
 
 ## Context
 

@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-08
 tags: []
 related:
-- implements: docs/stories/STORY-049-scrollbar-for-focused-views.md
+- implements: STORY-049
 ---
+
 
 
 

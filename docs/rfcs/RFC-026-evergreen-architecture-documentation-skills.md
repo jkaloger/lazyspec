@@ -1,18 +1,19 @@
 ---
-title: "Evergreen Architecture Documentation Skills"
+title: Evergreen Architecture Documentation Skills
 type: rfc
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-15
 tags:
-  - skills
-  - architecture
-  - documentation
-  - ai
+- skills
+- architecture
+- documentation
+- ai
 related:
-  - related to: docs/rfcs/RFC-002-ai-driven-workflow.md
-  - related to: docs/rfcs/RFC-019-inline-type-references-with-ref.md
+- related to: RFC-002
+- related to: RFC-019
 ---
+
 
 ## Problem
 

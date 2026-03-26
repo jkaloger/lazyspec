@@ -9,8 +9,9 @@ tags:
 - modal
 - input
 related:
-- implements: docs/stories/STORY-006-create-form-ui-and-input-handling.md
+- implements: STORY-006
 ---
+
 
 
 ## Changes

@@ -9,9 +9,10 @@ tags:
 - tui
 - markdown
 related:
-- related-to: docs/rfcs/RFC-017-better-markdown-preview.md
-- related-to: docs/stories/STORY-067-gfm-extensions-for-markdown-preview.md
+- related-to: RFC-017
+- related-to: STORY-067
 ---
+
 
 
 

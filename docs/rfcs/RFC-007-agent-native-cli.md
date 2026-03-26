@@ -9,9 +9,10 @@ tags:
 - agents
 - json
 related:
-- related-to: docs/rfcs/RFC-002-ai-driven-workflow.md
-- related-to: docs/stories/STORY-002-cli-commands.md
+- related-to: RFC-002
+- related-to: STORY-002
 ---
+
 
 
 ## Summary

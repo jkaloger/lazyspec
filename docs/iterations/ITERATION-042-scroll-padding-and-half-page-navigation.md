@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-08
 tags: []
 related:
-- implements: docs/stories/STORY-048-scroll-padding-and-half-page-navigation.md
+- implements: STORY-048
 ---
+
 
 
 

@@ -1,13 +1,17 @@
 ---
-title: "Document Model and Store"
+title: Document Model and Store
 type: story
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-04
-tags: [engine, parsing, store]
+tags:
+- engine
+- parsing
+- store
 related:
-  - implements: docs/rfcs/RFC-001-my-first-rfc.md
+- implements: RFC-001
 ---
+
 
 ## Context
 

@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-23
 tags: []
 related:
-- implements: docs/stories/STORY-078-git-status-gutter-in-search-and-filtered-views.md
+- implements: STORY-078
 ---
+
 
 
 ## Changes

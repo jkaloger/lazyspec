@@ -1,13 +1,15 @@
 ---
-title: "Single Binary Architecture"
+title: Single Binary Architecture
 type: adr
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-04
-tags: [architecture]
+tags:
+- architecture
 related:
-  - related-to: docs/rfcs/RFC-001-my-first-rfc.md
+- related-to: RFC-001
 ---
+
 
 ## Context
 

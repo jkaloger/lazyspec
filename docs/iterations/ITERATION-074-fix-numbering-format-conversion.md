@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-16
 tags: []
 related:
-- implements: docs/stories/STORY-066-fix-numbering-format-conversion.md
+- implements: STORY-066
 ---
+
 
 
 

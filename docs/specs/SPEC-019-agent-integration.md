@@ -1,15 +1,19 @@
 ---
-title: "Agent Integration"
+title: Agent Integration
 type: spec
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-25
-tags: [tui, agent, claude]
+tags:
+- tui
+- agent
+- claude
 related:
-  - implements: "docs/stories/STORY-051-agent-invocation-from-tui.md"
-  - implements: "docs/stories/STORY-052-agent-management-screen.md"
-  - implements: "docs/stories/STORY-053-custom-agent-prompts.md"
+- implements: STORY-051
+- implements: STORY-052
+- implements: STORY-053
 ---
+
 
 ## Summary
 

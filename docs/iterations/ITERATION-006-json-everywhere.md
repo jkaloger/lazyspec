@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-05
 tags: []
 related:
-- implements: docs/stories/STORY-021-json-everywhere.md
+- implements: STORY-021
 ---
+
 
 
 

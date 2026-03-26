@@ -9,8 +9,9 @@ tags:
 - agents
 - ai
 related:
-- implements: docs/rfcs/RFC-016-init-agents-from-tui.md
+- implements: RFC-016
 ---
+
 
 
 

@@ -1,17 +1,18 @@
 ---
-title: "Document Reference Ergonomics"
+title: Document Reference Ergonomics
 type: rfc
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-20
 tags:
-  - cli
-  - tui
-  - ergonomics
+- cli
+- tui
+- ergonomics
 related:
-  - related to: docs/rfcs/RFC-018-tui-interaction-enhancements.md
-  - related to: docs/rfcs/RFC-027-sqids-document-numbering.md
+- related to: RFC-018
+- related to: RFC-027
 ---
+
 
 
 ## Problem

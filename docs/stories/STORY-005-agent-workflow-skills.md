@@ -1,13 +1,17 @@
 ---
-title: "Agent Workflow Skills"
+title: Agent Workflow Skills
 type: story
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-05
-tags: [skills, agents, superpowers]
+tags:
+- skills
+- agents
+- superpowers
 related:
-  - implements: docs/rfcs/RFC-002-ai-driven-workflow.md
+- implements: RFC-002
 ---
+
 
 ## Context
 

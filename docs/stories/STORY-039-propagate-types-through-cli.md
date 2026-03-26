@@ -6,8 +6,9 @@ author: jkaloger
 date: 2026-03-06
 tags: []
 related:
-- implements: docs/rfcs/RFC-013-custom-document-types.md
+- implements: RFC-013
 ---
+
 
 
 

@@ -6,14 +6,15 @@ author: jkaloger
 date: 2026-03-15
 tags: []
 related:
-- related-to: docs/rfcs/RFC-002-ai-driven-workflow.md
-- related-to: docs/rfcs/RFC-005-tui-flat-navigation-model.md
-- related-to: docs/rfcs/RFC-007-agent-native-cli.md
-- related-to: docs/rfcs/RFC-009-codebase-quality-baseline.md
-- related-to: docs/rfcs/RFC-012-architecture-review-yagni-dry-cleanup.md
-- related-to: docs/rfcs/RFC-016-init-agents-from-tui.md
-- related-to: docs/rfcs/RFC-019-inline-type-references-with-ref.md
+- related-to: RFC-002
+- related-to: RFC-005
+- related-to: RFC-007
+- related-to: RFC-009
+- related-to: RFC-012
+- related-to: RFC-016
+- related-to: RFC-019
 ---
+
 
 
 

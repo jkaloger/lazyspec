@@ -9,8 +9,9 @@ tags:
 - distributed
 - git
 related:
-- related-to: docs/rfcs/RFC-027-sqids-document-numbering.md
+- related-to: RFC-027
 ---
+
 
 
 

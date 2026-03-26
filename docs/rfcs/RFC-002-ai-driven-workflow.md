@@ -1,13 +1,18 @@
 ---
-title: "AI-Driven Development Workflow"
+title: AI-Driven Development Workflow
 type: rfc
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-05
-tags: [ai, workflow, agents, skills]
+tags:
+- ai
+- workflow
+- agents
+- skills
 related:
-  - supersedes: docs/rfcs/RFC-001-my-first-rfc.md
+- supersedes: RFC-001
 ---
+
 
 ## Summary
 

@@ -10,7 +10,7 @@ fn setup() -> (common::TestFixture, lazyspec::engine::store::Store) {
     );
     fixture.write_doc(
         "docs/stories/STORY-001-auth-impl.md",
-        "---\ntitle: \"Auth Implementation\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: [security]\nrelated:\n- implements: docs/rfcs/RFC-001-auth.md\n---\n\nStory body.\n",
+        "---\ntitle: \"Auth Implementation\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: [security]\nrelated:\n- implements: RFC-001\n---\n\nStory body.\n",
     );
     let store = fixture.store();
     (fixture, store)
@@ -43,7 +43,7 @@ fn doc_to_json_includes_related() {
     assert_eq!(json["related"][0]["type"], "implements");
     assert_eq!(
         json["related"][0]["target"],
-        "docs/rfcs/RFC-001-auth.md"
+        "RFC-001"
     );
 }
 
@@ -179,4 +179,29 @@ fn show_json_full_path_works_when_shorthand_ambiguous() {
 
     assert_eq!(parsed["title"], "First");
     assert!(parsed["body"].as_str().unwrap().contains("First body."));
+}
+
+#[test]
+fn doc_to_json_link_command_produces_id_targets() {
+    let fixture = common::TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-feature.md",
+        "---\ntitle: \"Feature\"\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\nrelated: []\n---\n",
+    );
+    fixture.write_doc(
+        "docs/stories/STORY-001-impl.md",
+        "---\ntitle: \"Impl\"\ntype: story\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\nrelated: []\n---\n",
+    );
+
+    let store = fixture.store();
+    let fs = lazyspec::engine::fs::RealFileSystem;
+    lazyspec::cli::link::link(fixture.root(), &store, "STORY-001", "implements", "RFC-001", &fs).unwrap();
+
+    // Reload store after link wrote the file
+    let store = fixture.store();
+    let doc = store.resolve_shorthand("STORY-001").expect("should resolve");
+    let json = doc_to_json(doc);
+
+    assert_eq!(json["related"][0]["type"], "implements");
+    assert_eq!(json["related"][0]["target"], "RFC-001");
 }

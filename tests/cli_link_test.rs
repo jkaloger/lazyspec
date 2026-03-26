@@ -29,7 +29,7 @@ fn link_adds_relationship_to_frontmatter() {
     let content = fs::read_to_string(fixture.root().join("docs/adrs/ADR-001-adopt-auth.md")).unwrap();
     let meta = DocMeta::parse(&content).unwrap();
     assert_eq!(meta.related.len(), 1);
-    assert_eq!(meta.related[0].target, "docs/rfcs/RFC-001-auth.md");
+    assert_eq!(meta.related[0].target, "RFC-001");
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn link_with_shorthand_ids() {
         std::fs::read_to_string(fixture.root().join("docs/adrs/ADR-001-adopt-auth.md")).unwrap();
     let meta = DocMeta::parse(&content).unwrap();
     assert_eq!(meta.related.len(), 1);
-    assert_eq!(meta.related[0].target, "docs/rfcs/RFC-001-auth.md");
+    assert_eq!(meta.related[0].target, "RFC-001");
 }
 
 #[test]

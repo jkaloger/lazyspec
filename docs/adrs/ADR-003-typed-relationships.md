@@ -1,13 +1,16 @@
 ---
-title: "Typed Relationships Over Directory Nesting"
+title: Typed Relationships Over Directory Nesting
 type: adr
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-04
-tags: [architecture, relationships]
+tags:
+- architecture
+- relationships
 related:
-  - related-to: docs/rfcs/RFC-001-my-first-rfc.md
+- related-to: RFC-001
 ---
+
 
 ## Context
 

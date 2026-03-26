@@ -4,10 +4,14 @@ type: spec
 status: draft
 author: jkaloger
 date: 2026-03-25
-tags: [tui, search, overlay]
+tags:
+- tui
+- search
+- overlay
 related:
-- related-to: docs/stories/STORY-010-read-only-relations-tab.md
+- related-to: STORY-010
 ---
+
 
 ## Summary
 

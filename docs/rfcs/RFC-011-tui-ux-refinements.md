@@ -9,8 +9,9 @@ tags:
 - ux
 - keybindings
 related:
-- related-to: docs/rfcs/RFC-006-tui-progressive-disclosure.md
+- related-to: RFC-006
 ---
+
 
 
 

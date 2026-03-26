@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-05
 tags: []
 related:
-- implements: docs/stories/STORY-029-tui-test-coverage.md
+- implements: STORY-029
 ---
+
 
 
 

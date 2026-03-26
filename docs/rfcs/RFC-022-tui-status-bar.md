@@ -1,17 +1,18 @@
 ---
-title: "TUI Status Bar"
+title: TUI Status Bar
 type: rfc
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-15
 tags:
-  - tui
-  - ux
-  - status-bar
+- tui
+- ux
+- status-bar
 related:
-  - related to: docs/rfcs/RFC-011-tui-ux-refinements.md
-  - related to: docs/rfcs/RFC-018-tui-interaction-enhancements.md
+- related to: RFC-011
+- related to: RFC-018
 ---
+
 
 ## Problem
 

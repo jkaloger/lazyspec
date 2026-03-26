@@ -684,6 +684,106 @@ fn list_includes_both_duplicate_docs() {
     assert!(titles.contains(&"Second"));
 }
 
+// --- ID-based link resolution tests ---
+
+#[test]
+fn store_resolves_id_based_links() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-event-sourcing.md", "Event Sourcing", "accepted");
+    fixture.write_doc(
+        "docs/adrs/ADR-001-adopt-es.md",
+        r#"---
+title: "Adopt Event Sourcing"
+type: adr
+status: draft
+author: jkaloger
+date: 2026-03-04
+tags: [architecture]
+related:
+  - implements: RFC-001
+---
+
+## Decision
+We adopt event sourcing.
+"#,
+    );
+
+    let store = fixture.store();
+
+    // Forward link from ADR should resolve to the RFC path
+    let adr_path = PathBuf::from("docs/adrs/ADR-001-adopt-es.md");
+    let rfc_path = PathBuf::from("docs/rfcs/RFC-001-event-sourcing.md");
+
+    let fwd = store.forward_links_for(&adr_path);
+    assert_eq!(fwd.len(), 1, "ADR should have one forward link");
+    assert_eq!(fwd[0].1, rfc_path, "forward link target should be the RFC path");
+
+    // Reverse link on the RFC should point back to the ADR
+    let rev = store.reverse_links_for(&rfc_path);
+    assert_eq!(rev.len(), 1, "RFC should have one reverse link");
+    assert_eq!(rev[0].1, adr_path, "reverse link source should be the ADR path");
+}
+
+#[test]
+fn store_resolves_id_based_links_via_related_to() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-event-sourcing.md", "Event Sourcing", "accepted");
+    fixture.write_doc(
+        "docs/adrs/ADR-001-adopt-es.md",
+        r#"---
+title: "Adopt Event Sourcing"
+type: adr
+status: draft
+author: jkaloger
+date: 2026-03-04
+tags: []
+related:
+  - implements: RFC-001
+---
+"#,
+    );
+
+    let store = fixture.store();
+    let adr_path = PathBuf::from("docs/adrs/ADR-001-adopt-es.md");
+    let rfc_path = PathBuf::from("docs/rfcs/RFC-001-event-sourcing.md");
+
+    let related = store.related_to(&adr_path);
+    assert_eq!(related.len(), 1);
+    assert_eq!(*related[0].1, rfc_path);
+
+    let referenced = store.referenced_by(&rfc_path);
+    assert_eq!(referenced.len(), 1);
+    assert_eq!(*referenced[0].1, adr_path);
+}
+
+#[test]
+fn store_id_link_unresolvable_is_skipped() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/adrs/ADR-001-orphan.md",
+        r#"---
+title: "Orphan ADR"
+type: adr
+status: draft
+author: test
+date: 2026-03-04
+tags: []
+related:
+  - implements: NONEXISTENT-999
+---
+"#,
+    );
+
+    let store = fixture.store();
+    let adr_path = PathBuf::from("docs/adrs/ADR-001-orphan.md");
+
+    // The unresolvable ID falls back to a path, so it still creates a link entry
+    // (just to a non-existent path). This is the expected behavior -- validation
+    // catches broken links separately.
+    let fwd = store.forward_links_for(&adr_path);
+    assert_eq!(fwd.len(), 1);
+}
+
 // --- Mixed-format ID resolution tests (AC-1 through AC-7) ---
 
 fn setup_mixed_fixture() -> TestFixture {

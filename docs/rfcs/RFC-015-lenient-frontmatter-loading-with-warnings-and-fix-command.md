@@ -1,16 +1,17 @@
 ---
-title: "Lenient frontmatter loading with warnings and fix command"
+title: Lenient frontmatter loading with warnings and fix command
 type: rfc
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-08
 tags:
-  - frontmatter
-  - validation
-  - dx
+- frontmatter
+- validation
+- dx
 related:
-  - related to: docs/rfcs/RFC-008-project-health-awareness.md
+- related to: RFC-008
 ---
+
 
 
 ## Problem

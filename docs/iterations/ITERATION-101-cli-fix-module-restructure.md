@@ -6,8 +6,9 @@ author: unknown
 date: 2026-03-23
 tags: []
 related:
-- implements: docs/stories/STORY-082-cli-fix-module-restructure.md
+- implements: STORY-082
 ---
+
 
 
 

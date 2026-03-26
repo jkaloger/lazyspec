@@ -1,14 +1,18 @@
 ---
-title: "Project Status and Validation"
+title: Project Status and Validation
 type: spec
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-25
-tags: [cli, status, validation]
+tags:
+- cli
+- status
+- validation
 related:
-  - related-to: "docs/stories/STORY-020-status-command.md"
-  - related-to: "docs/stories/STORY-022-expanded-validation.md"
+- related-to: STORY-020
+- related-to: STORY-022
 ---
+
 
 ## Summary
 

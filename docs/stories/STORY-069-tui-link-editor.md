@@ -6,8 +6,9 @@ author: jkaloger
 date: 2026-03-20
 tags: []
 related:
-- implements: docs/rfcs/RFC-028-document-reference-ergonomics.md
+- implements: RFC-028
 ---
+
 
 
 ## Context

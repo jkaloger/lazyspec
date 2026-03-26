@@ -1,13 +1,15 @@
 ---
-title: "Mode System and View Switching"
+title: Mode System and View Switching
 type: story
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-05
-tags: [tui]
+tags:
+- tui
 related:
-  - implements: docs/rfcs/RFC-006-tui-progressive-disclosure.md
+- implements: RFC-006
 ---
+
 
 
 ## Context

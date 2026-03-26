@@ -6,8 +6,9 @@ author: unknown
 date: 2026-03-23
 tags: []
 related:
-- implements: docs/rfcs/RFC-032-code-quality-remediation-audit-007-findings.md
+- implements: RFC-032
 ---
+
 
 
 

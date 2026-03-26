@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-12
 tags: []
 related:
-- implements: docs/stories/STORY-017-open-in-editor.md
+- implements: STORY-017
 ---
+
 
 
 

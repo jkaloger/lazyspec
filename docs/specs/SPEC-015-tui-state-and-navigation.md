@@ -1,17 +1,21 @@
 ---
-title: "TUI State and Navigation"
+title: TUI State and Navigation
 type: spec
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-25
-tags: [tui, state, navigation]
+tags:
+- tui
+- state
+- navigation
 related:
-  - related-to: docs/stories/STORY-009-flat-navigation-model.md
-  - related-to: docs/stories/STORY-012-mode-system-and-view-switching.md
-  - related-to: docs/stories/STORY-042-tui-expandable-tree-nodes.md
-  - related-to: docs/stories/STORY-048-scroll-padding-and-half-page-navigation.md
-  - related-to: docs/stories/STORY-015-graph-mode.md
+- related-to: STORY-009
+- related-to: STORY-012
+- related-to: STORY-042
+- related-to: STORY-048
+- related-to: STORY-015
 ---
+
 
 ## Summary
 

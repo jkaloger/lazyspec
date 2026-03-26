@@ -23,5 +23,21 @@ pub(super) fn format_human(output: &FixOutput, dry_run: bool) -> String {
         }
     }
 
+    for r in &output.relation_fixes {
+        for (old_target, new_target) in &r.replacements {
+            if dry_run {
+                result.push_str(&format!(
+                    "Would migrate relation in {}: {} -> {}\n",
+                    r.path, old_target, new_target
+                ));
+            } else {
+                result.push_str(&format!(
+                    "Migrated relation in {}: {} -> {}\n",
+                    r.path, old_target, new_target
+                ));
+            }
+        }
+    }
+
     result
 }

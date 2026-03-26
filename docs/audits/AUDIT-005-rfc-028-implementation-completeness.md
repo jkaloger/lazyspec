@@ -6,11 +6,12 @@ author: jkaloger
 date: 2026-03-20
 tags: []
 related:
-- related-to: docs/rfcs/RFC-030-git-based-document-number-reservation.md
-- related-to: docs/stories/STORY-074-core-reservation-mechanism.md
-- related-to: docs/stories/STORY-075-reserved-numbering-config-and-validation.md
-- related-to: docs/stories/STORY-076-reservation-management.md
+- related-to: RFC-030
+- related-to: STORY-074
+- related-to: STORY-075
+- related-to: STORY-076
 ---
+
 
 
 

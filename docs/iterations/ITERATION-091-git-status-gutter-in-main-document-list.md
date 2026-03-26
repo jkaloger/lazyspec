@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-23
 tags: []
 related:
-- implements: docs/stories/STORY-077-git-status-gutter-in-main-document-list.md
+- implements: STORY-077
 ---
+
 
 
 

@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 pub enum ValidationIssue {
     BrokenLink {
         source: PathBuf,
-        target: PathBuf,
+        target: String,
     },
     MissingParentLink {
         path: PathBuf,
@@ -82,12 +82,7 @@ impl std::fmt::Display for ValidationIssue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ValidationIssue::BrokenLink { source, target } => {
-                write!(
-                    f,
-                    "broken link: {} -> {}",
-                    source.display(),
-                    target.display()
-                )
+                write!(f, "broken link: {} -> {}", source.display(), target)
             }
             ValidationIssue::MissingParentLink {
                 path,
@@ -239,23 +234,40 @@ impl Checker for BrokenLinkRule {
         let hierarchy = hierarchy_from_config(config);
         let mut issues = Vec::new();
 
+        let id_to_path: HashMap<String, PathBuf> = store
+            .docs
+            .iter()
+            .map(|(_, doc)| (doc.id.clone(), doc.path.clone()))
+            .collect();
+
         for (path, meta) in &store.docs {
             if meta.validate_ignore {
                 continue;
             }
 
             for rel in &meta.related {
-                let target = PathBuf::from(&rel.target);
-                if !store.docs.contains_key(&target) {
+                let resolved = id_to_path
+                    .get(&rel.target)
+                    .cloned()
+                    .or_else(|| {
+                        let p = PathBuf::from(&rel.target);
+                        if store.docs.contains_key(&p) {
+                            Some(p)
+                        } else {
+                            None
+                        }
+                    });
+
+                let Some(target) = resolved else {
                     issues.push((
                         Severity::Error,
                         ValidationIssue::BrokenLink {
                             source: path.clone(),
-                            target,
+                            target: rel.target.clone(),
                         },
                     ));
                     continue;
-                }
+                };
 
                 let is_hierarchy_link = hierarchy
                     .iter()
@@ -322,6 +334,12 @@ impl Checker for ParentLinkRule {
     ) -> Vec<(Severity, ValidationIssue)> {
         let mut issues = Vec::new();
 
+        let id_to_path: HashMap<String, PathBuf> = store
+            .docs
+            .iter()
+            .map(|(_, doc)| (doc.id.clone(), doc.path.clone()))
+            .collect();
+
         for (path, meta) in &store.docs {
             if meta.validate_ignore {
                 continue;
@@ -340,10 +358,14 @@ impl Checker for ParentLinkRule {
                             continue;
                         }
                         let has_parent_link = meta.related.iter().any(|r| {
+                            let resolved = id_to_path
+                                .get(&r.target)
+                                .cloned()
+                                .unwrap_or_else(|| PathBuf::from(&r.target));
                             r.rel_type.to_string() == *link
                                 && store
                                     .docs
-                                    .get(&PathBuf::from(&r.target))
+                                    .get(&resolved)
                                     .map(|d| d.doc_type == DocType::new(parent))
                                     .unwrap_or(false)
                         });

@@ -1,13 +1,17 @@
 ---
-title: "Create Form UI and Input Handling"
+title: Create Form UI and Input Handling
 type: story
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-05
-tags: [tui, modal, input]
+tags:
+- tui
+- modal
+- input
 related:
-  - implements: docs/rfcs/RFC-003-tui-document-creation.md
+- implements: RFC-003
 ---
+
 
 ## Context
 

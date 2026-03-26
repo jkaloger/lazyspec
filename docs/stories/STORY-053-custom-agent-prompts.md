@@ -6,8 +6,9 @@ author: jkaloger
 date: 2026-03-08
 tags: []
 related:
-- implements: docs/rfcs/RFC-016-init-agents-from-tui.md
+- implements: RFC-016
 ---
+
 
 
 

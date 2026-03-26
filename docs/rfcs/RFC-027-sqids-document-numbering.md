@@ -1,17 +1,18 @@
 ---
-title: "Sqids Document Numbering"
+title: Sqids Document Numbering
 type: rfc
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-15
 tags:
-  - numbering
-  - distributed
-  - sqids
+- numbering
+- distributed
+- sqids
 related:
-  - related to: docs/rfcs/RFC-020-fix-command-numbering-conflict-resolution.md
-  - related to: docs/rfcs/RFC-013-custom-document-types.md
+- related to: RFC-020
+- related to: RFC-013
 ---
+
 
 
 ## Problem

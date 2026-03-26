@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-16
 tags: []
 related:
-- implements: docs/rfcs/RFC-027-sqids-document-numbering.md
+- implements: RFC-027
 ---
+
 
 
 

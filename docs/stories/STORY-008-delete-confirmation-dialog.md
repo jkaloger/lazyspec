@@ -9,8 +9,9 @@ tags:
 - deletion
 - modal
 related:
-- implements: docs/rfcs/RFC-004-tui-document-deletion.md
+- implements: RFC-004
 ---
+
 
 
 ## Context

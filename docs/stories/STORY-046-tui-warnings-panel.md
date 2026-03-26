@@ -6,8 +6,9 @@ author: jkaloger
 date: 2026-03-08
 tags: []
 related:
-- implements: docs/rfcs/RFC-015-lenient-frontmatter-loading-with-warnings-and-fix-command.md
+- implements: RFC-015
 ---
+
 
 
 

@@ -6,10 +6,11 @@ author: agent
 date: 2026-03-05
 tags: []
 related:
-- implements: docs/stories/STORY-009-flat-navigation-model.md
-- implements: docs/stories/STORY-010-read-only-relations-tab.md
-- implements: docs/stories/STORY-011-simplified-border-highlighting.md
+- implements: STORY-009
+- implements: STORY-010
+- implements: STORY-011
 ---
+
 
 
 

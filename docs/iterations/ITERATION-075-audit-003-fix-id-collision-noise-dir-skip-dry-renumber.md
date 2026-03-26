@@ -6,9 +6,10 @@ author: agent
 date: 2026-03-17
 tags: []
 related:
-- implements: docs/stories/STORY-066-fix-numbering-format-conversion.md
-- related-to: docs/audits/AUDIT-006-rfc-027-sqids-implementation-quality-review.md
+- implements: STORY-066
+- related-to: AUDIT-006
 ---
+
 
 
 

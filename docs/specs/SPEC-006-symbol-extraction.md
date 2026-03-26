@@ -1,13 +1,17 @@
 ---
-title: "Symbol Extraction"
+title: Symbol Extraction
 type: spec
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-25
-tags: [engine, tree-sitter, symbols]
+tags:
+- engine
+- tree-sitter
+- symbols
 related:
-  - implements: "docs/stories/STORY-056-tree-sitter-symbol-extraction.md"
+- implements: STORY-056
 ---
+
 
 ## Summary
 

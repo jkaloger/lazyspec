@@ -9,10 +9,11 @@ tags:
 - engine
 - expansion
 related:
-- related-to: docs/stories/STORY-055-ref-parsing-and-expansion-pipeline.md
-- related-to: docs/stories/STORY-057-rendering-integration.md
-- related-to: docs/stories/STORY-058-ref-expansion-hardening-and-performance.md
+- related-to: STORY-055
+- related-to: STORY-057
+- related-to: STORY-058
 ---
+
 
 
 

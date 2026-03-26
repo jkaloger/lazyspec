@@ -10,8 +10,9 @@ tags:
 - blob-pinning
 - semantic-hashing
 related:
-- implements: docs/rfcs/RFC-034-spec-certification-and-drift-detection.md
+- implements: RFC-034
 ---
+
 
 
 

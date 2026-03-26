@@ -4,10 +4,14 @@ type: spec
 status: draft
 author: jkaloger
 date: 2026-03-25
-tags: [tui, graph, navigation]
+tags:
+- tui
+- graph
+- navigation
 related:
-- related-to: docs/stories/STORY-015-graph-mode.md
+- related-to: STORY-015
 ---
+
 
 
 ## Summary

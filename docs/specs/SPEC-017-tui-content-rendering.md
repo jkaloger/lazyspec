@@ -1,15 +1,20 @@
 ---
-title: "TUI Content Rendering"
+title: TUI Content Rendering
 type: spec
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-25
-tags: [tui, rendering, markdown, diagrams]
+tags:
+- tui
+- rendering
+- markdown
+- diagrams
 related:
-  - implements: "docs/stories/STORY-057-rendering-integration.md"
-  - implements: "docs/stories/STORY-063-diagram-rendering-pipeline.md"
-  - implements: "docs/stories/STORY-067-gfm-extensions-for-markdown-preview.md"
+- implements: STORY-057
+- implements: STORY-063
+- implements: STORY-067
 ---
+
 
 ## Summary
 

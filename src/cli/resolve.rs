@@ -16,3 +16,8 @@ pub fn resolve_to_path(store: &Store, id: &str) -> Result<PathBuf, ResolveError>
     let doc = resolve_shorthand_or_path(store, id)?;
     Ok(doc.path.clone())
 }
+
+pub fn resolve_to_id(store: &Store, input: &str) -> Result<String, ResolveError> {
+    let doc = resolve_shorthand_or_path(store, input)?;
+    Ok(doc.id.clone())
+}

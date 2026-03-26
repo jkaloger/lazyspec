@@ -6,10 +6,11 @@ author: jkaloger
 date: 2026-03-23
 tags: []
 related:
-- related-to: docs/audits/AUDIT-007-rust-code-quality-audit.md
-- related-to: docs/rfcs/RFC-009-codebase-quality-baseline.md
-- related-to: docs/rfcs/RFC-012-architecture-review-yagni-dry-cleanup.md
+- related-to: AUDIT-007
+- related-to: RFC-009
+- related-to: RFC-012
 ---
+
 
 
 
