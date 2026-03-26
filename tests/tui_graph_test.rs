@@ -135,12 +135,15 @@ fn test_graph_enter_jumps_to_types_mode() {
 fn test_graph_rebuilds_on_mode_switch() {
     let (fixture, mut app) = setup_graph_fixture();
 
-    // Cycle from Types -> Filters -> Metrics -> Graph
+    // Cycle from Types -> Filters -> [Metrics] -> Graph
     app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
     assert_eq!(app.view_mode, ViewMode::Filters);
 
-    app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
-    assert_eq!(app.view_mode, ViewMode::Metrics);
+    #[cfg(feature = "metrics")]
+    {
+        app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+        assert_eq!(app.view_mode, ViewMode::Metrics);
+    }
 
     app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
     assert_eq!(app.view_mode, ViewMode::Graph);
@@ -157,9 +160,10 @@ fn test_graph_rebuilds_on_mode_switch() {
     }
     assert_eq!(app.view_mode, ViewMode::Types);
 
-    // Cycle back: Types -> Filters -> Metrics -> Graph
+    // Cycle back: Types -> Filters -> [Metrics] -> Graph
     app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
     app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    #[cfg(feature = "metrics")]
     app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
     assert_eq!(app.view_mode, ViewMode::Graph);
     assert_eq!(

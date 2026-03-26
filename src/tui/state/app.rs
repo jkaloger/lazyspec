@@ -128,6 +128,7 @@ pub struct DocListNode {
 pub enum ViewMode {
     Types,
     Filters,
+    #[cfg(feature = "metrics")]
     Metrics,
     Graph,
     #[cfg(feature = "agent")]
@@ -138,8 +139,12 @@ impl ViewMode {
     pub fn next(self) -> Self {
         match self {
             ViewMode::Types => ViewMode::Filters,
+            #[cfg(feature = "metrics")]
             ViewMode::Filters => ViewMode::Metrics,
+            #[cfg(feature = "metrics")]
             ViewMode::Metrics => ViewMode::Graph,
+            #[cfg(not(feature = "metrics"))]
+            ViewMode::Filters => ViewMode::Graph,
             #[cfg(feature = "agent")]
             ViewMode::Graph => ViewMode::Agents,
             #[cfg(not(feature = "agent"))]
@@ -153,6 +158,7 @@ impl ViewMode {
         match self {
             ViewMode::Types => "Types",
             ViewMode::Filters => "Filters",
+            #[cfg(feature = "metrics")]
             ViewMode::Metrics => "Metrics",
             ViewMode::Graph => "Graph",
             #[cfg(feature = "agent")]

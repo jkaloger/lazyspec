@@ -33,6 +33,7 @@ indicatif = "0.17"
 [features]
 default = []
 agent = []
+metrics = []
 
 [dev-dependencies]
 tempfile = "3"

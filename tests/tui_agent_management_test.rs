@@ -42,8 +42,13 @@ fn setup_agents_mode(fixture: &TestFixture, records: Vec<AgentRecord>) -> App {
 #[test]
 fn test_agents_view_mode_in_cycle() {
     assert_eq!(ViewMode::Types.next(), ViewMode::Filters);
-    assert_eq!(ViewMode::Filters.next(), ViewMode::Metrics);
-    assert_eq!(ViewMode::Metrics.next(), ViewMode::Graph);
+    #[cfg(feature = "metrics")]
+    {
+        assert_eq!(ViewMode::Filters.next(), ViewMode::Metrics);
+        assert_eq!(ViewMode::Metrics.next(), ViewMode::Graph);
+    }
+    #[cfg(not(feature = "metrics"))]
+    assert_eq!(ViewMode::Filters.next(), ViewMode::Graph);
     assert_eq!(ViewMode::Graph.next(), ViewMode::Agents);
     assert_eq!(ViewMode::Agents.next(), ViewMode::Types);
 }

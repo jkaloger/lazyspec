@@ -24,9 +24,11 @@ use overlays::{
 #[cfg(feature = "agent")]
 use overlays::draw_agent_dialog;
 use panels::{
-    draw_doc_list, draw_graph, draw_metrics_skeleton, draw_preview, draw_type_panel,
+    draw_doc_list, draw_graph, draw_preview, draw_type_panel,
     render_filter_panel, render_fullscreen_document,
 };
+#[cfg(feature = "metrics")]
+use panels::draw_metrics_skeleton;
 #[cfg(feature = "agent")]
 use panels::draw_agents_screen;
 
@@ -102,6 +104,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             draw_preview(f, app, right[1]);
         }
         ViewMode::Filters => render_filter_panel(f, app, outer[1]),
+        #[cfg(feature = "metrics")]
         ViewMode::Metrics => draw_metrics_skeleton(f, outer[1]),
         ViewMode::Graph => draw_graph(f, app, outer[1]),
         #[cfg(feature = "agent")]

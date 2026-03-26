@@ -30,8 +30,13 @@ fn test_app_defaults_to_types_mode() {
 #[test]
 fn test_view_mode_next_cycles() {
     assert_eq!(ViewMode::Types.next(), ViewMode::Filters);
-    assert_eq!(ViewMode::Filters.next(), ViewMode::Metrics);
-    assert_eq!(ViewMode::Metrics.next(), ViewMode::Graph);
+    #[cfg(feature = "metrics")]
+    {
+        assert_eq!(ViewMode::Filters.next(), ViewMode::Metrics);
+        assert_eq!(ViewMode::Metrics.next(), ViewMode::Graph);
+    }
+    #[cfg(not(feature = "metrics"))]
+    assert_eq!(ViewMode::Filters.next(), ViewMode::Graph);
     #[cfg(feature = "agent")]
     {
         assert_eq!(ViewMode::Graph.next(), ViewMode::Agents);
@@ -49,8 +54,16 @@ fn test_backtick_cycles_mode() {
     app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
     assert_eq!(app.view_mode, ViewMode::Filters);
 
-    app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
-    assert_eq!(app.view_mode, ViewMode::Metrics);
+    #[cfg(feature = "metrics")]
+    {
+        app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+        assert_eq!(app.view_mode, ViewMode::Metrics);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+        assert_eq!(app.view_mode, ViewMode::Graph);
+    }
 }
 
 #[test]

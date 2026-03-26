@@ -962,6 +962,7 @@ pub fn draw_agents_screen(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+#[cfg(feature = "metrics")]
 pub fn draw_metrics_skeleton(f: &mut Frame, area: Rect) {
     let layout = Layout::default()
         .direction(Direction::Horizontal)
