@@ -1,7 +1,7 @@
 ---
 title: Blob Pinning with Semantic Hashing
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-24
 tags:
@@ -12,6 +12,7 @@ tags:
 related:
 - implements: docs/rfcs/RFC-034-spec-certification-and-drift-detection.md
 ---
+
 
 
 

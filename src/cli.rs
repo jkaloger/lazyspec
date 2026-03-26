@@ -15,6 +15,7 @@ pub mod update;
 pub mod search;
 pub mod validate;
 pub mod fix;
+pub mod pin;
 pub mod reservations;
 
 use crate::cli::reservations::ReservationsCommand;
@@ -193,6 +194,15 @@ pub enum Commands {
         /// Show warnings in addition to errors
         #[arg(long)]
         warnings: bool,
+    },
+    /// Pin blob hashes onto @ref directives in a document
+    Pin {
+        /// Document path or shorthand ID (e.g. ITERATION-114)
+        #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
+        id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Manage reservation refs
     Reservations {

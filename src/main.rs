@@ -170,6 +170,10 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(exit_code);
             }
         }
+        Some(Commands::Pin { id, json }) => {
+            let store = Store::load(&cwd, &config)?;
+            lazyspec::cli::pin::run(&store, &config, &id, json)?;
+        }
         Some(Commands::Reservations { command }) => {
             match command {
                 ReservationsCommand::List { json } => {

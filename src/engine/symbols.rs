@@ -2,9 +2,62 @@ pub trait SymbolExtractor {
     fn extract(&self, source: &str, symbol: &str) -> Option<String>;
 }
 
-use tree_sitter::{Parser, TreeCursor};
+use tree_sitter::{Node, Parser, TreeCursor};
 use tree_sitter_rust::LANGUAGE as LANGUAGE_RUST;
 use tree_sitter_typescript::LANGUAGE_TYPESCRIPT;
+
+const COMMENT_NODE_KINDS: &[&str] = &["line_comment", "block_comment", "comment"];
+
+/// Parse source text with the given tree-sitter language, strip comment nodes,
+/// collect leaf-node text, and collapse whitespace runs into single spaces.
+pub fn normalize_ast(source: &str, language: tree_sitter::Language) -> String {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&language)
+        .expect("failed to set language");
+    let tree = parser.parse(source, None).expect("failed to parse source");
+    let root = tree.root_node();
+
+    let mut leaves = Vec::new();
+    collect_leaves(&root, source, &mut leaves);
+
+    let joined = leaves.join(" ");
+    // Collapse runs of whitespace into single spaces and trim
+    let mut result = String::with_capacity(joined.len());
+    let mut prev_was_space = true; // treat start as space to trim leading
+    for ch in joined.chars() {
+        if ch.is_whitespace() {
+            if !prev_was_space {
+                result.push(' ');
+                prev_was_space = true;
+            }
+        } else {
+            result.push(ch);
+            prev_was_space = false;
+        }
+    }
+    // Trim trailing space
+    if result.ends_with(' ') {
+        result.pop();
+    }
+    result
+}
+
+fn collect_leaves<'a>(node: &Node<'a>, source: &str, out: &mut Vec<String>) {
+    if COMMENT_NODE_KINDS.contains(&node.kind()) {
+        return;
+    }
+    if node.child_count() == 0 {
+        let text = &source[node.start_byte()..node.end_byte()];
+        out.push(text.to_string());
+    } else {
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                collect_leaves(&child, source, out);
+            }
+        }
+    }
+}
 
 fn find_symbol_node(
     cursor: &mut TreeCursor,
@@ -579,5 +632,92 @@ impl Widget {
         let rust = RustSymbolExtractor::new();
         let result = accepts_extractor(&rust);
         assert!(result.is_none());
+    }
+
+    // --- normalize_ast tests ---
+
+    #[test]
+    fn test_normalize_strips_line_comments() {
+        let source = r#"fn hello() {
+    // this is a comment
+    let x = 1;
+}"#;
+        let result = normalize_ast(source, LANGUAGE_RUST.into());
+        assert!(
+            !result.contains("this is a comment"),
+            "line comment should be stripped"
+        );
+        assert!(result.contains("let"));
+        assert!(result.contains("x"));
+    }
+
+    #[test]
+    fn test_normalize_strips_block_comments() {
+        let source = r#"fn hello() {
+    /* block comment here */
+    let x = 1;
+}"#;
+        let result = normalize_ast(source, LANGUAGE_RUST.into());
+        assert!(
+            !result.contains("block comment"),
+            "block comment should be stripped"
+        );
+        assert!(result.contains("let"));
+        assert!(result.contains("x"));
+    }
+
+    #[test]
+    fn test_normalize_collapses_whitespace() {
+        let compact = "fn hello() { let x = 1; }";
+        let spacious = "fn    hello()   {\n\n\n    let   x   =   1;\n\n}";
+        let lang: tree_sitter::Language = LANGUAGE_RUST.into();
+        let a = normalize_ast(compact, lang.clone());
+        let b = normalize_ast(spacious, lang);
+        assert_eq!(a, b, "different whitespace should produce identical output");
+    }
+
+    #[test]
+    fn test_normalize_preserves_code_structure() {
+        let source = "pub fn process(input: &str) -> String { input.to_uppercase() }";
+        let result = normalize_ast(source, LANGUAGE_RUST.into());
+        assert!(result.contains("pub"));
+        assert!(result.contains("fn"));
+        assert!(result.contains("process"));
+        assert!(result.contains("input"));
+        assert!(result.contains("&"));
+        assert!(result.contains("str"));
+        assert!(result.contains("->"));
+        assert!(result.contains("String"));
+        assert!(result.contains("to_uppercase"));
+    }
+
+    #[test]
+    fn test_normalize_ts_strips_comments() {
+        let source = r#"function greet(name: string): string {
+    // line comment
+    /* block comment */
+    return name;
+}"#;
+        let result = normalize_ast(source, LANGUAGE_TYPESCRIPT.into());
+        assert!(
+            !result.contains("line comment"),
+            "TS line comment should be stripped"
+        );
+        assert!(
+            !result.contains("block comment"),
+            "TS block comment should be stripped"
+        );
+        assert!(result.contains("greet"));
+        assert!(result.contains("return"));
+        assert!(result.contains("name"));
+    }
+
+    #[test]
+    fn test_normalize_idempotent() {
+        let source = "fn hello() { let x = 1; }";
+        let lang: tree_sitter::Language = LANGUAGE_RUST.into();
+        let first = normalize_ast(source, lang.clone());
+        let second = normalize_ast(&first, lang);
+        assert_eq!(first, second, "normalizing twice should produce same result");
     }
 }

@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -120,6 +121,8 @@ pub struct Config {
     pub rules: Vec<ValidationRule>,
     #[serde(skip)]
     pub ref_count_ceiling: usize,
+    #[serde(default)]
+    pub certification: CertificationConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +143,41 @@ pub struct Naming {
     pub pattern: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CertificationConfig {
+    #[serde(default = "default_normalize")]
+    pub normalize: bool,
+    #[serde(default)]
+    pub overrides: HashMap<String, CertificationOverride>,
+}
+
+impl Default for CertificationConfig {
+    fn default() -> Self {
+        CertificationConfig {
+            normalize: default_normalize(),
+            overrides: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CertificationOverride {
+    pub normalize: bool,
+}
+
+fn default_normalize() -> bool {
+    true
+}
+
+impl CertificationConfig {
+    pub fn should_normalize(&self, spec_path: &str) -> bool {
+        if let Some(override_cfg) = self.overrides.get(spec_path) {
+            return override_cfg.normalize;
+        }
+        self.normalize
+    }
+}
+
 #[derive(Deserialize)]
 struct RawNumbering {
     sqids: Option<SqidsConfig>,
@@ -157,6 +195,8 @@ struct RawConfig {
     numbering: Option<RawNumbering>,
     #[serde(default)]
     ref_count_ceiling: Option<usize>,
+    #[serde(default)]
+    certification: Option<CertificationConfig>,
 }
 
 fn build_type_def(name: &str, dir: &str, prefix: &str, icon: &str) -> TypeDef {
@@ -261,6 +301,7 @@ impl Default for Config {
             ui: UiConfig::default(),
             rules: default_rules(),
             ref_count_ceiling: 15,
+            certification: CertificationConfig::default(),
         }
     }
 }
@@ -354,6 +395,7 @@ impl Config {
             ui: raw.tui.unwrap_or_default(),
             rules,
             ref_count_ceiling,
+            certification: raw.certification.unwrap_or_default(),
         })
     }
 
@@ -372,5 +414,92 @@ impl Config {
 
     pub fn type_by_name(&self, name: &str) -> Option<&TypeDef> {
         self.documents.types.iter().find(|t| t.name == name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_certification_default_when_absent() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert!(config.certification.normalize);
+        assert!(config.certification.overrides.is_empty());
+    }
+
+    #[test]
+    fn test_certification_explicit_true() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[certification]
+normalize = true
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert!(config.certification.normalize);
+    }
+
+    #[test]
+    fn test_certification_explicit_false() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[certification]
+normalize = false
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert!(!config.certification.normalize);
+    }
+
+    #[test]
+    fn test_certification_override_disables_normalize() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[certification]
+normalize = true
+
+[certification.overrides."docs/specs/SPEC-007"]
+normalize = false
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert!(!config.certification.should_normalize("docs/specs/SPEC-007"));
+    }
+
+    #[test]
+    fn test_certification_override_does_not_affect_other_specs() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[certification]
+normalize = true
+
+[certification.overrides."docs/specs/SPEC-007"]
+normalize = false
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert!(config.certification.should_normalize("docs/specs/SPEC-008"));
+    }
+
+    #[test]
+    fn test_should_normalize_falls_back_to_global() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[certification]
+normalize = false
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert!(!config.certification.should_normalize("docs/specs/SPEC-001"));
     }
 }
