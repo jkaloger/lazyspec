@@ -2,7 +2,7 @@ use lazyspec::tui::infra::terminal_caps::TerminalImageProtocol;
 use lazyspec::tui::content::diagram::{
     DiagramBlock, DiagramCache, DiagramCacheEntry, DiagramLanguage, PreviewSegment, ToolAvailability,
     build_preview_segments, extract_diagram_blocks, fallback_hint,
-    is_tool_available, render_diagram, render_diagram_text, source_hash, tool_name,
+    source_hash, tool_name,
 };
 
 #[test]
@@ -13,25 +13,6 @@ fn test_extract_d2_block() {
     assert_eq!(blocks[0].language, DiagramLanguage::D2);
     assert_eq!(blocks[0].source, "a -> b\nb -> c\n");
     assert_eq!(&body[blocks[0].byte_range.clone()], "```d2\na -> b\nb -> c\n```\n");
-}
-
-#[test]
-fn test_extract_mermaid_block() {
-    let body = "```mermaid\ngraph TD;\n  A-->B;\n```\n";
-    let blocks = extract_diagram_blocks(body);
-    assert_eq!(blocks.len(), 1);
-    assert_eq!(blocks[0].language, DiagramLanguage::Mermaid);
-    assert_eq!(blocks[0].source, "graph TD;\n  A-->B;\n");
-    assert_eq!(&body[blocks[0].byte_range.clone()], "```mermaid\ngraph TD;\n  A-->B;\n```\n");
-}
-
-#[test]
-fn test_extract_multiple_blocks() {
-    let body = "```d2\nx -> y\n```\n\ntext\n\n```mermaid\nsequenceDiagram\n```\n";
-    let blocks = extract_diagram_blocks(body);
-    assert_eq!(blocks.len(), 2);
-    assert_eq!(blocks[0].language, DiagramLanguage::D2);
-    assert_eq!(blocks[1].language, DiagramLanguage::Mermaid);
 }
 
 #[test]
@@ -51,11 +32,6 @@ fn test_extract_nested_backticks() {
 #[test]
 fn test_tool_name_d2() {
     assert_eq!(tool_name(&DiagramLanguage::D2), "d2");
-}
-
-#[test]
-fn test_tool_name_mermaid() {
-    assert_eq!(tool_name(&DiagramLanguage::Mermaid), "mmdc");
 }
 
 fn make_d2_block() -> DiagramBlock {
@@ -96,16 +72,8 @@ fn test_hint_all_available() {
 
 #[test]
 fn test_tool_availability_is_available_d2() {
-    let tools = ToolAvailability { d2: true, mmdc: false };
+    let tools = ToolAvailability { d2: true };
     assert!(tools.is_available(&DiagramLanguage::D2));
-    assert!(!tools.is_available(&DiagramLanguage::Mermaid));
-}
-
-#[test]
-fn test_tool_availability_is_available_mermaid() {
-    let tools = ToolAvailability { d2: false, mmdc: true };
-    assert!(!tools.is_available(&DiagramLanguage::D2));
-    assert!(tools.is_available(&DiagramLanguage::Mermaid));
 }
 
 #[test]
@@ -116,57 +84,6 @@ fn test_source_hash_deterministic() {
 
     let b = source_hash("x -> y");
     assert_ne!(a1, b);
-}
-
-#[test]
-fn test_render_diagram_produces_png() {
-    if !is_tool_available(&DiagramLanguage::D2) {
-        return;
-    }
-
-    let tmp = tempfile::tempdir().unwrap();
-    let block = DiagramBlock {
-        language: DiagramLanguage::D2,
-        source: "a -> b\n".to_string(),
-        byte_range: 0..16,
-    };
-
-    let path = render_diagram(&block, tmp.path()).unwrap();
-    assert_eq!(path.extension().unwrap(), "png");
-    assert!(path.exists());
-
-    let bytes = std::fs::read(&path).unwrap();
-    assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']));
-}
-
-#[test]
-fn test_render_diagram_text_produces_ascii() {
-    if !is_tool_available(&DiagramLanguage::D2) {
-        return;
-    }
-
-    let tmp = tempfile::tempdir().unwrap();
-    let block = DiagramBlock {
-        language: DiagramLanguage::D2,
-        source: "a -> b\n".to_string(),
-        byte_range: 0..16,
-    };
-
-    let text = render_diagram_text(&block, tmp.path()).unwrap();
-    assert!(!text.is_empty());
-}
-
-#[test]
-fn test_render_diagram_text_mermaid_errors() {
-    let tmp = tempfile::tempdir().unwrap();
-    let block = DiagramBlock {
-        language: DiagramLanguage::Mermaid,
-        source: "graph TD;\n  A-->B;\n".to_string(),
-        byte_range: 0..30,
-    };
-
-    let result = render_diagram_text(&block, tmp.path());
-    assert!(result.is_err());
 }
 
 #[test]
@@ -228,7 +145,7 @@ fn option_entry_name(entry: Option<&DiagramCacheEntry>) -> &'static str {
 fn test_build_segments_no_diagrams() {
     let body = "# Hello\n\nSome plain text.\n";
     let cache = DiagramCache::new();
-    let tools = ToolAvailability { d2: true, mmdc: true };
+    let tools = ToolAvailability { d2: true };
 
     let blocks = extract_diagram_blocks(body);
     let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools, &blocks);
@@ -247,7 +164,7 @@ fn test_build_segments_with_cached_image() {
 
     let mut cache = DiagramCache::new();
     cache.insert(hash, DiagramCacheEntry::Image(img_path.clone()));
-    let tools = ToolAvailability { d2: true, mmdc: true };
+    let tools = ToolAvailability { d2: true };
 
     let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools, &blocks);
     assert_eq!(segments.len(), 3);
@@ -260,7 +177,7 @@ fn test_build_segments_with_cached_image() {
 fn test_build_segments_loading_when_uncached() {
     let body = "# Title\n\n```d2\na -> b\n```\n\nMore text.\n";
     let cache = DiagramCache::new();
-    let tools = ToolAvailability { d2: true, mmdc: true };
+    let tools = ToolAvailability { d2: true };
 
     let blocks = extract_diagram_blocks(body);
     let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools, &blocks);
@@ -274,7 +191,7 @@ fn test_build_segments_loading_when_uncached() {
 fn test_build_segments_tool_unavailable_stays_markdown() {
     let body = "# Title\n\n```d2\na -> b\n```\n\nMore text.\n";
     let cache = DiagramCache::new();
-    let tools = ToolAvailability { d2: false, mmdc: false };
+    let tools = ToolAvailability { d2: false };
 
     let blocks = extract_diagram_blocks(body);
     let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools, &blocks);
@@ -290,7 +207,7 @@ fn test_build_segments_with_cached_text() {
 
     let mut cache = DiagramCache::new();
     cache.insert(hash, DiagramCacheEntry::Text("  ┌───┐    ┌───┐\n  │ a │───>│ b │\n  └───┘    └───┘".to_string()));
-    let tools = ToolAvailability { d2: true, mmdc: true };
+    let tools = ToolAvailability { d2: true };
 
     let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools, &blocks);
     assert_eq!(segments.len(), 3);

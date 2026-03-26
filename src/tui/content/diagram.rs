@@ -13,7 +13,6 @@ use crate::tui::infra::terminal_caps::TerminalImageProtocol;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiagramLanguage {
     D2,
-    Mermaid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -26,7 +25,6 @@ pub struct DiagramBlock {
 pub fn tool_name(lang: &DiagramLanguage) -> &'static str {
     match lang {
         DiagramLanguage::D2 => "d2",
-        DiagramLanguage::Mermaid => "mmdc",
     }
 }
 
@@ -62,8 +60,6 @@ pub fn extract_diagram_blocks(body: &str) -> Vec<DiagramBlock> {
 
         let language = if trimmed == "```d2" {
             Some(DiagramLanguage::D2)
-        } else if trimmed == "```mermaid" {
-            Some(DiagramLanguage::Mermaid)
         } else {
             None
         };
@@ -113,21 +109,18 @@ pub fn fallback_hint(block: &DiagramBlock, tool_available: bool, protocol: Termi
 
 pub struct ToolAvailability {
     pub d2: bool,
-    pub mmdc: bool,
 }
 
 impl ToolAvailability {
     pub fn detect() -> Self {
         ToolAvailability {
             d2: is_tool_available(&DiagramLanguage::D2),
-            mmdc: is_tool_available(&DiagramLanguage::Mermaid),
         }
     }
 
     pub fn is_available(&self, lang: &DiagramLanguage) -> bool {
         match lang {
             DiagramLanguage::D2 => self.d2,
-            DiagramLanguage::Mermaid => self.mmdc,
         }
     }
 }
@@ -164,19 +157,6 @@ pub fn render_diagram(block: &DiagramBlock, output_dir: &Path) -> Result<PathBuf
             ];
             (input_path, args)
         }
-        DiagramLanguage::Mermaid => {
-            let input_path = output_dir.join(format!("{:016x}.mmd", hash));
-            fs::write(&input_path, &block.source)?;
-            let args = vec![
-                "-i".to_string(),
-                input_path.display().to_string(),
-                "-o".to_string(),
-                output_path.display().to_string(),
-                "-s".to_string(),
-                "2".to_string(),
-            ];
-            (input_path, args)
-        }
     };
 
     let result = Command::new(tool_name(&block.language))
@@ -200,10 +180,6 @@ pub fn render_diagram(block: &DiagramBlock, output_dir: &Path) -> Result<PathBuf
 }
 
 pub fn render_diagram_text(block: &DiagramBlock, output_dir: &Path) -> Result<String> {
-    if block.language == DiagramLanguage::Mermaid {
-        bail!("ASCII fallback is not supported for Mermaid diagrams");
-    }
-
     let hash = source_hash(&block.source);
     let txt_path = output_dir.join(format!("{:016x}.txt", hash));
     let input_path = output_dir.join(format!("{:016x}.d2", hash));
