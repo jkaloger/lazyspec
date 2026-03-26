@@ -73,8 +73,9 @@ fn e_key_sets_editor_request_in_graph_mode() {
     let store = fixture.store();
     let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
 
-    // Cycle to Graph mode: Types -> Filters -> Metrics -> Graph
+    // Cycle to Graph mode: Types -> Filters -> [Metrics] -> Graph
     app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    #[cfg(feature = "metrics")]
     app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
     app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
     assert_eq!(app.view_mode, ViewMode::Graph);
