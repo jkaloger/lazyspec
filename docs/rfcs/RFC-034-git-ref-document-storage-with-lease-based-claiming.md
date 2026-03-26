@@ -150,6 +150,61 @@ Git-ref documents are visible to:
 - `lazyspec context ITERATION-042` (shows full chain across backends)
 - The TUI (displays alongside filesystem documents)
 
+### Local Shadow Cache
+
+Git-ref documents live in refs, not in the working tree. Reading a ref requires git2 calls (resolve ref, read commit, read tree, read blob) on every access. For CLI commands that scan all documents (`list`, `search`, `status`, `validate`), this adds up. The TUI re-reads on every poll cycle.
+
+A local shadow cache materializes git-ref documents into `.lazyspec/cache/{type}/{id}.md`, giving the engine a fast filesystem read path identical to how it reads `filesystem`-backend documents. The cache is gitignored and read-only.
+
+#### Cache structure
+
+```
+.lazyspec/
+  cache/
+    iteration/
+      ITERATION-042.md
+      ITERATION-043.md
+  cache.lock
+```
+
+`cache.lock` is a JSON file mapping each cached document to the ref SHA it was materialized from:
+
+```json
+{
+  "iteration/042": "a1b2c3d4...",
+  "iteration/043": "e5f6g7h8..."
+}
+```
+
+#### Sync: explicit fetch
+
+`lazyspec fetch` updates local refs from the remote _and_ rematerializes the cache in one operation:
+
+1. `git fetch origin refs/lazyspec/*` (via git2)
+2. For each ref whose SHA differs from `cache.lock`: read the blob from the ref's commit tree, write it to `.lazyspec/cache/{type}/{id}.md`, update `cache.lock`
+3. Remove cache files for refs that no longer exist on the remote
+
+Between fetches, reads hit the cache directory. The cache may be stale relative to the remote, which is the same trade-off git makes with branches. `lazyspec setup` runs an initial fetch-and-materialize for new clones.
+
+#### Read path
+
+The unified document engine reads `git-ref` types from `.lazyspec/cache/{type}/` rather than calling git2 per document. From the engine's perspective, it's just another directory of markdown files, dispatched by `store` type. If the cache directory is empty (no fetch yet), the engine falls back to reading refs directly via git2, so the system works without a cache, just slower.
+
+#### Write path
+
+The cache is read-only. All mutations go through `lazyspec create`, `lazyspec update`, or `lazyspec delete`:
+
+1. The CLI creates a new blob, tree, and commit on the ref via git2
+2. `update-ref` with CAS (old SHA from `cache.lock`) prevents concurrent overwrites
+3. The CLI rematerializes the affected cache file and updates `cache.lock`
+4. The CLI pushes the ref to the remote
+
+Because the cache is never edited directly, there is no risk of orphaned edits being silently overwritten on the next fetch. Agents and humans interact with git-ref documents exclusively through the CLI or TUI.
+
+#### Init and .gitignore
+
+`lazyspec init` adds `.lazyspec/cache/` to `.gitignore` when any type uses `store = "git-ref"`. The cache directory is created on first fetch.
+
 ### Relationships Across Backends
 
 Documents link to each other using the same relationship system, regardless of where each lives:
@@ -180,7 +235,7 @@ RFC-030 (Git-Based Document Number Reservation)
 The document engine currently reads from configured `dir` paths on the filesystem. With `git-ref` documents in refs, the engine needs a unified read path dispatched by `store`:
 
 - `filesystem`: read from `TypeDef.dir`, as today
-- `git-ref`: read from `refs/lazyspec/{type}/*` via git2
+- `git-ref`: read from `.lazyspec/cache/{type}/` (the shadow cache), falling back to `refs/lazyspec/{type}/*` via git2 if the cache is cold
 
 `lazyspec list`, `lazyspec search`, `lazyspec show`, `lazyspec validate`, `lazyspec context`, and `lazyspec status` all operate across backends. The TUI's document tree merges both sources.
 
@@ -283,7 +338,7 @@ max_push_retries = 5
 If the remote is unreachable:
 - _Claim, release, heartbeat_: fail. Coordination requires a coordinator.
 - _Git-ref create/update_: local ref commit succeeds. Push fails but document is readable locally.
-- _Git-ref read_: works from locally fetched refs.
+- _Git-ref read_: works from the shadow cache (as fresh as the last successful fetch). Falls back to locally fetched refs if cache is cold.
 - _Filesystem reads_: always work.
 - _Filesystem writes (via lazyspec)_: fail if lock check requires remote.
 
