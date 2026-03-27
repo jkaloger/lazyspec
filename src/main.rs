@@ -86,13 +86,13 @@ fn main() -> anyhow::Result<()> {
                 updates.push(("title", t.as_str()));
             }
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
-            lazyspec::cli::update::run(&cwd, &store, &path, &updates)?;
+            lazyspec::cli::update::run_with_config(&cwd, &store, &path, &updates, Some(&config))?;
             println!("Updated {}", resolved.display());
         }
         Some(Commands::Delete { path }) => {
             let store = Store::load(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
-            lazyspec::cli::delete::run(&cwd, &store, &path)?;
+            lazyspec::cli::delete::run_with_config(&cwd, &store, &path, Some(&config))?;
             println!("Deleted {}", resolved.display());
         }
         Some(Commands::Link { from, rel_type, to }) => {

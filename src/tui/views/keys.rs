@@ -21,7 +21,7 @@ impl App {
             return self.handle_create_form_key(code, root, config);
         }
         if self.delete_confirm.active {
-            return self.handle_delete_confirm_key(code, root);
+            return self.handle_delete_confirm_key(code, root, config);
         }
         if self.status_picker.active {
             return self.handle_status_picker_key(code, root, config);
@@ -62,9 +62,9 @@ impl App {
         }
     }
 
-    fn handle_delete_confirm_key(&mut self, code: KeyCode, root: &Path) {
+    fn handle_delete_confirm_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
         match code {
-            KeyCode::Enter => { let _ = self.confirm_delete(root); }
+            KeyCode::Enter => { let _ = self.confirm_delete(root, config); }
             KeyCode::Esc => self.close_delete_confirm(),
             _ => {}
         }

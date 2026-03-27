@@ -90,7 +90,7 @@ fn test_confirm_delete_removes_file() {
     app.selected_type = 0;
     app.selected_doc = 0;
     app.open_delete_confirm();
-    app.confirm_delete(root).unwrap();
+    app.confirm_delete(root, &fixture.config()).unwrap();
 
     assert!(!root.join("docs/rfcs/RFC-001-test.md").exists());
     assert!(app
@@ -128,7 +128,7 @@ fn test_selection_adjusts_after_delete_last() {
     app.selected_type = 0;
     app.selected_doc = 1; // second RFC (sorted by path)
     app.open_delete_confirm();
-    app.confirm_delete(fixture.root()).unwrap();
+    app.confirm_delete(fixture.root(), &fixture.config()).unwrap();
 
     assert_eq!(app.selected_doc, 0);
     assert_eq!(app.docs_for_current_type().len(), 1);

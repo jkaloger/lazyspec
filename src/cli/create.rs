@@ -1,10 +1,14 @@
 use crate::cli::json::doc_to_json;
-use crate::engine::config::{Config, NumberingStrategy, ReservedFormat};
+use crate::engine::config::{Config, NumberingStrategy, ReservedFormat, StoreBackend};
 use crate::engine::document::DocMeta;
+use crate::engine::gh::GhCli;
+use crate::engine::issue_map::IssueMap;
 use crate::engine::reservation;
+use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
 use crate::engine::template;
 use anyhow::{anyhow, Result};
 use chrono::Local;
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +23,23 @@ pub fn run(
     let type_def = config.type_by_name(doc_type)
         .ok_or_else(|| anyhow!("unknown doc type: '{}'. valid types: {}", doc_type,
             config.documents.types.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ")))?;
+
+    if type_def.store == StoreBackend::GithubIssues {
+        let gh_config = config.documents.github.as_ref()
+            .ok_or_else(|| anyhow!("type '{}' uses github-issues store but no [github] config found", doc_type))?;
+        let repo = gh_config.repo.as_ref()
+            .ok_or_else(|| anyhow!("type '{}' uses github-issues store but no github.repo configured", doc_type))?;
+        let store = GithubIssuesStore {
+            client: GhCli::new(),
+            root: root.to_path_buf(),
+            repo: repo.clone(),
+            config: config.clone(),
+            issue_map: RefCell::new(IssueMap::load(root)?),
+        };
+        let created = store.create(type_def, title, author, "")?;
+        return Ok(root.join(&created.path));
+    }
+
     let dir = &type_def.dir;
 
     let target_dir = root.join(dir);

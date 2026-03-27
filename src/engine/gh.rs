@@ -170,6 +170,7 @@ pub trait GhClient {
         &self,
         repo: &str,
         number: u64,
+        title: Option<&str>,
         body: Option<&str>,
         labels_add: &[String],
         labels_remove: &[String],
@@ -267,6 +268,7 @@ impl GhClient for GhCli {
         &self,
         repo: &str,
         number: u64,
+        title: Option<&str>,
         body: Option<&str>,
         labels_add: &[String],
         labels_remove: &[String],
@@ -274,6 +276,10 @@ impl GhClient for GhCli {
         let num_str = number.to_string();
         let mut args = vec!["issue", "edit", &num_str, "--repo", repo];
 
+        if let Some(t) = title {
+            args.push("--title");
+            args.push(t);
+        }
         if let Some(b) = body {
             args.push("--body");
             args.push(b);
@@ -626,6 +632,7 @@ mod tests {
             &self,
             _repo: &str,
             _number: u64,
+            _title: Option<&str>,
             _body: Option<&str>,
             _labels_add: &[String],
             _labels_remove: &[String],
@@ -778,6 +785,7 @@ mod tests {
         let result = client.issue_edit(
             "owner/repo",
             42,
+            None,
             Some("updated body"),
             &["new-label".to_string()],
             &["old-label".to_string()],

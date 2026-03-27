@@ -1066,10 +1066,10 @@ impl App {
         self.delete_confirm.references.clear();
     }
 
-    pub fn confirm_delete(&mut self, root: &Path) -> Result<()> {
+    pub fn confirm_delete(&mut self, root: &Path, config: &Config) -> Result<()> {
         let doc_path = self.delete_confirm.doc_path.clone();
         let doc_path_str = doc_path.to_string_lossy().to_string();
-        crate::cli::delete::run(root, &self.store, &doc_path_str)?;
+        crate::cli::delete::run_with_config(root, &self.store, &doc_path_str, Some(config))?;
         self.store.remove_file(&doc_path);
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
@@ -1115,7 +1115,7 @@ impl App {
         self.status_picker.doc_path = PathBuf::new();
     }
 
-    pub fn confirm_status_change(&mut self, root: &Path, _config: &Config) -> Result<()> {
+    pub fn confirm_status_change(&mut self, root: &Path, config: &Config) -> Result<()> {
         let status = match self.status_picker.selected {
             0 => Status::Draft,
             1 => Status::Review,
@@ -1129,7 +1129,7 @@ impl App {
         let doc_path = self.status_picker.doc_path.clone();
         let doc_path_str = doc_path.to_string_lossy().to_string();
 
-        crate::cli::update::run(root, &self.store, &doc_path_str, &[("status", &status.to_string())])?;
+        crate::cli::update::run_with_config(root, &self.store, &doc_path_str, &[("status", &status.to_string())], Some(config))?;
         self.store.reload_file(root, &doc_path, &*self.fs)?;
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
