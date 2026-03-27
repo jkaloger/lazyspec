@@ -93,6 +93,12 @@ pub enum Commands {
         /// Set title
         #[arg(long)]
         title: Option<String>,
+        /// Set body content inline
+        #[arg(long)]
+        body: Option<String>,
+        /// Read body from file (use `-` for stdin)
+        #[arg(long)]
+        body_file: Option<String>,
     },
     /// Delete a document
     Delete {

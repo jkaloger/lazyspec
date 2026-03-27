@@ -81,7 +81,23 @@ fn main() -> anyhow::Result<()> {
                 lazyspec::cli::show::run(&store, &id, expand_references, max_ref_lines, &fs)?;
             }
         }
-        Some(Commands::Update { path, status, title }) => {
+        Some(Commands::Update { path, status, title, body, body_file }) => {
+            if body.is_some() && body_file.is_some() {
+                anyhow::bail!("cannot use both --body and --body-file");
+            }
+            let body_content = if let Some(ref b) = body {
+                Some(b.clone())
+            } else if let Some(ref bf) = body_file {
+                if bf == "-" {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                    Some(buf)
+                } else {
+                    Some(std::fs::read_to_string(bf)?)
+                }
+            } else {
+                None
+            };
             let store = Store::load(&cwd, &config)?;
             let mut updates = Vec::new();
             if let Some(ref s) = status {
@@ -89,6 +105,9 @@ fn main() -> anyhow::Result<()> {
             }
             if let Some(ref t) = title {
                 updates.push(("title", t.as_str()));
+            }
+            if let Some(ref b) = body_content {
+                updates.push(("body", b.as_str()));
             }
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
             lazyspec::cli::update::run_with_config(&cwd, &store, &path, &updates, Some(&config))?;

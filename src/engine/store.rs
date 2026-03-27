@@ -1,7 +1,7 @@
 mod links;
 mod loader;
 
-use crate::engine::config::Config;
+use crate::engine::config::{Config, StoreBackend};
 use crate::engine::document::{DocMeta, DocType, RelationType, Status};
 use crate::engine::fs::{FileSystem, RealFileSystem};
 use crate::engine::refs::RefExpander;
@@ -44,7 +44,11 @@ impl Store {
         let mut parse_errors: Vec<ParseError> = Vec::new();
 
         for type_def in &config.documents.types {
-            let full_path = root.join(&type_def.dir);
+            let full_path = if type_def.store == StoreBackend::GithubIssues {
+                root.join(".lazyspec/cache").join(&type_def.name)
+            } else {
+                root.join(&type_def.dir)
+            };
             if !fs.exists(&full_path) {
                 continue;
             }
@@ -532,5 +536,116 @@ mod tests {
         assert!(doc2.is_some());
         assert_eq!(doc2.unwrap().title, "Second RFC");
         assert_eq!(doc2.unwrap().id, "RFC-002");
+    }
+
+    fn github_issues_config() -> Config {
+        use crate::engine::config::{TypeDef, StoreBackend, NumberingStrategy};
+
+        let issue_type = TypeDef {
+            name: "issue".to_string(),
+            plural: "issues".to_string(),
+            dir: "docs/issues".to_string(),
+            prefix: "ISSUE".to_string(),
+            icon: Some("◉".to_string()),
+            numbering: NumberingStrategy::default(),
+            subdirectory: false,
+            store: StoreBackend::GithubIssues,
+        };
+
+        let mut config = Config::default();
+        config.documents.types.push(issue_type);
+        config
+    }
+
+    #[test]
+    fn test_load_includes_github_issues_cache() {
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+
+        let cache_dir = root.join(".lazyspec/cache/issue");
+        fs.add_dir(cache_dir.clone());
+
+        let issue_path = cache_dir.join("ISSUE-042-login-broken.md");
+        fs.add_file(&issue_path, concat!(
+            "---\n",
+            "title: \"Login broken\"\n",
+            "type: issue\n",
+            "status: draft\n",
+            "author: \"alice\"\n",
+            "date: 2026-03-01\n",
+            "tags: [\"bug\"]\n",
+            "---\n",
+            "The login page returns 500.\n",
+        ));
+
+        let config = github_issues_config();
+        let store = Store::load_with_fs(&root, &config, &fs).unwrap();
+
+        assert_eq!(store.docs.len(), 1);
+
+        let rel = PathBuf::from(".lazyspec/cache/issue/ISSUE-042-login-broken.md");
+        let doc = store.get(&rel);
+        assert!(doc.is_some());
+        assert_eq!(doc.unwrap().title, "Login broken");
+        assert_eq!(doc.unwrap().id, "ISSUE-042");
+    }
+
+    #[test]
+    fn test_show_works_for_cached_github_issues_doc() {
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+
+        let cache_dir = root.join(".lazyspec/cache/issue");
+        fs.add_dir(cache_dir.clone());
+
+        let issue_path = cache_dir.join("ISSUE-007-fix-auth.md");
+        fs.add_file(&issue_path, concat!(
+            "---\n",
+            "title: \"Fix auth\"\n",
+            "type: issue\n",
+            "status: draft\n",
+            "author: \"bob\"\n",
+            "date: 2026-03-15\n",
+            "tags: []\n",
+            "---\n",
+            "Auth tokens expire too quickly.\n",
+        ));
+
+        let config = github_issues_config();
+        let store = Store::load_with_fs(&root, &config, &fs).unwrap();
+
+        let rel = PathBuf::from(".lazyspec/cache/issue/ISSUE-007-fix-auth.md");
+        let body = store.get_body_raw(&rel, &fs).unwrap();
+        assert_eq!(body.trim(), "Auth tokens expire too quickly.");
+    }
+
+    #[test]
+    fn test_resolve_shorthand_finds_cached_doc() {
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+
+        let cache_dir = root.join(".lazyspec/cache/issue");
+        fs.add_dir(cache_dir.clone());
+
+        let issue_path = cache_dir.join("ISSUE-001-example.md");
+        fs.add_file(&issue_path, concat!(
+            "---\n",
+            "title: \"Example issue\"\n",
+            "type: issue\n",
+            "status: draft\n",
+            "author: \"carol\"\n",
+            "date: 2026-03-20\n",
+            "tags: []\n",
+            "---\n",
+            "An example cached issue.\n",
+        ));
+
+        let config = github_issues_config();
+        let store = Store::load_with_fs(&root, &config, &fs).unwrap();
+
+        let doc = store.resolve_shorthand("ISSUE-001").expect("should resolve cached doc");
+        assert_eq!(doc.title, "Example issue");
+        assert_eq!(doc.id, "ISSUE-001");
+        assert_eq!(doc.path, PathBuf::from(".lazyspec/cache/issue/ISSUE-001-example.md"));
     }
 }

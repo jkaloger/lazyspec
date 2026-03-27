@@ -208,7 +208,7 @@ impl<G: GhClient> DocumentStore for GithubIssuesStore<G> {
             labels: remote_issue.labels.iter().map(|l| l.name.clone()).collect(),
             is_open: remote_issue.state == "OPEN",
         };
-        let (mut meta, body) = issue_body::deserialize(&remote_issue.body, &ctx)?;
+        let (mut meta, mut body) = issue_body::deserialize(&remote_issue.body, &ctx)?;
 
         let mut new_status: Option<Status> = None;
         for &(key, value) in updates {
@@ -220,6 +220,7 @@ impl<G: GhClient> DocumentStore for GithubIssuesStore<G> {
                 }
                 "title" => meta.title = value.to_string(),
                 "author" => meta.author = value.to_string(),
+                "body" => body = value.to_string(),
                 _ => bail!("unknown update field: {}", key),
             }
         }
@@ -360,6 +361,7 @@ mod tests {
         closed: Cell<bool>,
         reopened: Cell<bool>,
         last_edit_title: RefCell<Option<String>>,
+        last_edit_body: RefCell<Option<String>>,
         last_edit_labels_remove: RefCell<Vec<String>>,
     }
 
@@ -370,6 +372,7 @@ mod tests {
                 closed: Cell::new(false),
                 reopened: Cell::new(false),
                 last_edit_title: RefCell::new(None),
+                last_edit_body: RefCell::new(None),
                 last_edit_labels_remove: RefCell::new(vec![]),
             }
         }
@@ -410,11 +413,12 @@ mod tests {
             _repo: &str,
             _number: u64,
             title: Option<&str>,
-            _body: Option<&str>,
+            body: Option<&str>,
             _labels_add: &[String],
             labels_remove: &[String],
         ) -> Result<()> {
             *self.last_edit_title.borrow_mut() = title.map(|s| s.to_string());
+            *self.last_edit_body.borrow_mut() = body.map(|s| s.to_string());
             *self.last_edit_labels_remove.borrow_mut() = labels_remove.to_vec();
             Ok(())
         }
@@ -965,6 +969,134 @@ mod tests {
 
         let result = store.create(&td, "dispatched", "author", "");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn github_issues_update_body_success() {
+        let root = tmp_root("gh_update_body");
+        let issue_body = make_issue_body("agent-7", "2026-03-27", None, "original body");
+        let view_issue = GhIssue {
+            number: 42,
+            url: String::new(),
+            title: "My RFC".to_string(),
+            body: issue_body,
+            labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T10:00:00Z".to_string(),
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+
+        let gh_store = GithubIssuesStore {
+            client,
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: RefCell::new(map),
+        };
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        gh_store
+            .update(&td, "RFC-001", &[("body", "new content")])
+            .unwrap();
+
+        let captured = gh_store.client.last_edit_body.borrow();
+        let body_str = captured.as_deref().expect("issue_edit should have been called with body");
+        assert!(body_str.contains("new content"), "body should contain 'new content', got: {}", body_str);
+        assert!(body_str.contains("<!-- lazyspec"), "body should be wrapped in issue_body format");
+    }
+
+    #[test]
+    fn github_issues_update_body_with_status() {
+        let root = tmp_root("gh_update_body_status");
+        let issue_body = make_issue_body("agent-7", "2026-03-27", None, "old body");
+        let view_issue = GhIssue {
+            number: 42,
+            url: String::new(),
+            title: "My RFC".to_string(),
+            body: issue_body,
+            labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T10:00:00Z".to_string(),
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+
+        let gh_store = GithubIssuesStore {
+            client,
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: RefCell::new(map),
+        };
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        gh_store
+            .update(&td, "RFC-001", &[("body", "new"), ("status", "complete")])
+            .unwrap();
+
+        let captured = gh_store.client.last_edit_body.borrow();
+        let body_str = captured.as_deref().expect("issue_edit should have been called with body");
+        assert!(body_str.contains("new"), "body should contain updated text");
+        assert!(gh_store.client.closed.get(), "issue should be closed for status=complete");
+    }
+
+    #[test]
+    fn github_issues_update_body_optimistic_lock_failure() {
+        let root = tmp_root("gh_update_body_lock");
+        let issue_body = make_issue_body("agent-7", "2026-03-27", None, "some body");
+        let view_issue = GhIssue {
+            number: 42,
+            url: String::new(),
+            title: "My RFC".to_string(),
+            body: issue_body,
+            labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T10:45:00Z".to_string(),
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+
+        let gh_store = GithubIssuesStore {
+            client,
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: RefCell::new(map),
+        };
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        let err = gh_store
+            .update(&td, "RFC-001", &[("body", "new content")])
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("modified on GitHub"), "got: {}", msg);
+    }
+
+    #[test]
+    fn filesystem_update_rejects_body() {
+        let root = tmp_root("fs_update_body");
+        let config = Config::default();
+
+        let fs_store = FilesystemStore {
+            root: root.clone(),
+            config: config.clone(),
+        };
+
+        let td = test_type_def(StoreBackend::Filesystem);
+        let created = fs_store.create(&td, "test doc", "author", "").unwrap();
+
+        let err = fs_store
+            .update(&td, &created.id, &[("body", "content")])
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not supported for filesystem documents"), "got: {}", msg);
     }
 
     #[test]

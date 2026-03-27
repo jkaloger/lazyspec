@@ -5,7 +5,7 @@ use crate::engine::gh::GhCli;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
@@ -40,6 +40,10 @@ pub fn run_with_config(
                 return gh_store.update(type_def, &doc.id, updates);
             }
         }
+    }
+
+    if updates.iter().any(|(k, _)| *k == "body") {
+        bail!("--body and --body-file are not supported for filesystem documents; edit the file directly");
     }
 
     let resolved = resolve_to_path(store, doc_path)?;
