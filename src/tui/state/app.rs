@@ -4,7 +4,7 @@ use super::forms::AgentDialog;
 use super::graph::traverse_dependency_chain;
 
 use crate::engine::cache::DiskCache;
-use crate::engine::config::{Config, NumberingStrategy};
+use crate::engine::config::{Config, NumberingStrategy, StoreBackend};
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, RelationType, Status};
 use crate::engine::fs::FileSystem;
 use crate::engine::git_status::GitStatusCache;
@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Instant;
 
 pub struct SearchEntry {
     pub path: PathBuf,
@@ -41,6 +42,7 @@ pub enum AppEvent {
     CreateStarted,
     CreateProgress { message: String },
     CreateComplete { result: Result<CreateResult, String> },
+    CacheRefresh,
     #[cfg(feature = "agent")]
     AgentFinished,
 }
@@ -239,6 +241,8 @@ pub struct App {
     pub filtered_docs_cache: Option<Vec<PathBuf>>,
     pub search_index: Vec<SearchEntry>,
     pub git_status_cache: GitStatusCache,
+    pub gh_conflict_message: Option<String>,
+    pub last_sync: Option<Instant>,
 }
 
 impl App {
@@ -254,6 +258,8 @@ impl App {
 
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
         let git_status_cache = GitStatusCache::new(store.root());
+        let has_github_issues = config.documents.types.iter()
+            .any(|t| t.store == StoreBackend::GithubIssues);
 
         let mut app = App {
             fs,
@@ -319,6 +325,8 @@ impl App {
             filtered_docs_cache: None,
             search_index: Vec::new(),
             git_status_cache,
+            gh_conflict_message: None,
+            last_sync: if has_github_issues { Some(Instant::now()) } else { None },
         };
         app.rebuild_search_index();
         app.build_doc_tree();
@@ -1379,6 +1387,8 @@ mod tests {
             filtered_docs_cache: None,
             search_index: Vec::new(),
             git_status_cache: GitStatusCache::new(Path::new(".")),
+            gh_conflict_message: None,
+            last_sync: None,
         };
         app
     }
@@ -1627,5 +1637,136 @@ mod tests {
         app.validation_warnings = vec!["warn1".to_string()];
 
         assert_eq!(app.total_warnings_count(), 3);
+    }
+
+    #[test]
+    fn gh_conflict_blocks_other_keys() {
+        let mut app = make_test_app(5);
+        app.gh_conflict_message = Some("conflict detected".to_string());
+        let root = std::path::PathBuf::from(".");
+        let config = Config::default();
+
+        app.handle_key(KeyCode::Char('q'), KeyModifiers::NONE, &root, &config);
+        assert!(!app.should_quit, "quit should be blocked while conflict overlay is visible");
+        assert!(app.gh_conflict_message.is_some(), "conflict message should persist");
+    }
+
+    #[test]
+    fn gh_conflict_dismissed_by_esc() {
+        let mut app = make_test_app(5);
+        app.gh_conflict_message = Some("conflict detected".to_string());
+        let root = std::path::PathBuf::from(".");
+        let config = Config::default();
+
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE, &root, &config);
+        assert!(app.gh_conflict_message.is_none(), "Esc should dismiss conflict overlay");
+    }
+
+    #[test]
+    fn gh_conflict_none_by_default() {
+        let app = make_test_app(0);
+        assert!(app.gh_conflict_message.is_none());
+    }
+
+    #[test]
+    fn status_picker_navigates_all_seven_statuses() {
+        let mut app = make_test_app(5);
+        app.status_picker.active = true;
+        app.status_picker.selected = 0;
+
+        let root = PathBuf::from(".");
+        let config = Config::default();
+
+        for expected in 1..=6 {
+            app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, &root, &config);
+            assert_eq!(app.status_picker.selected, expected);
+        }
+
+        // should not exceed index 6
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, &root, &config);
+        assert_eq!(app.status_picker.selected, 6);
+
+        // navigate back up to 0
+        for expected in (0..=5).rev() {
+            app.handle_key(KeyCode::Char('k'), KeyModifiers::NONE, &root, &config);
+            assert_eq!(app.status_picker.selected, expected);
+        }
+
+        // should not go below 0
+        app.handle_key(KeyCode::Char('k'), KeyModifiers::NONE, &root, &config);
+        assert_eq!(app.status_picker.selected, 0);
+    }
+
+    #[test]
+    fn status_picker_esc_closes() {
+        let mut app = make_test_app(5);
+        app.status_picker.active = true;
+        app.status_picker.selected = 3;
+
+        let root = PathBuf::from(".");
+        let config = Config::default();
+
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE, &root, &config);
+        assert!(!app.status_picker.active);
+        assert_eq!(app.status_picker.selected, 0);
+    }
+
+    #[test]
+    fn open_status_picker_sets_index_from_doc_status() {
+        use crate::engine::document::DocMeta;
+        use chrono::NaiveDate;
+
+        let mut app = make_test_app(1);
+        let path = PathBuf::from("docs/rfcs/RFC-001.md");
+        let date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+
+        let statuses = [
+            (Status::Draft, 0),
+            (Status::Review, 1),
+            (Status::Accepted, 2),
+            (Status::InProgress, 3),
+            (Status::Complete, 4),
+            (Status::Rejected, 5),
+            (Status::Superseded, 6),
+        ];
+
+        for (status, expected_index) in &statuses {
+            app.store.docs.insert(path.clone(), DocMeta {
+                path: path.clone(),
+                title: "Test".to_string(),
+                doc_type: DocType::new("rfc"),
+                status: status.clone(),
+                id: "RFC-001".to_string(),
+                tags: Vec::new(),
+                author: String::new(),
+                date,
+                related: Vec::new(),
+                validate_ignore: false,
+                virtual_doc: false,
+            });
+            app.doc_tree[0].path = path.clone();
+            app.selected_doc = 0;
+
+            app.open_status_picker();
+            assert_eq!(
+                app.status_picker.selected, *expected_index,
+                "status {:?} should map to index {}", status, expected_index
+            );
+            app.close_status_picker();
+        }
+    }
+
+    #[test]
+    fn cache_refresh_sets_last_sync() {
+        let mut app = make_test_app(0);
+        assert!(app.last_sync.is_none());
+        app.last_sync = Some(Instant::now());
+        assert!(app.last_sync.is_some());
+    }
+
+    #[test]
+    fn last_sync_initially_none() {
+        let app = make_test_app(0);
+        assert!(app.last_sync.is_none());
     }
 }

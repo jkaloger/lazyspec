@@ -15,10 +15,11 @@ use ratatui::{
     Frame,
 };
 
+use crate::engine::config::{Config, StoreBackend};
 use crate::tui::state::{App, ViewMode};
 
 use overlays::{
-    draw_create_form, draw_help_overlay, draw_delete_confirm, draw_link_editor,
+    draw_create_form, draw_gh_conflict, draw_help_overlay, draw_delete_confirm, draw_link_editor,
     draw_search_overlay, draw_status_picker, draw_warnings_panel,
 };
 #[cfg(feature = "agent")]
@@ -32,7 +33,27 @@ use panels::draw_metrics_skeleton;
 #[cfg(feature = "agent")]
 use panels::draw_agents_screen;
 
-pub fn draw(f: &mut Frame, app: &mut App) {
+pub fn sync_indicator_text(elapsed_secs: u64, cache_ttl: u64) -> (String, Color) {
+    if elapsed_secs >= 2 * cache_ttl {
+        return ("stale".to_string(), Color::Red);
+    }
+
+    let label = if elapsed_secs >= 60 {
+        format!("synced {}m ago", elapsed_secs / 60)
+    } else {
+        format!("synced {}s ago", elapsed_secs)
+    };
+
+    let color = if elapsed_secs < cache_ttl {
+        Color::Green
+    } else {
+        Color::Yellow
+    };
+
+    (label, color)
+}
+
+pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
     app.git_status_cache.refresh();
     if app.fullscreen_doc {
         render_fullscreen_document(f, app);
@@ -78,10 +99,28 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     )]);
     f.render_widget(Paragraph::new(title), outer[0]);
 
-    let mode_indicator = Line::from(vec![Span::styled(
+    let has_gh_types = config.documents.types.iter()
+        .any(|t| t.store == StoreBackend::GithubIssues);
+
+    let mut right_spans: Vec<Span> = Vec::new();
+    if has_gh_types {
+        if let Some(last_sync) = app.last_sync {
+            let cache_ttl = config.documents.github
+                .as_ref()
+                .map(|g| g.cache_ttl)
+                .unwrap_or(60);
+            let elapsed = last_sync.elapsed().as_secs();
+            let (text, color) = sync_indicator_text(elapsed, cache_ttl);
+            right_spans.push(Span::styled(text, Style::default().fg(color)));
+            right_spans.push(Span::raw("  "));
+        }
+    }
+    right_spans.push(Span::styled(
         format!("[{}] ` to cycle ", app.view_mode.name()),
         Style::default().fg(Color::DarkGray),
-    )]);
+    ));
+
+    let mode_indicator = Line::from(right_spans);
     f.render_widget(
         Paragraph::new(mode_indicator).alignment(Alignment::Right),
         outer[0],
@@ -100,10 +139,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 .split(main[1]);
 
             draw_type_panel(f, app, main[0]);
-            draw_doc_list(f, app, right[0]);
+            draw_doc_list(f, app, right[0], config);
             draw_preview(f, app, right[1]);
         }
-        ViewMode::Filters => render_filter_panel(f, app, outer[1]),
+        ViewMode::Filters => render_filter_panel(f, app, outer[1], config),
         #[cfg(feature = "metrics")]
         ViewMode::Metrics => draw_metrics_skeleton(f, outer[1]),
         ViewMode::Graph => draw_graph(f, app, outer[1]),
@@ -128,6 +167,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_agent_dialog(f, app);
     }
 
+    if app.gh_conflict_message.is_some() {
+        draw_gh_conflict(f, app);
+    }
+
     if app.show_warnings {
         draw_warnings_panel(f, app);
     }
@@ -141,8 +184,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 mod tests {
     use crate::engine::document::Status;
     use std::path::Path;
+    use ratatui::style::Color;
 
     use super::panels;
+    use super::sync_indicator_text;
 
     fn display_name(path: &Path) -> &str {
         let stem = path.file_stem().and_then(|s| s.to_str());
@@ -225,6 +270,34 @@ mod tests {
     }
 
     #[test]
+    fn doc_row_cells_gh_badge_present() {
+        let cells = panels::doc_row_cells_gh_for_test("ISSUE-001", "GH Doc", &Status::Draft, &[], false, false, true);
+
+        assert_eq!(cells.len(), 4);
+        let id_dbg = cell_debug(&cells[0]);
+        assert!(id_dbg.contains("[gh]"), "GH-backed doc should have [gh] badge in ID cell, got: {}", id_dbg);
+        assert!(id_dbg.contains("ISSUE-001"), "ID cell should still contain the ID, got: {}", id_dbg);
+    }
+
+    #[test]
+    fn doc_row_cells_no_gh_badge_for_filesystem() {
+        let cells = panels::doc_row_cells_gh_for_test("RFC-005", "FS Doc", &Status::Draft, &[], false, false, false);
+
+        let id_dbg = cell_debug(&cells[0]);
+        assert!(!id_dbg.contains("[gh]"), "Filesystem doc should not have [gh] badge, got: {}", id_dbg);
+    }
+
+    #[test]
+    fn doc_row_cells_gh_badge_dimmed_when_dim() {
+        let cells = panels::doc_row_cells_gh_for_test("ISSUE-002", "Dim GH", &Status::Draft, &[], false, true, true);
+
+        let id_dbg = cell_debug(&cells[0]);
+        assert!(id_dbg.contains("[gh]"), "GH badge should still appear when dim, got: {}", id_dbg);
+        let has_dark_gray = id_dbg.contains("DarkGray") || id_dbg.contains("dark_gray");
+        assert!(has_dark_gray, "GH badge should be dimmed when dim=true, got: {}", id_dbg);
+    }
+
+    #[test]
     fn doc_row_cells_dim_when_relations_focused() {
         let tags = vec!["x".to_string()];
         let cells = panels::doc_row_cells_for_test("RFC-004", "Dim", &Status::Accepted, &tags, false, true);
@@ -239,5 +312,54 @@ mod tests {
                 dbg,
             );
         }
+    }
+
+    #[test]
+    fn sync_indicator_fresh() {
+        let (text, color) = sync_indicator_text(10, 60);
+        assert_eq!(text, "synced 10s ago");
+        assert_eq!(color, Color::Green);
+    }
+
+    #[test]
+    fn sync_indicator_approaching_stale() {
+        let (text, color) = sync_indicator_text(90, 60);
+        assert_eq!(text, "synced 1m ago");
+        assert_eq!(color, Color::Yellow);
+    }
+
+    #[test]
+    fn sync_indicator_stale() {
+        let (text, color) = sync_indicator_text(120, 60);
+        assert_eq!(text, "stale");
+        assert_eq!(color, Color::Red);
+    }
+
+    #[test]
+    fn sync_indicator_beyond_stale() {
+        let (text, color) = sync_indicator_text(300, 60);
+        assert_eq!(text, "stale");
+        assert_eq!(color, Color::Red);
+    }
+
+    #[test]
+    fn sync_indicator_zero_elapsed() {
+        let (text, color) = sync_indicator_text(0, 60);
+        assert_eq!(text, "synced 0s ago");
+        assert_eq!(color, Color::Green);
+    }
+
+    #[test]
+    fn sync_indicator_exactly_at_ttl() {
+        let (text, color) = sync_indicator_text(60, 60);
+        assert_eq!(text, "synced 1m ago");
+        assert_eq!(color, Color::Yellow);
+    }
+
+    #[test]
+    fn sync_indicator_minutes_format() {
+        let (text, color) = sync_indicator_text(125, 120);
+        assert_eq!(text, "synced 2m ago");
+        assert_eq!(color, Color::Yellow);
     }
 }

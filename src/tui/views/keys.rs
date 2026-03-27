@@ -10,6 +10,12 @@ use crate::tui::state::{App, FilterField, PreviewTab, ViewMode};
 
 impl App {
     pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path, config: &Config) {
+        if self.gh_conflict_message.is_some() {
+            if code == KeyCode::Esc {
+                self.gh_conflict_message = None;
+            }
+            return;
+        }
         if self.show_help {
             self.show_help = false;
             return;
@@ -73,7 +79,7 @@ impl App {
     fn handle_status_picker_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.status_picker.selected < 4 {
+                if self.status_picker.selected < 6 {
                     self.status_picker.selected += 1;
                 }
             }

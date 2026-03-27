@@ -178,7 +178,7 @@ impl<G: GhClient> DocumentStore for GithubIssuesStore<G> {
 
     fn update(
         &self,
-        _type_def: &TypeDef,
+        type_def: &TypeDef,
         doc_id: &str,
         updates: &[(&str, &str)],
     ) -> Result<()> {
@@ -196,7 +196,7 @@ impl<G: GhClient> DocumentStore for GithubIssuesStore<G> {
                 "{} has been modified on GitHub since your last fetch.\n  \
                  Local:  {}\n  \
                  Remote: {}\n\
-                 Run `lazyspec fetch` to pull the latest version, then retry.",
+                 Wait for background sync or restart the TUI to pull the latest version.",
                 doc_id,
                 local_updated_at,
                 remote_issue.updated_at,
@@ -252,6 +252,9 @@ impl<G: GhClient> DocumentStore for GithubIssuesStore<G> {
         let mut map = self.issue_map.borrow_mut();
         map.insert(doc_id, issue_number, &refreshed.updated_at);
         map.save(&self.root)?;
+        drop(map);
+
+        write_cache_file(&self.root, type_def, &meta, &body)?;
 
         Ok(())
     }
@@ -275,7 +278,7 @@ impl<G: GhClient> DocumentStore for GithubIssuesStore<G> {
                 "{} has been modified on GitHub since your last fetch.\n  \
                  Local:  {}\n  \
                  Remote: {}\n\
-                 Run `lazyspec fetch` to pull the latest version, then retry.",
+                 Wait for background sync or restart the TUI to pull the latest version.",
                 doc_id,
                 local_updated_at,
                 remote_issue.updated_at,
@@ -312,6 +315,61 @@ impl<G: GhClient> DocumentStore for GithubIssuesStore<G> {
 
         Ok(())
     }
+}
+
+pub fn write_cache_file(
+    root: &std::path::Path,
+    type_def: &TypeDef,
+    meta: &DocMeta,
+    body: &str,
+) -> Result<()> {
+    let cache_dir = root.join(".lazyspec/cache").join(&type_def.name);
+    std::fs::create_dir_all(&cache_dir)?;
+    let cache_path = find_cache_file(&cache_dir, &meta.id)
+        .unwrap_or_else(|| cache_dir.join(format!("{}.md", meta.id)));
+
+    let tags_str = if meta.tags.is_empty() {
+        "[]".to_string()
+    } else {
+        format!("[{}]", meta.tags.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(", "))
+    };
+
+    let related_str = if meta.related.is_empty() {
+        "[]".to_string()
+    } else {
+        let lines: Vec<String> = meta.related.iter().map(|r| {
+            format!("\n- {}: {}", r.rel_type, r.target)
+        }).collect();
+        lines.join("")
+    };
+
+    let cache_content = format!(
+        "---\ntitle: \"{}\"\ntype: {}\nstatus: {}\nauthor: \"{}\"\ndate: {}\ntags: {}\nrelated: {}\n---\n{}",
+        meta.title,
+        meta.doc_type.as_str(),
+        meta.status,
+        meta.author,
+        meta.date,
+        tags_str,
+        related_str,
+        if body.is_empty() { String::new() } else { format!("\n{}\n", body) },
+    );
+    std::fs::write(&cache_path, &cache_content)?;
+    Ok(())
+}
+
+fn find_cache_file(cache_dir: &std::path::Path, doc_id: &str) -> Option<PathBuf> {
+    let prefix = format!("{}-", doc_id);
+    let exact = format!("{}.md", doc_id);
+    std::fs::read_dir(cache_dir).ok()?.find_map(|entry| {
+        let entry = entry.ok()?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == exact || name.starts_with(&prefix) {
+            Some(entry.path())
+        } else {
+            None
+        }
+    })
 }
 
 pub fn dispatch_for_type<'a, G: GhClient>(
@@ -718,7 +776,7 @@ mod tests {
         assert!(msg.contains("has been modified on GitHub"), "got: {}", msg);
         assert!(msg.contains("2026-03-27T10:00:00Z"));
         assert!(msg.contains("2026-03-27T10:45:00Z"));
-        assert!(msg.contains("lazyspec fetch"));
+        assert!(msg.contains("background sync"));
     }
 
     #[test]
