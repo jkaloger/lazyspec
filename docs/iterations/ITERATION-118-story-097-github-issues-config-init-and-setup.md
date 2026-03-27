@@ -1,13 +1,14 @@
 ---
 title: STORY-097 GitHub Issues config init and setup
 type: iteration
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-27
 tags: []
 related:
 - implements: STORY-097
 ---
+
 
 
 ## Goal

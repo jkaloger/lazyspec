@@ -17,6 +17,7 @@ pub mod validate;
 pub mod fix;
 pub mod pin;
 pub mod reservations;
+pub mod setup;
 
 use crate::cli::reservations::ReservationsCommand;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -204,6 +205,8 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Set up github-issues backend (validate auth, fetch issues)
+    Setup,
     /// Manage reservation refs
     Reservations {
         #[command(subcommand)]

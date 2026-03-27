@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod certification;
 pub mod gh;
+pub mod github;
 pub mod hashing;
 pub mod config;
 pub mod document;

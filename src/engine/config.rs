@@ -401,16 +401,8 @@ impl Config {
         let any_github_issues = types
             .iter()
             .any(|t| t.store == StoreBackend::GithubIssues);
-        if any_github_issues {
-            match &raw.github {
-                Some(gh) if gh.repo.is_some() => {}
-                Some(_) => {
-                    bail!("store = \"github-issues\" requires github.repo to be set");
-                }
-                None => {
-                    bail!("store = \"github-issues\" requires a [github] section with repo set");
-                }
-            }
+        if any_github_issues && raw.github.is_none() {
+            bail!("store = \"github-issues\" requires a [github] section");
         }
 
         let ref_count_ceiling = raw.ref_count_ceiling.unwrap_or(15);
@@ -667,7 +659,7 @@ store = "github-issues"
     }
 
     #[test]
-    fn test_github_issues_without_repo_fails() {
+    fn test_github_issues_without_repo_parses() {
         let toml_str = r#"
 [github]
 cache_ttl = 30
@@ -679,11 +671,8 @@ dir = "docs/rfcs"
 prefix = "RFC"
 store = "github-issues"
 "#;
-        let err = Config::parse(toml_str).unwrap_err();
-        assert!(
-            err.to_string().contains("github.repo"),
-            "unexpected error: {}",
-            err
-        );
+        let config = Config::parse(toml_str).unwrap();
+        let gh = config.documents.github.unwrap();
+        assert!(gh.repo.is_none());
     }
 }

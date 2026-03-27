@@ -63,7 +63,7 @@ fn validate_json_includes_parse_errors() {
     );
 
     let store = fixture.store();
-    let output = lazyspec::cli::validate::run_json(&store, &fixture.config());
+    let output = lazyspec::cli::validate::run_json(&store, &fixture.config(), &[]);
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let errors = parsed["parse_errors"].as_array().unwrap();
@@ -122,7 +122,7 @@ fn validate_duplicate_id_json_output() {
     fixture.write_rfc("RFC-030-beta.md", "Beta", "draft");
 
     let store = fixture.store();
-    let output = lazyspec::cli::validate::run_json(&store, &fixture.config());
+    let output = lazyspec::cli::validate::run_json(&store, &fixture.config(), &[]);
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let errors = parsed["errors"].as_array().unwrap();
@@ -141,7 +141,7 @@ fn validate_duplicate_id_human_output() {
     fixture.write_rfc("RFC-040-two.md", "Two", "draft");
 
     let store = fixture.store();
-    let output = lazyspec::cli::validate::run_human(&store, &fixture.config(), true);
+    let output = lazyspec::cli::validate::run_human(&store, &fixture.config(), true, &[]);
 
     assert!(
         output.contains("duplicate id: RFC-040"),
@@ -242,7 +242,7 @@ fn validate_broken_link_with_nonexistent_id_in_json_output() {
     );
 
     let store = fixture.store();
-    let output = lazyspec::cli::validate::run_json(&store, &fixture.config());
+    let output = lazyspec::cli::validate::run_json(&store, &fixture.config(), &[]);
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let errors = parsed["errors"].as_array().unwrap();

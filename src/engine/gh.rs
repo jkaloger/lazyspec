@@ -124,7 +124,7 @@ fn extract_http_status(stderr: &str) -> Option<u16> {
 
 // --- Auth ---
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthStatus {
     Authenticated { user: String, host: String },
     NotAuthenticated(String),

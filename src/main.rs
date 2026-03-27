@@ -4,6 +4,7 @@ use lazyspec::cli::reservations::ReservationsCommand;
 use lazyspec::cli::{Cli, Commands};
 use lazyspec::engine::config::Config;
 use lazyspec::engine::fs::RealFileSystem;
+use lazyspec::engine::gh::GhCli;
 use lazyspec::engine::store::Store;
 
 fn main() -> anyhow::Result<()> {
@@ -54,6 +55,10 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Init) | Some(Commands::Completions { .. }) => unreachable!(),
+        Some(Commands::Setup) => {
+            let gh = GhCli::new();
+            lazyspec::cli::setup::run(&cwd, &config, &gh)?;
+        }
         Some(Commands::Create { doc_type, title, author, json }) => {
             if json {
                 let output = lazyspec::cli::create::run_json(&cwd, &config, &doc_type, &title, &author, |_| {})?;

@@ -1,13 +1,14 @@
 ---
 title: GitHub Issues config init and setup
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-27
 tags: []
 related:
 - implements: docs/rfcs/RFC-037-github-issues-document-store.md
 ---
+
 ## Context
 
 The GitHub Issues document store requires initial configuration and setup. Users must configure the repo location and cache behavior in `.lazyspec.toml`, then initialize labels in their repo and set up authentication and initial data fetch for new clones.
