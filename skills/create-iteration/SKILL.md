@@ -90,6 +90,7 @@ Use /build skill.shape: double_circle
 
 ## Preflight
 
+0. Load convention context: run `lazyspec convention --tags iteration,testing --json`. If the command returns non-empty dicta, use them to inform the task breakdown and test plan. If the result is empty or the command returns no convention, proceed without injecting any convention context.
 1. If linked to a Story: run `lazyspec context <story-id> --json` to see the chain, then `lazyspec show <story-id> --json` for the full ACs
 2. Run `lazyspec status --json` to see all documents and check no existing iteration covers the same ACs
 3. Read relevant documents using `lazyspec show --json` before modifying anything

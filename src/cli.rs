@@ -1,5 +1,6 @@
 pub mod completions;
 pub mod context;
+pub mod convention;
 pub mod style;
 pub mod create;
 pub mod status;
@@ -223,6 +224,18 @@ pub enum Commands {
     },
     /// Set up github-issues backend (validate auth, fetch issues)
     Setup,
+    /// Show convention and dictum content
+    Convention {
+        /// Show only the convention preamble (no dictum)
+        #[arg(long)]
+        preamble: bool,
+        /// Filter dictum by tags (comma-separated, OR logic)
+        #[arg(long)]
+        tags: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage reservation refs
     Reservations {
         #[command(subcommand)]

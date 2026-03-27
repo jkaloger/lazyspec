@@ -948,9 +948,11 @@ impl App {
                 let thread_fs = crate::engine::fs::RealFileSystem;
                 let progress_tx = tx.clone();
                 let result = (|| -> Result<CreateResult, String> {
+                    let store = Store::load(&root, &config).map_err(|e| e.to_string())?;
                     let path = crate::cli::create::run(
                         &root,
                         &config,
+                        &store,
                         &doc_type_str,
                         &title,
                         &author,
@@ -1013,7 +1015,7 @@ impl App {
             return Ok(());
         }
 
-        let path = crate::cli::create::run(root, config, &doc_type_str, &title, &author, |_| {})?;
+        let path = crate::cli::create::run(root, config, &self.store, &doc_type_str, &title, &author, |_| {})?;
         let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
         let relative_str = relative.to_string_lossy().to_string();
 

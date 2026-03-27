@@ -35,7 +35,7 @@ fn default_config() {
 #[test]
 fn default_config_has_four_type_defs() {
     let config = Config::default();
-    assert_eq!(config.documents.types.len(), 5);
+    assert_eq!(config.documents.types.len(), 7);
 
     let rfc = config.type_by_name("rfc").unwrap();
     assert_eq!(rfc.plural, "rfcs");
@@ -132,7 +132,7 @@ pattern = "{type}-{n:03}-{title}.md"
 "#;
 
     let config = Config::parse(toml_str).unwrap();
-    assert_eq!(config.documents.types.len(), 5);
+    assert_eq!(config.documents.types.len(), 7);
     assert_eq!(config.type_by_name("rfc").unwrap().dir, "docs/rfcs");
     assert_eq!(config.filesystem.directories.rfcs, "docs/rfcs");
 }
@@ -595,4 +595,93 @@ numbering = "reserved"
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("reserved"), "Error should mention reserved, got: {msg}");
+}
+
+#[test]
+fn singleton_field_defaults_to_false() {
+    let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    let rfc = config.type_by_name("rfc").unwrap();
+    assert!(!rfc.singleton);
+}
+
+#[test]
+fn singleton_field_parses_true() {
+    let toml_str = r#"
+[[types]]
+name = "convention"
+plural = "conventions"
+dir = "docs/conventions"
+prefix = "CONV"
+singleton = true
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    let conv = config.type_by_name("convention").unwrap();
+    assert!(conv.singleton);
+}
+
+#[test]
+fn parent_type_defaults_to_none() {
+    let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    let rfc = config.type_by_name("rfc").unwrap();
+    assert!(rfc.parent_type.is_none());
+}
+
+#[test]
+fn default_config_has_convention_and_dictum_types() {
+    let config = Config::default();
+
+    let convention = config
+        .type_by_name("convention")
+        .expect("convention type should exist in defaults");
+    assert_eq!(convention.name, "convention");
+    assert_eq!(convention.plural, "convention");
+    assert_eq!(convention.dir, "docs/convention");
+    assert_eq!(convention.prefix, "CONVENTION");
+    assert_eq!(convention.icon, Some("\u{1F4DC}".to_string()));
+    assert!(convention.singleton);
+    assert!(convention.parent_type.is_none());
+    assert_eq!(convention.numbering, NumberingStrategy::Incremental);
+    assert!(convention.subdirectory);
+
+    let dictum = config
+        .type_by_name("dictum")
+        .expect("dictum type should exist in defaults");
+    assert_eq!(dictum.name, "dictum");
+    assert_eq!(dictum.plural, "dicta");
+    assert_eq!(dictum.dir, "docs/convention");
+    assert_eq!(dictum.prefix, "DICTUM");
+    assert_eq!(dictum.icon, Some("\u{2696}".to_string()));
+    assert!(!dictum.singleton);
+    assert_eq!(dictum.parent_type, Some("convention".to_string()));
+    assert_eq!(dictum.numbering, NumberingStrategy::Incremental);
+    assert!(!dictum.subdirectory);
+}
+
+#[test]
+fn parent_type_parses_value() {
+    let toml_str = r#"
+[[types]]
+name = "dictum"
+plural = "dicta"
+dir = "docs/conventions/dicta"
+prefix = "DICTUM"
+parent_type = "convention"
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    let dictum = config.type_by_name("dictum").unwrap();
+    assert_eq!(dictum.parent_type, Some("convention".to_string()));
 }

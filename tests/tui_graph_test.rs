@@ -187,6 +187,8 @@ fn custom_types_populate_doc_types_and_icons() {
             numbering: Default::default(),
             subdirectory: false,
             store: Default::default(),
+            singleton: false,
+            parent_type: None,
         },
         TypeDef {
             name: "task".into(),
@@ -197,6 +199,8 @@ fn custom_types_populate_doc_types_and_icons() {
             numbering: Default::default(),
             subdirectory: false,
             store: Default::default(),
+            singleton: false,
+            parent_type: None,
         },
     ];
     let store = Store::load(fixture.root(), &config).unwrap();

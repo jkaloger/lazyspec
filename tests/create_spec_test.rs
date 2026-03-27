@@ -9,7 +9,7 @@ fn create_spec_produces_flat_file() {
     let config = fixture.config();
 
     let path = lazyspec::cli::create::run(
-        fixture.root(), &config, "spec", "Auth Flow", "jkaloger", |_| {},
+        fixture.root(), &config, &fixture.store(), "spec", "Auth Flow", "jkaloger", |_| {},
     ).unwrap();
 
     // Returned path should be a flat .md file
@@ -27,7 +27,7 @@ fn created_spec_has_correct_frontmatter() {
     let config = fixture.config();
 
     let path = lazyspec::cli::create::run(
-        fixture.root(), &config, "spec", "Payment Gateway", "alice", |_| {},
+        fixture.root(), &config, &fixture.store(), "spec", "Payment Gateway", "alice", |_| {},
     ).unwrap();
 
     let content = fs::read_to_string(&path).unwrap();
@@ -45,7 +45,7 @@ fn created_spec_loads_in_store() {
     let config = fixture.config();
 
     let path = lazyspec::cli::create::run(
-        fixture.root(), &config, "spec", "Search Index", "carol", |_| {},
+        fixture.root(), &config, &fixture.store(), "spec", "Search Index", "carol", |_| {},
     ).unwrap();
 
     let store = fixture.store();
@@ -63,7 +63,7 @@ fn non_subdirectory_types_still_produce_flat_files() {
     let config = fixture.config();
 
     let path = lazyspec::cli::create::run(
-        fixture.root(), &config, "rfc", "Flat File Test", "dave", |_| {},
+        fixture.root(), &config, &fixture.store(), "rfc", "Flat File Test", "dave", |_| {},
     ).unwrap();
 
     assert!(path.exists());

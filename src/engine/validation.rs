@@ -63,6 +63,19 @@ pub enum ValidationIssue {
         path: PathBuf,
         ref_target: String,
     },
+    SingletonViolation {
+        type_name: String,
+        paths: Vec<PathBuf>,
+    },
+    ParentTypeViolation {
+        path: PathBuf,
+        type_name: String,
+        expected_dir: String,
+    },
+    ParentTypeNotSingleton {
+        type_name: String,
+        parent_type: String,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -193,6 +206,40 @@ impl std::fmt::Display for ValidationIssue {
                     "orphan ref in {}: @ref {} target does not exist",
                     path.display(),
                     ref_target
+                )
+            }
+            ValidationIssue::SingletonViolation { type_name, paths } => {
+                let path_strs: Vec<String> =
+                    paths.iter().map(|p| p.display().to_string()).collect();
+                write!(
+                    f,
+                    "singleton violation: type \"{}\" allows only one document, found {} ({})",
+                    type_name,
+                    paths.len(),
+                    path_strs.join(", ")
+                )
+            }
+            ValidationIssue::ParentTypeViolation {
+                path,
+                type_name,
+                expected_dir,
+            } => {
+                write!(
+                    f,
+                    "parent type violation: {} (type \"{}\") must reside within {}",
+                    path.display(),
+                    type_name,
+                    expected_dir
+                )
+            }
+            ValidationIssue::ParentTypeNotSingleton {
+                type_name,
+                parent_type,
+            } => {
+                write!(
+                    f,
+                    "parent type not singleton: type \"{}\" references parent type \"{}\" which is not a singleton",
+                    type_name, parent_type
                 )
             }
         }
@@ -753,6 +800,76 @@ impl Checker for OrphanRefRule {
     }
 }
 
+pub struct TypeConstraintChecker;
+
+impl Checker for TypeConstraintChecker {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        let mut issues = Vec::new();
+
+        for type_def in &config.documents.types {
+            if type_def.singleton {
+                let docs = store.list(&super::store::Filter {
+                    doc_type: Some(DocType::new(&type_def.name)),
+                    ..Default::default()
+                });
+                if docs.len() > 1 {
+                    let mut paths: Vec<PathBuf> = docs.iter().map(|d| d.path.clone()).collect();
+                    paths.sort();
+                    issues.push((
+                        Severity::Error,
+                        ValidationIssue::SingletonViolation {
+                            type_name: type_def.name.clone(),
+                            paths,
+                        },
+                    ));
+                }
+            }
+
+            let Some(ref parent_type_name) = type_def.parent_type else {
+                continue;
+            };
+
+            let Some(parent_type_def) = config.type_by_name(parent_type_name) else {
+                continue;
+            };
+
+            if !parent_type_def.singleton {
+                issues.push((
+                    Severity::Error,
+                    ValidationIssue::ParentTypeNotSingleton {
+                        type_name: type_def.name.clone(),
+                        parent_type: parent_type_name.clone(),
+                    },
+                ));
+                continue;
+            }
+
+            let docs = store.list(&super::store::Filter {
+                doc_type: Some(DocType::new(&type_def.name)),
+                ..Default::default()
+            });
+            for doc in docs {
+                if !doc.path.starts_with(&parent_type_def.dir) {
+                    issues.push((
+                        Severity::Error,
+                        ValidationIssue::ParentTypeViolation {
+                            path: doc.path.clone(),
+                            type_name: type_def.name.clone(),
+                            expected_dir: parent_type_def.dir.clone(),
+                        },
+                    ));
+                }
+            }
+        }
+
+        issues
+    }
+}
+
 fn default_checkers() -> Vec<Box<dyn Checker>> {
     vec![
         Box::new(BrokenLinkRule),
@@ -762,6 +879,7 @@ fn default_checkers() -> Vec<Box<dyn Checker>> {
         Box::new(AcSlugFormatRule),
         Box::new(RefScopeRule),
         Box::new(OrphanRefRule),
+        Box::new(TypeConstraintChecker),
     ]
 }
 

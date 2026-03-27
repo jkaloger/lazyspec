@@ -41,15 +41,13 @@ prefix = "AUDIT"
 icon = "🔍"
 
 [[types]]
-name = "testgh"
-plural = "testghs"
-dir = "docs/testghs"
-prefix = "TESTGH"
-icon = "🐙"
-store = "github-issues"
-
-[github]
-repo = 'jkaloger/lazyspec'
+name = "convention"
+plural = "convention"
+dir = "docs/convention"
+prefix = "CONVENTION"
+icon = "📜"
+singleton = true
+subdirectory = true
 
 [templates]
 dir = ".lazyspec/templates"

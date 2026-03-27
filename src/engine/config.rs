@@ -106,6 +106,10 @@ pub struct TypeDef {
     pub subdirectory: bool,
     #[serde(default)]
     pub store: StoreBackend,
+    #[serde(default)]
+    pub singleton: bool,
+    #[serde(default)]
+    pub parent_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,6 +252,8 @@ fn build_type_def(name: &str, dir: &str, prefix: &str, icon: &str) -> TypeDef {
         numbering: NumberingStrategy::default(),
         subdirectory: false,
         store: StoreBackend::default(),
+        singleton: false,
+        parent_type: None,
     }
 }
 
@@ -258,6 +264,30 @@ fn default_types() -> Vec<TypeDef> {
         build_type_def("iteration", "docs/iterations", "ITERATION", "◆"),
         build_type_def("adr", "docs/adrs", "ADR", "■"),
         build_type_def("spec", "docs/specs", "SPEC", "📋"),
+        TypeDef {
+            name: "convention".to_string(),
+            plural: "convention".to_string(),
+            dir: "docs/convention".to_string(),
+            prefix: "CONVENTION".to_string(),
+            icon: Some("📜".to_string()),
+            numbering: NumberingStrategy::default(),
+            subdirectory: true,
+            store: StoreBackend::default(),
+            singleton: true,
+            parent_type: None,
+        },
+        TypeDef {
+            name: "dictum".to_string(),
+            plural: "dicta".to_string(),
+            dir: "docs/convention".to_string(),
+            prefix: "DICTUM".to_string(),
+            icon: Some("⚖".to_string()),
+            numbering: NumberingStrategy::default(),
+            subdirectory: false,
+            store: StoreBackend::default(),
+            singleton: false,
+            parent_type: Some("convention".to_string()),
+        },
     ]
 }
 
@@ -492,6 +522,8 @@ impl TypeDef {
             numbering: NumberingStrategy::default(),
             subdirectory: false,
             store,
+            singleton: false,
+            parent_type: None,
         }
     }
 }

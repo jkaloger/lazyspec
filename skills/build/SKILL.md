@@ -86,6 +86,7 @@ Done.shape: double_circle
 
 ## Preflight
 
+0. Load convention context: run `lazyspec convention --tags build,testing,architecture --json`. If the command returns non-empty dicta, include them in the context provided to each subagent prompt under a `## Convention Context` block. If the result is empty or the command returns no convention, proceed without injecting any convention context.
 1. Resolve the full chain with `lazyspec context <iteration-id> --json` to see RFC -> Story -> Iteration
 2. Read the iteration body with `lazyspec show <iteration-id> --json` to get the task breakdown
 3. Read the parent Story body with `lazyspec show <story-id> --json` to get the ACs

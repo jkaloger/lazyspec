@@ -445,6 +445,8 @@ mod tests {
             numbering: NumberingStrategy::default(),
             subdirectory: false,
             store: StoreBackend::GithubIssues,
+            singleton: false,
+            parent_type: None,
         }
     }
 

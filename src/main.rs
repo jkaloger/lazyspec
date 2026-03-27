@@ -67,11 +67,12 @@ fn main() -> anyhow::Result<()> {
             lazyspec::cli::setup::run(&cwd, &config, &gh)?;
         }
         Some(Commands::Create { doc_type, title, author, json }) => {
+            let store = Store::load(&cwd, &config)?;
             if json {
-                let output = lazyspec::cli::create::run_json(&cwd, &config, &doc_type, &title, &author, |_| {})?;
+                let output = lazyspec::cli::create::run_json(&cwd, &config, &store, &doc_type, &title, &author, |_| {})?;
                 println!("{}", output);
             } else {
-                let path = lazyspec::cli::create::run(&cwd, &config, &doc_type, &title, &author, |_| {})?;
+                let path = lazyspec::cli::create::run(&cwd, &config, &store, &doc_type, &title, &author, |_| {})?;
                 println!("{}", path.display());
             }
         }
@@ -178,6 +179,16 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", output);
             } else {
                 let output = lazyspec::cli::context::run_human(&store, &id)?;
+                print!("{}", output);
+            }
+        }
+        Some(Commands::Convention { preamble, tags, json }) => {
+            let store = Store::load(&cwd, &config)?;
+            if json {
+                let output = lazyspec::cli::convention::run_json(&store, &config, preamble, tags.as_deref(), &fs)?;
+                println!("{}", output);
+            } else {
+                let output = lazyspec::cli::convention::run_human(&store, &config, preamble, tags.as_deref(), &fs)?;
                 print!("{}", output);
             }
         }
