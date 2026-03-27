@@ -7,6 +7,8 @@ pub fn status_color(status: &Status) -> Color {
         Status::Draft => Color::Yellow,
         Status::Review => Color::Blue,
         Status::Accepted => Color::Green,
+        Status::InProgress => Color::Cyan,
+        Status::Complete => Color::Green,
         Status::Rejected => Color::Red,
         Status::Superseded => Color::DarkGray,
     }

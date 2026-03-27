@@ -97,6 +97,12 @@ fn test_cycle_status_filter() {
     assert_eq!(app.filter_status, Some(Status::Accepted));
 
     app.handle_key(KeyCode::Char('l'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    assert_eq!(app.filter_status, Some(Status::InProgress));
+
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    assert_eq!(app.filter_status, Some(Status::Complete));
+
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::NONE, fixture.root(), &fixture.config());
     assert_eq!(app.filter_status, Some(Status::Rejected));
 
     app.handle_key(KeyCode::Char('l'), KeyModifiers::NONE, fixture.root(), &fixture.config());

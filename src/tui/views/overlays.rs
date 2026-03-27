@@ -207,6 +207,8 @@ pub fn draw_status_picker(f: &mut Frame, app: &App) {
         Status::Draft,
         Status::Review,
         Status::Accepted,
+        Status::InProgress,
+        Status::Complete,
         Status::Rejected,
         Status::Superseded,
     ];

@@ -5,6 +5,7 @@ pub mod config;
 pub mod document;
 pub mod fs;
 pub mod git_status;
+pub mod issue_body;
 pub mod refs;
 pub mod reservation;
 pub mod store;

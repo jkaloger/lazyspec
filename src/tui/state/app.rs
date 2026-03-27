@@ -475,7 +475,9 @@ impl App {
                     None => Some(Status::Draft),
                     Some(Status::Draft) => Some(Status::Review),
                     Some(Status::Review) => Some(Status::Accepted),
-                    Some(Status::Accepted) => Some(Status::Rejected),
+                    Some(Status::Accepted) => Some(Status::InProgress),
+                    Some(Status::InProgress) => Some(Status::Complete),
+                    Some(Status::Complete) => Some(Status::Rejected),
                     Some(Status::Rejected) => Some(Status::Superseded),
                     Some(Status::Superseded) => None,
                 };
@@ -505,7 +507,9 @@ impl App {
                 self.filter_status = match &self.filter_status {
                     None => Some(Status::Superseded),
                     Some(Status::Superseded) => Some(Status::Rejected),
-                    Some(Status::Rejected) => Some(Status::Accepted),
+                    Some(Status::Rejected) => Some(Status::Complete),
+                    Some(Status::Complete) => Some(Status::InProgress),
+                    Some(Status::InProgress) => Some(Status::Accepted),
                     Some(Status::Accepted) => Some(Status::Review),
                     Some(Status::Review) => Some(Status::Draft),
                     Some(Status::Draft) => None,
@@ -1093,8 +1097,10 @@ impl App {
             Status::Draft => 0,
             Status::Review => 1,
             Status::Accepted => 2,
-            Status::Rejected => 3,
-            Status::Superseded => 4,
+            Status::InProgress => 3,
+            Status::Complete => 4,
+            Status::Rejected => 5,
+            Status::Superseded => 6,
         };
         let path = doc.path.clone();
 
@@ -1114,8 +1120,10 @@ impl App {
             0 => Status::Draft,
             1 => Status::Review,
             2 => Status::Accepted,
-            3 => Status::Rejected,
-            4 => Status::Superseded,
+            3 => Status::InProgress,
+            4 => Status::Complete,
+            5 => Status::Rejected,
+            6 => Status::Superseded,
             _ => return Err(anyhow!("invalid status index")),
         };
         let doc_path = self.status_picker.doc_path.clone();
