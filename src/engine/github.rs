@@ -2,6 +2,18 @@ use anyhow::{bail, Result};
 use std::path::Path;
 use std::process::Command;
 
+use crate::engine::config::Config;
+
+/// Resolves the GitHub repo from config or by inferring from git remote.
+pub fn resolve_repo(config: &Config, root: &Path) -> Result<String> {
+    if let Some(ref gh) = config.documents.github {
+        if let Some(ref repo) = gh.repo {
+            return Ok(repo.clone());
+        }
+    }
+    infer_github_repo(root)
+}
+
 /// Parses `owner/repo` from a git remote URL.
 ///
 /// Supports SSH (`git@github.com:owner/repo.git`) and

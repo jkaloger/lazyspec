@@ -1,7 +1,7 @@
 ---
 title: Cross-backend document resolution
 type: audit
-status: draft
+status: complete
 author: jkaloger
 date: 2026-03-27
 tags: []
@@ -9,6 +9,7 @@ related:
 - related-to: RFC-037
 - related-to: STORY-099
 ---
+
 
 
 

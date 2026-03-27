@@ -1,7 +1,7 @@
 ---
 title: Sqids distributed collision analysis
 type: audit
-status: draft
+status: complete
 author: jkaloger
 date: 2026-03-18
 tags:
@@ -11,6 +11,8 @@ tags:
 related:
 - related to: RFC-027
 ---
+
+
 
 
 

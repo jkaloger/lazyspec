@@ -4,6 +4,7 @@ pub mod style;
 pub mod create;
 pub mod status;
 pub mod delete;
+pub mod fetch;
 pub mod init;
 pub mod json;
 pub mod ignore;
@@ -210,6 +211,15 @@ pub enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Fetch all github-issues documents from the API
+    Fetch {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Filter to a single document type
+        #[arg(long = "type")]
+        doc_type: Option<String>,
     },
     /// Set up github-issues backend (validate auth, fetch issues)
     Setup,

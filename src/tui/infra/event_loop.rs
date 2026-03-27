@@ -5,8 +5,9 @@ use crate::tui::infra::{perf_log, terminal_caps};
 use crate::tui::views;
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::document::split_frontmatter;
-use crate::engine::gh::{GhCli, GhClient};
+use crate::engine::gh::{GhCli, GhIssueReader};
 use crate::engine::issue_body;
+use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::{self, DocumentStore, GithubIssuesStore};
@@ -99,6 +100,7 @@ fn try_push_gh_edit(root: &Path, relative: &Path, config: &Config) -> Result<(),
         issue_map: RefCell::new(
             IssueMap::load(root).map_err(|e| e.to_string())?
         ),
+        issue_cache: IssueCache::new(root),
     };
 
     let body_trimmed = body.trim();
@@ -342,7 +344,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                         for type_def in &gh_types {
                             let label = crate::engine::gh::type_label(&type_def.name);
                             let labels = vec![label];
-                            if let Ok(issues) = client.issue_list(&repo, &labels, &[]) {
+                            if let Ok(issues) = client.issue_list(&repo, &labels, &[], None) {
                                 for issue in &issues {
                                     let ctx = issue_body::IssueContext {
                                         title: issue.title.clone(),

@@ -6,8 +6,9 @@ use chrono::Local;
 
 use crate::engine::config::{Config, StoreBackend, TypeDef};
 use crate::engine::document::{DocMeta, DocType, Status};
-use crate::engine::gh::{self, GhClient};
+use crate::engine::gh::{self, GhIssueReader, GhIssueWriter};
 use crate::engine::issue_body;
+use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::{self, Store};
 use crate::engine::template;
@@ -97,15 +98,16 @@ impl DocumentStore for FilesystemStore {
     }
 }
 
-pub struct GithubIssuesStore<G: GhClient> {
+pub struct GithubIssuesStore<G: GhIssueReader + GhIssueWriter> {
     pub client: G,
     pub root: PathBuf,
     pub repo: String,
     pub config: Config,
     pub issue_map: RefCell<IssueMap>,
+    pub issue_cache: IssueCache,
 }
 
-impl<G: GhClient> DocumentStore for GithubIssuesStore<G> {
+impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
     fn create(
         &self,
         type_def: &TypeDef,
@@ -169,9 +171,9 @@ impl<G: GhClient> DocumentStore for GithubIssuesStore<G> {
             date,
             if body.is_empty() { String::new() } else { format!("\n{}\n", body) },
         );
-        let cache_path = cache_dir.join(&filename);
-        std::fs::write(&cache_path, &cache_content)?;
+        self.issue_cache.write(&id, &type_def.name, &cache_content);
 
+        let cache_path = self.root.join(".lazyspec/cache").join(&type_def.name).join(format!("{}.md", id));
         let relative = cache_path.strip_prefix(&self.root).unwrap_or(&cache_path).to_path_buf();
         Ok(CreatedDoc { path: relative, id })
     }
@@ -254,7 +256,22 @@ impl<G: GhClient> DocumentStore for GithubIssuesStore<G> {
         map.save(&self.root)?;
         drop(map);
 
-        write_cache_file(&self.root, type_def, &meta, &body)?;
+        let cache_content = format!(
+            "---\ntitle: \"{}\"\ntype: {}\nstatus: {}\nauthor: \"{}\"\ndate: {}\ntags: {}\nrelated: {}\n---\n{}",
+            meta.title,
+            meta.doc_type.as_str(),
+            meta.status,
+            meta.author,
+            meta.date,
+            if meta.tags.is_empty() { "[]".to_string() } else {
+                format!("[{}]", meta.tags.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(", "))
+            },
+            if meta.related.is_empty() { "[]".to_string() } else {
+                meta.related.iter().map(|r| format!("\n- {}: {}", r.rel_type, r.target)).collect::<Vec<String>>().join("")
+            },
+            if body.is_empty() { String::new() } else { format!("\n{}\n", body) },
+        );
+        self.issue_cache.write(doc_id, &type_def.name, &cache_content);
 
         Ok(())
     }
@@ -303,15 +320,7 @@ impl<G: GhClient> DocumentStore for GithubIssuesStore<G> {
         map.save(&self.root)?;
         drop(map);
 
-        let cache_path = self.root
-            .join(".lazyspec/cache")
-            .join(&type_def.name)
-            .join(format!("{}.md", doc_id));
-        if let Err(e) = std::fs::remove_file(&cache_path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(e.into());
-            }
-        }
+        self.issue_cache.remove(doc_id, &type_def.name);
 
         Ok(())
     }
@@ -372,7 +381,7 @@ fn find_cache_file(cache_dir: &std::path::Path, doc_id: &str) -> Option<PathBuf>
     })
 }
 
-pub fn dispatch_for_type<'a, G: GhClient>(
+pub fn dispatch_for_type<'a, G: GhIssueReader + GhIssueWriter>(
     type_def: &TypeDef,
     fs_store: &'a FilesystemStore,
     gh_store: Option<&'a GithubIssuesStore<G>>,
@@ -395,7 +404,7 @@ mod tests {
     use crate::engine::config::{
         Config, NumberingStrategy, StoreBackend, TypeDef,
     };
-    use crate::engine::gh::{AuthStatus, GhClient, GhIssue, GhLabel};
+    use crate::engine::gh::{GhIssueReader, GhIssueWriter, GhIssue, GhLabel};
     use crate::engine::issue_map::IssueMap;
     use std::path::PathBuf;
 
@@ -441,7 +450,34 @@ mod tests {
         }
     }
 
-    impl GhClient for MockGhClient {
+    impl GhIssueReader for MockGhClient {
+        fn issue_list(
+            &self,
+            _repo: &str,
+            _labels: &[String],
+            _json_fields: &[String],
+            _limit: Option<u64>,
+        ) -> Result<Vec<GhIssue>> {
+            Ok(vec![])
+        }
+
+        fn issue_view(&self, _repo: &str, number: u64) -> Result<GhIssue> {
+            if let Some(issue) = self.view_issue.borrow().as_ref() {
+                return Ok(issue.clone());
+            }
+            Ok(GhIssue {
+                number,
+                url: String::new(),
+                title: String::new(),
+                body: String::new(),
+                labels: vec![],
+                state: "OPEN".to_string(),
+                updated_at: String::new(),
+            })
+        }
+    }
+
+    impl GhIssueWriter for MockGhClient {
         fn issue_create(
             &self,
             _repo: &str,
@@ -481,30 +517,6 @@ mod tests {
             Ok(())
         }
 
-        fn issue_list(
-            &self,
-            _repo: &str,
-            _labels: &[String],
-            _json_fields: &[String],
-        ) -> Result<Vec<GhIssue>> {
-            Ok(vec![])
-        }
-
-        fn issue_view(&self, _repo: &str, number: u64) -> Result<GhIssue> {
-            if let Some(issue) = self.view_issue.borrow().as_ref() {
-                return Ok(issue.clone());
-            }
-            Ok(GhIssue {
-                number,
-                url: String::new(),
-                title: String::new(),
-                body: String::new(),
-                labels: vec![],
-                state: "OPEN".to_string(),
-                updated_at: String::new(),
-            })
-        }
-
         fn issue_close(&self, _repo: &str, _number: u64) -> Result<()> {
             self.closed.set(true);
             Ok(())
@@ -513,13 +525,6 @@ mod tests {
         fn issue_reopen(&self, _repo: &str, _number: u64) -> Result<()> {
             self.reopened.set(true);
             Ok(())
-        }
-
-        fn auth_status(&self) -> Result<AuthStatus> {
-            Ok(AuthStatus::Authenticated {
-                user: "testuser".to_string(),
-                host: "github.com".to_string(),
-            })
         }
 
         fn label_create(
@@ -620,6 +625,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             config: Config::default(),
             issue_map: RefCell::new(IssueMap::load(&root).unwrap()),
+            issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
@@ -646,6 +652,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             config: Config::default(),
             issue_map: RefCell::new(IssueMap::load(&root).unwrap()),
+            issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
@@ -666,6 +673,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             config: Config::default(),
             issue_map: RefCell::new(IssueMap::load(&root).unwrap()),
+            issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
@@ -684,6 +692,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             config: Config::default(),
             issue_map: RefCell::new(IssueMap::load(&root).unwrap()),
+            issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
@@ -734,6 +743,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             config: Config::default(),
             issue_map: RefCell::new(map),
+            issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
@@ -766,6 +776,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             config: Config::default(),
             issue_map: RefCell::new(map),
+            issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
@@ -803,6 +814,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             config: Config::default(),
             issue_map: RefCell::new(map),
+            issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
@@ -837,6 +849,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             config: Config::default(),
             issue_map: RefCell::new(map),
+            issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
@@ -856,6 +869,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             config: Config::default(),
             issue_map: RefCell::new(IssueMap::load(&root).unwrap()),
+            issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
@@ -889,6 +903,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             config: Config::default(),
             issue_map: RefCell::new(map),
+            issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
@@ -925,6 +940,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             config: Config::default(),
             issue_map: RefCell::new(map),
+            issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
@@ -943,6 +959,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             config: Config::default(),
             issue_map: RefCell::new(IssueMap::load(&root).unwrap()),
+            issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
@@ -979,6 +996,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             config: Config::default(),
             issue_map: RefCell::new(map),
+            issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
@@ -1020,6 +1038,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             config: Config::default(),
             issue_map: RefCell::new(IssueMap::load(&root).unwrap()),
+            issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
@@ -1053,6 +1072,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             config: Config::default(),
             issue_map: RefCell::new(map),
+            issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
@@ -1090,6 +1110,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             config: Config::default(),
             issue_map: RefCell::new(map),
+            issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
@@ -1127,6 +1148,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             config: Config::default(),
             issue_map: RefCell::new(map),
+            issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);

@@ -1,5 +1,5 @@
 use crate::engine::config::{Config, StoreBackend};
-use crate::engine::gh::{deterministic_color, type_label, GhCli, GhClient, GhError};
+use crate::engine::gh::{deterministic_color, type_label, GhCli, GhIssueWriter, GhError};
 use crate::engine::github::infer_github_repo;
 use anyhow::{bail, Result};
 use std::fs;

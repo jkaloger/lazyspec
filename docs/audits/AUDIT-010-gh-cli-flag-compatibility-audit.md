@@ -1,7 +1,7 @@
 ---
 title: GH CLI flag compatibility audit
 type: audit
-status: draft
+status: complete
 author: jkaloger
 date: 2026-03-27
 tags: []
@@ -9,6 +9,7 @@ related:
 - related-to: STORY-097
 - related-to: RFC-037
 ---
+
 
 
 

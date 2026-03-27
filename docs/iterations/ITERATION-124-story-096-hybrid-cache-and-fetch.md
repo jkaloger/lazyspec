@@ -1,7 +1,7 @@
 ---
 title: STORY-096 hybrid cache and fetch
 type: iteration
-status: draft
+status: accepted
 author: agent
 date: 2026-03-27
 tags: []
@@ -10,229 +10,300 @@ related:
 ---
 
 
+
+## Audit
+
+AUDIT-012 reviewed this iteration against the codebase, STORY-096 ACs, RFC-037, and SOLID principles. This revision addresses all 12 findings.
+
 ## Changes
 
-### Task 1: Cache directory structure and cache.lock
+### Task 1: Split `GhClient` into segregated traits
 
-**ACs addressed:** cache-structure-with-timestamps, fresh-cache-hit
+ACs addressed: none (structural improvement, AUDIT-012 Finding 10)
 
-**Files:**
-- Create: `src/engine/issue_cache.rs`
-- Modify: `src/engine.rs` (add module)
+Files:
+- Modify: `src/engine/gh.rs`
+- Modify: `src/engine/store_dispatch.rs`
+- Modify: `src/cli/setup.rs`
+- Modify all test mocks that implement `GhClient`
 
-**What to implement:**
+What to implement:
 
-Define an `IssueCache` struct rooted at `.lazyspec/cache/`. Each cached document lives at `.lazyspec/cache/{type}/{id}.md`, matching the layout from RFC-037.
+The current `GhClient` trait has 9 methods. Every mock must implement all 9, even when testing a single operation. Split into three traits:
 
-Implement `cache.lock` as a JSON file at `.lazyspec/cache.lock` containing per-document timestamps and optional ETags:
+```rust
+pub trait GhIssueReader {
+    fn issue_list(&self, repo: &str, labels: &[String], json_fields: &[String]) -> Result<Vec<GhIssue>>;
+    fn issue_view(&self, repo: &str, number: u64) -> Result<GhIssue>;
+}
 
-```json
-{
-  "ITERATION-042": { "cached_at": "2026-03-27T10:00:00Z", "etag": "W/\"abc123\"" },
-  "STORY-075": { "cached_at": "2026-03-27T09:55:00Z", "etag": null }
+pub trait GhIssueWriter {
+    fn issue_create(&self, repo: &str, title: &str, body: &str, labels: &[String]) -> Result<GhIssue>;
+    fn issue_edit(&self, repo: &str, number: u64, title: Option<&str>, body: Option<&str>, labels_add: &[String], labels_remove: &[String]) -> Result<()>;
+    fn issue_close(&self, repo: &str, number: u64) -> Result<()>;
+    fn issue_reopen(&self, repo: &str, number: u64) -> Result<()>;
+    fn label_create(&self, repo: &str, name: &str, description: &str, color: &str) -> Result<()>;
+    fn label_ensure(&self, repo: &str, name: &str, description: &str, color: &str) -> Result<()>;
+}
+
+pub trait GhAuth {
+    fn auth_status(&self) -> Result<AuthStatus>;
 }
 ```
 
-Provide methods: `read_lock()`, `write_lock()`, `entry_for(id)`, `update_entry(id, timestamp, etag)`, `remove_entry(id)`. Use `serde_json` for serialization. Create directories lazily on first write.
+`GhCli` implements all three. Update `GithubIssuesStore` generic bounds to `G: GhIssueReader + GhIssueWriter`. Update `setup.rs` to accept `&(dyn GhIssueReader + GhAuth)`. Update test mocks to implement only the traits they need.
 
-The existing `DiskCache` in `src/engine/cache.rs` is a ref-expansion cache (keyed by path hash + body hash). This new cache is structurally different and lives in a separate module.
+How to verify:
+```
+cargo test
+```
 
-**How to verify:**
+---
+
+### Task 2: Consolidate cache writers and issue map usage
+
+ACs addressed: cache-structure-with-timestamps (AUDIT-012 Findings 1, 2, 8)
+
+Files:
+- Modify: `src/cli/setup.rs`
+- Modify: `src/engine/store_dispatch.rs`
+
+What to implement:
+
+`setup.rs` has two problems: it defines its own `IssueMapEntry` instead of using `engine::issue_map::IssueMap`, and its `write_cache_file` produces non-standard frontmatter (`number`, `title`, `state`, `updated_at`) that `Store::load_with_fs` cannot parse.
+
+1. Delete `setup.rs::IssueMapEntry`. Import and use `engine::issue_map::IssueMap` for all map operations (`load`, `insert`, `save`).
+
+2. Delete `setup.rs::write_cache_file`. Replace with a call to `store_dispatch::write_cache_file`, which produces standard lazyspec frontmatter. This requires parsing each `GhIssue` into a `DocMeta` via `issue_body::deserialize` before writing. The `issue_body::IssueContext` needed for deserialization can be constructed from the `GhIssue` fields.
+
+3. Update `setup.rs::extract_doc_id` to also handle the case where the issue body contains an HTML comment block with frontmatter (the `issue_body` format). When present, extract the ID from the serialized frontmatter rather than parsing the title.
+
+After this task, `lazyspec setup` produces cache files that `Store::load_with_fs` can parse. All cache writes go through a single code path.
+
+How to verify:
+```
+cargo test setup
+cargo test store::github_issues
+```
+
+---
+
+### Task 3: `IssueCache` module with `cache.lock` and TTL
+
+ACs addressed: cache-structure-with-timestamps, fresh-cache-hit, stale-cache-triggers-fetch, cold-cache-fetches
+
+Files:
+- Create: `src/engine/issue_cache.rs`
+- Modify: `src/engine.rs` (add module)
+
+What to implement:
+
+Define an `IssueCache` struct rooted at `.lazyspec/cache/`. Each cached document lives at `.lazyspec/cache/{type}/{id}.md`.
+
+Implement `cache.lock` as a JSON file at `.lazyspec/cache.lock` with per-document timestamps:
+
+```json
+{
+  "ITERATION-042": { "cached_at": "2026-03-27T10:00:00Z" },
+  "STORY-075": { "cached_at": "2026-03-27T09:55:00Z" }
+}
+```
+
+No ETag field. Conditional refresh is deferred to the native HTTP client.
+
+Methods:
+
+- `IssueCache::new(root: &Path) -> Self`
+- `read_lock() -> CacheLock`, `write_lock(&CacheLock)`
+- `is_fresh(id: &str, ttl: Duration) -> bool`
+- `read_if_fresh(id: &str, doc_type: &str, ttl: Duration) -> Option<String>` (fast path)
+- `read_stale(id: &str, doc_type: &str) -> Option<String>` (degradation path)
+- `write(id: &str, doc_type: &str, content: &str)` (writes file + updates `cache.lock`)
+- `remove(id: &str, doc_type: &str)` (deletes file + removes `cache.lock` entry)
+- `list_cached(doc_type: &str) -> Vec<String>` (scans directory for IDs)
+
+The existing `DiskCache` (`src/engine/cache.rs`) caches ref-expanded content keyed by content hash. `IssueCache` caches raw documents keyed by document ID. They coexist.
+
+How to verify:
 ```
 cargo test issue_cache
 ```
 
 ---
 
-### Task 2: TTL freshness checking
+### Task 4: Pre-load batch refresh and offline degradation
 
-**ACs addressed:** fresh-cache-hit, stale-cache-triggers-fetch
+ACs addressed: fresh-cache-hit, stale-cache-triggers-fetch, cold-cache-fetches, offline-degradation
 
-**Files:**
-- Modify: `src/engine/issue_cache.rs`
-- Modify: `src/engine/config.rs` (add `cache_ttl` to github config)
+Files:
+- Modify: `src/engine/issue_cache.rs` (add refresh method)
 
-**What to implement:**
+What to implement:
 
-Add a `cache_ttl` field to the `[github]` config section (default `60s`, parsed as `Duration`). If no `[github]` section exists yet in config, add the struct.
+`Store::load_with_fs` loads all documents eagerly by scanning directories. Rather than adding per-document read-through to the store, refresh stale documents _before_ `Store::load` runs.
 
-Add `IssueCache::is_fresh(id: &str, ttl: Duration) -> bool` that reads the `cached_at` timestamp from `cache.lock`, compares against `now`, and returns whether the entry is within TTL.
+Add `IssueCache::refresh_stale(type_def: &TypeDef, gh: &dyn GhIssueReader, repo: &str, issue_map: &mut IssueMap, ttl: Duration) -> Result<RefreshResult>`:
 
-Add `IssueCache::read_if_fresh(id: &str, doc_type: &str, ttl: Duration) -> Option<String>` that returns cached content only if fresh. This is the fast read path -- no API call needed.
+1. Check if _any_ cached document of this type is stale via `is_fresh`. If all are fresh, return early (zero API calls).
+2. If any are stale, make a single `gh.issue_list` call with `lazyspec:{type}` label filter and `number,title,body,labels,state,updatedAt` fields. This returns all documents for the type with full bodies in one request.
+3. For each returned issue, parse via `issue_body::deserialize`, compare against cached content, and call `self.write` for any that changed. Update `issue_map` entries.
+4. On API failure: leave all stale cache in place, return `RefreshResult` with a warning. Stale data is better than no data.
+5. `RefreshResult` contains `refreshed: usize`, `unchanged: usize`, `warnings: Vec<RefreshWarning>`.
 
-Add `IssueCache::read_stale(id: &str, doc_type: &str) -> Option<String>` for the degradation path -- returns content regardless of TTL.
+This means the TUI at 60s TTL uses 1 API call per type per TTL cycle, regardless of document count. With 3 github-issues types, that's ~180 calls/hour.
 
-**How to verify:**
+For cold cache (no cached files at all), there's nothing to scan and no staleness to detect. Cold cache is populated by `lazyspec fetch` or `lazyspec setup`.
+
+Callers (CLI commands that load the store) call `refresh_stale` for each github-issues type before `Store::load`. Warnings are printed to stderr. The store itself stays stateless with respect to freshness.
+
+How to verify:
 ```
-cargo test issue_cache::freshness
-```
-
----
-
-### Task 3: Cache write path
-
-**ACs addressed:** cold-cache-fetches, stale-cache-triggers-fetch, cache-structure-with-timestamps
-
-**Files:**
-- Modify: `src/engine/issue_cache.rs`
-
-**What to implement:**
-
-Add `IssueCache::write(id: &str, doc_type: &str, content: &str, etag: Option<&str>)` that:
-
-1. Writes the document content to `.lazyspec/cache/{type}/{id}.md`
-2. Updates `cache.lock` with the current timestamp and optional ETag
-3. Creates the type subdirectory if it does not exist
-
-Add `IssueCache::remove(id: &str, doc_type: &str)` for cleanup of deleted issues. Removes the cache file and the `cache.lock` entry.
-
-Add `IssueCache::list_cached(doc_type: &str) -> Vec<String>` that returns all cached document IDs for a given type by scanning the directory.
-
-**How to verify:**
-```
-cargo test issue_cache::write
+cargo test issue_cache::refresh
 ```
 
 ---
 
-### Task 4: Cache-aware read path
+### Task 5: `lazyspec fetch` command with pagination and cleanup
 
-**ACs addressed:** fresh-cache-hit, stale-cache-triggers-fetch, cold-cache-fetches, offline-degradation
+ACs addressed: fetch-refreshes-all, fetch-uses-label-filtering, removed-issues-cleaned-up
 
-**Files:**
-- Create: `src/engine/github_read.rs` (or integrate into an existing github module if one exists)
-- Modify: `src/engine.rs`
-
-**What to implement:**
-
-Implement the read-through logic described in RFC-037:
-
-1. If `IssueCache::read_if_fresh` returns content, return it (fast path, no API call)
-2. If stale or missing, call `gh issue view {number} --json body,title,labels,state,updatedAt` via the gh CLI layer
-3. On success: write to cache via `IssueCache::write`, return fresh content
-4. On API failure: call `IssueCache::read_stale`. If stale content exists, return it with a warning on stderr. If no cache exists at all, return an error.
-
-The gh CLI integration layer (STORY-095 / ITERATION-121) provides the shell-out mechanism. If that layer does not exist yet, define a trait `GhClient` with a `view_issue(number: u64) -> Result<IssueData>` method and a stub implementation. The real implementation will be wired in when ITERATION-121 lands.
-
-**How to verify:**
-```
-cargo test github_read
-```
-
----
-
-### Task 5: Conditional refresh with ETag/If-Modified-Since
-
-**ACs addressed:** stale-cache-triggers-fetch (efficiently)
-
-**Files:**
-- Modify: `src/engine/github_read.rs`
-- Modify: `src/engine/issue_cache.rs` (ETag storage already in Task 1)
-
-**What to implement:**
-
-When refreshing a stale cache entry, pass the stored ETag to the gh CLI call. The `gh api` command supports custom headers:
-
-```
-gh api repos/{owner}/{repo}/issues/{number} \
-  -H "If-None-Match: W/\"abc123\""
-```
-
-If the response is 304 Not Modified, update only the `cached_at` timestamp in `cache.lock` (extending freshness) without rewriting the cache file. If 200, write the new content and ETag as usual.
-
-This reduces bandwidth and counts toward GitHub's rate limit at a lower cost. If the gh CLI layer does not expose header control, fall back to unconditional fetch and note the limitation.
-
-**How to verify:**
-```
-cargo test github_read::conditional
-```
-
----
-
-### Task 6: `lazyspec fetch` command
-
-**ACs addressed:** fetch-refreshes-all, fetch-uses-label-filtering, removed-issues-cleaned-up
-
-**Files:**
+Files:
 - Create: `src/cli/fetch.rs`
 - Modify: `src/cli.rs` (register subcommand)
 - Modify: `src/main.rs` (wire command)
+- Modify: `src/cli/setup.rs` (extract shared fetch logic)
 
-**What to implement:**
+What to implement:
 
-Add a `lazyspec fetch` subcommand that:
+Extract the fetch-and-cache loop from `setup.rs::run` into a shared function in `IssueCache`:
 
-1. For each type with `store = "github-issues"`, call `gh issue list --label "lazyspec:{type}" --json number,title,body,labels,state,updatedAt --limit 100` with pagination (repeat with `--page` until results are empty or use `gh api` with pagination).
-2. For each returned issue, write to cache via `IssueCache::write` and update `issue-map.json`.
-3. Compare the set of fetched IDs against `IssueCache::list_cached(type)`. Any cached ID not in the fetched set represents a removed issue: delete its cache file and remove its `cache.lock` and `issue-map.json` entries.
-4. Print a summary: `Fetched 12 iterations (2 new, 1 removed)`.
+```rust
+impl IssueCache {
+    pub fn fetch_all(
+        &self,
+        type_def: &TypeDef,
+        gh: &dyn GhIssueReader,
+        repo: &str,
+        issue_map: &mut IssueMap,
+    ) -> Result<FetchResult> { ... }
+}
+```
 
-Support `--json` flag for machine-readable output. Support `--type` flag to limit fetch to a single document type.
+`FetchResult` contains `fetched: usize`, `new: usize`, `removed: usize`.
 
-**How to verify:**
+The fetch logic:
+
+1. Call `gh.issue_list` with `lazyspec:{type}` label filter. Handle pagination: `gh issue list` accepts `--limit`; pass a high limit (e.g. 500) to get all results. If the API returns exactly the limit, warn that there may be more issues than retrieved.
+2. For each returned issue, parse via `issue_body::deserialize`, write to cache via `IssueCache::write`, update `issue_map`.
+3. Compare fetched IDs against `IssueCache::list_cached`. Remove stale entries: delete cache file, remove from `cache.lock`, remove from `issue_map`.
+
+Refactor `setup.rs::run` to call `IssueCache::fetch_all` instead of its inline loop.
+
+Add `lazyspec fetch` subcommand with `--json` and `--type` flags. Calls `fetch_all` for each (or the specified) github-issues type, prints summary.
+
+How to verify:
 ```
 cargo test cli_fetch
+cargo test setup
 cargo run -- fetch --json
 ```
 
 ---
 
-### Task 7: Integration with store read path
+### Task 6: `GithubIssuesStore` delegates to `IssueCache`
 
-**ACs addressed:** fresh-cache-hit, cold-cache-fetches
+ACs addressed: cache-structure-with-timestamps (AUDIT-012 Finding 9, SRP)
 
-**Files:**
-- Modify: `src/engine/store/loader.rs`
-- Modify: `src/engine/store.rs`
+Files:
+- Modify: `src/engine/store_dispatch.rs`
 
-**What to implement:**
+What to implement:
 
-In `Store::load_with_fs`, when processing a `TypeDef` with `store = "github-issues"`, load documents from the cache directory (`.lazyspec/cache/{type}/`) instead of the configured `dir`. The cache files have standard frontmatter, so the existing `load_type_directory` works on them.
+`GithubIssuesStore` currently calls `write_cache_file` directly and manages cache paths inline. Replace these with calls to `IssueCache`:
 
-This means `lazyspec list`, `lazyspec show`, `lazyspec search` all read from cache transparently. The fetch/refresh logic in Task 4 is invoked on the read path when a specific document is requested and its cache is stale.
+1. Add `issue_cache: IssueCache` field to `GithubIssuesStore`.
+2. In `create`: after API call, use `issue_cache.write(id, type_name, content)` instead of inline `std::fs::write`.
+3. In `update`: after API call, use `issue_cache.write` instead of `write_cache_file`.
+4. In `delete`: use `issue_cache.remove` instead of inline `std::fs::remove_file`.
 
-For `list` operations, serve from whatever is cached. Staleness-triggered refresh only applies to single-document reads (`show`, `context`). Bulk refresh is `lazyspec fetch`.
+The standalone `write_cache_file` function in `store_dispatch.rs` remains available for `setup.rs` (Task 2) but `GithubIssuesStore` no longer calls it directly.
 
-**How to verify:**
+This reduces `GithubIssuesStore` to CRUD orchestration: optimistic lock check, API call, delegate cache and map updates.
+
+How to verify:
+```
+cargo test store_dispatch
+```
+
+---
+
+### Task 7: Store integration and end-to-end verification
+
+ACs addressed: fresh-cache-hit, cold-cache-fetches
+
+Files:
+- Modify: `src/engine/store.rs` (if needed)
+- Modify CLI entry points that load the store (add pre-load refresh calls)
+
+What to implement:
+
+`Store::load_with_fs` already reads from `.lazyspec/cache/{type}/` for github-issues types (line 47-48 of `store.rs`). After Task 2 fixes the cache format, this path works without further changes.
+
+Wire the pre-load refresh (Task 4) into the CLI commands that load the store. Identify the callsites (likely in `src/main.rs` or individual CLI modules) where `Store::load` is called. For each, insert a `refresh_stale` call for github-issues types before loading.
+
+For `list` operations, serve from whatever is cached without triggering refresh. Bulk refresh is `lazyspec fetch`. Per-document staleness refresh only triggers on `show` and `context`.
+
+Verify the full chain works end-to-end: `lazyspec setup` populates cache, `lazyspec list` reads it, `lazyspec show` refreshes stale entries, `lazyspec fetch` does a full refresh with cleanup.
+
+How to verify:
 ```
 cargo test store::github_issues
+cargo test -- --test integration  # if integration tests exist
 ```
 
 ## Test Plan
 
 ### Test 1: Cache write and fresh read (AC: fresh-cache-hit, cache-structure-with-timestamps)
-Write a document to `IssueCache`, immediately read it back with a TTL of 60s. Assert content matches and no API call is made. Verify `.lazyspec/cache/{type}/{id}.md` exists on disk and `cache.lock` contains the entry. Isolated, fast, filesystem-only.
+Write a document to `IssueCache`, immediately read it back with a TTL of 60s. Assert content matches and no API call is made. Verify `.lazyspec/cache/{type}/{id}.md` exists on disk and `cache.lock` contains the entry.
 
 ### Test 2: Stale cache returns None from fresh read (AC: stale-cache-triggers-fetch)
-Write a document, then set its `cached_at` to 2 minutes ago. Call `read_if_fresh` with a 60s TTL. Assert it returns `None`. Call `read_stale` and assert it returns the content. Isolated, fast, deterministic (manual timestamp).
+Write a document, then set its `cached_at` to 2 minutes ago. Call `read_if_fresh` with a 60s TTL. Assert it returns `None`. Call `read_stale` and assert it returns the content.
 
 ### Test 3: Cold cache returns None (AC: cold-cache-fetches)
-On a fresh `IssueCache` with no entries, call `read_if_fresh` for a non-existent ID. Assert `None`. Call `read_stale`. Assert `None`. Isolated, fast.
+On a fresh `IssueCache` with no entries, call `read_if_fresh` for a non-existent ID. Assert `None`. Call `read_stale`. Assert `None`.
 
 ### Test 4: Cache removal deletes file and lock entry (AC: removed-issues-cleaned-up)
-Write two documents. Remove one via `IssueCache::remove`. Assert the removed file is gone, the remaining file is intact, and `cache.lock` has exactly one entry. Isolated, fast.
+Write two documents. Remove one via `IssueCache::remove`. Assert the removed file is gone, the remaining file is intact, and `cache.lock` has exactly one entry.
 
-### Test 5: Read-through fetches on stale cache (AC: stale-cache-triggers-fetch)
-Mock the `GhClient` trait. Set up a stale cache entry. Call the read-through function. Assert the mock was called exactly once, the cache file was updated, and `cache.lock` timestamp is fresh. Isolated, fast, no real API calls.
+### Test 5: Pre-load batch refresh fetches all via `issue_list` (AC: stale-cache-triggers-fetch)
+Mock `GhIssueReader`. Set up 3 stale cache entries. Call `refresh_stale`. Assert `issue_list` was called exactly once (not 3 `issue_view` calls). Assert all 3 cache files were updated and `cache.lock` timestamps are fresh.
 
-### Test 6: Read-through returns stale on API failure (AC: offline-degradation)
-Mock the `GhClient` to return an error. Set up a stale cache entry. Call read-through. Assert stale content is returned and a warning is emitted to stderr. Isolated, fast.
+### Test 6: Pre-load refresh skips API when all fresh (AC: fresh-cache-hit)
+Set up 3 fresh cache entries within TTL. Call `refresh_stale`. Assert `issue_list` was never called. Zero API usage on the fast path.
 
-### Test 7: Read-through fails on cold cache + API failure (AC: offline-degradation)
-Mock the `GhClient` to return an error. No cache entry. Call read-through. Assert an error is returned (not a silent empty response). Isolated, fast.
+### Test 7: Pre-load refresh returns stale on API failure (AC: offline-degradation)
+Mock `GhIssueReader` to return an error on `issue_list`. Set up stale cache entries. Call `refresh_stale`. Assert stale content is unchanged and `RefreshResult.warnings` is non-empty.
 
-### Test 8: Fetch command populates cache (AC: fetch-refreshes-all, fetch-uses-label-filtering)
-Mock `gh issue list` output. Run `lazyspec fetch`. Assert all returned issues are written to cache, `cache.lock` is updated, and `issue-map.json` entries exist. Isolated, fast.
+### Test 8: Cold cache + API failure returns error (AC: offline-degradation)
+No cache entry, API unreachable. Verify that `Store::load` produces an empty set for that type (no panic, no silent failure), and that `lazyspec show` for a missing doc returns a clear error.
 
-### Test 9: Fetch command cleans up removed issues (AC: removed-issues-cleaned-up)
-Pre-populate cache with 3 documents. Mock `gh issue list` returning only 2 of them. Run fetch. Assert the third document's cache file is deleted and its entries removed from `cache.lock` and `issue-map.json`. Isolated, fast.
+### Test 9: Fetch command populates cache with standard frontmatter (AC: fetch-refreshes-all, fetch-uses-label-filtering)
+Mock `GhIssueReader::issue_list`. Run `fetch_all`. Assert all returned issues are written to cache with parseable lazyspec frontmatter, `cache.lock` is updated, and `issue-map.json` entries exist. Load the cache directory via `Store::load_with_fs` and assert documents are found.
 
-### Test 10: ETag conditional refresh skips body write on 304 (AC: stale-cache-triggers-fetch)
-Mock `GhClient` to return a 304 response. Set up a stale cache entry with an ETag. Call read-through. Assert the cache file content is unchanged, but `cached_at` in `cache.lock` is updated. Isolated, fast.
+### Test 10: Fetch command cleans up removed issues (AC: removed-issues-cleaned-up)
+Pre-populate cache with 3 documents. Mock `issue_list` returning only 2 of them. Run `fetch_all`. Assert the third document's cache file is deleted and its entries removed from `cache.lock` and `issue-map.json`.
+
+### Test 11: Setup produces parseable cache files (AC: cache-structure-with-timestamps)
+Run `setup.rs::run` with mocked `GhIssueReader`. Load the resulting cache directory via `Store::load_with_fs`. Assert documents parse correctly with proper `title`, `type`, `status`, `author`, `date` frontmatter fields.
+
+### Test 12: Segregated trait mocks compile with minimal implementation (structural)
+Write a test mock that implements only `GhIssueReader` and verify it compiles and works with `refresh_stale`. Confirms the trait split doesn't force unnecessary stubs.
 
 ## Notes
 
-- The existing `DiskCache` (`src/engine/cache.rs`) caches ref-expanded document bodies, keyed by content hash. The new `IssueCache` caches raw GitHub issue content, keyed by document ID. They serve different purposes and coexist.
-- `store = "github-issues"` on `TypeDef` does not exist in the config schema yet. Task 7 assumes it will be added (likely by STORY-095's iteration or a config-focused story). If not present, gate the cache integration behind a check for the field.
-- The `GhClient` trait in Task 4 is a seam for testing. The real implementation depends on ITERATION-121 (gh CLI integration layer). If that iteration lands first, wire directly into it instead of creating a separate trait.
-- `issue-map.json` is managed by STORY-095 (Issue CRUD). This iteration reads and writes to it during fetch (Task 6) but does not own its schema. Coordinate with ITERATION-120.
+- The existing `DiskCache` (`src/engine/cache.rs`) caches ref-expanded document bodies, keyed by content hash. `IssueCache` caches raw GitHub issue content, keyed by document ID. They coexist.
+- `StoreBackend::GithubIssues` and `GithubConfig` already exist in `config.rs`. `cache_ttl` is already a `u64` field with default 60.
+- `GhClient` trait, `GhCli` impl, `IssueMap`, and `issue_body` module all exist and are tested. This iteration builds on them.
+- ETag/conditional refresh is deferred entirely. When a native HTTP client replaces `gh` CLI, conditional requests can be added without changing the `IssueCache` interface.
+- Pagination: `gh issue list --limit 500` is the pragmatic approach. True cursor-based pagination would require `gh api` with Link header parsing, which is deferred to the native HTTP client.
+- Rate limits: batch refresh uses `issue_list` (1 call per type) instead of per-document `issue_view`. With 3 github-issues types at 60s TTL, the TUI uses ~180 calls/hour against a 5000/hour budget. CLI commands that don't need refresh (`list`, `search`, `status`) make zero API calls.

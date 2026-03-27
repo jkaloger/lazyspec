@@ -1,6 +1,7 @@
 use crate::cli::resolve::{resolve_shorthand_or_path, resolve_to_path};
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::gh::GhCli;
+use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
@@ -34,6 +35,7 @@ pub fn run_with_config(
                     repo: repo.clone(),
                     config: config.clone(),
                     issue_map: RefCell::new(IssueMap::load(root)?),
+                    issue_cache: IssueCache::new(root),
                 };
                 return gh_store.delete(type_def, &doc.id);
             }

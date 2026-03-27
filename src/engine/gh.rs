@@ -90,9 +90,21 @@ pub fn deterministic_color(type_name: &str) -> String {
     format!("{:06x}", hash & 0xFFFFFF)
 }
 
-// --- Trait ---
+// --- Traits ---
 
-pub trait GhClient {
+pub trait GhIssueReader {
+    fn issue_list(
+        &self,
+        repo: &str,
+        labels: &[String],
+        json_fields: &[String],
+        limit: Option<u64>,
+    ) -> Result<Vec<GhIssue>>;
+
+    fn issue_view(&self, repo: &str, number: u64) -> Result<GhIssue>;
+}
+
+pub trait GhIssueWriter {
     fn issue_create(
         &self,
         repo: &str,
@@ -111,20 +123,9 @@ pub trait GhClient {
         labels_remove: &[String],
     ) -> Result<()>;
 
-    fn issue_list(
-        &self,
-        repo: &str,
-        labels: &[String],
-        json_fields: &[String],
-    ) -> Result<Vec<GhIssue>>;
-
-    fn issue_view(&self, repo: &str, number: u64) -> Result<GhIssue>;
-
     fn issue_close(&self, repo: &str, number: u64) -> Result<()>;
 
     fn issue_reopen(&self, repo: &str, number: u64) -> Result<()>;
-
-    fn auth_status(&self) -> Result<AuthStatus>;
 
     fn label_create(
         &self,
@@ -141,6 +142,10 @@ pub trait GhClient {
         description: &str,
         color: &str,
     ) -> Result<()>;
+}
+
+pub trait GhAuth {
+    fn auth_status(&self) -> Result<AuthStatus>;
 }
 
 // --- Implementation ---
@@ -176,7 +181,56 @@ impl GhCli {
     }
 }
 
-impl GhClient for GhCli {
+impl GhIssueReader for GhCli {
+    fn issue_list(
+        &self,
+        repo: &str,
+        labels: &[String],
+        json_fields: &[String],
+        limit: Option<u64>,
+    ) -> Result<Vec<GhIssue>> {
+        let label_filter = labels.join(",");
+        let fields = if json_fields.is_empty() {
+            "number,url,title,body,labels,state,updatedAt".to_string()
+        } else {
+            json_fields.join(",")
+        };
+
+        let limit_str = limit.map(|l| l.to_string());
+        let mut args = vec!["issue", "list", "--repo", repo, "--json", &fields];
+
+        if !labels.is_empty() {
+            args.push("--label");
+            args.push(&label_filter);
+        }
+
+        if let Some(ref l) = limit_str {
+            args.push("--limit");
+            args.push(l);
+        }
+
+        let stdout = self.run_gh_checked(&args)?;
+        parse_issue_list_json(&stdout)
+    }
+
+    fn issue_view(&self, repo: &str, number: u64) -> Result<GhIssue> {
+        let num_str = number.to_string();
+        let args = [
+            "issue",
+            "view",
+            &num_str,
+            "--repo",
+            repo,
+            "--json",
+            "number,url,title,body,labels,state,updatedAt",
+        ];
+
+        let stdout = self.run_gh_checked(&args)?;
+        parse_issue_json(&stdout)
+    }
+}
+
+impl GhIssueWriter for GhCli {
     fn issue_create(
         &self,
         repo: &str,
@@ -230,46 +284,6 @@ impl GhClient for GhCli {
         Ok(())
     }
 
-    fn issue_list(
-        &self,
-        repo: &str,
-        labels: &[String],
-        json_fields: &[String],
-    ) -> Result<Vec<GhIssue>> {
-        let label_filter = labels.join(",");
-        let fields = if json_fields.is_empty() {
-            "number,url,title,body,labels,state,updatedAt".to_string()
-        } else {
-            json_fields.join(",")
-        };
-
-        let mut args = vec!["issue", "list", "--repo", repo, "--json", &fields];
-
-        if !labels.is_empty() {
-            args.push("--label");
-            args.push(&label_filter);
-        }
-
-        let stdout = self.run_gh_checked(&args)?;
-        parse_issue_list_json(&stdout)
-    }
-
-    fn issue_view(&self, repo: &str, number: u64) -> Result<GhIssue> {
-        let num_str = number.to_string();
-        let args = [
-            "issue",
-            "view",
-            &num_str,
-            "--repo",
-            repo,
-            "--json",
-            "number,url,title,body,labels,state,updatedAt",
-        ];
-
-        let stdout = self.run_gh_checked(&args)?;
-        parse_issue_json(&stdout)
-    }
-
     fn issue_close(&self, repo: &str, number: u64) -> Result<()> {
         let num_str = number.to_string();
         self.run_gh_checked(&["issue", "close", &num_str, "--repo", repo])?;
@@ -280,33 +294,6 @@ impl GhClient for GhCli {
         let num_str = number.to_string();
         self.run_gh_checked(&["issue", "reopen", &num_str, "--repo", repo])?;
         Ok(())
-    }
-
-    fn auth_status(&self) -> Result<AuthStatus> {
-        let output = match Command::new("gh").args(["auth", "status"]).output() {
-            Ok(o) => o,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(AuthStatus::GhNotInstalled);
-            }
-            Err(e) => bail!("failed to execute gh: {}", e),
-        };
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let combined = format!("{}{}", stdout, stderr);
-
-        if !output.status.success() {
-            return Ok(AuthStatus::NotAuthenticated(combined.trim().to_string()));
-        }
-
-        let user = extract_field(&combined, "Logged in to")
-            .and_then(|_| extract_field(&combined, "account"))
-            .or_else(|| extract_after(&combined, "account "))
-            .unwrap_or_default();
-
-        let host = extract_field(&combined, "Logged in to").unwrap_or_default();
-
-        Ok(AuthStatus::Authenticated { user, host })
     }
 
     fn label_create(
@@ -350,6 +337,35 @@ impl GhClient for GhCli {
             "--force",
         ])?;
         Ok(())
+    }
+}
+
+impl GhAuth for GhCli {
+    fn auth_status(&self) -> Result<AuthStatus> {
+        let output = match Command::new("gh").args(["auth", "status"]).output() {
+            Ok(o) => o,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(AuthStatus::GhNotInstalled);
+            }
+            Err(e) => bail!("failed to execute gh: {}", e),
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{}{}", stdout, stderr);
+
+        if !output.status.success() {
+            return Ok(AuthStatus::NotAuthenticated(combined.trim().to_string()));
+        }
+
+        let user = extract_field(&combined, "Logged in to")
+            .and_then(|_| extract_field(&combined, "account"))
+            .or_else(|| extract_after(&combined, "account "))
+            .unwrap_or_default();
+
+        let host = extract_field(&combined, "Logged in to").unwrap_or_default();
+
+        Ok(AuthStatus::Authenticated { user, host })
     }
 }
 
@@ -486,7 +502,31 @@ mod tests {
         }
     }
 
-    impl GhClient for MockGhClient {
+    impl GhIssueReader for MockGhClient {
+        fn issue_list(
+            &self,
+            _repo: &str,
+            _labels: &[String],
+            _json_fields: &[String],
+            _limit: Option<u64>,
+        ) -> Result<Vec<GhIssue>> {
+            Ok(self.list_result.clone())
+        }
+
+        fn issue_view(&self, _repo: &str, number: u64) -> Result<GhIssue> {
+            Ok(GhIssue {
+                number,
+                url: format!("https://github.com/test/repo/issues/{}", number),
+                title: "Viewed issue".to_string(),
+                body: String::new(),
+                labels: vec![],
+                state: "OPEN".to_string(),
+                updated_at: String::new(),
+            })
+        }
+    }
+
+    impl GhIssueWriter for MockGhClient {
         fn issue_create(
             &self,
             _repo: &str,
@@ -526,40 +566,12 @@ mod tests {
             Ok(())
         }
 
-        fn issue_list(
-            &self,
-            _repo: &str,
-            _labels: &[String],
-            _json_fields: &[String],
-        ) -> Result<Vec<GhIssue>> {
-            Ok(self.list_result.clone())
-        }
-
-        fn issue_view(&self, _repo: &str, number: u64) -> Result<GhIssue> {
-            Ok(GhIssue {
-                number,
-                url: format!("https://github.com/test/repo/issues/{}", number),
-                title: "Viewed issue".to_string(),
-                body: String::new(),
-                labels: vec![],
-                state: "OPEN".to_string(),
-                updated_at: String::new(),
-            })
-        }
-
         fn issue_close(&self, _repo: &str, _number: u64) -> Result<()> {
             Ok(())
         }
 
         fn issue_reopen(&self, _repo: &str, _number: u64) -> Result<()> {
             Ok(())
-        }
-
-        fn auth_status(&self) -> Result<AuthStatus> {
-            Ok(AuthStatus::Authenticated {
-                user: "testuser".to_string(),
-                host: "github.com".to_string(),
-            })
         }
 
         fn label_create(
@@ -582,8 +594,16 @@ mod tests {
             _description: &str,
             _color: &str,
         ) -> Result<()> {
-            // label_ensure always succeeds (treats "already exists" as OK)
             Ok(())
+        }
+    }
+
+    impl GhAuth for MockGhClient {
+        fn auth_status(&self) -> Result<AuthStatus> {
+            Ok(AuthStatus::Authenticated {
+                user: "testuser".to_string(),
+                host: "github.com".to_string(),
+            })
         }
     }
 
@@ -602,7 +622,7 @@ mod tests {
     fn mock_issue_list_empty() {
         let client = MockGhClient::new();
         let issues = client
-            .issue_list("owner/repo", &[], &[])
+            .issue_list("owner/repo", &[], &[], None)
             .unwrap();
         assert!(issues.is_empty());
     }
@@ -630,7 +650,7 @@ mod tests {
                 updated_at: String::new(),
             },
         ];
-        let issues = client.issue_list("owner/repo", &[], &[]).unwrap();
+        let issues = client.issue_list("owner/repo", &[], &[], None).unwrap();
         assert_eq!(issues.len(), 2);
     }
 

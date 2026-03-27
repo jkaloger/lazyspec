@@ -2,9 +2,12 @@ use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 use lazyspec::cli::reservations::ReservationsCommand;
 use lazyspec::cli::{Cli, Commands};
-use lazyspec::engine::config::Config;
+use lazyspec::engine::config::{Config, StoreBackend};
 use lazyspec::engine::fs::RealFileSystem;
 use lazyspec::engine::gh::GhCli;
+use lazyspec::engine::github::resolve_repo;
+use lazyspec::engine::issue_cache::IssueCache;
+use lazyspec::engine::issue_map::IssueMap;
 use lazyspec::engine::store::Store;
 
 fn main() -> anyhow::Result<()> {
@@ -55,6 +58,10 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Init) | Some(Commands::Completions { .. }) => unreachable!(),
+        Some(Commands::Fetch { json, doc_type }) => {
+            let gh = GhCli::new();
+            lazyspec::cli::fetch::run(&cwd, &config, &gh, doc_type.as_deref(), json)?;
+        }
         Some(Commands::Setup) => {
             let gh = GhCli::new();
             lazyspec::cli::setup::run(&cwd, &config, &gh)?;
@@ -73,6 +80,7 @@ fn main() -> anyhow::Result<()> {
             lazyspec::cli::list::run(&store, doc_type.as_deref(), status.as_deref(), json);
         }
         Some(Commands::Show { id, json, expand_references, max_ref_lines }) => {
+            refresh_github_cache(&cwd, &config);
             let store = Store::load(&cwd, &config)?;
             if json {
                 let output = lazyspec::cli::show::run_json(&store, &id, expand_references, max_ref_lines, &fs)?;
@@ -163,6 +171,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Context { id, json }) => {
+            refresh_github_cache(&cwd, &config);
             let store = Store::load(&cwd, &config)?;
             if json {
                 let output = lazyspec::cli::context::run_json(&store, &id)?;
@@ -216,4 +225,60 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Refreshes stale github-issues cache entries. Failures are non-fatal and print warnings to stderr.
+fn refresh_github_cache(cwd: &std::path::Path, config: &Config) {
+    let gh_config = match config.documents.github.as_ref() {
+        Some(gh) => gh,
+        None => return,
+    };
+
+    let gh_types: Vec<_> = config
+        .documents
+        .types
+        .iter()
+        .filter(|t| t.store == StoreBackend::GithubIssues)
+        .collect();
+
+    if gh_types.is_empty() {
+        return;
+    }
+
+    let repo = match resolve_repo(config, cwd) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("warning: could not resolve github repo, skipping refresh: {}", e);
+            return;
+        }
+    };
+
+    let gh = GhCli::new();
+    let cache = IssueCache::new(cwd);
+    let ttl = chrono::Duration::seconds(gh_config.cache_ttl as i64);
+
+    let mut issue_map = match IssueMap::load(cwd) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("warning: could not load issue map, skipping refresh: {}", e);
+            return;
+        }
+    };
+
+    let mut map_changed = false;
+    for type_def in &gh_types {
+        let result = cache.refresh_stale(cwd, type_def, &gh, &repo, &mut issue_map, ttl);
+        for warning in &result.warnings {
+            eprintln!("warning: {}", warning.message);
+        }
+        if result.refreshed > 0 {
+            map_changed = true;
+        }
+    }
+
+    if map_changed {
+        if let Err(e) = issue_map.save(cwd) {
+            eprintln!("warning: could not save issue map after refresh: {}", e);
+        }
+    }
 }

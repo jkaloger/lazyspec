@@ -1,6 +1,6 @@
 use crate::cli::style::{error_prefix, warning_prefix};
 use crate::engine::config::{Config, StoreBackend};
-use crate::engine::gh::{AuthStatus, GhClient, GhCli};
+use crate::engine::gh::{AuthStatus, GhAuth, GhCli};
 use crate::engine::store::Store;
 use console::{colors_enabled, Style};
 
@@ -23,7 +23,7 @@ fn has_github_issues_types(config: &Config) -> bool {
         .any(|t| t.store == StoreBackend::GithubIssues)
 }
 
-pub fn gh_auth_warnings(gh: &dyn GhClient) -> Vec<String> {
+pub fn gh_auth_warnings(gh: &dyn GhAuth) -> Vec<String> {
     match gh.auth_status() {
         Ok(AuthStatus::GhNotInstalled) => {
             vec!["gh CLI is not installed; github-issues types will not sync".to_string()]
@@ -108,7 +108,7 @@ pub fn run_human(store: &Store, config: &Config, show_warnings: bool, extra_warn
 mod tests {
     use super::*;
     use crate::engine::config::{NumberingStrategy, TypeDef};
-    use crate::engine::gh::{AuthStatus, GhClient, GhIssue};
+    use crate::engine::gh::{AuthStatus, GhAuth};
     use anyhow::Result;
 
     fn make_type(name: &str, store: StoreBackend) -> TypeDef {
@@ -128,33 +128,9 @@ mod tests {
         auth: AuthStatus,
     }
 
-    impl GhClient for MockGh {
-        fn issue_create(&self, _: &str, _: &str, _: &str, _: &[String]) -> Result<GhIssue> {
-            unimplemented!()
-        }
-        fn issue_edit(&self, _: &str, _: u64, _: Option<&str>, _: Option<&str>, _: &[String], _: &[String]) -> Result<()> {
-            unimplemented!()
-        }
-        fn issue_list(&self, _: &str, _: &[String], _: &[String]) -> Result<Vec<GhIssue>> {
-            unimplemented!()
-        }
-        fn issue_view(&self, _: &str, _: u64) -> Result<GhIssue> {
-            unimplemented!()
-        }
-        fn issue_close(&self, _: &str, _: u64) -> Result<()> {
-            unimplemented!()
-        }
-        fn issue_reopen(&self, _: &str, _: u64) -> Result<()> {
-            unimplemented!()
-        }
+    impl GhAuth for MockGh {
         fn auth_status(&self) -> Result<AuthStatus> {
             Ok(self.auth.clone())
-        }
-        fn label_create(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn label_ensure(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
-            unimplemented!()
         }
     }
 
