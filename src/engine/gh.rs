@@ -35,92 +35,17 @@ pub struct GhIssue {
 #[derive(Debug)]
 pub enum GhError {
     NotInstalled,
-    AuthFailure(String),
-    RateLimit { retry_after: Option<String> },
-    NetworkError(String),
-    ApiError { status: Option<u16>, message: String },
-    JsonParse(String),
 }
 
 impl std::fmt::Display for GhError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GhError::NotInstalled => write!(f, "gh CLI is not installed"),
-            GhError::AuthFailure(msg) => write!(f, "gh auth failure: {}", msg),
-            GhError::RateLimit { retry_after } => {
-                write!(f, "GitHub rate limit exceeded")?;
-                if let Some(after) = retry_after {
-                    write!(f, " (retry after {})", after)?;
-                }
-                Ok(())
-            }
-            GhError::NetworkError(msg) => write!(f, "network error: {}", msg),
-            GhError::ApiError { status, message } => {
-                write!(f, "GitHub API error")?;
-                if let Some(s) = status {
-                    write!(f, " ({})", s)?;
-                }
-                write!(f, ": {}", message)
-            }
-            GhError::JsonParse(msg) => write!(f, "JSON parse error: {}", msg),
         }
     }
 }
 
 impl std::error::Error for GhError {}
-
-pub fn classify_error(exit_code: i32, stderr: &str) -> GhError {
-    let lower = stderr.to_lowercase();
-
-    if exit_code == 127 || lower.contains("not found") || lower.contains("not installed") {
-        return GhError::NotInstalled;
-    }
-
-    if lower.contains("rate limit") || lower.contains("secondary rate") {
-        let retry_after = extract_retry_after(stderr);
-        return GhError::RateLimit { retry_after };
-    }
-
-    if lower.contains("auth") || lower.contains("login") || lower.contains("401") {
-        return GhError::AuthFailure(stderr.trim().to_string());
-    }
-
-    if lower.contains("could not resolve")
-        || lower.contains("connection")
-        || lower.contains("timeout")
-        || lower.contains("network")
-    {
-        return GhError::NetworkError(stderr.trim().to_string());
-    }
-
-    let status = extract_http_status(stderr);
-    GhError::ApiError {
-        status,
-        message: stderr.trim().to_string(),
-    }
-}
-
-fn extract_retry_after(stderr: &str) -> Option<String> {
-    for line in stderr.lines() {
-        let lower = line.to_lowercase();
-        if lower.contains("retry after") || lower.contains("retry-after") {
-            return Some(line.trim().to_string());
-        }
-    }
-    None
-}
-
-fn extract_http_status(stderr: &str) -> Option<u16> {
-    for word in stderr.split_whitespace() {
-        let trimmed = word.trim_matches(|c: char| !c.is_ascii_digit());
-        if let Ok(n) = trimmed.parse::<u16>() {
-            if (400..600).contains(&n) {
-                return Some(n);
-            }
-        }
-    }
-    None
-}
 
 // --- Auth ---
 
@@ -129,6 +54,16 @@ pub enum AuthStatus {
     Authenticated { user: String, host: String },
     NotAuthenticated(String),
     GhNotInstalled,
+}
+
+// --- URL parsing ---
+
+pub fn parse_issue_number_from_url(url: &str) -> Result<u64> {
+    url.trim()
+        .rsplit('/')
+        .next()
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or_else(|| anyhow::anyhow!("failed to parse issue number from URL: {}", url))
 }
 
 // --- JSON parsing ---
@@ -234,9 +169,7 @@ impl GhCli {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let code = output.status.code().unwrap_or(1);
-            let err = classify_error(code, &stderr);
-            bail!(err);
+            bail!("{}", stderr.trim());
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -258,10 +191,10 @@ impl GhClient for GhCli {
             args.push("--label");
             args.push(label);
         }
-        args.extend_from_slice(&["--json", "number,url,title,body,labels,state,updatedAt"]);
 
         let stdout = self.run_gh_checked(&args)?;
-        parse_issue_json(&stdout)
+        let number = parse_issue_number_from_url(&stdout)?;
+        self.issue_view(repo, number)
     }
 
     fn issue_edit(
@@ -535,53 +468,6 @@ mod tests {
         assert_ne!(c1, c2);
     }
 
-    // --- classify_error tests ---
-
-    #[test]
-    fn classify_not_installed() {
-        let err = classify_error(127, "gh: command not found");
-        assert!(matches!(err, GhError::NotInstalled));
-    }
-
-    #[test]
-    fn classify_not_installed_from_stderr() {
-        let err = classify_error(1, "gh is not installed");
-        assert!(matches!(err, GhError::NotInstalled));
-    }
-
-    #[test]
-    fn classify_rate_limit() {
-        let err = classify_error(1, "API rate limit exceeded; retry after 60s");
-        assert!(matches!(err, GhError::RateLimit { .. }));
-        if let GhError::RateLimit { retry_after } = err {
-            assert!(retry_after.is_some());
-        }
-    }
-
-    #[test]
-    fn classify_auth_failure() {
-        let err = classify_error(1, "You are not logged in. Run gh auth login");
-        assert!(matches!(err, GhError::AuthFailure(_)));
-    }
-
-    #[test]
-    fn classify_network_error() {
-        let err = classify_error(1, "could not resolve host github.com");
-        assert!(matches!(err, GhError::NetworkError(_)));
-    }
-
-    #[test]
-    fn classify_api_error_with_status() {
-        let err = classify_error(1, "HTTP 422: Validation Failed");
-        assert!(matches!(err, GhError::ApiError { status: Some(422), .. }));
-    }
-
-    #[test]
-    fn classify_generic_api_error() {
-        let err = classify_error(1, "something went wrong");
-        assert!(matches!(err, GhError::ApiError { status: None, .. }));
-    }
-
     // --- Mock-based tests ---
 
     struct MockGhClient {
@@ -799,4 +685,26 @@ mod tests {
         assert!(client.issue_close("owner/repo", 1).is_ok());
         assert!(client.issue_reopen("owner/repo", 1).is_ok());
     }
+
+    // --- parse_issue_number_from_url tests ---
+
+    #[test]
+    fn parse_issue_number_from_valid_url() {
+        let num = parse_issue_number_from_url("https://github.com/owner/repo/issues/42").unwrap();
+        assert_eq!(num, 42);
+    }
+
+    #[test]
+    fn parse_issue_number_from_url_with_trailing_newline() {
+        let num =
+            parse_issue_number_from_url("https://github.com/owner/repo/issues/99\n").unwrap();
+        assert_eq!(num, 99);
+    }
+
+    #[test]
+    fn parse_issue_number_from_invalid_url() {
+        let result = parse_issue_number_from_url("not-a-url");
+        assert!(result.is_err());
+    }
+
 }
