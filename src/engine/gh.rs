@@ -33,6 +33,8 @@ pub struct GhIssue {
     pub state: String,
     #[serde(default, rename = "updatedAt")]
     pub updated_at: String,
+    #[serde(default, rename = "createdAt")]
+    pub created_at: String,
     #[serde(default)]
     pub author: Option<GhAuthor>,
 }
@@ -210,7 +212,7 @@ impl GhIssueReader for GhCli {
     ) -> Result<Vec<GhIssue>> {
         let label_filter = labels.join(",");
         let fields = if json_fields.is_empty() {
-            "number,url,title,body,labels,state,updatedAt,author".to_string()
+            "number,url,title,body,labels,state,updatedAt,createdAt,author".to_string()
         } else {
             json_fields.join(",")
         };
@@ -243,7 +245,7 @@ impl GhIssueReader for GhCli {
             "--repo",
             repo,
             "--json",
-            "number,url,title,body,labels,state,updatedAt,author",
+            "number,url,title,body,labels,state,updatedAt,createdAt,author",
         ];
 
         let stdout = self.run_gh_checked(&args)?;
@@ -555,6 +557,7 @@ pub mod test_support {
                 labels: vec![],
                 state: "OPEN".to_string(),
                 updated_at: String::new(),
+                created_at: String::new(),
                 author: None,
             })
         }
@@ -586,6 +589,7 @@ pub mod test_support {
                     .collect(),
                 state: "OPEN".to_string(),
                 updated_at: "2026-03-27T00:00:00Z".to_string(),
+                created_at: String::new(),
                 author: None,
             })
         }
@@ -787,6 +791,7 @@ mod tests {
                 labels: vec![],
                 state: "OPEN".to_string(),
                 updated_at: String::new(),
+                created_at: String::new(),
                 author: None,
             },
             GhIssue {
@@ -797,6 +802,7 @@ mod tests {
                 labels: vec![],
                 state: "OPEN".to_string(),
                 updated_at: String::new(),
+                created_at: String::new(),
                 author: None,
             },
         ]);

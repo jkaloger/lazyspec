@@ -125,6 +125,39 @@ pub struct GithubIssuesStore<G: GhIssueReader + GhIssueWriter> {
 }
 
 impl<G: GhIssueReader + GhIssueWriter> GithubIssuesStore<G> {
+    /// Push the current cache file content to GitHub.
+    ///
+    /// Reads the cache file for `doc_id`, parses its frontmatter and body,
+    /// re-serializes into the GitHub issue body format, and pushes via
+    /// `issue_edit`. Used after local cache writes (e.g. link/unlink) to
+    /// sync relationship changes back to GitHub.
+    pub fn push_cache(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()> {
+        let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
+        let cache_path = find_cache_file(&cache_dir, doc_id)
+            .ok_or_else(|| anyhow::anyhow!("cache file not found for {}", doc_id))?;
+        let content = std::fs::read_to_string(&cache_path)?;
+        let meta = DocMeta::parse(&content)?;
+        let body = DocMeta::extract_body(&content)?;
+
+        let (issue_number, _remote_issue) = self.check_lock(doc_id)?;
+
+        let new_body = issue_body::serialize(&meta, &body);
+        self.client.issue_edit(
+            &self.repo,
+            issue_number,
+            None,
+            Some(&new_body),
+            &[],
+            &[],
+        )?;
+
+        self.issue_map.insert(doc_id, issue_number, "");
+        self.issue_map.save(&self.root)?;
+        self.issue_cache.touch_lock(doc_id);
+
+        Ok(())
+    }
+
     /// Fetch the remote issue and check the optimistic lock.
     ///
     /// If `updated_at` is empty (we just pushed), accept the remote state and
@@ -592,6 +625,7 @@ mod tests {
             labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
         };
 
@@ -631,6 +665,7 @@ mod tests {
             labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:45:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
         };
 
@@ -670,6 +705,7 @@ mod tests {
             labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
         };
 
@@ -706,6 +742,7 @@ mod tests {
             labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
             state: "CLOSED".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
         };
 
@@ -761,6 +798,7 @@ mod tests {
             labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
         };
 
@@ -799,6 +837,7 @@ mod tests {
             labels: vec![],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:45:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
         };
 
@@ -850,6 +889,7 @@ mod tests {
             labels: vec![],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
         };
 
@@ -933,6 +973,7 @@ mod tests {
             labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
         };
 
@@ -978,6 +1019,7 @@ mod tests {
             labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
         };
 
@@ -1017,6 +1059,7 @@ mod tests {
             labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:45:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
         };
 
@@ -1124,5 +1167,88 @@ mod tests {
             parsed["related"][0]["implements"].as_str().unwrap(),
             "STORY: special & \"fun\""
         );
+    }
+
+    #[test]
+    fn push_cache_sends_updated_relationships_to_github() {
+        let root = tmp_root("gh_push_cache");
+
+        // Set up a cache file with a relationship (simulating what link() writes)
+        let cache_dir = root.join(".lazyspec/cache/rfc");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache_content = concat!(
+            "---\n",
+            "title: My RFC\n",
+            "type: rfc\n",
+            "status: draft\n",
+            "author: agent-7\n",
+            "date: 2026-03-27\n",
+            "tags: []\n",
+            "related:\n",
+            "- implements: STORY-001\n",
+            "---\n",
+            "Some body text.\n",
+        );
+        std::fs::write(cache_dir.join("RFC-001.md"), cache_content).unwrap();
+
+        // Set up the mock: remote issue has no relationships yet
+        let remote_body = make_issue_body("agent-7", "2026-03-27", None, "Some body text.");
+        let view_issue = GhIssue {
+            number: 42,
+            url: String::new(),
+            title: "My RFC".to_string(),
+            body: remote_body,
+            labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+
+        let mut gh_store = GithubIssuesStore {
+            client,
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        gh_store.push_cache(&td, "RFC-001").unwrap();
+
+        let captured = gh_store.client.last_edit_body.borrow();
+        let body_str = captured.as_deref().expect("issue_edit should have been called");
+        assert!(body_str.contains("implements: STORY-001"), "pushed body should contain the relationship, got: {}", body_str);
+        assert!(body_str.contains("Some body text."), "pushed body should contain markdown body");
+        assert!(body_str.contains("<!-- lazyspec"), "pushed body should be in issue_body format");
+
+        // updated_at should be cleared (we just pushed)
+        let entry = gh_store.issue_map.get("RFC-001").unwrap();
+        assert_eq!(entry.updated_at, "");
+    }
+
+    #[test]
+    fn push_cache_missing_cache_file_errors() {
+        let root = tmp_root("gh_push_cache_missing");
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+
+        let mut gh_store = GithubIssuesStore {
+            client: MockGhClient::new(),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        let err = gh_store.push_cache(&td, "RFC-001").unwrap_err();
+        assert!(err.to_string().contains("cache file not found"), "got: {}", err);
     }
 }

@@ -173,6 +173,7 @@ impl IssueCache {
             "labels".into(),
             "state".into(),
             "updatedAt".into(),
+            "createdAt".into(),
         ];
 
         let issues = match gh.issue_list(repo, &labels, &fields, None) {
@@ -325,6 +326,12 @@ impl IssueCache {
     }
 }
 
+fn parse_created_date(created_at: &str) -> chrono::NaiveDate {
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .map(|dt| dt.date_naive())
+        .unwrap_or_else(|_| Utc::now().date_naive())
+}
+
 fn parse_issue(issue: &GhIssue, type_name: &str, known_types: &[String]) -> (DocMeta, String) {
     let ctx = IssueContext {
         title: issue.title.clone(),
@@ -357,7 +364,7 @@ fn parse_issue(issue: &GhIssue, type_name: &str, known_types: &[String]) -> (Doc
         doc_type: DocType::new(type_name),
         status,
         author: author.clone(),
-        date: Utc::now().date_naive(),
+        date: parse_created_date(&issue.created_at),
         tags: issue
             .labels
             .iter()
@@ -456,6 +463,7 @@ mod tests {
                 .collect(),
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
         }
     }
@@ -981,5 +989,32 @@ mod tests {
             "cache file should contain author from GH issue, got: {}",
             content
         );
+    }
+
+    #[test]
+    fn parse_issue_uses_created_at_for_date() {
+        let mut issue = make_gh_issue(1, "Test issue", "Just a plain body", &["lazyspec:story"]);
+        issue.created_at = "2025-06-15T09:30:00Z".to_string();
+        let known_types = vec!["story".to_string()];
+        let (meta, _) = parse_issue(&issue, "story", &known_types);
+        assert_eq!(meta.date, chrono::NaiveDate::from_ymd_opt(2025, 6, 15).unwrap());
+    }
+
+    #[test]
+    fn parse_issue_falls_back_to_today_on_bad_created_at() {
+        let mut issue = make_gh_issue(2, "Test issue", "Just a plain body", &["lazyspec:story"]);
+        issue.created_at = "not-a-date".to_string();
+        let known_types = vec!["story".to_string()];
+        let (meta, _) = parse_issue(&issue, "story", &known_types);
+        assert_eq!(meta.date, Utc::now().date_naive());
+    }
+
+    #[test]
+    fn parse_issue_falls_back_to_today_on_empty_created_at() {
+        let mut issue = make_gh_issue(3, "Test issue", "Just a plain body", &["lazyspec:story"]);
+        issue.created_at = String::new();
+        let known_types = vec!["story".to_string()];
+        let (meta, _) = parse_issue(&issue, "story", &known_types);
+        assert_eq!(meta.date, Utc::now().date_naive());
     }
 }

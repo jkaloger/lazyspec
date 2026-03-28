@@ -1211,14 +1211,14 @@ impl App {
         }
     }
 
-    pub(crate) fn confirm_link(&mut self, root: &Path) -> Result<()> {
+    pub(crate) fn confirm_link(&mut self, root: &Path, config: &Config) -> Result<()> {
         let selected = self.link_editor.selected;
         let target_path = self.link_editor.results[selected].clone();
         let from = self.link_editor.doc_path.to_string_lossy().to_string();
         let to = target_path.to_string_lossy().to_string();
         let rel_type = REL_TYPES[self.link_editor.rel_type_index];
 
-        crate::cli::link::link(root, &self.store, &from, rel_type, &to, &*self.fs)?;
+        crate::cli::link::link_with_config(root, &self.store, &from, rel_type, &to, &*self.fs, Some(config))?;
         self.store.reload_file(root, &self.link_editor.doc_path.clone(), &*self.fs)?;
         self.filtered_docs_cache = None;
         self.rebuild_search_index();

@@ -33,7 +33,7 @@ impl App {
             return self.handle_status_picker_key(code, root, config);
         }
         if self.link_editor.active {
-            return self.handle_link_editor_key(code, root);
+            return self.handle_link_editor_key(code, root, config);
         }
         #[cfg(feature = "agent")]
         if self.agent_dialog.active {
@@ -96,7 +96,7 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_link_editor_key(&mut self, code: KeyCode, root: &Path) {
+    pub(crate) fn handle_link_editor_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
         match code {
             KeyCode::Esc => self.close_link_editor(),
             KeyCode::Tab => {
@@ -104,7 +104,7 @@ impl App {
             }
             KeyCode::Enter => {
                 if !self.link_editor.results.is_empty() {
-                    let _ = self.confirm_link(root);
+                    let _ = self.confirm_link(root, config);
                 }
             }
             KeyCode::Char('j') | KeyCode::Down => {

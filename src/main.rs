@@ -129,14 +129,14 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Link { from, rel_type, to }) => {
             let store = Store::load(&cwd, &config)?;
-            lazyspec::cli::link::link(&cwd, &store, &from, &rel_type, &to, &fs)?;
+            lazyspec::cli::link::link_with_config(&cwd, &store, &from, &rel_type, &to, &fs, Some(&config))?;
             let resolved_from = lazyspec::cli::resolve::resolve_to_path(&store, &from)?;
             let resolved_to = lazyspec::cli::resolve::resolve_to_path(&store, &to)?;
             println!("Linked {} --{}--> {}", resolved_from.display(), rel_type, resolved_to.display());
         }
         Some(Commands::Unlink { from, rel_type, to }) => {
             let store = Store::load(&cwd, &config)?;
-            lazyspec::cli::link::unlink(&cwd, &store, &from, &rel_type, &to, &fs)?;
+            lazyspec::cli::link::unlink_with_config(&cwd, &store, &from, &rel_type, &to, &fs, Some(&config))?;
             let resolved_from = lazyspec::cli::resolve::resolve_to_path(&store, &from)?;
             let resolved_to = lazyspec::cli::resolve::resolve_to_path(&store, &to)?;
             println!("Unlinked {} --{}--> {}", resolved_from.display(), rel_type, resolved_to.display());
