@@ -216,6 +216,7 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
             labels: remote_issue.labels.iter().map(|l| l.name.clone()).collect(),
             is_open: remote_issue.state == "OPEN",
             known_types: self.config.documents.types.iter().map(|t| t.name.clone()).collect(),
+            default_type: type_def.name.clone(),
         };
         let (mut meta, mut body) = issue_body::deserialize(&remote_issue.body, &ctx)?;
 

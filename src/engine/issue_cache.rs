@@ -333,6 +333,7 @@ fn parse_issue(issue: &GhIssue, type_name: &str, known_types: &[String]) -> (Doc
         labels: issue.labels.iter().map(|l| l.name.clone()).collect(),
         is_open: issue.state.eq_ignore_ascii_case("open"),
         known_types: known_types.to_vec(),
+        default_type: type_name.to_string(),
     };
 
     if let Ok((meta, body)) = issue_body::deserialize(&issue.body, &ctx) {

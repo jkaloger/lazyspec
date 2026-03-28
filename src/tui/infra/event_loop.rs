@@ -5,12 +5,11 @@ use crate::tui::infra::{perf_log, terminal_caps};
 use crate::tui::views;
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::document::split_frontmatter;
-use crate::engine::gh::{GhCli, GhIssueReader};
-use crate::engine::issue_body;
+use crate::engine::gh::GhCli;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
-use crate::engine::store_dispatch::{self, DocumentStore, GithubIssuesStore};
+use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
 use anyhow::Result;
 use crossterm::{
     event::Event,
@@ -130,6 +129,8 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                 app.store = refreshed;
             }
             app.last_sync = Some(Instant::now());
+            app.filtered_docs_cache = None;
+            app.rebuild_search_index();
             app.refresh_validation(config);
         }
         AppEvent::GhPushResult(result) => {
@@ -226,7 +227,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         .map(|g| g.cache_ttl)
         .unwrap_or(60);
     let mut next_poll = if shared_gh_store.is_some() {
-        Some(Instant::now() + Duration::from_secs(cache_ttl))
+        Some(Instant::now())
     } else {
         None
     };
@@ -330,38 +331,26 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                     let gh_types: Vec<_> = poll_config.documents.types.iter()
                         .filter(|t| t.store == StoreBackend::GithubIssues)
                         .collect();
-                    let (client, repo) = {
-                        let store = poll_store.lock().unwrap();
-                        (GhCli::new(), store.repo.clone())
-                    };
+                    let all_type_names: Vec<String> = poll_config.documents.types.iter()
+                        .map(|t| t.name.clone())
+                        .collect();
+                    let client = GhCli::new();
+                    let mut guard = poll_store.lock().unwrap();
+                    let store = &mut *guard;
                     for type_def in &gh_types {
-                        let label = crate::engine::gh::type_label(&type_def.name);
-                        let labels = vec![label];
-                        if let Ok(issues) = client.issue_list(&repo, &labels, &[], None) {
-                            for issue in &issues {
-                                let ctx = issue_body::IssueContext {
-                                    title: issue.title.clone(),
-                                    labels: issue.labels.iter().map(|l| l.name.clone()).collect(),
-                                    is_open: issue.state == "OPEN",
-                                    known_types: poll_config.documents.types.iter().map(|t| t.name.clone()).collect(),
-                                };
-                                if let Ok((meta, body)) = issue_body::deserialize(&issue.body, &ctx) {
-                                    let mut meta = meta;
-                                    meta.doc_type = crate::engine::document::DocType::new(&type_def.name);
-                                    if let Some(id) = issue_body::extract_doc_id_from_title(&issue.title, &type_def.name) {
-                                        meta.id = id.clone();
-                                        let _ = store_dispatch::write_cache_file(&poll_root, type_def, &meta, &body);
-                                        let mut store = poll_store.lock().unwrap();
-                                        store.issue_map.insert(&id, issue.number, &issue.updated_at);
-                                    }
-                                }
-                            }
+                        if let Err(e) = store.issue_cache.fetch_all(
+                            &poll_root,
+                            type_def,
+                            &client,
+                            &store.repo,
+                            &mut store.issue_map,
+                            &all_type_names,
+                        ) {
+                            eprintln!("cache refresh failed for {}: {}", type_def.name, e);
                         }
                     }
-                    {
-                        let store = poll_store.lock().unwrap();
-                        let _ = store.issue_map.save(&poll_root);
-                    }
+                    let _ = store.issue_map.save(&poll_root);
+                    drop(guard);
                     poll_flag.store(false, Ordering::Relaxed);
                     let _ = poll_tx.send(AppEvent::CacheRefresh);
                 });

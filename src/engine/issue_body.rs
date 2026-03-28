@@ -11,6 +11,7 @@ pub struct IssueContext {
     pub labels: Vec<String>,
     pub is_open: bool,
     pub known_types: Vec<String>,
+    pub default_type: String,
 }
 
 const COMMENT_START: &str = "<!-- lazyspec\n";
@@ -68,7 +69,7 @@ pub fn deserialize(issue_body: &str, ctx: &IssueContext) -> Result<(DocMeta, Str
         .collect::<Result<Vec<_>>>()?;
 
     let known_type_refs: Vec<&str> = ctx.known_types.iter().map(|s| s.as_str()).collect();
-    let (doc_type, tags) = extract_type_and_tags(&ctx.labels, &known_type_refs);
+    let (doc_type, tags) = extract_type_and_tags(&ctx.labels, &known_type_refs, &ctx.default_type);
 
     let status = reconstruct_status(ctx.is_open, parsed.status.as_deref());
 
@@ -114,7 +115,7 @@ fn reconstruct_status(is_open: bool, frontmatter_status: Option<&str>) -> Status
 ///
 /// The first label matching a known doc type is used as the type; all remaining
 /// labels become tags.
-fn extract_type_and_tags(labels: &[String], known_types: &[&str]) -> (DocType, Vec<String>) {
+fn extract_type_and_tags(labels: &[String], known_types: &[&str], default_type: &str) -> (DocType, Vec<String>) {
     let mut doc_type: Option<DocType> = None;
     let mut tags = Vec::new();
 
@@ -130,7 +131,7 @@ fn extract_type_and_tags(labels: &[String], known_types: &[&str]) -> (DocType, V
         }
     }
 
-    (doc_type.unwrap_or_else(|| DocType::new("spec")), tags)
+    (doc_type.unwrap_or_else(|| DocType::new(default_type)), tags)
 }
 
 #[derive(serde::Deserialize)]
@@ -231,6 +232,7 @@ mod tests {
             labels: vec!["lazyspec:rfc".to_string(), "performance".to_string()],
             is_open: true,
             known_types: default_known_types(),
+            default_type: "spec".to_string(),
         }
     }
 
@@ -336,18 +338,18 @@ mod tests {
         let labels = vec!["lazyspec:rfc".to_string(), "cache".to_string()];
         let types = default_known_types();
         let known: Vec<&str> = types.iter().map(|s| s.as_str()).collect();
-        let (dt, tags) = extract_type_and_tags(&labels, &known);
+        let (dt, tags) = extract_type_and_tags(&labels, &known, "spec");
         assert_eq!(dt.as_str(), "rfc");
         assert_eq!(tags, vec!["cache"]);
     }
 
     #[test]
-    fn extract_type_and_tags_defaults_to_spec() {
+    fn extract_type_and_tags_defaults_to_configured_type() {
         let labels = vec!["random-label".to_string()];
         let types = default_known_types();
         let known: Vec<&str> = types.iter().map(|s| s.as_str()).collect();
-        let (dt, tags) = extract_type_and_tags(&labels, &known);
-        assert_eq!(dt.as_str(), "spec");
+        let (dt, tags) = extract_type_and_tags(&labels, &known, "testgh");
+        assert_eq!(dt.as_str(), "testgh");
         assert_eq!(tags, vec!["random-label"]);
     }
 
@@ -362,6 +364,7 @@ mod tests {
             labels: vec!["lazyspec:rfc".to_string(), "performance".to_string()],
             is_open: false,
             known_types: default_known_types(),
+            default_type: "spec".to_string(),
         };
 
         let (meta, _) = deserialize(&serialized, &ctx).unwrap();
@@ -455,7 +458,7 @@ mod tests {
         ];
         let types = default_known_types();
         let known: Vec<&str> = types.iter().map(|s| s.as_str()).collect();
-        let (dt, tags) = extract_type_and_tags(&labels, &known);
+        let (dt, tags) = extract_type_and_tags(&labels, &known, "spec");
         assert_eq!(dt.as_str(), "iteration");
         assert_eq!(tags, vec!["team-alpha"]);
     }
@@ -571,17 +574,17 @@ mod tests {
     fn custom_type_recognized_when_in_known_types() {
         let labels = vec!["lazyspec:task".to_string(), "team-beta".to_string()];
         let known = vec!["task", "rfc", "story"];
-        let (dt, tags) = extract_type_and_tags(&labels, &known);
+        let (dt, tags) = extract_type_and_tags(&labels, &known, "spec");
         assert_eq!(dt.as_str(), "task");
         assert_eq!(tags, vec!["team-beta"]);
     }
 
     #[test]
-    fn custom_type_defaults_to_spec_when_not_in_known_types() {
+    fn custom_type_defaults_to_configured_type_when_not_in_known_types() {
         let labels = vec!["lazyspec:task".to_string(), "team-beta".to_string()];
         let known = vec!["rfc", "story"];
-        let (dt, tags) = extract_type_and_tags(&labels, &known);
-        assert_eq!(dt.as_str(), "spec");
+        let (dt, tags) = extract_type_and_tags(&labels, &known, "testgh");
+        assert_eq!(dt.as_str(), "testgh");
         assert_eq!(tags, vec!["team-beta"]);
     }
 }

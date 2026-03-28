@@ -209,7 +209,9 @@ impl GhIssueReader for GhCli {
         };
 
         let limit_str = limit.map(|l| l.to_string());
-        let mut args = vec!["issue", "list", "--repo", repo, "--json", &fields];
+        let mut args = vec![
+            "issue", "list", "--repo", repo, "--state", "all", "--json", &fields,
+        ];
 
         if !labels.is_empty() {
             args.push("--label");

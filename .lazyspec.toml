@@ -40,6 +40,17 @@ dir = "docs/audits"
 prefix = "AUDIT"
 icon = "🔍"
 
+[[types]]
+name = "testgh"
+plural = "testghs"
+dir = "docs/testghs"
+prefix = "TESTGH"
+icon = "🐙"
+store = "github-issues"
+
+[github]
+repo = 'jkaloger/lazyspec'
+
 [templates]
 dir = ".lazyspec/templates"
 
