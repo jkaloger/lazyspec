@@ -124,6 +124,40 @@ pub struct GithubIssuesStore<G: GhIssueReader + GhIssueWriter> {
     pub issue_cache: IssueCache,
 }
 
+impl<G: GhIssueReader + GhIssueWriter> GithubIssuesStore<G> {
+    /// Fetch the remote issue and check the optimistic lock.
+    ///
+    /// If `updated_at` is empty (we just pushed), accept the remote state and
+    /// record its timestamp. Otherwise, reject if the remote has been modified
+    /// since our last fetch.
+    fn check_lock(&mut self, doc_id: &str) -> Result<(u64, gh::GhIssue)> {
+        let entry = self.issue_map.get(doc_id)
+            .ok_or_else(|| anyhow::anyhow!("{} not found in issue map", doc_id))?;
+        let issue_number = entry.issue_number;
+        let local_updated_at = entry.updated_at.clone();
+
+        let remote_issue = self.client.issue_view(&self.repo, issue_number)?;
+
+        if local_updated_at.is_empty() {
+            // We pushed recently; accept remote state and record timestamp.
+            self.issue_map.insert(doc_id, issue_number, &remote_issue.updated_at);
+            self.issue_map.save(&self.root)?;
+        } else if remote_issue.updated_at != local_updated_at {
+            bail!(
+                "{} has been modified on GitHub since your last fetch.\n  \
+                 Local:  {}\n  \
+                 Remote: {}\n\
+                 Wait for background sync or restart the TUI to pull the latest version.",
+                doc_id,
+                local_updated_at,
+                remote_issue.updated_at,
+            );
+        }
+
+        Ok((issue_number, remote_issue))
+    }
+}
+
 impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
     fn create(
         &mut self,
@@ -192,24 +226,7 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
         doc_id: &str,
         updates: &[(&str, &str)],
     ) -> Result<()> {
-        let entry = self.issue_map.get(doc_id)
-            .ok_or_else(|| anyhow::anyhow!("{} not found in issue map", doc_id))?;
-        let issue_number = entry.issue_number;
-        let local_updated_at = entry.updated_at.clone();
-
-        let remote_issue = self.client.issue_view(&self.repo, issue_number)?;
-
-        if remote_issue.updated_at != local_updated_at {
-            bail!(
-                "{} has been modified on GitHub since your last fetch.\n  \
-                 Local:  {}\n  \
-                 Remote: {}\n\
-                 Wait for background sync or restart the TUI to pull the latest version.",
-                doc_id,
-                local_updated_at,
-                remote_issue.updated_at,
-            );
-        }
+        let (issue_number, remote_issue) = self.check_lock(doc_id)?;
 
         let ctx = issue_body::IssueContext {
             title: remote_issue.title.clone(),
@@ -258,8 +275,9 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
             }
         }
 
-        let refreshed = self.client.issue_view(&self.repo, issue_number)?;
-        self.issue_map.insert(doc_id, issue_number, &refreshed.updated_at);
+        // Clear updated_at: we just pushed, so our stored timestamp is stale.
+        // The next edit's pre-flight fetch will record the fresh timestamp.
+        self.issue_map.insert(doc_id, issue_number, "");
         self.issue_map.save(&self.root)?;
 
         let meta = DocMeta { id: doc_id.to_string(), ..meta };
@@ -274,24 +292,7 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
         type_def: &TypeDef,
         doc_id: &str,
     ) -> Result<()> {
-        let entry = self.issue_map.get(doc_id)
-            .ok_or_else(|| anyhow::anyhow!("{} not found in issue map", doc_id))?;
-        let issue_number = entry.issue_number;
-        let local_updated_at = entry.updated_at.clone();
-
-        let remote_issue = self.client.issue_view(&self.repo, issue_number)?;
-
-        if remote_issue.updated_at != local_updated_at {
-            bail!(
-                "{} has been modified on GitHub since your last fetch.\n  \
-                 Local:  {}\n  \
-                 Remote: {}\n\
-                 Wait for background sync or restart the TUI to pull the latest version.",
-                doc_id,
-                local_updated_at,
-                remote_issue.updated_at,
-            );
-        }
+        let (issue_number, remote_issue) = self.check_lock(doc_id)?;
 
         let deleted_title = format!("[DELETED] {}", remote_issue.title);
         let label = gh::type_label(&type_def.name);
@@ -487,6 +488,13 @@ mod tests {
         assert!(result.path.to_string_lossy().contains(".lazyspec/cache/rfc/"));
         assert!(root.join(&result.path).exists());
 
+        // Issue body sent to GH should NOT contain author: in lazyspec comment
+        let create_body = gh_store.client.last_create_body.borrow();
+        let create_body_str = create_body.as_deref().expect("issue_create should have been called");
+        assert!(create_body_str.contains("<!-- lazyspec"), "body should have lazyspec comment");
+        assert!(!create_body_str.contains("author:"), "issue body should not contain author: in lazyspec comment, got: {}", create_body_str);
+
+        // Cache file should still have author in frontmatter
         let content = std::fs::read_to_string(root.join(&result.path)).unwrap();
         let (yaml, _) = crate::engine::document::split_frontmatter(&content).unwrap();
         let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("valid YAML frontmatter");
@@ -584,6 +592,7 @@ mod tests {
             labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -603,6 +612,11 @@ mod tests {
         gh_store
             .update(&td, "RFC-001", &[("status", "accepted")])
             .unwrap();
+
+        // Re-serialized body sent to GH should not contain author:
+        let captured = gh_store.client.last_edit_body.borrow();
+        let body_str = captured.as_deref().expect("issue_edit should have been called with body");
+        assert!(!body_str.contains("author:"), "re-serialized issue body should not contain author:, got: {}", body_str);
     }
 
     #[test]
@@ -617,6 +631,7 @@ mod tests {
             labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:45:00Z".to_string(),
+            author: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -655,6 +670,7 @@ mod tests {
             labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -690,6 +706,7 @@ mod tests {
             labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
             state: "CLOSED".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -744,6 +761,7 @@ mod tests {
             labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -781,6 +799,7 @@ mod tests {
             labels: vec![],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:45:00Z".to_string(),
+            author: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -831,6 +850,7 @@ mod tests {
             labels: vec![],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -913,6 +933,7 @@ mod tests {
             labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -937,6 +958,12 @@ mod tests {
         let body_str = captured.as_deref().expect("issue_edit should have been called with body");
         assert!(body_str.contains("new content"), "body should contain 'new content', got: {}", body_str);
         assert!(body_str.contains("<!-- lazyspec"), "body should be wrapped in issue_body format");
+        assert!(!body_str.contains("author:"), "re-serialized issue body should not contain author:, got: {}", body_str);
+
+        // Cache file should still have author in frontmatter
+        let cache_path = root.join(".lazyspec/cache/rfc/RFC-001.md");
+        let cache_content = std::fs::read_to_string(&cache_path).unwrap();
+        assert!(cache_content.contains("author:"), "cache file should contain author in frontmatter");
     }
 
     #[test]
@@ -951,6 +978,7 @@ mod tests {
             labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -989,6 +1017,7 @@ mod tests {
             labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:45:00Z".to_string(),
+            author: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);

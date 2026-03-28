@@ -116,7 +116,7 @@ fn plan_renumbering(
                         Ok(s) => s.to_lowercase(),
                         Err(_) => continue,
                     };
-                    let new_id = format!("{}-{}", prefix, sqid);
+                    let new_id = type_def.make_id(&sqid);
 
                     if let Some(rename) = build_rename(root, doc, id, &new_id, dry_run, fs) {
                         all_renames.push(rename);
@@ -151,7 +151,7 @@ fn plan_renumbering(
                     let id = doc.display_name();
 
                     let new_num = max_existing + (i as u32) + 1;
-                    let new_id = format!("{}-{:03}", prefix, new_num);
+                    let new_id = type_def.make_id(format_args!("{:03}", new_num));
 
                     if id == new_id {
                         continue;

@@ -474,6 +474,12 @@ impl Config {
     }
 }
 
+impl TypeDef {
+    pub fn make_id(&self, suffix: impl std::fmt::Display) -> String {
+        format!("{}-{}", self.prefix, suffix)
+    }
+}
+
 #[cfg(test)]
 impl TypeDef {
     pub fn test_fixture(name: &str, store: StoreBackend) -> TypeDef {
@@ -763,6 +769,24 @@ store = "github-issues"
     fn has_github_issues_types_false_when_filesystem_only() {
         let config = Config::default();
         assert!(!config.documents.has_github_issues_types());
+    }
+
+    #[test]
+    fn test_make_id_basic() {
+        let td = TypeDef::test_fixture("story", StoreBackend::Filesystem);
+        assert_eq!(td.make_id(42), "STORY-42");
+    }
+
+    #[test]
+    fn test_make_id_with_zero_padded_suffix() {
+        let td = TypeDef::test_fixture("rfc", StoreBackend::Filesystem);
+        assert_eq!(td.make_id(format_args!("{:03}", 7)), "RFC-007");
+    }
+
+    #[test]
+    fn test_make_id_with_string_suffix() {
+        let td = TypeDef::test_fixture("adr", StoreBackend::Filesystem);
+        assert_eq!(td.make_id("abc"), "ADR-abc");
     }
 
     #[test]

@@ -87,11 +87,11 @@ fn renumber_doc(
         NumberingStrategy::Sqids => {
             let sqids_config = config.documents.sqids.as_ref()?;
             let sqid = next_sqids_id(&type_dir, &type_def.prefix, sqids_config).ok()?;
-            format!("{}-{}", type_def.prefix, sqid)
+            type_def.make_id(&sqid)
         }
         NumberingStrategy::Incremental => {
             let new_num = next_number(&type_dir, &type_def.prefix);
-            format!("{}-{:03}", type_def.prefix, new_num)
+            type_def.make_id(format_args!("{:03}", new_num))
         }
         NumberingStrategy::Reserved => {
             return None;

@@ -135,8 +135,21 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
         }
         AppEvent::GhPushResult(result) => {
             app.gh_push_in_flight.store(false, Ordering::Relaxed);
-            if let Err(msg) = result {
-                app.gh_conflict_message = Some(msg);
+            match result {
+                Ok(()) => {
+                    let root = app.store.root().to_path_buf();
+                    if let Ok(refreshed) = Store::load(&root, config) {
+                        app.store = refreshed;
+                    }
+                    app.filtered_docs_cache = None;
+                    app.rebuild_search_index();
+                    app.refresh_validation(config);
+                    app.expanded_body_cache.clear();
+                    app.disk_cache.clear();
+                }
+                Err(msg) => {
+                    app.gh_conflict_message = Some(msg);
+                }
             }
         }
         AppEvent::CreateStarted => {}
@@ -259,11 +272,16 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 std::thread::sleep(Duration::from_millis(50));
                 continue;
             }
-            // Blocking read - wakes immediately on keypress
-            if let Ok(Event::Key(key)) = crossterm::event::read() {
-                perf_log::log(&format!("input_thread: read key {:?}", key.code));
-                let _ = term_tx.send(AppEvent::Terminal(key));
-                perf_log::log("input_thread: sent to channel");
+            // Poll with short timeout so we re-check paused frequently
+            match crossterm::event::poll(Duration::from_millis(50)) {
+                Ok(true) => {
+                    if let Ok(Event::Key(key)) = crossterm::event::read() {
+                        perf_log::log(&format!("input_thread: read key {:?}", key.code));
+                        let _ = term_tx.send(AppEvent::Terminal(key));
+                        perf_log::log("input_thread: sent to channel");
+                    }
+                }
+                _ => {}
             }
         }
     });
@@ -372,6 +390,8 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             let root = app.store.root().to_path_buf();
             if let Ok(relative) = path.strip_prefix(&root) {
                 let _ = app.store.reload_file(&root, relative, &*app.fs);
+                app.expanded_body_cache.remove(relative);
+                app.disk_cache.invalidate(relative);
                 if let Some(ref shared_store) = shared_gh_store {
                     let push_root = root.clone();
                     let push_relative = relative.to_path_buf();

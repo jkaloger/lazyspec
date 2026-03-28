@@ -87,6 +87,7 @@ mod tests {
                 .collect(),
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
         }
     }
 
@@ -138,20 +139,20 @@ mod tests {
 
         run(dir.path(), &config, &gh).unwrap();
 
-        // Cache files use doc ID, not issue number
+        // Cache files use doc ID derived from prefix + issue number
         let cache_dir = dir.path().join(".lazyspec/cache/story");
-        assert!(cache_dir.join("STORY-001.md").exists());
-        assert!(cache_dir.join("STORY-002.md").exists());
+        assert!(cache_dir.join("STORY-10.md").exists());
+        assert!(cache_dir.join("STORY-11.md").exists());
 
         // Verify standard frontmatter
-        let content = fs::read_to_string(cache_dir.join("STORY-001.md")).unwrap();
+        let content = fs::read_to_string(cache_dir.join("STORY-10.md")).unwrap();
         assert!(content.contains("title:"));
         assert!(content.contains("type: story"));
 
         // Issue map created
         let map = IssueMap::load(dir.path()).unwrap();
-        assert_eq!(map.get("STORY-001").unwrap().issue_number, 10);
-        assert_eq!(map.get("STORY-002").unwrap().issue_number, 11);
+        assert_eq!(map.get("STORY-10").unwrap().issue_number, 10);
+        assert_eq!(map.get("STORY-11").unwrap().issue_number, 11);
     }
 
     #[test]

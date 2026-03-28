@@ -25,7 +25,6 @@ const COMMENT_END: &str = "\n-->";
 pub fn serialize(doc: &DocMeta, body: &str) -> String {
     let mut yaml_lines: Vec<String> = Vec::new();
 
-    yaml_lines.push(format!("author: {}", doc.author));
     yaml_lines.push(format!("date: {}", doc.date));
 
     if needs_frontmatter_status(&doc.status) {
@@ -78,7 +77,7 @@ pub fn deserialize(issue_body: &str, ctx: &IssueContext) -> Result<(DocMeta, Str
         title: ctx.title.clone(),
         doc_type,
         status,
-        author: parsed.author,
+        author: parsed.author.unwrap_or_else(|| "unknown".to_string()),
         date: parsed.date,
         tags,
         related,
@@ -136,7 +135,8 @@ fn extract_type_and_tags(labels: &[String], known_types: &[&str], default_type: 
 
 #[derive(serde::Deserialize)]
 struct CommentFrontmatter {
-    author: String,
+    #[serde(default)]
+    author: Option<String>,
     date: NaiveDate,
     #[serde(default)]
     status: Option<String>,
@@ -162,33 +162,6 @@ fn extract_comment(issue_body: &str) -> Result<(String, String)> {
     let rest = issue_body[full_match.end()..].trim().to_string();
 
     Ok((yaml, rest))
-}
-
-/// Extract a doc ID (e.g. "STORY-042") from a title string.
-///
-/// Checks whether the title starts with the pattern, then falls back to
-/// scanning whitespace-separated words.
-pub fn extract_doc_id_from_title(title: &str, type_name: &str) -> Option<String> {
-    let prefix = type_name.to_uppercase();
-    let tag = format!("{}-", prefix);
-
-    if let Some(rest) = title.strip_prefix(&tag) {
-        let id_part: String = rest.chars().take_while(|c| c.is_alphanumeric()).collect();
-        if !id_part.is_empty() {
-            return Some(format!("{}-{}", prefix, id_part));
-        }
-    }
-
-    for word in title.split_whitespace() {
-        if let Some(rest) = word.strip_prefix(&tag) {
-            let id_part: String = rest.chars().take_while(|c| c.is_alphanumeric()).collect();
-            if !id_part.is_empty() {
-                return Some(format!("{}-{}", prefix, id_part));
-            }
-        }
-    }
-
-    None
 }
 
 #[cfg(test)]
@@ -242,7 +215,7 @@ mod tests {
         let result = serialize(&doc, "Some body text.");
 
         assert!(result.starts_with("<!-- lazyspec\n---\n"));
-        assert!(result.contains("author: agent-7"));
+        assert!(!result.contains("author:"), "serialize should not emit author");
         assert!(result.contains("date: 2026-03-27"));
         assert!(result.contains("- implements: STORY-075"));
         assert!(result.ends_with("Some body text."));
@@ -282,7 +255,8 @@ mod tests {
         let (meta, parsed_body) = deserialize(&serialized, &ctx).unwrap();
 
         assert_eq!(meta.title, "Add caching layer");
-        assert_eq!(meta.author, "agent-7");
+        // author no longer round-trips through serialize; deserialize returns placeholder
+        assert_eq!(meta.author, "unknown");
         assert_eq!(meta.date, NaiveDate::from_ymd_opt(2026, 3, 27).unwrap());
         assert_eq!(meta.doc_type.as_str(), "rfc");
         assert_eq!(meta.tags, vec!["performance"]);
@@ -542,41 +516,30 @@ mod tests {
     }
 
     #[test]
-    fn extract_doc_id_prefix() {
-        assert_eq!(
-            extract_doc_id_from_title("STORY-042 Implement feature", "story"),
-            Some("STORY-042".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_doc_id_mid_title() {
-        assert_eq!(
-            extract_doc_id_from_title("Some prefix STORY-007 suffix", "story"),
-            Some("STORY-007".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_doc_id_none_when_missing() {
-        assert_eq!(extract_doc_id_from_title("Just a random title", "story"), None);
-    }
-
-    #[test]
-    fn extract_doc_id_different_type() {
-        assert_eq!(
-            extract_doc_id_from_title("RFC-001 Some RFC", "rfc"),
-            Some("RFC-001".to_string())
-        );
-    }
-
-    #[test]
     fn custom_type_recognized_when_in_known_types() {
         let labels = vec!["lazyspec:task".to_string(), "team-beta".to_string()];
         let known = vec!["task", "rfc", "story"];
         let (dt, tags) = extract_type_and_tags(&labels, &known, "spec");
         assert_eq!(dt.as_str(), "task");
         assert_eq!(tags, vec!["team-beta"]);
+    }
+
+    #[test]
+    fn deserialize_tolerates_missing_author() {
+        let input = "<!-- lazyspec\n---\ndate: 2026-03-27\n---\n-->\n\nbody";
+        let ctx = sample_context();
+        let (meta, body) = deserialize(input, &ctx).unwrap();
+        assert_eq!(meta.author, "unknown");
+        assert_eq!(body, "body");
+    }
+
+    #[test]
+    fn deserialize_backward_compat_with_author() {
+        let input = "<!-- lazyspec\n---\nauthor: old-value\ndate: 2026-03-27\n---\n-->\n\nbody";
+        let ctx = sample_context();
+        let (meta, body) = deserialize(input, &ctx).unwrap();
+        assert_eq!(meta.author, "old-value");
+        assert_eq!(body, "body");
     }
 
     #[test]
