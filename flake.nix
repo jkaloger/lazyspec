@@ -97,6 +97,8 @@
           packages = [
             rustToolchain
             pkgs.rust-analyzer
+            pkgs.ast-grep
+            pkgs.ripgrep
           ];
         };
       }
