@@ -78,15 +78,15 @@ fn test_status_picker_navigation() {
     app.handle_key(KeyCode::Char('k'), KeyModifiers::NONE, root, &config);
     assert_eq!(app.status_picker.selected, 0);
 
-    // navigate to max (4 = superseded)
+    // navigate to max (6 = superseded)
     for _ in 0..10 {
         app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, root, &config);
     }
-    assert_eq!(app.status_picker.selected, 4);
+    assert_eq!(app.status_picker.selected, 6);
 
-    // j at 4 stays clamped
+    // j at 6 stays clamped
     app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, root, &config);
-    assert_eq!(app.status_picker.selected, 4);
+    assert_eq!(app.status_picker.selected, 6);
 }
 
 // AC4: confirming writes new status to frontmatter and reloads store

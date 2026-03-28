@@ -1,13 +1,14 @@
 ---
 title: Hybrid cache and fetch
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-27
 tags: []
 related:
 - implements: docs/rfcs/RFC-037-github-issues-document-store.md
 ---
+
 
 
 ## Context

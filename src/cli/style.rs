@@ -10,6 +10,8 @@ pub fn status_style(status: &Status) -> Style {
         Status::Accepted => style.green(),
         Status::Draft => style.yellow(),
         Status::Review => style.blue(),
+        Status::InProgress => style.cyan(),
+        Status::Complete => style.green(),
         Status::Rejected => style.red(),
         Status::Superseded => style.color256(8),
     }

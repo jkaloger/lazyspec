@@ -8,6 +8,7 @@ use ratatui::{
 
 use std::path::PathBuf;
 
+use crate::engine::config::{Config, StoreBackend};
 use crate::engine::document::{DocMeta, RelationType, Status};
 use crate::engine::git_status::GitFileStatus;
 #[cfg(feature = "agent")]
@@ -188,6 +189,35 @@ fn doc_table_widths() -> [Constraint; 6] {
     ]
 }
 
+/// Returns `true` when `elapsed_secs` exceeds twice the given `cache_ttl`.
+pub(crate) fn is_cache_stale(elapsed_secs: u64, cache_ttl: u64) -> bool {
+    elapsed_secs >= 2 * cache_ttl
+}
+
+fn check_doc_stale(path: &std::path::Path, doc_type: &str, config: &Config) -> (bool, bool) {
+    let is_gh = config
+        .type_by_name(doc_type)
+        .map(|td| td.store == StoreBackend::GithubIssues)
+        .unwrap_or(false);
+    let is_stale = if is_gh {
+        let cache_ttl = config
+            .documents
+            .github
+            .as_ref()
+            .map(|g| g.cache_ttl)
+            .unwrap_or(60);
+        std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(|elapsed| is_cache_stale(elapsed.as_secs(), cache_ttl))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    (is_gh, is_stale)
+}
+
 fn doc_row_cells(
     id: &str,
     title: &str,
@@ -195,12 +225,26 @@ fn doc_row_cells(
     tags: &[String],
     is_virtual: bool,
     dim: bool,
+    is_gh: bool,
+    is_stale: bool,
 ) -> Vec<Cell<'static>> {
     let dim_style = Style::default().fg(Color::DarkGray);
     let normal_style = Style::default();
 
     let id_style = if dim { dim_style } else { normal_style };
-    let id_cell = Cell::new(Span::styled(format!("{:<18}", id), id_style));
+    let id_cell = if is_gh {
+        let badge_style = if dim {
+            dim_style
+        } else {
+            Style::default().fg(Color::Magenta)
+        };
+        Cell::new(Line::from(vec![
+            Span::styled(format!("{:<18}", id), id_style),
+            Span::styled(" [gh]", badge_style),
+        ]))
+    } else {
+        Cell::new(Span::styled(format!("{:<18}", id), id_style))
+    };
 
     let title_text = if is_virtual {
         format!("{} (virtual)", title)
@@ -215,7 +259,19 @@ fn doc_row_cells(
     } else {
         Style::default().fg(status_color(status))
     };
-    let status_cell = Cell::new(Span::styled(format!("{:<12}", status), status_style));
+    let status_cell = if is_stale {
+        let stale_style = if dim {
+            dim_style
+        } else {
+            Style::default().fg(Color::Red)
+        };
+        Cell::new(Line::from(vec![
+            Span::styled(format!("{:<12}", status), status_style),
+            Span::styled(" [!]", stale_style),
+        ]))
+    } else {
+        Cell::new(Span::styled(format!("{:<12}", status), status_style))
+    };
 
     let mut tag_spans: Vec<Span<'static>> = Vec::new();
     for (idx, tag) in tags.iter().take(3).enumerate() {
@@ -236,7 +292,7 @@ fn doc_row_cells(
     vec![id_cell, title_cell, status_cell, tags_cell]
 }
 
-fn doc_row_for_node(app: &App, node: &DocListNode, index: usize, dim: bool) -> Row<'static> {
+fn doc_row_for_node(app: &App, node: &DocListNode, index: usize, dim: bool, config: &Config) -> Row<'static> {
     let tree_text = if node.depth > 0 {
         let leading = "   ".repeat(node.depth - 1);
         let is_last = match app.doc_tree.get(index + 1) {
@@ -271,6 +327,8 @@ fn doc_row_for_node(app: &App, node: &DocListNode, index: usize, dim: bool) -> R
         node.id.clone()
     };
 
+    let (is_gh, is_stale) = check_doc_stale(&node.path, node.doc_type.as_str(), config);
+
     let mut cells = vec![gutter_cell, tree_cell];
     cells.extend(doc_row_cells(
         &display_id,
@@ -279,6 +337,8 @@ fn doc_row_for_node(app: &App, node: &DocListNode, index: usize, dim: bool) -> R
         &tags,
         node.is_virtual,
         dim,
+        is_gh,
+        is_stale,
     ));
 
     let style = if dim {
@@ -319,7 +379,7 @@ pub fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
-pub fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect) {
+pub fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect, config: &Config) {
     app.doc_list_height = area.height.saturating_sub(2) as usize;
     let relations_focused = app.preview_tab == PreviewTab::Relations;
     let dim = relations_focused;
@@ -328,7 +388,7 @@ pub fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect) {
         .doc_tree
         .iter()
         .enumerate()
-        .map(|(i, node)| doc_row_for_node(app, node, i, dim))
+        .map(|(i, node)| doc_row_for_node(app, node, i, dim, config))
         .collect();
 
     let widths = doc_table_widths();
@@ -721,7 +781,7 @@ pub fn render_fullscreen_document(f: &mut Frame, app: &mut App) {
     }
 }
 
-pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect) {
+pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect, config: &Config) {
     let main = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
@@ -803,7 +863,8 @@ pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect) {
             };
             let tree_cell = Cell::new("");
             let mut cells = vec![gutter_cell, tree_cell];
-            cells.extend(doc_row_cells(&doc.id, &doc.title, &doc.status, &doc.tags, doc.virtual_doc, dim));
+            let (is_gh, is_stale) = check_doc_stale(&doc.path, doc.doc_type.as_str(), config);
+            cells.extend(doc_row_cells(&doc.id, &doc.title, &doc.status, &doc.tags, doc.virtual_doc, dim, is_gh, is_stale));
             let style = if dim {
                 Style::default().fg(Color::DarkGray)
             } else {
@@ -1067,5 +1128,51 @@ pub(super) fn doc_row_cells_for_test(
     is_virtual: bool,
     dim: bool,
 ) -> Vec<Cell<'static>> {
-    doc_row_cells(id, title, status, tags, is_virtual, dim)
+    doc_row_cells(id, title, status, tags, is_virtual, dim, false, false)
+}
+
+#[cfg(test)]
+pub(super) fn doc_row_cells_gh_for_test(
+    id: &str,
+    title: &str,
+    status: &Status,
+    tags: &[String],
+    is_virtual: bool,
+    dim: bool,
+    is_gh: bool,
+) -> Vec<Cell<'static>> {
+    doc_row_cells(id, title, status, tags, is_virtual, dim, is_gh, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_cache_stale_returns_false_within_threshold() {
+        assert!(!is_cache_stale(119, 60));
+    }
+
+    #[test]
+    fn is_cache_stale_returns_true_at_boundary() {
+        assert!(is_cache_stale(120, 60));
+    }
+
+    #[test]
+    fn is_cache_stale_returns_true_beyond_threshold() {
+        assert!(is_cache_stale(121, 60));
+    }
+
+    #[test]
+    fn is_cache_stale_zero_ttl() {
+        assert!(is_cache_stale(1, 0));
+        assert!(is_cache_stale(0, 0));
+    }
+
+    #[test]
+    fn is_cache_stale_large_ttl() {
+        assert!(!is_cache_stale(3599, 1800));
+        assert!(is_cache_stale(3600, 1800));
+        assert!(is_cache_stale(3601, 1800));
+    }
 }

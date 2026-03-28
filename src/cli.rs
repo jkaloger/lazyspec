@@ -4,6 +4,7 @@ pub mod style;
 pub mod create;
 pub mod status;
 pub mod delete;
+pub mod fetch;
 pub mod init;
 pub mod json;
 pub mod ignore;
@@ -17,6 +18,7 @@ pub mod validate;
 pub mod fix;
 pub mod pin;
 pub mod reservations;
+pub mod setup;
 
 use crate::cli::reservations::ReservationsCommand;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -92,6 +94,12 @@ pub enum Commands {
         /// Set title
         #[arg(long)]
         title: Option<String>,
+        /// Set body content inline
+        #[arg(long)]
+        body: Option<String>,
+        /// Read body from file (use `-` for stdin)
+        #[arg(long)]
+        body_file: Option<String>,
     },
     /// Delete a document
     Delete {
@@ -204,6 +212,17 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Fetch all github-issues documents from the API
+    Fetch {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Filter to a single document type
+        #[arg(long = "type")]
+        doc_type: Option<String>,
+    },
+    /// Set up github-issues backend (validate auth, fetch issues)
+    Setup,
     /// Manage reservation refs
     Reservations {
         #[command(subcommand)]

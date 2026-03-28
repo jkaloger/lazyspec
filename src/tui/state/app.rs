@@ -4,7 +4,7 @@ use super::forms::AgentDialog;
 use super::graph::traverse_dependency_chain;
 
 use crate::engine::cache::DiskCache;
-use crate::engine::config::{Config, NumberingStrategy};
+use crate::engine::config::{Config, NumberingStrategy, StoreBackend};
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, RelationType, Status};
 use crate::engine::fs::FileSystem;
 use crate::engine::git_status::GitStatusCache;
@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Instant;
 
 pub struct SearchEntry {
     pub path: PathBuf,
@@ -41,6 +42,8 @@ pub enum AppEvent {
     CreateStarted,
     CreateProgress { message: String },
     CreateComplete { result: Result<CreateResult, String> },
+    CacheRefresh,
+    GhPushResult(Result<(), String>),
     #[cfg(feature = "agent")]
     AgentFinished,
 }
@@ -239,6 +242,9 @@ pub struct App {
     pub filtered_docs_cache: Option<Vec<PathBuf>>,
     pub search_index: Vec<SearchEntry>,
     pub git_status_cache: GitStatusCache,
+    pub gh_conflict_message: Option<String>,
+    pub gh_push_in_flight: Arc<AtomicBool>,
+    pub last_sync: Option<Instant>,
 }
 
 impl App {
@@ -254,6 +260,8 @@ impl App {
 
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
         let git_status_cache = GitStatusCache::new(store.root());
+        let has_github_issues = config.documents.types.iter()
+            .any(|t| t.store == StoreBackend::GithubIssues);
 
         let mut app = App {
             fs,
@@ -319,6 +327,9 @@ impl App {
             filtered_docs_cache: None,
             search_index: Vec::new(),
             git_status_cache,
+            gh_conflict_message: None,
+            gh_push_in_flight: Arc::new(AtomicBool::new(false)),
+            last_sync: if has_github_issues { Some(Instant::now()) } else { None },
         };
         app.rebuild_search_index();
         app.build_doc_tree();
@@ -475,7 +486,9 @@ impl App {
                     None => Some(Status::Draft),
                     Some(Status::Draft) => Some(Status::Review),
                     Some(Status::Review) => Some(Status::Accepted),
-                    Some(Status::Accepted) => Some(Status::Rejected),
+                    Some(Status::Accepted) => Some(Status::InProgress),
+                    Some(Status::InProgress) => Some(Status::Complete),
+                    Some(Status::Complete) => Some(Status::Rejected),
                     Some(Status::Rejected) => Some(Status::Superseded),
                     Some(Status::Superseded) => None,
                 };
@@ -505,7 +518,9 @@ impl App {
                 self.filter_status = match &self.filter_status {
                     None => Some(Status::Superseded),
                     Some(Status::Superseded) => Some(Status::Rejected),
-                    Some(Status::Rejected) => Some(Status::Accepted),
+                    Some(Status::Rejected) => Some(Status::Complete),
+                    Some(Status::Complete) => Some(Status::InProgress),
+                    Some(Status::InProgress) => Some(Status::Accepted),
                     Some(Status::Accepted) => Some(Status::Review),
                     Some(Status::Review) => Some(Status::Draft),
                     Some(Status::Draft) => None,
@@ -1062,10 +1077,10 @@ impl App {
         self.delete_confirm.references.clear();
     }
 
-    pub fn confirm_delete(&mut self, root: &Path) -> Result<()> {
+    pub fn confirm_delete(&mut self, root: &Path, config: &Config) -> Result<()> {
         let doc_path = self.delete_confirm.doc_path.clone();
         let doc_path_str = doc_path.to_string_lossy().to_string();
-        crate::cli::delete::run(root, &self.store, &doc_path_str)?;
+        crate::cli::delete::run_with_config(root, &self.store, &doc_path_str, Some(config))?;
         self.store.remove_file(&doc_path);
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
@@ -1093,8 +1108,10 @@ impl App {
             Status::Draft => 0,
             Status::Review => 1,
             Status::Accepted => 2,
-            Status::Rejected => 3,
-            Status::Superseded => 4,
+            Status::InProgress => 3,
+            Status::Complete => 4,
+            Status::Rejected => 5,
+            Status::Superseded => 6,
         };
         let path = doc.path.clone();
 
@@ -1109,19 +1126,21 @@ impl App {
         self.status_picker.doc_path = PathBuf::new();
     }
 
-    pub fn confirm_status_change(&mut self, root: &Path, _config: &Config) -> Result<()> {
+    pub fn confirm_status_change(&mut self, root: &Path, config: &Config) -> Result<()> {
         let status = match self.status_picker.selected {
             0 => Status::Draft,
             1 => Status::Review,
             2 => Status::Accepted,
-            3 => Status::Rejected,
-            4 => Status::Superseded,
+            3 => Status::InProgress,
+            4 => Status::Complete,
+            5 => Status::Rejected,
+            6 => Status::Superseded,
             _ => return Err(anyhow!("invalid status index")),
         };
         let doc_path = self.status_picker.doc_path.clone();
         let doc_path_str = doc_path.to_string_lossy().to_string();
 
-        crate::cli::update::run(root, &self.store, &doc_path_str, &[("status", &status.to_string())])?;
+        crate::cli::update::run_with_config(root, &self.store, &doc_path_str, &[("status", &status.to_string())], Some(config))?;
         self.store.reload_file(root, &doc_path, &*self.fs)?;
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
@@ -1192,14 +1211,14 @@ impl App {
         }
     }
 
-    pub(crate) fn confirm_link(&mut self, root: &Path) -> Result<()> {
+    pub(crate) fn confirm_link(&mut self, root: &Path, config: &Config) -> Result<()> {
         let selected = self.link_editor.selected;
         let target_path = self.link_editor.results[selected].clone();
         let from = self.link_editor.doc_path.to_string_lossy().to_string();
         let to = target_path.to_string_lossy().to_string();
         let rel_type = REL_TYPES[self.link_editor.rel_type_index];
 
-        crate::cli::link::link(root, &self.store, &from, rel_type, &to, &*self.fs)?;
+        crate::cli::link::link_with_config(root, &self.store, &from, rel_type, &to, &*self.fs, Some(config))?;
         self.store.reload_file(root, &self.link_editor.doc_path.clone(), &*self.fs)?;
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
@@ -1371,6 +1390,9 @@ mod tests {
             filtered_docs_cache: None,
             search_index: Vec::new(),
             git_status_cache: GitStatusCache::new(Path::new(".")),
+            gh_conflict_message: None,
+            gh_push_in_flight: Arc::new(AtomicBool::new(false)),
+            last_sync: None,
         };
         app
     }
@@ -1619,5 +1641,136 @@ mod tests {
         app.validation_warnings = vec!["warn1".to_string()];
 
         assert_eq!(app.total_warnings_count(), 3);
+    }
+
+    #[test]
+    fn gh_conflict_blocks_other_keys() {
+        let mut app = make_test_app(5);
+        app.gh_conflict_message = Some("conflict detected".to_string());
+        let root = std::path::PathBuf::from(".");
+        let config = Config::default();
+
+        app.handle_key(KeyCode::Char('q'), KeyModifiers::NONE, &root, &config);
+        assert!(!app.should_quit, "quit should be blocked while conflict overlay is visible");
+        assert!(app.gh_conflict_message.is_some(), "conflict message should persist");
+    }
+
+    #[test]
+    fn gh_conflict_dismissed_by_esc() {
+        let mut app = make_test_app(5);
+        app.gh_conflict_message = Some("conflict detected".to_string());
+        let root = std::path::PathBuf::from(".");
+        let config = Config::default();
+
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE, &root, &config);
+        assert!(app.gh_conflict_message.is_none(), "Esc should dismiss conflict overlay");
+    }
+
+    #[test]
+    fn gh_conflict_none_by_default() {
+        let app = make_test_app(0);
+        assert!(app.gh_conflict_message.is_none());
+    }
+
+    #[test]
+    fn status_picker_navigates_all_seven_statuses() {
+        let mut app = make_test_app(5);
+        app.status_picker.active = true;
+        app.status_picker.selected = 0;
+
+        let root = PathBuf::from(".");
+        let config = Config::default();
+
+        for expected in 1..=6 {
+            app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, &root, &config);
+            assert_eq!(app.status_picker.selected, expected);
+        }
+
+        // should not exceed index 6
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, &root, &config);
+        assert_eq!(app.status_picker.selected, 6);
+
+        // navigate back up to 0
+        for expected in (0..=5).rev() {
+            app.handle_key(KeyCode::Char('k'), KeyModifiers::NONE, &root, &config);
+            assert_eq!(app.status_picker.selected, expected);
+        }
+
+        // should not go below 0
+        app.handle_key(KeyCode::Char('k'), KeyModifiers::NONE, &root, &config);
+        assert_eq!(app.status_picker.selected, 0);
+    }
+
+    #[test]
+    fn status_picker_esc_closes() {
+        let mut app = make_test_app(5);
+        app.status_picker.active = true;
+        app.status_picker.selected = 3;
+
+        let root = PathBuf::from(".");
+        let config = Config::default();
+
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE, &root, &config);
+        assert!(!app.status_picker.active);
+        assert_eq!(app.status_picker.selected, 0);
+    }
+
+    #[test]
+    fn open_status_picker_sets_index_from_doc_status() {
+        use crate::engine::document::DocMeta;
+        use chrono::NaiveDate;
+
+        let mut app = make_test_app(1);
+        let path = PathBuf::from("docs/rfcs/RFC-001.md");
+        let date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+
+        let statuses = [
+            (Status::Draft, 0),
+            (Status::Review, 1),
+            (Status::Accepted, 2),
+            (Status::InProgress, 3),
+            (Status::Complete, 4),
+            (Status::Rejected, 5),
+            (Status::Superseded, 6),
+        ];
+
+        for (status, expected_index) in &statuses {
+            app.store.docs.insert(path.clone(), DocMeta {
+                path: path.clone(),
+                title: "Test".to_string(),
+                doc_type: DocType::new("rfc"),
+                status: status.clone(),
+                id: "RFC-001".to_string(),
+                tags: Vec::new(),
+                author: String::new(),
+                date,
+                related: Vec::new(),
+                validate_ignore: false,
+                virtual_doc: false,
+            });
+            app.doc_tree[0].path = path.clone();
+            app.selected_doc = 0;
+
+            app.open_status_picker();
+            assert_eq!(
+                app.status_picker.selected, *expected_index,
+                "status {:?} should map to index {}", status, expected_index
+            );
+            app.close_status_picker();
+        }
+    }
+
+    #[test]
+    fn cache_refresh_sets_last_sync() {
+        let mut app = make_test_app(0);
+        assert!(app.last_sync.is_none());
+        app.last_sync = Some(Instant::now());
+        assert!(app.last_sync.is_some());
+    }
+
+    #[test]
+    fn last_sync_initially_none() {
+        let app = make_test_app(0);
+        assert!(app.last_sync.is_none());
     }
 }

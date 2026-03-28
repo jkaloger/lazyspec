@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -74,6 +75,24 @@ fn default_reserved_max_retries() -> u8 {
     5
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub enum StoreBackend {
+    #[default]
+    #[serde(rename = "filesystem")]
+    Filesystem,
+    #[serde(rename = "github-issues")]
+    GithubIssues,
+}
+
+impl fmt::Display for StoreBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StoreBackend::Filesystem => write!(f, "filesystem"),
+            StoreBackend::GithubIssues => write!(f, "github-issues"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TypeDef {
     pub name: String,
@@ -85,6 +104,8 @@ pub struct TypeDef {
     pub numbering: NumberingStrategy,
     #[serde(default)]
     pub subdirectory: bool,
+    #[serde(default)]
+    pub store: StoreBackend,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +117,8 @@ pub struct DocumentConfig {
     pub sqids: Option<SqidsConfig>,
     #[serde(skip)]
     pub reserved: Option<ReservedConfig>,
+    #[serde(skip)]
+    pub github: Option<GithubConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,6 +207,17 @@ struct RawNumbering {
     reserved: Option<ReservedConfig>,
 }
 
+fn default_cache_ttl() -> u64 {
+    60
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GithubConfig {
+    pub repo: Option<String>,
+    #[serde(default = "default_cache_ttl")]
+    pub cache_ttl: u64,
+}
+
 #[derive(Deserialize)]
 struct RawConfig {
     types: Option<Vec<TypeDef>>,
@@ -197,6 +231,7 @@ struct RawConfig {
     ref_count_ceiling: Option<usize>,
     #[serde(default)]
     certification: Option<CertificationConfig>,
+    github: Option<GithubConfig>,
 }
 
 fn build_type_def(name: &str, dir: &str, prefix: &str, icon: &str) -> TypeDef {
@@ -212,6 +247,7 @@ fn build_type_def(name: &str, dir: &str, prefix: &str, icon: &str) -> TypeDef {
         icon: Some(icon.to_string()),
         numbering: NumberingStrategy::default(),
         subdirectory: false,
+        store: StoreBackend::default(),
     }
 }
 
@@ -287,6 +323,7 @@ impl Default for Config {
                 },
                 sqids: None,
                 reserved: None,
+                github: None,
             },
             filesystem: FilesystemConfig {
                 directories,
@@ -299,6 +336,22 @@ impl Default for Config {
             ref_count_ceiling: 15,
             certification: CertificationConfig::default(),
         }
+    }
+}
+
+impl DocumentConfig {
+    pub fn github_issues_types(&self) -> Vec<&str> {
+        self.types
+            .iter()
+            .filter(|t| t.store == StoreBackend::GithubIssues)
+            .map(|t| t.name.as_str())
+            .collect()
+    }
+
+    pub fn has_github_issues_types(&self) -> bool {
+        self.types
+            .iter()
+            .any(|t| t.store == StoreBackend::GithubIssues)
     }
 }
 
@@ -371,6 +424,13 @@ impl Config {
             }
         }
 
+        let any_github_issues = types
+            .iter()
+            .any(|t| t.store == StoreBackend::GithubIssues);
+        if any_github_issues && raw.github.is_none() {
+            bail!("store = \"github-issues\" requires a [github] section");
+        }
+
         let ref_count_ceiling = raw.ref_count_ceiling.unwrap_or(15);
 
         Ok(Config {
@@ -381,6 +441,7 @@ impl Config {
                 }),
                 sqids,
                 reserved,
+                github: raw.github,
             },
             filesystem: FilesystemConfig {
                 directories,
@@ -413,9 +474,37 @@ impl Config {
     }
 }
 
+impl TypeDef {
+    pub fn make_id(&self, suffix: impl std::fmt::Display) -> String {
+        format!("{}-{}", self.prefix, suffix)
+    }
+}
+
+#[cfg(test)]
+impl TypeDef {
+    pub fn test_fixture(name: &str, store: StoreBackend) -> TypeDef {
+        TypeDef {
+            name: name.to_string(),
+            plural: format!("{}s", name),
+            dir: format!("docs/{}", name),
+            prefix: name.to_uppercase(),
+            icon: None,
+            numbering: NumberingStrategy::default(),
+            subdirectory: false,
+            store,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_store_backend_display() {
+        assert_eq!(StoreBackend::Filesystem.to_string(), "filesystem");
+        assert_eq!(StoreBackend::GithubIssues.to_string(), "github-issues");
+    }
 
     #[test]
     fn test_certification_default_when_absent() {
@@ -497,5 +586,224 @@ normalize = false
 "#;
         let config = Config::parse(toml_str).unwrap();
         assert!(!config.certification.should_normalize("docs/specs/SPEC-001"));
+    }
+
+    #[test]
+    fn test_store_backend_defaults_to_filesystem() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert_eq!(config.documents.types[0].store, StoreBackend::Filesystem);
+    }
+
+    #[test]
+    fn test_store_backend_parses_github_issues() {
+        let toml_str = r#"
+[github]
+repo = "owner/repo"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+store = "github-issues"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert_eq!(config.documents.types[0].store, StoreBackend::GithubIssues);
+    }
+
+    #[test]
+    fn test_store_backend_parses_filesystem_explicit() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+store = "filesystem"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert_eq!(config.documents.types[0].store, StoreBackend::Filesystem);
+    }
+
+    #[test]
+    fn test_store_backend_mixed_types() {
+        let toml_str = r#"
+[github]
+repo = "owner/repo"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+store = "github-issues"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert_eq!(config.documents.types[0].store, StoreBackend::Filesystem);
+        assert_eq!(config.documents.types[1].store, StoreBackend::GithubIssues);
+    }
+
+    #[test]
+    fn test_github_config_defaults() {
+        let toml_str = r#"
+[github]
+repo = "owner/repo"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let gh = config.documents.github.unwrap();
+        assert_eq!(gh.repo.as_deref(), Some("owner/repo"));
+        assert_eq!(gh.cache_ttl, 60);
+    }
+
+    #[test]
+    fn test_github_config_custom_cache_ttl() {
+        let toml_str = r#"
+[github]
+repo = "owner/repo"
+cache_ttl = 120
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let gh = config.documents.github.unwrap();
+        assert_eq!(gh.cache_ttl, 120);
+    }
+
+    #[test]
+    fn test_github_config_absent_when_not_needed() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+store = "filesystem"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert!(config.documents.github.is_none());
+    }
+
+    #[test]
+    fn test_github_issues_without_github_section_fails() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+store = "github-issues"
+"#;
+        let err = Config::parse(toml_str).unwrap_err();
+        assert!(
+            err.to_string().contains("[github] section"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn github_issues_types_filters_by_store_backend() {
+        let toml_str = r#"
+[github]
+repo = "owner/repo"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+store = "github-issues"
+
+[[types]]
+name = "adr"
+plural = "adrs"
+dir = "docs/adrs"
+prefix = "ADR"
+store = "github-issues"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert_eq!(config.documents.github_issues_types(), vec!["story", "adr"]);
+    }
+
+    #[test]
+    fn github_issues_types_empty_when_all_filesystem() {
+        let config = Config::default();
+        assert!(config.documents.github_issues_types().is_empty());
+    }
+
+    #[test]
+    fn has_github_issues_types_true_when_present() {
+        let toml_str = r#"
+[github]
+repo = "owner/repo"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+store = "github-issues"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert!(config.documents.has_github_issues_types());
+    }
+
+    #[test]
+    fn has_github_issues_types_false_when_filesystem_only() {
+        let config = Config::default();
+        assert!(!config.documents.has_github_issues_types());
+    }
+
+    #[test]
+    fn test_make_id_basic() {
+        let td = TypeDef::test_fixture("story", StoreBackend::Filesystem);
+        assert_eq!(td.make_id(42), "STORY-42");
+    }
+
+    #[test]
+    fn test_make_id_with_zero_padded_suffix() {
+        let td = TypeDef::test_fixture("rfc", StoreBackend::Filesystem);
+        assert_eq!(td.make_id(format_args!("{:03}", 7)), "RFC-007");
+    }
+
+    #[test]
+    fn test_make_id_with_string_suffix() {
+        let td = TypeDef::test_fixture("adr", StoreBackend::Filesystem);
+        assert_eq!(td.make_id("abc"), "ADR-abc");
+    }
+
+    #[test]
+    fn test_github_issues_without_repo_parses() {
+        let toml_str = r#"
+[github]
+cache_ttl = 30
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+store = "github-issues"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let gh = config.documents.github.unwrap();
+        assert!(gh.repo.is_none());
     }
 }

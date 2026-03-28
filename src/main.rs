@@ -2,8 +2,12 @@ use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 use lazyspec::cli::reservations::ReservationsCommand;
 use lazyspec::cli::{Cli, Commands};
-use lazyspec::engine::config::Config;
+use lazyspec::engine::config::{Config, StoreBackend};
 use lazyspec::engine::fs::RealFileSystem;
+use lazyspec::engine::gh::GhCli;
+use lazyspec::engine::github::resolve_repo;
+use lazyspec::engine::issue_cache::IssueCache;
+use lazyspec::engine::issue_map::IssueMap;
 use lazyspec::engine::store::Store;
 
 fn main() -> anyhow::Result<()> {
@@ -54,6 +58,14 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Init) | Some(Commands::Completions { .. }) => unreachable!(),
+        Some(Commands::Fetch { json, doc_type }) => {
+            let gh = GhCli::new();
+            lazyspec::cli::fetch::run(&cwd, &config, &gh, doc_type.as_deref(), json)?;
+        }
+        Some(Commands::Setup) => {
+            let gh = GhCli::new();
+            lazyspec::cli::setup::run(&cwd, &config, &gh)?;
+        }
         Some(Commands::Create { doc_type, title, author, json }) => {
             if json {
                 let output = lazyspec::cli::create::run_json(&cwd, &config, &doc_type, &title, &author, |_| {})?;
@@ -68,6 +80,7 @@ fn main() -> anyhow::Result<()> {
             lazyspec::cli::list::run(&store, doc_type.as_deref(), status.as_deref(), json);
         }
         Some(Commands::Show { id, json, expand_references, max_ref_lines }) => {
+            refresh_github_cache(&cwd, &config);
             let store = Store::load(&cwd, &config)?;
             if json {
                 let output = lazyspec::cli::show::run_json(&store, &id, expand_references, max_ref_lines, &fs)?;
@@ -76,7 +89,23 @@ fn main() -> anyhow::Result<()> {
                 lazyspec::cli::show::run(&store, &id, expand_references, max_ref_lines, &fs)?;
             }
         }
-        Some(Commands::Update { path, status, title }) => {
+        Some(Commands::Update { path, status, title, body, body_file }) => {
+            if body.is_some() && body_file.is_some() {
+                anyhow::bail!("cannot use both --body and --body-file");
+            }
+            let body_content = if let Some(ref b) = body {
+                Some(b.clone())
+            } else if let Some(ref bf) = body_file {
+                if bf == "-" {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                    Some(buf)
+                } else {
+                    Some(std::fs::read_to_string(bf)?)
+                }
+            } else {
+                None
+            };
             let store = Store::load(&cwd, &config)?;
             let mut updates = Vec::new();
             if let Some(ref s) = status {
@@ -85,26 +114,29 @@ fn main() -> anyhow::Result<()> {
             if let Some(ref t) = title {
                 updates.push(("title", t.as_str()));
             }
+            if let Some(ref b) = body_content {
+                updates.push(("body", b.as_str()));
+            }
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
-            lazyspec::cli::update::run(&cwd, &store, &path, &updates)?;
+            lazyspec::cli::update::run_with_config(&cwd, &store, &path, &updates, Some(&config))?;
             println!("Updated {}", resolved.display());
         }
         Some(Commands::Delete { path }) => {
             let store = Store::load(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
-            lazyspec::cli::delete::run(&cwd, &store, &path)?;
+            lazyspec::cli::delete::run_with_config(&cwd, &store, &path, Some(&config))?;
             println!("Deleted {}", resolved.display());
         }
         Some(Commands::Link { from, rel_type, to }) => {
             let store = Store::load(&cwd, &config)?;
-            lazyspec::cli::link::link(&cwd, &store, &from, &rel_type, &to, &fs)?;
+            lazyspec::cli::link::link_with_config(&cwd, &store, &from, &rel_type, &to, &fs, Some(&config))?;
             let resolved_from = lazyspec::cli::resolve::resolve_to_path(&store, &from)?;
             let resolved_to = lazyspec::cli::resolve::resolve_to_path(&store, &to)?;
             println!("Linked {} --{}--> {}", resolved_from.display(), rel_type, resolved_to.display());
         }
         Some(Commands::Unlink { from, rel_type, to }) => {
             let store = Store::load(&cwd, &config)?;
-            lazyspec::cli::link::unlink(&cwd, &store, &from, &rel_type, &to, &fs)?;
+            lazyspec::cli::link::unlink_with_config(&cwd, &store, &from, &rel_type, &to, &fs, Some(&config))?;
             let resolved_from = lazyspec::cli::resolve::resolve_to_path(&store, &from)?;
             let resolved_to = lazyspec::cli::resolve::resolve_to_path(&store, &to)?;
             println!("Unlinked {} --{}--> {}", resolved_from.display(), rel_type, resolved_to.display());
@@ -139,6 +171,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Context { id, json }) => {
+            refresh_github_cache(&cwd, &config);
             let store = Store::load(&cwd, &config)?;
             if json {
                 let output = lazyspec::cli::context::run_json(&store, &id)?;
@@ -192,4 +225,61 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Refreshes stale github-issues cache entries. Failures are non-fatal and print warnings to stderr.
+fn refresh_github_cache(cwd: &std::path::Path, config: &Config) {
+    let gh_config = match config.documents.github.as_ref() {
+        Some(gh) => gh,
+        None => return,
+    };
+
+    let gh_types: Vec<_> = config
+        .documents
+        .types
+        .iter()
+        .filter(|t| t.store == StoreBackend::GithubIssues)
+        .collect();
+
+    if gh_types.is_empty() {
+        return;
+    }
+
+    let repo = match resolve_repo(config, cwd) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("warning: could not resolve github repo, skipping refresh: {}", e);
+            return;
+        }
+    };
+
+    let gh = GhCli::new();
+    let cache = IssueCache::new(cwd);
+    let ttl = chrono::Duration::seconds(gh_config.cache_ttl as i64);
+
+    let mut issue_map = match IssueMap::load(cwd) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("warning: could not load issue map, skipping refresh: {}", e);
+            return;
+        }
+    };
+
+    let mut map_changed = false;
+    for type_def in &gh_types {
+        let all_type_names: Vec<String> = config.documents.types.iter().map(|t| t.name.clone()).collect();
+        let result = cache.refresh_stale(cwd, type_def, &gh, &repo, &mut issue_map, ttl, &all_type_names);
+        for warning in &result.warnings {
+            eprintln!("warning: {}", warning.message);
+        }
+        if result.refreshed > 0 {
+            map_changed = true;
+        }
+    }
+
+    if map_changed {
+        if let Err(e) = issue_map.save(cwd) {
+            eprintln!("warning: could not save issue map after refresh: {}", e);
+        }
+    }
 }

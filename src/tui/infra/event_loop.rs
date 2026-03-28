@@ -3,8 +3,13 @@ use crate::tui::state::AppEvent;
 use crate::tui::content;
 use crate::tui::infra::{perf_log, terminal_caps};
 use crate::tui::views;
-use crate::engine::config::Config;
+use crate::engine::config::{Config, StoreBackend};
+use crate::engine::document::split_frontmatter;
+use crate::engine::gh::GhCli;
+use crate::engine::issue_cache::IssueCache;
+use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
+use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
 use anyhow::Result;
 use crossterm::{
     event::Event,
@@ -17,7 +22,7 @@ use std::io;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 fn run_editor(
@@ -39,6 +44,36 @@ fn run_editor(
     }
 
     Ok(())
+}
+
+fn try_push_gh_edit(
+    root: &Path,
+    relative: &Path,
+    config: &Config,
+    shared_store: &Arc<Mutex<GithubIssuesStore<GhCli>>>,
+) -> Result<(), String> {
+    let content = std::fs::read_to_string(root.join(relative))
+        .map_err(|e| format!("failed to read edited file: {e}"))?;
+
+    let (_yaml, body) = split_frontmatter(&content)
+        .map_err(|e| format!("failed to parse edited file: {e}"))?;
+
+    let store = Store::load(root, config).map_err(|e| e.to_string())?;
+    let doc = store.get(relative).ok_or_else(|| "document not found in store".to_string())?;
+    let doc_id = doc.id.clone();
+    let type_name = doc.doc_type.as_str().to_string();
+
+    let type_def = config.type_by_name(&type_name)
+        .ok_or_else(|| format!("type '{}' not found in config", type_name))?;
+
+    if type_def.store != StoreBackend::GithubIssues {
+        return Ok(());
+    }
+
+    let body_trimmed = body.trim();
+    let mut gh_store = shared_store.lock().map_err(|e| format!("lock poisoned: {e}"))?;
+    gh_store.update(type_def, &doc_id, &[("body", body_trimmed)])
+        .map_err(|e| e.to_string())
 }
 
 fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config) {
@@ -87,6 +122,35 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
             app.tool_availability = tool_availability;
             app.diagram_cache = content::diagram::DiagramCache::new();
             app.image_states.clear();
+        }
+        AppEvent::CacheRefresh => {
+            let root = app.store.root().to_path_buf();
+            if let Ok(refreshed) = Store::load(&root, config) {
+                app.store = refreshed;
+            }
+            app.last_sync = Some(Instant::now());
+            app.filtered_docs_cache = None;
+            app.rebuild_search_index();
+            app.refresh_validation(config);
+        }
+        AppEvent::GhPushResult(result) => {
+            app.gh_push_in_flight.store(false, Ordering::Relaxed);
+            match result {
+                Ok(()) => {
+                    let root = app.store.root().to_path_buf();
+                    if let Ok(refreshed) = Store::load(&root, config) {
+                        app.store = refreshed;
+                    }
+                    app.filtered_docs_cache = None;
+                    app.rebuild_search_index();
+                    app.refresh_validation(config);
+                    app.expanded_body_cache.clear();
+                    app.disk_cache.clear();
+                }
+                Err(msg) => {
+                    app.gh_conflict_message = Some(msg);
+                }
+            }
         }
         AppEvent::CreateStarted => {}
         AppEvent::CreateProgress { message } => {
@@ -149,6 +213,39 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         let _ = probe_tx.send(AppEvent::ProbeResult { picker, protocol, tool_availability });
     });
 
+    let has_gh_types = config.documents.types.iter()
+        .any(|t| t.store == StoreBackend::GithubIssues);
+
+    let shared_gh_store: Option<Arc<Mutex<GithubIssuesStore<GhCli>>>> = if has_gh_types {
+        let gh_config = config.documents.github.as_ref();
+        let repo = gh_config.and_then(|g| g.repo.clone());
+        repo.map(|repo| {
+            let root = app.store.root();
+            Arc::new(Mutex::new(GithubIssuesStore {
+                client: GhCli::new(),
+                root: root.to_path_buf(),
+                repo,
+                config: config.clone(),
+                issue_map: IssueMap::load(root).unwrap_or_else(|_| {
+                    serde_json::from_str("{}").unwrap()
+                }),
+                issue_cache: IssueCache::new(root),
+            }))
+        })
+    } else {
+        None
+    };
+
+    let cache_ttl = config.documents.github.as_ref()
+        .map(|g| g.cache_ttl)
+        .unwrap_or(60);
+    let mut next_poll = if shared_gh_store.is_some() {
+        Some(Instant::now())
+    } else {
+        None
+    };
+    let refresh_in_flight = Arc::new(AtomicBool::new(false));
+
     let root = app.store.root().to_path_buf();
     let fs_tx = tx.clone();
     let mut _watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -175,11 +272,16 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 std::thread::sleep(Duration::from_millis(50));
                 continue;
             }
-            // Blocking read - wakes immediately on keypress
-            if let Ok(Event::Key(key)) = crossterm::event::read() {
-                perf_log::log(&format!("input_thread: read key {:?}", key.code));
-                let _ = term_tx.send(AppEvent::Terminal(key));
-                perf_log::log("input_thread: sent to channel");
+            // Poll with short timeout so we re-check paused frequently
+            match crossterm::event::poll(Duration::from_millis(50)) {
+                Ok(true) => {
+                    if let Ok(Event::Key(key)) = crossterm::event::read() {
+                        perf_log::log(&format!("input_thread: read key {:?}", key.code));
+                        let _ = term_tx.send(AppEvent::Terminal(key));
+                        perf_log::log("input_thread: sent to channel");
+                    }
+                }
+                _ => {}
             }
         }
     });
@@ -189,7 +291,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         let loop_start = Instant::now();
 
         let t = Instant::now();
-        terminal.draw(|f| views::draw(f, &mut app))?;
+        terminal.draw(|f| views::draw(f, &mut app, config))?;
         perf_log::log_duration("draw", t);
 
         let t = Instant::now();
@@ -234,6 +336,45 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             }
         }
 
+        if let (Some(deadline), Some(ref shared_store)) = (next_poll, &shared_gh_store) {
+            if Instant::now() >= deadline && !refresh_in_flight.load(Ordering::Relaxed) {
+                refresh_in_flight.store(true, Ordering::Relaxed);
+                next_poll = Some(Instant::now() + Duration::from_secs(cache_ttl));
+                let poll_tx = tx.clone();
+                let poll_root = root.clone();
+                let poll_config = config.clone();
+                let poll_flag = refresh_in_flight.clone();
+                let poll_store = Arc::clone(shared_store);
+                std::thread::spawn(move || {
+                    let gh_types: Vec<_> = poll_config.documents.types.iter()
+                        .filter(|t| t.store == StoreBackend::GithubIssues)
+                        .collect();
+                    let all_type_names: Vec<String> = poll_config.documents.types.iter()
+                        .map(|t| t.name.clone())
+                        .collect();
+                    let client = GhCli::new();
+                    let mut guard = poll_store.lock().unwrap();
+                    let store = &mut *guard;
+                    for type_def in &gh_types {
+                        if let Err(e) = store.issue_cache.fetch_all(
+                            &poll_root,
+                            type_def,
+                            &client,
+                            &store.repo,
+                            &mut store.issue_map,
+                            &all_type_names,
+                        ) {
+                            eprintln!("cache refresh failed for {}: {}", type_def.name, e);
+                        }
+                    }
+                    let _ = store.issue_map.save(&poll_root);
+                    drop(guard);
+                    poll_flag.store(false, Ordering::Relaxed);
+                    let _ = poll_tx.send(AppEvent::CacheRefresh);
+                });
+            }
+        }
+
         loop_count += 1;
         if perf_log::enabled() && loop_count % 60 == 0 {
             perf_log::log(&format!("--- loop #{} ---", loop_count));
@@ -249,6 +390,22 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             let root = app.store.root().to_path_buf();
             if let Ok(relative) = path.strip_prefix(&root) {
                 let _ = app.store.reload_file(&root, relative, &*app.fs);
+                app.expanded_body_cache.remove(relative);
+                app.disk_cache.invalidate(relative);
+                if let Some(ref shared_store) = shared_gh_store {
+                    let push_root = root.clone();
+                    let push_relative = relative.to_path_buf();
+                    let push_config = config.clone();
+                    let push_tx = tx.clone();
+                    let push_flag = app.gh_push_in_flight.clone();
+                    let push_store = Arc::clone(shared_store);
+                    push_flag.store(true, Ordering::Relaxed);
+                    std::thread::spawn(move || {
+                        let result = try_push_gh_edit(&push_root, &push_relative, &push_config, &push_store);
+                        push_flag.store(false, Ordering::Relaxed);
+                        let _ = push_tx.send(AppEvent::GhPushResult(result));
+                    });
+                }
             }
             app.refresh_validation(config);
         }
@@ -300,3 +457,5 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
 
     Ok(())
 }
+
+

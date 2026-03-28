@@ -1,13 +1,14 @@
 ---
 title: Module Layout and Organisation
 type: audit
-status: draft
+status: complete
 author: jkaloger
 date: 2026-03-24
 tags: []
 related:
 - related-to: RFC-032
 ---
+
 
 
 

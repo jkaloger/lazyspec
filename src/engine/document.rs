@@ -46,6 +46,9 @@ pub enum Status {
     Draft,
     Review,
     Accepted,
+    #[serde(rename = "in-progress")]
+    InProgress,
+    Complete,
     Rejected,
     Superseded,
 }
@@ -56,6 +59,8 @@ impl fmt::Display for Status {
             Status::Draft => write!(f, "draft"),
             Status::Review => write!(f, "review"),
             Status::Accepted => write!(f, "accepted"),
+            Status::InProgress => write!(f, "in-progress"),
+            Status::Complete => write!(f, "complete"),
             Status::Rejected => write!(f, "rejected"),
             Status::Superseded => write!(f, "superseded"),
         }
@@ -106,6 +111,8 @@ impl std::str::FromStr for Status {
             "draft" => Ok(Status::Draft),
             "review" => Ok(Status::Review),
             "accepted" => Ok(Status::Accepted),
+            "in-progress" => Ok(Status::InProgress),
+            "complete" => Ok(Status::Complete),
             "rejected" => Ok(Status::Rejected),
             "superseded" => Ok(Status::Superseded),
             _ => Err(anyhow!("unknown status: {}", s)),
@@ -193,7 +200,7 @@ pub fn split_frontmatter(content: &str) -> Result<(String, String)> {
     Ok((frontmatter, body))
 }
 
-fn parse_relation(value: &serde_yaml::Value) -> Result<Relation> {
+pub(crate) fn parse_relation(value: &serde_yaml::Value) -> Result<Relation> {
     let map = value
         .as_mapping()
         .ok_or_else(|| anyhow!("relation entry must be a mapping"))?;

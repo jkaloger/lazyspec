@@ -1,4 +1,6 @@
 /target
 .DS_Store
-
 .claude/worktrees
+.lazyspec/cache/
+.lazyspec/cache.lock
+.lazyspec/issue-map.json

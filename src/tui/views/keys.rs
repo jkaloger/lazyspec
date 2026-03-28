@@ -10,6 +10,12 @@ use crate::tui::state::{App, FilterField, PreviewTab, ViewMode};
 
 impl App {
     pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path, config: &Config) {
+        if self.gh_conflict_message.is_some() {
+            if code == KeyCode::Esc {
+                self.gh_conflict_message = None;
+            }
+            return;
+        }
         if self.show_help {
             self.show_help = false;
             return;
@@ -21,13 +27,13 @@ impl App {
             return self.handle_create_form_key(code, root, config);
         }
         if self.delete_confirm.active {
-            return self.handle_delete_confirm_key(code, root);
+            return self.handle_delete_confirm_key(code, root, config);
         }
         if self.status_picker.active {
             return self.handle_status_picker_key(code, root, config);
         }
         if self.link_editor.active {
-            return self.handle_link_editor_key(code, root);
+            return self.handle_link_editor_key(code, root, config);
         }
         #[cfg(feature = "agent")]
         if self.agent_dialog.active {
@@ -62,9 +68,9 @@ impl App {
         }
     }
 
-    fn handle_delete_confirm_key(&mut self, code: KeyCode, root: &Path) {
+    fn handle_delete_confirm_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
         match code {
-            KeyCode::Enter => { let _ = self.confirm_delete(root); }
+            KeyCode::Enter => { let _ = self.confirm_delete(root, config); }
             KeyCode::Esc => self.close_delete_confirm(),
             _ => {}
         }
@@ -73,7 +79,7 @@ impl App {
     fn handle_status_picker_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.status_picker.selected < 4 {
+                if self.status_picker.selected < 6 {
                     self.status_picker.selected += 1;
                 }
             }
@@ -90,7 +96,7 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_link_editor_key(&mut self, code: KeyCode, root: &Path) {
+    pub(crate) fn handle_link_editor_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
         match code {
             KeyCode::Esc => self.close_link_editor(),
             KeyCode::Tab => {
@@ -98,7 +104,7 @@ impl App {
             }
             KeyCode::Enter => {
                 if !self.link_editor.results.is_empty() {
-                    let _ = self.confirm_link(root);
+                    let _ = self.confirm_link(root, config);
                 }
             }
             KeyCode::Char('j') | KeyCode::Down => {

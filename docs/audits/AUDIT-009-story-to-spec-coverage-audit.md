@@ -1,12 +1,13 @@
 ---
 title: "Story-to-Spec Coverage Audit"
 type: audit
-status: draft
+status: complete
 author: "jkaloger"
 date: 2026-03-25
 tags: [coverage, specs, stories]
 related: []
 ---
+
 
 ## Scope
 

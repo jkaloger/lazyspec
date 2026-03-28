@@ -1,12 +1,13 @@
 ---
 title: TUI input lag audit
 type: audit
-status: draft
+status: complete
 author: jkaloger
 date: 2026-03-16
 tags: []
 related: []
 ---
+
 
 
 
