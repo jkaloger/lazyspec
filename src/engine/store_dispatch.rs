@@ -1,8 +1,9 @@
-use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use chrono::Local;
+use serde::Serialize;
 
 use crate::engine::config::{Config, StoreBackend, TypeDef};
 use crate::engine::document::{DocMeta, DocType, Status};
@@ -13,6 +14,18 @@ use crate::engine::issue_map::IssueMap;
 use crate::engine::store::{self, Store};
 use crate::engine::template;
 
+#[derive(Serialize)]
+struct CacheFrontmatter {
+    title: String,
+    #[serde(rename = "type")]
+    doc_type: String,
+    status: String,
+    author: String,
+    date: String,
+    tags: Vec<String>,
+    related: Vec<BTreeMap<String, String>>,
+}
+
 #[derive(Debug)]
 pub struct CreatedDoc {
     pub path: PathBuf,
@@ -21,7 +34,7 @@ pub struct CreatedDoc {
 
 pub trait DocumentStore {
     fn create(
-        &self,
+        &mut self,
         type_def: &TypeDef,
         title: &str,
         author: &str,
@@ -29,14 +42,14 @@ pub trait DocumentStore {
     ) -> Result<CreatedDoc>;
 
     fn update(
-        &self,
+        &mut self,
         type_def: &TypeDef,
         doc_id: &str,
         updates: &[(&str, &str)],
     ) -> Result<()>;
 
     fn delete(
-        &self,
+        &mut self,
         type_def: &TypeDef,
         doc_id: &str,
     ) -> Result<()>;
@@ -49,18 +62,22 @@ pub struct FilesystemStore {
 
 impl DocumentStore for FilesystemStore {
     fn create(
-        &self,
+        &mut self,
         type_def: &TypeDef,
         title: &str,
         author: &str,
         _body: &str,
     ) -> Result<CreatedDoc> {
-        let path = crate::cli::create::run(
+        let path = crate::engine::fs_ops::create_document(
             &self.root,
             &self.config,
             &type_def.name,
+            &type_def.dir,
+            &type_def.prefix,
             title,
             author,
+            &type_def.numbering,
+            type_def.subdirectory,
             |_| {},
         )?;
 
@@ -79,22 +96,22 @@ impl DocumentStore for FilesystemStore {
     }
 
     fn update(
-        &self,
+        &mut self,
         _type_def: &TypeDef,
         doc_id: &str,
         updates: &[(&str, &str)],
     ) -> Result<()> {
         let store = Store::load(&self.root, &self.config)?;
-        crate::cli::update::run(&self.root, &store, doc_id, updates)
+        crate::engine::fs_ops::update_document(&self.root, &store, doc_id, updates)
     }
 
     fn delete(
-        &self,
+        &mut self,
         _type_def: &TypeDef,
         doc_id: &str,
     ) -> Result<()> {
         let store = Store::load(&self.root, &self.config)?;
-        crate::cli::delete::run(&self.root, &store, doc_id)
+        crate::engine::fs_ops::delete_document(&self.root, &store, doc_id)
     }
 }
 
@@ -103,13 +120,13 @@ pub struct GithubIssuesStore<G: GhIssueReader + GhIssueWriter> {
     pub root: PathBuf,
     pub repo: String,
     pub config: Config,
-    pub issue_map: RefCell<IssueMap>,
+    pub issue_map: IssueMap,
     pub issue_cache: IssueCache,
 }
 
 impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
     fn create(
-        &self,
+        &mut self,
         type_def: &TypeDef,
         title: &str,
         author: &str,
@@ -158,20 +175,11 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
         let label = gh::type_label(&type_def.name);
         let issue = self.client.issue_create(&self.repo, title, &issue_body, &[label])?;
 
-        let mut map = self.issue_map.borrow_mut();
-        map.insert(&id, issue.number, &issue.updated_at);
-        map.save(&self.root)?;
-        drop(map);
+        self.issue_map.insert(&id, issue.number, &issue.updated_at);
+        self.issue_map.save(&self.root)?;
 
-        let cache_content = format!(
-            "---\ntitle: \"{}\"\ntype: {}\nstatus: draft\nauthor: \"{}\"\ndate: {}\ntags: []\nrelated: []\n---\n{}",
-            title,
-            type_def.name,
-            author,
-            date,
-            if body.is_empty() { String::new() } else { format!("\n{}\n", body) },
-        );
-        self.issue_cache.write(&id, &type_def.name, &cache_content);
+        write_cache_file(&self.root, type_def, &doc_meta, body)?;
+        self.issue_cache.touch_lock(&id);
 
         let cache_path = self.root.join(".lazyspec/cache").join(&type_def.name).join(format!("{}.md", id));
         let relative = cache_path.strip_prefix(&self.root).unwrap_or(&cache_path).to_path_buf();
@@ -179,17 +187,15 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
     }
 
     fn update(
-        &self,
+        &mut self,
         type_def: &TypeDef,
         doc_id: &str,
         updates: &[(&str, &str)],
     ) -> Result<()> {
-        let (issue_number, local_updated_at) = {
-            let map = self.issue_map.borrow();
-            let entry = map.get(doc_id)
-                .ok_or_else(|| anyhow::anyhow!("{} not found in issue map", doc_id))?;
-            (entry.issue_number, entry.updated_at.clone())
-        };
+        let entry = self.issue_map.get(doc_id)
+            .ok_or_else(|| anyhow::anyhow!("{} not found in issue map", doc_id))?;
+        let issue_number = entry.issue_number;
+        let local_updated_at = entry.updated_at.clone();
 
         let remote_issue = self.client.issue_view(&self.repo, issue_number)?;
 
@@ -209,6 +215,7 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
             title: remote_issue.title.clone(),
             labels: remote_issue.labels.iter().map(|l| l.name.clone()).collect(),
             is_open: remote_issue.state == "OPEN",
+            known_types: self.config.documents.types.iter().map(|t| t.name.clone()).collect(),
         };
         let (mut meta, mut body) = issue_body::deserialize(&remote_issue.body, &ctx)?;
 
@@ -251,42 +258,25 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
         }
 
         let refreshed = self.client.issue_view(&self.repo, issue_number)?;
-        let mut map = self.issue_map.borrow_mut();
-        map.insert(doc_id, issue_number, &refreshed.updated_at);
-        map.save(&self.root)?;
-        drop(map);
+        self.issue_map.insert(doc_id, issue_number, &refreshed.updated_at);
+        self.issue_map.save(&self.root)?;
 
-        let cache_content = format!(
-            "---\ntitle: \"{}\"\ntype: {}\nstatus: {}\nauthor: \"{}\"\ndate: {}\ntags: {}\nrelated: {}\n---\n{}",
-            meta.title,
-            meta.doc_type.as_str(),
-            meta.status,
-            meta.author,
-            meta.date,
-            if meta.tags.is_empty() { "[]".to_string() } else {
-                format!("[{}]", meta.tags.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(", "))
-            },
-            if meta.related.is_empty() { "[]".to_string() } else {
-                meta.related.iter().map(|r| format!("\n- {}: {}", r.rel_type, r.target)).collect::<Vec<String>>().join("")
-            },
-            if body.is_empty() { String::new() } else { format!("\n{}\n", body) },
-        );
-        self.issue_cache.write(doc_id, &type_def.name, &cache_content);
+        let meta = DocMeta { id: doc_id.to_string(), ..meta };
+        write_cache_file(&self.root, type_def, &meta, &body)?;
+        self.issue_cache.touch_lock(doc_id);
 
         Ok(())
     }
 
     fn delete(
-        &self,
+        &mut self,
         type_def: &TypeDef,
         doc_id: &str,
     ) -> Result<()> {
-        let (issue_number, local_updated_at) = {
-            let map = self.issue_map.borrow();
-            let entry = map.get(doc_id)
-                .ok_or_else(|| anyhow::anyhow!("{} not found in issue map", doc_id))?;
-            (entry.issue_number, entry.updated_at.clone())
-        };
+        let entry = self.issue_map.get(doc_id)
+            .ok_or_else(|| anyhow::anyhow!("{} not found in issue map", doc_id))?;
+        let issue_number = entry.issue_number;
+        let local_updated_at = entry.updated_at.clone();
 
         let remote_issue = self.client.issue_view(&self.repo, issue_number)?;
 
@@ -315,10 +305,8 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
 
         self.client.issue_close(&self.repo, issue_number)?;
 
-        let mut map = self.issue_map.borrow_mut();
-        map.remove(doc_id);
-        map.save(&self.root)?;
-        drop(map);
+        self.issue_map.remove(doc_id);
+        self.issue_map.save(&self.root)?;
 
         self.issue_cache.remove(doc_id, &type_def.name);
 
@@ -337,32 +325,23 @@ pub fn write_cache_file(
     let cache_path = find_cache_file(&cache_dir, &meta.id)
         .unwrap_or_else(|| cache_dir.join(format!("{}.md", meta.id)));
 
-    let tags_str = if meta.tags.is_empty() {
-        "[]".to_string()
-    } else {
-        format!("[{}]", meta.tags.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(", "))
+    let frontmatter = CacheFrontmatter {
+        title: meta.title.clone(),
+        doc_type: meta.doc_type.as_str().to_string(),
+        status: meta.status.to_string(),
+        author: meta.author.clone(),
+        date: meta.date.to_string(),
+        tags: meta.tags.clone(),
+        related: meta.related.iter().map(|r| {
+            let mut m = BTreeMap::new();
+            m.insert(r.rel_type.to_string(), r.target.clone());
+            m
+        }).collect(),
     };
 
-    let related_str = if meta.related.is_empty() {
-        "[]".to_string()
-    } else {
-        let lines: Vec<String> = meta.related.iter().map(|r| {
-            format!("\n- {}: {}", r.rel_type, r.target)
-        }).collect();
-        lines.join("")
-    };
-
-    let cache_content = format!(
-        "---\ntitle: \"{}\"\ntype: {}\nstatus: {}\nauthor: \"{}\"\ndate: {}\ntags: {}\nrelated: {}\n---\n{}",
-        meta.title,
-        meta.doc_type.as_str(),
-        meta.status,
-        meta.author,
-        meta.date,
-        tags_str,
-        related_str,
-        if body.is_empty() { String::new() } else { format!("\n{}\n", body) },
-    );
+    let yaml = serde_yaml::to_string(&frontmatter)?;
+    let body_section = if body.is_empty() { String::new() } else { format!("\n{}\n", body) };
+    let cache_content = format!("---\n{}---\n{}", yaml, body_section);
     std::fs::write(&cache_path, &cache_content)?;
     Ok(())
 }
@@ -383,16 +362,16 @@ fn find_cache_file(cache_dir: &std::path::Path, doc_id: &str) -> Option<PathBuf>
 
 pub fn dispatch_for_type<'a, G: GhIssueReader + GhIssueWriter>(
     type_def: &TypeDef,
-    fs_store: &'a FilesystemStore,
-    gh_store: Option<&'a GithubIssuesStore<G>>,
-) -> Result<&'a dyn DocumentStore> {
+    fs_store: &'a mut FilesystemStore,
+    gh_store: Option<&'a mut GithubIssuesStore<G>>,
+) -> Result<&'a mut dyn DocumentStore> {
     match type_def.store {
-        StoreBackend::Filesystem => Ok(fs_store as &dyn DocumentStore),
+        StoreBackend::Filesystem => Ok(fs_store as &mut dyn DocumentStore),
         StoreBackend::GithubIssues => match gh_store {
-            Some(s) => Ok(s as &dyn DocumentStore),
+            Some(s) => Ok(s as &mut dyn DocumentStore),
             None => bail!(
-                "type '{}' uses github-issues store but no GitHub backend is configured",
-                type_def.name
+                "type '{}' uses {} store but no GitHub backend is configured",
+                type_def.name, type_def.store
             ),
         },
     }
@@ -404,9 +383,8 @@ mod tests {
     use crate::engine::config::{
         Config, NumberingStrategy, StoreBackend, TypeDef,
     };
-    use crate::engine::gh::{GhIssueReader, GhIssueWriter, GhIssue, GhLabel};
+    use crate::engine::gh::{GhIssue, GhLabel, test_support::MockGhClient};
     use crate::engine::issue_map::IssueMap;
-    use std::path::PathBuf;
 
     fn test_type_def(store: StoreBackend) -> TypeDef {
         TypeDef {
@@ -418,133 +396,6 @@ mod tests {
             numbering: NumberingStrategy::Incremental,
             subdirectory: false,
             store,
-        }
-    }
-
-    use std::cell::Cell;
-
-    struct MockGhClient {
-        view_issue: RefCell<Option<GhIssue>>,
-        closed: Cell<bool>,
-        reopened: Cell<bool>,
-        last_edit_title: RefCell<Option<String>>,
-        last_edit_body: RefCell<Option<String>>,
-        last_edit_labels_remove: RefCell<Vec<String>>,
-    }
-
-    impl MockGhClient {
-        fn new() -> Self {
-            Self {
-                view_issue: RefCell::new(None),
-                closed: Cell::new(false),
-                reopened: Cell::new(false),
-                last_edit_title: RefCell::new(None),
-                last_edit_body: RefCell::new(None),
-                last_edit_labels_remove: RefCell::new(vec![]),
-            }
-        }
-
-        fn with_view_issue(mut self, issue: GhIssue) -> Self {
-            self.view_issue = RefCell::new(Some(issue));
-            self
-        }
-    }
-
-    impl GhIssueReader for MockGhClient {
-        fn issue_list(
-            &self,
-            _repo: &str,
-            _labels: &[String],
-            _json_fields: &[String],
-            _limit: Option<u64>,
-        ) -> Result<Vec<GhIssue>> {
-            Ok(vec![])
-        }
-
-        fn issue_view(&self, _repo: &str, number: u64) -> Result<GhIssue> {
-            if let Some(issue) = self.view_issue.borrow().as_ref() {
-                return Ok(issue.clone());
-            }
-            Ok(GhIssue {
-                number,
-                url: String::new(),
-                title: String::new(),
-                body: String::new(),
-                labels: vec![],
-                state: "OPEN".to_string(),
-                updated_at: String::new(),
-            })
-        }
-    }
-
-    impl GhIssueWriter for MockGhClient {
-        fn issue_create(
-            &self,
-            _repo: &str,
-            title: &str,
-            body: &str,
-            labels: &[String],
-        ) -> Result<GhIssue> {
-            Ok(GhIssue {
-                number: 1,
-                url: "https://github.com/test/repo/issues/1".to_string(),
-                title: title.to_string(),
-                body: body.to_string(),
-                labels: labels
-                    .iter()
-                    .map(|l| GhLabel {
-                        name: l.clone(),
-                        color: String::new(),
-                    })
-                    .collect(),
-                state: "OPEN".to_string(),
-                updated_at: "2026-03-27T00:00:00Z".to_string(),
-            })
-        }
-
-        fn issue_edit(
-            &self,
-            _repo: &str,
-            _number: u64,
-            title: Option<&str>,
-            body: Option<&str>,
-            _labels_add: &[String],
-            labels_remove: &[String],
-        ) -> Result<()> {
-            *self.last_edit_title.borrow_mut() = title.map(|s| s.to_string());
-            *self.last_edit_body.borrow_mut() = body.map(|s| s.to_string());
-            *self.last_edit_labels_remove.borrow_mut() = labels_remove.to_vec();
-            Ok(())
-        }
-
-        fn issue_close(&self, _repo: &str, _number: u64) -> Result<()> {
-            self.closed.set(true);
-            Ok(())
-        }
-
-        fn issue_reopen(&self, _repo: &str, _number: u64) -> Result<()> {
-            self.reopened.set(true);
-            Ok(())
-        }
-
-        fn label_create(
-            &self,
-            _repo: &str,
-            _name: &str,
-            _description: &str,
-            _color: &str,
-        ) -> Result<()> {
-            Ok(())
-        }
-
-        fn label_ensure(
-            &self,
-            _repo: &str,
-            _name: &str,
-            _description: &str,
-            _color: &str,
-        ) -> Result<()> {
-            Ok(())
         }
     }
 
@@ -564,7 +415,7 @@ mod tests {
         let root = tmp_root("fs_create");
         let config = Config::default();
 
-        let fs_store = FilesystemStore {
+        let mut fs_store = FilesystemStore {
             root: root.clone(),
             config: config.clone(),
         };
@@ -582,7 +433,7 @@ mod tests {
         let root = tmp_root("fs_create_delete");
         let config = Config::default();
 
-        let fs_store = FilesystemStore {
+        let mut fs_store = FilesystemStore {
             root: root.clone(),
             config: config.clone(),
         };
@@ -600,7 +451,7 @@ mod tests {
         let root = tmp_root("fs_create_update");
         let config = Config::default();
 
-        let fs_store = FilesystemStore {
+        let mut fs_store = FilesystemStore {
             root: root.clone(),
             config: config.clone(),
         };
@@ -619,12 +470,12 @@ mod tests {
     #[test]
     fn github_issues_create_produces_cache_file() {
         let root = tmp_root("gh_create");
-        let gh_store = GithubIssuesStore {
+        let mut gh_store = GithubIssuesStore {
             client: MockGhClient::new(),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
-            issue_map: RefCell::new(IssueMap::load(&root).unwrap()),
+            issue_map: IssueMap::load(&root).unwrap(),
             issue_cache: IssueCache::new(&root),
         };
 
@@ -636,30 +487,31 @@ mod tests {
         assert!(root.join(&result.path).exists());
 
         let content = std::fs::read_to_string(root.join(&result.path)).unwrap();
-        assert!(content.contains("title: \"my title\""));
-        assert!(content.contains("type: rfc"));
-        assert!(content.contains("status: draft"));
-        assert!(content.contains("author: \"author\""));
+        let (yaml, _) = crate::engine::document::split_frontmatter(&content).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("valid YAML frontmatter");
+        assert_eq!(parsed["title"].as_str().unwrap(), "my title");
+        assert_eq!(parsed["type"].as_str().unwrap(), "rfc");
+        assert_eq!(parsed["status"].as_str().unwrap(), "draft");
+        assert_eq!(parsed["author"].as_str().unwrap(), "author");
         assert!(content.contains("body text"));
     }
 
     #[test]
     fn github_issues_create_updates_issue_map() {
         let root = tmp_root("gh_create_map");
-        let gh_store = GithubIssuesStore {
+        let mut gh_store = GithubIssuesStore {
             client: MockGhClient::new(),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
-            issue_map: RefCell::new(IssueMap::load(&root).unwrap()),
+            issue_map: IssueMap::load(&root).unwrap(),
             issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
         gh_store.create(&td, "mapped", "author", "").unwrap();
 
-        let map = gh_store.issue_map.borrow();
-        let entry = map.get("RFC-001").expect("issue map entry should exist");
+        let entry = gh_store.issue_map.get("RFC-001").expect("issue map entry should exist");
         assert_eq!(entry.issue_number, 1);
         assert_eq!(entry.updated_at, "2026-03-27T00:00:00Z");
     }
@@ -667,12 +519,12 @@ mod tests {
     #[test]
     fn github_issues_create_persists_issue_map() {
         let root = tmp_root("gh_create_persist");
-        let gh_store = GithubIssuesStore {
+        let mut gh_store = GithubIssuesStore {
             client: MockGhClient::new(),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
-            issue_map: RefCell::new(IssueMap::load(&root).unwrap()),
+            issue_map: IssueMap::load(&root).unwrap(),
             issue_cache: IssueCache::new(&root),
         };
 
@@ -686,12 +538,12 @@ mod tests {
     #[test]
     fn github_issues_create_increments_id() {
         let root = tmp_root("gh_create_incr");
-        let gh_store = GithubIssuesStore {
+        let mut gh_store = GithubIssuesStore {
             client: MockGhClient::new(),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
-            issue_map: RefCell::new(IssueMap::load(&root).unwrap()),
+            issue_map: IssueMap::load(&root).unwrap(),
             issue_cache: IssueCache::new(&root),
         };
 
@@ -737,12 +589,12 @@ mod tests {
         let mut map = IssueMap::load(&root).unwrap();
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
 
-        let gh_store = GithubIssuesStore {
+        let mut gh_store = GithubIssuesStore {
             client,
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
-            issue_map: RefCell::new(map),
+            issue_map: map,
             issue_cache: IssueCache::new(&root),
         };
 
@@ -770,12 +622,12 @@ mod tests {
         let mut map = IssueMap::load(&root).unwrap();
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
 
-        let gh_store = GithubIssuesStore {
+        let mut gh_store = GithubIssuesStore {
             client,
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
-            issue_map: RefCell::new(map),
+            issue_map: map,
             issue_cache: IssueCache::new(&root),
         };
 
@@ -808,12 +660,12 @@ mod tests {
         let mut map = IssueMap::load(&root).unwrap();
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
 
-        let gh_store = GithubIssuesStore {
+        let mut gh_store = GithubIssuesStore {
             client,
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
-            issue_map: RefCell::new(map),
+            issue_map: map,
             issue_cache: IssueCache::new(&root),
         };
 
@@ -843,12 +695,12 @@ mod tests {
         let mut map = IssueMap::load(&root).unwrap();
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
 
-        let gh_store = GithubIssuesStore {
+        let mut gh_store = GithubIssuesStore {
             client,
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
-            issue_map: RefCell::new(map),
+            issue_map: map,
             issue_cache: IssueCache::new(&root),
         };
 
@@ -863,12 +715,12 @@ mod tests {
     #[test]
     fn github_issues_update_not_in_map() {
         let root = tmp_root("gh_update_nomap");
-        let gh_store = GithubIssuesStore {
+        let mut gh_store = GithubIssuesStore {
             client: MockGhClient::new(),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
-            issue_map: RefCell::new(IssueMap::load(&root).unwrap()),
+            issue_map: IssueMap::load(&root).unwrap(),
             issue_cache: IssueCache::new(&root),
         };
 
@@ -897,12 +749,12 @@ mod tests {
         let mut map = IssueMap::load(&root).unwrap();
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
 
-        let gh_store = GithubIssuesStore {
+        let mut gh_store = GithubIssuesStore {
             client,
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
-            issue_map: RefCell::new(map),
+            issue_map: map,
             issue_cache: IssueCache::new(&root),
         };
 
@@ -914,7 +766,7 @@ mod tests {
         assert_eq!(title.as_deref(), Some("[DELETED] My RFC"));
         let labels_remove = gh_store.client.last_edit_labels_remove.borrow();
         assert_eq!(*labels_remove, vec!["lazyspec:rfc".to_string()]);
-        assert!(gh_store.issue_map.borrow().get("RFC-001").is_none());
+        assert!(gh_store.issue_map.get("RFC-001").is_none());
     }
 
     #[test]
@@ -934,12 +786,12 @@ mod tests {
         let mut map = IssueMap::load(&root).unwrap();
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
 
-        let gh_store = GithubIssuesStore {
+        let mut gh_store = GithubIssuesStore {
             client,
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
-            issue_map: RefCell::new(map),
+            issue_map: map,
             issue_cache: IssueCache::new(&root),
         };
 
@@ -953,12 +805,12 @@ mod tests {
     #[test]
     fn github_issues_delete_not_in_map() {
         let root = tmp_root("gh_delete_nomap");
-        let gh_store = GithubIssuesStore {
+        let mut gh_store = GithubIssuesStore {
             client: MockGhClient::new(),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
-            issue_map: RefCell::new(IssueMap::load(&root).unwrap()),
+            issue_map: IssueMap::load(&root).unwrap(),
             issue_cache: IssueCache::new(&root),
         };
 
@@ -990,12 +842,12 @@ mod tests {
         std::fs::write(&cache_file, "cached content").unwrap();
         assert!(cache_file.exists());
 
-        let gh_store = GithubIssuesStore {
+        let mut gh_store = GithubIssuesStore {
             client,
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
-            issue_map: RefCell::new(map),
+            issue_map: map,
             issue_cache: IssueCache::new(&root),
         };
 
@@ -1009,13 +861,13 @@ mod tests {
         let root = tmp_root("dispatch_fs");
         let config = Config::default();
 
-        let fs_store = FilesystemStore {
+        let mut fs_store = FilesystemStore {
             root: root.clone(),
             config,
         };
 
         let td = test_type_def(StoreBackend::Filesystem);
-        let store = dispatch_for_type::<MockGhClient>(&td, &fs_store, None).unwrap();
+        let store = dispatch_for_type::<MockGhClient>(&td, &mut fs_store, None).unwrap();
 
         // Should succeed (routed to filesystem)
         let result = store.create(&td, "dispatched", "author", "");
@@ -1027,22 +879,22 @@ mod tests {
         let root = tmp_root("dispatch_gh");
         let config = Config::default();
 
-        let fs_store = FilesystemStore {
+        let mut fs_store = FilesystemStore {
             root: root.clone(),
             config,
         };
 
-        let gh_store = GithubIssuesStore {
+        let mut gh_store = GithubIssuesStore {
             client: MockGhClient::new(),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
-            issue_map: RefCell::new(IssueMap::load(&root).unwrap()),
+            issue_map: IssueMap::load(&root).unwrap(),
             issue_cache: IssueCache::new(&root),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
-        let store = dispatch_for_type(&td, &fs_store, Some(&gh_store)).unwrap();
+        let store = dispatch_for_type(&td, &mut fs_store, Some(&mut gh_store)).unwrap();
 
         let result = store.create(&td, "dispatched", "author", "");
         assert!(result.is_ok());
@@ -1066,12 +918,12 @@ mod tests {
         let mut map = IssueMap::load(&root).unwrap();
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
 
-        let gh_store = GithubIssuesStore {
+        let mut gh_store = GithubIssuesStore {
             client,
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
-            issue_map: RefCell::new(map),
+            issue_map: map,
             issue_cache: IssueCache::new(&root),
         };
 
@@ -1104,12 +956,12 @@ mod tests {
         let mut map = IssueMap::load(&root).unwrap();
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
 
-        let gh_store = GithubIssuesStore {
+        let mut gh_store = GithubIssuesStore {
             client,
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
-            issue_map: RefCell::new(map),
+            issue_map: map,
             issue_cache: IssueCache::new(&root),
         };
 
@@ -1142,12 +994,12 @@ mod tests {
         let mut map = IssueMap::load(&root).unwrap();
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
 
-        let gh_store = GithubIssuesStore {
+        let mut gh_store = GithubIssuesStore {
             client,
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
-            issue_map: RefCell::new(map),
+            issue_map: map,
             issue_cache: IssueCache::new(&root),
         };
 
@@ -1164,7 +1016,7 @@ mod tests {
         let root = tmp_root("fs_update_body");
         let config = Config::default();
 
-        let fs_store = FilesystemStore {
+        let mut fs_store = FilesystemStore {
             root: root.clone(),
             config: config.clone(),
         };
@@ -1184,14 +1036,63 @@ mod tests {
         let root = tmp_root("dispatch_no_gh");
         let config = Config::default();
 
-        let fs_store = FilesystemStore {
+        let mut fs_store = FilesystemStore {
             root: root.clone(),
             config,
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
-        let result = dispatch_for_type::<MockGhClient>(&td, &fs_store, None);
+        let result = dispatch_for_type::<MockGhClient>(&td, &mut fs_store, None);
         assert!(result.is_err());
         assert!(result.err().unwrap().to_string().contains("no GitHub backend"));
+    }
+
+    #[test]
+    fn write_cache_file_escapes_special_characters() {
+        use crate::engine::document::{Relation, RelationType};
+        use chrono::NaiveDate;
+
+        let root = tmp_root("cache_special_chars");
+        let td = test_type_def(StoreBackend::GithubIssues);
+
+        let meta = DocMeta {
+            path: PathBuf::new(),
+            title: "Title with \"quotes\" and: colons".to_string(),
+            doc_type: DocType::new("rfc"),
+            status: Status::Draft,
+            author: "O'Brien".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 3, 28).unwrap(),
+            tags: vec!["tag:with:colons".to_string(), "tag \"quoted\"".to_string()],
+            related: vec![Relation {
+                rel_type: RelationType::Implements,
+                target: "STORY: special & \"fun\"".to_string(),
+            }],
+            validate_ignore: false,
+            virtual_doc: false,
+            id: "RFC-099".to_string(),
+        };
+
+        write_cache_file(&root, &td, &meta, "body").unwrap();
+
+        let cache_dir = root.join(".lazyspec/cache/rfc");
+        let cache_path = cache_dir.join("RFC-099.md");
+        let content = std::fs::read_to_string(&cache_path).unwrap();
+
+        // Verify the file is valid YAML by round-tripping through serde_yaml
+        let (yaml, _body) = crate::engine::document::split_frontmatter(&content).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml)
+            .expect("frontmatter should be valid YAML");
+
+        assert_eq!(
+            parsed["title"].as_str().unwrap(),
+            "Title with \"quotes\" and: colons"
+        );
+        assert_eq!(parsed["author"].as_str().unwrap(), "O'Brien");
+        assert_eq!(parsed["tags"][0].as_str().unwrap(), "tag:with:colons");
+        assert_eq!(parsed["tags"][1].as_str().unwrap(), "tag \"quoted\"");
+        assert_eq!(
+            parsed["related"][0]["implements"].as_str().unwrap(),
+            "STORY: special & \"fun\""
+        );
     }
 }

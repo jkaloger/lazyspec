@@ -43,6 +43,7 @@ pub enum AppEvent {
     CreateProgress { message: String },
     CreateComplete { result: Result<CreateResult, String> },
     CacheRefresh,
+    GhPushResult(Result<(), String>),
     #[cfg(feature = "agent")]
     AgentFinished,
 }
@@ -242,6 +243,7 @@ pub struct App {
     pub search_index: Vec<SearchEntry>,
     pub git_status_cache: GitStatusCache,
     pub gh_conflict_message: Option<String>,
+    pub gh_push_in_flight: Arc<AtomicBool>,
     pub last_sync: Option<Instant>,
 }
 
@@ -326,6 +328,7 @@ impl App {
             search_index: Vec::new(),
             git_status_cache,
             gh_conflict_message: None,
+            gh_push_in_flight: Arc::new(AtomicBool::new(false)),
             last_sync: if has_github_issues { Some(Instant::now()) } else { None },
         };
         app.rebuild_search_index();
@@ -1388,6 +1391,7 @@ mod tests {
             search_index: Vec::new(),
             git_status_cache: GitStatusCache::new(Path::new(".")),
             gh_conflict_message: None,
+            gh_push_in_flight: Arc::new(AtomicBool::new(false)),
             last_sync: None,
         };
         app

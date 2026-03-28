@@ -1,5 +1,5 @@
 use crate::cli::style::{error_prefix, warning_prefix};
-use crate::engine::config::{Config, StoreBackend};
+use crate::engine::config::Config;
 use crate::engine::gh::{AuthStatus, GhAuth, GhCli};
 use crate::engine::store::Store;
 use console::{colors_enabled, Style};
@@ -13,14 +13,6 @@ fn success_message() -> String {
     } else {
         "All documents valid.".to_string()
     }
-}
-
-fn has_github_issues_types(config: &Config) -> bool {
-    config
-        .documents
-        .types
-        .iter()
-        .any(|t| t.store == StoreBackend::GithubIssues)
 }
 
 pub fn gh_auth_warnings(gh: &dyn GhAuth) -> Vec<String> {
@@ -44,7 +36,7 @@ pub fn gh_auth_warnings(gh: &dyn GhAuth) -> Vec<String> {
 pub fn run_full(store: &Store, config: &Config, json: bool, warnings: bool) -> i32 {
     let result = store.validate_full(config);
 
-    let gh_warnings = if has_github_issues_types(config) {
+    let gh_warnings = if config.documents.has_github_issues_types() {
         let gh = GhCli::new();
         gh_auth_warnings(&gh)
     } else {
@@ -107,36 +99,11 @@ pub fn run_human(store: &Store, config: &Config, show_warnings: bool, extra_warn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::{NumberingStrategy, TypeDef};
-    use crate::engine::gh::{AuthStatus, GhAuth};
-    use anyhow::Result;
-
-    fn make_type(name: &str, store: StoreBackend) -> TypeDef {
-        TypeDef {
-            name: name.to_string(),
-            plural: format!("{}s", name),
-            dir: format!("docs/{}", name),
-            prefix: name.to_uppercase(),
-            icon: None,
-            numbering: NumberingStrategy::default(),
-            subdirectory: false,
-            store,
-        }
-    }
-
-    struct MockGh {
-        auth: AuthStatus,
-    }
-
-    impl GhAuth for MockGh {
-        fn auth_status(&self) -> Result<AuthStatus> {
-            Ok(self.auth.clone())
-        }
-    }
+    use crate::engine::gh::{AuthStatus, test_support::MockGhClient};
 
     #[test]
     fn gh_auth_warnings_when_not_installed() {
-        let gh = MockGh { auth: AuthStatus::GhNotInstalled };
+        let gh = MockGhClient::new().with_auth(AuthStatus::GhNotInstalled);
         let warnings = gh_auth_warnings(&gh);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("not installed"));
@@ -144,9 +111,8 @@ mod tests {
 
     #[test]
     fn gh_auth_warnings_when_not_authenticated() {
-        let gh = MockGh {
-            auth: AuthStatus::NotAuthenticated("token expired".to_string()),
-        };
+        let gh = MockGhClient::new()
+            .with_auth(AuthStatus::NotAuthenticated("token expired".to_string()));
         let warnings = gh_auth_warnings(&gh);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("not authenticated"));
@@ -155,34 +121,9 @@ mod tests {
 
     #[test]
     fn gh_auth_warnings_when_authenticated() {
-        let gh = MockGh {
-            auth: AuthStatus::Authenticated {
-                user: "testuser".to_string(),
-                host: "github.com".to_string(),
-            },
-        };
+        let gh = MockGhClient::new();
         let warnings = gh_auth_warnings(&gh);
         assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn has_github_issues_types_true() {
-        let mut config = Config::default();
-        config.documents.types = vec![make_type("story", StoreBackend::GithubIssues)];
-        assert!(has_github_issues_types(&config));
-    }
-
-    #[test]
-    fn has_github_issues_types_false_for_filesystem_only() {
-        let mut config = Config::default();
-        config.documents.types = vec![make_type("rfc", StoreBackend::Filesystem)];
-        assert!(!has_github_issues_types(&config));
-    }
-
-    #[test]
-    fn has_github_issues_types_false_when_empty() {
-        let config = Config::default();
-        assert!(!has_github_issues_types(&config));
     }
 
     #[test]

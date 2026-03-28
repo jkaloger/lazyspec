@@ -67,6 +67,25 @@ pub fn infer_github_repo(project_root: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::config::GithubConfig;
+
+    #[test]
+    fn resolve_repo_prefers_config() {
+        let mut config = Config::default();
+        config.documents.github = Some(GithubConfig {
+            repo: Some("configured/repo".to_string()),
+            cache_ttl: 60,
+        });
+        let repo = resolve_repo(&config, Path::new("/nonexistent")).unwrap();
+        assert_eq!(repo, "configured/repo");
+    }
+
+    #[test]
+    fn resolve_repo_fails_without_config_or_git() {
+        let config = Config::default();
+        let result = resolve_repo(&config, Path::new("/nonexistent"));
+        assert!(result.is_err());
+    }
 
     #[test]
     fn ssh_url() {

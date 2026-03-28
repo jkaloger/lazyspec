@@ -1,4 +1,4 @@
-use crate::cli::resolve::{resolve_shorthand_or_path, resolve_to_path};
+use crate::cli::resolve::resolve_shorthand_or_path;
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::gh::GhCli;
 use crate::engine::issue_cache::IssueCache;
@@ -6,8 +6,6 @@ use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
 use anyhow::{anyhow, Result};
-use std::cell::RefCell;
-use std::fs;
 use std::path::Path;
 
 pub fn run(root: &Path, store: &Store, doc_path: &str) -> Result<()> {
@@ -29,12 +27,12 @@ pub fn run_with_config(
                     .ok_or_else(|| anyhow!("type '{}' uses github-issues store but no [github] config found", type_name))?;
                 let repo = gh_config.repo.as_ref()
                     .ok_or_else(|| anyhow!("type '{}' uses github-issues store but no github.repo configured", type_name))?;
-                let gh_store = GithubIssuesStore {
+                let mut gh_store = GithubIssuesStore {
                     client: GhCli::new(),
                     root: root.to_path_buf(),
                     repo: repo.clone(),
                     config: config.clone(),
-                    issue_map: RefCell::new(IssueMap::load(root)?),
+                    issue_map: IssueMap::load(root)?,
                     issue_cache: IssueCache::new(root),
                 };
                 return gh_store.delete(type_def, &doc.id);
@@ -42,11 +40,5 @@ pub fn run_with_config(
         }
     }
 
-    let resolved = resolve_to_path(store, doc_path)?;
-    let full_path = root.join(&resolved);
-    if !full_path.exists() {
-        return Err(anyhow!("file not found: {}", resolved.display()));
-    }
-    fs::remove_file(&full_path)?;
-    Ok(())
+    crate::engine::fs_ops::delete_document(root, store, doc_path)
 }

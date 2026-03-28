@@ -19,33 +19,12 @@ use crossterm::{
 };
 use notify::{RecursiveMode, Watcher, EventKind};
 use ratatui::{backend::CrosstermBackend, Terminal};
-use std::cell::RefCell;
 use std::io;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-fn extract_doc_id_from_title(title: &str, type_name: &str) -> Option<String> {
-    let prefix = type_name.to_uppercase();
-    let tag = format!("{}-", prefix);
-    if let Some(rest) = title.strip_prefix(&tag) {
-        let id_part: String = rest.chars().take_while(|c| c.is_alphanumeric()).collect();
-        if !id_part.is_empty() {
-            return Some(format!("{}-{}", prefix, id_part));
-        }
-    }
-    for word in title.split_whitespace() {
-        if let Some(rest) = word.strip_prefix(&tag) {
-            let id_part: String = rest.chars().take_while(|c| c.is_alphanumeric()).collect();
-            if !id_part.is_empty() {
-                return Some(format!("{}-{}", prefix, id_part));
-            }
-        }
-    }
-    None
-}
 
 fn run_editor(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -68,7 +47,12 @@ fn run_editor(
     Ok(())
 }
 
-fn try_push_gh_edit(root: &Path, relative: &Path, config: &Config) -> Result<(), String> {
+fn try_push_gh_edit(
+    root: &Path,
+    relative: &Path,
+    config: &Config,
+    shared_store: &Arc<Mutex<GithubIssuesStore<GhCli>>>,
+) -> Result<(), String> {
     let content = std::fs::read_to_string(root.join(relative))
         .map_err(|e| format!("failed to read edited file: {e}"))?;
 
@@ -87,23 +71,8 @@ fn try_push_gh_edit(root: &Path, relative: &Path, config: &Config) -> Result<(),
         return Ok(());
     }
 
-    let gh_config = config.documents.github.as_ref()
-        .ok_or_else(|| "no [github] config found".to_string())?;
-    let repo = gh_config.repo.as_ref()
-        .ok_or_else(|| "no github.repo configured".to_string())?;
-
-    let gh_store = GithubIssuesStore {
-        client: GhCli::new(),
-        root: root.to_path_buf(),
-        repo: repo.clone(),
-        config: config.clone(),
-        issue_map: RefCell::new(
-            IssueMap::load(root).map_err(|e| e.to_string())?
-        ),
-        issue_cache: IssueCache::new(root),
-    };
-
     let body_trimmed = body.trim();
+    let mut gh_store = shared_store.lock().map_err(|e| format!("lock poisoned: {e}"))?;
     gh_store.update(type_def, &doc_id, &[("body", body_trimmed)])
         .map_err(|e| e.to_string())
 }
@@ -162,6 +131,12 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
             }
             app.last_sync = Some(Instant::now());
             app.refresh_validation(config);
+        }
+        AppEvent::GhPushResult(result) => {
+            app.gh_push_in_flight.store(false, Ordering::Relaxed);
+            if let Err(msg) = result {
+                app.gh_conflict_message = Some(msg);
+            }
         }
         AppEvent::CreateStarted => {}
         AppEvent::CreateProgress { message } => {
@@ -226,10 +201,31 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
 
     let has_gh_types = config.documents.types.iter()
         .any(|t| t.store == StoreBackend::GithubIssues);
+
+    let shared_gh_store: Option<Arc<Mutex<GithubIssuesStore<GhCli>>>> = if has_gh_types {
+        let gh_config = config.documents.github.as_ref();
+        let repo = gh_config.and_then(|g| g.repo.clone());
+        repo.map(|repo| {
+            let root = app.store.root();
+            Arc::new(Mutex::new(GithubIssuesStore {
+                client: GhCli::new(),
+                root: root.to_path_buf(),
+                repo,
+                config: config.clone(),
+                issue_map: IssueMap::load(root).unwrap_or_else(|_| {
+                    serde_json::from_str("{}").unwrap()
+                }),
+                issue_cache: IssueCache::new(root),
+            }))
+        })
+    } else {
+        None
+    };
+
     let cache_ttl = config.documents.github.as_ref()
         .map(|g| g.cache_ttl)
         .unwrap_or(60);
-    let mut next_poll = if has_gh_types {
+    let mut next_poll = if shared_gh_store.is_some() {
         Some(Instant::now() + Duration::from_secs(cache_ttl))
     } else {
         None
@@ -321,7 +317,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             }
         }
 
-        if let Some(deadline) = next_poll {
+        if let (Some(deadline), Some(ref shared_store)) = (next_poll, &shared_gh_store) {
             if Instant::now() >= deadline && !refresh_in_flight.load(Ordering::Relaxed) {
                 refresh_in_flight.store(true, Ordering::Relaxed);
                 next_poll = Some(Instant::now() + Duration::from_secs(cache_ttl));
@@ -329,41 +325,42 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 let poll_root = root.clone();
                 let poll_config = config.clone();
                 let poll_flag = refresh_in_flight.clone();
+                let poll_store = Arc::clone(shared_store);
                 std::thread::spawn(move || {
                     let gh_types: Vec<_> = poll_config.documents.types.iter()
                         .filter(|t| t.store == StoreBackend::GithubIssues)
                         .collect();
-                    let repo = poll_config.documents.github.as_ref()
-                        .and_then(|g| g.repo.clone());
-                    if let Some(repo) = repo {
-                        let client = GhCli::new();
-                        let mut issue_map = IssueMap::load(&poll_root).unwrap_or_else(|_| {
-                            // Fallback: construct via serde default
-                            serde_json::from_str("{}").unwrap()
-                        });
-                        for type_def in &gh_types {
-                            let label = crate::engine::gh::type_label(&type_def.name);
-                            let labels = vec![label];
-                            if let Ok(issues) = client.issue_list(&repo, &labels, &[], None) {
-                                for issue in &issues {
-                                    let ctx = issue_body::IssueContext {
-                                        title: issue.title.clone(),
-                                        labels: issue.labels.iter().map(|l| l.name.clone()).collect(),
-                                        is_open: issue.state == "OPEN",
-                                    };
-                                    if let Ok((meta, body)) = issue_body::deserialize(&issue.body, &ctx) {
-                                        let mut meta = meta;
-                                        meta.doc_type = crate::engine::document::DocType::new(&type_def.name);
-                                        if let Some(id) = extract_doc_id_from_title(&issue.title, &type_def.name) {
-                                            meta.id = id.clone();
-                                            let _ = store_dispatch::write_cache_file(&poll_root, type_def, &meta, &body);
-                                            issue_map.insert(&id, issue.number, &issue.updated_at);
-                                        }
+                    let (client, repo) = {
+                        let store = poll_store.lock().unwrap();
+                        (GhCli::new(), store.repo.clone())
+                    };
+                    for type_def in &gh_types {
+                        let label = crate::engine::gh::type_label(&type_def.name);
+                        let labels = vec![label];
+                        if let Ok(issues) = client.issue_list(&repo, &labels, &[], None) {
+                            for issue in &issues {
+                                let ctx = issue_body::IssueContext {
+                                    title: issue.title.clone(),
+                                    labels: issue.labels.iter().map(|l| l.name.clone()).collect(),
+                                    is_open: issue.state == "OPEN",
+                                    known_types: poll_config.documents.types.iter().map(|t| t.name.clone()).collect(),
+                                };
+                                if let Ok((meta, body)) = issue_body::deserialize(&issue.body, &ctx) {
+                                    let mut meta = meta;
+                                    meta.doc_type = crate::engine::document::DocType::new(&type_def.name);
+                                    if let Some(id) = issue_body::extract_doc_id_from_title(&issue.title, &type_def.name) {
+                                        meta.id = id.clone();
+                                        let _ = store_dispatch::write_cache_file(&poll_root, type_def, &meta, &body);
+                                        let mut store = poll_store.lock().unwrap();
+                                        store.issue_map.insert(&id, issue.number, &issue.updated_at);
                                     }
                                 }
                             }
                         }
-                        let _ = issue_map.save(&poll_root);
+                    }
+                    {
+                        let store = poll_store.lock().unwrap();
+                        let _ = store.issue_map.save(&poll_root);
                     }
                     poll_flag.store(false, Ordering::Relaxed);
                     let _ = poll_tx.send(AppEvent::CacheRefresh);
@@ -385,10 +382,21 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             input_paused.store(false, Ordering::Relaxed);
             let root = app.store.root().to_path_buf();
             if let Ok(relative) = path.strip_prefix(&root) {
-                if let Err(msg) = try_push_gh_edit(&root, relative, config) {
-                    app.gh_conflict_message = Some(msg);
-                }
                 let _ = app.store.reload_file(&root, relative, &*app.fs);
+                if let Some(ref shared_store) = shared_gh_store {
+                    let push_root = root.clone();
+                    let push_relative = relative.to_path_buf();
+                    let push_config = config.clone();
+                    let push_tx = tx.clone();
+                    let push_flag = app.gh_push_in_flight.clone();
+                    let push_store = Arc::clone(shared_store);
+                    push_flag.store(true, Ordering::Relaxed);
+                    std::thread::spawn(move || {
+                        let result = try_push_gh_edit(&push_root, &push_relative, &push_config, &push_store);
+                        push_flag.store(false, Ordering::Relaxed);
+                        let _ = push_tx.send(AppEvent::GhPushResult(result));
+                    });
+                }
             }
             app.refresh_validation(config);
         }
@@ -441,36 +449,4 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn extract_doc_id_prefix() {
-        assert_eq!(
-            extract_doc_id_from_title("STORY-042 Implement feature", "story"),
-            Some("STORY-042".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_doc_id_mid_title() {
-        assert_eq!(
-            extract_doc_id_from_title("Some prefix STORY-007 suffix", "story"),
-            Some("STORY-007".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_doc_id_none_when_missing() {
-        assert_eq!(extract_doc_id_from_title("Just a random title", "story"), None);
-    }
-
-    #[test]
-    fn extract_doc_id_different_type() {
-        assert_eq!(
-            extract_doc_id_from_title("RFC-001 Some RFC", "rfc"),
-            Some("RFC-001".to_string())
-        );
-    }
-}

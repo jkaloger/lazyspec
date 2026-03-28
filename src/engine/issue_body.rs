@@ -10,6 +10,7 @@ pub struct IssueContext {
     pub title: String,
     pub labels: Vec<String>,
     pub is_open: bool,
+    pub known_types: Vec<String>,
 }
 
 const COMMENT_START: &str = "<!-- lazyspec\n";
@@ -26,7 +27,7 @@ pub fn serialize(doc: &DocMeta, body: &str) -> String {
     yaml_lines.push(format!("author: {}", doc.author));
     yaml_lines.push(format!("date: {}", doc.date));
 
-    if is_non_lifecycle_status(&doc.status) {
+    if needs_frontmatter_status(&doc.status) {
         yaml_lines.push(format!("status: {}", doc.status));
     }
 
@@ -66,7 +67,8 @@ pub fn deserialize(issue_body: &str, ctx: &IssueContext) -> Result<(DocMeta, Str
         .map(parse_relation)
         .collect::<Result<Vec<_>>>()?;
 
-    let (doc_type, tags) = extract_type_and_tags(&ctx.labels);
+    let known_type_refs: Vec<&str> = ctx.known_types.iter().map(|s| s.as_str()).collect();
+    let (doc_type, tags) = extract_type_and_tags(&ctx.labels, &known_type_refs);
 
     let status = reconstruct_status(ctx.is_open, parsed.status.as_deref());
 
@@ -87,7 +89,7 @@ pub fn deserialize(issue_body: &str, ctx: &IssueContext) -> Result<(DocMeta, Str
     Ok((meta, body))
 }
 
-fn is_non_lifecycle_status(status: &Status) -> bool {
+fn needs_frontmatter_status(status: &Status) -> bool {
     !matches!(status, Status::Draft | Status::Complete)
 }
 
@@ -112,22 +114,14 @@ fn reconstruct_status(is_open: bool, frontmatter_status: Option<&str>) -> Status
 ///
 /// The first label matching a known doc type is used as the type; all remaining
 /// labels become tags.
-fn extract_type_and_tags(labels: &[String]) -> (DocType, Vec<String>) {
-    let known_types = [
-        DocType::RFC,
-        DocType::STORY,
-        DocType::ITERATION,
-        DocType::ADR,
-        DocType::SPEC,
-    ];
-
+fn extract_type_and_tags(labels: &[String], known_types: &[&str]) -> (DocType, Vec<String>) {
     let mut doc_type: Option<DocType> = None;
     let mut tags = Vec::new();
 
     for label in labels {
         let lower = label.to_lowercase();
         if let Some(suffix) = lower.strip_prefix("lazyspec:") {
-            if doc_type.is_none() && known_types.iter().any(|t| *t == suffix) {
+            if doc_type.is_none() && known_types.iter().any(|t| t.to_lowercase() == suffix) {
                 doc_type = Some(DocType::new(suffix));
             }
             // lazyspec:-prefixed labels are never added to tags
@@ -169,6 +163,33 @@ fn extract_comment(issue_body: &str) -> Result<(String, String)> {
     Ok((yaml, rest))
 }
 
+/// Extract a doc ID (e.g. "STORY-042") from a title string.
+///
+/// Checks whether the title starts with the pattern, then falls back to
+/// scanning whitespace-separated words.
+pub fn extract_doc_id_from_title(title: &str, type_name: &str) -> Option<String> {
+    let prefix = type_name.to_uppercase();
+    let tag = format!("{}-", prefix);
+
+    if let Some(rest) = title.strip_prefix(&tag) {
+        let id_part: String = rest.chars().take_while(|c| c.is_alphanumeric()).collect();
+        if !id_part.is_empty() {
+            return Some(format!("{}-{}", prefix, id_part));
+        }
+    }
+
+    for word in title.split_whitespace() {
+        if let Some(rest) = word.strip_prefix(&tag) {
+            let id_part: String = rest.chars().take_while(|c| c.is_alphanumeric()).collect();
+            if !id_part.is_empty() {
+                return Some(format!("{}-{}", prefix, id_part));
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,11 +215,22 @@ mod tests {
         }
     }
 
+    fn default_known_types() -> Vec<String> {
+        vec![
+            "rfc".to_string(),
+            "story".to_string(),
+            "iteration".to_string(),
+            "adr".to_string(),
+            "spec".to_string(),
+        ]
+    }
+
     fn sample_context() -> IssueContext {
         IssueContext {
             title: "Add caching layer".to_string(),
             labels: vec!["lazyspec:rfc".to_string(), "performance".to_string()],
             is_open: true,
+            known_types: default_known_types(),
         }
     }
 
@@ -302,7 +334,9 @@ mod tests {
     #[test]
     fn extract_type_and_tags_finds_type() {
         let labels = vec!["lazyspec:rfc".to_string(), "cache".to_string()];
-        let (dt, tags) = extract_type_and_tags(&labels);
+        let types = default_known_types();
+        let known: Vec<&str> = types.iter().map(|s| s.as_str()).collect();
+        let (dt, tags) = extract_type_and_tags(&labels, &known);
         assert_eq!(dt.as_str(), "rfc");
         assert_eq!(tags, vec!["cache"]);
     }
@@ -310,7 +344,9 @@ mod tests {
     #[test]
     fn extract_type_and_tags_defaults_to_spec() {
         let labels = vec!["random-label".to_string()];
-        let (dt, tags) = extract_type_and_tags(&labels);
+        let types = default_known_types();
+        let known: Vec<&str> = types.iter().map(|s| s.as_str()).collect();
+        let (dt, tags) = extract_type_and_tags(&labels, &known);
         assert_eq!(dt.as_str(), "spec");
         assert_eq!(tags, vec!["random-label"]);
     }
@@ -325,6 +361,7 @@ mod tests {
             title: doc.title.clone(),
             labels: vec!["lazyspec:rfc".to_string(), "performance".to_string()],
             is_open: false,
+            known_types: default_known_types(),
         };
 
         let (meta, _) = deserialize(&serialized, &ctx).unwrap();
@@ -416,7 +453,9 @@ mod tests {
             "lazyspec:unknown".to_string(),
             "team-alpha".to_string(),
         ];
-        let (dt, tags) = extract_type_and_tags(&labels);
+        let types = default_known_types();
+        let known: Vec<&str> = types.iter().map(|s| s.as_str()).collect();
+        let (dt, tags) = extract_type_and_tags(&labels, &known);
         assert_eq!(dt.as_str(), "iteration");
         assert_eq!(tags, vec!["team-alpha"]);
     }
@@ -497,5 +536,52 @@ mod tests {
         // The second block is treated as part of the body
         assert!(body.contains("<!-- lazyspec"));
         assert!(body.contains("second-author"));
+    }
+
+    #[test]
+    fn extract_doc_id_prefix() {
+        assert_eq!(
+            extract_doc_id_from_title("STORY-042 Implement feature", "story"),
+            Some("STORY-042".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_doc_id_mid_title() {
+        assert_eq!(
+            extract_doc_id_from_title("Some prefix STORY-007 suffix", "story"),
+            Some("STORY-007".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_doc_id_none_when_missing() {
+        assert_eq!(extract_doc_id_from_title("Just a random title", "story"), None);
+    }
+
+    #[test]
+    fn extract_doc_id_different_type() {
+        assert_eq!(
+            extract_doc_id_from_title("RFC-001 Some RFC", "rfc"),
+            Some("RFC-001".to_string())
+        );
+    }
+
+    #[test]
+    fn custom_type_recognized_when_in_known_types() {
+        let labels = vec!["lazyspec:task".to_string(), "team-beta".to_string()];
+        let known = vec!["task", "rfc", "story"];
+        let (dt, tags) = extract_type_and_tags(&labels, &known);
+        assert_eq!(dt.as_str(), "task");
+        assert_eq!(tags, vec!["team-beta"]);
+    }
+
+    #[test]
+    fn custom_type_defaults_to_spec_when_not_in_known_types() {
+        let labels = vec!["lazyspec:task".to_string(), "team-beta".to_string()];
+        let known = vec!["rfc", "story"];
+        let (dt, tags) = extract_type_and_tags(&labels, &known);
+        assert_eq!(dt.as_str(), "spec");
+        assert_eq!(tags, vec!["team-beta"]);
     }
 }

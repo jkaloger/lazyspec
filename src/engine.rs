@@ -6,6 +6,7 @@ pub mod hashing;
 pub mod config;
 pub mod document;
 pub mod fs;
+pub mod fs_ops;
 pub mod git_status;
 pub mod issue_body;
 pub mod issue_cache;

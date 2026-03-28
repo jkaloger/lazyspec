@@ -267,7 +267,8 @@ fn refresh_github_cache(cwd: &std::path::Path, config: &Config) {
 
     let mut map_changed = false;
     for type_def in &gh_types {
-        let result = cache.refresh_stale(cwd, type_def, &gh, &repo, &mut issue_map, ttl);
+        let all_type_names: Vec<String> = config.documents.types.iter().map(|t| t.name.clone()).collect();
+        let result = cache.refresh_stale(cwd, type_def, &gh, &repo, &mut issue_map, ttl, &all_type_names);
         for warning in &result.warnings {
             eprintln!("warning: {}", warning.message);
         }

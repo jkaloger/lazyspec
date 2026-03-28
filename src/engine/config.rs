@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -81,6 +82,15 @@ pub enum StoreBackend {
     Filesystem,
     #[serde(rename = "github-issues")]
     GithubIssues,
+}
+
+impl fmt::Display for StoreBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StoreBackend::Filesystem => write!(f, "filesystem"),
+            StoreBackend::GithubIssues => write!(f, "github-issues"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -329,6 +339,22 @@ impl Default for Config {
     }
 }
 
+impl DocumentConfig {
+    pub fn github_issues_types(&self) -> Vec<&str> {
+        self.types
+            .iter()
+            .filter(|t| t.store == StoreBackend::GithubIssues)
+            .map(|t| t.name.as_str())
+            .collect()
+    }
+
+    pub fn has_github_issues_types(&self) -> bool {
+        self.types
+            .iter()
+            .any(|t| t.store == StoreBackend::GithubIssues)
+    }
+}
+
 impl Config {
     pub fn parse(toml_str: &str) -> Result<Self> {
         let raw: RawConfig = toml::from_str(toml_str)?;
@@ -449,8 +475,30 @@ impl Config {
 }
 
 #[cfg(test)]
+impl TypeDef {
+    pub fn test_fixture(name: &str, store: StoreBackend) -> TypeDef {
+        TypeDef {
+            name: name.to_string(),
+            plural: format!("{}s", name),
+            dir: format!("docs/{}", name),
+            prefix: name.to_uppercase(),
+            icon: None,
+            numbering: NumberingStrategy::default(),
+            subdirectory: false,
+            store,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_store_backend_display() {
+        assert_eq!(StoreBackend::Filesystem.to_string(), "filesystem");
+        assert_eq!(StoreBackend::GithubIssues.to_string(), "github-issues");
+    }
 
     #[test]
     fn test_certification_default_when_absent() {
@@ -656,6 +704,65 @@ store = "github-issues"
             "unexpected error: {}",
             err
         );
+    }
+
+    #[test]
+    fn github_issues_types_filters_by_store_backend() {
+        let toml_str = r#"
+[github]
+repo = "owner/repo"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+store = "github-issues"
+
+[[types]]
+name = "adr"
+plural = "adrs"
+dir = "docs/adrs"
+prefix = "ADR"
+store = "github-issues"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert_eq!(config.documents.github_issues_types(), vec!["story", "adr"]);
+    }
+
+    #[test]
+    fn github_issues_types_empty_when_all_filesystem() {
+        let config = Config::default();
+        assert!(config.documents.github_issues_types().is_empty());
+    }
+
+    #[test]
+    fn has_github_issues_types_true_when_present() {
+        let toml_str = r#"
+[github]
+repo = "owner/repo"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+store = "github-issues"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert!(config.documents.has_github_issues_types());
+    }
+
+    #[test]
+    fn has_github_issues_types_false_when_filesystem_only() {
+        let config = Config::default();
+        assert!(!config.documents.has_github_issues_types());
     }
 
     #[test]

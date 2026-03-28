@@ -15,6 +15,8 @@ use ratatui::{
     Frame,
 };
 
+use std::sync::atomic::Ordering;
+
 use crate::engine::config::{Config, StoreBackend};
 use crate::tui::state::{App, ViewMode};
 
@@ -114,6 +116,9 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
             right_spans.push(Span::styled(text, Style::default().fg(color)));
             right_spans.push(Span::raw("  "));
         }
+    }
+    if app.gh_push_in_flight.load(Ordering::Relaxed) {
+        right_spans.push(Span::styled("pushing... ", Style::default().fg(Color::Yellow)));
     }
     right_spans.push(Span::styled(
         format!("[{}] ` to cycle ", app.view_mode.name()),

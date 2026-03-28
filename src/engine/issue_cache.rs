@@ -112,6 +112,17 @@ impl IssueCache {
         self.write_lock(&lock);
     }
 
+    pub fn touch_lock(&self, id: &str) {
+        let mut lock = self.read_lock();
+        lock.insert(
+            id.to_string(),
+            CacheLockEntry {
+                cached_at: Utc::now().to_rfc3339(),
+            },
+        );
+        self.write_lock(&lock);
+    }
+
     pub fn remove(&self, id: &str, doc_type: &str) {
         let path = self.doc_path(id, doc_type);
         let _ = fs::remove_file(&path);
@@ -133,6 +144,7 @@ impl IssueCache {
         repo: &str,
         issue_map: &mut IssueMap,
         ttl: Duration,
+        known_types: &[String],
     ) -> RefreshResult {
         let cached_ids = self.list_cached(&type_def.name);
         if cached_ids.is_empty() {
@@ -183,7 +195,7 @@ impl IssueCache {
         let mut unchanged = 0usize;
 
         for issue in &issues {
-            let (meta, body) = parse_issue(issue, &type_def.name);
+            let (meta, body) = parse_issue(issue, &type_def.name, known_types);
             let id = extract_doc_id(issue, &type_def.name)
                 .unwrap_or_else(|| issue.number.to_string());
             let meta = DocMeta { id: id.clone(), ..meta };
@@ -248,6 +260,7 @@ impl IssueCache {
         gh: &dyn GhIssueReader,
         repo: &str,
         issue_map: &mut IssueMap,
+        known_types: &[String],
     ) -> anyhow::Result<FetchResult> {
         let label = type_label(&type_def.name);
         let labels = vec![label];
@@ -272,7 +285,7 @@ impl IssueCache {
         let mut new_count = 0usize;
 
         for issue in &issues {
-            let (meta, body) = parse_issue(issue, &type_def.name);
+            let (meta, body) = parse_issue(issue, &type_def.name, known_types);
             let id = extract_doc_id(issue, &type_def.name)
                 .unwrap_or_else(|| issue.number.to_string());
             let meta = DocMeta { id: id.clone(), ..meta };
@@ -314,11 +327,12 @@ impl IssueCache {
     }
 }
 
-fn parse_issue(issue: &GhIssue, type_name: &str) -> (DocMeta, String) {
+fn parse_issue(issue: &GhIssue, type_name: &str, known_types: &[String]) -> (DocMeta, String) {
     let ctx = IssueContext {
         title: issue.title.clone(),
         labels: issue.labels.iter().map(|l| l.name.clone()).collect(),
         is_open: issue.state.eq_ignore_ascii_case("open"),
+        known_types: known_types.to_vec(),
     };
 
     if let Ok((meta, body)) = issue_body::deserialize(&issue.body, &ctx) {
@@ -354,21 +368,8 @@ fn parse_issue(issue: &GhIssue, type_name: &str) -> (DocMeta, String) {
 }
 
 fn extract_doc_id(issue: &GhIssue, type_name: &str) -> Option<String> {
-    let prefix = type_name.to_uppercase();
-    let pattern = format!("{}-", prefix);
-
-    for text in [&issue.title, &issue.body] {
-        for word in text.split_whitespace() {
-            if let Some(rest) = word.strip_prefix(&pattern) {
-                let id_part: String = rest.chars().take_while(|c| c.is_alphanumeric()).collect();
-                if !id_part.is_empty() {
-                    return Some(format!("{}-{}", prefix, id_part));
-                }
-            }
-        }
-    }
-
-    None
+    issue_body::extract_doc_id_from_title(&issue.title, type_name)
+        .or_else(|| issue_body::extract_doc_id_from_title(&issue.body, type_name))
 }
 
 fn build_cache_content(meta: &DocMeta, body: &str) -> String {
@@ -604,6 +605,7 @@ mod tests {
         ]);
 
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let known_types = vec!["story".to_string()];
         let result = cache.refresh_stale(
             tmp.path(),
             &type_def,
@@ -611,6 +613,7 @@ mod tests {
             "owner/repo",
             &mut issue_map,
             ttl,
+            &known_types,
         );
 
         assert_eq!(gh.call_count(), 1, "should make exactly one issue_list call");
@@ -645,6 +648,7 @@ mod tests {
 
         let gh = MockReader::new(vec![]);
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let known_types = vec!["story".to_string()];
         let result = cache.refresh_stale(
             tmp.path(),
             &type_def,
@@ -652,6 +656,7 @@ mod tests {
             "owner/repo",
             &mut issue_map,
             ttl,
+            &known_types,
         );
 
         assert_eq!(gh.call_count(), 0, "should not call API when all fresh");
@@ -673,6 +678,7 @@ mod tests {
 
         let gh = MockReader::failing();
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let known_types = vec!["story".to_string()];
         let result = cache.refresh_stale(
             tmp.path(),
             &type_def,
@@ -680,6 +686,7 @@ mod tests {
             "owner/repo",
             &mut issue_map,
             ttl,
+            &known_types,
         );
 
         assert_eq!(result.refreshed, 0);
@@ -713,7 +720,7 @@ mod tests {
 
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
         let result = cache
-            .fetch_all(tmp.path(), &type_def, &gh, "owner/repo", &mut issue_map)
+            .fetch_all(tmp.path(), &type_def, &gh, "owner/repo", &mut issue_map, &vec!["story".to_string()])
             .unwrap();
 
         assert_eq!(result.fetched, 3);
@@ -775,7 +782,7 @@ mod tests {
         ]);
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
         cache
-            .fetch_all(tmp.path(), &type_def, &initial_gh, "owner/repo", &mut issue_map)
+            .fetch_all(tmp.path(), &type_def, &initial_gh, "owner/repo", &mut issue_map, &vec!["story".to_string()])
             .unwrap();
 
         // Second fetch returns only 2 of the 3
@@ -784,7 +791,7 @@ mod tests {
             make_gh_issue(11, "STORY-002 Second", "Body 2 updated", &["lazyspec:story"]),
         ]);
         let result = cache
-            .fetch_all(tmp.path(), &type_def, &updated_gh, "owner/repo", &mut issue_map)
+            .fetch_all(tmp.path(), &type_def, &updated_gh, "owner/repo", &mut issue_map, &vec!["story".to_string()])
             .unwrap();
 
         assert_eq!(result.fetched, 2);

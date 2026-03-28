@@ -1,12 +1,14 @@
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::gh::GhIssueReader;
+use crate::engine::github::resolve_repo;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::path::Path;
 
 pub fn run(root: &Path, config: &Config, gh: &dyn GhIssueReader, type_filter: Option<&str>, json: bool) -> Result<()> {
-    let repo = resolve_repo(config, root)?;
+    let repo = resolve_repo(config, root)
+        .context("Could not determine GitHub repo. Set [documents.github].repo in .lazyspec.toml")?;
     let mut issue_map = IssueMap::load(root)?;
     let cache = IssueCache::new(root);
 
@@ -43,7 +45,8 @@ pub fn run(root: &Path, config: &Config, gh: &dyn GhIssueReader, type_filter: Op
             .type_by_name(type_name)
             .ok_or_else(|| anyhow::anyhow!("type '{}' not found in config", type_name))?;
 
-        let result = cache.fetch_all(root, type_def, gh, &repo, &mut issue_map)?;
+        let all_type_names: Vec<String> = config.documents.types.iter().map(|t| t.name.clone()).collect();
+        let result = cache.fetch_all(root, type_def, gh, &repo, &mut issue_map, &all_type_names)?;
 
         summaries.push(TypeSummary {
             type_name: type_name.to_string(),
@@ -87,14 +90,3 @@ struct TypeSummary {
     removed: usize,
 }
 
-fn resolve_repo(config: &Config, root: &Path) -> Result<String> {
-    if let Some(ref gh) = config.documents.github {
-        if let Some(ref repo) = gh.repo {
-            return Ok(repo.clone());
-        }
-    }
-    match crate::engine::github::infer_github_repo(root) {
-        Ok(repo) => Ok(repo),
-        Err(_) => bail!("Could not determine GitHub repo. Set [documents.github].repo in .lazyspec.toml"),
-    }
-}

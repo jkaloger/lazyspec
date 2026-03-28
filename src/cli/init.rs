@@ -1,6 +1,6 @@
-use crate::engine::config::{Config, StoreBackend};
+use crate::engine::config::Config;
 use crate::engine::gh::{deterministic_color, type_label, GhCli, GhIssueWriter, GhError};
-use crate::engine::github::infer_github_repo;
+use crate::engine::github::resolve_repo;
 use anyhow::{bail, Result};
 use std::fs;
 use std::path::Path;
@@ -28,14 +28,13 @@ pub fn run(root: &Path) -> Result<()> {
 }
 
 fn ensure_github_labels(config: &Config, root: &Path) {
-    let gh_types = github_issues_types(config);
+    let gh_types = config.documents.github_issues_types();
 
     if gh_types.is_empty() {
         return;
     }
 
-    let repo = resolve_repo(config, root);
-    let repo = match repo {
+    let repo = match resolve_repo(config, root).ok() {
         Some(r) => r,
         None => {
             eprintln!("warning: could not resolve GitHub repo; skipping label creation");
@@ -65,19 +64,10 @@ fn ensure_github_labels(config: &Config, root: &Path) {
     }
 }
 
-fn resolve_repo(config: &Config, root: &Path) -> Option<String> {
-    if let Some(ref gh) = config.documents.github {
-        if let Some(ref repo) = gh.repo {
-            return Some(repo.clone());
-        }
-    }
-    infer_github_repo(root).ok()
-}
-
 const GITIGNORE_ENTRIES: &[&str] = &[".lazyspec/cache/", ".lazyspec/issue-map.json"];
 
 fn ensure_gitignore(config: &Config, root: &Path) -> Result<()> {
-    if github_issues_types(config).is_empty() {
+    if !config.documents.has_github_issues_types() {
         return Ok(());
     }
 
@@ -110,76 +100,16 @@ fn ensure_gitignore(config: &Config, root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn github_issues_types(config: &Config) -> Vec<&str> {
-    config
-        .documents
-        .types
-        .iter()
-        .filter(|t| t.store == StoreBackend::GithubIssues)
-        .map(|t| t.name.as_str())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::{GithubConfig, TypeDef, NumberingStrategy};
-
-    fn make_type(name: &str, store: StoreBackend) -> TypeDef {
-        TypeDef {
-            name: name.to_string(),
-            plural: format!("{}s", name),
-            dir: format!("docs/{}", name),
-            prefix: name.to_uppercase(),
-            icon: None,
-            numbering: NumberingStrategy::default(),
-            subdirectory: false,
-            store,
-        }
-    }
-
-    #[test]
-    fn github_issues_types_filters_correctly() {
-        let mut config = Config::default();
-        config.documents.types = vec![
-            make_type("rfc", StoreBackend::Filesystem),
-            make_type("story", StoreBackend::GithubIssues),
-            make_type("adr", StoreBackend::GithubIssues),
-        ];
-        let types = github_issues_types(&config);
-        assert_eq!(types, vec!["story", "adr"]);
-    }
-
-    #[test]
-    fn github_issues_types_empty_when_all_filesystem() {
-        let config = Config::default();
-        let types = github_issues_types(&config);
-        assert!(types.is_empty());
-    }
-
-    #[test]
-    fn resolve_repo_prefers_config() {
-        let mut config = Config::default();
-        config.documents.github = Some(GithubConfig {
-            repo: Some("configured/repo".to_string()),
-            cache_ttl: 60,
-        });
-        let repo = resolve_repo(&config, Path::new("/nonexistent"));
-        assert_eq!(repo, Some("configured/repo".to_string()));
-    }
-
-    #[test]
-    fn resolve_repo_none_without_config_or_git() {
-        let config = Config::default();
-        let repo = resolve_repo(&config, Path::new("/nonexistent"));
-        assert!(repo.is_none());
-    }
+    use crate::engine::config::{StoreBackend, TypeDef};
 
     fn gh_issues_config() -> Config {
         let mut config = Config::default();
         config.documents.types = vec![
-            make_type("rfc", StoreBackend::Filesystem),
-            make_type("story", StoreBackend::GithubIssues),
+            TypeDef::test_fixture("rfc", StoreBackend::Filesystem),
+            TypeDef::test_fixture("story", StoreBackend::GithubIssues),
         ];
         config
     }
