@@ -6,8 +6,10 @@ author: jkaloger
 date: 2026-03-27
 tags: []
 related:
-- implements: docs/rfcs/RFC-034-convention-and-dictum-document-types.md
+- implements: RFC-038
 ---
+
+
 
 
 

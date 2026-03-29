@@ -6,8 +6,10 @@ author: jkaloger
 date: 2026-03-28
 tags: []
 related:
-- implements: docs/stories/STORY-093-issue-body-format-and-parsing.md
+- implements: docs/stories/STORY-101-issue-body-format-and-parsing.md
 ---
+
+
 
 
 

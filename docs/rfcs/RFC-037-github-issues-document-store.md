@@ -10,8 +10,9 @@ tags:
 - issues
 - sync
 related:
-- related-to: docs/rfcs/RFC-035-git-ref-document-storage-with-lease-based-claiming.md
+- related-to: RFC-035
 ---
+
 
 
 ## Problem

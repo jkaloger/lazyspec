@@ -6,8 +6,11 @@ author: agent
 date: 2026-03-27
 tags: []
 related:
-- implements: docs/stories/STORY-093-default-convention-and-dictum-content.md
+- implements: STORY-101
 ---
+
+
+
 
 
 

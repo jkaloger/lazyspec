@@ -1,14 +1,19 @@
 ---
-title: "Convention and Dictum Document Types"
+title: Convention and Dictum Document Types
 type: rfc
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-03-26
-tags: [convention, dictum, config, types]
+tags:
+- convention
+- dictum
+- config
+- types
 related:
-  - related-to: "docs/rfcs/RFC-013-custom-document-types.md"
-  - related-to: "docs/rfcs/RFC-014-nested-child-document-support.md"
+- related-to: RFC-013
+- related-to: RFC-014
 ---
+
 
 
 ## Summary

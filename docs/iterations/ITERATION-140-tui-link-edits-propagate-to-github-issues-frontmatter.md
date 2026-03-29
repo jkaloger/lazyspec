@@ -6,8 +6,9 @@ author: jkaloger
 date: 2026-03-28
 tags: []
 related:
-- implements: docs/stories/STORY-098-github-issues-tui-integration.md
+- implements: STORY-098
 ---
+
 
 
 

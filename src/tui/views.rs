@@ -138,14 +138,24 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
                 .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
                 .split(outer[1]);
 
-            let right = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-                .split(main[1]);
+            let is_singleton = config
+                .type_by_name(app.current_type().as_str())
+                .map(|td| td.singleton)
+                .unwrap_or(false);
 
             draw_type_panel(f, app, main[0]);
-            draw_doc_list(f, app, right[0], config);
-            draw_preview(f, app, right[1]);
+
+            if is_singleton {
+                draw_preview(f, app, main[1]);
+            } else {
+                let right = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                    .split(main[1]);
+
+                draw_doc_list(f, app, right[0], config);
+                draw_preview(f, app, right[1]);
+            }
         }
         ViewMode::Filters => render_filter_panel(f, app, outer[1], config),
         #[cfg(feature = "metrics")]
