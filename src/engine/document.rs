@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 /// serde_yaml 0.9 parses bare `YYYY-MM-DD` as a YAML date tag, not a string.
 /// Chrono's default `NaiveDate` deserializer expects a string, so we need a
 /// custom deserializer that handles both representations.
-pub(crate) fn deserialize_naive_date<'de, D>(deserializer: D) -> std::result::Result<NaiveDate, D::Error>
+pub(crate) fn deserialize_naive_date<'de, D>(
+    deserializer: D,
+) -> std::result::Result<NaiveDate, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -18,26 +20,34 @@ where
         // serde_yaml 0.9 parses bare YYYY-MM-DD as a tagged timestamp
         serde_yaml::Value::Tagged(tagged) => match &tagged.value {
             serde_yaml::Value::String(s) => s.clone(),
-            _ => return Err(serde::de::Error::custom(format!(
-                "expected date string, got: {:?}", value
-            ))),
+            _ => {
+                return Err(serde::de::Error::custom(format!(
+                    "expected date string, got: {:?}",
+                    value
+                )))
+            }
         },
         // Some serde_yaml versions parse bare dates as a single-key mapping
         serde_yaml::Value::Mapping(m) if m.len() == 1 => {
             let key = m.keys().next().unwrap();
             match key {
                 serde_yaml::Value::String(s) => s.clone(),
-                _ => return Err(serde::de::Error::custom(format!(
-                    "expected date string, got: {:?}", value
-                ))),
+                _ => {
+                    return Err(serde::de::Error::custom(format!(
+                        "expected date string, got: {:?}",
+                        value
+                    )))
+                }
             }
         }
-        _ => return Err(serde::de::Error::custom(format!(
-            "expected date string, got: {:?}", value
-        ))),
+        _ => {
+            return Err(serde::de::Error::custom(format!(
+                "expected date string, got: {:?}",
+                value
+            )))
+        }
     };
-    NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-        .map_err(serde::de::Error::custom)
+    NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(serde::de::Error::custom)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
