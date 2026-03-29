@@ -9,7 +9,7 @@ tags: [rust, style, engine, cli, tui]
 
 ## Error Handling
 
-- `anyhow::Result<T>` for all fallible functions — no custom error types unless a caller needs to match on variants
+- `anyhow::Result<T>` for all fallible functions. No custom error types unless a caller needs to match on variants
 - Propagate errors with `?`, add context with `.context()` / `.with_context()` when the call site wouldn't be obvious from a stack trace
 - No `unwrap()` outside of tests. `expect()` only when the invariant is genuinely guaranteed and the message explains why
 
@@ -18,7 +18,7 @@ tags: [rust, style, engine, cli, tui]
 - Prefer owned types in structs, borrow in function signatures where the lifetime is obvious
 - Prefer `&str` over `&String` in function parameters
 - Use `impl Into<T>` / `AsRef<T>` for flexible public APIs, concrete types for internal code
-- Avoid `clone()` as a first resort — restructure ownership first, clone when the borrow checker fight isn't worth it
+- Avoid `clone()` as a first resort. Restructure ownership first; clone when the borrow checker fight isn't worth it
 
 ## Naming
 
@@ -27,7 +27,7 @@ tags: [rust, style, engine, cli, tui]
 ## Type Design
 
 - Use tuple structs / newtypes for domain concepts (like `DocType(String)`) rather than bare primitives
-- Use `Default` trait and derive it where sensible — prefer `Type::default()` over manual field-by-field construction
+- Use `Default` trait and derive it where sensible. Prefer `Type::default()` over manual field-by-field construction
 - Use `From`/`Into` implementations for type conversions rather than ad-hoc methods
 - Derive `Debug` on all public types. Derive `Clone`, `PartialEq` etc. when there's a use for it, not speculatively
 
@@ -36,4 +36,4 @@ tags: [rust, style, engine, cli, tui]
 - Prefer iterators and combinators over manual loops where readability doesn't suffer
 - Prefer `collect()` into concrete types over building collections manually
 - Prefer `if let` / `let else` over `match` when only one variant matters
-- Prefer exhaustive `match` over `_` wildcards when the enum is local — forces handling new variants
+- Prefer exhaustive `match` over `_` wildcards when the enum is local. Forces handling new variants

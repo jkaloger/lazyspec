@@ -9,13 +9,13 @@ tags: [traits, rust, engine, cli, tui]
 
 ## When to Use Traits
 
-- Use traits for **testability boundaries** — the `FileSystem` trait pattern is the canonical example: real I/O in prod, injectable in tests
-- Use traits for **polymorphism you actually need** — e.g., multiple store backends (filesystem, GitHub Issues)
+- Use traits for **testability boundaries**. The `FileSystem` trait pattern is the canonical example: real I/O in prod, injectable in tests
+- Use traits for **polymorphism you actually need**. Multiple store backends (filesystem, GitHub Issues) is the motivating case
 - Don't introduce a trait for a single implementation. If there's only one impl and no testing seam, use a concrete type
 
 ## Design
 
-- Trait methods should be minimal — prefer several small traits over one fat trait. A consumer should never need to implement methods it doesn't use
+- Trait methods should be minimal. Prefer several small traits over one fat trait. A consumer should never need to implement methods it doesn't use
 - Default implementations are fine when there's an obvious sensible default, not as a way to make a big trait look smaller
 
 ## Dispatch
