@@ -393,7 +393,7 @@ impl Counter {
     #[test]
     fn test_trait_is_public() {
         assert!(
-            SymbolExtractor::extract(&TypeScriptSymbolExtractor::new(), "", "").is_none() || true
+            SymbolExtractor::extract(&TypeScriptSymbolExtractor::new(), "", "").is_none()
         );
     }
 

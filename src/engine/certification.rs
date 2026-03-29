@@ -240,10 +240,12 @@ mod tests {
             CertificationOverride { normalize: false },
         );
 
-        let mut config = Config::default();
-        config.certification = CertificationConfig {
-            normalize: true,
-            overrides,
+        let config = Config {
+            certification: CertificationConfig {
+                normalize: true,
+                overrides,
+            },
+            ..Default::default()
         };
 
         let for_spec_hash = compute_blob_hash_for_spec(

@@ -95,7 +95,7 @@ Body.
 "#;
 
     let meta = DocMeta::parse(content).unwrap();
-    assert_eq!(meta.validate_ignore, false);
+    assert!(!meta.validate_ignore);
 }
 
 #[test]
@@ -114,7 +114,7 @@ Body.
 "#;
 
     let meta = DocMeta::parse(content).unwrap();
-    assert_eq!(meta.validate_ignore, true);
+    assert!(meta.validate_ignore);
 }
 
 #[test]

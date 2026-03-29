@@ -8,19 +8,19 @@ fn setup() -> common::TestFixture {
     let fixture = common::TestFixture::new();
 
     let _output = Command::new("git")
-        .args(&["init"])
+        .args(["init"])
         .current_dir(fixture.root())
         .output()
         .unwrap();
 
     let _output = Command::new("git")
-        .args(&["config", "user.email", "test@test.com"])
+        .args(["config", "user.email", "test@test.com"])
         .current_dir(fixture.root())
         .output()
         .unwrap();
 
     let _output = Command::new("git")
-        .args(&["config", "user.name", "Test"])
+        .args(["config", "user.name", "Test"])
         .current_dir(fixture.root())
         .output()
         .unwrap();
@@ -34,13 +34,13 @@ fn commit_file(fixture: &common::TestFixture, path: &str, content: &str) -> Stri
     std::fs::write(&full_path, content).unwrap();
 
     let _ = Command::new("git")
-        .args(&["add", "-A"])
+        .args(["add", "-A"])
         .current_dir(fixture.root())
         .output()
         .unwrap();
 
     let output = Command::new("git")
-        .args(&["commit", "-m", "add file"])
+        .args(["commit", "-m", "add file"])
         .current_dir(fixture.root())
         .output()
         .unwrap();
@@ -53,7 +53,7 @@ fn commit_file(fixture: &common::TestFixture, path: &str, content: &str) -> Stri
     }
 
     let output = Command::new("git")
-        .args(&["rev-parse", "HEAD"])
+        .args(["rev-parse", "HEAD"])
         .current_dir(fixture.root())
         .output()
         .unwrap();

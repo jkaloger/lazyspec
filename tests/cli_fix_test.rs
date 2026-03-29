@@ -16,7 +16,7 @@ fn fix_fills_missing_fields() {
         fixture.root(),
         &store,
         &fixture.config(),
-        &vec!["docs/rfcs/RFC-broken.md".to_string()],
+        &["docs/rfcs/RFC-broken.md".to_string()],
         false,
         &RealFileSystem,
     );
@@ -27,28 +27,28 @@ fn fix_fills_missing_fields() {
     let map = value.as_mapping().unwrap();
 
     assert_eq!(
-        map.get(&serde_yaml::Value::String("title".into())).unwrap(),
+        map.get(serde_yaml::Value::String("title".into())).unwrap(),
         &serde_yaml::Value::String("Broken".into()),
     );
     assert_eq!(
-        map.get(&serde_yaml::Value::String("type".into())).unwrap(),
+        map.get(serde_yaml::Value::String("type".into())).unwrap(),
         &serde_yaml::Value::String("rfc".into()),
     );
     assert_eq!(
-        map.get(&serde_yaml::Value::String("author".into()))
+        map.get(serde_yaml::Value::String("author".into()))
             .unwrap(),
         &serde_yaml::Value::String("test".into()),
     );
     assert_eq!(
-        map.get(&serde_yaml::Value::String("date".into())).unwrap(),
+        map.get(serde_yaml::Value::String("date".into())).unwrap(),
         &serde_yaml::Value::String("2026-01-01".into()),
     );
     assert_eq!(
-        map.get(&serde_yaml::Value::String("status".into()))
+        map.get(serde_yaml::Value::String("status".into()))
             .unwrap(),
         &serde_yaml::Value::String("draft".into()),
     );
-    let tags = map.get(&serde_yaml::Value::String("tags".into())).unwrap();
+    let tags = map.get(serde_yaml::Value::String("tags".into())).unwrap();
     assert_eq!(tags.as_sequence().unwrap().len(), 0);
 }
 
@@ -65,7 +65,7 @@ fn fix_preserves_body() {
         fixture.root(),
         &store,
         &fixture.config(),
-        &vec!["docs/rfcs/RFC-body.md".to_string()],
+        &["docs/rfcs/RFC-body.md".to_string()],
         false,
         &RealFileSystem,
     );
@@ -87,7 +87,7 @@ fn fix_dry_run_does_not_write() {
         fixture.root(),
         &store,
         &fixture.config(),
-        &vec!["docs/rfcs/RFC-dry.md".to_string()],
+        &["docs/rfcs/RFC-dry.md".to_string()],
         true,
         &RealFileSystem,
     );
@@ -116,7 +116,7 @@ fn fix_all_broken_docs() {
         fixture.root(),
         &store,
         &fixture.config(),
-        &vec![],
+        &[],
         false,
         &RealFileSystem,
     );
@@ -141,7 +141,7 @@ fn fix_json_output() {
         fixture.root(),
         &store,
         &fixture.config(),
-        &vec!["docs/rfcs/RFC-json.md".to_string()],
+        &["docs/rfcs/RFC-json.md".to_string()],
         false,
         &RealFileSystem,
     );
@@ -153,7 +153,7 @@ fn fix_json_output() {
     let arr = obj["field_fixes"].as_array().unwrap();
     assert_eq!(arr.len(), 1);
     assert!(arr[0]["path"].is_string());
-    assert!(arr[0]["fields_added"].as_array().unwrap().len() > 0);
+    assert!(!arr[0]["fields_added"].as_array().unwrap().is_empty());
     assert!(arr[0]["written"].is_boolean());
 }
 
@@ -353,7 +353,7 @@ fn fix_infers_type_from_directory() {
         fixture.root(),
         &store,
         &fixture.config(),
-        &vec!["docs/rfcs/RFC-notype.md".to_string()],
+        &["docs/rfcs/RFC-notype.md".to_string()],
         false,
         &RealFileSystem,
     );
@@ -363,7 +363,7 @@ fn fix_infers_type_from_directory() {
     let value: serde_yaml::Value = serde_yaml::from_str(&yaml_str).unwrap();
     let map = value.as_mapping().unwrap();
     assert_eq!(
-        map.get(&serde_yaml::Value::String("type".into())).unwrap(),
+        map.get(serde_yaml::Value::String("type".into())).unwrap(),
         &serde_yaml::Value::String("rfc".into()),
     );
 }

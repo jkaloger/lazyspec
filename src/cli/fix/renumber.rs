@@ -421,6 +421,7 @@ pub fn cascade_references(
     fs: &dyn FileSystem,
 ) -> Vec<ReferenceUpdate> {
     let mut updates = Vec::new();
+    let ref_re = Regex::new(REF_PATTERN).unwrap();
 
     for doc in store.all_docs() {
         let full_path = root.join(&doc.path);
@@ -468,7 +469,6 @@ pub fn cascade_references(
             }
         }
 
-        let ref_re = Regex::new(REF_PATTERN).unwrap();
         let mut new_body = body.clone();
         let mut body_changed = false;
 

@@ -50,8 +50,8 @@ impl Store {
         self.reverse_links.clear();
         let id_to_path: HashMap<String, PathBuf> = self
             .docs
-            .iter()
-            .map(|(_, doc)| (doc.id.clone(), doc.path.clone()))
+            .values()
+            .map(|doc| (doc.id.clone(), doc.path.clone()))
             .collect();
         for (path, meta) in &self.docs {
             for rel in &meta.related {
@@ -71,6 +71,7 @@ impl Store {
         self.propagate_parent_links();
     }
 
+    #[allow(clippy::type_complexity)]
     pub(super) fn build_links(
         docs: &HashMap<PathBuf, DocMeta>,
     ) -> (
@@ -81,8 +82,8 @@ impl Store {
         let mut reverse_links: HashMap<PathBuf, Vec<(RelationType, PathBuf)>> = HashMap::new();
 
         let id_to_path: HashMap<String, PathBuf> = docs
-            .iter()
-            .map(|(_, doc)| (doc.id.clone(), doc.path.clone()))
+            .values()
+            .map(|doc| (doc.id.clone(), doc.path.clone()))
             .collect();
 
         for (path, meta) in docs {

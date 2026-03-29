@@ -104,8 +104,7 @@ TODO
 "#
         .to_string(),
 
-        "spec" => format!(
-            r#"---
+        "spec" => r#"---
 title: "{{title}}"
 type: spec
 status: draft
@@ -119,7 +118,7 @@ related: []
 
 TODO
 "#
-        ),
+        .to_string(),
 
         _ => format!(
             r#"---
@@ -142,6 +141,7 @@ TODO
 
 /// Create a document on the filesystem. Handles numbering, template resolution, and file writing.
 /// Returns the absolute path to the created file.
+#[allow(clippy::too_many_arguments)]
 pub fn create_document(
     root: &Path,
     config: &Config,

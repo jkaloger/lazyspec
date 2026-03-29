@@ -10,6 +10,12 @@ pub struct DiskCache {
     dir: PathBuf,
 }
 
+impl Default for DiskCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DiskCache {
     pub fn new() -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());

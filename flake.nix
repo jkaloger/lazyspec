@@ -3,6 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    crane.url = "github:ipetkov/crane";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -10,92 +11,78 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, rust-overlay, flake-utils }:
+  outputs = { self, nixpkgs, crane, rust-overlay, flake-utils, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        overlays = [ (import rust-overlay) ];
-        pkgs = import nixpkgs { inherit system overlays; };
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [ (import rust-overlay) ];
+        };
+
+        inherit (pkgs) lib;
 
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [ "clippy" "rustfmt" "rust-src" ];
         };
 
-        rustPlatform = pkgs.makeRustPlatform {
-          cargo = rustToolchain;
-          rustc = rustToolchain;
+        craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+
+        src = lib.cleanSourceWith {
+          src = ./.;
+          filter = path: type:
+            let baseName = builtins.baseNameOf path;
+            in !(baseName == "docs" || baseName == ".claude")
+              && (craneLib.filterCargoSources path type || baseName == "README.md");
         };
-      in
-      {
-        packages.default = rustPlatform.buildRustPackage {
-          pname = "lazyspec";
-          version = "0.5.0";
 
-          src = pkgs.lib.cleanSourceWith {
-            src = ./.;
-            filter = path: type:
-              let baseName = builtins.baseNameOf path;
-              in !(baseName == "docs" || baseName == "target" || baseName == ".claude");
-          };
-
-          cargoHash = "sha256-7ccAvyRnbmXnpmLlyIlv74Fa4cSHtLzkM2LBNqk++tc=";
-
-          # Tests require filesystem fixtures not available in the nix sandbox
-          doCheck = false;
-
+        commonArgs = {
+          inherit src;
+          strictDeps = true;
           nativeBuildInputs = [ pkgs.pkg-config ];
-
-          buildInputs = pkgs.lib.optionals pkgs.stdenv.isDarwin [
+          buildInputs = lib.optionals pkgs.stdenv.isDarwin [
             pkgs.apple-sdk_15
           ];
         };
 
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+      in
+      {
+        packages.default = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          doCheck = false;
+        });
+
         checks = {
-          clippy = self.packages.${system}.default.overrideAttrs (old: {
-            pname = "lazyspec-clippy";
-            nativeBuildInputs = (old.nativeBuildInputs or []) ++ [ pkgs.clippy ];
-            buildPhase = ''
-              cargo clippy -- -D warnings
-            '';
-            installPhase = ''
-              touch $out
-            '';
-            doCheck = false;
+          build = self.packages.${system}.default;
+
+          clippy = craneLib.cargoClippy (commonArgs // {
+            inherit cargoArtifacts;
+            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
           });
 
-          fmt = self.packages.${system}.default.overrideAttrs (old: {
-            pname = "lazyspec-fmt";
-            buildPhase = ''
-              cargo fmt --check
-            '';
-            installPhase = ''
-              touch $out
-            '';
-            doCheck = false;
-          });
+          fmt = craneLib.cargoFmt {
+            inherit src;
+          };
 
-          test = self.packages.${system}.default.overrideAttrs (old: {
-            pname = "lazyspec-test";
-            nativeBuildInputs = (old.nativeBuildInputs or []) ++ [ pkgs.git ];
-            buildPhase = ''
+          test = craneLib.cargoTest (commonArgs // {
+            inherit cargoArtifacts;
+            nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.git ];
+            preCheck = ''
               export HOME=$(mktemp -d)
               git config --global user.email "nix@test"
               git config --global user.name "nix"
               git init
               git add -A
               git commit -m "init" --allow-empty
-              cargo test
             '';
-            installPhase = ''
-              touch $out
-            '';
-            doCheck = false;
           });
         };
 
-        devShells.default = pkgs.mkShell {
-          inputsFrom = [ self.packages.${system}.default ];
+        formatter = pkgs.nixfmt;
+
+        devShells.default = craneLib.devShell {
+          checks = self.checks.${system};
           packages = [
-            rustToolchain
             pkgs.rust-analyzer
             pkgs.ast-grep
             pkgs.ripgrep

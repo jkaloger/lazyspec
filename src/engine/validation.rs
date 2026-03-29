@@ -283,8 +283,8 @@ impl Checker for BrokenLinkRule {
 
         let id_to_path: HashMap<String, PathBuf> = store
             .docs
-            .iter()
-            .map(|(_, doc)| (doc.id.clone(), doc.path.clone()))
+            .values()
+            .map(|doc| (doc.id.clone(), doc.path.clone()))
             .collect();
 
         for (path, meta) in &store.docs {
@@ -379,8 +379,8 @@ impl Checker for ParentLinkRule {
 
         let id_to_path: HashMap<String, PathBuf> = store
             .docs
-            .iter()
-            .map(|(_, doc)| (doc.id.clone(), doc.path.clone()))
+            .values()
+            .map(|doc| (doc.id.clone(), doc.path.clone()))
             .collect();
 
         for (path, meta) in &store.docs {

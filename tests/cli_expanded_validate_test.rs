@@ -226,9 +226,10 @@ fn all_children_accepted_json_output() {
 // --- Custom rule tests ---
 
 fn config_with_rules(rules: Vec<ValidationRule>) -> Config {
-    let mut config = Config::default();
-    config.rules = rules;
-    config
+    Config {
+        rules,
+        ..Config::default()
+    }
 }
 
 #[test]

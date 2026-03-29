@@ -160,6 +160,12 @@ pub trait GhAuth {
 
 pub struct GhCli;
 
+impl Default for GhCli {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GhCli {
     pub fn new() -> Self {
         GhCli
@@ -472,6 +478,12 @@ pub mod test_support {
         pub last_edit_body: RefCell<Option<String>>,
         pub last_edit_labels_remove: RefCell<Vec<String>>,
         pub last_create_body: RefCell<Option<String>>,
+    }
+
+    impl Default for MockGhClient {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl MockGhClient {

@@ -48,7 +48,7 @@ pub fn extract_diagram_blocks(body: &str) -> Vec<DiagramBlock> {
         if trimmed.starts_with("````") {
             byte_offset += line.len();
             // Consume until matching close fence
-            while let Some(inner) = lines.next() {
+            for inner in lines.by_ref() {
                 byte_offset += inner.len();
                 let inner_trimmed = inner.trim_end_matches('\n').trim_end_matches('\r');
                 if inner_trimmed.starts_with("````") {
@@ -69,18 +69,13 @@ pub fn extract_diagram_blocks(body: &str) -> Vec<DiagramBlock> {
             byte_offset += line.len();
             let mut source = String::new();
 
-            loop {
-                match lines.next() {
-                    Some(inner) => {
-                        let inner_trimmed = inner.trim_end_matches('\n').trim_end_matches('\r');
-                        byte_offset += inner.len();
-                        if inner_trimmed == "```" {
-                            break;
-                        }
-                        source.push_str(inner);
-                    }
-                    None => break,
+            for inner in lines.by_ref() {
+                let inner_trimmed = inner.trim_end_matches('\n').trim_end_matches('\r');
+                byte_offset += inner.len();
+                if inner_trimmed == "```" {
+                    break;
                 }
+                source.push_str(inner);
             }
 
             blocks.push(DiagramBlock {
@@ -311,6 +306,12 @@ pub enum DiagramCacheEntry {
 pub struct DiagramCache {
     cache_dir: PathBuf,
     entries: HashMap<u64, DiagramCacheEntry>,
+}
+
+impl Default for DiagramCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DiagramCache {

@@ -309,15 +309,12 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 continue;
             }
             // Poll with short timeout so we re-check paused frequently
-            match crossterm::event::poll(Duration::from_millis(50)) {
-                Ok(true) => {
-                    if let Ok(Event::Key(key)) = crossterm::event::read() {
-                        perf_log::log(&format!("input_thread: read key {:?}", key.code));
-                        let _ = term_tx.send(AppEvent::Terminal(key));
-                        perf_log::log("input_thread: sent to channel");
-                    }
+            if let Ok(true) = crossterm::event::poll(Duration::from_millis(50)) {
+                if let Ok(Event::Key(key)) = crossterm::event::read() {
+                    perf_log::log(&format!("input_thread: read key {:?}", key.code));
+                    let _ = term_tx.send(AppEvent::Terminal(key));
+                    perf_log::log("input_thread: sent to channel");
                 }
-                _ => {}
             }
         }
     });
@@ -418,7 +415,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         }
 
         loop_count += 1;
-        if perf_log::enabled() && loop_count % 60 == 0 {
+        if perf_log::enabled() && loop_count.is_multiple_of(60) {
             perf_log::log(&format!("--- loop #{} ---", loop_count));
         }
         perf_log::log_duration("loop_total", loop_start);

@@ -115,6 +115,7 @@ pub fn run(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_renumber(
     root: &Path,
     store: &Store,

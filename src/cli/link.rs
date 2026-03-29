@@ -33,6 +33,7 @@ pub fn link_with_config(
     link_inner(root, store, from, rel_type, to, fs, config, GhCli::new)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn link_inner<G: GhIssueReader + GhIssueWriter>(
     root: &Path,
     store: &Store,

@@ -230,7 +230,7 @@ pub fn reserve_next(
         create_local_ref(repo_root, prefix, candidate)?;
 
         on_progress(ReservationProgress::PushAttempt {
-            attempt: attempt as u8 + 1,
+            attempt: attempt + 1,
             max: max_retries,
             candidate,
         });

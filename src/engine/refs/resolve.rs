@@ -8,7 +8,7 @@ use super::RefExpander;
 impl RefExpander {
     pub(super) fn resolve_head_short_sha(&self) -> Option<String> {
         let output = Command::new("git")
-            .args(&["rev-parse", "--short", "HEAD"])
+            .args(["rev-parse", "--short", "HEAD"])
             .current_dir(&self.root)
             .output()
             .ok()?;
@@ -28,7 +28,7 @@ impl RefExpander {
     ) -> Result<String> {
         let rev = sha.unwrap_or("HEAD");
         let output = Command::new("git")
-            .args(&["show", &format!("{}:{}", rev, path)])
+            .args(["show", &format!("{}:{}", rev, path)])
             .current_dir(&self.root)
             .output()?;
 

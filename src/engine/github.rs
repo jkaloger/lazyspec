@@ -26,7 +26,7 @@ fn parse_owner_repo(url: &str) -> Result<String> {
         // https://github.com/owner/repo.git
         url.split("//")
             .nth(1)
-            .and_then(|s| s.splitn(2, '/').nth(1))
+            .and_then(|s| s.split_once('/').map(|x| x.1))
             .unwrap_or("")
     } else {
         bail!("unrecognised git remote URL format: {}", url);

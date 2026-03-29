@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use super::{extract_id, title_from_folder_name, ParseError};
 
+#[allow(clippy::too_many_arguments)]
 pub fn load_type_directory(
     root: &Path,
     full_path: &Path,
@@ -93,6 +94,7 @@ fn load_child_markdown_files(
     Ok(child_paths)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn load_subdirectory(
     root: &Path,
     path: &Path,

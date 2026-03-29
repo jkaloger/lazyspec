@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
         let env_shell = shells.iter().find(|s| s.is(shell_name));
         match env_shell {
             Some(s) => {
-                s.write_registration("COMPLETE", "lazyspec", &bin, &bin, &mut std::io::stdout())?;
+                s.write_registration("COMPLETE", "lazyspec", bin, bin, &mut std::io::stdout())?;
             }
             None => {
                 // Fallback to static generation for shells without dynamic support

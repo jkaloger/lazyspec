@@ -239,6 +239,7 @@ fn check_doc_stale(path: &std::path::Path, doc_type: &str, config: &Config) -> (
     (is_gh, is_stale)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn doc_row_cells(
     id: &str,
     title: &str,
@@ -384,8 +385,7 @@ pub fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = app
         .doc_types
         .iter()
-        .enumerate()
-        .map(|(_, dt)| {
+        .map(|dt| {
             let count = app.doc_count(dt);
             let plural = app
                 .type_plurals
@@ -647,11 +647,7 @@ pub fn render_relationship_sections(
     let mut chain_paths = Vec::new();
     {
         let mut current_path = doc.path.clone();
-        loop {
-            let current_doc = match app.store.get(&current_path) {
-                Some(d) => d,
-                None => break,
-            };
+        while let Some(current_doc) = app.store.get(&current_path) {
             let implements_target = current_doc.related.iter().find_map(|r| {
                 if r.rel_type == RelationType::Implements {
                     if let Some(fwd) = app.store.forward_links.get(&current_doc.path) {
@@ -959,8 +955,7 @@ pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect, config: &Co
 
     let filtered_paths: Vec<PathBuf> = app
         .filtered_docs_cache
-        .as_ref()
-        .map(|c| c.clone())
+        .clone()
         .unwrap_or_default();
 
     let rows: Vec<Row> = filtered_paths

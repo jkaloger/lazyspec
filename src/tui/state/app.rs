@@ -811,14 +811,9 @@ impl App {
         // Chain: walk Implements links upward from doc
         let mut chain = Vec::new();
         let mut current_path = doc.path.clone();
-        loop {
-            let current_doc = match self.store.get(&current_path) {
-                Some(d) => d,
-                None => break,
-            };
+        while let Some(current_doc) = self.store.get(&current_path) {
             let implements_target = current_doc.related.iter().find_map(|r| {
                 if r.rel_type == RelationType::Implements {
-                    // resolve target path via forward_links
                     if let Some(fwd) = self.store.forward_links.get(&current_doc.path) {
                         for (rel, target) in fwd {
                             if *rel == RelationType::Implements {

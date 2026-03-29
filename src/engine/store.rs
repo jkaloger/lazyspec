@@ -312,7 +312,7 @@ impl Store {
             }
         }
 
-        results.sort_by(|a, b| DocMeta::sort_by_date(&a.doc, &b.doc));
+        results.sort_by(|a, b| DocMeta::sort_by_date(a.doc, b.doc));
         results
     }
 }

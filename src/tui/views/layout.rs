@@ -13,7 +13,7 @@ pub fn wrapped_line_count(line: &Line, content_width: usize) -> usize {
     if line_width == 0 {
         return 1;
     }
-    (line_width + content_width - 1) / content_width
+    line_width.div_ceil(content_width)
 }
 
 pub fn wrapped_lines_total(lines: &[Line], content_width: usize) -> usize {

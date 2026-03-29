@@ -136,6 +136,7 @@ impl IssueCache {
     ///
     /// Returns early with zero API calls if all cached documents are fresh.
     /// On API failure, leaves stale cache in place and returns a warning.
+    #[allow(clippy::too_many_arguments)]
     pub fn refresh_stale(
         &self,
         root: &Path,
@@ -749,7 +750,7 @@ mod tests {
                 &gh,
                 "owner/repo",
                 &mut issue_map,
-                &vec!["story".to_string()],
+                &["story".to_string()],
             )
             .unwrap();
 
@@ -828,7 +829,7 @@ mod tests {
                 &initial_gh,
                 "owner/repo",
                 &mut issue_map,
-                &vec!["story".to_string()],
+                &["story".to_string()],
             )
             .unwrap();
 
@@ -849,7 +850,7 @@ mod tests {
                 &updated_gh,
                 "owner/repo",
                 &mut issue_map,
-                &vec!["story".to_string()],
+                &["story".to_string()],
             )
             .unwrap();
 
@@ -895,7 +896,7 @@ mod tests {
                 &gh,
                 "owner/repo",
                 &mut issue_map,
-                &vec!["story".to_string()],
+                &["story".to_string()],
             )
             .unwrap();
 
@@ -940,7 +941,7 @@ mod tests {
                 &gh,
                 "owner/repo",
                 &mut issue_map,
-                &vec!["story".to_string()],
+                &["story".to_string()],
             )
             .unwrap();
 
@@ -1059,7 +1060,7 @@ mod tests {
                 &gh,
                 "owner/repo",
                 &mut issue_map,
-                &vec!["story".to_string()],
+                &["story".to_string()],
             )
             .unwrap();
 
