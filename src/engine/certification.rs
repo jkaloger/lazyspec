@@ -3,7 +3,9 @@ use std::path::Path;
 
 use super::config::Config;
 use super::hashing;
-use super::symbols::{normalize_ast, RustSymbolExtractor, SymbolExtractor, TypeScriptSymbolExtractor};
+use super::symbols::{
+    normalize_ast, RustSymbolExtractor, SymbolExtractor, TypeScriptSymbolExtractor,
+};
 
 use tree_sitter_rust::LANGUAGE as LANGUAGE_RUST;
 use tree_sitter_typescript::LANGUAGE_TYPESCRIPT;
@@ -96,7 +98,8 @@ mod tests {
         let path = dir.path().join("lib.rs");
 
         let v1 = "pub fn greet() { println!(\"hi\"); }\n";
-        let v2 = "// a friendly greeting\npub fn greet() {\n    // say hi\n    println!(\"hi\");\n}\n";
+        let v2 =
+            "// a friendly greeting\npub fn greet() {\n    // say hi\n    println!(\"hi\");\n}\n";
 
         fs::write(&path, v1).unwrap();
         let h1 = compute_blob_hash(dir.path(), "lib.rs", Some("greet"), true).unwrap();
@@ -167,7 +170,10 @@ mod tests {
 
         let file_hash = compute_blob_hash(dir.path(), "lib.rs", None, false).unwrap();
         let direct_hash = hashing::hash_file(&path).unwrap();
-        assert_eq!(file_hash, direct_hash, "whole-file hash should use raw content");
+        assert_eq!(
+            file_hash, direct_hash,
+            "whole-file hash should use raw content"
+        );
     }
 
     #[test]
@@ -249,8 +255,7 @@ mod tests {
         )
         .unwrap();
 
-        let direct_raw =
-            compute_blob_hash(dir.path(), "lib.rs", Some("greet"), false).unwrap();
+        let direct_raw = compute_blob_hash(dir.path(), "lib.rs", Some("greet"), false).unwrap();
         let direct_normalized =
             compute_blob_hash(dir.path(), "lib.rs", Some("greet"), true).unwrap();
 

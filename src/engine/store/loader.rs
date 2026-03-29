@@ -20,7 +20,16 @@ pub fn load_type_directory(
 ) -> Result<()> {
     for path in fs.read_dir(full_path)? {
         if fs.is_dir(&path) {
-            load_subdirectory(root, &path, type_def, docs, children, parent_of, parse_errors, fs)?;
+            load_subdirectory(
+                root,
+                &path,
+                type_def,
+                docs,
+                children,
+                parent_of,
+                parse_errors,
+                fs,
+            )?;
             continue;
         }
 
@@ -97,7 +106,10 @@ fn load_subdirectory(
     let index_path = path.join("index.md");
 
     if fs.exists(&index_path) {
-        let parent_relative = index_path.strip_prefix(root).unwrap_or(&index_path).to_path_buf();
+        let parent_relative = index_path
+            .strip_prefix(root)
+            .unwrap_or(&index_path)
+            .to_path_buf();
         parse_document_entry(root, &index_path, docs, parse_errors, fs)?;
         let child_paths = load_child_markdown_files(root, path, true, docs, parse_errors, fs)?;
         for cp in &child_paths {
@@ -128,7 +140,11 @@ fn load_subdirectory(
         path: parent_relative.clone(),
         title: title_from_folder_name(folder_name),
         doc_type: DocType::new(&type_def.name),
-        status: if all_accepted { Status::Accepted } else { Status::Draft },
+        status: if all_accepted {
+            Status::Accepted
+        } else {
+            Status::Draft
+        },
         author: "".to_string(),
         date: Utc::now().date_naive(),
         tags: vec![],

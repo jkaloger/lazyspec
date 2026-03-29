@@ -33,7 +33,11 @@ pub fn type_header(doc_type: &DocType) -> String {
     let label = doc_type.to_string();
     if colors_enabled() {
         let width = 25usize.saturating_sub(label.len() + 3);
-        format!("\u{256d}\u{2500} {} {}\u{256e}", label, "\u{2500}".repeat(width))
+        format!(
+            "\u{256d}\u{2500} {} {}\u{256e}",
+            label,
+            "\u{2500}".repeat(width)
+        )
     } else {
         format!("--- {} ---", label)
     }

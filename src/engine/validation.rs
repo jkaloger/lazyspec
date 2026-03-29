@@ -293,17 +293,14 @@ impl Checker for BrokenLinkRule {
             }
 
             for rel in &meta.related {
-                let resolved = id_to_path
-                    .get(&rel.target)
-                    .cloned()
-                    .or_else(|| {
-                        let p = PathBuf::from(&rel.target);
-                        if store.docs.contains_key(&p) {
-                            Some(p)
-                        } else {
-                            None
-                        }
-                    });
+                let resolved = id_to_path.get(&rel.target).cloned().or_else(|| {
+                    let p = PathBuf::from(&rel.target);
+                    if store.docs.contains_key(&p) {
+                        Some(p)
+                    } else {
+                        None
+                    }
+                });
 
                 let Some(target) = resolved else {
                     issues.push((
@@ -335,8 +332,7 @@ impl Checker for BrokenLinkRule {
                             parent: target.clone(),
                         },
                     ));
-                } else if parent_doc.status == Status::Superseded
-                    && meta.status == Status::Accepted
+                } else if parent_doc.status == Status::Superseded && meta.status == Status::Accepted
                 {
                     issues.push((
                         Severity::Warning,
@@ -570,10 +566,7 @@ impl Checker for DuplicateIdRule {
                 continue;
             }
             paths.sort();
-            issues.push((
-                Severity::Error,
-                ValidationIssue::DuplicateId { id, paths },
-            ));
+            issues.push((Severity::Error, ValidationIssue::DuplicateId { id, paths }));
         }
 
         issues
@@ -638,7 +631,8 @@ impl AcSlugFormatRule {
                     ValidationIssue::InvalidAcSlug {
                         path: path.to_path_buf(),
                         slug: slug.to_string(),
-                        reason: "slug must be lowercase kebab-case (a-z0-9 separated by hyphens)".to_string(),
+                        reason: "slug must be lowercase kebab-case (a-z0-9 separated by hyphens)"
+                            .to_string(),
                     },
                 ));
             }

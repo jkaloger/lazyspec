@@ -14,11 +14,7 @@ fn log_file() -> Option<&'static File> {
             }
             let path = std::env::var("LAZYSPEC_LOG_PATH")
                 .unwrap_or_else(|_| "/tmp/lazyspec-tui.log".to_string());
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .ok()
+            OpenOptions::new().create(true).append(true).open(path).ok()
         })
         .as_ref()
 }

@@ -92,7 +92,10 @@ fn rel_type_completer_returns_all_types() {
         .map(|c| c.get_value().to_string_lossy().into_owned())
         .collect();
 
-    assert_eq!(values, vec!["implements", "supersedes", "blocks", "related-to"]);
+    assert_eq!(
+        values,
+        vec!["implements", "supersedes", "blocks", "related-to"]
+    );
 }
 
 #[test]

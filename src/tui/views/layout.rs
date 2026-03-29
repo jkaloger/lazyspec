@@ -5,7 +5,11 @@ pub fn wrapped_line_count(line: &Line, content_width: usize) -> usize {
     if content_width == 0 {
         return 1;
     }
-    let line_width: usize = line.spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+    let line_width: usize = line
+        .spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
     if line_width == 0 {
         return 1;
     }
@@ -13,7 +17,10 @@ pub fn wrapped_line_count(line: &Line, content_width: usize) -> usize {
 }
 
 pub fn wrapped_lines_total(lines: &[Line], content_width: usize) -> usize {
-    lines.iter().map(|l| wrapped_line_count(l, content_width)).sum()
+    lines
+        .iter()
+        .map(|l| wrapped_line_count(l, content_width))
+        .sum()
 }
 
 pub fn calculate_image_height(

@@ -122,7 +122,12 @@ impl Store {
         DocMeta::extract_body(&content)
     }
 
-    pub fn get_body_expanded(&self, path: &Path, max_lines: usize, fs: &dyn FileSystem) -> Result<String> {
+    pub fn get_body_expanded(
+        &self,
+        path: &Path,
+        max_lines: usize,
+        fs: &dyn FileSystem,
+    ) -> Result<String> {
         let body = self.get_body_raw(path, fs)?;
         let expander = RefExpander::with_max_lines(self.root.clone(), max_lines);
         expander.expand(&body)
@@ -137,41 +142,66 @@ impl Store {
             return self.resolve_unqualified(id);
         };
 
-        let parent = self.docs.values().find(|d| {
-            !self.parent_of.contains_key(&d.path)
-                && canonical_name(&d.path)
-                    .map(|n| n.starts_with(parent_id))
-                    .unwrap_or(false)
-        }).ok_or_else(|| ResolveError::NotFound(id.to_string()))?;
-
-        let child_paths = self.children.get(&parent.path)
+        let parent = self
+            .docs
+            .values()
+            .find(|d| {
+                !self.parent_of.contains_key(&d.path)
+                    && canonical_name(&d.path)
+                        .map(|n| n.starts_with(parent_id))
+                        .unwrap_or(false)
+            })
             .ok_or_else(|| ResolveError::NotFound(id.to_string()))?;
 
-        child_paths.iter().find_map(|cp| {
-            let stem = cp.file_stem().and_then(|f| f.to_str())?;
-            if stem.starts_with(child_stem) { self.docs.get(cp) } else { None }
-        }).ok_or_else(|| ResolveError::NotFound(id.to_string()))
+        let child_paths = self
+            .children
+            .get(&parent.path)
+            .ok_or_else(|| ResolveError::NotFound(id.to_string()))?;
+
+        child_paths
+            .iter()
+            .find_map(|cp| {
+                let stem = cp.file_stem().and_then(|f| f.to_str())?;
+                if stem.starts_with(child_stem) {
+                    self.docs.get(cp)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| ResolveError::NotFound(id.to_string()))
     }
 
     fn resolve_unqualified(&self, id: &str) -> Result<&DocMeta, ResolveError> {
-        let matches: Vec<&DocMeta> = self.docs.values().filter(|d| {
-            !self.parent_of.contains_key(&d.path)
-                && canonical_name(&d.path)
-                    .map(|n| n.starts_with(id))
-                    .unwrap_or(false)
-        }).collect();
+        let matches: Vec<&DocMeta> = self
+            .docs
+            .values()
+            .filter(|d| {
+                !self.parent_of.contains_key(&d.path)
+                    && canonical_name(&d.path)
+                        .map(|n| n.starts_with(id))
+                        .unwrap_or(false)
+            })
+            .collect();
 
         match matches.len() {
             0 => Err(ResolveError::NotFound(id.to_string())),
             1 => Ok(matches[0]),
             _ => {
                 let paths: Vec<PathBuf> = matches.iter().map(|d| d.path.clone()).collect();
-                Err(ResolveError::Ambiguous { id: id.to_string(), matches: paths })
+                Err(ResolveError::Ambiguous {
+                    id: id.to_string(),
+                    matches: paths,
+                })
             }
         }
     }
 
-    pub fn reload_file(&mut self, root: &Path, relative_path: &Path, fs: &dyn FileSystem) -> Result<()> {
+    pub fn reload_file(
+        &mut self,
+        root: &Path,
+        relative_path: &Path,
+        fs: &dyn FileSystem,
+    ) -> Result<()> {
         let full_path = root.join(relative_path);
         if !fs.exists(&full_path) {
             self.docs.remove(relative_path);
@@ -218,11 +248,17 @@ impl Store {
     }
 
     pub fn forward_links_for(&self, path: &Path) -> &[(RelationType, PathBuf)] {
-        self.forward_links.get(path).map(|v| v.as_slice()).unwrap_or(&[])
+        self.forward_links
+            .get(path)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn reverse_links_for(&self, path: &Path) -> &[(RelationType, PathBuf)] {
-        self.reverse_links.get(path).map(|v| v.as_slice()).unwrap_or(&[])
+        self.reverse_links
+            .get(path)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn validate_full(&self, config: &Config) -> crate::engine::validation::ValidationResult {
@@ -284,7 +320,10 @@ impl Store {
 fn canonical_name(path: &Path) -> Option<&str> {
     let file_name = path.file_name().and_then(|f| f.to_str())?;
     if file_name == "index.md" || file_name == ".virtual" {
-        return path.parent().and_then(|p| p.file_name()).and_then(|f| f.to_str());
+        return path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|f| f.to_str());
     }
     Some(file_name)
 }
@@ -426,7 +465,10 @@ mod tests {
         }
 
         fn add_file(&self, path: impl Into<PathBuf>, content: &str) {
-            self.files.lock().unwrap().insert(path.into(), content.to_string());
+            self.files
+                .lock()
+                .unwrap()
+                .insert(path.into(), content.to_string());
         }
 
         fn add_dir(&self, path: impl Into<PathBuf>) {
@@ -445,7 +487,10 @@ mod tests {
         }
 
         fn write(&self, path: &Path, contents: &str) -> Result<()> {
-            self.files.lock().unwrap().insert(path.to_path_buf(), contents.to_string());
+            self.files
+                .lock()
+                .unwrap()
+                .insert(path.to_path_buf(), contents.to_string());
             Ok(())
         }
 
@@ -497,30 +542,36 @@ mod tests {
         fs.add_dir(rfc_dir.clone());
 
         let rfc1_path = rfc_dir.join("RFC-001-first.md");
-        fs.add_file(&rfc1_path, concat!(
-            "---\n",
-            "title: \"First RFC\"\n",
-            "type: rfc\n",
-            "status: draft\n",
-            "author: \"test\"\n",
-            "date: 2026-01-01\n",
-            "tags: []\n",
-            "---\n",
-            "Body of first RFC.\n",
-        ));
+        fs.add_file(
+            &rfc1_path,
+            concat!(
+                "---\n",
+                "title: \"First RFC\"\n",
+                "type: rfc\n",
+                "status: draft\n",
+                "author: \"test\"\n",
+                "date: 2026-01-01\n",
+                "tags: []\n",
+                "---\n",
+                "Body of first RFC.\n",
+            ),
+        );
 
         let rfc2_path = rfc_dir.join("RFC-002-second.md");
-        fs.add_file(&rfc2_path, concat!(
-            "---\n",
-            "title: \"Second RFC\"\n",
-            "type: rfc\n",
-            "status: accepted\n",
-            "author: \"test\"\n",
-            "date: 2026-01-02\n",
-            "tags: [\"important\"]\n",
-            "---\n",
-            "Body of second RFC.\n",
-        ));
+        fs.add_file(
+            &rfc2_path,
+            concat!(
+                "---\n",
+                "title: \"Second RFC\"\n",
+                "type: rfc\n",
+                "status: accepted\n",
+                "author: \"test\"\n",
+                "date: 2026-01-02\n",
+                "tags: [\"important\"]\n",
+                "---\n",
+                "Body of second RFC.\n",
+            ),
+        );
 
         let config = Config::default();
         let store = Store::load_with_fs(&root, &config, &fs).unwrap();
@@ -539,7 +590,7 @@ mod tests {
     }
 
     fn github_issues_config() -> Config {
-        use crate::engine::config::{TypeDef, StoreBackend, NumberingStrategy};
+        use crate::engine::config::{NumberingStrategy, StoreBackend, TypeDef};
 
         let issue_type = TypeDef {
             name: "issue".to_string(),
@@ -568,17 +619,20 @@ mod tests {
         fs.add_dir(cache_dir.clone());
 
         let issue_path = cache_dir.join("ISSUE-042-login-broken.md");
-        fs.add_file(&issue_path, concat!(
-            "---\n",
-            "title: \"Login broken\"\n",
-            "type: issue\n",
-            "status: draft\n",
-            "author: \"alice\"\n",
-            "date: 2026-03-01\n",
-            "tags: [\"bug\"]\n",
-            "---\n",
-            "The login page returns 500.\n",
-        ));
+        fs.add_file(
+            &issue_path,
+            concat!(
+                "---\n",
+                "title: \"Login broken\"\n",
+                "type: issue\n",
+                "status: draft\n",
+                "author: \"alice\"\n",
+                "date: 2026-03-01\n",
+                "tags: [\"bug\"]\n",
+                "---\n",
+                "The login page returns 500.\n",
+            ),
+        );
 
         let config = github_issues_config();
         let store = Store::load_with_fs(&root, &config, &fs).unwrap();
@@ -601,17 +655,20 @@ mod tests {
         fs.add_dir(cache_dir.clone());
 
         let issue_path = cache_dir.join("ISSUE-007-fix-auth.md");
-        fs.add_file(&issue_path, concat!(
-            "---\n",
-            "title: \"Fix auth\"\n",
-            "type: issue\n",
-            "status: draft\n",
-            "author: \"bob\"\n",
-            "date: 2026-03-15\n",
-            "tags: []\n",
-            "---\n",
-            "Auth tokens expire too quickly.\n",
-        ));
+        fs.add_file(
+            &issue_path,
+            concat!(
+                "---\n",
+                "title: \"Fix auth\"\n",
+                "type: issue\n",
+                "status: draft\n",
+                "author: \"bob\"\n",
+                "date: 2026-03-15\n",
+                "tags: []\n",
+                "---\n",
+                "Auth tokens expire too quickly.\n",
+            ),
+        );
 
         let config = github_issues_config();
         let store = Store::load_with_fs(&root, &config, &fs).unwrap();
@@ -630,24 +687,32 @@ mod tests {
         fs.add_dir(cache_dir.clone());
 
         let issue_path = cache_dir.join("ISSUE-001-example.md");
-        fs.add_file(&issue_path, concat!(
-            "---\n",
-            "title: \"Example issue\"\n",
-            "type: issue\n",
-            "status: draft\n",
-            "author: \"carol\"\n",
-            "date: 2026-03-20\n",
-            "tags: []\n",
-            "---\n",
-            "An example cached issue.\n",
-        ));
+        fs.add_file(
+            &issue_path,
+            concat!(
+                "---\n",
+                "title: \"Example issue\"\n",
+                "type: issue\n",
+                "status: draft\n",
+                "author: \"carol\"\n",
+                "date: 2026-03-20\n",
+                "tags: []\n",
+                "---\n",
+                "An example cached issue.\n",
+            ),
+        );
 
         let config = github_issues_config();
         let store = Store::load_with_fs(&root, &config, &fs).unwrap();
 
-        let doc = store.resolve_shorthand("ISSUE-001").expect("should resolve cached doc");
+        let doc = store
+            .resolve_shorthand("ISSUE-001")
+            .expect("should resolve cached doc");
         assert_eq!(doc.title, "Example issue");
         assert_eq!(doc.id, "ISSUE-001");
-        assert_eq!(doc.path, PathBuf::from(".lazyspec/cache/issue/ISSUE-001-example.md"));
+        assert_eq!(
+            doc.path,
+            PathBuf::from(".lazyspec/cache/issue/ISSUE-001-example.md")
+        );
     }
 }

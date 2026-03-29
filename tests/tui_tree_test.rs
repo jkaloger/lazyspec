@@ -40,11 +40,24 @@ fn setup_parent_with_children() -> (TestFixture, App) {
     let fixture = TestFixture::new();
 
     fixture.write_subfolder_doc("docs/rfcs/RFC-001-parent", PARENT_FRONTMATTER);
-    fixture.write_child_doc("docs/rfcs/RFC-001-parent", "child-a.md", CHILD_A_FRONTMATTER);
-    fixture.write_child_doc("docs/rfcs/RFC-001-parent", "child-b.md", CHILD_B_FRONTMATTER);
+    fixture.write_child_doc(
+        "docs/rfcs/RFC-001-parent",
+        "child-a.md",
+        CHILD_A_FRONTMATTER,
+    );
+    fixture.write_child_doc(
+        "docs/rfcs/RFC-001-parent",
+        "child-b.md",
+        CHILD_B_FRONTMATTER,
+    );
 
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
     (fixture, app)
 }
 
@@ -84,18 +97,35 @@ fn test_standalone_documents_unaffected() {
         "---\ntitle: Standalone\ntype: rfc\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\n---\n",
     );
     fixture.write_subfolder_doc("docs/rfcs/RFC-001-parent", PARENT_FRONTMATTER);
-    fixture.write_child_doc("docs/rfcs/RFC-001-parent", "child-a.md", CHILD_A_FRONTMATTER);
+    fixture.write_child_doc(
+        "docs/rfcs/RFC-001-parent",
+        "child-a.md",
+        CHILD_A_FRONTMATTER,
+    );
 
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     // Collapsed: parent + standalone, both at depth 0
     assert_eq!(app.doc_tree.len(), 2);
-    let standalone = app.doc_tree.iter().find(|n| n.title == "Standalone").unwrap();
+    let standalone = app
+        .doc_tree
+        .iter()
+        .find(|n| n.title == "Standalone")
+        .unwrap();
     assert_eq!(standalone.depth, 0);
     assert!(!standalone.is_parent);
 
-    let parent = app.doc_tree.iter().find(|n| n.title == "Parent RFC").unwrap();
+    let parent = app
+        .doc_tree
+        .iter()
+        .find(|n| n.title == "Parent RFC")
+        .unwrap();
     assert!(parent.is_parent);
 
     // Expand: child only appears under parent
@@ -103,7 +133,11 @@ fn test_standalone_documents_unaffected() {
     app.toggle_expanded(&parent_path);
 
     assert_eq!(app.doc_tree.len(), 3);
-    let standalone = app.doc_tree.iter().find(|n| n.title == "Standalone").unwrap();
+    let standalone = app
+        .doc_tree
+        .iter()
+        .find(|n| n.title == "Standalone")
+        .unwrap();
     assert_eq!(standalone.depth, 0);
     assert!(!standalone.is_parent);
 
@@ -117,11 +151,24 @@ fn test_virtual_parent_rendering() {
     let fixture = TestFixture::new();
 
     // No index.md in the folder -> virtual parent
-    fixture.write_child_doc("docs/rfcs/RFC-002-virtual", "part-one.md", CHILD_A_FRONTMATTER);
-    fixture.write_child_doc("docs/rfcs/RFC-002-virtual", "part-two.md", CHILD_B_FRONTMATTER);
+    fixture.write_child_doc(
+        "docs/rfcs/RFC-002-virtual",
+        "part-one.md",
+        CHILD_A_FRONTMATTER,
+    );
+    fixture.write_child_doc(
+        "docs/rfcs/RFC-002-virtual",
+        "part-two.md",
+        CHILD_B_FRONTMATTER,
+    );
 
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     // Virtual parent should exist
     assert_eq!(app.doc_tree.len(), 1);

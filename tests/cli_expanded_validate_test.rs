@@ -28,7 +28,11 @@ fn setup_with_chain(rfc_status: &str, story_status: &str, iter_status: &str) -> 
     fixture
 }
 
-fn setup_with_two_stories(rfc_status: &str, story1_status: &str, story2_status: &str) -> TestFixture {
+fn setup_with_two_stories(
+    rfc_status: &str,
+    story1_status: &str,
+    story2_status: &str,
+) -> TestFixture {
     let fixture = TestFixture::new();
     fixture.write_doc(
         "docs/rfcs/RFC-001-feature.md",
@@ -58,7 +62,10 @@ fn superseded_parent_warning() {
     let store = fixture.store();
     let result = store.validate_full(&fixture.config());
 
-    assert!(result.warnings.iter().any(|w| matches!(w, ValidationIssue::SupersededParent { .. })));
+    assert!(result
+        .warnings
+        .iter()
+        .any(|w| matches!(w, ValidationIssue::SupersededParent { .. })));
     assert!(result.errors.is_empty());
 }
 
@@ -68,7 +75,10 @@ fn rejected_parent_error() {
     let store = fixture.store();
     let result = store.validate_full(&fixture.config());
 
-    assert!(result.errors.iter().any(|e| matches!(e, ValidationIssue::RejectedParent { .. })));
+    assert!(result
+        .errors
+        .iter()
+        .any(|e| matches!(e, ValidationIssue::RejectedParent { .. })));
 }
 
 #[test]
@@ -77,7 +87,10 @@ fn orphaned_acceptance_warning() {
     let store = fixture.store();
     let result = store.validate_full(&fixture.config());
 
-    assert!(result.warnings.iter().any(|w| matches!(w, ValidationIssue::OrphanedAcceptance { .. })));
+    assert!(result
+        .warnings
+        .iter()
+        .any(|w| matches!(w, ValidationIssue::OrphanedAcceptance { .. })));
 }
 
 #[test]
@@ -196,7 +209,9 @@ fn all_children_accepted_json_output() {
     let output = lazyspec::cli::validate::run_json(&store, &fixture.config(), &[]);
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
-    let warnings = parsed["warnings"].as_array().expect("warnings should be an array");
+    let warnings = parsed["warnings"]
+        .as_array()
+        .expect("warnings should be an array");
     assert!(
         warnings.iter().any(|w| {
             w.as_str()
@@ -298,7 +313,10 @@ fn custom_rule_with_warning_severity_produces_warning_not_error() {
         result.warnings
     );
     assert!(
-        !result.errors.iter().any(|e| matches!(e, ValidationIssue::MissingParentLink { .. })),
+        !result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationIssue::MissingParentLink { .. })),
         "expected no MissingParentLink errors when severity is warning, got: {:?}",
         result.errors
     );
@@ -324,7 +342,10 @@ fn custom_rules_replace_defaults_so_default_checks_do_not_fire() {
     let result = store.validate_full(&config);
 
     assert!(
-        !result.errors.iter().any(|e| matches!(e, ValidationIssue::MissingParentLink { .. })),
+        !result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationIssue::MissingParentLink { .. })),
         "expected no MissingParentLink since default iteration rule was replaced, got: {:?}",
         result.errors
     );
@@ -368,7 +389,10 @@ fn status_based_checks_work_with_custom_hierarchy() {
 
     // RejectedParent should fire from status-based check inferred from custom hierarchy
     assert!(
-        result.errors.iter().any(|e| matches!(e, ValidationIssue::RejectedParent { .. })),
+        result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationIssue::RejectedParent { .. })),
         "expected RejectedParent error from custom hierarchy, got errors: {:?}, warnings: {:?}",
         result.errors,
         result.warnings

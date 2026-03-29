@@ -48,7 +48,10 @@ fn ref_count_below_ceiling_no_warning() {
     fixture.write_doc("docs/specs/SPEC-001-test.md", &content);
 
     let warnings = warning_messages(&fixture);
-    let ref_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("@ref targets")).collect();
+    let ref_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.contains("@ref targets"))
+        .collect();
     assert!(
         ref_warnings.is_empty(),
         "14 refs should not exceed default ceiling of 15, got: {:?}",
@@ -59,13 +62,18 @@ fn ref_count_below_ceiling_no_warning() {
 #[test]
 fn ref_count_above_ceiling_produces_warning() {
     let fixture = TestFixture::new();
-    let paths: Vec<String> = (0..16).map(|i| format!("src/engine/file{}.rs", i)).collect();
+    let paths: Vec<String> = (0..16)
+        .map(|i| format!("src/engine/file{}.rs", i))
+        .collect();
     let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
     let content = spec_index_with_refs(&refs);
     fixture.write_doc("docs/specs/SPEC-002-test.md", &content);
 
     let warnings = warning_messages(&fixture);
-    let ref_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("@ref targets")).collect();
+    let ref_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.contains("@ref targets"))
+        .collect();
     assert_eq!(
         ref_warnings.len(),
         1,
@@ -91,7 +99,10 @@ fn configurable_ceiling_overrides_default() {
     let mut config_low = Config::default();
     config_low.ref_count_ceiling = 5;
     let warnings = warning_messages_with_config(&fixture, &config_low);
-    let ref_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("@ref targets")).collect();
+    let ref_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.contains("@ref targets"))
+        .collect();
     assert_eq!(
         ref_warnings.len(),
         1,
@@ -103,7 +114,10 @@ fn configurable_ceiling_overrides_default() {
     let mut config_high = Config::default();
     config_high.ref_count_ceiling = 10;
     let warnings = warning_messages_with_config(&fixture, &config_high);
-    let ref_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("@ref targets")).collect();
+    let ref_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.contains("@ref targets"))
+        .collect();
     assert!(
         ref_warnings.is_empty(),
         "6 refs should not exceed ceiling of 10, got: {:?}",

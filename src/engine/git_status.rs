@@ -24,9 +24,7 @@ pub fn parse_porcelain_line(line: &str) -> Option<(PathBuf, GitFileStatus)> {
     let raw_path = &line[3..];
 
     let (status, path) = match (x, y) {
-        (b'?', b'?') | (b'A', b' ') | (b'A', b'M') => {
-            (GitFileStatus::New, raw_path.to_string())
-        }
+        (b'?', b'?') | (b'A', b' ') | (b'A', b'M') => (GitFileStatus::New, raw_path.to_string()),
         (b'R', b' ') | (b'R', b'M') => {
             let dest = raw_path
                 .rsplit_once(" -> ")

@@ -198,7 +198,10 @@ impl IssueCache {
         for issue in &issues {
             let (meta, body) = parse_issue(issue, &type_def.name, known_types);
             let id = type_def.make_id(issue.number);
-            let meta = DocMeta { id: id.clone(), ..meta };
+            let meta = DocMeta {
+                id: id.clone(),
+                ..meta
+            };
 
             let existing = self.read_stale(&id, &type_def.name);
             let new_content = build_cache_content(&meta, &body);
@@ -287,7 +290,10 @@ impl IssueCache {
         for issue in &issues {
             let (meta, body) = parse_issue(issue, &type_def.name, known_types);
             let id = type_def.make_id(issue.number);
-            let meta = DocMeta { id: id.clone(), ..meta };
+            let meta = DocMeta {
+                id: id.clone(),
+                ..meta
+            };
 
             if !previously_cached.contains(&id) {
                 new_count += 1;
@@ -421,9 +427,9 @@ fn build_cache_content(meta: &DocMeta, body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Result;
     use crate::engine::config::{NumberingStrategy, StoreBackend};
     use crate::engine::gh::{GhAuthor, GhIssueReader, GhLabel};
+    use anyhow::Result;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
@@ -523,13 +529,14 @@ mod tests {
         let (cache, _tmp) = make_cache();
         let ttl = Duration::seconds(60);
 
-        cache.write("ITERATION-042", "iteration", "# Iteration 042\nSome content");
+        cache.write(
+            "ITERATION-042",
+            "iteration",
+            "# Iteration 042\nSome content",
+        );
 
         let result = cache.read_if_fresh("ITERATION-042", "iteration", ttl);
-        assert_eq!(
-            result,
-            Some("# Iteration 042\nSome content".to_string())
-        );
+        assert_eq!(result, Some("# Iteration 042\nSome content".to_string()));
 
         let doc_path = cache.doc_path("ITERATION-042", "iteration");
         assert!(doc_path.exists());
@@ -628,7 +635,11 @@ mod tests {
             &known_types,
         );
 
-        assert_eq!(gh.call_count(), 1, "should make exactly one issue_list call");
+        assert_eq!(
+            gh.call_count(),
+            1,
+            "should make exactly one issue_list call"
+        );
         assert_eq!(result.refreshed, 3);
         assert!(result.warnings.is_empty());
 
@@ -732,7 +743,14 @@ mod tests {
 
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
         let result = cache
-            .fetch_all(tmp.path(), &type_def, &gh, "owner/repo", &mut issue_map, &vec!["story".to_string()])
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &vec!["story".to_string()],
+            )
             .unwrap();
 
         assert_eq!(result.fetched, 3);
@@ -746,14 +764,24 @@ mod tests {
             assert!(path.exists(), "cache file for {} should exist", id);
             let content = std::fs::read_to_string(&path).unwrap();
             assert!(content.contains("title:"), "should have title frontmatter");
-            assert!(content.contains("type: story"), "should have type frontmatter");
-            assert!(content.contains("status:"), "should have status frontmatter");
+            assert!(
+                content.contains("type: story"),
+                "should have type frontmatter"
+            );
+            assert!(
+                content.contains("status:"),
+                "should have status frontmatter"
+            );
         }
 
         // cache.lock updated
         let ttl = Duration::seconds(60);
         for id in &["STORY-10", "STORY-11", "STORY-12"] {
-            assert!(cache.is_fresh(id, ttl), "cache.lock for {} should be fresh", id);
+            assert!(
+                cache.is_fresh(id, ttl),
+                "cache.lock for {} should be fresh",
+                id
+            );
         }
 
         // issue map entries
@@ -762,9 +790,9 @@ mod tests {
         assert_eq!(issue_map.get("STORY-12").unwrap().issue_number, 12);
 
         // Verify Store::load can find the documents
-        use crate::engine::store::Store;
         use crate::engine::config::{Config, GithubConfig};
         use crate::engine::document::DocType;
+        use crate::engine::store::Store;
         let mut config = Config::default();
         config.documents.types = vec![story_type_def()];
         config.documents.github = Some(GithubConfig {
@@ -794,16 +822,35 @@ mod tests {
         ]);
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
         cache
-            .fetch_all(tmp.path(), &type_def, &initial_gh, "owner/repo", &mut issue_map, &vec!["story".to_string()])
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &initial_gh,
+                "owner/repo",
+                &mut issue_map,
+                &vec!["story".to_string()],
+            )
             .unwrap();
 
         // Second fetch returns only 2 of the 3
         let updated_gh = MockReader::new(vec![
             make_gh_issue(10, "STORY-001 First", "Body 1 updated", &["lazyspec:story"]),
-            make_gh_issue(11, "STORY-002 Second", "Body 2 updated", &["lazyspec:story"]),
+            make_gh_issue(
+                11,
+                "STORY-002 Second",
+                "Body 2 updated",
+                &["lazyspec:story"],
+            ),
         ]);
         let result = cache
-            .fetch_all(tmp.path(), &type_def, &updated_gh, "owner/repo", &mut issue_map, &vec!["story".to_string()])
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &updated_gh,
+                "owner/repo",
+                &mut issue_map,
+                &vec!["story".to_string()],
+            )
             .unwrap();
 
         assert_eq!(result.fetched, 2);
@@ -833,13 +880,23 @@ mod tests {
         let type_def = story_type_def();
 
         // Issue with plain title (no STORY-XXX pattern), issue number 33
-        let gh = MockReader::new(vec![
-            make_gh_issue(33, "test", "Plain body", &["lazyspec:story"]),
-        ]);
+        let gh = MockReader::new(vec![make_gh_issue(
+            33,
+            "test",
+            "Plain body",
+            &["lazyspec:story"],
+        )]);
 
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
         let result = cache
-            .fetch_all(tmp.path(), &type_def, &gh, "owner/repo", &mut issue_map, &vec!["story".to_string()])
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &vec!["story".to_string()],
+            )
             .unwrap();
 
         assert_eq!(result.fetched, 1);
@@ -847,10 +904,16 @@ mod tests {
 
         // ID should be "STORY-33", not "33"
         let cache_dir = tmp.path().join(".lazyspec/cache/story");
-        assert!(cache_dir.join("STORY-33.md").exists(), "cache file should be STORY-33.md");
+        assert!(
+            cache_dir.join("STORY-33.md").exists(),
+            "cache file should be STORY-33.md"
+        );
 
         let ttl = Duration::seconds(60);
-        assert!(cache.is_fresh("STORY-33", ttl), "lock entry should use STORY-33");
+        assert!(
+            cache.is_fresh("STORY-33", ttl),
+            "lock entry should use STORY-33"
+        );
 
         assert_eq!(issue_map.get("STORY-33").unwrap().issue_number, 33);
     }
@@ -862,13 +925,23 @@ mod tests {
 
         // Issue with title "STORY-999 Some title" but issue number 10
         // ID should be STORY-10 (from number), not STORY-999 (from title)
-        let gh = MockReader::new(vec![
-            make_gh_issue(10, "STORY-999 Some title", "Body here", &["lazyspec:story"]),
-        ]);
+        let gh = MockReader::new(vec![make_gh_issue(
+            10,
+            "STORY-999 Some title",
+            "Body here",
+            &["lazyspec:story"],
+        )]);
 
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
         let result = cache
-            .fetch_all(tmp.path(), &type_def, &gh, "owner/repo", &mut issue_map, &vec!["story".to_string()])
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &vec!["story".to_string()],
+            )
             .unwrap();
 
         assert_eq!(result.fetched, 1);
@@ -876,8 +949,14 @@ mod tests {
 
         // Should use issue number, not title-embedded ID
         let cache_dir = tmp.path().join(".lazyspec/cache/story");
-        assert!(cache_dir.join("STORY-10.md").exists(), "cache file should be STORY-10.md");
-        assert!(!cache_dir.join("STORY-999.md").exists(), "should NOT use title-derived ID STORY-999");
+        assert!(
+            cache_dir.join("STORY-10.md").exists(),
+            "cache file should be STORY-10.md"
+        );
+        assert!(
+            !cache_dir.join("STORY-999.md").exists(),
+            "should NOT use title-derived ID STORY-999"
+        );
 
         let ttl = Duration::seconds(60);
         assert!(cache.is_fresh("STORY-10", ttl));
@@ -999,7 +1078,10 @@ mod tests {
         issue.created_at = "2025-06-15T09:30:00Z".to_string();
         let known_types = vec!["story".to_string()];
         let (meta, _) = parse_issue(&issue, "story", &known_types);
-        assert_eq!(meta.date, chrono::NaiveDate::from_ymd_opt(2025, 6, 15).unwrap());
+        assert_eq!(
+            meta.date,
+            chrono::NaiveDate::from_ymd_opt(2025, 6, 15).unwrap()
+        );
     }
 
     #[test]

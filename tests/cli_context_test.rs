@@ -108,8 +108,18 @@ fn forward_context_from_rfc() {
         "docs/rfcs/RFC-001-auth.md",
         "---\ntitle: \"Auth Redesign\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated: []\n---\n\nRFC body.\n",
     );
-    fixture.write_story("STORY-001-impl-a.md", "Impl A", "draft", Some("docs/rfcs/RFC-001-auth.md"));
-    fixture.write_story("STORY-002-impl-b.md", "Impl B", "draft", Some("docs/rfcs/RFC-001-auth.md"));
+    fixture.write_story(
+        "STORY-001-impl-a.md",
+        "Impl A",
+        "draft",
+        Some("docs/rfcs/RFC-001-auth.md"),
+    );
+    fixture.write_story(
+        "STORY-002-impl-b.md",
+        "Impl B",
+        "draft",
+        Some("docs/rfcs/RFC-001-auth.md"),
+    );
 
     let store = fixture.store();
     let resolved = lazyspec::cli::context::resolve_chain(&store, "RFC-001").unwrap();
@@ -125,9 +135,24 @@ fn forward_context_from_rfc() {
 fn forward_context_from_story() {
     let fixture = TestFixture::new();
     fixture.write_rfc("RFC-001-auth.md", "Auth Redesign", "accepted");
-    fixture.write_story("STORY-001-auth.md", "Auth Implementation", "draft", Some("docs/rfcs/RFC-001-auth.md"));
-    fixture.write_iteration("ITERATION-001-sprint1.md", "Sprint 1", "draft", Some("docs/stories/STORY-001-auth.md"));
-    fixture.write_iteration("ITERATION-002-sprint2.md", "Sprint 2", "draft", Some("docs/stories/STORY-001-auth.md"));
+    fixture.write_story(
+        "STORY-001-auth.md",
+        "Auth Implementation",
+        "draft",
+        Some("docs/rfcs/RFC-001-auth.md"),
+    );
+    fixture.write_iteration(
+        "ITERATION-001-sprint1.md",
+        "Sprint 1",
+        "draft",
+        Some("docs/stories/STORY-001-auth.md"),
+    );
+    fixture.write_iteration(
+        "ITERATION-002-sprint2.md",
+        "Sprint 2",
+        "draft",
+        Some("docs/stories/STORY-001-auth.md"),
+    );
 
     let store = fixture.store();
     let resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001").unwrap();
@@ -149,10 +174,18 @@ fn you_are_here_marker() {
 
     let marker = "\u{2190} you are here";
     let marker_count = output.matches(marker).count();
-    assert_eq!(marker_count, 1, "expected exactly one 'you are here' marker, found {}", marker_count);
+    assert_eq!(
+        marker_count, 1,
+        "expected exactly one 'you are here' marker, found {}",
+        marker_count
+    );
 
     let marker_line = output.lines().find(|l| l.contains(marker)).unwrap();
-    assert!(marker_line.contains("Auth Implementation"), "marker should be on the Story line, got: {}", marker_line);
+    assert!(
+        marker_line.contains("Auth Implementation"),
+        "marker should be on the Story line, got: {}",
+        marker_line
+    );
     assert!(!marker_line.contains("Auth Redesign"));
     assert!(!marker_line.contains("Auth Sprint 1"));
 }
@@ -163,8 +196,14 @@ fn related_records_in_human_output() {
     let store = fixture.store();
     let output = lazyspec::cli::context::run_human(&store, "STORY-001").unwrap();
 
-    assert!(output.contains("related"), "output should contain 'related' section header");
-    assert!(output.contains("Token Strategy"), "output should contain the related document title");
+    assert!(
+        output.contains("related"),
+        "output should contain 'related' section header"
+    );
+    assert!(
+        output.contains("Token Strategy"),
+        "output should contain the related document title"
+    );
 }
 
 #[test]
@@ -173,7 +212,10 @@ fn related_records_omitted_when_none() {
     let store = fixture.store();
     let output = lazyspec::cli::context::run_human(&store, "STORY-001").unwrap();
 
-    assert!(!output.contains("related"), "output should not contain 'related' when there are no related-to links");
+    assert!(
+        !output.contains("related"),
+        "output should not contain 'related' when there are no related-to links"
+    );
 }
 
 #[test]
@@ -186,7 +228,10 @@ fn json_related_field_present() {
     let related = parsed["related"].as_array().unwrap();
     assert!(!related.is_empty(), "related array should be non-empty");
     let titles: Vec<&str> = related.iter().filter_map(|r| r["title"].as_str()).collect();
-    assert!(titles.contains(&"Token Strategy"), "related should contain 'Token Strategy'");
+    assert!(
+        titles.contains(&"Token Strategy"),
+        "related should contain 'Token Strategy'"
+    );
 }
 
 #[test]
@@ -197,7 +242,10 @@ fn json_related_empty() {
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let related = parsed["related"].as_array().unwrap();
-    assert!(related.is_empty(), "related array should be empty when no related-to links exist");
+    assert!(
+        related.is_empty(),
+        "related array should be empty when no related-to links exist"
+    );
 }
 
 #[test]
@@ -206,5 +254,8 @@ fn no_forward_children_for_leaf() {
     let store = fixture.store();
     let resolved = lazyspec::cli::context::resolve_chain(&store, "ITERATION-001").unwrap();
 
-    assert!(resolved.forward.is_empty(), "leaf node should have no forward children");
+    assert!(
+        resolved.forward.is_empty(),
+        "leaf node should have no forward children"
+    );
 }

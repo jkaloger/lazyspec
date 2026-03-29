@@ -1,6 +1,4 @@
-use crate::engine::symbols::{
-    RustSymbolExtractor, SymbolExtractor, TypeScriptSymbolExtractor,
-};
+use crate::engine::symbols::{RustSymbolExtractor, SymbolExtractor, TypeScriptSymbolExtractor};
 use anyhow::Result;
 use std::path::Path;
 use std::process::Command;

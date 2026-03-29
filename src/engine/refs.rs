@@ -58,7 +58,10 @@ pub struct RefExpander {
 
 impl RefExpander {
     pub fn new(root: PathBuf) -> Self {
-        Self { root, max_lines: 25 }
+        Self {
+            root,
+            max_lines: 25,
+        }
     }
 
     pub fn with_max_lines(root: PathBuf, max_lines: usize) -> Self {
@@ -88,11 +91,7 @@ impl RefExpander {
         Ok(result)
     }
 
-    pub fn expand_cancellable(
-        &self,
-        content: &str,
-        cancel: &AtomicBool,
-    ) -> Result<Option<String>> {
+    pub fn expand_cancellable(&self, content: &str, cancel: &AtomicBool) -> Result<Option<String>> {
         let parsed = parse_refs(content);
         let head_sha = self.resolve_head_short_sha();
         let mut result = content.to_string();
@@ -141,7 +140,9 @@ mod tests {
         let content = "See code:\n\n@ref Cargo.toml\n";
         let result = expander.expand_cancellable(content, &cancel);
         assert!(result.is_ok());
-        let expanded = result.unwrap().expect("should return Some when not cancelled");
+        let expanded = result
+            .unwrap()
+            .expect("should return Some when not cancelled");
         assert!(expanded.contains("[package]") || expanded.contains("```"));
     }
 
@@ -281,7 +282,10 @@ mod tests {
         let expander = RefExpander::with_max_lines(std::env::current_dir().unwrap(), 9999);
         let content = "Check this: @ref Cargo.toml@{blob:1234}\n";
         let result = expander.expand(content);
-        assert!(result.is_ok(), "expand should not panic or error on blob ref");
+        assert!(
+            result.is_ok(),
+            "expand should not panic or error on blob ref"
+        );
         let expanded = result.unwrap();
         // blob hash is not yet used for resolution, so it falls through to HEAD
         assert!(
@@ -436,7 +440,10 @@ mod tests {
 
         let content = "See: @ref Cargo.toml#1";
         let result = expander.expand(content).unwrap();
-        assert!(result.contains("[package]"), "Should contain the first line");
+        assert!(
+            result.contains("[package]"),
+            "Should contain the first line"
+        );
         let lines_in_block: Vec<&str> = result
             .lines()
             .skip_while(|l| !l.starts_with("```"))

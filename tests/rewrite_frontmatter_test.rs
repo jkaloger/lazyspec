@@ -6,10 +6,7 @@ use tempfile::NamedTempFile;
 #[test]
 fn mutates_frontmatter_and_preserves_body() -> Result<()> {
     let mut file = NamedTempFile::new()?;
-    write!(
-        file,
-        "---\ntitle: Test\nstatus: draft\n---\nBody content\n"
-    )?;
+    write!(file, "---\ntitle: Test\nstatus: draft\n---\nBody content\n")?;
 
     let fs = lazyspec::engine::fs::RealFileSystem;
     rewrite_frontmatter(file.path(), &fs, |value| {
@@ -19,11 +16,23 @@ fn mutates_frontmatter_and_preserves_body() -> Result<()> {
 
     let result = std::fs::read_to_string(file.path())?;
 
-    assert!(result.starts_with("---\n"), "should start with frontmatter delimiter");
-    assert!(result.contains("status: accepted"), "status should be updated to accepted");
+    assert!(
+        result.starts_with("---\n"),
+        "should start with frontmatter delimiter"
+    );
+    assert!(
+        result.contains("status: accepted"),
+        "status should be updated to accepted"
+    );
     assert!(result.contains("title: Test"), "title should be preserved");
-    assert!(!result.contains("draft"), "old status value should not remain");
-    assert!(result.contains("Body content"), "body content should be preserved");
+    assert!(
+        !result.contains("draft"),
+        "old status value should not remain"
+    );
+    assert!(
+        result.contains("Body content"),
+        "body content should be preserved"
+    );
 
     Ok(())
 }

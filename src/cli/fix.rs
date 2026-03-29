@@ -108,7 +108,11 @@ pub fn run(
         }
     }
 
-    if has_fixes { 0 } else { 1 }
+    if has_fixes {
+        0
+    } else {
+        1
+    }
 }
 
 pub fn run_renumber(
@@ -135,14 +139,22 @@ pub fn run_renumber(
             }
             for r in &c.references_updated {
                 if dry_run {
-                    println!("  Would update ref in {}: {} -> {}", r.file, r.old_value, r.new_value);
+                    println!(
+                        "  Would update ref in {}: {} -> {}",
+                        r.file, r.old_value, r.new_value
+                    );
                 } else {
-                    println!("  Updated ref in {}: {} -> {}", r.file, r.old_value, r.new_value);
+                    println!(
+                        "  Updated ref in {}: {} -> {}",
+                        r.file, r.old_value, r.new_value
+                    );
                 }
             }
         }
         if output.changes.is_empty() {
-            let type_filter = doc_type.map(|t| format!(" (type: {})", t)).unwrap_or_default();
+            let type_filter = doc_type
+                .map(|t| format!(" (type: {})", t))
+                .unwrap_or_default();
             println!("No documents to renumber{}", type_filter);
         }
         if !output.external_references.is_empty() {

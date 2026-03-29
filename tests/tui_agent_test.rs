@@ -14,7 +14,12 @@ fn press(app: &mut App, fixture: &TestFixture, key: KeyCode) {
 fn open_dialog_on_rfc(fixture: &TestFixture) -> App {
     fixture.write_rfc("RFC-001-test.md", "Test RFC", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
     app.selected_type = 0;
     app.selected_doc = 0;
     press(&mut app, fixture, KeyCode::Char('a'));
@@ -59,9 +64,7 @@ fn create_children_prompt_contains_child_type_and_content() {
 fn config_parent_child_rules_derive_child_type() {
     let config = Config::default();
     let rfc_child = config.rules.iter().find_map(|rule| match rule {
-        ValidationRule::ParentChild { parent, child, .. } if parent == "rfc" => {
-            Some(child.clone())
-        }
+        ValidationRule::ParentChild { parent, child, .. } if parent == "rfc" => Some(child.clone()),
         _ => None,
     });
     assert_eq!(rfc_child, Some("story".to_string()));
@@ -194,7 +197,12 @@ fn agent_spawner_uses_claude_command() {
     // that calling spawn with no claude binary returns an error.
     use lazyspec::tui::agent::AgentSpawner;
     let mut spawner = AgentSpawner::new();
-    let result = spawner.spawn("test prompt", std::path::Path::new("/tmp/fake.md"), "Test Doc", "Expand document");
+    let result = spawner.spawn(
+        "test prompt",
+        std::path::Path::new("/tmp/fake.md"),
+        "Test Doc",
+        "Expand document",
+    );
     // In a test environment without claude installed, this should error
     assert!(result.is_err() || spawner.active_count() == 1);
 }

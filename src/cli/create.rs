@@ -21,9 +21,19 @@ pub fn run(
     author: &str,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<PathBuf> {
-    let type_def = config.type_by_name(doc_type)
-        .ok_or_else(|| anyhow!("unknown doc type: '{}'. valid types: {}", doc_type,
-            config.documents.types.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ")))?;
+    let type_def = config.type_by_name(doc_type).ok_or_else(|| {
+        anyhow!(
+            "unknown doc type: '{}'. valid types: {}",
+            doc_type,
+            config
+                .documents
+                .types
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
 
     if type_def.singleton {
         let existing: Vec<_> = store.list(&Filter {
@@ -36,10 +46,18 @@ pub fn run(
     }
 
     if type_def.store == StoreBackend::GithubIssues {
-        let gh_config = config.documents.github.as_ref()
-            .ok_or_else(|| anyhow!("type '{}' uses github-issues store but no [github] config found", doc_type))?;
-        let repo = gh_config.repo.as_ref()
-            .ok_or_else(|| anyhow!("type '{}' uses github-issues store but no github.repo configured", doc_type))?;
+        let gh_config = config.documents.github.as_ref().ok_or_else(|| {
+            anyhow!(
+                "type '{}' uses github-issues store but no [github] config found",
+                doc_type
+            )
+        })?;
+        let repo = gh_config.repo.as_ref().ok_or_else(|| {
+            anyhow!(
+                "type '{}' uses github-issues store but no github.repo configured",
+                doc_type
+            )
+        })?;
         let mut store = GithubIssuesStore {
             client: GhCli::new(),
             root: root.to_path_buf(),
@@ -85,4 +103,3 @@ pub fn run_json(
     let json = doc_to_json(&meta);
     Ok(serde_json::to_string_pretty(&json)?)
 }
-

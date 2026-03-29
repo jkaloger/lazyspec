@@ -24,7 +24,12 @@ pub fn draw_help_overlay(f: &mut Frame) {
     f.render_widget(Clear, popup_area);
 
     let help_text = vec![
-        Line::from(Span::styled("Keybindings", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "Keybindings",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from("  h/l       Switch type"),
         Line::from("  Space     Expand/collapse tree node"),
@@ -40,22 +45,33 @@ pub fn draw_help_overlay(f: &mut Frame) {
         Line::from("  q         Quit"),
         Line::from("  ?         Toggle this help"),
         Line::from(""),
-        Line::from(Span::styled("Relations", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "Relations",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from("  r         Add relation"),
         Line::from(""),
-        Line::from(Span::styled("Fullscreen", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "Fullscreen",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from("  j/k       Scroll"),
         Line::from("  Esc/q     Back to dashboard"),
     ];
 
-    let paragraph = Paragraph::new(help_text)
-        .block(Block::default()
+    let paragraph = Paragraph::new(help_text).block(
+        Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(" Help "));
+            .title(" Help "),
+    );
     f.render_widget(paragraph, popup_area);
 }
 
@@ -88,7 +104,9 @@ pub fn draw_create_form(f: &mut Frame, app: &App) {
         let label_style = if form.loading {
             Style::default().fg(Color::DarkGray)
         } else if is_focused {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -217,7 +235,11 @@ pub fn draw_status_picker(f: &mut Frame, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, status)| {
-            let prefix = if i == app.status_picker.selected { "> " } else { "  " };
+            let prefix = if i == app.status_picker.selected {
+                "> "
+            } else {
+                "  "
+            };
             let mut style = Style::default().fg(status_color(status));
             if i == app.status_picker.selected {
                 style = style.add_modifier(Modifier::BOLD);
@@ -266,7 +288,9 @@ pub fn draw_link_editor(f: &mut Frame, app: &App) {
         Span::styled("  Type: ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             format!("< {} >", rel_label),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
     ]));
 
@@ -287,11 +311,16 @@ pub fn draw_link_editor(f: &mut Frame, app: &App) {
 
         let prefix = if i == editor.selected { "> " } else { "  " };
         let style = if i == editor.selected {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
-        lines.push(Line::from(Span::styled(format!("{}{}", prefix, label), style)));
+        lines.push(Line::from(Span::styled(
+            format!("{}{}", prefix, label),
+            style,
+        )));
     }
 
     if editor.results.is_empty() {
@@ -327,7 +356,9 @@ pub fn draw_agent_dialog(f: &mut Frame, app: &App) {
     let dialog = &app.agent_dialog;
 
     if let Some(ref buffer) = dialog.text_input {
-        let popup_width = (area.width * 50 / 100).max(30).min(area.width.saturating_sub(4));
+        let popup_width = (area.width * 50 / 100)
+            .max(30)
+            .min(area.width.saturating_sub(4));
         let popup_height = 6u16.min(area.height.saturating_sub(4));
         let x = (area.width.saturating_sub(popup_width)) / 2;
         let y = (area.height.saturating_sub(popup_height)) / 2;
@@ -364,7 +395,9 @@ pub fn draw_agent_dialog(f: &mut Frame, app: &App) {
 
     let action_count = dialog.actions.len() as u16;
     let content_height = action_count + 2;
-    let popup_width = (area.width * 40 / 100).max(20).min(area.width.saturating_sub(4));
+    let popup_width = (area.width * 40 / 100)
+        .max(20)
+        .min(area.width.saturating_sub(4));
     let popup_height = content_height.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(popup_width)) / 2;
     let y = (area.height.saturating_sub(popup_height)) / 2;
@@ -427,8 +460,14 @@ pub fn draw_warnings_panel(f: &mut Frame, app: &App) {
             Some(output) => output.clone(),
             None => "  No warnings".to_string(),
         };
-        let lines: Vec<Line> = message.lines()
-            .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(Color::DarkGray))))
+        let lines: Vec<Line> = message
+            .lines()
+            .map(|l| {
+                Line::from(Span::styled(
+                    l.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ))
+            })
             .collect();
         let msg = Paragraph::new(lines).block(block);
         f.render_widget(msg, popup_area);
@@ -480,13 +519,11 @@ pub fn draw_warnings_panel(f: &mut Frame, app: &App) {
         items.push(ListItem::new(lines));
     }
 
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
+    let list = List::new(items).block(block).highlight_style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let mut state = ListState::default().with_selected(Some(app.warnings_selected));
     f.render_stateful_widget(list, popup_area, &mut state);
@@ -528,9 +565,7 @@ pub fn draw_search_overlay(f: &mut Frame, app: &App) {
                 None => ("?", "?".to_string(), Color::White),
             };
             let gutter_span = match app.git_status_cache.get(path) {
-                Some(GitFileStatus::New) => {
-                    Span::styled("┃", Style::default().fg(Color::Green))
-                }
+                Some(GitFileStatus::New) => Span::styled("┃", Style::default().fg(Color::Green)),
                 Some(GitFileStatus::Modified) => {
                     Span::styled("┃", Style::default().fg(Color::Yellow))
                 }

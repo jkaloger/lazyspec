@@ -21,9 +21,7 @@ pub fn resolve_repo(config: &Config, root: &Path) -> Result<String> {
 fn parse_owner_repo(url: &str) -> Result<String> {
     let path = if let Some(rest) = url.strip_prefix("git@") {
         // git@github.com:owner/repo.git
-        rest.split_once(':')
-            .map(|(_, path)| path)
-            .unwrap_or(rest)
+        rest.split_once(':').map(|(_, path)| path).unwrap_or(rest)
     } else if url.starts_with("https://") || url.starts_with("http://") {
         // https://github.com/owner/repo.git
         url.split("//")
@@ -54,10 +52,7 @@ pub fn infer_github_repo(project_root: &Path) -> Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "git remote get-url origin failed: {}",
-            stderr.trim()
-        );
+        bail!("git remote get-url origin failed: {}", stderr.trim());
     }
 
     let url = String::from_utf8_lossy(&output.stdout).trim().to_string();

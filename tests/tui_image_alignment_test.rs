@@ -1,7 +1,7 @@
 mod common;
 
-use ratatui::text::{Line, Span};
 use lazyspec::tui::views::{wrapped_line_count, wrapped_lines_total};
+use ratatui::text::{Line, Span};
 
 #[test]
 fn wrapped_line_count_short_line_fits_in_one_row() {
@@ -41,10 +41,7 @@ fn wrapped_line_count_zero_width_returns_one() {
 
 #[test]
 fn wrapped_line_count_multi_span_line() {
-    let line = Line::from(vec![
-        Span::raw("a".repeat(30)),
-        Span::raw("b".repeat(20)),
-    ]);
+    let line = Line::from(vec![Span::raw("a".repeat(30)), Span::raw("b".repeat(20))]);
     // 50 chars at width 40 = 2 rows
     assert_eq!(wrapped_line_count(&line, 40), 2);
 }
@@ -52,9 +49,9 @@ fn wrapped_line_count_multi_span_line() {
 #[test]
 fn wrapped_lines_total_sums_correctly() {
     let lines = vec![
-        Line::from("short"),                    // 1 row
-        Line::from("a".repeat(100)),            // 3 rows at width 40
-        Line::from(""),                         // 1 row
+        Line::from("short"),         // 1 row
+        Line::from("a".repeat(100)), // 3 rows at width 40
+        Line::from(""),              // 1 row
     ];
     assert_eq!(wrapped_lines_total(&lines, 40), 5);
 }
@@ -136,5 +133,8 @@ fn fullscreen_image_at_exact_scroll_boundary() {
     let scroll_offset: u16 = 20;
 
     let should_skip = line_y + image_height <= scroll_offset || line_y < scroll_offset;
-    assert!(!should_skip, "image at exact scroll boundary should be visible");
+    assert!(
+        !should_skip,
+        "image at exact scroll boundary should be visible"
+    );
 }

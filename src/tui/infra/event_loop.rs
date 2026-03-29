@@ -1,8 +1,3 @@
-use crate::tui::state::App;
-use crate::tui::state::AppEvent;
-use crate::tui::content;
-use crate::tui::infra::{perf_log, terminal_caps};
-use crate::tui::views;
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::document::split_frontmatter;
 use crate::engine::gh::GhCli;
@@ -10,13 +5,18 @@ use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
+use crate::tui::content;
+use crate::tui::infra::{perf_log, terminal_caps};
+use crate::tui::state::App;
+use crate::tui::state::AppEvent;
+use crate::tui::views;
 use anyhow::Result;
 use crossterm::{
     event::Event,
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use notify::{RecursiveMode, Watcher, EventKind};
+use notify::{EventKind, RecursiveMode, Watcher};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::path::Path;
@@ -25,10 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-fn run_editor(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    path: &Path,
-) -> Result<()> {
+fn run_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) -> Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     disable_raw_mode()?;
 
@@ -55,15 +52,18 @@ fn try_push_gh_edit(
     let content = std::fs::read_to_string(root.join(relative))
         .map_err(|e| format!("failed to read edited file: {e}"))?;
 
-    let (_yaml, body) = split_frontmatter(&content)
-        .map_err(|e| format!("failed to parse edited file: {e}"))?;
+    let (_yaml, body) =
+        split_frontmatter(&content).map_err(|e| format!("failed to parse edited file: {e}"))?;
 
     let store = Store::load(root, config).map_err(|e| e.to_string())?;
-    let doc = store.get(relative).ok_or_else(|| "document not found in store".to_string())?;
+    let doc = store
+        .get(relative)
+        .ok_or_else(|| "document not found in store".to_string())?;
     let doc_id = doc.id.clone();
     let type_name = doc.doc_type.as_str().to_string();
 
-    let type_def = config.type_by_name(&type_name)
+    let type_def = config
+        .type_by_name(&type_name)
         .ok_or_else(|| format!("type '{}' not found in config", type_name))?;
 
     if type_def.store != StoreBackend::GithubIssues {
@@ -71,8 +71,11 @@ fn try_push_gh_edit(
     }
 
     let body_trimmed = body.trim();
-    let mut gh_store = shared_store.lock().map_err(|e| format!("lock poisoned: {e}"))?;
-    gh_store.update(type_def, &doc_id, &[("body", body_trimmed)])
+    let mut gh_store = shared_store
+        .lock()
+        .map_err(|e| format!("lock poisoned: {e}"))?;
+    gh_store
+        .update(type_def, &doc_id, &[("body", body_trimmed)])
         .map_err(|e| e.to_string())
 }
 
@@ -81,32 +84,34 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
         AppEvent::Terminal(key) => {
             app.handle_key(key.code, key.modifiers, root, config);
         }
-        AppEvent::FileChange(event) => {
-            match event.kind {
-                EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
-                    let mut has_non_md = false;
-                    for path in &event.paths {
-                        if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                            if let Ok(relative) = path.strip_prefix(root) {
-                                let _ = app.store.reload_file(root, relative, &*app.fs);
-                                app.expanded_body_cache.remove(relative);
-                                app.disk_cache.invalidate(relative);
-                            }
-                        } else {
-                            has_non_md = true;
+        AppEvent::FileChange(event) => match event.kind {
+            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
+                let mut has_non_md = false;
+                for path in &event.paths {
+                    if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                        if let Ok(relative) = path.strip_prefix(root) {
+                            let _ = app.store.reload_file(root, relative, &*app.fs);
+                            app.expanded_body_cache.remove(relative);
+                            app.disk_cache.invalidate(relative);
                         }
+                    } else {
+                        has_non_md = true;
                     }
-                    if has_non_md {
-                        app.expanded_body_cache.clear();
-                        app.disk_cache.clear();
-                    }
-                    app.refresh_validation(config);
-                    app.git_status_cache.invalidate();
                 }
-                _ => {}
+                if has_non_md {
+                    app.expanded_body_cache.clear();
+                    app.disk_cache.clear();
+                }
+                app.refresh_validation(config);
+                app.git_status_cache.invalidate();
             }
-        }
-        AppEvent::ExpansionResult { path, body, body_hash } => {
+            _ => {}
+        },
+        AppEvent::ExpansionResult {
+            path,
+            body,
+            body_hash,
+        } => {
             if app.expansion_in_flight.as_ref() == Some(&path) {
                 app.expansion_in_flight = None;
             }
@@ -116,7 +121,11 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
         AppEvent::DiagramRendered { source_hash, entry } => {
             app.diagram_cache.insert(source_hash, entry);
         }
-        AppEvent::ProbeResult { picker, protocol, tool_availability } => {
+        AppEvent::ProbeResult {
+            picker,
+            protocol,
+            tool_availability,
+        } => {
             app.picker = picker;
             app.terminal_image_protocol = protocol;
             app.tool_availability = tool_availability;
@@ -167,10 +176,18 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                     let _ = app.store.reload_file(root, &create_result.path, &*app.fs);
                     app.filtered_docs_cache = None;
                     app.rebuild_search_index();
-                    if let Some(type_idx) = app.doc_types.iter().position(|t| *t == create_result.doc_type) {
+                    if let Some(type_idx) = app
+                        .doc_types
+                        .iter()
+                        .position(|t| *t == create_result.doc_type)
+                    {
                         app.selected_type = type_idx;
                         app.build_doc_tree();
-                        if let Some(doc_idx) = app.doc_tree.iter().position(|n| n.path == create_result.path) {
+                        if let Some(doc_idx) = app
+                            .doc_tree
+                            .iter()
+                            .position(|n| n.path == create_result.path)
+                        {
                             app.selected_doc = doc_idx;
                         }
                     }
@@ -198,7 +215,12 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(store, config, picker, Box::new(crate::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        config,
+        picker,
+        Box::new(crate::engine::fs::RealFileSystem),
+    );
     app.refresh_validation(config);
 
     let (tx, rx) = crossbeam_channel::unbounded();
@@ -210,10 +232,17 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         let picker = terminal_caps::create_picker();
         let protocol = terminal_caps::TerminalImageProtocol::from(picker.protocol_type());
         let tool_availability = content::diagram::ToolAvailability::detect();
-        let _ = probe_tx.send(AppEvent::ProbeResult { picker, protocol, tool_availability });
+        let _ = probe_tx.send(AppEvent::ProbeResult {
+            picker,
+            protocol,
+            tool_availability,
+        });
     });
 
-    let has_gh_types = config.documents.types.iter()
+    let has_gh_types = config
+        .documents
+        .types
+        .iter()
         .any(|t| t.store == StoreBackend::GithubIssues);
 
     let shared_gh_store: Option<Arc<Mutex<GithubIssuesStore<GhCli>>>> = if has_gh_types {
@@ -226,9 +255,8 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 root: root.to_path_buf(),
                 repo,
                 config: config.clone(),
-                issue_map: IssueMap::load(root).unwrap_or_else(|_| {
-                    serde_json::from_str("{}").unwrap()
-                }),
+                issue_map: IssueMap::load(root)
+                    .unwrap_or_else(|_| serde_json::from_str("{}").unwrap()),
                 issue_cache: IssueCache::new(root),
             }))
         })
@@ -236,7 +264,10 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         None
     };
 
-    let cache_ttl = config.documents.github.as_ref()
+    let cache_ttl = config
+        .documents
+        .github
+        .as_ref()
         .map(|g| g.cache_ttl)
         .unwrap_or(60);
     let mut next_poll = if shared_gh_store.is_some() {
@@ -254,7 +285,12 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         }
     })?;
 
-    let dirs: Vec<&str> = config.documents.types.iter().map(|t| t.dir.as_str()).collect();
+    let dirs: Vec<&str> = config
+        .documents
+        .types
+        .iter()
+        .map(|t| t.dir.as_str())
+        .collect();
     for dir in &dirs {
         let full = root.join(dir);
         if full.exists() {
@@ -346,10 +382,16 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 let poll_flag = refresh_in_flight.clone();
                 let poll_store = Arc::clone(shared_store);
                 std::thread::spawn(move || {
-                    let gh_types: Vec<_> = poll_config.documents.types.iter()
+                    let gh_types: Vec<_> = poll_config
+                        .documents
+                        .types
+                        .iter()
                         .filter(|t| t.store == StoreBackend::GithubIssues)
                         .collect();
-                    let all_type_names: Vec<String> = poll_config.documents.types.iter()
+                    let all_type_names: Vec<String> = poll_config
+                        .documents
+                        .types
+                        .iter()
                         .map(|t| t.name.clone())
                         .collect();
                     let client = GhCli::new();
@@ -401,7 +443,8 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                     let push_store = Arc::clone(shared_store);
                     push_flag.store(true, Ordering::Relaxed);
                     std::thread::spawn(move || {
-                        let result = try_push_gh_edit(&push_root, &push_relative, &push_config, &push_store);
+                        let result =
+                            try_push_gh_edit(&push_root, &push_relative, &push_config, &push_store);
                         push_flag.store(false, Ordering::Relaxed);
                         let _ = push_tx.send(AppEvent::GhPushResult(result));
                     });
@@ -434,7 +477,9 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         if app.fix_request {
             app.fix_request = false;
             let root = app.store.root().to_path_buf();
-            let paths: Vec<String> = app.store.parse_errors()
+            let paths: Vec<String> = app
+                .store
+                .parse_errors()
                 .iter()
                 .map(|e| e.path.to_string_lossy().to_string())
                 .collect();
@@ -442,7 +487,11 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             let output = crate::cli::fix::run_human(&root, &app.store, config, &paths, false, &fs);
             app.store = Store::load(&root, config)?;
             app.refresh_validation(config);
-            app.fix_result = if output.is_empty() { None } else { Some(output) };
+            app.fix_result = if output.is_empty() {
+                None
+            } else {
+                Some(output)
+            };
             app.warnings_selected = 0;
         }
 
@@ -457,5 +506,3 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
 
     Ok(())
 }
-
-

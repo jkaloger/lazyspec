@@ -1,13 +1,13 @@
 pub mod cache;
 pub mod certification;
-pub mod gh;
-pub mod github;
-pub mod hashing;
 pub mod config;
 pub mod document;
 pub mod fs;
 pub mod fs_ops;
+pub mod gh;
 pub mod git_status;
+pub mod github;
+pub mod hashing;
 pub mod issue_body;
 pub mod issue_cache;
 pub mod issue_map;

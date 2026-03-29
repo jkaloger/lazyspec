@@ -223,7 +223,12 @@ pub fn scan_external_references(
         })
         .collect();
 
-    let managed_dirs: HashSet<String> = config.documents.types.iter().map(|t| t.dir.clone()).collect();
+    let managed_dirs: HashSet<String> = config
+        .documents
+        .types
+        .iter()
+        .map(|t| t.dir.clone())
+        .collect();
 
     let managed_paths: HashSet<String> = store
         .all_docs()
@@ -232,7 +237,15 @@ pub fn scan_external_references(
         .collect();
 
     let mut refs = Vec::new();
-    scan_dir_for_references(root, root, &managed_dirs, &managed_paths, &old_names, &mut refs, fs);
+    scan_dir_for_references(
+        root,
+        root,
+        &managed_dirs,
+        &managed_paths,
+        &old_names,
+        &mut refs,
+        fs,
+    );
     refs
 }
 
@@ -250,7 +263,15 @@ fn scan_dir_for_references(
         Err(_) => return,
     };
 
-    const NOISE_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv", "dist", "build", ".hg"];
+    const NOISE_DIRS: &[&str] = &[
+        ".git",
+        "target",
+        "node_modules",
+        ".venv",
+        "dist",
+        "build",
+        ".hg",
+    ];
 
     for path in entries {
         if fs.is_dir(&path) {
@@ -264,7 +285,15 @@ fn scan_dir_for_references(
             if managed_dirs.contains(&rel_str) {
                 continue;
             }
-            scan_dir_for_references(root, &path, managed_dirs, managed_paths, old_names, refs, fs);
+            scan_dir_for_references(
+                root,
+                &path,
+                managed_dirs,
+                managed_paths,
+                old_names,
+                refs,
+                fs,
+            );
             continue;
         }
 

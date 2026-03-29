@@ -26,8 +26,13 @@ fn store_loads_spec_from_subdirectory() {
     let store = fixture.store();
     let docs = store.all_docs();
 
-    let spec = docs.iter().find(|d| d.doc_type == DocType::new(DocType::SPEC));
-    assert!(spec.is_some(), "spec document should be loaded by the store");
+    let spec = docs
+        .iter()
+        .find(|d| d.doc_type == DocType::new(DocType::SPEC));
+    assert!(
+        spec.is_some(),
+        "spec document should be loaded by the store"
+    );
     let spec = spec.unwrap();
     assert_eq!(spec.title, "Test Spec");
     assert!(spec.path.ends_with("SPEC-001-test-spec.md"));
@@ -72,8 +77,8 @@ fn spec_id_extracted_correctly() {
 
 #[test]
 fn story_inherits_parent_spec_relations() {
-    use std::path::PathBuf;
     use lazyspec::engine::document::RelationType;
+    use std::path::PathBuf;
 
     let fixture = TestFixture::new();
 
@@ -104,7 +109,9 @@ fn story_inherits_parent_spec_relations() {
     // Spec should have its forward link to the RFC
     let spec_links = store.forward_links_for(&spec_file_path);
     assert!(
-        spec_links.iter().any(|(rel, target)| *rel == RelationType::Implements && *target == rfc_path),
+        spec_links
+            .iter()
+            .any(|(rel, target)| *rel == RelationType::Implements && *target == rfc_path),
         "spec should have the 'implements' link to the RFC, got: {:?}",
         spec_links
     );
@@ -112,7 +119,9 @@ fn story_inherits_parent_spec_relations() {
     // The RFC should see the spec in its reverse links
     let rfc_links = store.reverse_links_for(&rfc_path);
     assert!(
-        rfc_links.iter().any(|(rel, src)| *rel == RelationType::Implements && *src == spec_file_path),
+        rfc_links
+            .iter()
+            .any(|(rel, src)| *rel == RelationType::Implements && *src == spec_file_path),
         "RFC reverse links should include the spec, got: {:?}",
         rfc_links
     );

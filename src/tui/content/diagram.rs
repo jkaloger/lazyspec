@@ -96,10 +96,17 @@ pub fn extract_diagram_blocks(body: &str) -> Vec<DiagramBlock> {
     blocks
 }
 
-pub fn fallback_hint(block: &DiagramBlock, tool_available: bool, protocol: TerminalImageProtocol) -> Option<String> {
+pub fn fallback_hint(
+    block: &DiagramBlock,
+    tool_available: bool,
+    protocol: TerminalImageProtocol,
+) -> Option<String> {
     if !tool_available {
         let name = tool_name(&block.language);
-        return Some(format!("[{}: install {} CLI for diagram rendering]", name, name));
+        return Some(format!(
+            "[{}: install {} CLI for diagram rendering]",
+            name, name
+        ));
     }
     if protocol == TerminalImageProtocol::Unsupported {
         return Some("[diagram: terminal does not support inline images]".to_string());
@@ -159,9 +166,7 @@ pub fn render_diagram(block: &DiagramBlock, output_dir: &Path) -> Result<PathBuf
         }
     };
 
-    let result = Command::new("d2")
-        .args(&args)
-        .output();
+    let result = Command::new("d2").args(&args).output();
 
     let _ = fs::remove_file(&input_path);
 
@@ -207,7 +212,11 @@ pub enum PreviewSegment {
     DiagramError(String),
 }
 
-fn should_render_block(block: &DiagramBlock, tools: &ToolAvailability, _protocol: TerminalImageProtocol) -> bool {
+fn should_render_block(
+    block: &DiagramBlock,
+    tools: &ToolAvailability,
+    _protocol: TerminalImageProtocol,
+) -> bool {
     tools.is_available(&block.language)
 }
 
@@ -222,7 +231,8 @@ pub fn build_preview_segments(
         return vec![PreviewSegment::Markdown(body.to_string())];
     }
 
-    let renderable: Vec<&DiagramBlock> = blocks.iter()
+    let renderable: Vec<&DiagramBlock> = blocks
+        .iter()
         .filter(|b| should_render_block(b, tools, protocol))
         .collect();
 
@@ -268,7 +278,12 @@ pub fn build_preview_segments(
     segments
 }
 
-pub fn inject_fallback_hints(body: &str, protocol: TerminalImageProtocol, tools: &ToolAvailability, blocks: &[DiagramBlock]) -> String {
+pub fn inject_fallback_hints(
+    body: &str,
+    protocol: TerminalImageProtocol,
+    tools: &ToolAvailability,
+    blocks: &[DiagramBlock],
+) -> String {
     if blocks.is_empty() {
         return body.to_string();
     }
@@ -285,7 +300,6 @@ pub fn inject_fallback_hints(body: &str, protocol: TerminalImageProtocol, tools:
 
     result
 }
-
 
 pub enum DiagramCacheEntry {
     Rendering,
@@ -322,6 +336,7 @@ impl DiagramCache {
     }
 
     pub fn mark_rendering(&mut self, source_hash: u64) {
-        self.entries.insert(source_hash, DiagramCacheEntry::Rendering);
+        self.entries
+            .insert(source_hash, DiagramCacheEntry::Rendering);
     }
 }

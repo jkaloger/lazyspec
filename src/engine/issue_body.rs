@@ -114,7 +114,11 @@ fn reconstruct_status(is_open: bool, frontmatter_status: Option<&str>) -> Status
 ///
 /// The first label matching a known doc type is used as the type; all remaining
 /// labels become tags.
-fn extract_type_and_tags(labels: &[String], known_types: &[&str], default_type: &str) -> (DocType, Vec<String>) {
+fn extract_type_and_tags(
+    labels: &[String],
+    known_types: &[&str],
+    default_type: &str,
+) -> (DocType, Vec<String>) {
     let mut doc_type: Option<DocType> = None;
     let mut tags = Vec::new();
 
@@ -215,7 +219,10 @@ mod tests {
         let result = serialize(&doc, "Some body text.");
 
         assert!(result.starts_with("<!-- lazyspec\n---\n"));
-        assert!(!result.contains("author:"), "serialize should not emit author");
+        assert!(
+            !result.contains("author:"),
+            "serialize should not emit author"
+        );
         assert!(result.contains("date: 2026-03-27"));
         assert!(result.contains("- implements: STORY-075"));
         assert!(result.ends_with("Some body text."));

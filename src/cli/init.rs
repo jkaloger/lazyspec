@@ -1,5 +1,5 @@
 use crate::engine::config::Config;
-use crate::engine::gh::{deterministic_color, type_label, GhCli, GhIssueWriter, GhError};
+use crate::engine::gh::{deterministic_color, type_label, GhCli, GhError, GhIssueWriter};
 use crate::engine::github::resolve_repo;
 use anyhow::{bail, Result};
 use std::fs;
@@ -109,10 +109,7 @@ fn scaffold_skeleton_files(root: &Path, config: &Config) -> Result<()> {
         if type_def.singleton && type_def.name == "convention" {
             let conv_dir = root.join(&type_def.dir).join("convention");
             fs::create_dir_all(&conv_dir)?;
-            write_if_absent(
-                &conv_dir.join("index.md"),
-                &convention_skeleton(&today),
-            )?;
+            write_if_absent(&conv_dir.join("index.md"), &convention_skeleton(&today))?;
         }
 
         if type_def.parent_type.as_deref() == Some("convention") && type_def.name == "dictum" {
@@ -123,10 +120,7 @@ fn scaffold_skeleton_files(root: &Path, config: &Config) -> Result<()> {
                 .find(|t| t.name == "convention");
             if let Some(parent) = parent {
                 let conv_dir = root.join(&parent.dir).join("convention");
-                write_if_absent(
-                    &conv_dir.join("example.md"),
-                    &dictum_skeleton(&today),
-                )?;
+                write_if_absent(&conv_dir.join("example.md"), &dictum_skeleton(&today))?;
             }
         }
     }

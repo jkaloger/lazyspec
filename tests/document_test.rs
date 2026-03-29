@@ -1,5 +1,5 @@
-use lazyspec::engine::document::{DocMeta, DocType, Status, RelationType};
 use chrono::NaiveDate;
+use lazyspec::engine::document::{DocMeta, DocType, RelationType, Status};
 
 #[test]
 fn parse_frontmatter_from_markdown() {

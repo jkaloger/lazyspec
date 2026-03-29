@@ -19,15 +19,19 @@ pub fn run(root: &Path, config: &Config, gh: &(impl GhIssueReader + GhAuth)) -> 
             bail!("gh CLI is not installed. Install it from https://cli.github.com/");
         }
         AuthStatus::NotAuthenticated(msg) => {
-            bail!("gh auth failed: {}\nRun `gh auth login` to authenticate.", msg);
+            bail!(
+                "gh auth failed: {}\nRun `gh auth login` to authenticate.",
+                msg
+            );
         }
         AuthStatus::Authenticated { user, host } => {
             println!("Authenticated as {} on {}", user, host);
         }
     }
 
-    let repo = resolve_repo(config, root)
-        .context("Could not determine GitHub repo. Set [documents.github].repo in .lazyspec.toml")?;
+    let repo = resolve_repo(config, root).context(
+        "Could not determine GitHub repo. Set [documents.github].repo in .lazyspec.toml",
+    )?;
     let mut issue_map = IssueMap::load(root)?;
     let cache = IssueCache::new(root);
 
@@ -36,7 +40,12 @@ pub fn run(root: &Path, config: &Config, gh: &(impl GhIssueReader + GhAuth)) -> 
             .type_by_name(type_name)
             .ok_or_else(|| anyhow::anyhow!("type '{}' not found in config", type_name))?;
 
-        let all_type_names: Vec<String> = config.documents.types.iter().map(|t| t.name.clone()).collect();
+        let all_type_names: Vec<String> = config
+            .documents
+            .types
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
         let result = cache.fetch_all(root, type_def, gh, &repo, &mut issue_map, &all_type_names)?;
 
         println!(
@@ -56,7 +65,7 @@ pub fn run(root: &Path, config: &Config, gh: &(impl GhIssueReader + GhAuth)) -> 
 mod tests {
     use super::*;
     use crate::engine::config::{GithubConfig, StoreBackend, TypeDef};
-    use crate::engine::gh::{GhIssue, GhLabel, test_support::MockGhClient};
+    use crate::engine::gh::{test_support::MockGhClient, GhIssue, GhLabel};
     use std::fs;
 
     fn gh_issues_config() -> Config {
