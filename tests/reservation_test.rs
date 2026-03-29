@@ -13,7 +13,9 @@ fn seed_ref_on_bare(bare_path: &std::path::Path, prefix: &str, num: u32) {
         .current_dir(bare_path)
         .output()
         .expect("hash-object in bare repo");
-    let sha = String::from_utf8_lossy(&sha_output.stdout).trim().to_string();
+    let sha = String::from_utf8_lossy(&sha_output.stdout)
+        .trim()
+        .to_string();
 
     let refname = format!("refs/reservations/{prefix}/{num}");
     Command::new("git")
@@ -139,7 +141,14 @@ exit 1
 fn unreachable_remote_fails_with_hint() {
     let (fixture, _bare) = TestFixture::with_git_remote();
 
-    let result = reserve_next(fixture.root(), "nonexistent_remote", "RFC", 5, fixture.root(), |_| {});
+    let result = reserve_next(
+        fixture.root(),
+        "nonexistent_remote",
+        "RFC",
+        5,
+        fixture.root(),
+        |_| {},
+    );
     assert!(result.is_err());
 
     let err_msg = result.unwrap_err().to_string();
@@ -162,7 +171,8 @@ fn pre_computed_id_passthrough() {
         dir.path(),
         None,
         Some("042"),
-    ).unwrap();
+    )
+    .unwrap();
 
     assert_eq!(filename, "RFC-042-my-feature.md");
 }
@@ -260,7 +270,8 @@ fn prune_deletes_refs_with_matching_documents() {
     fixture.write_rfc("RFC-042-some-title.md", "Some Title", "draft");
 
     let store = Store::load(fixture.root(), &config).unwrap();
-    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, false, false, |_| {}).unwrap();
+    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, false, false, |_| {})
+        .unwrap();
 
     assert!(
         !ref_exists_on_remote(fixture.root(), "origin", "refs/reservations/RFC/42"),
@@ -277,7 +288,8 @@ fn prune_flags_orphans_without_deleting() {
     seed_ref_on_bare(bare.path(), "RFC", 99);
 
     let store = Store::load(fixture.root(), &config).unwrap();
-    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, false, false, |_| {}).unwrap();
+    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, false, false, |_| {})
+        .unwrap();
 
     assert!(
         ref_exists_on_remote(fixture.root(), "origin", "refs/reservations/RFC/99"),
@@ -295,7 +307,8 @@ fn prune_dry_run_does_not_delete() {
     fixture.write_rfc("RFC-042-some-title.md", "Some Title", "draft");
 
     let store = Store::load(fixture.root(), &config).unwrap();
-    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, true, false, |_| {}).unwrap();
+    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, true, false, |_| {})
+        .unwrap();
 
     assert!(
         ref_exists_on_remote(fixture.root(), "origin", "refs/reservations/RFC/42"),
@@ -363,7 +376,10 @@ fn local_files_seed_higher_candidate() {
     std::fs::write(docs_dir.join("RFC-010-something.md"), "").unwrap();
 
     let result = reserve_next(fixture.root(), "origin", "RFC", 5, &docs_dir, |_| {}).unwrap();
-    assert_eq!(result, 11, "should start from local max (10) + 1, not remote max (3) + 1");
+    assert_eq!(
+        result, 11,
+        "should start from local max (10) + 1, not remote max (3) + 1"
+    );
 }
 
 #[test]
@@ -379,5 +395,8 @@ fn remote_wins_when_higher_than_local() {
     std::fs::write(docs_dir.join("RFC-005-something.md"), "").unwrap();
 
     let result = reserve_next(fixture.root(), "origin", "RFC", 5, &docs_dir, |_| {}).unwrap();
-    assert_eq!(result, 21, "should start from remote max (20) + 1, not local max (5) + 1");
+    assert_eq!(
+        result, 21,
+        "should start from remote max (20) + 1, not local max (5) + 1"
+    );
 }

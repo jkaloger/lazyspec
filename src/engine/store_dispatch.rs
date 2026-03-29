@@ -41,18 +41,9 @@ pub trait DocumentStore {
         body: &str,
     ) -> Result<CreatedDoc>;
 
-    fn update(
-        &mut self,
-        type_def: &TypeDef,
-        doc_id: &str,
-        updates: &[(&str, &str)],
-    ) -> Result<()>;
+    fn update(&mut self, type_def: &TypeDef, doc_id: &str, updates: &[(&str, &str)]) -> Result<()>;
 
-    fn delete(
-        &mut self,
-        type_def: &TypeDef,
-        doc_id: &str,
-    ) -> Result<()>;
+    fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()>;
 }
 
 pub struct FilesystemStore {
@@ -83,16 +74,10 @@ impl DocumentStore for FilesystemStore {
 
         let relative = path.strip_prefix(&self.root).unwrap_or(&path).to_path_buf();
         let id = crate::engine::store::extract_id_from_name(
-            relative
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(""),
+            relative.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
         );
 
-        Ok(CreatedDoc {
-            path: relative,
-            id,
-        })
+        Ok(CreatedDoc { path: relative, id })
     }
 
     fn update(
@@ -105,11 +90,7 @@ impl DocumentStore for FilesystemStore {
         crate::engine::fs_ops::update_document(&self.root, &store, doc_id, updates)
     }
 
-    fn delete(
-        &mut self,
-        _type_def: &TypeDef,
-        doc_id: &str,
-    ) -> Result<()> {
+    fn delete(&mut self, _type_def: &TypeDef, doc_id: &str) -> Result<()> {
         let store = Store::load(&self.root, &self.config)?;
         crate::engine::fs_ops::delete_document(&self.root, &store, doc_id)
     }
@@ -142,14 +123,8 @@ impl<G: GhIssueReader + GhIssueWriter> GithubIssuesStore<G> {
         let (issue_number, _remote_issue) = self.check_lock(doc_id)?;
 
         let new_body = issue_body::serialize(&meta, &body);
-        self.client.issue_edit(
-            &self.repo,
-            issue_number,
-            None,
-            Some(&new_body),
-            &[],
-            &[],
-        )?;
+        self.client
+            .issue_edit(&self.repo, issue_number, None, Some(&new_body), &[], &[])?;
 
         self.issue_map.insert(doc_id, issue_number, "");
         self.issue_map.save(&self.root)?;
@@ -164,7 +139,9 @@ impl<G: GhIssueReader + GhIssueWriter> GithubIssuesStore<G> {
     /// record its timestamp. Otherwise, reject if the remote has been modified
     /// since our last fetch.
     fn check_lock(&mut self, doc_id: &str) -> Result<(u64, gh::GhIssue)> {
-        let entry = self.issue_map.get(doc_id)
+        let entry = self
+            .issue_map
+            .get(doc_id)
             .ok_or_else(|| anyhow::anyhow!("{} not found in issue map", doc_id))?;
         let issue_number = entry.issue_number;
         let local_updated_at = entry.updated_at.clone();
@@ -173,7 +150,8 @@ impl<G: GhIssueReader + GhIssueWriter> GithubIssuesStore<G> {
 
         if local_updated_at.is_empty() {
             // We pushed recently; accept remote state and record timestamp.
-            self.issue_map.insert(doc_id, issue_number, &remote_issue.updated_at);
+            self.issue_map
+                .insert(doc_id, issue_number, &remote_issue.updated_at);
             self.issue_map.save(&self.root)?;
         } else if remote_issue.updated_at != local_updated_at {
             bail!(
@@ -204,8 +182,12 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
 
         let numbering = match type_def.numbering {
             crate::engine::config::NumberingStrategy::Sqids => {
-                let sqids_config = self.config.documents.sqids.as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("type '{}' uses sqids numbering but no sqids config found", type_def.name))?;
+                let sqids_config = self.config.documents.sqids.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "type '{}' uses sqids numbering but no sqids config found",
+                        type_def.name
+                    )
+                })?;
                 Some((&type_def.numbering, sqids_config))
             }
             _ => None,
@@ -218,7 +200,8 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
             &cache_dir,
             numbering,
             None,
-        ).map_err(|e| anyhow::anyhow!("{}", e))?;
+        )
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         let stem = filename.trim_end_matches(".md");
         let id = store::extract_id_from_name(stem);
@@ -240,7 +223,9 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
 
         let issue_body = issue_body::serialize(&doc_meta, body);
         let label = gh::type_label(&type_def.name);
-        let issue = self.client.issue_create(&self.repo, title, &issue_body, &[label])?;
+        let issue = self
+            .client
+            .issue_create(&self.repo, title, &issue_body, &[label])?;
 
         self.issue_map.insert(&id, issue.number, &issue.updated_at);
         self.issue_map.save(&self.root)?;
@@ -248,24 +233,32 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
         write_cache_file(&self.root, type_def, &doc_meta, body)?;
         self.issue_cache.touch_lock(&id);
 
-        let cache_path = self.root.join(".lazyspec/cache").join(&type_def.name).join(format!("{}.md", id));
-        let relative = cache_path.strip_prefix(&self.root).unwrap_or(&cache_path).to_path_buf();
+        let cache_path = self
+            .root
+            .join(".lazyspec/cache")
+            .join(&type_def.name)
+            .join(format!("{}.md", id));
+        let relative = cache_path
+            .strip_prefix(&self.root)
+            .unwrap_or(&cache_path)
+            .to_path_buf();
         Ok(CreatedDoc { path: relative, id })
     }
 
-    fn update(
-        &mut self,
-        type_def: &TypeDef,
-        doc_id: &str,
-        updates: &[(&str, &str)],
-    ) -> Result<()> {
+    fn update(&mut self, type_def: &TypeDef, doc_id: &str, updates: &[(&str, &str)]) -> Result<()> {
         let (issue_number, remote_issue) = self.check_lock(doc_id)?;
 
         let ctx = issue_body::IssueContext {
             title: remote_issue.title.clone(),
             labels: remote_issue.labels.iter().map(|l| l.name.clone()).collect(),
             is_open: remote_issue.state == "OPEN",
-            known_types: self.config.documents.types.iter().map(|t| t.name.clone()).collect(),
+            known_types: self
+                .config
+                .documents
+                .types
+                .iter()
+                .map(|t| t.name.clone())
+                .collect(),
             default_type: type_def.name.clone(),
         };
         let (mut meta, mut body) = issue_body::deserialize(&remote_issue.body, &ctx)?;
@@ -286,14 +279,8 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
         }
 
         let new_body = issue_body::serialize(&meta, &body);
-        self.client.issue_edit(
-            &self.repo,
-            issue_number,
-            None,
-            Some(&new_body),
-            &[],
-            &[],
-        )?;
+        self.client
+            .issue_edit(&self.repo, issue_number, None, Some(&new_body), &[], &[])?;
 
         if let Some(status) = new_status {
             let should_be_open = matches!(
@@ -313,18 +300,17 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
         self.issue_map.insert(doc_id, issue_number, "");
         self.issue_map.save(&self.root)?;
 
-        let meta = DocMeta { id: doc_id.to_string(), ..meta };
+        let meta = DocMeta {
+            id: doc_id.to_string(),
+            ..meta
+        };
         write_cache_file(&self.root, type_def, &meta, &body)?;
         self.issue_cache.touch_lock(doc_id);
 
         Ok(())
     }
 
-    fn delete(
-        &mut self,
-        type_def: &TypeDef,
-        doc_id: &str,
-    ) -> Result<()> {
+    fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()> {
         let (issue_number, remote_issue) = self.check_lock(doc_id)?;
 
         let deleted_title = format!("[DELETED] {}", remote_issue.title);
@@ -367,15 +353,23 @@ pub fn write_cache_file(
         author: meta.author.clone(),
         date: meta.date.to_string(),
         tags: meta.tags.clone(),
-        related: meta.related.iter().map(|r| {
-            let mut m = BTreeMap::new();
-            m.insert(r.rel_type.to_string(), r.target.clone());
-            m
-        }).collect(),
+        related: meta
+            .related
+            .iter()
+            .map(|r| {
+                let mut m = BTreeMap::new();
+                m.insert(r.rel_type.to_string(), r.target.clone());
+                m
+            })
+            .collect(),
     };
 
     let yaml = serde_yaml::to_string(&frontmatter)?;
-    let body_section = if body.is_empty() { String::new() } else { format!("\n{}\n", body) };
+    let body_section = if body.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}\n", body)
+    };
     let cache_content = format!("---\n{}---\n{}", yaml, body_section);
     std::fs::write(&cache_path, &cache_content)?;
     Ok(())
@@ -406,7 +400,8 @@ pub fn dispatch_for_type<'a, G: GhIssueReader + GhIssueWriter>(
             Some(s) => Ok(s as &mut dyn DocumentStore),
             None => bail!(
                 "type '{}' uses {} store but no GitHub backend is configured",
-                type_def.name, type_def.store
+                type_def.name,
+                type_def.store
             ),
         },
     }
@@ -415,10 +410,8 @@ pub fn dispatch_for_type<'a, G: GhIssueReader + GhIssueWriter>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::{
-        Config, NumberingStrategy, StoreBackend, TypeDef,
-    };
-    use crate::engine::gh::{GhIssue, GhLabel, test_support::MockGhClient};
+    use crate::engine::config::{Config, NumberingStrategy, StoreBackend, TypeDef};
+    use crate::engine::gh::{test_support::MockGhClient, GhIssue, GhLabel};
     use crate::engine::issue_map::IssueMap;
 
     fn test_type_def(store: StoreBackend) -> TypeDef {
@@ -517,22 +510,37 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
-        let result = gh_store.create(&td, "my title", "author", "body text").unwrap();
+        let result = gh_store
+            .create(&td, "my title", "author", "body text")
+            .unwrap();
 
         assert_eq!(result.id, "RFC-001");
-        assert!(result.path.to_string_lossy().contains(".lazyspec/cache/rfc/"));
+        assert!(result
+            .path
+            .to_string_lossy()
+            .contains(".lazyspec/cache/rfc/"));
         assert!(root.join(&result.path).exists());
 
         // Issue body sent to GH should NOT contain author: in lazyspec comment
         let create_body = gh_store.client.last_create_body.borrow();
-        let create_body_str = create_body.as_deref().expect("issue_create should have been called");
-        assert!(create_body_str.contains("<!-- lazyspec"), "body should have lazyspec comment");
-        assert!(!create_body_str.contains("author:"), "issue body should not contain author: in lazyspec comment, got: {}", create_body_str);
+        let create_body_str = create_body
+            .as_deref()
+            .expect("issue_create should have been called");
+        assert!(
+            create_body_str.contains("<!-- lazyspec"),
+            "body should have lazyspec comment"
+        );
+        assert!(
+            !create_body_str.contains("author:"),
+            "issue body should not contain author: in lazyspec comment, got: {}",
+            create_body_str
+        );
 
         // Cache file should still have author in frontmatter
         let content = std::fs::read_to_string(root.join(&result.path)).unwrap();
         let (yaml, _) = crate::engine::document::split_frontmatter(&content).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("valid YAML frontmatter");
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&yaml).expect("valid YAML frontmatter");
         assert_eq!(parsed["title"].as_str().unwrap(), "my title");
         assert_eq!(parsed["type"].as_str().unwrap(), "rfc");
         assert_eq!(parsed["status"].as_str().unwrap(), "draft");
@@ -555,7 +563,10 @@ mod tests {
         let td = test_type_def(StoreBackend::GithubIssues);
         gh_store.create(&td, "mapped", "author", "").unwrap();
 
-        let entry = gh_store.issue_map.get("RFC-001").expect("issue map entry should exist");
+        let entry = gh_store
+            .issue_map
+            .get("RFC-001")
+            .expect("issue map entry should exist");
         assert_eq!(entry.issue_number, 1);
         assert_eq!(entry.updated_at, "2026-03-27T00:00:00Z");
     }
@@ -624,7 +635,10 @@ mod tests {
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
-            labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
@@ -651,8 +665,14 @@ mod tests {
 
         // Re-serialized body sent to GH should not contain author:
         let captured = gh_store.client.last_edit_body.borrow();
-        let body_str = captured.as_deref().expect("issue_edit should have been called with body");
-        assert!(!body_str.contains("author:"), "re-serialized issue body should not contain author:, got: {}", body_str);
+        let body_str = captured
+            .as_deref()
+            .expect("issue_edit should have been called with body");
+        assert!(
+            !body_str.contains("author:"),
+            "re-serialized issue body should not contain author:, got: {}",
+            body_str
+        );
     }
 
     #[test]
@@ -664,7 +684,10 @@ mod tests {
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
-            labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:45:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
@@ -704,7 +727,10 @@ mod tests {
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
-            labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
@@ -741,7 +767,10 @@ mod tests {
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
-            labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
             state: "CLOSED".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
@@ -797,7 +826,10 @@ mod tests {
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
-            labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
@@ -972,7 +1004,10 @@ mod tests {
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
-            labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
@@ -998,15 +1033,31 @@ mod tests {
             .unwrap();
 
         let captured = gh_store.client.last_edit_body.borrow();
-        let body_str = captured.as_deref().expect("issue_edit should have been called with body");
-        assert!(body_str.contains("new content"), "body should contain 'new content', got: {}", body_str);
-        assert!(body_str.contains("<!-- lazyspec"), "body should be wrapped in issue_body format");
-        assert!(!body_str.contains("author:"), "re-serialized issue body should not contain author:, got: {}", body_str);
+        let body_str = captured
+            .as_deref()
+            .expect("issue_edit should have been called with body");
+        assert!(
+            body_str.contains("new content"),
+            "body should contain 'new content', got: {}",
+            body_str
+        );
+        assert!(
+            body_str.contains("<!-- lazyspec"),
+            "body should be wrapped in issue_body format"
+        );
+        assert!(
+            !body_str.contains("author:"),
+            "re-serialized issue body should not contain author:, got: {}",
+            body_str
+        );
 
         // Cache file should still have author in frontmatter
         let cache_path = root.join(".lazyspec/cache/rfc/RFC-001.md");
         let cache_content = std::fs::read_to_string(&cache_path).unwrap();
-        assert!(cache_content.contains("author:"), "cache file should contain author in frontmatter");
+        assert!(
+            cache_content.contains("author:"),
+            "cache file should contain author in frontmatter"
+        );
     }
 
     #[test]
@@ -1018,7 +1069,10 @@ mod tests {
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
-            labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
@@ -1044,9 +1098,14 @@ mod tests {
             .unwrap();
 
         let captured = gh_store.client.last_edit_body.borrow();
-        let body_str = captured.as_deref().expect("issue_edit should have been called with body");
+        let body_str = captured
+            .as_deref()
+            .expect("issue_edit should have been called with body");
         assert!(body_str.contains("new"), "body should contain updated text");
-        assert!(gh_store.client.closed.get(), "issue should be closed for status=complete");
+        assert!(
+            gh_store.client.closed.get(),
+            "issue should be closed for status=complete"
+        );
     }
 
     #[test]
@@ -1058,7 +1117,10 @@ mod tests {
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
-            labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:45:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
@@ -1103,7 +1165,11 @@ mod tests {
             .update(&td, &created.id, &[("body", "content")])
             .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("not supported for filesystem documents"), "got: {}", msg);
+        assert!(
+            msg.contains("not supported for filesystem documents"),
+            "got: {}",
+            msg
+        );
     }
 
     #[test]
@@ -1119,7 +1185,11 @@ mod tests {
         let td = test_type_def(StoreBackend::GithubIssues);
         let result = dispatch_for_type::<MockGhClient>(&td, &mut fs_store, None);
         assert!(result.is_err());
-        assert!(result.err().unwrap().to_string().contains("no GitHub backend"));
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("no GitHub backend"));
     }
 
     #[test]
@@ -1155,8 +1225,8 @@ mod tests {
 
         // Verify the file is valid YAML by round-tripping through serde_yaml
         let (yaml, _body) = crate::engine::document::split_frontmatter(&content).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml)
-            .expect("frontmatter should be valid YAML");
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&yaml).expect("frontmatter should be valid YAML");
 
         assert_eq!(
             parsed["title"].as_str().unwrap(),
@@ -1200,7 +1270,10 @@ mod tests {
             url: String::new(),
             title: "My RFC".to_string(),
             body: remote_body,
-            labels: vec![GhLabel { name: "lazyspec:rfc".to_string(), color: String::new() }],
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
             state: "OPEN".to_string(),
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
@@ -1224,10 +1297,22 @@ mod tests {
         gh_store.push_cache(&td, "RFC-001").unwrap();
 
         let captured = gh_store.client.last_edit_body.borrow();
-        let body_str = captured.as_deref().expect("issue_edit should have been called");
-        assert!(body_str.contains("implements: STORY-001"), "pushed body should contain the relationship, got: {}", body_str);
-        assert!(body_str.contains("Some body text."), "pushed body should contain markdown body");
-        assert!(body_str.contains("<!-- lazyspec"), "pushed body should be in issue_body format");
+        let body_str = captured
+            .as_deref()
+            .expect("issue_edit should have been called");
+        assert!(
+            body_str.contains("implements: STORY-001"),
+            "pushed body should contain the relationship, got: {}",
+            body_str
+        );
+        assert!(
+            body_str.contains("Some body text."),
+            "pushed body should contain markdown body"
+        );
+        assert!(
+            body_str.contains("<!-- lazyspec"),
+            "pushed body should be in issue_body format"
+        );
 
         // updated_at should be cleared (we just pushed)
         let entry = gh_store.issue_map.get("RFC-001").unwrap();
@@ -1251,6 +1336,10 @@ mod tests {
 
         let td = test_type_def(StoreBackend::GithubIssues);
         let err = gh_store.push_cache(&td, "RFC-001").unwrap_err();
-        assert!(err.to_string().contains("cache file not found"), "got: {}", err);
+        assert!(
+            err.to_string().contains("cache file not found"),
+            "got: {}",
+            err
+        );
     }
 }

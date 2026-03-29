@@ -10,7 +10,14 @@ use crate::engine::store_dispatch::GithubIssuesStore;
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
-pub fn link(root: &Path, store: &Store, from: &str, rel_type: &str, to: &str, fs: &dyn FileSystem) -> Result<()> {
+pub fn link(
+    root: &Path,
+    store: &Store,
+    from: &str,
+    rel_type: &str,
+    to: &str,
+    fs: &dyn FileSystem,
+) -> Result<()> {
     link_with_config(root, store, from, rel_type, to, fs, None)
 }
 
@@ -26,6 +33,7 @@ pub fn link_with_config(
     link_inner(root, store, from, rel_type, to, fs, config, GhCli::new)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn link_inner<G: GhIssueReader + GhIssueWriter>(
     root: &Path,
     store: &Store,
@@ -59,7 +67,14 @@ fn link_inner<G: GhIssueReader + GhIssueWriter>(
     Ok(())
 }
 
-pub fn unlink(root: &Path, store: &Store, from: &str, rel_type: &str, to: &str, fs: &dyn FileSystem) -> Result<()> {
+pub fn unlink(
+    root: &Path,
+    store: &Store,
+    from: &str,
+    rel_type: &str,
+    to: &str,
+    fs: &dyn FileSystem,
+) -> Result<()> {
     unlink_with_config(root, store, from, rel_type, to, fs, None)
 }
 
@@ -114,7 +129,12 @@ fn push_if_github_backed<G: GhIssueReader + GhIssueWriter>(
         .components()
         .nth(2)
         .and_then(|c| c.as_os_str().to_str())
-        .ok_or_else(|| anyhow!("cannot determine type from cache path: {}", doc_path.display()))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "cannot determine type from cache path: {}",
+                doc_path.display()
+            )
+        })?;
 
     let type_def = config
         .type_by_name(type_name)
@@ -124,22 +144,22 @@ fn push_if_github_backed<G: GhIssueReader + GhIssueWriter>(
         return Ok(());
     }
 
-    let gh_config = config
-        .documents
-        .github
-        .as_ref()
-        .ok_or_else(|| anyhow!("type '{}' uses github-issues store but no [github] config found", type_name))?;
-    let repo = gh_config
-        .repo
-        .as_ref()
-        .ok_or_else(|| anyhow!("type '{}' uses github-issues store but no github.repo configured", type_name))?;
+    let gh_config = config.documents.github.as_ref().ok_or_else(|| {
+        anyhow!(
+            "type '{}' uses github-issues store but no [github] config found",
+            type_name
+        )
+    })?;
+    let repo = gh_config.repo.as_ref().ok_or_else(|| {
+        anyhow!(
+            "type '{}' uses github-issues store but no github.repo configured",
+            type_name
+        )
+    })?;
 
     // Extract doc_id from filename
     let doc_id = crate::engine::store::extract_id_from_name(
-        doc_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(""),
+        doc_path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
     );
 
     let mut gh_store = GithubIssuesStore {
@@ -157,11 +177,9 @@ fn push_if_github_backed<G: GhIssueReader + GhIssueWriter>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::{
-        Config, GithubConfig, NumberingStrategy, StoreBackend, TypeDef,
-    };
+    use crate::engine::config::{Config, GithubConfig, NumberingStrategy, StoreBackend, TypeDef};
     use crate::engine::fs::RealFileSystem;
-    use crate::engine::gh::{GhIssue, GhLabel, test_support::MockGhClient};
+    use crate::engine::gh::{test_support::MockGhClient, GhIssue, GhLabel};
     use crate::engine::issue_map::IssueMap;
     use crate::engine::store::Store;
 
@@ -301,8 +319,7 @@ mod tests {
         .unwrap();
 
         // Re-read the file to check the frontmatter was rewritten with the link
-        let updated =
-            std::fs::read_to_string(rfc_cache.join("RFC-001-my-rfc.md")).unwrap();
+        let updated = std::fs::read_to_string(rfc_cache.join("RFC-001-my-rfc.md")).unwrap();
         assert!(
             updated.contains("implements: STORY-001"),
             "frontmatter should contain the new link, got:\n{}",

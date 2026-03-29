@@ -17,7 +17,12 @@ fn setup_app_with_docs() -> (TestFixture, App) {
     );
 
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
     (fixture, app)
 }
 
@@ -51,17 +56,32 @@ fn test_backtick_cycles_mode() {
     let (fixture, mut app) = setup_app_with_docs();
     assert_eq!(app.view_mode, ViewMode::Types);
 
-    app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('`'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.view_mode, ViewMode::Filters);
 
     #[cfg(feature = "metrics")]
     {
-        app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+        app.handle_key(
+            KeyCode::Char('`'),
+            KeyModifiers::NONE,
+            fixture.root(),
+            &fixture.config(),
+        );
         assert_eq!(app.view_mode, ViewMode::Metrics);
     }
     #[cfg(not(feature = "metrics"))]
     {
-        app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+        app.handle_key(
+            KeyCode::Char('`'),
+            KeyModifiers::NONE,
+            fixture.root(),
+            &fixture.config(),
+        );
         assert_eq!(app.view_mode, ViewMode::Graph);
     }
 }
@@ -73,35 +93,70 @@ fn test_types_mode_navigation_unchanged() {
 
     // j moves selected doc down
     assert_eq!(app.selected_doc, 0);
-    app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('j'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.selected_doc, 1);
     assert_eq!(app.view_mode, ViewMode::Types);
 
     // k moves selected doc up
-    app.handle_key(KeyCode::Char('k'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('k'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.selected_doc, 0);
     assert_eq!(app.view_mode, ViewMode::Types);
 
     // l switches type
     let before_type = app.selected_type;
-    app.handle_key(KeyCode::Char('l'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('l'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_ne!(app.selected_type, before_type);
     assert_eq!(app.view_mode, ViewMode::Types);
 
     // h switches type back
-    app.handle_key(KeyCode::Char('h'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('h'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.selected_type, before_type);
     assert_eq!(app.view_mode, ViewMode::Types);
 
     // Enter toggles fullscreen
-    app.handle_key(KeyCode::Enter, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert!(app.fullscreen_doc);
     assert_eq!(app.view_mode, ViewMode::Types);
-    app.handle_key(KeyCode::Esc, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
 
     // Tab toggles preview tab
     assert_eq!(app.preview_tab, PreviewTab::Preview);
-    app.handle_key(KeyCode::Tab, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Tab,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.preview_tab, PreviewTab::Relations);
     assert_eq!(app.view_mode, ViewMode::Types);
 }
@@ -112,25 +167,65 @@ fn test_backtick_ignored_in_modal_states() {
 
     // Search mode
     app.enter_search();
-    app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('`'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.view_mode, ViewMode::Types);
-    app.handle_key(KeyCode::Esc, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
 
     // Fullscreen mode
     app.enter_fullscreen();
-    app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('`'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.view_mode, ViewMode::Types);
-    app.handle_key(KeyCode::Esc, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
 
     // Create form mode
     app.open_create_form();
-    app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('`'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.view_mode, ViewMode::Types);
-    app.handle_key(KeyCode::Esc, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
 
     // Delete confirm mode
     app.open_delete_confirm();
-    app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('`'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.view_mode, ViewMode::Types);
-    app.handle_key(KeyCode::Esc, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
 }

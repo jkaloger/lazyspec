@@ -42,6 +42,12 @@ pub struct CreateForm {
     pub status_message: Option<String>,
 }
 
+impl Default for CreateForm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CreateForm {
     pub fn new() -> Self {
         CreateForm {
@@ -87,6 +93,12 @@ pub struct DeleteConfirm {
     pub references: Vec<(String, PathBuf)>,
 }
 
+impl Default for DeleteConfirm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DeleteConfirm {
     pub fn new() -> Self {
         DeleteConfirm {
@@ -102,6 +114,12 @@ pub struct StatusPicker {
     pub active: bool,
     pub selected: usize,
     pub doc_path: PathBuf,
+}
+
+impl Default for StatusPicker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StatusPicker {
@@ -123,6 +141,12 @@ pub struct LinkEditor {
     pub query: String,
     pub results: Vec<PathBuf>,
     pub selected: usize,
+}
+
+impl Default for LinkEditor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LinkEditor {

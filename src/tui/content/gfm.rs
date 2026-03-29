@@ -156,7 +156,10 @@ More text at the end.
         };
 
         let lines = render_table(&table, 80);
-        assert!(lines.len() >= 3, "should have header, separator, and data row");
+        assert!(
+            lines.len() >= 3,
+            "should have header, separator, and data row"
+        );
 
         let header = &lines[0];
         assert!(
@@ -164,12 +167,26 @@ More text at the end.
             "header cells should be bold"
         );
 
-        let sep_text: String = lines[1].spans.iter().map(|s| s.content.to_string()).collect();
+        let sep_text: String = lines[1]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
         assert!(sep_text.contains('─'), "separator should use ─ character");
-        assert!(sep_text.contains('┼'), "separator should use ┼ at column junctions");
+        assert!(
+            sep_text.contains('┼'),
+            "separator should use ┼ at column junctions"
+        );
 
-        let data_text: String = lines[2].spans.iter().map(|s| s.content.to_string()).collect();
-        assert!(data_text.contains('│'), "data rows should have │ separators");
+        let data_text: String = lines[2]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(
+            data_text.contains('│'),
+            "data rows should have │ separators"
+        );
 
         let right_col_span = &lines[2].spans[4];
         let right_text = right_col_span.content.to_string();
@@ -194,7 +211,11 @@ More text at the end.
             let lines = render_admonition(kind, "some body text");
             assert!(!lines.is_empty(), "admonition should produce lines");
 
-            let label_text: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+            let label_text: String = lines[0]
+                .spans
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect();
             assert_eq!(
                 label_text, expected_label,
                 "label for kind {:?} should be {:?}",
@@ -202,7 +223,11 @@ More text at the end.
             );
 
             assert!(lines.len() >= 2, "should have label + body lines");
-            let body_text: String = lines[1].spans.iter().map(|s| s.content.to_string()).collect();
+            let body_text: String = lines[1]
+                .spans
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect();
             assert!(
                 body_text.contains("some body text"),
                 "body should contain the text"
@@ -219,10 +244,18 @@ More text at the end.
 
         let lines = render_footnotes(&footnotes);
 
-        let sep_text: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        let sep_text: String = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
         assert!(sep_text.contains('─'), "should have a separator line");
 
-        let fn1_text: String = lines[1].spans.iter().map(|s| s.content.to_string()).collect();
+        let fn1_text: String = lines[1]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
         assert!(
             fn1_text.contains("[^1]:"),
             "should contain [^1]: prefix, got: {:?}",
@@ -230,7 +263,11 @@ More text at the end.
         );
         assert!(fn1_text.contains("First footnote."));
 
-        let fn2_text: String = lines[2].spans.iter().map(|s| s.content.to_string()).collect();
+        let fn2_text: String = lines[2]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
         assert!(fn2_text.contains("[^abc]:"));
         assert!(fn2_text.contains("Another footnote."));
     }

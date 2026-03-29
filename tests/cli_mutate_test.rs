@@ -10,7 +10,13 @@ fn update_status_in_frontmatter() {
     fixture.write_rfc("RFC-001-test.md", "Test", "draft");
     let store = fixture.store();
 
-    lazyspec::cli::update::run(fixture.root(), &store, "docs/rfcs/RFC-001-test.md", &[("status", "review")]).unwrap();
+    lazyspec::cli::update::run(
+        fixture.root(),
+        &store,
+        "docs/rfcs/RFC-001-test.md",
+        &[("status", "review")],
+    )
+    .unwrap();
 
     let content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-test.md")).unwrap();
     let meta = DocMeta::parse(&content).unwrap();

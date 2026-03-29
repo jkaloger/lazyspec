@@ -6,9 +6,16 @@ use crate::engine::issue_map::IssueMap;
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
-pub fn run(root: &Path, config: &Config, gh: &dyn GhIssueReader, type_filter: Option<&str>, json: bool) -> Result<()> {
-    let repo = resolve_repo(config, root)
-        .context("Could not determine GitHub repo. Set [documents.github].repo in .lazyspec.toml")?;
+pub fn run(
+    root: &Path,
+    config: &Config,
+    gh: &dyn GhIssueReader,
+    type_filter: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let repo = resolve_repo(config, root).context(
+        "Could not determine GitHub repo. Set [documents.github].repo in .lazyspec.toml",
+    )?;
     let mut issue_map = IssueMap::load(root)?;
     let cache = IssueCache::new(root);
 
@@ -45,7 +52,12 @@ pub fn run(root: &Path, config: &Config, gh: &dyn GhIssueReader, type_filter: Op
             .type_by_name(type_name)
             .ok_or_else(|| anyhow::anyhow!("type '{}' not found in config", type_name))?;
 
-        let all_type_names: Vec<String> = config.documents.types.iter().map(|t| t.name.clone()).collect();
+        let all_type_names: Vec<String> = config
+            .documents
+            .types
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
         let result = cache.fetch_all(root, type_def, gh, &repo, &mut issue_map, &all_type_names)?;
 
         summaries.push(TypeSummary {
@@ -89,4 +101,3 @@ struct TypeSummary {
     new: usize,
     removed: usize,
 }
-

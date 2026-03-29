@@ -392,9 +392,7 @@ impl Counter {
     // AC-6: Trait is extensible - verify trait is public and has correct signature
     #[test]
     fn test_trait_is_public() {
-        assert!(
-            SymbolExtractor::extract(&TypeScriptSymbolExtractor::new(), "", "").is_none() || true
-        );
+        assert!(SymbolExtractor::extract(&TypeScriptSymbolExtractor::new(), "", "").is_none());
     }
 
     #[test]
@@ -427,7 +425,10 @@ impl Counter {
 }
 interface Outer { y: string; }"#;
         let result = extractor.extract(source, "Outer");
-        assert!(result.is_some(), "Outer should be found after a module block");
+        assert!(
+            result.is_some(),
+            "Outer should be found after a module block"
+        );
         let extracted = result.unwrap();
         assert!(extracted.contains("Outer"));
         assert!(extracted.contains("y"));
@@ -551,7 +552,8 @@ impl Widget {
     #[test]
     fn test_extract_ts_class_basic() {
         let extractor = TypeScriptSymbolExtractor::new();
-        let source = "class Animal { name: string; constructor(name: string) { this.name = name; } }";
+        let source =
+            "class Animal { name: string; constructor(name: string) { this.name = name; } }";
         let result = extractor.extract(source, "Animal");
         assert!(result.is_some());
         let extracted = result.unwrap();
@@ -586,7 +588,8 @@ impl Widget {
     #[test]
     fn test_extract_ts_function_async() {
         let extractor = TypeScriptSymbolExtractor::new();
-        let source = "async function fetchData(url: string): Promise<Response> { return fetch(url); }";
+        let source =
+            "async function fetchData(url: string): Promise<Response> { return fetch(url); }";
         let result = extractor.extract(source, "fetchData");
         assert!(result.is_some());
         let extracted = result.unwrap();
@@ -718,6 +721,9 @@ impl Widget {
         let lang: tree_sitter::Language = LANGUAGE_RUST.into();
         let first = normalize_ast(source, lang.clone());
         let second = normalize_ast(&first, lang);
-        assert_eq!(first, second, "normalizing twice should produce same result");
+        assert_eq!(
+            first, second,
+            "normalizing twice should produce same result"
+        );
     }
 }

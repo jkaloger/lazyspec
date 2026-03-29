@@ -1,9 +1,9 @@
-use lazyspec::tui::infra::terminal_caps::TerminalImageProtocol;
 use lazyspec::tui::content::diagram::{
-    DiagramBlock, DiagramCache, DiagramCacheEntry, DiagramLanguage, PreviewSegment, ToolAvailability,
-    build_preview_segments, extract_diagram_blocks, fallback_hint,
-    source_hash, tool_name,
+    build_preview_segments, extract_diagram_blocks, fallback_hint, source_hash, tool_name,
+    DiagramBlock, DiagramCache, DiagramCacheEntry, DiagramLanguage, PreviewSegment,
+    ToolAvailability,
 };
+use lazyspec::tui::infra::terminal_caps::TerminalImageProtocol;
 
 #[test]
 fn test_extract_d2_block() {
@@ -12,7 +12,10 @@ fn test_extract_d2_block() {
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].language, DiagramLanguage::D2);
     assert_eq!(blocks[0].source, "a -> b\nb -> c\n");
-    assert_eq!(&body[blocks[0].byte_range.clone()], "```d2\na -> b\nb -> c\n```\n");
+    assert_eq!(
+        &body[blocks[0].byte_range.clone()],
+        "```d2\na -> b\nb -> c\n```\n"
+    );
 }
 
 #[test]
@@ -46,21 +49,30 @@ fn make_d2_block() -> DiagramBlock {
 fn test_hint_tool_missing() {
     let block = make_d2_block();
     let result = fallback_hint(&block, false, TerminalImageProtocol::KittyGraphics);
-    assert_eq!(result, Some("[d2: install d2 CLI for diagram rendering]".to_string()));
+    assert_eq!(
+        result,
+        Some("[d2: install d2 CLI for diagram rendering]".to_string())
+    );
 }
 
 #[test]
 fn test_hint_no_image_support() {
     let block = make_d2_block();
     let result = fallback_hint(&block, true, TerminalImageProtocol::Unsupported);
-    assert_eq!(result, Some("[diagram: terminal does not support inline images]".to_string()));
+    assert_eq!(
+        result,
+        Some("[diagram: terminal does not support inline images]".to_string())
+    );
 }
 
 #[test]
 fn test_hint_both_missing() {
     let block = make_d2_block();
     let result = fallback_hint(&block, false, TerminalImageProtocol::Unsupported);
-    assert_eq!(result, Some("[d2: install d2 CLI for diagram rendering]".to_string()));
+    assert_eq!(
+        result,
+        Some("[d2: install d2 CLI for diagram rendering]".to_string())
+    );
 }
 
 #[test]
@@ -109,7 +121,10 @@ fn test_diagram_cache_mark_rendering() {
     let hash = source_hash("a -> b\n");
 
     cache.mark_rendering(hash);
-    assert!(matches!(cache.get(hash), Some(DiagramCacheEntry::Rendering)));
+    assert!(matches!(
+        cache.get(hash),
+        Some(DiagramCacheEntry::Rendering)
+    ));
 
     let path = std::path::PathBuf::from("/tmp/test.png");
     cache.insert(hash, DiagramCacheEntry::Image(path.clone()));
@@ -148,7 +163,13 @@ fn test_build_segments_no_diagrams() {
     let tools = ToolAvailability { d2: true };
 
     let blocks = extract_diagram_blocks(body);
-    let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools, &blocks);
+    let segments = build_preview_segments(
+        body,
+        &cache,
+        TerminalImageProtocol::KittyGraphics,
+        &tools,
+        &blocks,
+    );
     assert_eq!(segments.len(), 1);
     assert!(matches!(&segments[0], PreviewSegment::Markdown(t) if t == body));
 }
@@ -166,7 +187,13 @@ fn test_build_segments_with_cached_image() {
     cache.insert(hash, DiagramCacheEntry::Image(img_path.clone()));
     let tools = ToolAvailability { d2: true };
 
-    let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools, &blocks);
+    let segments = build_preview_segments(
+        body,
+        &cache,
+        TerminalImageProtocol::KittyGraphics,
+        &tools,
+        &blocks,
+    );
     assert_eq!(segments.len(), 3);
     assert!(matches!(&segments[0], PreviewSegment::Markdown(_)));
     assert!(matches!(&segments[1], PreviewSegment::DiagramImage(p) if p == &img_path));
@@ -180,7 +207,13 @@ fn test_build_segments_loading_when_uncached() {
     let tools = ToolAvailability { d2: true };
 
     let blocks = extract_diagram_blocks(body);
-    let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools, &blocks);
+    let segments = build_preview_segments(
+        body,
+        &cache,
+        TerminalImageProtocol::KittyGraphics,
+        &tools,
+        &blocks,
+    );
     assert_eq!(segments.len(), 3);
     assert!(matches!(&segments[0], PreviewSegment::Markdown(_)));
     assert!(matches!(&segments[1], PreviewSegment::DiagramLoading));
@@ -194,7 +227,13 @@ fn test_build_segments_tool_unavailable_stays_markdown() {
     let tools = ToolAvailability { d2: false };
 
     let blocks = extract_diagram_blocks(body);
-    let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools, &blocks);
+    let segments = build_preview_segments(
+        body,
+        &cache,
+        TerminalImageProtocol::KittyGraphics,
+        &tools,
+        &blocks,
+    );
     assert_eq!(segments.len(), 1);
     assert!(matches!(&segments[0], PreviewSegment::Markdown(_)));
 }
@@ -206,10 +245,19 @@ fn test_build_segments_with_cached_text() {
     let hash = source_hash(&blocks[0].source);
 
     let mut cache = DiagramCache::new();
-    cache.insert(hash, DiagramCacheEntry::Text("  ┌───┐    ┌───┐\n  │ a │───>│ b │\n  └───┘    └───┘".to_string()));
+    cache.insert(
+        hash,
+        DiagramCacheEntry::Text("  ┌───┐    ┌───┐\n  │ a │───>│ b │\n  └───┘    └───┘".to_string()),
+    );
     let tools = ToolAvailability { d2: true };
 
-    let segments = build_preview_segments(body, &cache, TerminalImageProtocol::KittyGraphics, &tools, &blocks);
+    let segments = build_preview_segments(
+        body,
+        &cache,
+        TerminalImageProtocol::KittyGraphics,
+        &tools,
+        &blocks,
+    );
     assert_eq!(segments.len(), 3);
     assert!(matches!(&segments[0], PreviewSegment::Markdown(_)));
     assert!(matches!(&segments[1], PreviewSegment::DiagramText(t) if t.contains("┌───┐")));

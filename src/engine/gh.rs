@@ -147,21 +147,9 @@ pub trait GhIssueWriter {
 
     fn issue_reopen(&self, repo: &str, number: u64) -> Result<()>;
 
-    fn label_create(
-        &self,
-        repo: &str,
-        name: &str,
-        description: &str,
-        color: &str,
-    ) -> Result<()>;
+    fn label_create(&self, repo: &str, name: &str, description: &str, color: &str) -> Result<()>;
 
-    fn label_ensure(
-        &self,
-        repo: &str,
-        name: &str,
-        description: &str,
-        color: &str,
-    ) -> Result<()>;
+    fn label_ensure(&self, repo: &str, name: &str, description: &str, color: &str) -> Result<()>;
 }
 
 pub trait GhAuth {
@@ -171,6 +159,12 @@ pub trait GhAuth {
 // --- Implementation ---
 
 pub struct GhCli;
+
+impl Default for GhCli {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl GhCli {
     pub fn new() -> Self {
@@ -319,13 +313,7 @@ impl GhIssueWriter for GhCli {
         Ok(())
     }
 
-    fn label_create(
-        &self,
-        repo: &str,
-        name: &str,
-        description: &str,
-        color: &str,
-    ) -> Result<()> {
+    fn label_create(&self, repo: &str, name: &str, description: &str, color: &str) -> Result<()> {
         self.run_gh_checked(&[
             "label",
             "create",
@@ -340,13 +328,7 @@ impl GhIssueWriter for GhCli {
         Ok(())
     }
 
-    fn label_ensure(
-        &self,
-        repo: &str,
-        name: &str,
-        description: &str,
-        color: &str,
-    ) -> Result<()> {
+    fn label_ensure(&self, repo: &str, name: &str, description: &str, color: &str) -> Result<()> {
         self.run_gh_checked(&[
             "label",
             "create",
@@ -380,7 +362,10 @@ impl GhAuth for GhCli {
         if !output.status.success() {
             let msg = combined.trim().to_string();
             let lower = msg.to_lowercase();
-            if lower.contains("not logged in") || lower.contains("authentication") || lower.contains("auth") {
+            if lower.contains("not logged in")
+                || lower.contains("authentication")
+                || lower.contains("auth")
+            {
                 bail!(GhError::AuthFailed(msg.clone()));
             }
             return Ok(AuthStatus::NotAuthenticated(msg));
@@ -401,13 +386,11 @@ fn classify_gh_error(stderr: &str) -> GhError {
     let lower = stderr.to_lowercase();
 
     if lower.contains("rate limit") || lower.contains("api rate limit") {
-        let retry_after = lower
-            .find("retry after")
-            .and_then(|idx| {
-                lower[idx..]
-                    .split_whitespace()
-                    .find_map(|token| token.trim_end_matches('s').parse::<u64>().ok())
-            });
+        let retry_after = lower.find("retry after").and_then(|idx| {
+            lower[idx..]
+                .split_whitespace()
+                .find_map(|token| token.trim_end_matches('s').parse::<u64>().ok())
+        });
         return GhError::RateLimited { retry_after };
     }
 
@@ -429,13 +412,20 @@ fn classify_gh_error(stderr: &str) -> GhError {
 fn extract_http_status(lower: &str) -> Option<u16> {
     if let Some(idx) = lower.find("http ") {
         let rest = &lower[idx + 5..];
-        if let Some(code) = rest.split_whitespace().next().and_then(|s| s.parse::<u16>().ok()) {
+        if let Some(code) = rest
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse::<u16>().ok())
+        {
             return Some(code);
         }
     }
     // Also match bare "404:" or "422 " patterns
     for token in lower.split_whitespace() {
-        if let Ok(code) = token.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u16>() {
+        if let Ok(code) = token
+            .trim_matches(|c: char| !c.is_ascii_digit())
+            .parse::<u16>()
+        {
             if (400..=599).contains(&code) {
                 return Some(code);
             }
@@ -448,7 +438,9 @@ fn extract_field(text: &str, prefix: &str) -> Option<String> {
     for line in text.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix(prefix) {
-            let value = rest.trim().trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '-');
+            let value = rest
+                .trim()
+                .trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '-');
             if !value.is_empty() {
                 return Some(value.to_string());
             }
@@ -486,6 +478,12 @@ pub mod test_support {
         pub last_edit_body: RefCell<Option<String>>,
         pub last_edit_labels_remove: RefCell<Vec<String>>,
         pub last_create_body: RefCell<Option<String>>,
+    }
+
+    impl Default for MockGhClient {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl MockGhClient {
@@ -652,8 +650,8 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::test_support::MockGhClient;
+    use super::*;
 
     // --- JSON parsing tests ---
 
@@ -774,9 +772,7 @@ mod tests {
     #[test]
     fn mock_issue_list_empty() {
         let client = MockGhClient::new();
-        let issues = client
-            .issue_list("owner/repo", &[], &[], None)
-            .unwrap();
+        let issues = client.issue_list("owner/repo", &[], &[], None).unwrap();
         assert!(issues.is_empty());
     }
 
@@ -815,9 +811,13 @@ mod tests {
         let client = MockGhClient::new().with_label_create_fail();
 
         // label_create fails
-        assert!(client.label_create("owner/repo", "bug", "desc", "ff0000").is_err());
+        assert!(client
+            .label_create("owner/repo", "bug", "desc", "ff0000")
+            .is_err());
         // label_ensure still succeeds
-        assert!(client.label_ensure("owner/repo", "bug", "desc", "ff0000").is_ok());
+        assert!(client
+            .label_ensure("owner/repo", "bug", "desc", "ff0000")
+            .is_ok());
     }
 
     #[test]
@@ -871,8 +871,7 @@ mod tests {
 
     #[test]
     fn parse_issue_number_from_url_with_trailing_newline() {
-        let num =
-            parse_issue_number_from_url("https://github.com/owner/repo/issues/99\n").unwrap();
+        let num = parse_issue_number_from_url("https://github.com/owner/repo/issues/99\n").unwrap();
         assert_eq!(num, 99);
     }
 
@@ -952,10 +951,15 @@ mod tests {
         let auth = GhError::AuthFailed("bad token".to_string());
         assert_eq!(format!("{}", auth), "gh auth failed: bad token");
 
-        let api = GhError::ApiError { status: 404, message: "not found".to_string() };
+        let api = GhError::ApiError {
+            status: 404,
+            message: "not found".to_string(),
+        };
         assert_eq!(format!("{}", api), "gh API error (HTTP 404): not found");
 
-        let rate = GhError::RateLimited { retry_after: Some(30) };
+        let rate = GhError::RateLimited {
+            retry_after: Some(30),
+        };
         assert_eq!(format!("{}", rate), "gh API rate limited, retry after 30s");
 
         let rate_none = GhError::RateLimited { retry_after: None };

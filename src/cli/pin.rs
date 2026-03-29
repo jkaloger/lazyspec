@@ -37,12 +37,7 @@ fn ref_target(r: &Ref) -> String {
 }
 
 /// Core pin logic: parse refs, compute hashes, rewrite body.
-pub fn pin_document(
-    root: &Path,
-    config: &Config,
-    spec_path: &str,
-    body: &str,
-) -> PinResult {
+pub fn pin_document(root: &Path, config: &Config, spec_path: &str, body: &str) -> PinResult {
     let refs = parse_refs(body);
     let mut pinned = Vec::new();
     let mut errors = Vec::new();
@@ -50,13 +45,7 @@ pub fn pin_document(
 
     for r in &refs {
         let target = ref_target(r);
-        match compute_blob_hash_for_spec(
-            root,
-            config,
-            spec_path,
-            &r.path,
-            r.symbol.as_deref(),
-        ) {
+        match compute_blob_hash_for_spec(root, config, spec_path, &r.path, r.symbol.as_deref()) {
             Ok(hash) => {
                 // Build the new ref string
                 let new_ref = match &r.symbol {
@@ -94,8 +83,10 @@ pub fn run(store: &Store, config: &Config, id: &str, json: bool) -> Result<()> {
         Ok(doc) => doc,
         Err(ResolveError::Ambiguous { id, matches }) => {
             if json {
-                let paths: Vec<String> =
-                    matches.iter().map(|m| m.to_string_lossy().to_string()).collect();
+                let paths: Vec<String> = matches
+                    .iter()
+                    .map(|m| m.to_string_lossy().to_string())
+                    .collect();
                 let output = serde_json::json!({
                     "error": "ambiguous_id",
                     "id": id,
@@ -187,9 +178,9 @@ fn find_body_start(content: &str) -> Result<usize> {
         .ok_or_else(|| anyhow::anyhow!("no closing frontmatter delimiter"))?;
     // Position after the closing "---" plus its trailing newline
     let close_pos = leading_ws + 3 + end + 4; // skip "\n---"
-    // extract_body does: body = after_first[end + 4..], then trim_start_matches('\n')
-    // We need to include the newlines that extract_body trims, so the prefix ends right
-    // at the point where the trimmed body starts.
+                                              // extract_body does: body = after_first[end + 4..], then trim_start_matches('\n')
+                                              // We need to include the newlines that extract_body trims, so the prefix ends right
+                                              // at the point where the trimmed body starts.
     let remainder = &content[close_pos..];
     let trimmed_start = remainder.len() - remainder.trim_start_matches('\n').len();
     Ok(close_pos + trimmed_start)

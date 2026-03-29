@@ -14,16 +14,31 @@ pub struct Reservation {
 #[derive(Debug, Clone)]
 pub enum ReservationProgress {
     QueryingRemote,
-    PushAttempt { attempt: u8, max: u8, candidate: u32 },
-    PushRejected { candidate: u32 },
-    Reserved { number: u32 },
+    PushAttempt {
+        attempt: u8,
+        max: u8,
+        candidate: u32,
+    },
+    PushRejected {
+        candidate: u32,
+    },
+    Reserved {
+        number: u32,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub enum PruneProgress {
     QueryingRemote,
-    Deleting { current: usize, total: usize, ref_path: String },
-    Done { pruned: usize, orphaned: usize },
+    Deleting {
+        current: usize,
+        total: usize,
+        ref_path: String,
+    },
+    Done {
+        pruned: usize,
+        orphaned: usize,
+    },
 }
 
 pub fn list_reservations(
@@ -47,11 +62,7 @@ pub fn list_reservations(
             || lower.contains("auth")
             || lower.contains("resolve host")
         {
-            bail!(
-                "Remote '{}' is unreachable: {}",
-                remote,
-                stderr.trim()
-            );
+            bail!("Remote '{}' is unreachable: {}", remote, stderr.trim());
         }
         bail!("git ls-remote failed: {}", stderr.trim());
     }
@@ -144,7 +155,9 @@ fn create_local_ref(repo_root: &Path, prefix: &str, num: u32) -> Result<()> {
         bail!("git hash-object failed: {}", stderr.trim());
     }
 
-    let sha = String::from_utf8_lossy(&hash_output.stdout).trim().to_string();
+    let sha = String::from_utf8_lossy(&hash_output.stdout)
+        .trim()
+        .to_string();
     let refname = format!("refs/reservations/{prefix}/{num}");
 
     let update_output = Command::new("git")
@@ -173,7 +186,10 @@ fn push_ref(repo_root: &Path, remote: &str, prefix: &str, num: u32) -> Result<bo
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let lower = stderr.to_lowercase();
-    if lower.contains("rejected") || lower.contains("already exists") || lower.contains("non-fast-forward") {
+    if lower.contains("rejected")
+        || lower.contains("already exists")
+        || lower.contains("non-fast-forward")
+    {
         return Ok(false);
     }
 
@@ -214,7 +230,7 @@ pub fn reserve_next(
         create_local_ref(repo_root, prefix, candidate)?;
 
         on_progress(ReservationProgress::PushAttempt {
-            attempt: attempt as u8 + 1,
+            attempt: attempt + 1,
             max: max_retries,
             candidate,
         });

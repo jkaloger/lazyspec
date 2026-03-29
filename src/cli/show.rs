@@ -19,7 +19,13 @@ fn title_box(title: &str) -> String {
     format!("{}\n{}\n{}", top, mid, bot)
 }
 
-pub fn run(store: &Store, id: &str, expand: bool, max_ref_lines: usize, fs: &dyn FileSystem) -> Result<()> {
+pub fn run(
+    store: &Store,
+    id: &str,
+    expand: bool,
+    max_ref_lines: usize,
+    fs: &dyn FileSystem,
+) -> Result<()> {
     let doc = match resolve_shorthand_or_path(store, id) {
         Ok(doc) => doc,
         Err(ResolveError::Ambiguous { id, matches }) => {
@@ -75,8 +81,11 @@ pub fn run(store: &Store, id: &str, expand: bool, max_ref_lines: usize, fs: &dyn
             if let Some(child) = store.get(cp) {
                 let parent_dir = cp.parent().and_then(|p| p.file_name()).unwrap_or_default();
                 let file_stem = cp.file_stem().unwrap_or_default();
-                let qualified_shorthand =
-                    format!("{}/{}", parent_dir.to_string_lossy(), file_stem.to_string_lossy());
+                let qualified_shorthand = format!(
+                    "{}/{}",
+                    parent_dir.to_string_lossy(),
+                    file_stem.to_string_lossy()
+                );
                 println!("  - {}  ({})", child.title, qualified_shorthand);
             }
         }
@@ -85,11 +94,20 @@ pub fn run(store: &Store, id: &str, expand: bool, max_ref_lines: usize, fs: &dyn
     Ok(())
 }
 
-pub fn run_json(store: &Store, id: &str, expand: bool, max_ref_lines: usize, fs: &dyn FileSystem) -> Result<String> {
+pub fn run_json(
+    store: &Store,
+    id: &str,
+    expand: bool,
+    max_ref_lines: usize,
+    fs: &dyn FileSystem,
+) -> Result<String> {
     let doc = match resolve_shorthand_or_path(store, id) {
         Ok(doc) => doc,
         Err(ResolveError::Ambiguous { id, matches }) => {
-            let paths: Vec<String> = matches.iter().map(|m| m.to_string_lossy().to_string()).collect();
+            let paths: Vec<String> = matches
+                .iter()
+                .map(|m| m.to_string_lossy().to_string())
+                .collect();
             let error = serde_json::json!({
                 "error": "ambiguous_id",
                 "id": id,

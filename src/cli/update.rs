@@ -25,10 +25,18 @@ pub fn run_with_config(
         let type_name = doc.doc_type.as_str();
         if let Some(type_def) = config.type_by_name(type_name) {
             if type_def.store == StoreBackend::GithubIssues {
-                let gh_config = config.documents.github.as_ref()
-                    .ok_or_else(|| anyhow!("type '{}' uses github-issues store but no [github] config found", type_name))?;
-                let repo = gh_config.repo.as_ref()
-                    .ok_or_else(|| anyhow!("type '{}' uses github-issues store but no github.repo configured", type_name))?;
+                let gh_config = config.documents.github.as_ref().ok_or_else(|| {
+                    anyhow!(
+                        "type '{}' uses github-issues store but no [github] config found",
+                        type_name
+                    )
+                })?;
+                let repo = gh_config.repo.as_ref().ok_or_else(|| {
+                    anyhow!(
+                        "type '{}' uses github-issues store but no github.repo configured",
+                        type_name
+                    )
+                })?;
                 let mut gh_store = GithubIssuesStore {
                     client: GhCli::new(),
                     root: root.to_path_buf(),

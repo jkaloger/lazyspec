@@ -50,14 +50,20 @@ fn init_creates_convention_skeleton_files() {
     assert!(index_content.contains("tags: []"));
     // Date should be YYYY-MM-DD format
     let date_re = regex::Regex::new(r"date: \d{4}-\d{2}-\d{2}").unwrap();
-    assert!(date_re.is_match(&index_content), "index.md should contain a date in YYYY-MM-DD format");
+    assert!(
+        date_re.is_match(&index_content),
+        "index.md should contain a date in YYYY-MM-DD format"
+    );
 
     let example_content = fs::read_to_string(&example).unwrap();
     assert!(example_content.contains("type: dictum"));
     assert!(example_content.contains("status: draft"));
     assert!(example_content.contains("author: \"unknown\""));
     assert!(example_content.contains("tags: [example]"));
-    assert!(date_re.is_match(&example_content), "example.md should contain a date in YYYY-MM-DD format");
+    assert!(
+        date_re.is_match(&example_content),
+        "example.md should contain a date in YYYY-MM-DD format"
+    );
 }
 
 #[test]

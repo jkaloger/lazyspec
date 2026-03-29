@@ -4,3 +4,5 @@
 .lazyspec/cache/
 .lazyspec/cache.lock
 .lazyspec/issue-map.json
+result
+.direnv

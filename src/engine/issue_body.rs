@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use regex::Regex;
 
-use crate::engine::document::{self, DocMeta, DocType, Relation, Status};
+use crate::engine::document::{self, deserialize_naive_date, DocMeta, DocType, Relation, Status};
 use std::path::PathBuf;
 
 /// Fields that come from GitHub Issue primitives rather than the issue body.
@@ -114,7 +114,11 @@ fn reconstruct_status(is_open: bool, frontmatter_status: Option<&str>) -> Status
 ///
 /// The first label matching a known doc type is used as the type; all remaining
 /// labels become tags.
-fn extract_type_and_tags(labels: &[String], known_types: &[&str], default_type: &str) -> (DocType, Vec<String>) {
+fn extract_type_and_tags(
+    labels: &[String],
+    known_types: &[&str],
+    default_type: &str,
+) -> (DocType, Vec<String>) {
     let mut doc_type: Option<DocType> = None;
     let mut tags = Vec::new();
 
@@ -137,6 +141,7 @@ fn extract_type_and_tags(labels: &[String], known_types: &[&str], default_type: 
 struct CommentFrontmatter {
     #[serde(default)]
     author: Option<String>,
+    #[serde(deserialize_with = "deserialize_naive_date")]
     date: NaiveDate,
     #[serde(default)]
     status: Option<String>,
@@ -215,7 +220,10 @@ mod tests {
         let result = serialize(&doc, "Some body text.");
 
         assert!(result.starts_with("<!-- lazyspec\n---\n"));
-        assert!(!result.contains("author:"), "serialize should not emit author");
+        assert!(
+            !result.contains("author:"),
+            "serialize should not emit author"
+        );
         assert!(result.contains("date: 2026-03-27"));
         assert!(result.contains("- implements: STORY-075"));
         assert!(result.ends_with("Some body text."));

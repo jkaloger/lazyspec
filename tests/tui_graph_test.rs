@@ -33,7 +33,12 @@ fn setup_graph_fixture() -> (TestFixture, App) {
     );
 
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
     (fixture, app)
 }
 
@@ -67,7 +72,11 @@ fn test_rebuild_graph_roots_have_no_incoming_implements() {
     assert_eq!(roots.len(), 2);
 
     for root in &roots {
-        assert_eq!(root.doc_type, DocType::new(DocType::RFC), "root should be an RFC");
+        assert_eq!(
+            root.doc_type,
+            DocType::new(DocType::RFC),
+            "root should be an RFC"
+        );
     }
 }
 
@@ -78,13 +87,28 @@ fn test_graph_navigate_j_k() {
     app.view_mode = ViewMode::Graph;
     app.graph_selected = 0;
 
-    app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('j'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.graph_selected, 1);
 
-    app.handle_key(KeyCode::Char('k'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('k'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.graph_selected, 0);
 
-    app.handle_key(KeyCode::Char('k'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('k'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.graph_selected, 0, "should clamp at 0");
 }
 
@@ -95,14 +119,24 @@ fn test_graph_navigate_g_and_shift_g() {
     app.view_mode = ViewMode::Graph;
     app.graph_selected = 0;
 
-    app.handle_key(KeyCode::Char('G'), KeyModifiers::SHIFT, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('G'),
+        KeyModifiers::SHIFT,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(
         app.graph_selected,
         app.graph_nodes.len() - 1,
         "G should jump to last node"
     );
 
-    app.handle_key(KeyCode::Char('g'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('g'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.graph_selected, 0, "g should jump to first node");
 }
 
@@ -116,19 +150,36 @@ fn test_graph_enter_jumps_to_types_mode() {
     let story_idx = app
         .graph_nodes
         .iter()
-        .position(|n| n.doc_type == lazyspec::engine::document::DocType::new(lazyspec::engine::document::DocType::STORY))
+        .position(|n| {
+            n.doc_type
+                == lazyspec::engine::document::DocType::new(
+                    lazyspec::engine::document::DocType::STORY,
+                )
+        })
         .expect("should have a story node");
 
     let story_path = app.graph_nodes[story_idx].path.clone();
     app.graph_selected = story_idx;
 
-    app.handle_key(KeyCode::Enter, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
 
-    assert_eq!(app.view_mode, ViewMode::Types, "should switch to Types mode");
+    assert_eq!(
+        app.view_mode,
+        ViewMode::Types,
+        "should switch to Types mode"
+    );
     assert_eq!(app.selected_type, 1, "Story is at index 1 in doc_types");
 
     let selected_doc = app.selected_doc_meta().expect("should have a selected doc");
-    assert_eq!(selected_doc.path, story_path, "should select the correct story");
+    assert_eq!(
+        selected_doc.path, story_path,
+        "should select the correct story"
+    );
 }
 
 #[test]
@@ -136,35 +187,78 @@ fn test_graph_rebuilds_on_mode_switch() {
     let (fixture, mut app) = setup_graph_fixture();
 
     // Cycle from Types -> Filters -> [Metrics] -> Graph
-    app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('`'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.view_mode, ViewMode::Filters);
 
     #[cfg(feature = "metrics")]
     {
-        app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+        app.handle_key(
+            KeyCode::Char('`'),
+            KeyModifiers::NONE,
+            fixture.root(),
+            &fixture.config(),
+        );
         assert_eq!(app.view_mode, ViewMode::Metrics);
     }
 
-    app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('`'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.view_mode, ViewMode::Graph);
-    assert!(!app.graph_nodes.is_empty(), "graph should be populated on entering Graph mode");
+    assert!(
+        !app.graph_nodes.is_empty(),
+        "graph should be populated on entering Graph mode"
+    );
 
     let first_count = app.graph_nodes.len();
 
     // Cycle away: Graph -> Agents -> Types (or Graph -> Types without agent feature)
-    app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('`'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     #[cfg(feature = "agent")]
     {
         assert_eq!(app.view_mode, ViewMode::Agents);
-        app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+        app.handle_key(
+            KeyCode::Char('`'),
+            KeyModifiers::NONE,
+            fixture.root(),
+            &fixture.config(),
+        );
     }
     assert_eq!(app.view_mode, ViewMode::Types);
 
     // Cycle back: Types -> Filters -> [Metrics] -> Graph
-    app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
-    app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('`'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
+    app.handle_key(
+        KeyCode::Char('`'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     #[cfg(feature = "metrics")]
-    app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('`'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.view_mode, ViewMode::Graph);
     assert_eq!(
         app.graph_nodes.len(),
@@ -204,7 +298,12 @@ fn custom_types_populate_doc_types_and_icons() {
         },
     ];
     let store = Store::load(fixture.root(), &config).unwrap();
-    let app = App::new(store, &config, ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let app = App::new(
+        store,
+        &config,
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     assert_eq!(app.doc_types.len(), 2);
     assert_eq!(app.doc_types[0], DocType::new("epic"));

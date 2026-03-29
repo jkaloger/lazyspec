@@ -8,7 +8,12 @@ fn setup_app_with_rfc(title: &str, status: &str) -> (TestFixture, App) {
     let fixture = TestFixture::new();
     fixture.write_rfc("RFC-001-test.md", title, status);
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
     (fixture, app)
 }
 
@@ -37,7 +42,12 @@ fn test_open_link_editor_on_relations_tab() {
 fn test_open_link_editor_no_doc_selected_noop() {
     let fixture = TestFixture::new();
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     app.preview_tab = PreviewTab::Relations;
     app.open_link_editor();
@@ -75,7 +85,12 @@ fn test_esc_key_closes_link_editor() {
     app.open_link_editor();
     assert!(app.link_editor.active);
 
-    app.handle_key(KeyCode::Esc, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
 
     assert!(!app.link_editor.active);
 }
@@ -89,7 +104,12 @@ fn test_r_key_opens_link_editor_on_relations_tab() {
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
 
-    app.handle_key(KeyCode::Char('r'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('r'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
 
     assert!(app.link_editor.active);
 }
@@ -103,7 +123,12 @@ fn test_r_key_noop_on_preview_tab() {
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Preview;
 
-    app.handle_key(KeyCode::Char('r'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('r'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
 
     assert!(!app.link_editor.active);
 }
@@ -115,7 +140,12 @@ fn test_open_link_editor_results_exclude_self() {
     fixture.write_rfc("RFC-001-source.md", "Source RFC", "draft");
     fixture.write_rfc("RFC-002-target.md", "Target RFC", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -139,7 +169,12 @@ fn test_link_editor_intercepts_keys() {
 
     // 'q' normally quits, but link editor should intercept it
     let should_quit_before = app.should_quit;
-    app.handle_key(KeyCode::Char('q'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('q'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.should_quit, should_quit_before);
 }
 
@@ -151,7 +186,12 @@ fn test_typing_filters_results() {
     fixture.write_rfc("RFC-002-beta.md", "Beta Feature", "draft");
     fixture.write_story("STORY-001-gamma.md", "Gamma Story", "draft", None);
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     // Select RFC-001 as the source document
     app.selected_type = 0;
@@ -165,7 +205,12 @@ fn test_typing_filters_results() {
 
     // Type "beta" to filter
     for c in "beta".chars() {
-        app.handle_key(KeyCode::Char(c), KeyModifiers::NONE, fixture.root(), &fixture.config());
+        app.handle_key(
+            KeyCode::Char(c),
+            KeyModifiers::NONE,
+            fixture.root(),
+            &fixture.config(),
+        );
     }
 
     assert_eq!(app.link_editor.query, "beta");
@@ -184,7 +229,12 @@ fn test_backspace_updates_filter() {
     fixture.write_rfc("RFC-002-beta.md", "Beta Feature", "draft");
     fixture.write_rfc("RFC-003-gamma.md", "Gamma Feature", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -196,13 +246,23 @@ fn test_backspace_updates_filter() {
 
     // Type "beta" to filter to 1
     for c in "beta".chars() {
-        app.handle_key(KeyCode::Char(c), KeyModifiers::NONE, fixture.root(), &fixture.config());
+        app.handle_key(
+            KeyCode::Char(c),
+            KeyModifiers::NONE,
+            fixture.root(),
+            &fixture.config(),
+        );
     }
     assert_eq!(app.link_editor.results.len(), 1);
 
     // Backspace all to clear filter
     for _ in 0..4 {
-        app.handle_key(KeyCode::Backspace, KeyModifiers::NONE, fixture.root(), &fixture.config());
+        app.handle_key(
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+            fixture.root(),
+            &fixture.config(),
+        );
     }
     assert_eq!(app.link_editor.query, "");
     // All non-self docs visible again
@@ -216,7 +276,12 @@ fn test_search_case_insensitive() {
     fixture.write_rfc("RFC-001-source.md", "Source Doc", "draft");
     fixture.write_rfc("RFC-002-target.md", "Target Doc", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -225,7 +290,12 @@ fn test_search_case_insensitive() {
 
     // Search with uppercase should still match
     for c in "TARGET".chars() {
-        app.handle_key(KeyCode::Char(c), KeyModifiers::NONE, fixture.root(), &fixture.config());
+        app.handle_key(
+            KeyCode::Char(c),
+            KeyModifiers::NONE,
+            fixture.root(),
+            &fixture.config(),
+        );
     }
     assert_eq!(app.link_editor.results.len(), 1);
 }
@@ -235,9 +305,18 @@ fn test_search_case_insensitive() {
 fn test_display_format_type_nnn_colon_title() {
     let fixture = TestFixture::new();
     fixture.write_rfc("RFC-001-source.md", "Source Doc", "draft");
-    fixture.write_rfc("RFC-028-doc-ref-ergonomics.md", "Document Reference Ergonomics", "draft");
+    fixture.write_rfc(
+        "RFC-028-doc-ref-ergonomics.md",
+        "Document Reference Ergonomics",
+        "draft",
+    );
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -258,7 +337,12 @@ fn test_self_excluded_after_search() {
     fixture.write_rfc("RFC-001-source.md", "Source Doc", "draft");
     fixture.write_rfc("RFC-002-target.md", "Target Doc", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -269,7 +353,12 @@ fn test_self_excluded_after_search() {
 
     // Type part of the self-doc's ID to try to match it
     for c in "RFC-001".chars() {
-        app.handle_key(KeyCode::Char(c), KeyModifiers::NONE, fixture.root(), &fixture.config());
+        app.handle_key(
+            KeyCode::Char(c),
+            KeyModifiers::NONE,
+            fixture.root(),
+            &fixture.config(),
+        );
     }
 
     // Self should never appear in results
@@ -285,7 +374,12 @@ fn test_jk_navigation() {
     fixture.write_rfc("RFC-003-beta.md", "Beta", "draft");
     fixture.write_rfc("RFC-004-gamma.md", "Gamma", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -295,20 +389,45 @@ fn test_jk_navigation() {
     assert_eq!(app.link_editor.selected, 0);
 
     // j moves down
-    app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('j'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.link_editor.selected, 1);
 
-    app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('j'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.link_editor.selected, 2);
 
     // k moves up
-    app.handle_key(KeyCode::Char('k'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('k'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.link_editor.selected, 1);
 
     // k at 0 stays at 0
-    app.handle_key(KeyCode::Char('k'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('k'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.link_editor.selected, 0);
-    app.handle_key(KeyCode::Char('k'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('k'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.link_editor.selected, 0);
 }
 
@@ -320,17 +439,32 @@ fn test_arrow_navigation() {
     fixture.write_rfc("RFC-002-alpha.md", "Alpha", "draft");
     fixture.write_rfc("RFC-003-beta.md", "Beta", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
     app.open_link_editor();
 
-    app.handle_key(KeyCode::Down, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Down,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.link_editor.selected, 1);
 
-    app.handle_key(KeyCode::Up, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Up,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.link_editor.selected, 0);
 }
 
@@ -341,7 +475,12 @@ fn test_navigation_clamps_to_bounds() {
     fixture.write_rfc("RFC-001-source.md", "Source Doc", "draft");
     fixture.write_rfc("RFC-002-only.md", "Only Target", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -350,7 +489,12 @@ fn test_navigation_clamps_to_bounds() {
 
     // Only 1 result, j should not go past 0
     assert_eq!(app.link_editor.results.len(), 1);
-    app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('j'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.link_editor.selected, 0);
 }
 
@@ -363,7 +507,12 @@ fn test_selected_clamps_on_filter() {
     fixture.write_rfc("RFC-003-beta.md", "Beta", "draft");
     fixture.write_rfc("RFC-004-gamma.md", "Gamma", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -371,13 +520,28 @@ fn test_selected_clamps_on_filter() {
     app.open_link_editor();
 
     // Navigate to last item
-    app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, fixture.root(), &fixture.config());
-    app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('j'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
+    app.handle_key(
+        KeyCode::Char('j'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.link_editor.selected, 2);
 
     // Now filter to 1 result, selected should clamp
     for c in "alpha".chars() {
-        app.handle_key(KeyCode::Char(c), KeyModifiers::NONE, fixture.root(), &fixture.config());
+        app.handle_key(
+            KeyCode::Char(c),
+            KeyModifiers::NONE,
+            fixture.root(),
+            &fixture.config(),
+        );
     }
     assert_eq!(app.link_editor.results.len(), 1);
     assert_eq!(app.link_editor.selected, 0);
@@ -391,7 +555,12 @@ fn test_results_sorted_by_display_string() {
     fixture.write_rfc("RFC-001-alpha.md", "Alpha", "draft");
     fixture.write_rfc("RFC-002-beta.md", "Beta", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     // Select RFC-003 as source
     app.selected_type = 0;
@@ -429,17 +598,37 @@ fn test_tab_cycles_rel_type() {
 
     assert_eq!(app.link_editor.rel_type_index, 0); // implements
 
-    app.handle_key(KeyCode::Tab, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Tab,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.link_editor.rel_type_index, 1); // supersedes
 
-    app.handle_key(KeyCode::Tab, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Tab,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.link_editor.rel_type_index, 2); // blocks
 
-    app.handle_key(KeyCode::Tab, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Tab,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.link_editor.rel_type_index, 3); // related-to
 
     // Wraps around
-    app.handle_key(KeyCode::Tab, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Tab,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.link_editor.rel_type_index, 0); // back to implements
 }
 
@@ -450,7 +639,12 @@ fn test_enter_creates_link_and_closes() {
     fixture.write_rfc("RFC-001-source.md", "Source RFC", "draft");
     fixture.write_rfc("RFC-002-target.md", "Target RFC", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -461,16 +655,29 @@ fn test_enter_creates_link_and_closes() {
     assert!(!app.link_editor.results.is_empty());
 
     // Press Enter to confirm link
-    app.handle_key(KeyCode::Enter, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
 
     // Overlay should be closed
     assert!(!app.link_editor.active);
 
     // Verify the link was written by reloading the store
     let store = fixture.store();
-    let source = store.get(&std::path::PathBuf::from("docs/rfcs/RFC-001-source.md")).unwrap();
-    assert!(!source.related.is_empty(), "source should have a relation after Enter");
-    assert_eq!(source.related[0].rel_type, lazyspec::engine::document::RelationType::Implements);
+    let source = store
+        .get(&std::path::PathBuf::from("docs/rfcs/RFC-001-source.md"))
+        .unwrap();
+    assert!(
+        !source.related.is_empty(),
+        "source should have a relation after Enter"
+    );
+    assert_eq!(
+        source.related[0].rel_type,
+        lazyspec::engine::document::RelationType::Implements
+    );
     assert_eq!(source.related[0].target, "RFC-002");
 }
 
@@ -488,7 +695,12 @@ fn test_enter_with_empty_results_noop() {
     assert!(app.link_editor.results.is_empty());
 
     // Enter should do nothing -- overlay stays open
-    app.handle_key(KeyCode::Enter, KeyModifiers::NONE, _fixture.root(), &_fixture.config());
+    app.handle_key(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        _fixture.root(),
+        &_fixture.config(),
+    );
 
     assert!(app.link_editor.active);
 }
@@ -500,7 +712,12 @@ fn test_enter_with_tab_writes_correct_rel_type() {
     fixture.write_rfc("RFC-001-source.md", "Source RFC", "draft");
     fixture.write_rfc("RFC-002-target.md", "Target RFC", "draft");
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     app.selected_type = 0;
     app.selected_doc = 0;
@@ -508,15 +725,35 @@ fn test_enter_with_tab_writes_correct_rel_type() {
     app.open_link_editor();
 
     // Tab twice to get to "blocks"
-    app.handle_key(KeyCode::Tab, KeyModifiers::NONE, fixture.root(), &fixture.config());
-    app.handle_key(KeyCode::Tab, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Tab,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
+    app.handle_key(
+        KeyCode::Tab,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.link_editor.rel_type_index, 2);
 
-    app.handle_key(KeyCode::Enter, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
 
     assert!(!app.link_editor.active);
 
     let store = fixture.store();
-    let source = store.get(&std::path::PathBuf::from("docs/rfcs/RFC-001-source.md")).unwrap();
-    assert_eq!(source.related[0].rel_type, lazyspec::engine::document::RelationType::Blocks);
+    let source = store
+        .get(&std::path::PathBuf::from("docs/rfcs/RFC-001-source.md"))
+        .unwrap();
+    assert_eq!(
+        source.related[0].rel_type,
+        lazyspec::engine::document::RelationType::Blocks
+    );
 }

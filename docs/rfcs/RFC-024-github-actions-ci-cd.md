@@ -8,6 +8,7 @@ tags:
 - ci
 - cd
 - github-actions
+- nix
 - releases
 related:
 - related to: RFC-009
@@ -18,20 +19,85 @@ related:
 
 There's no automated CI or release pipeline. Every PR merge is a trust exercise: tests run locally (if at all), clippy warnings go unchecked, and releases are manual `cargo build` invocations. This doesn't scale, and it means regressions can land silently.
 
-The project is at v0.4.1 with an active development pace. Without CI, the feedback loop for catching breakage is "someone notices later."
+The project is at v0.5.0 with an active development pace. Without CI, the feedback loop for catching breakage is "someone notices later."
+
+Beyond CI, local development environments are not reproducible. Contributors need to manually install the right Rust toolchain, ensure a C compiler is available for tree-sitter, and hope their versions match. Nix solves both problems: a single `flake.nix` defines the build, the dev shell, and the CI checks.
 
 ## Intent
 
-Establish GitHub Actions workflows for three concerns: continuous integration on PRs, automated binary releases on tags, and a versioning strategy that keeps the release process low-friction.
+Establish a Nix flake as the single source of truth for building, developing, and testing lazyspec. Use that flake in GitHub Actions for CI. The same environment that passes locally passes in CI, with no drift between the two.
+
+Three concerns: a Nix package build, a reproducible dev shell, and a GitHub Actions CI workflow that delegates to `nix flake check` and `nix build`.
+
+Release workflows (cross-compilation, binary archives, GitHub Releases) are out of scope for now and will be addressed in a follow-up.
 
 ## Design
 
-### 1. CI Workflow (on PR)
+### 1. Nix Flake
 
-Runs on every pull request targeting `main` and on pushes to `main`.
+A `flake.nix` at the repo root using `nixpkgs-unstable` and `oxalica/rust-overlay` for toolchain pinning.
+
+The flake provides:
+
+- `packages.default` -- the lazyspec binary, built with `rustPlatform.buildRustPackage`. The `rust-overlay` pins the Rust toolchain to a specific stable version so builds are reproducible regardless of what nixpkgs ships. Tree-sitter crates require C/C++ compilation, so `stdenv.cc` is included in `nativeBuildInputs`.
+
+- `devShells.default` -- a development shell with the pinned Rust toolchain (cargo, clippy, rustfmt, rust-analyzer), plus any native dependencies needed for the build. Running `nix develop` drops you into a shell where `cargo build`, `cargo test`, and `cargo clippy` all work without any manual toolchain setup.
+
+- `checks` -- flake checks that run clippy (with `-D warnings`), `cargo test`, and `cargo fmt --check`. These are invoked by `nix flake check` and form the basis of the CI pipeline.
+
+```nix
+# Sketch of flake.nix structure
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    rust-overlay.url = "github:oxalica/rust-overlay";
+    flake-utils.url = "github:numtide/flake-utils";
+  };
+
+  outputs = { self, nixpkgs, rust-overlay, flake-utils }:
+    flake-utils.lib.eachDefaultSystem (system:
+      let
+        overlays = [ (import rust-overlay) ];
+        pkgs = import nixpkgs { inherit system overlays; };
+        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+          extensions = [ "clippy" "rustfmt" "rust-src" ];
+        };
+        rustPlatform = pkgs.makeRustPlatform {
+          cargo = rustToolchain;
+          rustc = rustToolchain;
+        };
+      in {
+        packages.default = rustPlatform.buildRustPackage {
+          pname = "lazyspec";
+          version = "..."; # read from Cargo.toml
+          src = ./.;
+          cargoHash = "sha256-...";
+          nativeBuildInputs = [ pkgs.pkg-config ];
+          # tree-sitter C deps handled by stdenv
+        };
+
+        devShells.default = pkgs.mkShell {
+          inputsFrom = [ self.packages.${system}.default ];
+          packages = [ rustToolchain pkgs.rust-analyzer ];
+        };
+
+        checks = {
+          clippy = /* cargo clippy -- -D warnings */;
+          test = /* cargo test */;
+          fmt = /* cargo fmt --check */;
+        };
+      });
+}
+```
+
+> [!NOTE]
+> `cargoHash` must be updated whenever `Cargo.lock` changes. This is the trade-off of `buildRustPackage` over crane/naersk -- simpler setup, but a manual hash update step. In practice this means: change a dependency, run `nix build`, copy the new hash from the error message.
+
+### 2. CI Workflow
+
+A single GitHub Actions workflow at `.github/workflows/ci.yml`. Runs on PRs targeting `main` and pushes to `main`.
 
 ```yaml
-# .github/workflows/ci.yml
 name: CI
 on:
   pull_request:
@@ -40,87 +106,36 @@ on:
     branches: [main]
 ```
 
-**Jobs:**
+The workflow uses `DeterminateSystems/nix-installer-action` for Nix setup and `DeterminateSystems/magic-nix-cache-action` for transparent caching of the Nix store between runs. This avoids rebuilding the entire dependency closure on every CI run.
+
+Jobs:
 
 | Job | Command | Purpose |
 |-----|---------|---------|
-| `check` | `cargo check --all-features` | Fast compilation check |
-| `test` | `cargo test` | Run all tests |
-| `clippy` | `cargo clippy -- -D warnings` | Lint, fail on warnings |
-| `fmt` | `cargo fmt --check` | Formatting check |
-| `validate` | `cargo run -- validate` | Dogfood: run lazyspec validation on the project's own docs |
+| `check` | `nix flake check` | Runs all flake checks: clippy, tests, fmt |
+| `build` | `nix build` | Verifies the package builds and produces a binary |
+| `validate` | `nix develop --command cargo run -- validate` | Dogfood: run lazyspec validation on the project's own docs |
 
-The `validate` job is the interesting one. It installs the tool from source and runs it against the repo's `docs/` directory. If we ship broken specs in a PR, CI catches it.
+The `validate` job builds lazyspec from source inside the dev shell and runs it against the repo's `docs/` directory. If a PR ships broken specs, CI catches it.
 
-Jobs run on `ubuntu-latest`. The Rust toolchain is pinned to stable via `dtolnay/rust-toolchain`.
+All jobs run on `ubuntu-latest`. Nix handles the toolchain, so no `dtolnay/rust-toolchain` or manual compiler setup is needed.
 
-Tree-sitter dependencies (`tree-sitter-typescript`, `tree-sitter-rust`) compile C/C++ code, so the CI image needs a C compiler. `ubuntu-latest` includes `gcc` by default, so no extra setup needed.
+### 3. Caching
 
-### 2. Release Workflow (on tag)
+`magic-nix-cache-action` uses GitHub Actions cache to store Nix store paths between runs. First builds pull the full closure; subsequent builds only rebuild what changed. Combined with `buildRustPackage`'s cargo vendor step, this keeps CI times reasonable.
 
-Triggered by pushing a version tag (`v*`).
+### 4. Dogfooding
 
-```yaml
-# .github/workflows/release.yml
-name: Release
-on:
-  push:
-    tags: ["v*"]
-```
+The `validate` job is the minimum dogfooding step. Future enhancements could include running `lazyspec status` and posting a summary comment on PRs, or diffing document counts before/after to surface what specs a PR adds or changes. These are not part of the initial scope.
 
-**Matrix build:**
+### 5. Release Workflow (future)
 
-| Target | Runner | Notes |
-|--------|--------|-------|
-| `x86_64-unknown-linux-gnu` | `ubuntu-latest` | Standard Linux |
-| `aarch64-unknown-linux-gnu` | `ubuntu-latest` | Cross-compiled via `cross` |
-| `x86_64-apple-darwin` | `macos-latest` | Intel Mac |
-| `aarch64-apple-darwin` | `macos-latest` | Apple Silicon |
-| `x86_64-pc-windows-msvc` | `windows-latest` | Windows |
-
-Each target produces a compressed binary archive (`lazyspec-{version}-{target}.tar.gz` on unix, `.zip` on Windows).
-
-The workflow:
-1. Checks out the repo at the tag
-2. Installs the Rust toolchain for the target
-3. Builds with `cargo build --release` (or `cross build` for cross-compiled targets)
-4. Strips the binary
-5. Creates a compressed archive
-6. Uploads artifacts
-
-A final job collects all artifacts and creates a GitHub Release with release notes extracted from the tag annotation (or auto-generated from commits since last tag).
-
-### 3. Versioning Strategy
-
-Use **tag-based releases** with conventional commit messages. The flow:
-
-1. Develop on feature branches, merge to `main`
-2. When ready to release, update `Cargo.toml` version and tag: `git tag v0.5.0`
-3. Push the tag: `git push origin v0.5.0`
-4. Release workflow triggers automatically
-
-> [!NOTE]
-> `release-please` is an option for fully automated version bumps based on conventional commits. It's worth considering once the commit discipline is consistent enough. For now, manual tagging keeps things simple and explicit.
-
-The release workflow extracts the version from the tag and verifies it matches `Cargo.toml`. Mismatch fails the build.
-
-### 4. Caching
-
-Rust builds are slow. The CI workflow uses `Swatinem/rust-cache` to cache the `target/` directory and cargo registry between runs. This cuts repeated CI runs from ~5min to ~1-2min.
-
-### 5. Dogfooding
-
-The `validate` job in CI is the minimum dogfooding step. Future enhancements could include:
-- Running `lazyspec status` and posting a summary comment on PRs
-- Checking that new RFCs/stories have required relationships
-- Diffing document counts before/after to surface what specs a PR adds or changes
-
-These are nice-to-haves and not part of the initial scope.
+Cross-compiled binary releases, GitHub Release creation, and versioning strategy are deferred. The Nix flake provides a foundation: `nix build` already produces a binary for the host platform. Extending to cross-compilation (via `pkgsCross` or a matrix of systems) is a natural follow-up but adds complexity that isn't needed yet.
 
 ## Stories
 
-1. **CI workflow** -- `.github/workflows/ci.yml` with check, test, clippy, fmt jobs. Rust toolchain setup, caching. Runs on PR and push to main.
+1. Nix flake -- `flake.nix` with `packages.default` (buildRustPackage + rust-overlay), `devShells.default`, and flake `checks` for clippy, test, and fmt. Includes `.envrc` for direnv integration.
 
-2. **Release workflow** -- `.github/workflows/release.yml` with matrix cross-compilation. Binary archives, GitHub Release creation. Tag-version-Cargo.toml consistency check.
+2. CI workflow -- `.github/workflows/ci.yml` using DeterminateSystems Nix actions. Jobs: `nix flake check`, `nix build`, `nix develop --command cargo run -- validate`. Runs on PR and push to main.
 
-3. **Validate job and dogfooding** -- Add `lazyspec validate` as a CI job. Build from source, run against `docs/`. Fail on validation errors.
+3. Release workflow (future) -- `.github/workflows/release.yml` with cross-compilation, binary archives, and GitHub Release creation. Not part of initial scope.

@@ -1,6 +1,6 @@
-use super::forms::{CreateForm, DeleteConfirm, LinkEditor, REL_TYPES, StatusPicker};
 #[cfg(feature = "agent")]
 use super::forms::AgentDialog;
+use super::forms::{CreateForm, DeleteConfirm, LinkEditor, StatusPicker, REL_TYPES};
 use super::graph::traverse_dependency_chain;
 
 use crate::engine::cache::DiskCache;
@@ -32,16 +32,27 @@ pub struct CreateResult {
 pub enum AppEvent {
     Terminal(crossterm::event::KeyEvent),
     FileChange(notify::Event),
-    ExpansionResult { path: PathBuf, body: String, body_hash: u64 },
-    DiagramRendered { source_hash: u64, entry: crate::tui::content::diagram::DiagramCacheEntry },
+    ExpansionResult {
+        path: PathBuf,
+        body: String,
+        body_hash: u64,
+    },
+    DiagramRendered {
+        source_hash: u64,
+        entry: crate::tui::content::diagram::DiagramCacheEntry,
+    },
     ProbeResult {
         picker: ratatui_image::picker::Picker,
         protocol: crate::tui::infra::terminal_caps::TerminalImageProtocol,
         tool_availability: crate::tui::content::diagram::ToolAvailability,
     },
     CreateStarted,
-    CreateProgress { message: String },
-    CreateComplete { result: Result<CreateResult, String> },
+    CreateProgress {
+        message: String,
+    },
+    CreateComplete {
+        result: Result<CreateResult, String>,
+    },
     CacheRefresh,
     GhPushResult(Result<(), String>),
     #[cfg(feature = "agent")]
@@ -51,7 +62,8 @@ pub enum AppEvent {
 fn update_tags(root: &Path, relative: &Path, tags: &[String], fs: &dyn FileSystem) -> Result<()> {
     let full_path = root.join(relative);
     rewrite_frontmatter(&full_path, fs, |doc| {
-        let tag_values: Vec<serde_yaml::Value> = tags.iter()
+        let tag_values: Vec<serde_yaml::Value> = tags
+            .iter()
             .map(|t| serde_yaml::Value::String(t.clone()))
             .collect();
         doc["tags"] = serde_yaml::Value::Sequence(tag_values);
@@ -238,7 +250,11 @@ pub struct App {
     pub picker: ratatui_image::picker::Picker,
     pub image_states: HashMap<u64, ratatui_image::protocol::StatefulProtocol>,
     pub ascii_diagrams: bool,
-    pub diagram_blocks_cache: Option<(PathBuf, u64, Vec<crate::tui::content::diagram::DiagramBlock>)>,
+    pub diagram_blocks_cache: Option<(
+        PathBuf,
+        u64,
+        Vec<crate::tui::content::diagram::DiagramBlock>,
+    )>,
     pub filtered_docs_cache: Option<Vec<PathBuf>>,
     pub search_index: Vec<SearchEntry>,
     pub git_status_cache: GitStatusCache,
@@ -248,19 +264,39 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(store: Store, config: &Config, picker: ratatui_image::picker::Picker, fs: Box<dyn FileSystem>) -> Self {
+    pub fn new(
+        store: Store,
+        config: &Config,
+        picker: ratatui_image::picker::Picker,
+        fs: Box<dyn FileSystem>,
+    ) -> Self {
         let default_glyphs = ["●", "■", "▲", "◆", "★", "◎"];
-        let type_icons: HashMap<String, String> = config.documents.types.iter().enumerate().map(|(i, t)| {
-            let icon = t.icon.clone().unwrap_or_else(|| default_glyphs[i % default_glyphs.len()].to_string());
-            (t.name.clone(), icon)
-        }).collect();
-        let type_plurals: HashMap<String, String> = config.documents.types.iter()
+        let type_icons: HashMap<String, String> = config
+            .documents
+            .types
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let icon = t
+                    .icon
+                    .clone()
+                    .unwrap_or_else(|| default_glyphs[i % default_glyphs.len()].to_string());
+                (t.name.clone(), icon)
+            })
+            .collect();
+        let type_plurals: HashMap<String, String> = config
+            .documents
+            .types
+            .iter()
             .map(|t| (t.name.clone(), t.plural.clone()))
             .collect();
 
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
         let git_status_cache = GitStatusCache::new(store.root());
-        let has_github_issues = config.documents.types.iter()
+        let has_github_issues = config
+            .documents
+            .types
+            .iter()
             .any(|t| t.store == StoreBackend::GithubIssues);
 
         let mut app = App {
@@ -268,7 +304,12 @@ impl App {
             store,
             selected_type: 0,
             selected_doc: 0,
-            doc_types: config.documents.types.iter().map(|t| DocType::new(&t.name)).collect(),
+            doc_types: config
+                .documents
+                .types
+                .iter()
+                .map(|t| DocType::new(&t.name))
+                .collect(),
             should_quit: false,
             fullscreen_doc: false,
             scroll_offset: 0,
@@ -317,7 +358,8 @@ impl App {
             event_tx,
             expansion_cancel: None,
             disk_cache: DiskCache::new(),
-            terminal_image_protocol: crate::tui::infra::terminal_caps::TerminalImageProtocol::Halfblocks,
+            terminal_image_protocol:
+                crate::tui::infra::terminal_caps::TerminalImageProtocol::Halfblocks,
             tool_availability: crate::tui::content::diagram::ToolAvailability { d2: false },
             diagram_cache: crate::tui::content::diagram::DiagramCache::new(),
             picker,
@@ -329,7 +371,11 @@ impl App {
             git_status_cache,
             gh_conflict_message: None,
             gh_push_in_flight: Arc::new(AtomicBool::new(false)),
-            last_sync: if has_github_issues { Some(Instant::now()) } else { None },
+            last_sync: if has_github_issues {
+                Some(Instant::now())
+            } else {
+                None
+            },
         };
         app.rebuild_search_index();
         app.build_doc_tree();
@@ -457,19 +503,24 @@ impl App {
     }
 
     pub fn rebuild_search_index(&mut self) {
-        self.search_index = self.store.all_docs().iter().map(|doc| {
-            let mut searchable = doc.title.to_lowercase();
-            for tag in &doc.tags {
+        self.search_index = self
+            .store
+            .all_docs()
+            .iter()
+            .map(|doc| {
+                let mut searchable = doc.title.to_lowercase();
+                for tag in &doc.tags {
+                    searchable.push('\0');
+                    searchable.push_str(&tag.to_lowercase());
+                }
                 searchable.push('\0');
-                searchable.push_str(&tag.to_lowercase());
-            }
-            searchable.push('\0');
-            searchable.push_str(&doc.path.to_string_lossy().to_lowercase());
-            SearchEntry {
-                path: doc.path.clone(),
-                searchable,
-            }
-        }).collect();
+                searchable.push_str(&doc.path.to_string_lossy().to_lowercase());
+                SearchEntry {
+                    path: doc.path.clone(),
+                    searchable,
+                }
+            })
+            .collect();
     }
 
     pub fn reset_filters(&mut self) {
@@ -556,7 +607,12 @@ impl App {
             .copied()
             .collect();
 
-        roots.sort_by(|a, b| a.doc_type.to_string().cmp(&b.doc_type.to_string()).then(a.title.cmp(&b.title)));
+        roots.sort_by(|a, b| {
+            a.doc_type
+                .to_string()
+                .cmp(&b.doc_type.to_string())
+                .then(a.title.cmp(&b.title))
+        });
 
         let mut nodes = Vec::new();
         let mut visited = HashSet::new();
@@ -607,7 +663,9 @@ impl App {
             self.doc_list_offset = self.selected_doc.saturating_sub(SCROLL_PADDING);
         }
 
-        if visible > SCROLL_PADDING && self.selected_doc >= self.doc_list_offset + visible - SCROLL_PADDING {
+        if visible > SCROLL_PADDING
+            && self.selected_doc >= self.doc_list_offset + visible - SCROLL_PADDING
+        {
             self.doc_list_offset = self.selected_doc + SCROLL_PADDING + 1 - visible;
         }
 
@@ -709,7 +767,9 @@ impl App {
         }
 
         let query = self.search_query.to_lowercase();
-        let mut results: Vec<_> = self.search_index.iter()
+        let mut results: Vec<_> = self
+            .search_index
+            .iter()
             .filter(|e| e.searchable.contains(&query))
             .map(|e| e.path.clone())
             .collect();
@@ -751,14 +811,9 @@ impl App {
         // Chain: walk Implements links upward from doc
         let mut chain = Vec::new();
         let mut current_path = doc.path.clone();
-        loop {
-            let current_doc = match self.store.get(&current_path) {
-                Some(d) => d,
-                None => break,
-            };
+        while let Some(current_doc) = self.store.get(&current_path) {
             let implements_target = current_doc.related.iter().find_map(|r| {
                 if r.rel_type == RelationType::Implements {
-                    // resolve target path via forward_links
                     if let Some(fwd) = self.store.forward_links.get(&current_doc.path) {
                         for (rel, target) in fwd {
                             if *rel == RelationType::Implements {
@@ -961,11 +1016,21 @@ impl App {
                                 ReservationProgress::QueryingRemote => {
                                     "Querying remote for latest tag...".to_string()
                                 }
-                                ReservationProgress::PushAttempt { attempt, max, candidate } => {
-                                    format!("Push attempt {}/{} for candidate {}...", attempt, max, candidate)
+                                ReservationProgress::PushAttempt {
+                                    attempt,
+                                    max,
+                                    candidate,
+                                } => {
+                                    format!(
+                                        "Push attempt {}/{} for candidate {}...",
+                                        attempt, max, candidate
+                                    )
                                 }
                                 ReservationProgress::PushRejected { candidate } => {
-                                    format!("Push rejected for candidate {}, retrying...", candidate)
+                                    format!(
+                                        "Push rejected for candidate {}, retrying...",
+                                        candidate
+                                    )
                                 }
                                 ReservationProgress::Reserved { number } => {
                                     format!("Reserved number {}", number)
@@ -985,7 +1050,8 @@ impl App {
                             .map(|t| t.trim().to_string())
                             .filter(|t| !t.is_empty())
                             .collect();
-                        update_tags(&root, &relative, &tags, &thread_fs).map_err(|e| e.to_string())?;
+                        update_tags(&root, &relative, &tags, &thread_fs)
+                            .map_err(|e| e.to_string())?;
                     }
 
                     if !relations.is_empty() {
@@ -1015,12 +1081,21 @@ impl App {
             return Ok(());
         }
 
-        let path = crate::cli::create::run(root, config, &self.store, &doc_type_str, &title, &author, |_| {})?;
+        let path = crate::cli::create::run(
+            root,
+            config,
+            &self.store,
+            &doc_type_str,
+            &title,
+            &author,
+            |_| {},
+        )?;
         let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
         let relative_str = relative.to_string_lossy().to_string();
 
         if !tags_str.is_empty() {
-            let tags: Vec<String> = tags_str.split(',')
+            let tags: Vec<String> = tags_str
+                .split(',')
                 .map(|t| t.trim().to_string())
                 .filter(|t| !t.is_empty())
                 .collect();
@@ -1032,7 +1107,14 @@ impl App {
 
         // Apply relations
         for (rel_type, target_path) in &relations {
-            crate::cli::link::link(root, &self.store, &relative_str, rel_type, &target_path.to_string_lossy(), &*self.fs)?;
+            crate::cli::link::link(
+                root,
+                &self.store,
+                &relative_str,
+                rel_type,
+                &target_path.to_string_lossy(),
+                &*self.fs,
+            )?;
         }
 
         // Reload again to pick up the relation changes
@@ -1142,7 +1224,13 @@ impl App {
         let doc_path = self.status_picker.doc_path.clone();
         let doc_path_str = doc_path.to_string_lossy().to_string();
 
-        crate::cli::update::run_with_config(root, &self.store, &doc_path_str, &[("status", &status.to_string())], Some(config))?;
+        crate::cli::update::run_with_config(
+            root,
+            &self.store,
+            &doc_path_str,
+            &[("status", &status.to_string())],
+            Some(config),
+        )?;
         self.store.reload_file(root, &doc_path, &*self.fs)?;
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
@@ -1220,8 +1308,17 @@ impl App {
         let to = target_path.to_string_lossy().to_string();
         let rel_type = REL_TYPES[self.link_editor.rel_type_index];
 
-        crate::cli::link::link_with_config(root, &self.store, &from, rel_type, &to, &*self.fs, Some(config))?;
-        self.store.reload_file(root, &self.link_editor.doc_path.clone(), &*self.fs)?;
+        crate::cli::link::link_with_config(
+            root,
+            &self.store,
+            &from,
+            rel_type,
+            &to,
+            &*self.fs,
+            Some(config),
+        )?;
+        self.store
+            .reload_file(root, &self.link_editor.doc_path.clone(), &*self.fs)?;
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
         self.build_doc_tree();
@@ -1259,7 +1356,6 @@ impl App {
         }
     }
 
-
     pub fn search_move_up(&mut self) {
         if self.search_selected > 0 {
             self.search_selected -= 1;
@@ -1279,7 +1375,11 @@ impl App {
         }
 
         let mut results = Vec::new();
-        for entry in related_str.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        for entry in related_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             let (rel_type, shorthand) = if let Some((prefix, id)) = entry.split_once(':') {
                 let rel: crate::engine::document::RelationType = prefix.trim().parse()?;
                 (rel.to_string(), id.trim().to_string())
@@ -1287,7 +1387,9 @@ impl App {
                 ("related-to".to_string(), entry.to_string())
             };
 
-            let doc = self.store.resolve_shorthand(&shorthand)
+            let doc = self
+                .store
+                .resolve_shorthand(&shorthand)
                 .map_err(|_| anyhow!("Cannot resolve: {}", shorthand))?;
             results.push((rel_type, doc.path.clone()));
         }
@@ -1382,7 +1484,8 @@ mod tests {
             event_tx: tx,
             expansion_cancel: None,
             disk_cache: DiskCache::new(),
-            terminal_image_protocol: crate::tui::infra::terminal_caps::TerminalImageProtocol::Unsupported,
+            terminal_image_protocol:
+                crate::tui::infra::terminal_caps::TerminalImageProtocol::Unsupported,
             tool_availability: crate::tui::content::diagram::ToolAvailability { d2: false },
             diagram_cache: crate::tui::content::diagram::DiagramCache::new(),
             picker: ratatui_image::picker::Picker::halfblocks(),
@@ -1408,11 +1511,17 @@ mod tests {
             app.move_down();
         }
         assert_eq!(app.selected_doc, 7);
-        assert_eq!(app.doc_list_offset, 0, "selection at 7, still within viewport");
+        assert_eq!(
+            app.doc_list_offset, 0,
+            "selection at 7, still within viewport"
+        );
 
         app.move_down();
         assert_eq!(app.selected_doc, 8);
-        assert_eq!(app.doc_list_offset, 1, "viewport should scroll to maintain 2-row bottom padding");
+        assert_eq!(
+            app.doc_list_offset, 1,
+            "viewport should scroll to maintain 2-row bottom padding"
+        );
     }
 
     #[test]
@@ -1440,7 +1549,10 @@ mod tests {
 
         app.move_up();
         assert_eq!(app.selected_doc, 11);
-        assert_eq!(app.doc_list_offset, 5, "viewport stays put while selection is in interior");
+        assert_eq!(
+            app.doc_list_offset, 5,
+            "viewport stays put while selection is in interior"
+        );
 
         app.move_up();
         assert_eq!(app.selected_doc, 10);
@@ -1456,11 +1568,17 @@ mod tests {
 
         app.move_up();
         assert_eq!(app.selected_doc, 7);
-        assert_eq!(app.doc_list_offset, 5, "selection at padding boundary, offset still 5");
+        assert_eq!(
+            app.doc_list_offset, 5,
+            "selection at padding boundary, offset still 5"
+        );
 
         app.move_up();
         assert_eq!(app.selected_doc, 6);
-        assert_eq!(app.doc_list_offset, 4, "crossed padding boundary, viewport adjusts");
+        assert_eq!(
+            app.doc_list_offset, 4,
+            "crossed padding boundary, viewport adjusts"
+        );
     }
 
     #[test]
@@ -1475,7 +1593,10 @@ mod tests {
         app.selected_doc = 4;
         app.move_down();
         assert_eq!(app.selected_doc, 4, "can't go past the last item");
-        assert_eq!(app.doc_list_offset, 0, "offset stays 0 when list fits in viewport");
+        assert_eq!(
+            app.doc_list_offset, 0,
+            "offset stays 0 when list fits in viewport"
+        );
     }
 
     #[test]
@@ -1557,7 +1678,10 @@ mod tests {
         let root = std::path::PathBuf::from(".");
         let config = Config::default();
         app.handle_key(KeyCode::Char('d'), KeyModifiers::CONTROL, &root, &config);
-        assert_eq!(app.scroll_offset, 0, "modal should block Ctrl-D from reaching fullscreen");
+        assert_eq!(
+            app.scroll_offset, 0,
+            "modal should block Ctrl-D from reaching fullscreen"
+        );
     }
 
     #[test]
@@ -1630,7 +1754,9 @@ mod tests {
             "expected validation errors for duplicate IDs"
         );
         assert!(
-            app.validation_errors.iter().any(|e| e.contains("duplicate id")),
+            app.validation_errors
+                .iter()
+                .any(|e| e.contains("duplicate id")),
             "expected a 'duplicate id' error, got: {:?}",
             app.validation_errors
         );
@@ -1653,8 +1779,14 @@ mod tests {
         let config = Config::default();
 
         app.handle_key(KeyCode::Char('q'), KeyModifiers::NONE, &root, &config);
-        assert!(!app.should_quit, "quit should be blocked while conflict overlay is visible");
-        assert!(app.gh_conflict_message.is_some(), "conflict message should persist");
+        assert!(
+            !app.should_quit,
+            "quit should be blocked while conflict overlay is visible"
+        );
+        assert!(
+            app.gh_conflict_message.is_some(),
+            "conflict message should persist"
+        );
     }
 
     #[test]
@@ -1665,7 +1797,10 @@ mod tests {
         let config = Config::default();
 
         app.handle_key(KeyCode::Esc, KeyModifiers::NONE, &root, &config);
-        assert!(app.gh_conflict_message.is_none(), "Esc should dismiss conflict overlay");
+        assert!(
+            app.gh_conflict_message.is_none(),
+            "Esc should dismiss conflict overlay"
+        );
     }
 
     #[test]
@@ -1737,26 +1872,30 @@ mod tests {
         ];
 
         for (status, expected_index) in &statuses {
-            app.store.docs.insert(path.clone(), DocMeta {
-                path: path.clone(),
-                title: "Test".to_string(),
-                doc_type: DocType::new("rfc"),
-                status: status.clone(),
-                id: "RFC-001".to_string(),
-                tags: Vec::new(),
-                author: String::new(),
-                date,
-                related: Vec::new(),
-                validate_ignore: false,
-                virtual_doc: false,
-            });
+            app.store.docs.insert(
+                path.clone(),
+                DocMeta {
+                    path: path.clone(),
+                    title: "Test".to_string(),
+                    doc_type: DocType::new("rfc"),
+                    status: status.clone(),
+                    id: "RFC-001".to_string(),
+                    tags: Vec::new(),
+                    author: String::new(),
+                    date,
+                    related: Vec::new(),
+                    validate_ignore: false,
+                    virtual_doc: false,
+                },
+            );
             app.doc_tree[0].path = path.clone();
             app.selected_doc = 0;
 
             app.open_status_picker();
             assert_eq!(
                 app.status_picker.selected, *expected_index,
-                "status {:?} should map to index {}", status, expected_index
+                "status {:?} should map to index {}",
+                status, expected_index
             );
             app.close_status_picker();
         }

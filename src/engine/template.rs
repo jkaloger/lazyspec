@@ -71,7 +71,11 @@ fn file_exists_with_prefix(dir: &Path, prefix: &str) -> bool {
     false
 }
 
-pub fn next_sqids_id(dir: &Path, prefix: &str, sqids_config: &SqidsConfig) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+pub fn next_sqids_id(
+    dir: &Path,
+    prefix: &str,
+    sqids_config: &SqidsConfig,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let alphabet = shuffle_alphabet(&sqids_config.salt);
     let sqids = sqids::Sqids::builder()
         .alphabet(alphabet)
@@ -79,9 +83,7 @@ pub fn next_sqids_id(dir: &Path, prefix: &str, sqids_config: &SqidsConfig) -> Re
         .blocklist(HashSet::new())
         .build()?;
 
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_secs();
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let mut input = ts;
 
     loop {
@@ -228,10 +230,7 @@ mod tests {
         // The next call uses the same timestamp, hits the collision,
         // increments input, and returns a different ID
         let second_id = next_sqids_id(dir.path(), "RFC", &config).unwrap();
-        assert_ne!(
-            first_id, second_id,
-            "should skip colliding ID and use next"
-        );
+        assert_ne!(first_id, second_id, "should skip colliding ID and use next");
     }
 
     #[test]
@@ -248,7 +247,8 @@ mod tests {
             dir.path(),
             Some((&NumberingStrategy::Sqids, &config)),
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(filename.starts_with("RFC-"), "got: {}", filename);
         assert!(filename.ends_with("-my-feature.md"), "got: {}", filename);
         // The middle part should be the sqids ID, not zero-padded
@@ -270,7 +270,8 @@ mod tests {
             dir.path(),
             None,
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(
             filename.starts_with("RFC-001-"),
             "incremental should still work, got: {}",
@@ -292,7 +293,8 @@ mod tests {
             dir.path(),
             Some((&NumberingStrategy::Incremental, &config)),
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(
             filename.starts_with("RFC-001-"),
             "explicit incremental should use numbers, got: {}",

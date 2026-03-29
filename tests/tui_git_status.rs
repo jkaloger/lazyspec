@@ -49,10 +49,7 @@ fn test_new_file_shows_green() {
 
     let app = make_app(&fixture);
     let path = fixture.root().join("docs/rfcs/RFC-100-new.md");
-    assert_eq!(
-        app.git_status_cache.get(&path),
-        Some(&GitFileStatus::New),
-    );
+    assert_eq!(app.git_status_cache.get(&path), Some(&GitFileStatus::New),);
 }
 
 #[test]

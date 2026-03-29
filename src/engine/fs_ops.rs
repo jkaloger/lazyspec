@@ -104,13 +104,12 @@ TODO
 "#
         .to_string(),
 
-        "spec" => format!(
-            r#"---
-title: "{{title}}"
+        "spec" => r#"---
+title: "{title}"
 type: spec
 status: draft
-author: "{{author}}"
-date: {{date}}
+author: "{author}"
+date: {date}
 tags: []
 related: []
 ---
@@ -119,7 +118,7 @@ related: []
 
 TODO
 "#
-        ),
+        .to_string(),
 
         _ => format!(
             r#"---
@@ -142,6 +141,7 @@ TODO
 
 /// Create a document on the filesystem. Handles numbering, template resolution, and file writing.
 /// Returns the absolute path to the created file.
+#[allow(clippy::too_many_arguments)]
 pub fn create_document(
     root: &Path,
     config: &Config,
@@ -159,13 +159,21 @@ pub fn create_document(
 
     let (numbering, pre_computed_id) = match numbering_strategy {
         NumberingStrategy::Sqids => {
-            let sqids_config = config.documents.sqids.as_ref()
-                .ok_or_else(|| anyhow!("type '{}' uses sqids numbering but no [numbering.sqids] config found", doc_type))?;
+            let sqids_config = config.documents.sqids.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "type '{}' uses sqids numbering but no [numbering.sqids] config found",
+                    doc_type
+                )
+            })?;
             (Some((numbering_strategy, sqids_config)), None)
         }
         NumberingStrategy::Reserved => {
-            let reserved_cfg = config.documents.reserved.as_ref()
-                .ok_or_else(|| anyhow!("type '{}' uses reserved numbering but no [numbering.reserved] config found", doc_type))?;
+            let reserved_cfg = config.documents.reserved.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "type '{}' uses reserved numbering but no [numbering.reserved] config found",
+                    doc_type
+                )
+            })?;
             let num = reservation::reserve_next(
                 root,
                 &reserved_cfg.remote,
@@ -177,8 +185,9 @@ pub fn create_document(
             let id = match reserved_cfg.format {
                 ReservedFormat::Incremental => format!("{:03}", num),
                 ReservedFormat::Sqids => {
-                    let sqids_config = config.documents.sqids.as_ref()
-                        .ok_or_else(|| anyhow!("reserved format 'sqids' requires [numbering.sqids] config"))?;
+                    let sqids_config = config.documents.sqids.as_ref().ok_or_else(|| {
+                        anyhow!("reserved format 'sqids' requires [numbering.sqids] config")
+                    })?;
                     let alphabet = template::shuffle_alphabet(&sqids_config.salt);
                     let sqids = sqids::Sqids::builder()
                         .alphabet(alphabet)
@@ -194,9 +203,14 @@ pub fn create_document(
     };
 
     let filename = template::resolve_filename(
-        &config.documents.naming.pattern, doc_type, title, &target_dir, numbering,
+        &config.documents.naming.pattern,
+        doc_type,
+        title,
+        &target_dir,
+        numbering,
         pre_computed_id.as_deref(),
-    ).map_err(|e| anyhow!("{}", e))?;
+    )
+    .map_err(|e| anyhow!("{}", e))?;
 
     let date = Local::now().format("%Y-%m-%d").to_string();
     let vars = vec![
@@ -270,7 +284,10 @@ pub fn update_document(
     let mut lines: Vec<String> = yaml.lines().map(|l| l.to_string()).collect();
     for (key, value) in updates {
         let prefix = format!("{}:", key);
-        if let Some(line) = lines.iter_mut().find(|l| l.trim_start().starts_with(&prefix)) {
+        if let Some(line) = lines
+            .iter_mut()
+            .find(|l| l.trim_start().starts_with(&prefix))
+        {
             *line = format!("{}: {}", key, value);
         }
     }

@@ -43,11 +43,16 @@ fn main() -> anyhow::Result<()> {
         let env_shell = shells.iter().find(|s| s.is(shell_name));
         match env_shell {
             Some(s) => {
-                s.write_registration("COMPLETE", "lazyspec", &bin, &bin, &mut std::io::stdout())?;
+                s.write_registration("COMPLETE", "lazyspec", bin, bin, &mut std::io::stdout())?;
             }
             None => {
                 // Fallback to static generation for shells without dynamic support
-                clap_complete::generate(*shell, &mut Cli::command(), "lazyspec", &mut std::io::stdout());
+                clap_complete::generate(
+                    *shell,
+                    &mut Cli::command(),
+                    "lazyspec",
+                    &mut std::io::stdout(),
+                );
             }
         }
         return Ok(());
@@ -66,31 +71,73 @@ fn main() -> anyhow::Result<()> {
             let gh = GhCli::new();
             lazyspec::cli::setup::run(&cwd, &config, &gh)?;
         }
-        Some(Commands::Create { doc_type, title, author, json }) => {
+        Some(Commands::Create {
+            doc_type,
+            title,
+            author,
+            json,
+        }) => {
             let store = Store::load(&cwd, &config)?;
             if json {
-                let output = lazyspec::cli::create::run_json(&cwd, &config, &store, &doc_type, &title, &author, |_| {})?;
+                let output = lazyspec::cli::create::run_json(
+                    &cwd,
+                    &config,
+                    &store,
+                    &doc_type,
+                    &title,
+                    &author,
+                    |_| {},
+                )?;
                 println!("{}", output);
             } else {
-                let path = lazyspec::cli::create::run(&cwd, &config, &store, &doc_type, &title, &author, |_| {})?;
+                let path = lazyspec::cli::create::run(
+                    &cwd,
+                    &config,
+                    &store,
+                    &doc_type,
+                    &title,
+                    &author,
+                    |_| {},
+                )?;
                 println!("{}", path.display());
             }
         }
-        Some(Commands::List { doc_type, status, json }) => {
+        Some(Commands::List {
+            doc_type,
+            status,
+            json,
+        }) => {
             let store = Store::load(&cwd, &config)?;
             lazyspec::cli::list::run(&store, doc_type.as_deref(), status.as_deref(), json);
         }
-        Some(Commands::Show { id, json, expand_references, max_ref_lines }) => {
+        Some(Commands::Show {
+            id,
+            json,
+            expand_references,
+            max_ref_lines,
+        }) => {
             refresh_github_cache(&cwd, &config);
             let store = Store::load(&cwd, &config)?;
             if json {
-                let output = lazyspec::cli::show::run_json(&store, &id, expand_references, max_ref_lines, &fs)?;
+                let output = lazyspec::cli::show::run_json(
+                    &store,
+                    &id,
+                    expand_references,
+                    max_ref_lines,
+                    &fs,
+                )?;
                 println!("{}", output);
             } else {
                 lazyspec::cli::show::run(&store, &id, expand_references, max_ref_lines, &fs)?;
             }
         }
-        Some(Commands::Update { path, status, title, body, body_file }) => {
+        Some(Commands::Update {
+            path,
+            status,
+            title,
+            body,
+            body_file,
+        }) => {
             if body.is_some() && body_file.is_some() {
                 anyhow::bail!("cannot use both --body and --body-file");
             }
@@ -130,17 +177,43 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Link { from, rel_type, to }) => {
             let store = Store::load(&cwd, &config)?;
-            lazyspec::cli::link::link_with_config(&cwd, &store, &from, &rel_type, &to, &fs, Some(&config))?;
+            lazyspec::cli::link::link_with_config(
+                &cwd,
+                &store,
+                &from,
+                &rel_type,
+                &to,
+                &fs,
+                Some(&config),
+            )?;
             let resolved_from = lazyspec::cli::resolve::resolve_to_path(&store, &from)?;
             let resolved_to = lazyspec::cli::resolve::resolve_to_path(&store, &to)?;
-            println!("Linked {} --{}--> {}", resolved_from.display(), rel_type, resolved_to.display());
+            println!(
+                "Linked {} --{}--> {}",
+                resolved_from.display(),
+                rel_type,
+                resolved_to.display()
+            );
         }
         Some(Commands::Unlink { from, rel_type, to }) => {
             let store = Store::load(&cwd, &config)?;
-            lazyspec::cli::link::unlink_with_config(&cwd, &store, &from, &rel_type, &to, &fs, Some(&config))?;
+            lazyspec::cli::link::unlink_with_config(
+                &cwd,
+                &store,
+                &from,
+                &rel_type,
+                &to,
+                &fs,
+                Some(&config),
+            )?;
             let resolved_from = lazyspec::cli::resolve::resolve_to_path(&store, &from)?;
             let resolved_to = lazyspec::cli::resolve::resolve_to_path(&store, &to)?;
-            println!("Unlinked {} --{}--> {}", resolved_from.display(), rel_type, resolved_to.display());
+            println!(
+                "Unlinked {} --{}--> {}",
+                resolved_from.display(),
+                rel_type,
+                resolved_to.display()
+            );
         }
         Some(Commands::Ignore { path }) => {
             let store = Store::load(&cwd, &config)?;
@@ -154,7 +227,11 @@ fn main() -> anyhow::Result<()> {
             lazyspec::cli::ignore::unignore(&cwd, &store, &path, &fs)?;
             println!("Unignoring {}", resolved.display());
         }
-        Some(Commands::Search { query, doc_type, json }) => {
+        Some(Commands::Search {
+            query,
+            doc_type,
+            json,
+        }) => {
             let store = Store::load(&cwd, &config)?;
             lazyspec::cli::search::run(&store, &query, doc_type.as_deref(), json, &fs);
         }
@@ -182,26 +259,58 @@ fn main() -> anyhow::Result<()> {
                 print!("{}", output);
             }
         }
-        Some(Commands::Convention { preamble, tags, json }) => {
+        Some(Commands::Convention {
+            preamble,
+            tags,
+            json,
+        }) => {
             let store = Store::load(&cwd, &config)?;
             if json {
-                let output = lazyspec::cli::convention::run_json(&store, &config, preamble, tags.as_deref(), &fs)?;
+                let output = lazyspec::cli::convention::run_json(
+                    &store,
+                    &config,
+                    preamble,
+                    tags.as_deref(),
+                    &fs,
+                )?;
                 println!("{}", output);
             } else {
-                let output = lazyspec::cli::convention::run_human(&store, &config, preamble, tags.as_deref(), &fs)?;
+                let output = lazyspec::cli::convention::run_human(
+                    &store,
+                    &config,
+                    preamble,
+                    tags.as_deref(),
+                    &fs,
+                )?;
                 print!("{}", output);
             }
         }
-        Some(Commands::Fix { paths, dry_run, json, renumber, doc_type }) => {
+        Some(Commands::Fix {
+            paths,
+            dry_run,
+            json,
+            renumber,
+            doc_type,
+        }) => {
             let store = Store::load(&cwd, &config)?;
             let fs = lazyspec::engine::fs::RealFileSystem;
             if let Some(format) = renumber {
-                let exit_code = lazyspec::cli::fix::run_renumber(&cwd, &store, &config, &format, doc_type.as_deref(), dry_run, json, &fs);
+                let exit_code = lazyspec::cli::fix::run_renumber(
+                    &cwd,
+                    &store,
+                    &config,
+                    &format,
+                    doc_type.as_deref(),
+                    dry_run,
+                    json,
+                    &fs,
+                );
                 if exit_code != 0 {
                     std::process::exit(exit_code);
                 }
             } else {
-                let exit_code = lazyspec::cli::fix::run(&cwd, &store, &config, &paths, dry_run, json, &fs);
+                let exit_code =
+                    lazyspec::cli::fix::run(&cwd, &store, &config, &paths, dry_run, json, &fs);
                 if exit_code != 0 {
                     std::process::exit(exit_code);
                 }
@@ -218,17 +327,22 @@ fn main() -> anyhow::Result<()> {
             let store = Store::load(&cwd, &config)?;
             lazyspec::cli::pin::run(&store, &config, &id, json)?;
         }
-        Some(Commands::Reservations { command }) => {
-            match command {
-                ReservationsCommand::List { json } => {
-                    lazyspec::cli::reservations::run_list(&cwd, &config, json)?;
-                }
-                ReservationsCommand::Prune { dry_run, json } => {
-                    let store = Store::load(&cwd, &config)?;
-                    lazyspec::cli::reservations::run_prune(&cwd, &config, &store, dry_run, json, |_| {})?;
-                }
+        Some(Commands::Reservations { command }) => match command {
+            ReservationsCommand::List { json } => {
+                lazyspec::cli::reservations::run_list(&cwd, &config, json)?;
             }
-        }
+            ReservationsCommand::Prune { dry_run, json } => {
+                let store = Store::load(&cwd, &config)?;
+                lazyspec::cli::reservations::run_prune(
+                    &cwd,
+                    &config,
+                    &store,
+                    dry_run,
+                    json,
+                    |_| {},
+                )?;
+            }
+        },
         None => {
             let store = Store::load(&cwd, &config)?;
             lazyspec::tui::run(store, &config)?;
@@ -259,7 +373,10 @@ fn refresh_github_cache(cwd: &std::path::Path, config: &Config) {
     let repo = match resolve_repo(config, cwd) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("warning: could not resolve github repo, skipping refresh: {}", e);
+            eprintln!(
+                "warning: could not resolve github repo, skipping refresh: {}",
+                e
+            );
             return;
         }
     };
@@ -278,8 +395,21 @@ fn refresh_github_cache(cwd: &std::path::Path, config: &Config) {
 
     let mut map_changed = false;
     for type_def in &gh_types {
-        let all_type_names: Vec<String> = config.documents.types.iter().map(|t| t.name.clone()).collect();
-        let result = cache.refresh_stale(cwd, type_def, &gh, &repo, &mut issue_map, ttl, &all_type_names);
+        let all_type_names: Vec<String> = config
+            .documents
+            .types
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        let result = cache.refresh_stale(
+            cwd,
+            type_def,
+            &gh,
+            &repo,
+            &mut issue_map,
+            ttl,
+            &all_type_names,
+        );
         for warning in &result.warnings {
             eprintln!("warning: {}", warning.message);
         }

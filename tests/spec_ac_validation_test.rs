@@ -19,11 +19,19 @@ fn warning_messages(fixture: &TestFixture) -> Vec<String> {
 #[test]
 fn valid_ac_slug_passes_validation() {
     let fixture = TestFixture::new();
-    write_spec_with_ac(&fixture, "SPEC-001-test", "### AC: valid-slug\nSome criteria\n");
+    write_spec_with_ac(
+        &fixture,
+        "SPEC-001-test",
+        "### AC: valid-slug\nSome criteria\n",
+    );
 
     let warnings = warning_messages(&fixture);
     let ac_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("AC slug")).collect();
-    assert!(ac_warnings.is_empty(), "valid slug should produce no warnings, got: {:?}", ac_warnings);
+    assert!(
+        ac_warnings.is_empty(),
+        "valid slug should produce no warnings, got: {:?}",
+        ac_warnings
+    );
 }
 
 #[test]
@@ -33,7 +41,9 @@ fn empty_ac_slug_produces_warning() {
 
     let warnings = warning_messages(&fixture);
     assert!(
-        warnings.iter().any(|w| w.contains("AC slug") && w.contains("empty")),
+        warnings
+            .iter()
+            .any(|w| w.contains("AC slug") && w.contains("empty")),
         "empty slug should produce a warning, got: {:?}",
         warnings
     );
@@ -42,11 +52,17 @@ fn empty_ac_slug_produces_warning() {
 #[test]
 fn camel_case_ac_slug_produces_warning() {
     let fixture = TestFixture::new();
-    write_spec_with_ac(&fixture, "SPEC-003-test", "### AC: CamelCase\nSome criteria\n");
+    write_spec_with_ac(
+        &fixture,
+        "SPEC-003-test",
+        "### AC: CamelCase\nSome criteria\n",
+    );
 
     let warnings = warning_messages(&fixture);
     assert!(
-        warnings.iter().any(|w| w.contains("AC slug") && w.contains("CamelCase")),
+        warnings
+            .iter()
+            .any(|w| w.contains("AC slug") && w.contains("CamelCase")),
         "CamelCase slug should produce a warning, got: {:?}",
         warnings
     );
@@ -63,7 +79,9 @@ fn duplicate_ac_slugs_produce_warning() {
 
     let warnings = warning_messages(&fixture);
     assert!(
-        warnings.iter().any(|w| w.contains("AC slug") && w.contains("duplicate")),
+        warnings
+            .iter()
+            .any(|w| w.contains("AC slug") && w.contains("duplicate")),
         "duplicate slugs should produce a warning, got: {:?}",
         warnings
     );
@@ -114,27 +132,45 @@ fn multiple_valid_ac_slugs_pass() {
 
     let warnings = warning_messages(&fixture);
     let ac_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("AC slug")).collect();
-    assert!(ac_warnings.is_empty(), "all valid slugs should pass, got: {:?}", ac_warnings);
+    assert!(
+        ac_warnings.is_empty(),
+        "all valid slugs should pass, got: {:?}",
+        ac_warnings
+    );
 }
 
 #[test]
 fn slug_with_numbers_passes() {
     let fixture = TestFixture::new();
-    write_spec_with_ac(&fixture, "SPEC-007-test", "### AC: step-2-verify\nCriteria\n");
+    write_spec_with_ac(
+        &fixture,
+        "SPEC-007-test",
+        "### AC: step-2-verify\nCriteria\n",
+    );
 
     let warnings = warning_messages(&fixture);
     let ac_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("AC slug")).collect();
-    assert!(ac_warnings.is_empty(), "slug with numbers should pass, got: {:?}", ac_warnings);
+    assert!(
+        ac_warnings.is_empty(),
+        "slug with numbers should pass, got: {:?}",
+        ac_warnings
+    );
 }
 
 #[test]
 fn slug_with_underscores_produces_warning() {
     let fixture = TestFixture::new();
-    write_spec_with_ac(&fixture, "SPEC-008-test", "### AC: uses_underscores\nCriteria\n");
+    write_spec_with_ac(
+        &fixture,
+        "SPEC-008-test",
+        "### AC: uses_underscores\nCriteria\n",
+    );
 
     let warnings = warning_messages(&fixture);
     assert!(
-        warnings.iter().any(|w| w.contains("AC slug") && w.contains("uses_underscores")),
+        warnings
+            .iter()
+            .any(|w| w.contains("AC slug") && w.contains("uses_underscores")),
         "underscore slug should produce a warning, got: {:?}",
         warnings
     );
