@@ -1,4 +1,20 @@
 [[types]]
+name = "convention"
+plural = "convention"
+dir = "docs/convention"
+prefix = "CONVENTION"
+icon = "📜"
+singleton = true
+
+[[types]]
+name = "dictum"
+plural = "dicta"
+dir = "docs/convention"
+prefix = "DICTUM"
+icon = "⚖"
+parent_type = "convention"
+
+[[types]]
 name = "spec"
 plural = "specs"
 dir = "docs/specs"
@@ -40,14 +56,8 @@ dir = "docs/audits"
 prefix = "AUDIT"
 icon = "🔍"
 
-[[types]]
-name = "convention"
-plural = "convention"
-dir = "docs/convention"
-prefix = "CONVENTION"
-icon = "📜"
-singleton = true
-subdirectory = true
+[github]
+repo = 'jkaloger/lazyspec'
 
 [templates]
 dir = ".lazyspec/templates"
