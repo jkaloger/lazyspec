@@ -186,6 +186,8 @@ mod tests {
             numbering: NumberingStrategy::Incremental,
             subdirectory: false,
             store: StoreBackend::GithubIssues,
+            singleton: false,
+            parent_type: None,
         };
         let story_type = TypeDef {
             name: "story".to_string(),
@@ -196,6 +198,8 @@ mod tests {
             numbering: NumberingStrategy::Incremental,
             subdirectory: false,
             store: StoreBackend::GithubIssues,
+            singleton: false,
+            parent_type: None,
         };
 
         let mut config = Config::default();

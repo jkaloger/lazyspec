@@ -431,6 +431,8 @@ mod tests {
             numbering: NumberingStrategy::Incremental,
             subdirectory: false,
             store,
+            singleton: false,
+            parent_type: None,
         }
     }
 

@@ -18,6 +18,8 @@ pub fn run(root: &Path) -> Result<()> {
     }
     fs::create_dir_all(root.join(&config.filesystem.templates.dir))?;
 
+    scaffold_skeleton_files(root, &config)?;
+
     fs::write(&config_path, config.to_toml()?)?;
 
     ensure_github_labels(&config, root);
@@ -98,6 +100,86 @@ fn ensure_gitignore(config: &Config, root: &Path) -> Result<()> {
 
     fs::write(&gitignore_path, content)?;
     Ok(())
+}
+
+fn scaffold_skeleton_files(root: &Path, config: &Config) -> Result<()> {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+    for type_def in &config.documents.types {
+        if type_def.singleton && type_def.name == "convention" {
+            let conv_dir = root.join(&type_def.dir).join("convention");
+            fs::create_dir_all(&conv_dir)?;
+            write_if_absent(
+                &conv_dir.join("index.md"),
+                &convention_skeleton(&today),
+            )?;
+        }
+
+        if type_def.parent_type.as_deref() == Some("convention") && type_def.name == "dictum" {
+            let parent = config
+                .documents
+                .types
+                .iter()
+                .find(|t| t.name == "convention");
+            if let Some(parent) = parent {
+                let conv_dir = root.join(&parent.dir).join("convention");
+                write_if_absent(
+                    &conv_dir.join("example.md"),
+                    &dictum_skeleton(&today),
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn write_if_absent(path: &Path, content: &str) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    fs::write(path, content)?;
+    Ok(())
+}
+
+fn convention_skeleton(date: &str) -> String {
+    format!(
+        r#"---
+title: "Convention"
+type: convention
+status: draft
+author: "unknown"
+date: {date}
+tags: []
+---
+
+This is your project's convention. It captures the values, constraints, and
+principles that should inform all work in this repository.
+
+Edit this document to describe your project's constitution. Keep it short.
+Dictum (child documents in this folder) capture specific principles.
+"#
+    )
+}
+
+fn dictum_skeleton(date: &str) -> String {
+    format!(
+        r#"---
+title: "Example Dictum"
+type: dictum
+status: draft
+author: "unknown"
+date: {date}
+tags: [example]
+---
+
+This is an example dictum. Replace it with a principle that matters to your project.
+
+Each dictum should cover a single topic and be tagged for selective retrieval
+by agent skills. For example, a dictum about testing philosophy would have
+`tags: [testing]`.
+"#
+    )
 }
 
 #[cfg(test)]

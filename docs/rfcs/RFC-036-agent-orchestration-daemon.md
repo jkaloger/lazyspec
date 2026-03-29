@@ -10,9 +10,10 @@ tags:
 - daemon
 - tui
 related:
-- supersedes: docs/rfcs/RFC-016-init-agents-from-tui.md
-- related-to: docs/rfcs/RFC-035-git-ref-document-storage-with-lease-based-claiming.md
+- supersedes: RFC-016
+- related-to: RFC-035
 ---
+
 
 
 

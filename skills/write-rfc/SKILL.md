@@ -67,6 +67,7 @@ Use /create-story skill.shape: double_circle
 
 ## Preflight
 
+0. Load convention context: run `lazyspec convention --tags rfc,architecture --json`. If the command returns non-empty dicta, use them to inform the RFC's design intent and interface sketches. If the result is empty or the command returns no convention, proceed without injecting any convention context.
 1. Read relevant documents using `lazyspec show --json` before modifying anything
 2. Check for existing artifacts using `lazyspec search --json` and `lazyspec list --json`
 3. Search for existing RFCs on the topic: `lazyspec search "<topic>" --json`, `lazyspec list rfc --json`

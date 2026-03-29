@@ -1,5 +1,6 @@
 mod common;
 
+use lazyspec::engine::config::{Config, TypeDef, NumberingStrategy};
 use lazyspec::engine::validation::ValidationIssue;
 use std::path::PathBuf;
 
@@ -252,4 +253,189 @@ fn validate_broken_link_with_nonexistent_id_in_json_output() {
             .unwrap_or(false)
     });
     assert!(has_broken, "JSON output should contain broken link error with unresolved ID RFC-999, got: {:?}", errors);
+}
+
+fn config_with_extra_types(extra: Vec<TypeDef>) -> Config {
+    let mut config = Config::default();
+    let extra_names: Vec<&str> = extra.iter().map(|t| t.name.as_str()).collect();
+    config.documents.types.retain(|t| !extra_names.contains(&t.name.as_str()));
+    config.documents.types.extend(extra);
+    config
+}
+
+fn singleton_type(name: &str, dir: &str, prefix: &str) -> TypeDef {
+    TypeDef {
+        name: name.to_string(),
+        plural: format!("{}s", name),
+        dir: dir.to_string(),
+        prefix: prefix.to_string(),
+        icon: None,
+        numbering: NumberingStrategy::default(),
+        subdirectory: false,
+        store: Default::default(),
+        singleton: true,
+        parent_type: None,
+    }
+}
+
+fn child_type(name: &str, dir: &str, prefix: &str, parent: &str) -> TypeDef {
+    TypeDef {
+        name: name.to_string(),
+        plural: format!("{}s", name),
+        dir: dir.to_string(),
+        prefix: prefix.to_string(),
+        icon: None,
+        numbering: NumberingStrategy::default(),
+        subdirectory: false,
+        store: Default::default(),
+        singleton: false,
+        parent_type: Some(parent.to_string()),
+    }
+}
+
+#[test]
+fn singleton_violation_detected() {
+    let fixture = common::TestFixture::new();
+    let config = config_with_extra_types(vec![
+        singleton_type("convention", "docs/convention", "CONV"),
+    ]);
+
+    std::fs::create_dir_all(fixture.root().join("docs/convention")).unwrap();
+    fixture.write_doc(
+        "docs/convention/CONV-001-first.md",
+        "---\ntitle: \"First\"\ntype: convention\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_doc(
+        "docs/convention/CONV-002-second.md",
+        "---\ntitle: \"Second\"\ntype: convention\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
+    let result = store.validate_full(&config);
+
+    let violations: Vec<_> = result.errors.iter().filter(|e| matches!(e, ValidationIssue::SingletonViolation { .. })).collect();
+    assert_eq!(violations.len(), 1);
+    match &violations[0] {
+        ValidationIssue::SingletonViolation { type_name, paths } => {
+            assert_eq!(type_name, "convention");
+            assert_eq!(paths.len(), 2);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn singleton_single_doc_no_error() {
+    let fixture = common::TestFixture::new();
+    let config = config_with_extra_types(vec![
+        singleton_type("convention", "docs/convention", "CONV"),
+    ]);
+
+    std::fs::create_dir_all(fixture.root().join("docs/convention")).unwrap();
+    fixture.write_doc(
+        "docs/convention/CONV-001-only.md",
+        "---\ntitle: \"Only\"\ntype: convention\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
+    let result = store.validate_full(&config);
+
+    let violations: Vec<_> = result.errors.iter().filter(|e| matches!(e, ValidationIssue::SingletonViolation { .. })).collect();
+    assert!(violations.is_empty());
+}
+
+#[test]
+fn parent_type_inside_dir_no_error() {
+    let fixture = common::TestFixture::new();
+    let config = config_with_extra_types(vec![
+        singleton_type("convention", "docs/convention", "CONV"),
+        child_type("dictum", "docs/convention", "DICT", "convention"),
+    ]);
+
+    std::fs::create_dir_all(fixture.root().join("docs/convention")).unwrap();
+    fixture.write_doc(
+        "docs/convention/CONV-001-main.md",
+        "---\ntitle: \"Main Convention\"\ntype: convention\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_doc(
+        "docs/convention/DICT-001-child.md",
+        "---\ntitle: \"A Dictum\"\ntype: dictum\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
+    let result = store.validate_full(&config);
+
+    let violations: Vec<_> = result.errors.iter().filter(|e| matches!(e, ValidationIssue::ParentTypeViolation { .. })).collect();
+    assert!(violations.is_empty());
+}
+
+#[test]
+fn parent_type_outside_dir_error() {
+    let fixture = common::TestFixture::new();
+    let config = config_with_extra_types(vec![
+        singleton_type("convention", "docs/convention", "CONV"),
+        child_type("dictum", "docs/dictums", "DICT", "convention"),
+    ]);
+
+    std::fs::create_dir_all(fixture.root().join("docs/convention")).unwrap();
+    std::fs::create_dir_all(fixture.root().join("docs/dictums")).unwrap();
+    fixture.write_doc(
+        "docs/convention/CONV-001-main.md",
+        "---\ntitle: \"Main Convention\"\ntype: convention\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_doc(
+        "docs/dictums/DICT-001-stray.md",
+        "---\ntitle: \"Stray Dictum\"\ntype: dictum\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
+    let result = store.validate_full(&config);
+
+    let violations: Vec<_> = result.errors.iter().filter(|e| matches!(e, ValidationIssue::ParentTypeViolation { .. })).collect();
+    assert_eq!(violations.len(), 1);
+    match &violations[0] {
+        ValidationIssue::ParentTypeViolation { path, type_name, expected_dir } => {
+            assert_eq!(type_name, "dictum");
+            assert_eq!(expected_dir, "docs/convention");
+            assert!(path.to_string_lossy().contains("DICT-001"));
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn parent_type_references_non_singleton_error() {
+    let fixture = common::TestFixture::new();
+
+    let non_singleton_parent = TypeDef {
+        name: "guideline".to_string(),
+        plural: "guidelines".to_string(),
+        dir: "docs/guidelines".to_string(),
+        prefix: "GUIDE".to_string(),
+        icon: None,
+        numbering: NumberingStrategy::default(),
+        subdirectory: false,
+        store: Default::default(),
+        singleton: false,
+        parent_type: None,
+    };
+    let config = config_with_extra_types(vec![
+        non_singleton_parent,
+        child_type("dictum", "docs/guidelines", "DICT", "guideline"),
+    ]);
+
+    std::fs::create_dir_all(fixture.root().join("docs/guidelines")).unwrap();
+
+    let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
+    let result = store.validate_full(&config);
+
+    let violations: Vec<_> = result.errors.iter().filter(|e| matches!(e, ValidationIssue::ParentTypeNotSingleton { .. })).collect();
+    assert_eq!(violations.len(), 1);
+    match &violations[0] {
+        ValidationIssue::ParentTypeNotSingleton { type_name, parent_type } => {
+            assert_eq!(type_name, "dictum");
+            assert_eq!(parent_type, "guideline");
+        }
+        _ => unreachable!(),
+    }
 }
