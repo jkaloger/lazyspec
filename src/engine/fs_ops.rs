@@ -105,11 +105,11 @@ TODO
         .to_string(),
 
         "spec" => r#"---
-title: "{{title}}"
+title: "{title}"
 type: spec
 status: draft
-author: "{{author}}"
-date: {{date}}
+author: "{author}"
+date: {date}
 tags: []
 related: []
 ---

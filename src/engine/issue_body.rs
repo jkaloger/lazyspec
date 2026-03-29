@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use regex::Regex;
 
-use crate::engine::document::{self, DocMeta, DocType, Relation, Status};
+use crate::engine::document::{self, deserialize_naive_date, DocMeta, DocType, Relation, Status};
 use std::path::PathBuf;
 
 /// Fields that come from GitHub Issue primitives rather than the issue body.
@@ -141,6 +141,7 @@ fn extract_type_and_tags(
 struct CommentFrontmatter {
     #[serde(default)]
     author: Option<String>,
+    #[serde(deserialize_with = "deserialize_naive_date")]
     date: NaiveDate,
     #[serde(default)]
     status: Option<String>,
