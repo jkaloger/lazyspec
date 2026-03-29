@@ -953,10 +953,7 @@ pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect, config: &Co
     let relations_focused = app.preview_tab == PreviewTab::Relations;
     let dim = relations_focused;
 
-    let filtered_paths: Vec<PathBuf> = app
-        .filtered_docs_cache
-        .clone()
-        .unwrap_or_default();
+    let filtered_paths: Vec<PathBuf> = app.filtered_docs_cache.clone().unwrap_or_default();
 
     let rows: Vec<Row> = filtered_paths
         .iter()

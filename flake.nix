@@ -4,42 +4,21 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     crane.url = "github:ipetkov/crane";
-    rust-overlay = {
-      url = "github:oxalica/rust-overlay";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, crane, rust-overlay, flake-utils, ... }:
+  outputs = { self, nixpkgs, crane, flake-utils, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = import nixpkgs {
-          inherit system;
-          overlays = [ (import rust-overlay) ];
-        };
-
-        inherit (pkgs) lib;
-
-        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
-          extensions = [ "clippy" "rustfmt" "rust-src" ];
-        };
-
-        craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
-
-        src = lib.cleanSourceWith {
-          src = ./.;
-          filter = path: type:
-            let baseName = builtins.baseNameOf path;
-            in !(baseName == "docs" || baseName == ".claude")
-              && (craneLib.filterCargoSources path type || baseName == "README.md");
-        };
+        pkgs = nixpkgs.legacyPackages.${system};
+        craneLib = crane.mkLib pkgs;
+        src = craneLib.cleanCargoSource ./.;
 
         commonArgs = {
           inherit src;
           strictDeps = true;
           nativeBuildInputs = [ pkgs.pkg-config ];
-          buildInputs = lib.optionals pkgs.stdenv.isDarwin [
+          buildInputs = pkgs.lib.optionals pkgs.stdenv.isDarwin [
             pkgs.apple-sdk_15
           ];
         };
@@ -83,6 +62,8 @@
         devShells.default = craneLib.devShell {
           checks = self.checks.${system};
           packages = [
+            pkgs.clippy
+            pkgs.rustfmt
             pkgs.rust-analyzer
             pkgs.ast-grep
             pkgs.ripgrep

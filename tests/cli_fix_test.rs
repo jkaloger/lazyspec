@@ -35,8 +35,7 @@ fn fix_fills_missing_fields() {
         &serde_yaml::Value::String("rfc".into()),
     );
     assert_eq!(
-        map.get(serde_yaml::Value::String("author".into()))
-            .unwrap(),
+        map.get(serde_yaml::Value::String("author".into())).unwrap(),
         &serde_yaml::Value::String("test".into()),
     );
     assert_eq!(
@@ -44,8 +43,7 @@ fn fix_fills_missing_fields() {
         &serde_yaml::Value::String("2026-01-01".into()),
     );
     assert_eq!(
-        map.get(serde_yaml::Value::String("status".into()))
-            .unwrap(),
+        map.get(serde_yaml::Value::String("status".into())).unwrap(),
         &serde_yaml::Value::String("draft".into()),
     );
     let tags = map.get(serde_yaml::Value::String("tags".into())).unwrap();

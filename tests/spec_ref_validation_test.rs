@@ -96,7 +96,10 @@ fn configurable_ceiling_overrides_default() {
     fixture.write_doc("docs/specs/SPEC-003-test.md", &content);
 
     // ceiling=5 should trigger
-    let config_low = Config { ref_count_ceiling: 5, ..Config::default() };
+    let config_low = Config {
+        ref_count_ceiling: 5,
+        ..Config::default()
+    };
     let warnings = warning_messages_with_config(&fixture, &config_low);
     let ref_warnings: Vec<_> = warnings
         .iter()
@@ -110,7 +113,10 @@ fn configurable_ceiling_overrides_default() {
     );
 
     // ceiling=10 should not trigger
-    let config_high = Config { ref_count_ceiling: 10, ..Config::default() };
+    let config_high = Config {
+        ref_count_ceiling: 10,
+        ..Config::default()
+    };
     let warnings = warning_messages_with_config(&fixture, &config_high);
     let ref_warnings: Vec<_> = warnings
         .iter()
