@@ -38,6 +38,25 @@ pub fn parse_porcelain_line(line: &str) -> Option<(PathBuf, GitFileStatus)> {
     Some((PathBuf::from(path), status))
 }
 
+pub fn query_git_branch(repo_root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        return None;
+    }
+
+    Some(branch)
+}
+
 pub fn query_git_status(repo_root: &Path) -> Option<HashMap<PathBuf, GitFileStatus>> {
     let output = Command::new("git")
         .args(["status", "--porcelain"])
@@ -179,6 +198,28 @@ mod tests {
         let _ = fs::create_dir_all(&tmp);
 
         let result = query_git_status(&tmp);
+        assert!(result.is_none());
+
+        let _ = fs::remove_dir(&tmp);
+    }
+
+    #[test]
+    fn test_query_git_branch_returns_some_in_repo() {
+        if !in_git_repo() {
+            return;
+        }
+        let root = std::env::current_dir().unwrap();
+        let result = query_git_branch(&root);
+        assert!(result.is_some());
+        assert!(!result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_query_git_branch_returns_none_for_non_repo() {
+        let tmp = std::env::temp_dir().join("lazyspec_git_branch_test");
+        let _ = fs::create_dir_all(&tmp);
+
+        let result = query_git_branch(&tmp);
         assert!(result.is_none());
 
         let _ = fs::remove_dir(&tmp);

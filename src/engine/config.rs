@@ -131,9 +131,39 @@ pub struct FilesystemConfig {
     pub templates: Templates,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StatusBarConfig {
+    #[serde(default = "default_statusbar_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub left: Option<Vec<String>>,
+    #[serde(default)]
+    pub center: Option<Vec<String>>,
+    #[serde(default)]
+    pub right: Option<Vec<String>>,
+}
+
+fn default_statusbar_enabled() -> bool {
+    true
+}
+
+impl Default for StatusBarConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            left: None,
+            center: None,
+            right: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UiConfig {
+    #[serde(default)]
     pub ascii_diagrams: bool,
+    #[serde(default)]
+    pub statusbar: StatusBarConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
