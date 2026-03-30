@@ -6,6 +6,14 @@
     A little TUI & CLI for project documentation.
 </p>
 
+<p align="center">
+  <a href="https://github.com/jkaloger/lazyspec/actions/workflows/ci.yml"><img src="https://github.com/jkaloger/lazyspec/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <img src="https://img.shields.io/badge/rust-2021-orange" alt="Rust 2021">
+  <img src="https://img.shields.io/badge/status-experimental-blueviolet" alt="Status: Experimental">
+  <img src="https://img.shields.io/github/v/tag/jkaloger/lazyspec?label=version&color=blue" alt="Version">
+  <a href="https://github.com/jkaloger/lazyspec/commits/main"><img src="https://img.shields.io/github/last-commit/jkaloger/lazyspec" alt="Last commit"></a>
+</p>
+
 <img width="1864" height="1193" alt="screenshot of a terminal interface displaying codebase documentation, categorised by type" src="https://github.com/user-attachments/assets/18bdd9a7-16db-43f6-b6cc-a3dced1c9f66" />
 
 > [!WARNING]
