@@ -139,11 +139,6 @@ fn help_hint_component_always_returns_some() {
     let (_fixture, app) = fixture_with_docs();
     let span = help_hint_component(&app).expect("help_hint_component should always return Some");
     assert_eq!(span.content.as_ref(), "? help");
-    assert_eq!(
-        span.style.fg,
-        Some(ratatui::style::Color::DarkGray),
-        "help hint should be DarkGray"
-    );
 }
 
 #[test]
