@@ -251,6 +251,7 @@ pub struct App {
     pub diagram_cache: crate::tui::content::diagram::DiagramCache,
     pub picker: ratatui_image::picker::Picker,
     pub image_states: HashMap<u64, ratatui_image::protocol::StatefulProtocol>,
+    pub image_dimensions_cache: HashMap<PathBuf, (u32, u32)>,
     pub ascii_diagrams: bool,
     pub diagram_blocks_cache: Option<(
         PathBuf,
@@ -375,6 +376,7 @@ impl App {
             diagram_cache: crate::tui::content::diagram::DiagramCache::new(),
             picker,
             image_states: HashMap::new(),
+            image_dimensions_cache: HashMap::new(),
             ascii_diagrams: config.ui.ascii_diagrams,
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
@@ -1510,6 +1512,7 @@ mod tests {
             diagram_cache: crate::tui::content::diagram::DiagramCache::new(),
             picker: ratatui_image::picker::Picker::halfblocks(),
             image_states: HashMap::new(),
+            image_dimensions_cache: HashMap::new(),
             ascii_diagrams: false,
             diagram_blocks_cache: None,
             filtered_docs_cache: None,

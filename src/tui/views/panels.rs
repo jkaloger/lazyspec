@@ -21,6 +21,18 @@ use crate::tui::state::{App, DocListNode, FilterField, PreviewTab};
 use super::colors::{status_color, tag_color};
 use super::layout::{calculate_image_height, wrapped_line_count, wrapped_lines_total};
 
+fn get_image_dimensions_cached(app: &mut App, path: &std::path::Path) -> Option<(u32, u32)> {
+    if let Some(&dims) = app.image_dimensions_cache.get(path) {
+        return Some(dims);
+    }
+    if let Ok(dims) = image::image_dimensions(path) {
+        let dims = (dims.0, dims.1);
+        app.image_dimensions_cache.insert(path.to_path_buf(), dims);
+        return Some(dims);
+    }
+    None
+}
+
 fn render_markdown_to_lines(text: &str, max_width: u16) -> Vec<Line<'static>> {
     let segments = crate::tui::content::gfm::extract_gfm_segments(text);
     crate::tui::content::gfm::render_gfm_segments(&segments, max_width)
@@ -70,6 +82,7 @@ struct SegmentLines {
 }
 
 fn render_markdown_segment(
+    app: &mut App,
     segments: &[crate::tui::content::diagram::PreviewSegment],
     panel_width: u16,
     panel_height: u16,
@@ -88,7 +101,7 @@ fn render_markdown_segment(
             }
             crate::tui::content::diagram::PreviewSegment::DiagramImage(path) => {
                 let hash = crate::tui::content::diagram::source_hash_path(path);
-                let img_height = image::image_dimensions(path)
+                let img_height = get_image_dimensions_cached(app, path)
                     .map(|(w, h)| calculate_image_height(w, h, panel_width, panel_height))
                     .unwrap_or(12);
                 image_segments.push((hash, path.clone(), img_height));
@@ -148,7 +161,7 @@ fn render_diagram_overlays(
             }
             crate::tui::content::diagram::PreviewSegment::DiagramImage(path) => {
                 let hash = crate::tui::content::diagram::source_hash_path(path);
-                let img_height = image::image_dimensions(path)
+                let img_height = get_image_dimensions_cached(app, path)
                     .map(|(w, h)| calculate_image_height(w, h, inner.width, inner.height))
                     .unwrap_or(12);
 
@@ -593,7 +606,7 @@ pub fn render_document_preview(
 
     let content_width = area.width.saturating_sub(2) as usize;
     let segment_lines =
-        render_markdown_segment(&segments, panel_width, panel_height, content_width);
+        render_markdown_segment(app, &segments, panel_width, panel_height, content_width);
     let has_images = !segment_lines.image_segments.is_empty();
     lines.extend(segment_lines.lines);
 
@@ -844,7 +857,7 @@ pub fn render_fullscreen_document(f: &mut Frame, app: &mut App) {
     );
 
     let segment_lines =
-        render_markdown_segment(&segments, panel_width, panel_height, content_width);
+        render_markdown_segment(app, &segments, panel_width, panel_height, content_width);
     let total_lines = segment_lines.wrapped_height;
 
     let paragraph = Paragraph::new(segment_lines.lines)
