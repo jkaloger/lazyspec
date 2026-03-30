@@ -7,11 +7,12 @@ use crate::engine::cache::DiskCache;
 use crate::engine::config::{Config, NumberingStrategy, StoreBackend};
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, RelationType, Status};
 use crate::engine::fs::FileSystem;
-use crate::engine::git_status::GitStatusCache;
+use crate::engine::git_status::{query_git_branch, GitStatusCache};
 use crate::engine::reservation::ReservationProgress;
 use crate::engine::store::{Filter, Store};
 #[cfg(feature = "agent")]
 use crate::tui::agent::{load_all_records, AgentSpawner};
+use crate::tui::views::status_bar::StatusBarComponents;
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -230,6 +231,7 @@ pub struct App {
     pub warnings_selected: usize,
     pub validation_errors: Vec<String>,
     pub validation_warnings: Vec<String>,
+    pub status_bar_warnings: Vec<String>,
     pub fix_request: bool,
     pub fix_result: Option<String>,
     pub doc_list_offset: usize,
@@ -257,11 +259,14 @@ pub struct App {
     )>,
     pub filtered_docs_cache: Option<Vec<PathBuf>>,
     pub search_index: Vec<SearchEntry>,
+    pub git_branch: Option<String>,
     pub git_status_cache: GitStatusCache,
     pub gh_conflict_message: Option<String>,
     pub gh_push_in_flight: Arc<AtomicBool>,
     pub last_sync: Option<Instant>,
     pub gh_issue_map_stale: bool,
+    pub status_bar_enabled: bool,
+    pub status_bar_components: StatusBarComponents,
 }
 
 impl App {
@@ -293,12 +298,16 @@ impl App {
             .collect();
 
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
+        let git_branch = query_git_branch(store.root());
         let git_status_cache = GitStatusCache::new(store.root());
         let has_github_issues = config
             .documents
             .types
             .iter()
             .any(|t| t.store == StoreBackend::GithubIssues);
+
+        let (status_bar_components, status_bar_warnings) =
+            StatusBarComponents::from_config(&config.ui.statusbar);
 
         let mut app = App {
             fs,
@@ -345,6 +354,7 @@ impl App {
             warnings_selected: 0,
             validation_errors: Vec::new(),
             validation_warnings: Vec::new(),
+            status_bar_warnings: Vec::new(),
             fix_request: false,
             fix_result: None,
             doc_list_offset: 0,
@@ -369,6 +379,7 @@ impl App {
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
             search_index: Vec::new(),
+            git_branch,
             git_status_cache,
             gh_conflict_message: None,
             gh_push_in_flight: Arc::new(AtomicBool::new(false)),
@@ -378,7 +389,10 @@ impl App {
                 None
             },
             gh_issue_map_stale: false,
+            status_bar_enabled: config.ui.statusbar.enabled,
+            status_bar_components,
         };
+        app.status_bar_warnings = status_bar_warnings;
         app.rebuild_search_index();
         app.build_doc_tree();
         app
@@ -388,6 +402,8 @@ impl App {
         let result = crate::engine::validation::validate_full(&self.store, config);
         self.validation_errors = result.errors.iter().map(|e| e.to_string()).collect();
         self.validation_warnings = result.warnings.iter().map(|e| e.to_string()).collect();
+        self.validation_warnings
+            .extend(self.status_bar_warnings.iter().cloned());
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
     }
@@ -1473,6 +1489,7 @@ mod tests {
             warnings_selected: 0,
             validation_errors: Vec::new(),
             validation_warnings: Vec::new(),
+            status_bar_warnings: Vec::new(),
             fix_request: false,
             fix_result: None,
             doc_list_offset: 0,
@@ -1497,11 +1514,14 @@ mod tests {
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
             search_index: Vec::new(),
+            git_branch: None,
             git_status_cache: GitStatusCache::new(Path::new(".")),
             gh_conflict_message: None,
             gh_push_in_flight: Arc::new(AtomicBool::new(false)),
             last_sync: None,
             gh_issue_map_stale: false,
+            status_bar_enabled: true,
+            status_bar_components: StatusBarComponents::default(),
         };
         app
     }

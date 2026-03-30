@@ -65,3 +65,7 @@ dir = ".lazyspec/templates"
 [naming]
 pattern = "{type}-{n:03}-{title}.md"
 
+[tui.statusbar]
+left = ["mode", "git_branch"]
+right = ["version", "help_hint"]
+

@@ -3,6 +3,7 @@ pub mod keys;
 mod layout;
 mod overlays;
 mod panels;
+pub mod status_bar;
 
 pub use colors::{status_color, tag_color};
 pub use layout::{calculate_image_height, wrapped_line_count, wrapped_lines_total};
@@ -19,6 +20,7 @@ use std::sync::atomic::Ordering;
 
 use crate::engine::config::{Config, StoreBackend};
 use crate::tui::state::{App, ViewMode};
+use status_bar::draw_status_bar;
 
 #[cfg(feature = "agent")]
 use overlays::draw_agent_dialog;
@@ -68,7 +70,16 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
         return;
     }
     if app.create_form.active {
-        draw_create_form(f, app);
+        if app.status_bar_enabled {
+            let areas = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(1)])
+                .split(f.area());
+            draw_create_form(f, app);
+            draw_status_bar(f, app, areas[1], &app.status_bar_components);
+        } else {
+            draw_create_form(f, app);
+        }
         if app.show_warnings {
             draw_warnings_panel(f, app);
         }
@@ -78,7 +89,16 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
         return;
     }
     if app.search_mode {
-        draw_search_overlay(f, app);
+        if app.status_bar_enabled {
+            let areas = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(1)])
+                .split(f.area());
+            draw_search_overlay(f, app);
+            draw_status_bar(f, app, areas[1], &app.status_bar_components);
+        } else {
+            draw_search_overlay(f, app);
+        }
         if app.show_warnings {
             draw_warnings_panel(f, app);
         }
@@ -88,10 +108,21 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
         return;
     }
 
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(f.area());
+    let outer = if app.status_bar_enabled {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(f.area())
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(f.area())
+    };
 
     let title = Line::from(vec![Span::styled(
         "  lazyspec",
@@ -171,6 +202,10 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
         ViewMode::Graph => draw_graph(f, app, outer[1]),
         #[cfg(feature = "agent")]
         ViewMode::Agents => draw_agents_screen(f, app, outer[1]),
+    }
+
+    if app.status_bar_enabled {
+        draw_status_bar(f, app, outer[2], &app.status_bar_components);
     }
 
     if app.delete_confirm.active {

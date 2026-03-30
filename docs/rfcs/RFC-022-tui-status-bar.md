@@ -1,7 +1,7 @@
 ---
 title: TUI Status Bar
 type: rfc
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-15
 tags:
@@ -12,6 +12,8 @@ related:
 - related to: RFC-011
 - related to: RFC-018
 ---
+
+
 
 
 ## Problem
