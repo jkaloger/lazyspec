@@ -204,7 +204,7 @@ pub fn create_document(
 
     let filename = template::resolve_filename(
         &config.documents.naming.pattern,
-        doc_type,
+        prefix,
         title,
         &target_dir,
         numbering,

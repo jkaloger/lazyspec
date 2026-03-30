@@ -194,6 +194,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                     app.close_create_form();
                     app.refresh_validation(config);
                     app.git_status_cache.invalidate();
+                    app.gh_issue_map_stale = true;
                 }
                 Err(msg) => {
                     app.create_form.loading = false;
@@ -367,6 +368,17 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             Err(_) => {
                 perf_log::log_duration("recv_timeout", t);
             }
+        }
+
+        if app.gh_issue_map_stale {
+            if let Some(ref shared_store) = shared_gh_store {
+                if let Ok(mut guard) = shared_store.lock() {
+                    if let Ok(map) = IssueMap::load(&root) {
+                        guard.issue_map = map;
+                    }
+                }
+            }
+            app.gh_issue_map_stale = false;
         }
 
         if let (Some(deadline), Some(ref shared_store)) = (next_poll, &shared_gh_store) {

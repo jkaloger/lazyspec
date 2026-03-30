@@ -478,6 +478,7 @@ pub mod test_support {
         pub last_edit_body: RefCell<Option<String>>,
         pub last_edit_labels_remove: RefCell<Vec<String>>,
         pub last_create_body: RefCell<Option<String>>,
+        pub next_issue_number: Cell<u64>,
     }
 
     impl Default for MockGhClient {
@@ -503,6 +504,7 @@ pub mod test_support {
                 last_edit_body: RefCell::new(None),
                 last_edit_labels_remove: RefCell::new(vec![]),
                 last_create_body: RefCell::new(None),
+                next_issue_number: Cell::new(1),
             }
         }
 
@@ -573,9 +575,11 @@ pub mod test_support {
             if let Some(ref issue) = self.create_result {
                 return Ok(issue.clone());
             }
+            let number = self.next_issue_number.get();
+            self.next_issue_number.set(number + 1);
             Ok(GhIssue {
-                number: 1,
-                url: "https://github.com/test/repo/issues/1".to_string(),
+                number,
+                url: format!("https://github.com/test/repo/issues/{}", number),
                 title: title.to_string(),
                 body: body.to_string(),
                 labels: labels

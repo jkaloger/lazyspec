@@ -261,6 +261,7 @@ pub struct App {
     pub gh_conflict_message: Option<String>,
     pub gh_push_in_flight: Arc<AtomicBool>,
     pub last_sync: Option<Instant>,
+    pub gh_issue_map_stale: bool,
 }
 
 impl App {
@@ -376,6 +377,7 @@ impl App {
             } else {
                 None
             },
+            gh_issue_map_stale: false,
         };
         app.rebuild_search_index();
         app.build_doc_tree();
@@ -1132,6 +1134,7 @@ impl App {
         }
 
         self.close_create_form();
+        self.gh_issue_map_stale = true;
         Ok(())
     }
 
@@ -1498,6 +1501,7 @@ mod tests {
             gh_conflict_message: None,
             gh_push_in_flight: Arc::new(AtomicBool::new(false)),
             last_sync: None,
+            gh_issue_map_stale: false,
         };
         app
     }

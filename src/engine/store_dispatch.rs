@@ -180,34 +180,9 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
         let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
         std::fs::create_dir_all(&cache_dir)?;
 
-        let numbering = match type_def.numbering {
-            crate::engine::config::NumberingStrategy::Sqids => {
-                let sqids_config = self.config.documents.sqids.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "type '{}' uses sqids numbering but no sqids config found",
-                        type_def.name
-                    )
-                })?;
-                Some((&type_def.numbering, sqids_config))
-            }
-            _ => None,
-        };
-
-        let filename = template::resolve_filename(
-            &self.config.documents.naming.pattern,
-            &type_def.name,
-            title,
-            &cache_dir,
-            numbering,
-            None,
-        )
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        let stem = filename.trim_end_matches(".md");
-        let id = store::extract_id_from_name(stem);
-
+        // Create the GitHub issue first so the issue number becomes the doc ID.
         let date = Local::now().date_naive();
-        let doc_meta = DocMeta {
+        let placeholder_meta = DocMeta {
             path: PathBuf::new(),
             title: title.to_string(),
             doc_type: DocType::new(&type_def.name),
@@ -218,14 +193,38 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
-            id: id.clone(),
+            id: String::new(),
         };
 
-        let issue_body = issue_body::serialize(&doc_meta, body);
+        let issue_body = issue_body::serialize(&placeholder_meta, body);
         let label = gh::type_label(&type_def.name);
+        let color = gh::deterministic_color(&type_def.name);
+        let description = format!("lazyspec document type: {}", type_def.name);
+        self.client
+            .label_ensure(&self.repo, &label, &description, &color)?;
         let issue = self
             .client
             .issue_create(&self.repo, title, &issue_body, &[label])?;
+
+        // Use the GitHub issue number as the document number.
+        let issue_num_str = issue.number.to_string();
+        let filename = template::resolve_filename(
+            &self.config.documents.naming.pattern,
+            &type_def.prefix,
+            title,
+            &cache_dir,
+            None,
+            Some(&issue_num_str),
+        )
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        let stem = filename.trim_end_matches(".md");
+        let id = store::extract_id_from_name(stem);
+
+        let doc_meta = DocMeta {
+            id: id.clone(),
+            ..placeholder_meta
+        };
 
         self.issue_map.insert(&id, issue.number, &issue.updated_at);
         self.issue_map.save(&self.root)?;
@@ -514,7 +513,7 @@ mod tests {
             .create(&td, "my title", "author", "body text")
             .unwrap();
 
-        assert_eq!(result.id, "RFC-001");
+        assert_eq!(result.id, "RFC-1");
         assert!(result
             .path
             .to_string_lossy()
@@ -565,7 +564,7 @@ mod tests {
 
         let entry = gh_store
             .issue_map
-            .get("RFC-001")
+            .get("RFC-1")
             .expect("issue map entry should exist");
         assert_eq!(entry.issue_number, 1);
         assert_eq!(entry.updated_at, "2026-03-27T00:00:00Z");
@@ -587,7 +586,7 @@ mod tests {
         gh_store.create(&td, "persist", "author", "").unwrap();
 
         let reloaded = IssueMap::load(&root).unwrap();
-        assert!(reloaded.get("RFC-001").is_some());
+        assert!(reloaded.get("RFC-1").is_some());
     }
 
     #[test]
@@ -606,8 +605,42 @@ mod tests {
         let first = gh_store.create(&td, "first", "author", "").unwrap();
         let second = gh_store.create(&td, "second", "author", "").unwrap();
 
-        assert_eq!(first.id, "RFC-001");
-        assert_eq!(second.id, "RFC-002");
+        assert_eq!(first.id, "RFC-1");
+        assert_eq!(second.id, "RFC-2");
+    }
+
+    #[test]
+    fn github_issues_create_uses_prefix_not_name() {
+        let root = tmp_root("gh_create_prefix");
+        let mut gh_store = GithubIssuesStore {
+            client: MockGhClient::new(),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: IssueMap::load(&root).unwrap(),
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let td = TypeDef {
+            name: "github".to_string(),
+            plural: "gh".to_string(),
+            dir: "docs/gh".to_string(),
+            prefix: "GH".to_string(),
+            icon: None,
+            numbering: NumberingStrategy::Incremental,
+            subdirectory: false,
+            store: StoreBackend::GithubIssues,
+            singleton: false,
+            parent_type: None,
+        };
+
+        let result = gh_store.create(&td, "test prefix", "author", "").unwrap();
+        assert_eq!(result.id, "GH-1");
+        assert!(
+            result.path.to_string_lossy().contains("GH-1"),
+            "path should use prefix GH, got: {}",
+            result.path.display()
+        );
     }
 
     fn make_issue_body(author: &str, date: &str, status: Option<&str>, body: &str) -> String {
