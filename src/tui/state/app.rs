@@ -5,7 +5,6 @@ use super::graph::traverse_dependency_chain;
 
 use crate::engine::cache::DiskCache;
 use crate::engine::config::{Config, NumberingStrategy, StoreBackend};
-use crate::tui::views::status_bar::StatusBarComponents;
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, RelationType, Status};
 use crate::engine::fs::FileSystem;
 use crate::engine::git_status::{query_git_branch, GitStatusCache};
@@ -13,6 +12,7 @@ use crate::engine::reservation::ReservationProgress;
 use crate::engine::store::{Filter, Store};
 #[cfg(feature = "agent")]
 use crate::tui::agent::{load_all_records, AgentSpawner};
+use crate::tui::views::status_bar::StatusBarComponents;
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

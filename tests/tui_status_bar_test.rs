@@ -50,7 +50,8 @@ fn doc_count_component_returns_count_when_nonzero() {
     let mut app = make_app(&fixture);
     app.build_doc_tree();
 
-    let span = doc_count_component(&app).expect("doc_count_component should return Some when docs exist");
+    let span =
+        doc_count_component(&app).expect("doc_count_component should return Some when docs exist");
     assert!(
         span.content.contains("docs"),
         "expected 'docs' in '{}' ",
@@ -83,7 +84,11 @@ fn warnings_component_returns_yellow_span_when_nonzero() {
     app.validation_warnings = vec!["some warning".to_string()];
 
     let span = warnings_component(&app).expect("should return Some with warnings");
-    assert!(span.content.contains("1"), "expected count '1', got '{}'", span.content);
+    assert!(
+        span.content.contains("1"),
+        "expected count '1', got '{}'",
+        span.content
+    );
     assert_eq!(
         span.style.fg,
         Some(ratatui::style::Color::Yellow),
@@ -106,7 +111,11 @@ fn errors_component_returns_red_span_when_nonzero() {
     app.validation_errors = vec!["err1".to_string(), "err2".to_string()];
 
     let span = errors_component(&app).expect("should return Some with errors");
-    assert!(span.content.contains("2"), "expected count '2', got '{}'", span.content);
+    assert!(
+        span.content.contains("2"),
+        "expected count '2', got '{}'",
+        span.content
+    );
     assert_eq!(
         span.style.fg,
         Some(ratatui::style::Color::Red),
@@ -141,7 +150,11 @@ fn help_hint_component_always_returns_some() {
 fn default_components_wire_correctly() {
     let components = StatusBarComponents::default();
     assert_eq!(components.left.len(), 3, "left should have 3 components");
-    assert_eq!(components.center.len(), 2, "center should have 2 components");
+    assert_eq!(
+        components.center.len(),
+        2,
+        "center should have 2 components"
+    );
     assert_eq!(components.right.len(), 4, "right should have 4 components");
 }
 
@@ -162,8 +175,16 @@ fn git_branch_component_returns_span_when_branch_set() {
     app.git_branch = Some("main".to_string());
 
     let span = git_branch_component(&app).expect("should return Some when branch is set");
-    assert!(span.content.contains("main"), "expected 'main', got '{}'", span.content);
-    assert_eq!(span.style.fg, Some(ratatui::style::Color::Cyan), "branch should be cyan");
+    assert!(
+        span.content.contains("main"),
+        "expected 'main', got '{}'",
+        span.content
+    );
+    assert_eq!(
+        span.style.fg,
+        Some(ratatui::style::Color::Cyan),
+        "branch should be cyan"
+    );
 }
 
 #[test]
@@ -173,8 +194,16 @@ fn search_component_returns_query_in_search_mode() {
     app.search_query = "hello".to_string();
 
     let span = search_component(&app).expect("should return Some in search mode with query");
-    assert!(span.content.contains("/hello"), "expected '/hello', got '{}'", span.content);
-    assert_eq!(span.style.fg, Some(ratatui::style::Color::Yellow), "search should be yellow");
+    assert!(
+        span.content.contains("/hello"),
+        "expected '/hello', got '{}'",
+        span.content
+    );
+    assert_eq!(
+        span.style.fg,
+        Some(ratatui::style::Color::Yellow),
+        "search should be yellow"
+    );
 }
 
 #[test]
@@ -189,7 +218,11 @@ fn search_component_returns_none_when_not_searching() {
 #[test]
 fn type_filter_component_returns_type_in_types_mode() {
     let (_fixture, app) = fixture_with_docs();
-    assert_eq!(app.view_mode, ViewMode::Types, "app should default to Types mode");
+    assert_eq!(
+        app.view_mode,
+        ViewMode::Types,
+        "app should default to Types mode"
+    );
 
     let span = type_filter_component(&app).expect("should return Some in Types mode");
     let type_name = app.current_type().to_string();
@@ -234,10 +267,7 @@ right = ["version"]
         config.ui.statusbar.center,
         Some(vec!["warnings".to_string()])
     );
-    assert_eq!(
-        config.ui.statusbar.right,
-        Some(vec!["version".to_string()])
-    );
+    assert_eq!(config.ui.statusbar.right, Some(vec!["version".to_string()]));
 
     // Without [tui.statusbar] section, defaults apply
     let toml_without = r#"
@@ -305,7 +335,11 @@ fn default_config_produces_default_components() {
     assert_eq!(components.left.len(), defaults.left.len());
     assert_eq!(components.center.len(), defaults.center.len());
     assert_eq!(components.right.len(), defaults.right.len());
-    assert!(warnings.is_empty(), "no warnings expected, got {:?}", warnings);
+    assert!(
+        warnings.is_empty(),
+        "no warnings expected, got {:?}",
+        warnings
+    );
 }
 
 #[test]
@@ -342,5 +376,9 @@ fn invalid_component_name_skipped_with_warning() {
     let (components, warnings) = StatusBarComponents::from_config(&config);
     assert_eq!(components.left.len(), 1);
     assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("bogus"), "warning should mention 'bogus', got '{}'", warnings[0]);
+    assert!(
+        warnings[0].contains("bogus"),
+        "warning should mention 'bogus', got '{}'",
+        warnings[0]
+    );
 }

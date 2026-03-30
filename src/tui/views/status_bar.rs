@@ -44,10 +44,7 @@ fn zone_spans(items: Vec<Option<Span<'static>>>) -> Vec<Span<'static>> {
                 let fg = span.style.fg.unwrap_or(Color::White);
                 let padded = format!(" {} ", span.content.trim());
                 bgs.push(BG_ALT);
-                styled.push(Span::styled(
-                    padded,
-                    Style::default().bg(BG_ALT).fg(fg),
-                ));
+                styled.push(Span::styled(padded, Style::default().bg(BG_ALT).fg(fg)));
             }
             _ => {
                 bgs.push(BAR_BG);
@@ -106,8 +103,8 @@ impl StatusBar {
         } else {
             0
         };
-        let right_pad = total_width
-            .saturating_sub(left_width + left_pad + center_width + right_width);
+        let right_pad =
+            total_width.saturating_sub(left_width + left_pad + center_width + right_width);
 
         let mut spans = Vec::new();
         spans.extend(left_spans);
@@ -132,11 +129,8 @@ pub fn draw_status_bar(f: &mut Frame, app: &App, area: Rect, components: &Status
     };
 
     let line = bar.render(area.width);
-    let paragraph = Paragraph::new(line).style(
-        Style::default()
-            .bg(Color::DarkGray)
-            .fg(Color::White),
-    );
+    let paragraph =
+        Paragraph::new(line).style(Style::default().bg(Color::DarkGray).fg(Color::White));
     f.render_widget(paragraph, area);
 }
 
@@ -179,7 +173,14 @@ impl StatusBarComponents {
             Some(names) => resolve_names(names, &mut warnings),
         };
 
-        (Self { left, center, right }, warnings)
+        (
+            Self {
+                left,
+                center,
+                right,
+            },
+            warnings,
+        )
     }
 }
 
@@ -200,7 +201,12 @@ impl Default for StatusBarComponents {
         Self {
             left: vec![mode_component, type_filter_component, doc_count_component],
             center: vec![warnings_component, errors_component],
-            right: vec![git_branch_component, search_component, version_component, help_hint_component],
+            right: vec![
+                git_branch_component,
+                search_component,
+                version_component,
+                help_hint_component,
+            ],
         }
     }
 }
@@ -259,14 +265,14 @@ pub fn errors_component(app: &App) -> Option<Span<'static>> {
 }
 
 pub fn version_component(_app: &App) -> Option<Span<'static>> {
-    Some(Span::raw(format!("lazyspec v{}", env!("CARGO_PKG_VERSION"))))
+    Some(Span::raw(format!(
+        "lazyspec v{}",
+        env!("CARGO_PKG_VERSION")
+    )))
 }
 
 pub fn help_hint_component(_app: &App) -> Option<Span<'static>> {
-    Some(Span::styled(
-        "? help",
-        Style::default().fg(Color::Gray),
-    ))
+    Some(Span::styled("? help", Style::default().fg(Color::Gray)))
 }
 
 pub fn git_branch_component(app: &App) -> Option<Span<'static>> {
@@ -300,10 +306,7 @@ mod tests {
     #[test]
     fn renders_spans_with_spaces() {
         let bar = StatusBar {
-            left: vec![
-                Some(Span::raw("mode")),
-                Some(Span::raw("branch")),
-            ],
+            left: vec![Some(Span::raw("mode")), Some(Span::raw("branch"))],
             center: vec![],
             right: vec![Some(Span::raw("errors: 0"))],
         };
@@ -314,14 +317,20 @@ mod tests {
         assert!(text.contains("mode"), "should contain 'mode'");
         assert!(text.contains("branch"), "should contain 'branch'");
         assert!(text.contains("errors: 0"), "should contain right component");
-        assert!(!text.contains('\u{2502}'), "should not contain pipe separators");
+        assert!(
+            !text.contains('\u{2502}'),
+            "should not contain pipe separators"
+        );
     }
 
     #[test]
     fn bg_component_triggers_powerline_transition() {
         let bar = StatusBar {
             left: vec![
-                Some(Span::styled(" Types ", Style::default().bg(Color::Blue).fg(Color::Black))),
+                Some(Span::styled(
+                    " Types ",
+                    Style::default().bg(Color::Blue).fg(Color::Black),
+                )),
                 Some(Span::raw("branch")),
             ],
             center: vec![],
@@ -331,7 +340,10 @@ mod tests {
         let line = bar.render(80);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
 
-        assert!(text.contains(POWERLINE_RIGHT), "should contain powerline transition after bg component");
+        assert!(
+            text.contains(POWERLINE_RIGHT),
+            "should contain powerline transition after bg component"
+        );
         assert!(text.contains("Types"), "should contain 'Types'");
         assert!(text.contains("branch"), "should contain 'branch'");
     }
@@ -339,11 +351,7 @@ mod tests {
     #[test]
     fn none_components_produce_no_extra_spaces() {
         let bar = StatusBar {
-            left: vec![
-                Some(Span::raw("a")),
-                None,
-                Some(Span::raw("b")),
-            ],
+            left: vec![Some(Span::raw("a")), None, Some(Span::raw("b"))],
             center: vec![None],
             right: vec![None, Some(Span::raw("c"))],
         };
@@ -367,7 +375,11 @@ mod tests {
         let line = bar.render(40);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         let trimmed = text.trim();
-        assert!(trimmed.is_empty(), "all-None bar should produce no visible text, got '{}'", trimmed);
+        assert!(
+            trimmed.is_empty(),
+            "all-None bar should produce no visible text, got '{}'",
+            trimmed
+        );
     }
 
     #[test]
@@ -386,14 +398,21 @@ mod tests {
                 // We can't easily create a real App in tests, so test the StatusBar directly
                 // and verify draw_status_bar compiles with the right signature.
                 let bar = StatusBar {
-                    left: components.left.iter().map(|_| Some(Span::raw("left"))).collect(),
+                    left: components
+                        .left
+                        .iter()
+                        .map(|_| Some(Span::raw("left")))
+                        .collect(),
                     center: vec![],
-                    right: components.right.iter().map(|_| Some(Span::raw("right"))).collect(),
+                    right: components
+                        .right
+                        .iter()
+                        .map(|_| Some(Span::raw("right")))
+                        .collect(),
                 };
                 let line = bar.render(area.width);
-                let paragraph = Paragraph::new(line).style(
-                    Style::default().bg(Color::DarkGray).fg(Color::White),
-                );
+                let paragraph = Paragraph::new(line)
+                    .style(Style::default().bg(Color::DarkGray).fg(Color::White));
                 f.render_widget(paragraph, area);
             })
             .unwrap();
@@ -403,8 +422,16 @@ mod tests {
             .map(|x| buffer.cell((x, 0)).unwrap().symbol().to_string())
             .collect();
 
-        assert!(content.contains("left"), "buffer should contain 'left', got '{}'", content);
-        assert!(content.contains("right"), "buffer should contain 'right', got '{}'", content);
+        assert!(
+            content.contains("left"),
+            "buffer should contain 'left', got '{}'",
+            content
+        );
+        assert!(
+            content.contains("right"),
+            "buffer should contain 'right', got '{}'",
+            content
+        );
 
         // Verify background color
         let cell = buffer.cell((0, 0)).unwrap();
