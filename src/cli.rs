@@ -1,25 +1,25 @@
 pub mod completions;
 pub mod context;
 pub mod convention;
-pub mod style;
 pub mod create;
-pub mod status;
 pub mod delete;
 pub mod fetch;
+pub mod fix;
+pub mod ignore;
 pub mod init;
 pub mod json;
-pub mod ignore;
 pub mod link;
 pub mod list;
-pub mod resolve;
-pub mod show;
-pub mod update;
-pub mod search;
-pub mod validate;
-pub mod fix;
 pub mod pin;
 pub mod reservations;
+pub mod resolve;
+pub mod search;
 pub mod setup;
+pub mod show;
+pub mod status;
+pub mod style;
+pub mod update;
+pub mod validate;
 
 use crate::cli::reservations::ReservationsCommand;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -32,7 +32,10 @@ pub enum RenumberFormat {
 }
 
 #[derive(Parser)]
-#[command(name = "lazyspec", about = "Manage project stories, RFCs, ADRs, and iterations")]
+#[command(
+    name = "lazyspec",
+    about = "Manage project stories, RFCs, ADRs, and iterations"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,

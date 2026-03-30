@@ -27,6 +27,8 @@ pub fn tag_color(tag: &str) -> Color {
         Color::LightGreen,
         Color::LightBlue,
     ];
-    let hash = tag.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    let hash = tag
+        .bytes()
+        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
     PALETTE[(hash as usize) % PALETTE.len()]
 }

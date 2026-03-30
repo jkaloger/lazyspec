@@ -24,6 +24,20 @@ Lazyspec manages project documentation as version-controlled markdown files with
 
 ## Install
 
+### Nix
+
+```sh
+nix profile install github:jkaloger/lazyspec
+```
+
+Or run without installing:
+
+```sh
+nix run github:jkaloger/lazyspec
+```
+
+### Cargo
+
 ```sh
 cargo install --git https://github.com/jkaloger/lazyspec
 ```
@@ -260,6 +274,30 @@ Place markdown templates in the templates directory (`.lazyspec/templates/` by d
 </details>
 
 ## Development
+
+### Nix (recommended)
+
+The repo includes a Nix flake that provides the full toolchain. With [direnv](https://direnv.net/) installed:
+
+```sh
+direnv allow
+```
+
+Or enter the dev shell manually:
+
+```sh
+nix develop
+```
+
+This gives you cargo, clippy, rustfmt, and rust-analyzer at pinned versions.
+
+To run all checks (clippy, tests, formatting):
+
+```sh
+nix flake check
+```
+
+### Without Nix
 
 ```sh
 cargo build

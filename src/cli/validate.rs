@@ -55,7 +55,11 @@ pub fn run_full(store: &Store, config: &Config, json: bool, warnings: bool) -> i
         }
     }
 
-    if result.errors.is_empty() && store.parse_errors().is_empty() { 0 } else { 2 }
+    if result.errors.is_empty() && store.parse_errors().is_empty() {
+        0
+    } else {
+        2
+    }
 }
 
 pub fn run_json(store: &Store, config: &Config, extra_warnings: &[String]) -> String {
@@ -63,9 +67,11 @@ pub fn run_json(store: &Store, config: &Config, extra_warnings: &[String]) -> St
     let errors: Vec<_> = result.errors.iter().map(|e| format!("{}", e)).collect();
     let mut warnings: Vec<_> = result.warnings.iter().map(|w| format!("{}", w)).collect();
     warnings.extend(extra_warnings.iter().cloned());
-    let parse_errors: Vec<_> = store.parse_errors().iter().map(|pe| {
-        serde_json::json!({ "path": pe.path.display().to_string(), "error": pe.error })
-    }).collect();
+    let parse_errors: Vec<_> = store
+        .parse_errors()
+        .iter()
+        .map(|pe| serde_json::json!({ "path": pe.path.display().to_string(), "error": pe.error }))
+        .collect();
     serde_json::to_string_pretty(&serde_json::json!({
         "errors": errors,
         "warnings": warnings,
@@ -74,12 +80,22 @@ pub fn run_json(store: &Store, config: &Config, extra_warnings: &[String]) -> St
     .unwrap()
 }
 
-pub fn run_human(store: &Store, config: &Config, show_warnings: bool, extra_warnings: &[String]) -> String {
+pub fn run_human(
+    store: &Store,
+    config: &Config,
+    show_warnings: bool,
+    extra_warnings: &[String],
+) -> String {
     let result = store.validate_full(config);
     let mut output = String::new();
 
     for pe in store.parse_errors() {
-        output.push_str(&format!("  {} parse error in {}: {}\n", error_prefix(), pe.path.display(), pe.error));
+        output.push_str(&format!(
+            "  {} parse error in {}: {}\n",
+            error_prefix(),
+            pe.path.display(),
+            pe.error
+        ));
     }
     for error in &result.errors {
         output.push_str(&format!("  {} {}\n", error_prefix(), error));
@@ -99,7 +115,7 @@ pub fn run_human(store: &Store, config: &Config, show_warnings: bool, extra_warn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::gh::{AuthStatus, test_support::MockGhClient};
+    use crate::engine::gh::{test_support::MockGhClient, AuthStatus};
 
     #[test]
     fn gh_auth_warnings_when_not_installed() {

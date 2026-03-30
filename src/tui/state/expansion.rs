@@ -46,31 +46,51 @@ impl App {
 
             if !body.contains("@ref ") {
                 let body_hash = DiskCache::body_hash(&body);
-                let _ = tx.send(AppEvent::ExpansionResult { path: doc_path, body, body_hash });
+                let _ = tx.send(AppEvent::ExpansionResult {
+                    path: doc_path,
+                    body,
+                    body_hash,
+                });
                 return;
             }
 
             let body_hash = DiskCache::body_hash(&body);
 
             if let Some(cached) = disk_cache.read(&doc_path, body_hash) {
-                let _ = tx.send(AppEvent::ExpansionResult { path: doc_path, body: cached, body_hash });
+                let _ = tx.send(AppEvent::ExpansionResult {
+                    path: doc_path,
+                    body: cached,
+                    body_hash,
+                });
                 return;
             }
 
             let expander = RefExpander::new(root);
             match expander.expand_cancellable(&body, &cancel) {
                 Ok(Some(expanded)) => {
-                    let _ = tx.send(AppEvent::ExpansionResult { path: doc_path, body: expanded, body_hash });
+                    let _ = tx.send(AppEvent::ExpansionResult {
+                        path: doc_path,
+                        body: expanded,
+                        body_hash,
+                    });
                 }
                 Ok(None) => {}
                 Err(_) => {
-                    let _ = tx.send(AppEvent::ExpansionResult { path: doc_path, body, body_hash });
+                    let _ = tx.send(AppEvent::ExpansionResult {
+                        path: doc_path,
+                        body,
+                        body_hash,
+                    });
                 }
             }
         });
     }
 
-    pub fn request_diagram_render(&mut self, block: &crate::tui::content::diagram::DiagramBlock, tx: &crossbeam_channel::Sender<AppEvent>) {
+    pub fn request_diagram_render(
+        &mut self,
+        block: &crate::tui::content::diagram::DiagramBlock,
+        tx: &crossbeam_channel::Sender<AppEvent>,
+    ) {
         let hash = crate::tui::content::diagram::source_hash(&block.source);
 
         if self.diagram_cache.get(hash).is_some() {
@@ -96,19 +116,27 @@ impl App {
                 byte_range: 0..0,
             };
 
-            let entry = if ascii && block.language == crate::tui::content::diagram::DiagramLanguage::D2 {
-                match crate::tui::content::diagram::render_diagram_text(&block, &cache_dir) {
-                    Ok(text) => crate::tui::content::diagram::DiagramCacheEntry::Text(text),
-                    Err(err) => crate::tui::content::diagram::DiagramCacheEntry::Failed(err.to_string()),
-                }
-            } else {
-                match crate::tui::content::diagram::render_diagram(&block, &cache_dir) {
-                    Ok(path) => crate::tui::content::diagram::DiagramCacheEntry::Image(path),
-                    Err(err) => crate::tui::content::diagram::DiagramCacheEntry::Failed(err.to_string()),
-                }
-            };
+            let entry =
+                if ascii && block.language == crate::tui::content::diagram::DiagramLanguage::D2 {
+                    match crate::tui::content::diagram::render_diagram_text(&block, &cache_dir) {
+                        Ok(text) => crate::tui::content::diagram::DiagramCacheEntry::Text(text),
+                        Err(err) => {
+                            crate::tui::content::diagram::DiagramCacheEntry::Failed(err.to_string())
+                        }
+                    }
+                } else {
+                    match crate::tui::content::diagram::render_diagram(&block, &cache_dir) {
+                        Ok(path) => crate::tui::content::diagram::DiagramCacheEntry::Image(path),
+                        Err(err) => {
+                            crate::tui::content::diagram::DiagramCacheEntry::Failed(err.to_string())
+                        }
+                    }
+                };
 
-            let _ = tx.send(AppEvent::DiagramRendered { source_hash: hash, entry });
+            let _ = tx.send(AppEvent::DiagramRendered {
+                source_hash: hash,
+                entry,
+            });
         });
     }
 

@@ -14,7 +14,10 @@ fn ignored_document_with_broken_link_produces_no_error() {
     let result = store.validate_full(&fixture.config());
 
     assert!(
-        !result.errors.iter().any(|e| matches!(e, ValidationIssue::BrokenLink { .. })),
+        !result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationIssue::BrokenLink { .. })),
         "expected no BrokenLink error for ignored document, got: {:?}",
         result.errors
     );
@@ -35,7 +38,10 @@ fn ignored_story_skips_upward_orphaned_acceptance() {
     let result = store.validate_full(&fixture.config());
 
     assert!(
-        !result.warnings.iter().any(|w| matches!(w, ValidationIssue::UpwardOrphanedAcceptance { .. })),
+        !result
+            .warnings
+            .iter()
+            .any(|w| matches!(w, ValidationIssue::UpwardOrphanedAcceptance { .. })),
         "expected no UpwardOrphanedAcceptance warning for ignored story, got: {:?}",
         result.warnings
     );

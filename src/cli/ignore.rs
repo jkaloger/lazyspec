@@ -19,7 +19,7 @@ pub fn unignore(root: &Path, store: &Store, doc_path: &str, fs: &dyn FileSystem)
     let full_path = root.join(&resolved);
     rewrite_frontmatter(&full_path, fs, |doc| {
         if let Some(mapping) = doc.as_mapping_mut() {
-            mapping.remove(&serde_yaml::Value::String("validate-ignore".to_string()));
+            mapping.remove(serde_yaml::Value::String("validate-ignore".to_string()));
         }
         Ok(())
     })

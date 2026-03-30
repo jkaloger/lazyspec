@@ -1,8 +1,8 @@
 mod common;
 
-use std::fs;
 use lazyspec::engine::config::SqidsConfig;
 use lazyspec::engine::template::next_sqids_id;
+use std::fs;
 
 fn sqids_config(salt: &str, min_length: u8) -> lazyspec::engine::config::Config {
     let toml = format!(
@@ -35,11 +35,22 @@ fn create_with_sqids_produces_sqids_filename() {
     let root = fixture.root();
     let config = sqids_config("integration-salt", 3);
 
-    let path =
-        lazyspec::cli::create::run(root, &config, &fixture.store(), "rfc", "Test Feature", "author", |_| {}).unwrap();
+    let path = lazyspec::cli::create::run(
+        root,
+        &config,
+        &fixture.store(),
+        "rfc",
+        "Test Feature",
+        "author",
+        |_| {},
+    )
+    .unwrap();
     let filename = path.file_name().unwrap().to_str().unwrap();
 
-    assert!(filename.starts_with("RFC-"), "expected RFC- prefix, got: {filename}");
+    assert!(
+        filename.starts_with("RFC-"),
+        "expected RFC- prefix, got: {filename}"
+    );
     // Should NOT be incremental (RFC-001)
     assert!(
         !filename.starts_with("RFC-001"),
@@ -47,7 +58,10 @@ fn create_with_sqids_produces_sqids_filename() {
     );
     // The ID portion (between first and second dash) should be alphabetic (sqids output)
     let parts: Vec<&str> = filename.split('-').collect();
-    assert!(parts.len() >= 3, "filename should have at least 3 dash-separated parts: {filename}");
+    assert!(
+        parts.len() >= 3,
+        "filename should have at least 3 dash-separated parts: {filename}"
+    );
     let id_part = parts[1];
     assert!(
         id_part.chars().all(|c| c.is_ascii_alphanumeric()),
@@ -62,8 +76,16 @@ fn create_without_numbering_field_uses_incremental() {
     let root = fixture.root();
     let config = fixture.config(); // default config has no sqids
 
-    let path =
-        lazyspec::cli::create::run(root, &config, &fixture.store(), "rfc", "Incremental Test", "author", |_| {}).unwrap();
+    let path = lazyspec::cli::create::run(
+        root,
+        &config,
+        &fixture.store(),
+        "rfc",
+        "Incremental Test",
+        "author",
+        |_| {},
+    )
+    .unwrap();
     let filename = path.file_name().unwrap().to_str().unwrap();
 
     assert!(
@@ -88,9 +110,16 @@ numbering = "incremental"
 "#;
     let config = lazyspec::engine::config::Config::parse(toml).unwrap();
 
-    let path =
-        lazyspec::cli::create::run(root, &config, &fixture.store(), "rfc", "Explicit Incremental", "author", |_| {})
-            .unwrap();
+    let path = lazyspec::cli::create::run(
+        root,
+        &config,
+        &fixture.store(),
+        "rfc",
+        "Explicit Incremental",
+        "author",
+        |_| {},
+    )
+    .unwrap();
     let filename = path.file_name().unwrap().to_str().unwrap();
 
     assert!(
@@ -108,12 +137,26 @@ fn different_salts_produce_different_ids() {
     let config_a = sqids_config("salt-alpha", 3);
     let config_b = sqids_config("salt-beta", 3);
 
-    let path_a =
-        lazyspec::cli::create::run(fixture_a.root(), &config_a, &fixture_a.store(), "rfc", "Same Title", "author", |_| {})
-            .unwrap();
-    let path_b =
-        lazyspec::cli::create::run(fixture_b.root(), &config_b, &fixture_b.store(), "rfc", "Same Title", "author", |_| {})
-            .unwrap();
+    let path_a = lazyspec::cli::create::run(
+        fixture_a.root(),
+        &config_a,
+        &fixture_a.store(),
+        "rfc",
+        "Same Title",
+        "author",
+        |_| {},
+    )
+    .unwrap();
+    let path_b = lazyspec::cli::create::run(
+        fixture_b.root(),
+        &config_b,
+        &fixture_b.store(),
+        "rfc",
+        "Same Title",
+        "author",
+        |_| {},
+    )
+    .unwrap();
 
     let name_a = path_a.file_name().unwrap().to_str().unwrap();
     let name_b = path_b.file_name().unwrap().to_str().unwrap();
@@ -134,9 +177,16 @@ fn min_length_five_produces_ids_at_least_five_chars() {
     let fixture = common::TestFixture::new();
     let config = sqids_config("min-length-test", 5);
 
-    let path =
-        lazyspec::cli::create::run(fixture.root(), &config, &fixture.store(), "rfc", "Length Test", "author", |_| {})
-            .unwrap();
+    let path = lazyspec::cli::create::run(
+        fixture.root(),
+        &config,
+        &fixture.store(),
+        "rfc",
+        "Length Test",
+        "author",
+        |_| {},
+    )
+    .unwrap();
     let filename = path.file_name().unwrap().to_str().unwrap();
 
     let id_part = filename.split('-').nth(1).unwrap();
@@ -166,7 +216,10 @@ min_length = 0
     let result = lazyspec::engine::config::Config::parse(toml);
     assert!(result.is_err(), "min_length=0 should fail");
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("min_length"), "error should mention min_length, got: {msg}");
+    assert!(
+        msg.contains("min_length"),
+        "error should mention min_length, got: {msg}"
+    );
 }
 
 #[test]
@@ -186,7 +239,10 @@ min_length = 11
     let result = lazyspec::engine::config::Config::parse(toml);
     assert!(result.is_err(), "min_length=11 should fail");
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("min_length"), "error should mention min_length, got: {msg}");
+    assert!(
+        msg.contains("min_length"),
+        "error should mention min_length, got: {msg}"
+    );
 }
 
 // AC-7: sqids without salt fails validation
@@ -203,7 +259,10 @@ numbering = "sqids"
     let result = lazyspec::engine::config::Config::parse(toml);
     assert!(result.is_err(), "sqids without salt should fail");
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("salt"), "error should mention salt, got: {msg}");
+    assert!(
+        msg.contains("salt"),
+        "error should mention salt, got: {msg}"
+    );
 }
 
 // AC-8: collision retry with pre-existing files
@@ -214,14 +273,30 @@ fn create_retries_on_collision() {
     let config = sqids_config("collision-integration", 3);
 
     // Create the first doc to get its ID
-    let path1 =
-        lazyspec::cli::create::run(root, &config, &fixture.store(), "rfc", "First Doc", "author", |_| {}).unwrap();
+    let path1 = lazyspec::cli::create::run(
+        root,
+        &config,
+        &fixture.store(),
+        "rfc",
+        "First Doc",
+        "author",
+        |_| {},
+    )
+    .unwrap();
     let name1 = path1.file_name().unwrap().to_str().unwrap();
     let id1 = name1.split('-').nth(1).unwrap();
 
     // Create a second doc; it should get a different ID
-    let path2 =
-        lazyspec::cli::create::run(root, &config, &fixture.store(), "rfc", "Second Doc", "author", |_| {}).unwrap();
+    let path2 = lazyspec::cli::create::run(
+        root,
+        &config,
+        &fixture.store(),
+        "rfc",
+        "Second Doc",
+        "author",
+        |_| {},
+    )
+    .unwrap();
     let name2 = path2.file_name().unwrap().to_str().unwrap();
     let id2 = name2.split('-').nth(1).unwrap();
 
@@ -266,9 +341,16 @@ fn sqids_id_is_lowercase() {
     let fixture = common::TestFixture::new();
     let config = sqids_config("lowercase-test", 3);
 
-    let path =
-        lazyspec::cli::create::run(fixture.root(), &config, &fixture.store(), "rfc", "Case Test", "author", |_| {})
-            .unwrap();
+    let path = lazyspec::cli::create::run(
+        fixture.root(),
+        &config,
+        &fixture.store(),
+        "rfc",
+        "Case Test",
+        "author",
+        |_| {},
+    )
+    .unwrap();
     let filename = path.file_name().unwrap().to_str().unwrap();
     let id_part = filename.split('-').nth(1).unwrap();
 
@@ -287,14 +369,29 @@ fn mixed_numbering_types_work_together() {
     let config = sqids_config("mixed-test", 3);
 
     // rfc uses sqids
-    let rfc_path =
-        lazyspec::cli::create::run(root, &config, &fixture.store(), "rfc", "Sqids RFC", "author", |_| {}).unwrap();
+    let rfc_path = lazyspec::cli::create::run(
+        root,
+        &config,
+        &fixture.store(),
+        "rfc",
+        "Sqids RFC",
+        "author",
+        |_| {},
+    )
+    .unwrap();
     let rfc_name = rfc_path.file_name().unwrap().to_str().unwrap();
 
     // story uses incremental (default in our config helper)
-    let story_path =
-        lazyspec::cli::create::run(root, &config, &fixture.store(), "story", "Incremental Story", "author", |_| {})
-            .unwrap();
+    let story_path = lazyspec::cli::create::run(
+        root,
+        &config,
+        &fixture.store(),
+        "story",
+        "Incremental Story",
+        "author",
+        |_| {},
+    )
+    .unwrap();
     let story_name = story_path.file_name().unwrap().to_str().unwrap();
 
     assert!(

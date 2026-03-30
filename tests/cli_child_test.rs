@@ -48,13 +48,23 @@ fn show_parent_json_includes_children() {
     let fixture = setup_parent_with_children();
     let store = fixture.store();
 
-    let output = lazyspec::cli::show::run_json(&store, "RFC-003", false, 25, &lazyspec::engine::fs::RealFileSystem).unwrap();
+    let output = lazyspec::cli::show::run_json(
+        &store,
+        "RFC-003",
+        false,
+        25,
+        &lazyspec::engine::fs::RealFileSystem,
+    )
+    .unwrap();
     let json: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let children = json["children"].as_array().expect("children array missing");
     assert_eq!(children.len(), 2);
 
-    let titles: Vec<&str> = children.iter().map(|c| c["title"].as_str().unwrap()).collect();
+    let titles: Vec<&str> = children
+        .iter()
+        .map(|c| c["title"].as_str().unwrap())
+        .collect();
     assert!(titles.contains(&"Appendix"));
     assert!(titles.contains(&"Glossary"));
 
@@ -68,7 +78,14 @@ fn show_child_json_includes_parent() {
     let fixture = setup_parent_with_children();
     let store = fixture.store();
 
-    let output = lazyspec::cli::show::run_json(&store, "RFC-003/appendix", false, 25, &lazyspec::engine::fs::RealFileSystem).unwrap();
+    let output = lazyspec::cli::show::run_json(
+        &store,
+        "RFC-003/appendix",
+        false,
+        25,
+        &lazyspec::engine::fs::RealFileSystem,
+    )
+    .unwrap();
     let json: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let parent = json["parent"].as_object().expect("parent object missing");
@@ -99,11 +116,15 @@ fn list_json_includes_family_metadata() {
     let json: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
 
     let parent = json.iter().find(|d| d["title"] == "Multi Doc").unwrap();
-    let children = parent["children"].as_array().expect("parent should have children array");
+    let children = parent["children"]
+        .as_array()
+        .expect("parent should have children array");
     assert_eq!(children.len(), 2);
 
     let appendix = json.iter().find(|d| d["title"] == "Appendix").unwrap();
-    let parent_ref = appendix["parent"].as_object().expect("child should have parent object");
+    let parent_ref = appendix["parent"]
+        .as_object()
+        .expect("child should have parent object");
     assert_eq!(parent_ref["title"].as_str().unwrap(), "Multi Doc");
 }
 
@@ -113,10 +134,20 @@ fn show_parent_json_no_children_field_when_none() {
     fixture.write_rfc("RFC-010-flat.md", "Flat RFC", "draft");
     let store = fixture.store();
 
-    let output = lazyspec::cli::show::run_json(&store, "RFC-010", false, 25, &lazyspec::engine::fs::RealFileSystem).unwrap();
+    let output = lazyspec::cli::show::run_json(
+        &store,
+        "RFC-010",
+        false,
+        25,
+        &lazyspec::engine::fs::RealFileSystem,
+    )
+    .unwrap();
     let json: serde_json::Value = serde_json::from_str(&output).unwrap();
 
-    assert!(json.get("children").is_none(), "children field should be absent for docs without children");
+    assert!(
+        json.get("children").is_none(),
+        "children field should be absent for docs without children"
+    );
 }
 
 #[test]
@@ -137,8 +168,17 @@ fn list_json_virtual_doc_flag() {
     let output = lazyspec::cli::list::run_json(&store, None, None);
     let json: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
 
-    let virtual_parent = json.iter().find(|d| d["title"] == "Virtual").expect("virtual parent should appear in list");
-    assert_eq!(virtual_parent["virtual_doc"].as_bool(), Some(true), "virtual_doc should be true");
-    let children = virtual_parent["children"].as_array().expect("virtual parent should have children");
+    let virtual_parent = json
+        .iter()
+        .find(|d| d["title"] == "Virtual")
+        .expect("virtual parent should appear in list");
+    assert_eq!(
+        virtual_parent["virtual_doc"].as_bool(),
+        Some(true),
+        "virtual_doc should be true"
+    );
+    let children = virtual_parent["children"]
+        .as_array()
+        .expect("virtual parent should have children");
     assert_eq!(children.len(), 2);
 }

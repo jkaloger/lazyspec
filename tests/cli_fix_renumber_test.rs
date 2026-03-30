@@ -156,7 +156,10 @@ fn renumber_type_filter() {
     assert!(!fixture.root().join("docs/rfcs/RFC-001-foo.md").exists());
 
     // Story should NOT have been renamed
-    assert!(fixture.root().join("docs/stories/STORY-001-baz.md").exists());
+    assert!(fixture
+        .root()
+        .join("docs/stories/STORY-001-baz.md")
+        .exists());
 }
 
 // AC-5: dry_run previews without modifying disk
@@ -305,7 +308,10 @@ fn renumber_detects_external_references() {
     fixture.write_doc("docs/rfcs/RFC-001-foo.md", &valid_doc("RFC-001 Foo", "rfc"));
 
     // Create a README outside managed dirs that references the old filename
-    fixture.write_doc("README.md", "# Project\n\nSee [RFC-001-foo.md](docs/rfcs/RFC-001-foo.md) for details.\n");
+    fixture.write_doc(
+        "README.md",
+        "# Project\n\nSee [RFC-001-foo.md](docs/rfcs/RFC-001-foo.md) for details.\n",
+    );
 
     let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
 
@@ -319,8 +325,13 @@ fn renumber_detects_external_references() {
         written: false,
     }];
 
-    let ext_refs =
-        lazyspec::cli::fix::renumber::scan_external_references(fixture.root(), &store, &config, &changes, &RealFileSystem);
+    let ext_refs = lazyspec::cli::fix::renumber::scan_external_references(
+        fixture.root(),
+        &store,
+        &config,
+        &changes,
+        &RealFileSystem,
+    );
 
     assert_eq!(ext_refs.len(), 1);
     assert_eq!(ext_refs[0].file, "README.md");
@@ -351,8 +362,13 @@ fn renumber_external_refs_skips_managed_files() {
         written: false,
     }];
 
-    let ext_refs =
-        lazyspec::cli::fix::renumber::scan_external_references(fixture.root(), &store, &config, &changes, &RealFileSystem);
+    let ext_refs = lazyspec::cli::fix::renumber::scan_external_references(
+        fixture.root(),
+        &store,
+        &config,
+        &changes,
+        &RealFileSystem,
+    );
 
     // Managed store files should not appear in external references
     assert!(
@@ -399,7 +415,10 @@ fn renumber_json_output_structure() {
 
     let change = &changes[0];
     assert!(change["old_path"].as_str().unwrap().contains("RFC-001"));
-    assert!(change["new_path"].as_str().unwrap().starts_with("docs/rfcs/RFC-"));
+    assert!(change["new_path"]
+        .as_str()
+        .unwrap()
+        .starts_with("docs/rfcs/RFC-"));
     assert_eq!(change["old_id"], "RFC-001");
     assert!(change["new_id"].as_str().unwrap().starts_with("RFC-"));
     assert_eq!(change["written"], false);
@@ -408,7 +427,10 @@ fn renumber_json_output_structure() {
     let ext_refs = renumber["external_references"].as_array().unwrap();
     assert_eq!(ext_refs.len(), 1);
     assert_eq!(ext_refs[0]["file"], "README.md");
-    assert!(ext_refs[0]["old_name"].as_str().unwrap().contains("RFC-001"));
+    assert!(ext_refs[0]["old_name"]
+        .as_str()
+        .unwrap()
+        .contains("RFC-001"));
     assert!(ext_refs[0]["line"].is_number());
 }
 
@@ -508,11 +530,7 @@ fn renumber_external_refs_skips_noise_dirs() {
 
     let target_dir = fixture.root().join("target").join("debug");
     std::fs::create_dir_all(&target_dir).unwrap();
-    std::fs::write(
-        target_dir.join("README.md"),
-        "Built from RFC-001-foo.md\n",
-    )
-    .unwrap();
+    std::fs::write(target_dir.join("README.md"), "Built from RFC-001-foo.md\n").unwrap();
 
     let venv_dir = fixture.root().join(".venv").join("lib");
     std::fs::create_dir_all(&venv_dir).unwrap();
@@ -533,8 +551,13 @@ fn renumber_external_refs_skips_noise_dirs() {
         written: false,
     }];
 
-    let ext_refs =
-        lazyspec::cli::fix::renumber::scan_external_references(fixture.root(), &store, &config, &changes, &RealFileSystem);
+    let ext_refs = lazyspec::cli::fix::renumber::scan_external_references(
+        fixture.root(),
+        &store,
+        &config,
+        &changes,
+        &RealFileSystem,
+    );
 
     assert!(
         ext_refs.is_empty(),

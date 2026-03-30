@@ -1,6 +1,6 @@
 mod common;
 
-use lazyspec::engine::document::{DocMeta, split_frontmatter};
+use lazyspec::engine::document::{split_frontmatter, DocMeta};
 use lazyspec::engine::fs::RealFileSystem;
 
 #[test]
@@ -16,7 +16,7 @@ fn fix_fills_missing_fields() {
         fixture.root(),
         &store,
         &fixture.config(),
-        &vec!["docs/rfcs/RFC-broken.md".to_string()],
+        &["docs/rfcs/RFC-broken.md".to_string()],
         false,
         &RealFileSystem,
     );
@@ -27,26 +27,26 @@ fn fix_fills_missing_fields() {
     let map = value.as_mapping().unwrap();
 
     assert_eq!(
-        map.get(&serde_yaml::Value::String("title".into())).unwrap(),
+        map.get(serde_yaml::Value::String("title".into())).unwrap(),
         &serde_yaml::Value::String("Broken".into()),
     );
     assert_eq!(
-        map.get(&serde_yaml::Value::String("type".into())).unwrap(),
+        map.get(serde_yaml::Value::String("type".into())).unwrap(),
         &serde_yaml::Value::String("rfc".into()),
     );
     assert_eq!(
-        map.get(&serde_yaml::Value::String("author".into())).unwrap(),
+        map.get(serde_yaml::Value::String("author".into())).unwrap(),
         &serde_yaml::Value::String("test".into()),
     );
     assert_eq!(
-        map.get(&serde_yaml::Value::String("date".into())).unwrap(),
+        map.get(serde_yaml::Value::String("date".into())).unwrap(),
         &serde_yaml::Value::String("2026-01-01".into()),
     );
     assert_eq!(
-        map.get(&serde_yaml::Value::String("status".into())).unwrap(),
+        map.get(serde_yaml::Value::String("status".into())).unwrap(),
         &serde_yaml::Value::String("draft".into()),
     );
-    let tags = map.get(&serde_yaml::Value::String("tags".into())).unwrap();
+    let tags = map.get(serde_yaml::Value::String("tags".into())).unwrap();
     assert_eq!(tags.as_sequence().unwrap().len(), 0);
 }
 
@@ -63,7 +63,7 @@ fn fix_preserves_body() {
         fixture.root(),
         &store,
         &fixture.config(),
-        &vec!["docs/rfcs/RFC-body.md".to_string()],
+        &["docs/rfcs/RFC-body.md".to_string()],
         false,
         &RealFileSystem,
     );
@@ -85,7 +85,7 @@ fn fix_dry_run_does_not_write() {
         fixture.root(),
         &store,
         &fixture.config(),
-        &vec!["docs/rfcs/RFC-dry.md".to_string()],
+        &["docs/rfcs/RFC-dry.md".to_string()],
         true,
         &RealFileSystem,
     );
@@ -114,13 +114,14 @@ fn fix_all_broken_docs() {
         fixture.root(),
         &store,
         &fixture.config(),
-        &vec![],
+        &[],
         false,
         &RealFileSystem,
     );
 
     let content_a = std::fs::read_to_string(fixture.root().join("docs/rfcs/RFC-a.md")).unwrap();
-    let content_b = std::fs::read_to_string(fixture.root().join("docs/stories/STORY-b.md")).unwrap();
+    let content_b =
+        std::fs::read_to_string(fixture.root().join("docs/stories/STORY-b.md")).unwrap();
     assert!(DocMeta::parse(&content_a).is_ok());
     assert!(DocMeta::parse(&content_b).is_ok());
 }
@@ -138,7 +139,7 @@ fn fix_json_output() {
         fixture.root(),
         &store,
         &fixture.config(),
-        &vec!["docs/rfcs/RFC-json.md".to_string()],
+        &["docs/rfcs/RFC-json.md".to_string()],
         false,
         &RealFileSystem,
     );
@@ -150,7 +151,7 @@ fn fix_json_output() {
     let arr = obj["field_fixes"].as_array().unwrap();
     assert_eq!(arr.len(), 1);
     assert!(arr[0]["path"].is_string());
-    assert!(arr[0]["fields_added"].as_array().unwrap().len() > 0);
+    assert!(!arr[0]["fields_added"].as_array().unwrap().is_empty());
     assert!(arr[0]["written"].is_boolean());
 }
 
@@ -350,7 +351,7 @@ fn fix_infers_type_from_directory() {
         fixture.root(),
         &store,
         &fixture.config(),
-        &vec!["docs/rfcs/RFC-notype.md".to_string()],
+        &["docs/rfcs/RFC-notype.md".to_string()],
         false,
         &RealFileSystem,
     );
@@ -360,7 +361,7 @@ fn fix_infers_type_from_directory() {
     let value: serde_yaml::Value = serde_yaml::from_str(&yaml_str).unwrap();
     let map = value.as_mapping().unwrap();
     assert_eq!(
-        map.get(&serde_yaml::Value::String("type".into())).unwrap(),
+        map.get(serde_yaml::Value::String("type".into())).unwrap(),
         &serde_yaml::Value::String("rfc".into()),
     );
 }
@@ -394,11 +395,15 @@ fn fix_migrates_path_targets_to_ids() {
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
     let relation_fixes = parsed["relation_fixes"].as_array().unwrap();
     assert_eq!(relation_fixes.len(), 1);
-    assert_eq!(relation_fixes[0]["path"].as_str().unwrap(), "docs/stories/STORY-001-impl.md");
+    assert_eq!(
+        relation_fixes[0]["path"].as_str().unwrap(),
+        "docs/stories/STORY-001-impl.md"
+    );
     assert!(relation_fixes[0]["written"].as_bool().unwrap());
 
     // Verify the file was actually updated
-    let content = std::fs::read_to_string(fixture.root().join("docs/stories/STORY-001-impl.md")).unwrap();
+    let content =
+        std::fs::read_to_string(fixture.root().join("docs/stories/STORY-001-impl.md")).unwrap();
     let (yaml_str, _) = split_frontmatter(&content).unwrap();
     // The path target should now be an ID
     assert!(!yaml_str.contains("docs/rfcs/RFC-001-target.md"));
@@ -435,7 +440,8 @@ fn fix_migrates_path_targets_dry_run() {
     assert!(!relation_fixes[0]["written"].as_bool().unwrap());
 
     // File should still have path target
-    let content = std::fs::read_to_string(fixture.root().join("docs/stories/STORY-001-ref.md")).unwrap();
+    let content =
+        std::fs::read_to_string(fixture.root().join("docs/stories/STORY-001-ref.md")).unwrap();
     assert!(content.contains("docs/rfcs/RFC-001-target.md"));
 }
 

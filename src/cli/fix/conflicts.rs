@@ -80,7 +80,11 @@ fn renumber_doc(
 ) -> Option<ConflictFixResult> {
     let doc_type_prefix = old_id.split('-').next().unwrap_or("");
 
-    let type_def = config.documents.types.iter().find(|t| t.prefix.eq_ignore_ascii_case(doc_type_prefix))?;
+    let type_def = config
+        .documents
+        .types
+        .iter()
+        .find(|t| t.prefix.eq_ignore_ascii_case(doc_type_prefix))?;
     let type_dir = root.join(&type_def.dir);
 
     let new_id = match type_def.numbering {

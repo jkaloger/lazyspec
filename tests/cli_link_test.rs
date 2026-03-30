@@ -24,9 +24,11 @@ fn link_adds_relationship_to_frontmatter() {
         "implements",
         "docs/rfcs/RFC-001-auth.md",
         &fs,
-    ).unwrap();
+    )
+    .unwrap();
 
-    let content = fs::read_to_string(fixture.root().join("docs/adrs/ADR-001-adopt-auth.md")).unwrap();
+    let content =
+        fs::read_to_string(fixture.root().join("docs/adrs/ADR-001-adopt-auth.md")).unwrap();
     let meta = DocMeta::parse(&content).unwrap();
     assert_eq!(meta.related.len(), 1);
     assert_eq!(meta.related[0].target, "RFC-001");
@@ -45,7 +47,8 @@ fn unlink_removes_relationship() {
         "implements",
         "docs/rfcs/RFC-001-auth.md",
         &fs,
-    ).unwrap();
+    )
+    .unwrap();
 
     lazyspec::cli::link::unlink(
         fixture.root(),
@@ -54,9 +57,11 @@ fn unlink_removes_relationship() {
         "implements",
         "docs/rfcs/RFC-001-auth.md",
         &fs,
-    ).unwrap();
+    )
+    .unwrap();
 
-    let content = fs::read_to_string(fixture.root().join("docs/adrs/ADR-001-adopt-auth.md")).unwrap();
+    let content =
+        fs::read_to_string(fixture.root().join("docs/adrs/ADR-001-adopt-auth.md")).unwrap();
     let meta = DocMeta::parse(&content).unwrap();
     assert!(meta.related.is_empty());
 }

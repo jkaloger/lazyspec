@@ -66,9 +66,7 @@ fn singleton_type_skips_doc_list() {
     let backend = TestBackend::new(120, 40);
     let mut terminal = Terminal::new(backend).unwrap();
 
-    terminal
-        .draw(|f| draw(f, &mut app, &config))
-        .unwrap();
+    terminal.draw(|f| draw(f, &mut app, &config)).unwrap();
 
     // The doc list renders a table with block title " Documents ".
     // For a singleton, this should not appear.
@@ -105,9 +103,7 @@ fn non_singleton_type_shows_doc_list() {
     let backend = TestBackend::new(120, 40);
     let mut terminal = Terminal::new(backend).unwrap();
 
-    terminal
-        .draw(|f| draw(f, &mut app, &config))
-        .unwrap();
+    terminal.draw(|f| draw(f, &mut app, &config)).unwrap();
 
     // The doc list table SHOULD be present for non-singleton types
     assert!(

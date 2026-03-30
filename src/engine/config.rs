@@ -454,9 +454,7 @@ impl Config {
             }
         }
 
-        let any_github_issues = types
-            .iter()
-            .any(|t| t.store == StoreBackend::GithubIssues);
+        let any_github_issues = types.iter().any(|t| t.store == StoreBackend::GithubIssues);
         if any_github_issues && raw.github.is_none() {
             bail!("store = \"github-issues\" requires a [github] section");
         }
@@ -486,7 +484,10 @@ impl Config {
         })
     }
 
-    pub fn load(project_root: &std::path::Path, fs: &dyn crate::engine::fs::FileSystem) -> Result<Self> {
+    pub fn load(
+        project_root: &std::path::Path,
+        fs: &dyn crate::engine::fs::FileSystem,
+    ) -> Result<Self> {
         let path = project_root.join(".lazyspec.toml");
         if fs.exists(&path) {
             let content = fs.read_to_string(&path)?;

@@ -20,20 +20,20 @@ use std::sync::atomic::Ordering;
 use crate::engine::config::{Config, StoreBackend};
 use crate::tui::state::{App, ViewMode};
 
+#[cfg(feature = "agent")]
+use overlays::draw_agent_dialog;
 use overlays::{
-    draw_create_form, draw_gh_conflict, draw_help_overlay, draw_delete_confirm, draw_link_editor,
+    draw_create_form, draw_delete_confirm, draw_gh_conflict, draw_help_overlay, draw_link_editor,
     draw_search_overlay, draw_status_picker, draw_warnings_panel,
 };
 #[cfg(feature = "agent")]
-use overlays::draw_agent_dialog;
-use panels::{
-    draw_doc_list, draw_graph, draw_preview, draw_type_panel,
-    render_filter_panel, render_fullscreen_document,
-};
+use panels::draw_agents_screen;
 #[cfg(feature = "metrics")]
 use panels::draw_metrics_skeleton;
-#[cfg(feature = "agent")]
-use panels::draw_agents_screen;
+use panels::{
+    draw_doc_list, draw_graph, draw_preview, draw_type_panel, render_filter_panel,
+    render_fullscreen_document,
+};
 
 pub fn sync_indicator_text(elapsed_secs: u64, cache_ttl: u64) -> (String, Color) {
     if elapsed_secs >= 2 * cache_ttl {
@@ -101,13 +101,18 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
     )]);
     f.render_widget(Paragraph::new(title), outer[0]);
 
-    let has_gh_types = config.documents.types.iter()
+    let has_gh_types = config
+        .documents
+        .types
+        .iter()
         .any(|t| t.store == StoreBackend::GithubIssues);
 
     let mut right_spans: Vec<Span> = Vec::new();
     if has_gh_types {
         if let Some(last_sync) = app.last_sync {
-            let cache_ttl = config.documents.github
+            let cache_ttl = config
+                .documents
+                .github
                 .as_ref()
                 .map(|g| g.cache_ttl)
                 .unwrap_or(60);
@@ -118,7 +123,10 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
         }
     }
     if app.gh_push_in_flight.load(Ordering::Relaxed) {
-        right_spans.push(Span::styled("pushing... ", Style::default().fg(Color::Yellow)));
+        right_spans.push(Span::styled(
+            "pushing... ",
+            Style::default().fg(Color::Yellow),
+        ));
     }
     right_spans.push(Span::styled(
         format!("[{}] ` to cycle ", app.view_mode.name()),
@@ -198,8 +206,8 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
 #[cfg(test)]
 mod tests {
     use crate::engine::document::Status;
-    use std::path::Path;
     use ratatui::style::Color;
+    use std::path::Path;
 
     use super::panels;
     use super::sync_indicator_text;
@@ -219,12 +227,18 @@ mod tests {
 
     #[test]
     fn display_name_flat_file() {
-        assert_eq!(display_name(Path::new("docs/rfcs/RFC-001-foo.md")), "RFC-001-foo");
+        assert_eq!(
+            display_name(Path::new("docs/rfcs/RFC-001-foo.md")),
+            "RFC-001-foo"
+        );
     }
 
     #[test]
     fn display_name_subfolder_index() {
-        assert_eq!(display_name(Path::new("docs/rfcs/RFC-002-bar/index.md")), "RFC-002-bar");
+        assert_eq!(
+            display_name(Path::new("docs/rfcs/RFC-002-bar/index.md")),
+            "RFC-002-bar"
+        );
     }
 
     fn cell_debug(cell: &ratatui::widgets::Cell) -> String {
@@ -234,34 +248,78 @@ mod tests {
     #[test]
     fn doc_row_cells_standard_document() {
         let tags = vec!["cli".to_string(), "tui".to_string()];
-        let cells = panels::doc_row_cells_for_test("RFC-001", "Test Title", &Status::Draft, &tags, false, false);
+        let cells = panels::doc_row_cells_for_test(
+            "RFC-001",
+            "Test Title",
+            &Status::Draft,
+            &tags,
+            false,
+            false,
+        );
 
         assert_eq!(cells.len(), 4);
 
         let id_dbg = cell_debug(&cells[0]);
-        assert!(id_dbg.contains("RFC-001"), "ID cell should contain RFC-001, got: {}", id_dbg);
-        assert!(!id_dbg.contains("(virtual)"), "Non-virtual doc should not contain (virtual)");
+        assert!(
+            id_dbg.contains("RFC-001"),
+            "ID cell should contain RFC-001, got: {}",
+            id_dbg
+        );
+        assert!(
+            !id_dbg.contains("(virtual)"),
+            "Non-virtual doc should not contain (virtual)"
+        );
 
         let title_dbg = cell_debug(&cells[1]);
-        assert!(title_dbg.contains("Test Title"), "Title cell should contain Test Title, got: {}", title_dbg);
-        assert!(!title_dbg.contains("(virtual)"), "Non-virtual doc should not contain (virtual)");
+        assert!(
+            title_dbg.contains("Test Title"),
+            "Title cell should contain Test Title, got: {}",
+            title_dbg
+        );
+        assert!(
+            !title_dbg.contains("(virtual)"),
+            "Non-virtual doc should not contain (virtual)"
+        );
 
         let status_dbg = cell_debug(&cells[2]);
-        assert!(status_dbg.contains("draft"), "Status cell should contain draft, got: {}", status_dbg);
+        assert!(
+            status_dbg.contains("draft"),
+            "Status cell should contain draft, got: {}",
+            status_dbg
+        );
 
         let tags_dbg = cell_debug(&cells[3]);
-        assert!(tags_dbg.contains("[cli]"), "Tags cell should contain [cli], got: {}", tags_dbg);
-        assert!(tags_dbg.contains("[tui]"), "Tags cell should contain [tui], got: {}", tags_dbg);
+        assert!(
+            tags_dbg.contains("[cli]"),
+            "Tags cell should contain [cli], got: {}",
+            tags_dbg
+        );
+        assert!(
+            tags_dbg.contains("[tui]"),
+            "Tags cell should contain [tui], got: {}",
+            tags_dbg
+        );
     }
 
     #[test]
     fn doc_row_cells_virtual_document() {
-        let cells = panels::doc_row_cells_for_test("RFC-002", "Virtual Doc", &Status::Draft, &[], true, false);
+        let cells = panels::doc_row_cells_for_test(
+            "RFC-002",
+            "Virtual Doc",
+            &Status::Draft,
+            &[],
+            true,
+            false,
+        );
 
         assert_eq!(cells.len(), 4);
 
         let title_dbg = cell_debug(&cells[1]);
-        assert!(title_dbg.contains("(virtual)"), "Virtual doc title should contain (virtual), got: {}", title_dbg);
+        assert!(
+            title_dbg.contains("(virtual)"),
+            "Virtual doc title should contain (virtual), got: {}",
+            title_dbg
+        );
     }
 
     #[test]
@@ -273,49 +331,119 @@ mod tests {
             "d".to_string(),
             "e".to_string(),
         ];
-        let cells = panels::doc_row_cells_for_test("RFC-003", "Tags", &Status::Draft, &tags, false, false);
+        let cells =
+            panels::doc_row_cells_for_test("RFC-003", "Tags", &Status::Draft, &tags, false, false);
 
         let tags_dbg = cell_debug(&cells[3]);
-        assert!(tags_dbg.contains("[a]"), "Tags cell should contain [a], got: {}", tags_dbg);
-        assert!(tags_dbg.contains("[b]"), "Tags cell should contain [b], got: {}", tags_dbg);
-        assert!(tags_dbg.contains("[c]"), "Tags cell should contain [c], got: {}", tags_dbg);
-        assert!(tags_dbg.contains("+2"), "Tags cell should contain +2 overflow, got: {}", tags_dbg);
-        assert!(!tags_dbg.contains("[d]"), "Tags cell should not contain [d], got: {}", tags_dbg);
-        assert!(!tags_dbg.contains("[e]"), "Tags cell should not contain [e], got: {}", tags_dbg);
+        assert!(
+            tags_dbg.contains("[a]"),
+            "Tags cell should contain [a], got: {}",
+            tags_dbg
+        );
+        assert!(
+            tags_dbg.contains("[b]"),
+            "Tags cell should contain [b], got: {}",
+            tags_dbg
+        );
+        assert!(
+            tags_dbg.contains("[c]"),
+            "Tags cell should contain [c], got: {}",
+            tags_dbg
+        );
+        assert!(
+            tags_dbg.contains("+2"),
+            "Tags cell should contain +2 overflow, got: {}",
+            tags_dbg
+        );
+        assert!(
+            !tags_dbg.contains("[d]"),
+            "Tags cell should not contain [d], got: {}",
+            tags_dbg
+        );
+        assert!(
+            !tags_dbg.contains("[e]"),
+            "Tags cell should not contain [e], got: {}",
+            tags_dbg
+        );
     }
 
     #[test]
     fn doc_row_cells_gh_badge_present() {
-        let cells = panels::doc_row_cells_gh_for_test("ISSUE-001", "GH Doc", &Status::Draft, &[], false, false, true);
+        let cells = panels::doc_row_cells_gh_for_test(
+            "ISSUE-001",
+            "GH Doc",
+            &Status::Draft,
+            &[],
+            false,
+            false,
+            true,
+        );
 
         assert_eq!(cells.len(), 4);
         let id_dbg = cell_debug(&cells[0]);
-        assert!(id_dbg.contains("[gh]"), "GH-backed doc should have [gh] badge in ID cell, got: {}", id_dbg);
-        assert!(id_dbg.contains("ISSUE-001"), "ID cell should still contain the ID, got: {}", id_dbg);
+        assert!(
+            id_dbg.contains("[gh]"),
+            "GH-backed doc should have [gh] badge in ID cell, got: {}",
+            id_dbg
+        );
+        assert!(
+            id_dbg.contains("ISSUE-001"),
+            "ID cell should still contain the ID, got: {}",
+            id_dbg
+        );
     }
 
     #[test]
     fn doc_row_cells_no_gh_badge_for_filesystem() {
-        let cells = panels::doc_row_cells_gh_for_test("RFC-005", "FS Doc", &Status::Draft, &[], false, false, false);
+        let cells = panels::doc_row_cells_gh_for_test(
+            "RFC-005",
+            "FS Doc",
+            &Status::Draft,
+            &[],
+            false,
+            false,
+            false,
+        );
 
         let id_dbg = cell_debug(&cells[0]);
-        assert!(!id_dbg.contains("[gh]"), "Filesystem doc should not have [gh] badge, got: {}", id_dbg);
+        assert!(
+            !id_dbg.contains("[gh]"),
+            "Filesystem doc should not have [gh] badge, got: {}",
+            id_dbg
+        );
     }
 
     #[test]
     fn doc_row_cells_gh_badge_dimmed_when_dim() {
-        let cells = panels::doc_row_cells_gh_for_test("ISSUE-002", "Dim GH", &Status::Draft, &[], false, true, true);
+        let cells = panels::doc_row_cells_gh_for_test(
+            "ISSUE-002",
+            "Dim GH",
+            &Status::Draft,
+            &[],
+            false,
+            true,
+            true,
+        );
 
         let id_dbg = cell_debug(&cells[0]);
-        assert!(id_dbg.contains("[gh]"), "GH badge should still appear when dim, got: {}", id_dbg);
+        assert!(
+            id_dbg.contains("[gh]"),
+            "GH badge should still appear when dim, got: {}",
+            id_dbg
+        );
         let has_dark_gray = id_dbg.contains("DarkGray") || id_dbg.contains("dark_gray");
-        assert!(has_dark_gray, "GH badge should be dimmed when dim=true, got: {}", id_dbg);
+        assert!(
+            has_dark_gray,
+            "GH badge should be dimmed when dim=true, got: {}",
+            id_dbg
+        );
     }
 
     #[test]
     fn doc_row_cells_dim_when_relations_focused() {
         let tags = vec!["x".to_string()];
-        let cells = panels::doc_row_cells_for_test("RFC-004", "Dim", &Status::Accepted, &tags, false, true);
+        let cells =
+            panels::doc_row_cells_for_test("RFC-004", "Dim", &Status::Accepted, &tags, false, true);
 
         for (i, cell) in cells.iter().enumerate() {
             let dbg = cell_debug(cell);
@@ -323,8 +451,7 @@ mod tests {
             assert!(
                 has_dark_gray,
                 "Cell {} should have DarkGray style when dim=true, got: {}",
-                i,
-                dbg,
+                i, dbg,
             );
         }
     }

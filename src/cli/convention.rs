@@ -66,7 +66,11 @@ pub fn run_human(
     }
 
     if !requested_tags.is_empty() {
-        dicta.retain(|doc| doc.tags.iter().any(|t| requested_tags.contains(&t.as_str())));
+        dicta.retain(|doc| {
+            doc.tags
+                .iter()
+                .any(|t| requested_tags.contains(&t.as_str()))
+        });
     }
 
     dicta.sort_by(|a, b| a.path.cmp(&b.path));
@@ -129,7 +133,11 @@ pub fn run_json(
         }
 
         if !requested_tags.is_empty() {
-            dicta.retain(|doc| doc.tags.iter().any(|t| requested_tags.contains(&t.as_str())));
+            dicta.retain(|doc| {
+                doc.tags
+                    .iter()
+                    .any(|t| requested_tags.contains(&t.as_str()))
+            });
         }
 
         dicta.sort_by(|a, b| a.path.cmp(&b.path));

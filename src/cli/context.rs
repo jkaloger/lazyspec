@@ -103,8 +103,16 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str) -> Result<ResolvedContext<'
 
 pub fn run_json(store: &Store, id: &str) -> Result<String> {
     let resolved = resolve_chain(store, id)?;
-    let chain: Vec<_> = resolved.chain.iter().map(|d| doc_to_json_with_family(d, store)).collect();
-    let related: Vec<_> = resolved.related.iter().map(|d| doc_to_json_with_family(d, store)).collect();
+    let chain: Vec<_> = resolved
+        .chain
+        .iter()
+        .map(|d| doc_to_json_with_family(d, store))
+        .collect();
+    let related: Vec<_> = resolved
+        .related
+        .iter()
+        .map(|d| doc_to_json_with_family(d, store))
+        .collect();
     let output = serde_json::json!({ "chain": chain, "related": related });
     Ok(serde_json::to_string_pretty(&output)?)
 }
@@ -117,7 +125,11 @@ fn mini_card(doc: &DocMeta, marker: bool) -> String {
     let status_str = format!("{}", status);
     let line2_plain = format!("{} {} [{}]", shorthand, doc_type, status_str);
     let content_width = title.len().max(line2_plain.len()) + 2;
-    let marker_suffix = if marker { "  \u{2190} you are here" } else { "" };
+    let marker_suffix = if marker {
+        "  \u{2190} you are here"
+    } else {
+        ""
+    };
 
     if !colors_enabled() {
         let border = "-".repeat(content_width);
@@ -169,12 +181,13 @@ pub fn run_human(store: &Store, id: &str) -> Result<String> {
 
         let child_paths = store.children_of(&doc.path);
         if !child_paths.is_empty() {
-            let children: Vec<_> = child_paths
-                .iter()
-                .filter_map(|cp| store.get(cp))
-                .collect();
+            let children: Vec<_> = child_paths.iter().filter_map(|cp| store.get(cp)).collect();
             for (j, child) in children.iter().enumerate() {
-                let connector = if j == children.len() - 1 { "\u{2514}\u{2500}" } else { "\u{251c}\u{2500}" };
+                let connector = if j == children.len() - 1 {
+                    "\u{2514}\u{2500}"
+                } else {
+                    "\u{251c}\u{2500}"
+                };
                 let shorthand = child.id.to_uppercase();
                 let title = &child.title;
                 let status_display = if colors_enabled() {
@@ -182,7 +195,10 @@ pub fn run_human(store: &Store, id: &str) -> Result<String> {
                 } else {
                     format!("{}", child.status)
                 };
-                output.push_str(&format!("  {} {} {} [{}]\n", connector, shorthand, title, status_display));
+                output.push_str(&format!(
+                    "  {} {} {} [{}]\n",
+                    connector, shorthand, title, status_display
+                ));
             }
         }
     }
@@ -203,14 +219,20 @@ pub fn run_human(store: &Store, id: &str) -> Result<String> {
             } else {
                 format!("{}", child.status)
             };
-            output.push_str(&format!("  {} {} {} [{}]\n", connector, shorthand, title, status_display));
+            output.push_str(&format!(
+                "  {} {} {} [{}]\n",
+                connector, shorthand, title, status_display
+            ));
         }
     }
 
     if !resolved.related.is_empty() {
         output.push('\n');
         if colors_enabled() {
-            output.push_str(&format!("{}\n", dim("\u{2500}\u{2500}\u{2500} related \u{2500}\u{2500}\u{2500}")));
+            output.push_str(&format!(
+                "{}\n",
+                dim("\u{2500}\u{2500}\u{2500} related \u{2500}\u{2500}\u{2500}")
+            ));
         } else {
             output.push_str("--- related ---\n");
         }

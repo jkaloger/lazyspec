@@ -40,7 +40,12 @@ fn e_key_sets_editor_request_in_types_mode() {
     fixture.write_rfc("RFC-001-auth.md", "Auth RFC", "draft");
 
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     assert_eq!(app.view_mode, ViewMode::Types);
     app.handle_key(
@@ -71,15 +76,38 @@ fn e_key_sets_editor_request_in_graph_mode() {
     );
 
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     // Cycle to Graph mode: Types -> Filters -> [Metrics] -> Graph
-    app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('`'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     #[cfg(feature = "metrics")]
-    app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
-    app.handle_key(KeyCode::Char('`'), KeyModifiers::NONE, fixture.root(), &fixture.config());
+    app.handle_key(
+        KeyCode::Char('`'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
+    app.handle_key(
+        KeyCode::Char('`'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
     assert_eq!(app.view_mode, ViewMode::Graph);
-    assert!(!app.graph_nodes.is_empty(), "graph_nodes should be populated");
+    assert!(
+        !app.graph_nodes.is_empty(),
+        "graph_nodes should be populated"
+    );
 
     app.handle_key(
         KeyCode::Char('e'),
@@ -98,7 +126,12 @@ fn e_key_sets_editor_request_in_graph_mode() {
 fn e_key_noop_when_no_document_selected() {
     let fixture = TestFixture::new();
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     app.handle_key(
         KeyCode::Char('e'),
@@ -119,7 +152,12 @@ fn e_key_ignored_during_create_form() {
     fixture.write_rfc("RFC-001-auth.md", "Auth RFC", "draft");
 
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     // Open the create form
     app.handle_key(

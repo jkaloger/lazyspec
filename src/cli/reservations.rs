@@ -94,11 +94,10 @@ fn format_number(number: u32, config: &Config) -> Option<String> {
 
 fn has_local_document(store: &Store, prefix: &str, formatted_number: &str) -> bool {
     let needle = format!("{}-{}", prefix, formatted_number);
-    store.all_docs().iter().any(|doc| {
-        doc.path
-            .to_string_lossy()
-            .contains(&needle)
-    })
+    store
+        .all_docs()
+        .iter()
+        .any(|doc| doc.path.to_string_lossy().contains(&needle))
 }
 
 pub fn run_prune(
@@ -119,7 +118,9 @@ pub fn run_prune(
     let prunable: Vec<_> = reservations
         .iter()
         .filter(|r| {
-            let Some(formatted) = format_number(r.number, config) else { return false };
+            let Some(formatted) = format_number(r.number, config) else {
+                return false;
+            };
             has_local_document(store, &r.prefix, &formatted)
         })
         .collect();
@@ -145,7 +146,11 @@ pub fn run_prune(
                     total,
                     ref_path: r.ref_path.clone(),
                 });
-                match reservation::delete_remote_ref(repo_root, &reserved_config.remote, &r.ref_path) {
+                match reservation::delete_remote_ref(
+                    repo_root,
+                    &reserved_config.remote,
+                    &r.ref_path,
+                ) {
                     Ok(()) => {
                         if !json {
                             println!("pruned\t{}\t{}\t{}", r.prefix, r.number, r.ref_path);

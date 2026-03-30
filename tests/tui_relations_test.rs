@@ -27,7 +27,12 @@ fn setup_app_with_relations() -> (TestFixture, App) {
     );
 
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
     (fixture, app)
 }
 
@@ -83,7 +88,10 @@ fn test_move_relation_down() {
     app.selected_type = 0;
     app.selected_doc = 0;
     let count = app.relation_count();
-    assert!(count >= 2, "RFC should have at least 2 relations, got {count}");
+    assert!(
+        count >= 2,
+        "RFC should have at least 2 relations, got {count}"
+    );
 
     app.selected_relation = 0;
     app.move_relation_down();
@@ -111,7 +119,10 @@ fn test_move_relation_up() {
     app.selected_type = 0;
     app.selected_doc = 0;
     let count = app.relation_count();
-    assert!(count >= 2, "RFC should have at least 2 relations, got {count}");
+    assert!(
+        count >= 2,
+        "RFC should have at least 2 relations, got {count}"
+    );
 
     app.selected_relation = 1;
     app.move_relation_up();
@@ -154,7 +165,12 @@ fn test_navigate_to_relation() {
 fn test_navigate_to_relation_no_doc() {
     let fixture = TestFixture::new();
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     let before_type = app.selected_type;
     let before_doc = app.selected_doc;

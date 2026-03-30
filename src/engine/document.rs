@@ -5,6 +5,51 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+/// serde_yaml 0.9 parses bare `YYYY-MM-DD` as a YAML date tag, not a string.
+/// Chrono's default `NaiveDate` deserializer expects a string, so we need a
+/// custom deserializer that handles both representations.
+pub(crate) fn deserialize_naive_date<'de, D>(
+    deserializer: D,
+) -> std::result::Result<NaiveDate, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_yaml::Value::deserialize(deserializer)?;
+    let date_str = match &value {
+        serde_yaml::Value::String(s) => s.clone(),
+        // serde_yaml 0.9 parses bare YYYY-MM-DD as a tagged timestamp
+        serde_yaml::Value::Tagged(tagged) => match &tagged.value {
+            serde_yaml::Value::String(s) => s.clone(),
+            _ => {
+                return Err(serde::de::Error::custom(format!(
+                    "expected date string, got: {:?}",
+                    value
+                )))
+            }
+        },
+        // Some serde_yaml versions parse bare dates as a single-key mapping
+        serde_yaml::Value::Mapping(m) if m.len() == 1 => {
+            let key = m.keys().next().unwrap();
+            match key {
+                serde_yaml::Value::String(s) => s.clone(),
+                _ => {
+                    return Err(serde::de::Error::custom(format!(
+                        "expected date string, got: {:?}",
+                        value
+                    )))
+                }
+            }
+        }
+        _ => {
+            return Err(serde::de::Error::custom(format!(
+                "expected date string, got: {:?}",
+                value
+            )))
+        }
+    };
+    NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(serde::de::Error::custom)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct DocType(String);
 
@@ -161,6 +206,7 @@ struct RawFrontmatter {
     doc_type: DocType,
     status: Status,
     author: String,
+    #[serde(deserialize_with = "deserialize_naive_date")]
     date: NaiveDate,
     tags: Vec<String>,
     #[serde(default)]
@@ -289,7 +335,7 @@ mod tests {
     fn sort_by_date_oldest_first() {
         let old = make_doc("2025-01-01", "a.md");
         let new = make_doc("2026-03-17", "b.md");
-        let mut docs = vec![new, old];
+        let mut docs = [new, old];
         docs.sort_by(DocMeta::sort_by_date);
         assert_eq!(docs[0].date, NaiveDate::from_ymd_opt(2025, 1, 1).unwrap());
         assert_eq!(docs[1].date, NaiveDate::from_ymd_opt(2026, 3, 17).unwrap());
@@ -299,7 +345,7 @@ mod tests {
     fn sort_by_date_same_date_tiebreak_by_path() {
         let a = make_doc("2026-01-01", "aaa.md");
         let b = make_doc("2026-01-01", "zzz.md");
-        let mut docs = vec![b, a];
+        let mut docs = [b, a];
         docs.sort_by(DocMeta::sort_by_date);
         assert_eq!(docs[0].path, PathBuf::from("aaa.md"));
         assert_eq!(docs[1].path, PathBuf::from("zzz.md"));
@@ -311,7 +357,7 @@ mod tests {
         empty.sort_by(DocMeta::sort_by_date);
         assert!(empty.is_empty());
 
-        let mut single = vec![make_doc("2026-01-01", "only.md")];
+        let mut single = [make_doc("2026-01-01", "only.md")];
         single.sort_by(DocMeta::sort_by_date);
         assert_eq!(single.len(), 1);
     }

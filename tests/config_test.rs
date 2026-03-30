@@ -1,4 +1,6 @@
-use lazyspec::engine::config::{Config, NumberingStrategy, ReservedFormat, Severity, ValidationRule};
+use lazyspec::engine::config::{
+    Config, NumberingStrategy, ReservedFormat, Severity, ValidationRule,
+};
 
 #[test]
 fn parse_config_from_toml() {
@@ -155,7 +157,10 @@ dir = "docs/rfcs"
     let result = Config::parse(toml_str);
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("prefix"), "Error should mention missing field 'prefix', got: {err_msg}");
+    assert!(
+        err_msg.contains("prefix"),
+        "Error should mention missing field 'prefix', got: {err_msg}"
+    );
 }
 
 #[test]
@@ -294,7 +299,10 @@ severity = "fatal"
 "#;
 
     let result = Config::parse(toml_str);
-    assert!(result.is_err(), "Expected parse error for invalid severity 'fatal'");
+    assert!(
+        result.is_err(),
+        "Expected parse error for invalid severity 'fatal'"
+    );
 }
 
 #[test]
@@ -390,7 +398,10 @@ numbering = "sqids"
     let result = Config::parse(toml_str);
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("salt"), "Error should mention salt, got: {msg}");
+    assert!(
+        msg.contains("salt"),
+        "Error should mention salt, got: {msg}"
+    );
 }
 
 #[test]
@@ -409,7 +420,10 @@ salt = ""
     let result = Config::parse(toml_str);
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("salt"), "Error should mention salt, got: {msg}");
+    assert!(
+        msg.contains("salt"),
+        "Error should mention salt, got: {msg}"
+    );
 }
 
 #[test]
@@ -429,7 +443,10 @@ min_length = 0
     let result = Config::parse(toml_str);
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("min_length"), "Error should mention min_length, got: {msg}");
+    assert!(
+        msg.contains("min_length"),
+        "Error should mention min_length, got: {msg}"
+    );
 }
 
 #[test]
@@ -449,7 +466,10 @@ min_length = 11
     let result = Config::parse(toml_str);
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("min_length"), "Error should mention min_length, got: {msg}");
+    assert!(
+        msg.contains("min_length"),
+        "Error should mention min_length, got: {msg}"
+    );
 }
 
 // --- Numbering / Reserved config tests ---
@@ -513,7 +533,10 @@ format = "sqids"
     let result = Config::parse(toml_str);
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("sqids"), "Error should mention sqids, got: {msg}");
+    assert!(
+        msg.contains("sqids"),
+        "Error should mention sqids, got: {msg}"
+    );
 }
 
 #[test]
@@ -550,7 +573,10 @@ format = "incremental"
     let result = Config::parse(toml_str);
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("remote"), "Error should mention remote, got: {msg}");
+    assert!(
+        msg.contains("remote"),
+        "Error should mention remote, got: {msg}"
+    );
 }
 
 #[test]
@@ -594,7 +620,10 @@ numbering = "reserved"
     let result = Config::parse(toml_str);
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("reserved"), "Error should mention reserved, got: {msg}");
+    assert!(
+        msg.contains("reserved"),
+        "Error should mention reserved, got: {msg}"
+    );
 }
 
 #[test]

@@ -51,9 +51,8 @@ pub(super) fn collect_relation_fixes(
         let written = if !dry_run {
             let targets = path_targets.clone();
             let res = rewrite_frontmatter(&full_path, fs, |value| {
-                if let Some(related_seq) = value
-                    .get_mut("related")
-                    .and_then(|v| v.as_sequence_mut())
+                if let Some(related_seq) =
+                    value.get_mut("related").and_then(|v| v.as_sequence_mut())
                 {
                     for entry in related_seq.iter_mut() {
                         if let Some(mapping) = entry.as_mapping_mut() {

@@ -240,11 +240,8 @@ pub fn extract_gfm_segments(body: &str) -> Vec<GfmSegment> {
     let mut footnote_ext = FootnoteExtractor::new();
 
     for (event, range) in offset_iter {
-        let extractors: [&mut dyn GfmExtractor; 3] = [
-            &mut footnote_ext,
-            &mut admonition_ext,
-            &mut table_ext,
-        ];
+        let extractors: [&mut dyn GfmExtractor; 3] =
+            [&mut footnote_ext, &mut admonition_ext, &mut table_ext];
 
         let mut handled = false;
         for ext in extractors {

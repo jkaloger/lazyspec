@@ -7,7 +7,12 @@ fn setup_app_with_rfc(title: &str) -> (TestFixture, App) {
     let fixture = TestFixture::new();
     fixture.write_rfc("RFC-001-test.md", title, "draft");
     let store = fixture.store();
-    let app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
     (fixture, app)
 }
 
@@ -52,7 +57,12 @@ Impl Story body.
     );
 
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     app.selected_type = 0; // RFC
     app.selected_doc = 0;
@@ -123,12 +133,18 @@ fn test_selection_adjusts_after_delete_last() {
     fixture.write_rfc("RFC-002-second.md", "Second RFC", "draft");
 
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     app.selected_type = 0;
     app.selected_doc = 1; // second RFC (sorted by path)
     app.open_delete_confirm();
-    app.confirm_delete(fixture.root(), &fixture.config()).unwrap();
+    app.confirm_delete(fixture.root(), &fixture.config())
+        .unwrap();
 
     assert_eq!(app.selected_doc, 0);
     assert_eq!(app.docs_for_current_type().len(), 1);
@@ -139,7 +155,12 @@ fn test_selection_adjusts_after_delete_last() {
 fn test_open_delete_empty_list_noop() {
     let fixture = TestFixture::new();
     let store = fixture.store();
-    let mut app = App::new(store, &fixture.config(), ratatui_image::picker::Picker::halfblocks(), Box::new(lazyspec::engine::fs::RealFileSystem));
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
 
     app.selected_type = 0;
     app.open_delete_confirm();

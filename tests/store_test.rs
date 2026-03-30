@@ -86,8 +86,13 @@ fn store_gets_body_lazily() {
     let store = fixture.store();
 
     let docs = store.all_docs();
-    let rfc = docs.iter().find(|d| d.doc_type == DocType::new(DocType::RFC)).unwrap();
-    let body = store.get_body(&rfc.path, &lazyspec::engine::fs::RealFileSystem).unwrap();
+    let rfc = docs
+        .iter()
+        .find(|d| d.doc_type == DocType::new(DocType::RFC))
+        .unwrap();
+    let body = store
+        .get_body(&rfc.path, &lazyspec::engine::fs::RealFileSystem)
+        .unwrap();
     assert!(body.contains("Event sourcing proposal."));
 }
 
@@ -113,8 +118,13 @@ See code:
 
     let store = fixture.store();
     let doc = store.resolve_shorthand("RFC-010").expect("should resolve");
-    let body = store.get_body_raw(&doc.path, &lazyspec::engine::fs::RealFileSystem).unwrap();
-    assert!(body.contains("@ref src/main.rs#MyStruct"), "raw body should preserve @ref directives");
+    let body = store
+        .get_body_raw(&doc.path, &lazyspec::engine::fs::RealFileSystem)
+        .unwrap();
+    assert!(
+        body.contains("@ref src/main.rs#MyStruct"),
+        "raw body should preserve @ref directives"
+    );
 }
 
 #[test]
@@ -137,9 +147,16 @@ tags: []
 
     let store = fixture.store();
     let doc = store.resolve_shorthand("RFC-011").expect("should resolve");
-    let raw = store.get_body_raw(&doc.path, &lazyspec::engine::fs::RealFileSystem).unwrap();
-    let default = store.get_body(&doc.path, &lazyspec::engine::fs::RealFileSystem).unwrap();
-    assert_eq!(raw, default, "get_body should return the same result as get_body_raw");
+    let raw = store
+        .get_body_raw(&doc.path, &lazyspec::engine::fs::RealFileSystem)
+        .unwrap();
+    let default = store
+        .get_body(&doc.path, &lazyspec::engine::fs::RealFileSystem)
+        .unwrap();
+    assert_eq!(
+        raw, default,
+        "get_body should return the same result as get_body_raw"
+    );
 }
 
 #[test]
@@ -162,9 +179,17 @@ tags: []
 
     let store = fixture.store();
     let doc = store.resolve_shorthand("RFC-012").expect("should resolve");
-    let expanded = store.get_body_expanded(&doc.path, 25, &lazyspec::engine::fs::RealFileSystem).unwrap();
-    assert!(!expanded.contains("@ref nonexistent/file.rs"), "expanded body should not contain raw @ref");
-    assert!(expanded.contains("> [unresolved:"), "expanded body should contain unresolved marker");
+    let expanded = store
+        .get_body_expanded(&doc.path, 25, &lazyspec::engine::fs::RealFileSystem)
+        .unwrap();
+    assert!(
+        !expanded.contains("@ref nonexistent/file.rs"),
+        "expanded body should not contain raw @ref"
+    );
+    assert!(
+        expanded.contains("> [unresolved:"),
+        "expanded body should contain unresolved marker"
+    );
 }
 
 #[test]
@@ -173,7 +198,10 @@ fn store_resolves_related_docs() {
     let store = fixture.store();
 
     let docs = store.all_docs();
-    let adr = docs.iter().find(|d| d.doc_type == DocType::new(DocType::ADR)).unwrap();
+    let adr = docs
+        .iter()
+        .find(|d| d.doc_type == DocType::new(DocType::ADR))
+        .unwrap();
     let related = store.related_to(&adr.path);
     assert_eq!(related.len(), 1);
 }
@@ -210,7 +238,9 @@ fn store_search_matches_title() {
     let results = store.search("Event", &lazyspec::engine::fs::RealFileSystem);
     assert_eq!(results.len(), 2);
     assert!(results.iter().any(|r| r.doc.title == "Event Sourcing"));
-    assert!(results.iter().any(|r| r.doc.title == "Adopt Event Sourcing"));
+    assert!(results
+        .iter()
+        .any(|r| r.doc.title == "Adopt Event Sourcing"));
 }
 
 #[test]
@@ -408,7 +438,11 @@ fn store_discovers_child_md_files() {
 
     let store = fixture.store();
     assert_eq!(store.all_docs().len(), 2);
-    let child = store.all_docs().into_iter().find(|d| d.title == "Appendix").unwrap();
+    let child = store
+        .all_docs()
+        .into_iter()
+        .find(|d| d.title == "Appendix")
+        .unwrap();
     assert!(child.path.to_string_lossy().contains("appendix.md"));
 }
 
@@ -451,7 +485,11 @@ fn store_synthesises_virtual_parent() {
     );
 
     let store = fixture.store();
-    let virtual_parent = store.all_docs().into_iter().find(|d| d.virtual_doc).unwrap();
+    let virtual_parent = store
+        .all_docs()
+        .into_iter()
+        .find(|d| d.virtual_doc)
+        .unwrap();
     assert_eq!(virtual_parent.title, "Virtual");
     assert_eq!(virtual_parent.status, Status::Draft);
 }
@@ -471,7 +509,11 @@ fn store_virtual_parent_accepted_when_all_children_accepted() {
     );
 
     let store = fixture.store();
-    let virtual_parent = store.all_docs().into_iter().find(|d| d.virtual_doc).unwrap();
+    let virtual_parent = store
+        .all_docs()
+        .into_iter()
+        .find(|d| d.virtual_doc)
+        .unwrap();
     assert_eq!(virtual_parent.status, Status::Accepted);
 }
 
@@ -491,8 +533,14 @@ fn store_virtual_parent_not_on_disk() {
 
     let store = fixture.store();
     assert!(store.all_docs().iter().any(|d| d.virtual_doc));
-    assert!(!fixture.root().join("docs/rfcs/RFC-004-virtual/index.md").exists());
-    assert!(!fixture.root().join("docs/rfcs/RFC-004-virtual/.virtual").exists());
+    assert!(!fixture
+        .root()
+        .join("docs/rfcs/RFC-004-virtual/index.md")
+        .exists());
+    assert!(!fixture
+        .root()
+        .join("docs/rfcs/RFC-004-virtual/.virtual")
+        .exists());
 }
 
 #[test]
@@ -576,7 +624,10 @@ fn store_collects_parse_errors() {
 
     let store = fixture.store();
     assert_eq!(store.parse_errors().len(), 1);
-    assert!(store.parse_errors()[0].path.to_string_lossy().contains("RFC-broken.md"));
+    assert!(store.parse_errors()[0]
+        .path
+        .to_string_lossy()
+        .contains("RFC-broken.md"));
     assert!(store.all_docs().is_empty());
 }
 
@@ -593,7 +644,10 @@ fn store_loads_valid_alongside_invalid() {
     assert_eq!(store.all_docs().len(), 1);
     assert_eq!(store.all_docs()[0].title, "Good RFC");
     assert_eq!(store.parse_errors().len(), 1);
-    assert!(store.parse_errors()[0].path.to_string_lossy().contains("RFC-002-bad.md"));
+    assert!(store.parse_errors()[0]
+        .path
+        .to_string_lossy()
+        .contains("RFC-002-bad.md"));
 }
 
 #[test]
@@ -716,12 +770,18 @@ We adopt event sourcing.
 
     let fwd = store.forward_links_for(&adr_path);
     assert_eq!(fwd.len(), 1, "ADR should have one forward link");
-    assert_eq!(fwd[0].1, rfc_path, "forward link target should be the RFC path");
+    assert_eq!(
+        fwd[0].1, rfc_path,
+        "forward link target should be the RFC path"
+    );
 
     // Reverse link on the RFC should point back to the ADR
     let rev = store.reverse_links_for(&rfc_path);
     assert_eq!(rev.len(), 1, "RFC should have one reverse link");
-    assert_eq!(rev[0].1, adr_path, "reverse link source should be the ADR path");
+    assert_eq!(
+        rev[0].1, adr_path,
+        "reverse link source should be the ADR path"
+    );
 }
 
 #[test]

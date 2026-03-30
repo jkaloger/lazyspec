@@ -9,7 +9,13 @@ use crate::tui::state::forms::REL_TYPES;
 use crate::tui::state::{App, FilterField, PreviewTab, ViewMode};
 
 impl App {
-    pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path, config: &Config) {
+    pub fn handle_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        root: &Path,
+        config: &Config,
+    ) {
         if self.gh_conflict_message.is_some() {
             if code == KeyCode::Esc {
                 self.gh_conflict_message = None;
@@ -70,7 +76,9 @@ impl App {
 
     fn handle_delete_confirm_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
         match code {
-            KeyCode::Enter => { let _ = self.confirm_delete(root, config); }
+            KeyCode::Enter => {
+                let _ = self.confirm_delete(root, config);
+            }
             KeyCode::Esc => self.close_delete_confirm(),
             _ => {}
         }
@@ -100,7 +108,8 @@ impl App {
         match code {
             KeyCode::Esc => self.close_link_editor(),
             KeyCode::Tab => {
-                self.link_editor.rel_type_index = (self.link_editor.rel_type_index + 1) % REL_TYPES.len();
+                self.link_editor.rel_type_index =
+                    (self.link_editor.rel_type_index + 1) % REL_TYPES.len();
             }
             KeyCode::Enter => {
                 if !self.link_editor.results.is_empty() {
@@ -155,17 +164,21 @@ impl App {
                 if self.agent_dialog.selected_index > 0 {
                     self.agent_dialog.selected_index -= 1;
                 } else {
-                    self.agent_dialog.selected_index = self.agent_dialog.actions.len().saturating_sub(1);
+                    self.agent_dialog.selected_index =
+                        self.agent_dialog.actions.len().saturating_sub(1);
                 }
             }
             KeyCode::Down => {
                 if self.agent_dialog.actions.is_empty() {
                     return;
                 }
-                self.agent_dialog.selected_index = (self.agent_dialog.selected_index + 1) % self.agent_dialog.actions.len();
+                self.agent_dialog.selected_index =
+                    (self.agent_dialog.selected_index + 1) % self.agent_dialog.actions.len();
             }
             KeyCode::Enter => {
-                let action = self.agent_dialog.actions
+                let action = self
+                    .agent_dialog
+                    .actions
                     .get(self.agent_dialog.selected_index)
                     .cloned()
                     .unwrap_or_default();
@@ -184,7 +197,9 @@ impl App {
                     let full_path = self.store.root.join(&doc_path);
                     if let Ok(content) = self.fs.read_to_string(&full_path) {
                         let prompt = crate::tui::agent::build_expand_prompt(&content, &full_path);
-                        let _ = self.agent_spawner.spawn(&prompt, &full_path, &doc_title, &action);
+                        let _ = self
+                            .agent_spawner
+                            .spawn(&prompt, &full_path, &doc_title, &action);
                     }
                 } else if action == "Create children" {
                     self.spawn_create_children(&doc_path, &doc_title, config);
@@ -219,7 +234,9 @@ impl App {
             Err(_) => return,
         };
         let prompt = crate::tui::agent::build_create_children_prompt(&content, &child_type);
-        let _ = self.agent_spawner.spawn(&prompt, &full_path, doc_title, "Create children");
+        let _ = self
+            .agent_spawner
+            .spawn(&prompt, &full_path, doc_title, "Create children");
     }
 
     #[cfg(feature = "agent")]
@@ -246,7 +263,12 @@ impl App {
                             "Here is the document:\n\n{}\n\nUser request: {}",
                             content, prompt
                         );
-                        let _ = self.agent_spawner.spawn(&full_prompt, &full_path, &doc_title, "Custom prompt");
+                        let _ = self.agent_spawner.spawn(
+                            &full_prompt,
+                            &full_path,
+                            &doc_title,
+                            "Custom prompt",
+                        );
                     }
                 }
             }
@@ -292,10 +314,14 @@ impl App {
             (KeyCode::Char('g'), _) => self.scroll_offset = 0,
             (KeyCode::Char('G'), _) => self.scroll_offset = u16::MAX / 2,
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                self.scroll_offset = self.scroll_offset.saturating_add(self.fullscreen_height as u16 / 2);
+                self.scroll_offset = self
+                    .scroll_offset
+                    .saturating_add(self.fullscreen_height as u16 / 2);
             }
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(self.fullscreen_height as u16 / 2);
+                self.scroll_offset = self
+                    .scroll_offset
+                    .saturating_sub(self.fullscreen_height as u16 / 2);
             }
             _ => {}
         }
@@ -309,8 +335,8 @@ impl App {
             match code {
                 KeyCode::Char('d') => {
                     let jump = self.doc_list_height / 2;
-                    self.agent_selected_index = (self.agent_selected_index + jump)
-                        .min(record_count.saturating_sub(1));
+                    self.agent_selected_index =
+                        (self.agent_selected_index + jump).min(record_count.saturating_sub(1));
                 }
                 KeyCode::Char('u') => {
                     let jump = self.doc_list_height / 2;
@@ -323,8 +349,8 @@ impl App {
 
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
-                self.agent_selected_index = (self.agent_selected_index + 1)
-                    .min(record_count.saturating_sub(1));
+                self.agent_selected_index =
+                    (self.agent_selected_index + 1).min(record_count.saturating_sub(1));
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.agent_selected_index = self.agent_selected_index.saturating_sub(1);
@@ -448,8 +474,8 @@ impl App {
     fn handle_graph_key(&mut self, code: KeyCode, _modifiers: KeyModifiers, root: &Path) {
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
-                self.graph_selected = (self.graph_selected + 1)
-                    .min(self.graph_nodes.len().saturating_sub(1));
+                self.graph_selected =
+                    (self.graph_selected + 1).min(self.graph_nodes.len().saturating_sub(1));
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.graph_selected = self.graph_selected.saturating_sub(1);
@@ -462,7 +488,8 @@ impl App {
                         if let Some(type_idx) = self.doc_types.iter().position(|t| *t == doc_type) {
                             self.selected_type = type_idx;
                             self.build_doc_tree();
-                            if let Some(doc_idx) = self.doc_tree.iter().position(|n| n.path == path) {
+                            if let Some(doc_idx) = self.doc_tree.iter().position(|n| n.path == path)
+                            {
                                 self.selected_doc = doc_idx;
                             }
                         }
@@ -492,7 +519,13 @@ impl App {
     }
 
     #[allow(unused_variables)]
-    fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path, config: &Config) {
+    fn handle_normal_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        root: &Path,
+        config: &Config,
+    ) {
         match self.view_mode {
             ViewMode::Filters => return self.handle_filters_key(code, modifiers, root),
             ViewMode::Graph => return self.handle_graph_key(code, modifiers, root),
@@ -600,10 +633,8 @@ impl App {
                         matches!(rule, crate::engine::config::ValidationRule::ParentChild { parent, .. } if parent == &doc_type_str)
                     });
 
-                    let mut actions = vec![
-                        "Expand document".to_string(),
-                        "Custom prompt".to_string(),
-                    ];
+                    let mut actions =
+                        vec!["Expand document".to_string(), "Custom prompt".to_string()];
                     if has_children {
                         actions.push("Create children".to_string());
                     }

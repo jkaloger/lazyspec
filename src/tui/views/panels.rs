@@ -2,7 +2,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
+    },
     Frame,
 };
 
@@ -24,7 +27,10 @@ fn render_markdown_to_lines(text: &str, max_width: u16) -> Vec<Line<'static>> {
 }
 
 fn render_scrollbar(f: &mut Frame, area: Rect, total: usize, visible: usize, position: usize) {
-    let inner = area.inner(Margin { vertical: 1, horizontal: 0 });
+    let inner = area.inner(Margin {
+        vertical: 1,
+        horizontal: 0,
+    });
     let mut scrollbar_state = ScrollbarState::new(total)
         .viewport_content_length(visible)
         .position(position);
@@ -34,7 +40,13 @@ fn render_scrollbar(f: &mut Frame, area: Rect, total: usize, visible: usize, pos
     f.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
 }
 
-fn render_image_overlay(f: &mut Frame, app: &mut App, hash: u64, path: &std::path::Path, img_area: Rect) {
+fn render_image_overlay(
+    f: &mut Frame,
+    app: &mut App,
+    hash: u64,
+    path: &std::path::Path,
+    img_area: Rect,
+) {
     if img_area.height == 0 {
         return;
     }
@@ -45,7 +57,8 @@ fn render_image_overlay(f: &mut Frame, app: &mut App, hash: u64, path: &std::pat
         }
     }
     if let Some(state) = app.image_states.get_mut(&hash) {
-        let widget = ratatui_image::StatefulImage::<ratatui_image::protocol::StatefulProtocol>::new();
+        let widget =
+            ratatui_image::StatefulImage::<ratatui_image::protocol::StatefulProtocol>::new();
         f.render_stateful_widget(widget, img_area, state);
     }
 }
@@ -108,7 +121,11 @@ fn render_markdown_segment(
         }
     }
 
-    SegmentLines { lines, image_segments, wrapped_height }
+    SegmentLines {
+        lines,
+        image_segments,
+        wrapped_height,
+    }
 }
 
 fn render_diagram_overlays(
@@ -141,7 +158,11 @@ fn render_diagram_overlays(
                         inner.x,
                         inner.y.saturating_add(scrolled_y),
                         inner.width,
-                        img_height.min(inner.bottom().saturating_sub(inner.y.saturating_add(scrolled_y))),
+                        img_height.min(
+                            inner
+                                .bottom()
+                                .saturating_sub(inner.y.saturating_add(scrolled_y)),
+                        ),
                     );
                     if img_area.y < inner.bottom() {
                         render_image_overlay(f, app, hash, path, img_area);
@@ -183,9 +204,9 @@ fn doc_table_widths() -> [Constraint; 6] {
         Constraint::Length(1),  // gutter
         Constraint::Length(4),  // tree
         Constraint::Length(18), // ID
-        Constraint::Fill(1),   // title
+        Constraint::Fill(1),    // title
         Constraint::Length(12), // status
-        Constraint::Min(20),   // tags
+        Constraint::Min(20),    // tags
     ]
 }
 
@@ -218,6 +239,7 @@ fn check_doc_stale(path: &std::path::Path, doc_type: &str, config: &Config) -> (
     (is_gh, is_stale)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn doc_row_cells(
     id: &str,
     title: &str,
@@ -282,17 +304,20 @@ fn doc_row_cells(
         tag_spans.push(Span::styled(format!("[{}]", tag), Style::default().fg(tc)));
     }
     if tags.len() > 3 {
-        tag_spans.push(Span::styled(
-            format!(" +{}", tags.len() - 3),
-            dim_style,
-        ));
+        tag_spans.push(Span::styled(format!(" +{}", tags.len() - 3), dim_style));
     }
     let tags_cell = Cell::new(Line::from(tag_spans));
 
     vec![id_cell, title_cell, status_cell, tags_cell]
 }
 
-fn doc_row_for_node(app: &App, node: &DocListNode, index: usize, dim: bool, config: &Config) -> Row<'static> {
+fn doc_row_for_node(
+    app: &App,
+    node: &DocListNode,
+    index: usize,
+    dim: bool,
+    config: &Config,
+) -> Row<'static> {
     let tree_text = if node.depth > 0 {
         let leading = "   ".repeat(node.depth - 1);
         let is_last = match app.doc_tree.get(index + 1) {
@@ -302,12 +327,19 @@ fn doc_row_for_node(app: &App, node: &DocListNode, index: usize, dim: bool, conf
         let connector = if is_last { " └─ " } else { " ├─ " };
         format!("{}{}", leading, connector)
     } else if node.is_parent {
-        let indicator = if app.is_expanded(&node.path) { "▼ " } else { "▶ " };
+        let indicator = if app.is_expanded(&node.path) {
+            "▼ "
+        } else {
+            "▶ "
+        };
         format!("  {}", indicator)
     } else {
         "  ".to_string()
     };
-    let tree_cell = Cell::new(Span::styled(tree_text, Style::default().fg(Color::DarkGray)));
+    let tree_cell = Cell::new(Span::styled(
+        tree_text,
+        Style::default().fg(Color::DarkGray),
+    ));
 
     let gutter_cell = match app.git_status_cache.get(&node.path) {
         Some(GitFileStatus::New) => Cell::from("┃").style(Style::default().fg(Color::Green)),
@@ -353,10 +385,13 @@ pub fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = app
         .doc_types
         .iter()
-        .enumerate()
-        .map(|(_, dt)| {
+        .map(|dt| {
             let count = app.doc_count(dt);
-            let plural = app.type_plurals.get(&dt.to_string()).map(|s| s.as_str()).unwrap_or("unknown");
+            let plural = app
+                .type_plurals
+                .get(&dt.to_string())
+                .map(|s| s.as_str())
+                .unwrap_or("unknown");
             let content = format!("  {}  ({})", plural, count);
             ListItem::new(content)
         })
@@ -400,7 +435,9 @@ pub fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect, config: &Config) 
     };
 
     let highlight_style = if relations_focused {
-        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().add_modifier(Modifier::REVERSED)
     };
@@ -470,7 +507,13 @@ pub fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-pub fn render_document_preview(f: &mut Frame, app: &mut App, area: Rect, block: Block, doc: Option<&DocMeta>) {
+pub fn render_document_preview(
+    f: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    block: Block,
+    doc: Option<&DocMeta>,
+) {
     let Some(doc) = doc else {
         let paragraph = Paragraph::new(" No document selected.")
             .block(block)
@@ -479,7 +522,9 @@ pub fn render_document_preview(f: &mut Frame, app: &mut App, area: Rect, block: 
         return;
     };
 
-    let body = app.expanded_body_cache.get(&doc.path)
+    let body = app
+        .expanded_body_cache
+        .get(&doc.path)
         .cloned()
         .unwrap_or_default();
 
@@ -492,7 +537,10 @@ pub fn render_document_preview(f: &mut Frame, app: &mut App, area: Rect, block: 
         )),
         Line::from(vec![
             Span::raw(" Type: "),
-            Span::styled(format!("{}", doc.doc_type), Style::default().fg(Color::White)),
+            Span::styled(
+                format!("{}", doc.doc_type),
+                Style::default().fg(Color::White),
+            ),
             Span::raw("  Status: "),
             Span::styled(
                 format!("{}", doc.status),
@@ -501,9 +549,7 @@ pub fn render_document_preview(f: &mut Frame, app: &mut App, area: Rect, block: 
             Span::raw("  Author: "),
             Span::raw(&doc.author),
         ]),
-        Line::from(vec![
-            Span::raw(format!(" Date: {}", doc.date)),
-        ]),
+        Line::from(vec![Span::raw(format!(" Date: {}", doc.date))]),
     ];
 
     if !doc.tags.is_empty() {
@@ -537,10 +583,17 @@ pub fn render_document_preview(f: &mut Frame, app: &mut App, area: Rect, block: 
     };
     let panel_width = area.width.saturating_sub(2);
     let panel_height = area.height.saturating_sub(2);
-    let segments = crate::tui::content::diagram::build_preview_segments(&body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability, &diagram_blocks);
+    let segments = crate::tui::content::diagram::build_preview_segments(
+        &body,
+        &app.diagram_cache,
+        app.terminal_image_protocol,
+        &app.tool_availability,
+        &diagram_blocks,
+    );
 
     let content_width = area.width.saturating_sub(2) as usize;
-    let segment_lines = render_markdown_segment(&segments, panel_width, panel_height, content_width);
+    let segment_lines =
+        render_markdown_segment(&segments, panel_width, panel_height, content_width);
     let has_images = !segment_lines.image_segments.is_empty();
     lines.extend(segment_lines.lines);
 
@@ -550,14 +603,29 @@ pub fn render_document_preview(f: &mut Frame, app: &mut App, area: Rect, block: 
     f.render_widget(paragraph, area);
 
     if has_images {
-        let inner = area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+        let inner = area.inner(ratatui::layout::Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
         let header_y = wrapped_lines_total(&header_lines, inner.width as usize) as u16;
-        let segments_ref = crate::tui::content::diagram::build_preview_segments(&body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability, &diagram_blocks);
+        let segments_ref = crate::tui::content::diagram::build_preview_segments(
+            &body,
+            &app.diagram_cache,
+            app.terminal_image_protocol,
+            &app.tool_availability,
+            &diagram_blocks,
+        );
         render_diagram_overlays(f, app, &segments_ref, inner, panel_width, header_y, 0);
     }
 }
 
-pub fn render_relationship_sections(f: &mut Frame, app: &App, area: Rect, block: Block, doc: Option<&DocMeta>) {
+pub fn render_relationship_sections(
+    f: &mut Frame,
+    app: &App,
+    area: Rect,
+    block: Block,
+    doc: Option<&DocMeta>,
+) {
     let Some(doc) = doc else {
         let paragraph = Paragraph::new(" No document selected.")
             .block(block)
@@ -579,11 +647,7 @@ pub fn render_relationship_sections(f: &mut Frame, app: &App, area: Rect, block:
     let mut chain_paths = Vec::new();
     {
         let mut current_path = doc.path.clone();
-        loop {
-            let current_doc = match app.store.get(&current_path) {
-                Some(d) => d,
-                None => break,
-            };
+        while let Some(current_doc) = app.store.get(&current_path) {
             let implements_target = current_doc.related.iter().find_map(|r| {
                 if r.rel_type == RelationType::Implements {
                     if let Some(fwd) = app.store.forward_links.get(&current_doc.path) {
@@ -659,13 +723,21 @@ pub fn render_relationship_sections(f: &mut Frame, app: &App, area: Rect, block:
                 )
             } else {
                 let name = display_name(path);
-                (name.to_string(), "?".to_string(), "missing".to_string(), Color::Red)
+                (
+                    name.to_string(),
+                    "?".to_string(),
+                    "missing".to_string(),
+                    Color::Red,
+                )
             };
 
         ListItem::new(Line::from(vec![
             Span::raw("    "),
             Span::styled(format!("{:<35} ", title), Style::default()),
-            Span::styled(format!("{} ", doc_type_str), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{} ", doc_type_str),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::styled(format!("[{}]", status_str), Style::default().fg(status_clr)),
         ]))
     };
@@ -696,7 +768,11 @@ pub fn render_relationship_sections(f: &mut Frame, app: &App, area: Rect, block:
 
     let list = List::new(items)
         .block(block)
-        .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .highlight_symbol("  > ");
     let total_items = list_index;
     let mut state = ListState::default().with_selected(Some(selected_flat_index));
@@ -738,7 +814,9 @@ pub fn render_fullscreen_document(f: &mut Frame, app: &mut App) {
     ]);
     f.render_widget(Paragraph::new(header), layout[0]);
 
-    let body = app.expanded_body_cache.get(&doc.path)
+    let body = app
+        .expanded_body_cache
+        .get(&doc.path)
         .cloned()
         .unwrap_or_default();
 
@@ -757,9 +835,16 @@ pub fn render_fullscreen_document(f: &mut Frame, app: &mut App) {
         Some((p, _, b)) if p == &doc.path => b.clone(),
         _ => crate::tui::content::diagram::extract_diagram_blocks(&display_body),
     };
-    let segments = crate::tui::content::diagram::build_preview_segments(&display_body, &app.diagram_cache, app.terminal_image_protocol, &app.tool_availability, &fullscreen_blocks);
+    let segments = crate::tui::content::diagram::build_preview_segments(
+        &display_body,
+        &app.diagram_cache,
+        app.terminal_image_protocol,
+        &app.tool_availability,
+        &fullscreen_blocks,
+    );
 
-    let segment_lines = render_markdown_segment(&segments, panel_width, panel_height, content_width);
+    let segment_lines =
+        render_markdown_segment(&segments, panel_width, panel_height, content_width);
     let total_lines = segment_lines.wrapped_height;
 
     let paragraph = Paragraph::new(segment_lines.lines)
@@ -773,11 +858,20 @@ pub fn render_fullscreen_document(f: &mut Frame, app: &mut App) {
         .scroll((app.scroll_offset, 0));
     f.render_widget(paragraph, layout[1]);
 
-    let inner = layout[1].inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+    let inner = layout[1].inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
     render_diagram_overlays(f, app, &segments, inner, panel_width, 0, app.scroll_offset);
 
     if total_lines > app.fullscreen_height {
-        render_scrollbar(f, layout[1], total_lines, app.fullscreen_height, app.scroll_offset as usize);
+        render_scrollbar(
+            f,
+            layout[1],
+            total_lines,
+            app.fullscreen_height,
+            app.scroll_offset as usize,
+        );
     }
 }
 
@@ -802,7 +896,9 @@ pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect, config: &Co
     };
 
     let status_style = if app.filter_focused == FilterField::Status {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else if app.filter_status.is_some() {
         Style::default().fg(Color::Yellow)
     } else {
@@ -810,7 +906,9 @@ pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect, config: &Co
     };
 
     let tag_style = if app.filter_focused == FilterField::Tag {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else if app.filter_tag.is_some() {
         Style::default().fg(Color::Yellow)
     } else {
@@ -818,16 +916,24 @@ pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect, config: &Co
     };
 
     let clear_style = if app.filter_focused == FilterField::ClearAction {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     };
 
     let filter_lines = vec![
         Line::from(""),
-        Line::from(Span::styled(format!("  Status: [{}]", status_value), status_style)),
+        Line::from(Span::styled(
+            format!("  Status: [{}]", status_value),
+            status_style,
+        )),
         Line::from(""),
-        Line::from(Span::styled(format!("  Tag:    [{}]", tag_value), tag_style)),
+        Line::from(Span::styled(
+            format!("  Tag:    [{}]", tag_value),
+            tag_style,
+        )),
         Line::from(""),
         Line::from(Span::styled("  [clear filters]", clear_style)),
     ];
@@ -847,24 +953,34 @@ pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect, config: &Co
     let relations_focused = app.preview_tab == PreviewTab::Relations;
     let dim = relations_focused;
 
-    let filtered_paths: Vec<PathBuf> = app.filtered_docs_cache
-        .as_ref()
-        .map(|c| c.clone())
-        .unwrap_or_default();
+    let filtered_paths: Vec<PathBuf> = app.filtered_docs_cache.clone().unwrap_or_default();
 
     let rows: Vec<Row> = filtered_paths
         .iter()
         .filter_map(|p| app.store.get(p))
         .map(|doc| {
             let gutter_cell = match app.git_status_cache.get(&doc.path) {
-                Some(GitFileStatus::New) => Cell::from("┃").style(Style::default().fg(Color::Green)),
-                Some(GitFileStatus::Modified) => Cell::from("┃").style(Style::default().fg(Color::Yellow)),
+                Some(GitFileStatus::New) => {
+                    Cell::from("┃").style(Style::default().fg(Color::Green))
+                }
+                Some(GitFileStatus::Modified) => {
+                    Cell::from("┃").style(Style::default().fg(Color::Yellow))
+                }
                 None => Cell::from(" "),
             };
             let tree_cell = Cell::new("");
             let mut cells = vec![gutter_cell, tree_cell];
             let (is_gh, is_stale) = check_doc_stale(&doc.path, doc.doc_type.as_str(), config);
-            cells.extend(doc_row_cells(&doc.id, &doc.title, &doc.status, &doc.tags, doc.virtual_doc, dim, is_gh, is_stale));
+            cells.extend(doc_row_cells(
+                &doc.id,
+                &doc.title,
+                &doc.status,
+                &doc.tags,
+                doc.virtual_doc,
+                dim,
+                is_gh,
+                is_stale,
+            ));
             let style = if dim {
                 Style::default().fg(Color::DarkGray)
             } else {
@@ -883,7 +999,9 @@ pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect, config: &Co
     };
 
     let highlight_style = if relations_focused {
-        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().add_modifier(Modifier::REVERSED)
     };
@@ -894,7 +1012,10 @@ pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect, config: &Co
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(border_style)
-                .title(format!(" Documents ({} of {}) ", filtered_count, total_count)),
+                .title(format!(
+                    " Documents ({} of {}) ",
+                    filtered_count, total_count
+                )),
         )
         .row_highlight_style(highlight_style);
 
@@ -942,7 +1063,9 @@ pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect, config: &Co
 
     match app.preview_tab {
         PreviewTab::Preview => render_document_preview(f, app, right[1], block, doc.as_ref()),
-        PreviewTab::Relations => render_relationship_sections(f, app, right[1], block, doc.as_ref()),
+        PreviewTab::Relations => {
+            render_relationship_sections(f, app, right[1], block, doc.as_ref())
+        }
     }
 }
 
@@ -963,10 +1086,12 @@ pub fn draw_agents_screen(f: &mut Frame, app: &App, area: Rect) {
         .title(" Agents ");
 
     if app.agent_spawner.records.is_empty() {
-        let paragraph = Paragraph::new("No agents have been invoked yet. Press `a` on a document to start one.")
-            .style(Style::default().fg(Color::DarkGray))
-            .alignment(ratatui::layout::Alignment::Center)
-            .block(block);
+        let paragraph = Paragraph::new(
+            "No agents have been invoked yet. Press `a` on a document to start one.",
+        )
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(ratatui::layout::Alignment::Center)
+        .block(block);
         f.render_widget(paragraph, main_area);
     } else {
         let rows: Vec<Row> = app
@@ -980,11 +1105,24 @@ pub fn draw_agents_screen(f: &mut Frame, app: &App, area: Rect) {
                     AgentStatus::Failed => ("✘", Color::Red),
                 };
                 Row::new(vec![
-                    Cell::from(Span::styled(format!("  {}", icon), Style::default().fg(color))),
-                    Cell::from(Span::raw(format!("{:<14}", record.session_id.split('-').next().unwrap_or(&record.session_id)))),
+                    Cell::from(Span::styled(
+                        format!("  {}", icon),
+                        Style::default().fg(color),
+                    )),
+                    Cell::from(Span::raw(format!(
+                        "{:<14}",
+                        record
+                            .session_id
+                            .split('-')
+                            .next()
+                            .unwrap_or(&record.session_id)
+                    ))),
                     Cell::from(Span::raw(&*record.doc_title)),
                     Cell::from(Span::raw(&*record.action)),
-                    Cell::from(Span::styled(&*record.started_at, Style::default().fg(Color::DarkGray))),
+                    Cell::from(Span::styled(
+                        &*record.started_at,
+                        Style::default().fg(Color::DarkGray),
+                    )),
                 ])
             })
             .collect();
@@ -1000,8 +1138,11 @@ pub fn draw_agents_screen(f: &mut Frame, app: &App, area: Rect) {
         let table = Table::new(rows, widths)
             .block(block)
             .header(
-                Row::new(vec!["  ", "Session", "Document", "Action", "Started"])
-                    .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+                Row::new(vec!["  ", "Session", "Document", "Action", "Started"]).style(
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ),
             )
             .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
@@ -1071,14 +1212,19 @@ pub fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
                     Some(next) => next.depth <= node.depth,
                     None => true,
                 };
-                let connector = if is_last { " └─▶ " } else { " ├─▶ " };
+                let connector = if is_last {
+                    " └─▶ "
+                } else {
+                    " ├─▶ "
+                };
                 spans.push(Span::styled(
                     format!("{}{}", leading, connector),
                     Style::default().fg(Color::DarkGray),
                 ));
             }
 
-            let type_icon = app.type_icons
+            let type_icon = app
+                .type_icons
                 .get(&node.doc_type.to_string())
                 .map(|s| s.as_str())
                 .unwrap_or("○");

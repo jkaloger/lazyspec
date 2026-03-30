@@ -41,6 +41,9 @@ pub fn run_json(store: &Store, doc_type: Option<&str>, status: Option<&str>) -> 
 }
 
 fn json_output(docs: &[&crate::engine::document::DocMeta], store: &Store) -> String {
-    let items: Vec<_> = docs.iter().map(|d| doc_to_json_with_family(d, store)).collect();
+    let items: Vec<_> = docs
+        .iter()
+        .map(|d| doc_to_json_with_family(d, store))
+        .collect();
     serde_json::to_string_pretty(&items).unwrap()
 }

@@ -40,10 +40,7 @@ fn cascade_updates_related_frontmatter() {
     assert_eq!(related_update.old_value, "docs/rfcs/RFC-020-foo.md");
     assert_eq!(related_update.new_value, "docs/rfcs/RFC-021-foo.md");
 
-    let content = fs::read_to_string(
-        fixture.root().join("docs/stories/STORY-042-bar.md"),
-    )
-    .unwrap();
+    let content = fs::read_to_string(fixture.root().join("docs/stories/STORY-042-bar.md")).unwrap();
     let meta = DocMeta::parse(&content).unwrap();
     assert_eq!(meta.related[0].target, "docs/rfcs/RFC-021-foo.md");
 }
@@ -71,10 +68,8 @@ fn cascade_updates_body_ref_directive() {
     assert!(body_update.old_value.contains("docs/rfcs/RFC-020-foo.md"));
     assert!(body_update.new_value.contains("docs/rfcs/RFC-021-foo.md"));
 
-    let content = fs::read_to_string(
-        fixture.root().join("docs/stories/STORY-050-uses-ref.md"),
-    )
-    .unwrap();
+    let content =
+        fs::read_to_string(fixture.root().join("docs/stories/STORY-050-uses-ref.md")).unwrap();
     assert!(content.contains("docs/rfcs/RFC-021-foo.md"));
     assert!(!content.contains("docs/rfcs/RFC-020-foo.md"));
 }
@@ -122,10 +117,8 @@ fn cascade_dry_run_returns_updates_without_modifying_files() {
     let fixture = fixture_with_related();
     let store = fixture.store();
 
-    let content_before = fs::read_to_string(
-        fixture.root().join("docs/stories/STORY-042-bar.md"),
-    )
-    .unwrap();
+    let content_before =
+        fs::read_to_string(fixture.root().join("docs/stories/STORY-042-bar.md")).unwrap();
 
     let updates = cascade_references(
         fixture.root(),
@@ -138,10 +131,8 @@ fn cascade_dry_run_returns_updates_without_modifying_files() {
 
     assert!(!updates.is_empty());
 
-    let content_after = fs::read_to_string(
-        fixture.root().join("docs/stories/STORY-042-bar.md"),
-    )
-    .unwrap();
+    let content_after =
+        fs::read_to_string(fixture.root().join("docs/stories/STORY-042-bar.md")).unwrap();
     assert_eq!(content_before, content_after);
 }
 

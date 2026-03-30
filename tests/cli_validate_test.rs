@@ -1,6 +1,6 @@
 mod common;
 
-use lazyspec::engine::config::{Config, TypeDef, NumberingStrategy};
+use lazyspec::engine::config::{Config, NumberingStrategy, TypeDef};
 use lazyspec::engine::validation::ValidationIssue;
 use std::path::PathBuf;
 
@@ -38,7 +38,10 @@ fn validate_catches_unlinked_iteration() {
     let result = store.validate_full(&fixture.config());
 
     assert!(!result.errors.is_empty());
-    let has_unlinked = result.errors.iter().any(|e| matches!(e, ValidationIssue::MissingParentLink { .. }));
+    let has_unlinked = result
+        .errors
+        .iter()
+        .any(|e| matches!(e, ValidationIssue::MissingParentLink { .. }));
     assert!(has_unlinked);
 }
 
@@ -51,7 +54,10 @@ fn validate_catches_unlinked_adr() {
     let result = store.validate_full(&fixture.config());
 
     assert!(!result.errors.is_empty());
-    let has_unlinked = result.errors.iter().any(|e| matches!(e, ValidationIssue::MissingRelation { .. }));
+    let has_unlinked = result
+        .errors
+        .iter()
+        .any(|e| matches!(e, ValidationIssue::MissingRelation { .. }));
     assert!(has_unlinked);
 }
 
@@ -185,7 +191,10 @@ fn validate_ignore_excludes_from_duplicate_check() {
         .iter()
         .filter(|e| matches!(e, ValidationIssue::DuplicateId { .. }))
         .collect();
-    assert!(dups.is_empty(), "validate_ignore docs should be excluded from duplicate ID check");
+    assert!(
+        dups.is_empty(),
+        "validate_ignore docs should be excluded from duplicate ID check"
+    );
 }
 
 #[test]
@@ -208,7 +217,10 @@ fn validate_broken_link_with_nonexistent_id() {
     match &broken[0] {
         ValidationIssue::BrokenLink { source, target } => {
             assert!(source.ends_with("ADR-001-bad-id.md"));
-            assert_eq!(target, "RFC-999", "broken link target should be the unresolved ID");
+            assert_eq!(
+                target, "RFC-999",
+                "broken link target should be the unresolved ID"
+            );
         }
         _ => unreachable!(),
     }
@@ -231,7 +243,11 @@ fn validate_valid_id_link_is_not_broken() {
         .iter()
         .filter(|e| matches!(e, ValidationIssue::BrokenLink { .. }))
         .collect();
-    assert!(broken.is_empty(), "valid ID link should not produce BrokenLink error, got: {:?}", broken);
+    assert!(
+        broken.is_empty(),
+        "valid ID link should not produce BrokenLink error, got: {:?}",
+        broken
+    );
 }
 
 #[test]
@@ -247,18 +263,23 @@ fn validate_broken_link_with_nonexistent_id_in_json_output() {
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let errors = parsed["errors"].as_array().unwrap();
-    let has_broken = errors.iter().any(|e| {
-        e.as_str()
-            .map(|s| s.contains("RFC-999"))
-            .unwrap_or(false)
-    });
-    assert!(has_broken, "JSON output should contain broken link error with unresolved ID RFC-999, got: {:?}", errors);
+    let has_broken = errors
+        .iter()
+        .any(|e| e.as_str().map(|s| s.contains("RFC-999")).unwrap_or(false));
+    assert!(
+        has_broken,
+        "JSON output should contain broken link error with unresolved ID RFC-999, got: {:?}",
+        errors
+    );
 }
 
 fn config_with_extra_types(extra: Vec<TypeDef>) -> Config {
     let mut config = Config::default();
     let extra_names: Vec<&str> = extra.iter().map(|t| t.name.as_str()).collect();
-    config.documents.types.retain(|t| !extra_names.contains(&t.name.as_str()));
+    config
+        .documents
+        .types
+        .retain(|t| !extra_names.contains(&t.name.as_str()));
     config.documents.types.extend(extra);
     config
 }
@@ -296,9 +317,11 @@ fn child_type(name: &str, dir: &str, prefix: &str, parent: &str) -> TypeDef {
 #[test]
 fn singleton_violation_detected() {
     let fixture = common::TestFixture::new();
-    let config = config_with_extra_types(vec![
-        singleton_type("convention", "docs/convention", "CONV"),
-    ]);
+    let config = config_with_extra_types(vec![singleton_type(
+        "convention",
+        "docs/convention",
+        "CONV",
+    )]);
 
     std::fs::create_dir_all(fixture.root().join("docs/convention")).unwrap();
     fixture.write_doc(
@@ -313,7 +336,11 @@ fn singleton_violation_detected() {
     let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
     let result = store.validate_full(&config);
 
-    let violations: Vec<_> = result.errors.iter().filter(|e| matches!(e, ValidationIssue::SingletonViolation { .. })).collect();
+    let violations: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|e| matches!(e, ValidationIssue::SingletonViolation { .. }))
+        .collect();
     assert_eq!(violations.len(), 1);
     match &violations[0] {
         ValidationIssue::SingletonViolation { type_name, paths } => {
@@ -327,9 +354,11 @@ fn singleton_violation_detected() {
 #[test]
 fn singleton_single_doc_no_error() {
     let fixture = common::TestFixture::new();
-    let config = config_with_extra_types(vec![
-        singleton_type("convention", "docs/convention", "CONV"),
-    ]);
+    let config = config_with_extra_types(vec![singleton_type(
+        "convention",
+        "docs/convention",
+        "CONV",
+    )]);
 
     std::fs::create_dir_all(fixture.root().join("docs/convention")).unwrap();
     fixture.write_doc(
@@ -340,7 +369,11 @@ fn singleton_single_doc_no_error() {
     let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
     let result = store.validate_full(&config);
 
-    let violations: Vec<_> = result.errors.iter().filter(|e| matches!(e, ValidationIssue::SingletonViolation { .. })).collect();
+    let violations: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|e| matches!(e, ValidationIssue::SingletonViolation { .. }))
+        .collect();
     assert!(violations.is_empty());
 }
 
@@ -365,7 +398,11 @@ fn parent_type_inside_dir_no_error() {
     let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
     let result = store.validate_full(&config);
 
-    let violations: Vec<_> = result.errors.iter().filter(|e| matches!(e, ValidationIssue::ParentTypeViolation { .. })).collect();
+    let violations: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|e| matches!(e, ValidationIssue::ParentTypeViolation { .. }))
+        .collect();
     assert!(violations.is_empty());
 }
 
@@ -391,10 +428,18 @@ fn parent_type_outside_dir_error() {
     let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
     let result = store.validate_full(&config);
 
-    let violations: Vec<_> = result.errors.iter().filter(|e| matches!(e, ValidationIssue::ParentTypeViolation { .. })).collect();
+    let violations: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|e| matches!(e, ValidationIssue::ParentTypeViolation { .. }))
+        .collect();
     assert_eq!(violations.len(), 1);
     match &violations[0] {
-        ValidationIssue::ParentTypeViolation { path, type_name, expected_dir } => {
+        ValidationIssue::ParentTypeViolation {
+            path,
+            type_name,
+            expected_dir,
+        } => {
             assert_eq!(type_name, "dictum");
             assert_eq!(expected_dir, "docs/convention");
             assert!(path.to_string_lossy().contains("DICT-001"));
@@ -429,10 +474,17 @@ fn parent_type_references_non_singleton_error() {
     let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
     let result = store.validate_full(&config);
 
-    let violations: Vec<_> = result.errors.iter().filter(|e| matches!(e, ValidationIssue::ParentTypeNotSingleton { .. })).collect();
+    let violations: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|e| matches!(e, ValidationIssue::ParentTypeNotSingleton { .. }))
+        .collect();
     assert_eq!(violations.len(), 1);
     match &violations[0] {
-        ValidationIssue::ParentTypeNotSingleton { type_name, parent_type } => {
+        ValidationIssue::ParentTypeNotSingleton {
+            type_name,
+            parent_type,
+        } => {
             assert_eq!(type_name, "dictum");
             assert_eq!(parent_type, "guideline");
         }

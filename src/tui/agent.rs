@@ -167,8 +167,8 @@ impl AgentSpawner {
     pub fn poll_finished(&mut self) {
         let mut finished = Vec::new();
 
-        self.running.retain_mut(|(session_id, child)| {
-            match child.try_wait() {
+        self.running
+            .retain_mut(|(session_id, child)| match child.try_wait() {
                 Ok(Some(exit_status)) => {
                     let status = if exit_status.success() {
                         AgentStatus::Complete
@@ -183,8 +183,7 @@ impl AgentSpawner {
                     finished.push((session_id.clone(), AgentStatus::Failed));
                     false
                 }
-            }
-        });
+            });
 
         let now = chrono::Utc::now().to_rfc3339();
         for (session_id, status) in finished {
