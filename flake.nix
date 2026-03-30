@@ -32,8 +32,6 @@
         });
 
         checks = {
-          build = self.packages.${system}.default;
-
           clippy = craneLib.cargoClippy (commonArgs // {
             inherit cargoArtifacts;
             cargoClippyExtraArgs = "--all-targets -- --deny warnings";
