@@ -8,6 +8,7 @@ pub mod fix;
 pub mod ignore;
 pub mod init;
 pub mod json;
+pub mod lease;
 pub mod link;
 pub mod list;
 pub mod pin;
@@ -243,5 +244,50 @@ pub enum Commands {
     Reservations {
         #[command(subcommand)]
         command: ReservationsCommand,
+    },
+    /// Acquire a lease on a document
+    Claim {
+        /// Document ID (e.g. STORY-108, RFC-035)
+        #[arg()]
+        doc_id: String,
+        /// Agent identity (defaults to auto-resolved agent ID)
+        #[arg(long)]
+        agent_id: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Release a lease on a document
+    Release {
+        /// Document ID (e.g. STORY-108, RFC-035)
+        #[arg()]
+        doc_id: String,
+        /// Agent identity (defaults to auto-resolved agent ID)
+        #[arg(long)]
+        agent_id: Option<String>,
+        /// Admin release: verify the current holder matches this ID
+        #[arg(long)]
+        expected_holder: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List all active leases
+    Leases {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Extend the expiry of a held lease
+    Heartbeat {
+        /// Document ID (e.g. STORY-108, RFC-035)
+        #[arg()]
+        doc_id: String,
+        /// Agent identity (defaults to auto-resolved agent ID)
+        #[arg(long)]
+        agent_id: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }

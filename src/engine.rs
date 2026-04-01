@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod cache;
 pub mod certification;
 pub mod config;
@@ -5,7 +6,9 @@ pub mod document;
 pub mod fs;
 pub mod fs_ops;
 pub mod gh;
+pub mod git_ref;
 pub mod git_status;
+pub mod lease;
 pub mod github;
 pub mod hashing;
 pub mod issue_body;
