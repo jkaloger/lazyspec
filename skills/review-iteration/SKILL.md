@@ -12,87 +12,23 @@ If you haven't run the tests in this session, you cannot claim they pass.
 <HARD-GATE>
 Do NOT approve without running verification commands in this session.
 Stage 1 (AC compliance) MUST pass before entering Stage 2 (code quality).
-If ACs fail during a `/build` per-task review, dispatch a fix subagent.
-If ACs fail during a standalone review, use `/create-iteration` to re-plan.
+If ACs fail during `/build` per-task review, dispatch a fix subagent.
+If ACs fail during standalone review, report to user.
 </HARD-GATE>
 
-## Forbidden Actions
-
 <NEVER>
-- Do NOT write document files directly. Use `lazyspec create` to create documents and `lazyspec link` to create relationships.
-- Do NOT edit a document you haven't read. Always `lazyspec show <id>` or `Read` a file before modifying it.
-- Do NOT skip the workflow pipeline. Features need RFC -> Story -> Iteration. Bug fixes need Iteration.
+- Do NOT write document files directly. Use `lazyspec create` and `lazyspec link`.
+- Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
 - Do NOT approve without running tests in the current session. Do NOT trust prior test reports.
 </NEVER>
 
-## CLI Reference
-
-Before using any `lazyspec` command, run `lazyspec help` to see all available
-commands, and `lazyspec help <subcommand>` to see the full usage for that
-command. Do not assume you know the flags or arguments -- verify with `--help`.
-
-Always pass `--json` when the command supports it. This gives you structured,
-parseable output. Only omit `--json` when presenting output directly to the user.
-
-If a `lazyspec` command fails, run `lazyspec help <subcommand>` to check
-the correct usage before retrying. Do not guess at fixes or retry the same
-command blindly.
-
-# Review Iteration
-
-## Workflow Position
-
-```d2
-plan -> write-rfc -> create-story -> resolve-context -> create-iteration -> build -> review-iteration
-
-review-iteration.style.fill: "#4A9EFF"
-review-iteration.style.font-color: "#FFFFFF"
-plan.style.opacity: 0.4
-write-rfc.style.opacity: 0.4
-create-story.style.opacity: 0.4
-resolve-context.style.opacity: 0.4
-create-iteration.style.opacity: 0.4
-build.style.opacity: 0.4
-```
+Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. On failure, check `--help` before retrying.
 
 ## Modes
 
-This skill operates in two modes:
+**Per-task review** (dispatched by `/build` after each task): scoped to task ACs. On failure: report to build orchestrator for fix dispatch.
 
-**Per-task review** (dispatched as a reviewer subagent by `/build` after each task):
-
-- Scoped to the ACs relevant to the completed task
-- Same two-stage process (AC compliance first, code quality second)
-- On failure: report back to `/build` orchestrator, which dispatches a fix subagent
-
-**Full review** (dispatched by `/build` as final gate, or used standalone):
-
-- Checks ALL Story ACs against the complete implementation
-- On failure during `/build`: targeted fix subagents for specific gaps
-- On failure standalone: report to user
-
-## Preflight
-
-1. Resolve the chain with `lazyspec context <iteration-id> --json` to see RFC -> Story -> Iteration
-2. Read the iteration body with `lazyspec show <iteration-id> --json`
-3. Read the parent Story ACs with `lazyspec show <story-id> --json`
-4. Do NOT begin review until both documents are loaded into context
-
-## The Gate
-
-```
-BEFORE claiming review passes:
-
-1. IDENTIFY: Which Story ACs does this iteration cover?
-2. RUN: Execute the FULL test suite (fresh, in this session)
-3. READ: Full output, check exit code, count failures
-4. VERIFY: Does each claimed AC have a passing test?
-   - If NO: State which ACs are unmet. Return to create-iteration.
-   - If YES: Proceed to Stage 2 (code quality)
-5. ONLY THEN: Approve
-
-Skip any step = not a review
-```
+**Full review** (final `/build` gate or standalone): checks ALL Story ACs. On failure during build: targeted fix subagents. On failure standalone: report to user.
 
 ## Workflow
 
@@ -100,97 +36,65 @@ Skip any step = not a review
 Read iteration doc -> Read parent story ACs -> Run full test suite -> All ACs satisfied?
 
 All ACs satisfied?.shape: diamond
-All ACs satisfied? -> Fix (see failure handling below): no
+All ACs satisfied? -> Fix (see failure handling): no
 All ACs satisfied? -> Code quality review: yes
 
 Code quality review -> Critical issues?
 
 Critical issues?.shape: diamond
-Critical issues? -> Fix (see failure handling below): yes
+Critical issues? -> Fix (see failure handling): yes
 Critical issues? -> Approve: no
 
 Approve.shape: double_circle
 ```
 
+## Preflight
+
+1. `lazyspec context <iteration-id> --json` to see the chain
+2. `lazyspec show <iteration-id> --json` for iteration body
+3. `lazyspec show <story-id> --json` for Story ACs
+4. Do NOT begin review until both documents are loaded
+
 ## Stage 1: AC Compliance
 
-1. Run `lazyspec context <iteration-id> --json` to see the full chain.
-2. Run `lazyspec show <iteration-id> --json` to read the iteration body.
-3. Run `lazyspec show <story-id> --json` to read the Story's ACs.
-4. Run the full test suite. Show the output.
-5. For each AC the iteration claims to cover: verify the test exists and passes.
-6. If any AC is not satisfied, state which ACs are unmet. See Failure Handling below for what to do next.
+1. Run the full test suite. Show output.
+2. For each AC the iteration claims to cover: verify a passing test exists.
+3. If any AC unmet: state which ACs failed. See failure handling in Modes section.
 
 ## Stage 2: Code Quality
 
-Only enter this stage if all ACs are satisfied.
+Only enter if all ACs are satisfied.
 
-1. Review the code changes for correctness and clarity.
-2. Verify no unnecessary complexity (YAGNI -- only what was asked for).
-3. Check for real duplication worth extracting (DRY).
-4. Check for security issues.
-5. Evaluate test quality against these properties:
+1. Review code for correctness and clarity.
+2. YAGNI: only what was asked for. DRY: real duplication worth extracting. Security issues.
+3. Evaluate test quality:
 
-   | Property              | What to check                                              |
-   | --------------------- | ---------------------------------------------------------- |
-   | Behavioral            | Tests assert on behavior, not implementation details       |
-   | Structure-insensitive | A refactor preserving behavior shouldn't break tests       |
-   | Isolated              | No order dependence, no shared mutable state between tests |
-   | Deterministic         | No flaky results from timing, randomness, or global state  |
-   | Readable              | Motivation for each test is obvious to the reader          |
-   | Specific              | When a test fails, the cause is obvious                    |
-   | Writable              | Test complexity is proportional to code complexity         |
+   | Property | Check |
+   |----------|-------|
+   | Behavioral | Asserts on behavior, not implementation details |
+   | Structure-insensitive | Refactor preserving behavior shouldn't break tests |
+   | Isolated | No order dependence or shared mutable state |
+   | Deterministic | No flaky results from timing, randomness, global state |
+   | Readable | Motivation for each test is obvious |
+   | Specific | Failure cause is obvious |
 
-   These properties conflict. If a test trades one for another (e.g. an
-   integration test that sacrifices Fast/Isolated for Predictive/Inspiring),
-   the tradeoff should be noted. Flag unjustified tradeoffs to the collaborator.
-
-## Failure Handling
-
-The response to a failed review depends on context:
-
-**During `/build` per-task review:** Report the specific failures back to the `/build` orchestrator. The build skill will dispatch a fresh implementer subagent with the failure details. Do NOT re-plan the iteration or use `/create-iteration`.
-
-**During `/build` final review:** If individual ACs are unmet, the build skill dispatches targeted fix subagents. If the failures indicate a fundamental planning problem (wrong approach, missing tasks), escalate to the user.
-
-**Standalone review (not during build):** Report failures to the user. The user decides whether to use `/create-iteration` to re-plan or fix directly.
+   Flag unjustified property tradeoffs.
 
 ## Red Flags
 
-| Red Flag                     | Reality                                                         |
-| ---------------------------- | --------------------------------------------------------------- |
-| "The agent says tests pass"  | Run them yourself. Trust is not evidence.                       |
-| "I ran them earlier"         | Earlier is stale. Run them now, in this session.                |
-| "The code looks right to me" | Code review before AC compliance is backwards. Check ACs first. |
-| "It mostly works"            | Mostly = some ACs aren't met. Return to implementation.         |
-
-## Verification
-
-Before claiming this review is approved:
-
-- [ ] Test suite has been run in this session with full output shown
-- [ ] Every claimed AC has a corresponding passing test
-- [ ] Code quality review completed (only after Stage 1 passes)
-- [ ] `lazyspec validate --json` passes
+| Red Flag | Reality |
+|----------|---------|
+| "The agent says tests pass" | Run them yourself. Trust is not evidence. |
+| "I ran them earlier" | Earlier is stale. Run them now, in this session. |
+| "The code looks right to me" | Check ACs first. Code review before AC compliance is backwards. |
 
 ## Status Updates
 
-When a review passes (both stages), update document statuses.
-
-Run `lazyspec help update` to confirm usage.
-
-```bash
-lazyspec update <iteration-path> --status accepted
-```
-
-Then check whether the parent Story and RFC should also be promoted:
-
-- If all iterations under a Story are accepted and all Story ACs are covered, mark the Story as accepted.
-- If all Stories under an RFC are accepted, mark the RFC as accepted.
+On approval: `lazyspec update <iteration-path> --status accepted`. Then check whether parent Story (all ACs covered?) and RFC (all stories accepted?) should also be promoted.
 
 ## Rules
 
 - Never review code quality before AC compliance
-- The Story is the spec -- if the code satisfies the ACs, it's correct by definition
+- The Story is the spec -- if code satisfies the ACs, it's correct by definition
 - If ACs are ambiguous, that's a Story problem, not an Iteration problem
 - Always update document statuses after a successful review

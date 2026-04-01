@@ -11,46 +11,17 @@ If you're about to create a Story without an RFC, stop. Write the RFC first.
 
 <HARD-GATE>
 Do NOT create Stories until this RFC is written and the user has approved it.
-After completion: use the `/create-story` skill for each vertical slice identified.
+After completion: use `/create-story` for each vertical slice identified.
 </HARD-GATE>
 
-## Forbidden Actions
-
 <NEVER>
-- Do NOT write document files directly. Use `lazyspec create` to create documents and `lazyspec link` to create relationships.
-- Do NOT edit a document you haven't read. Always `lazyspec show <id>` or `Read` a file before modifying it.
-- Do NOT skip the workflow pipeline. Features need RFC -> Story -> Iteration. Bug fixes need Iteration.
-- Do NOT create Story documents from this skill. Finish the RFC, get approval, then use the `/create-story` skill.
+- Do NOT write document files directly. Use `lazyspec create` and `lazyspec link`.
+- Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
+- Do NOT skip the workflow pipeline. Features need RFC -> Story -> Iteration.
+- Do NOT create Story documents from this skill. Finish the RFC, get approval, then use `/create-story`.
 </NEVER>
 
-## CLI Reference
-
-Before using any `lazyspec` command, run `lazyspec help` to see all available
-commands, and `lazyspec help <subcommand>` to see the full usage for that
-command. Do not assume you know the flags or arguments -- verify with `--help`.
-
-Always pass `--json` when the command supports it. This gives you structured,
-parseable output. Only omit `--json` when presenting output directly to the user.
-
-If a `lazyspec` command fails, run `lazyspec help <subcommand>` to check
-the correct usage before retrying. Do not guess at fixes or retry the same
-command blindly.
-
-# Write RFC
-
-## Workflow Position
-
-```d2
-plan -> write-rfc -> create-story -> resolve-context -> create-iteration -> build
-
-write-rfc.style.fill: "#4A9EFF"
-write-rfc.style.font-color: "#FFFFFF"
-plan.style.opacity: 0.4
-create-story.style.opacity: 0.4
-resolve-context.style.opacity: 0.4
-create-iteration.style.opacity: 0.4
-build.style.opacity: 0.4
-```
+Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. On failure, check `--help` before retrying.
 
 ## Workflow
 
@@ -67,65 +38,29 @@ Use /create-story skill.shape: double_circle
 
 ## Preflight
 
-0. Load convention context: run `lazyspec convention --tags rfc,architecture --json`. If the command returns non-empty dicta, use them to inform the RFC's design intent and interface sketches. If the result is empty or the command returns no convention, proceed without injecting any convention context.
-1. Read relevant documents using `lazyspec show --json` before modifying anything
-2. Check for existing artifacts using `lazyspec search --json` and `lazyspec list --json`
-3. Search for existing RFCs on the topic: `lazyspec search "<topic>" --json`, `lazyspec list rfc --json`
-4. Read any related RFCs with `lazyspec show <id> --json`
-5. Confirm no existing RFC already covers this design
+0. Load convention context: `lazyspec convention --tags rfc,architecture --json`. Use non-empty results to inform design.
+1. Search for existing RFCs: `lazyspec search "<topic>" --json`, `lazyspec list rfc --json`
+2. Read related RFCs: `lazyspec show <id> --json`
+3. Confirm no existing RFC covers this design
 
 ## Steps
 
-1. **Understand the problem:** Search existing docs with `lazyspec search <topic> --json` to avoid duplicating prior work. Check for superseded RFCs.
-
-2. **Create the RFC:** Run `lazyspec help create` to confirm usage, then: `lazyspec create rfc "<title>" --author <name>`
-
-3. **Write intent:** Describe the problem being solved and why. This is design intent, not implementation detail.
-
-4. **Sketch interfaces:** Use `@draft` syntax for types that don't exist yet:
-   ```
-   @draft UserProfile { id: string; email: string }
-   ```
-   Use `@ref` for types that already exist in the codebase:
-   ```
-   @ref src/types/user.ts#UserProfile
-   ```
-   Pin a reference to a specific commit with `@sha`:
-   ```
-   @ref src/types/user.ts#UserProfile @sha abc1234
-   ```
-   This ensures the reference resolves to that exact version, even if the file changes later.
-
-   To preview how references expand, run `lazyspec show -e <id>`.
-
-   **`@ref` vs `@draft`:** Use `@ref` when the type already exists in the codebase. Use `@draft` when you're proposing a type that doesn't exist yet. If you're unsure whether something exists, search with `lazyspec search` first.
-
-5. **Identify Stories:** List the vertical slices that fall out of this RFC. Each should be independently shippable.
-
-6. **Emit ADRs:** For significant decisions made during RFC writing, run `lazyspec help create` to confirm usage, then: `lazyspec create adr "<decision>"`. Run `lazyspec help link` to confirm usage, then: `lazyspec link <adr-path> related-to <rfc-path>`.
-
-7. **Validate:** Run `lazyspec validate --json`.
-
-## Red Flags
-
-| Red Flag | Reality |
-|----------|---------|
-| "I'll just start coding and document later" | Documentation after = rationalisation. Write the RFC. |
-| "This is too small for an RFC" | Small changes with unexamined assumptions cause the most rework. |
-| "I already know the design" | If it's not written down, it doesn't exist. |
+1. **Create:** `lazyspec create rfc "<title>" --author <name>`
+2. **Write intent:** Describe the problem and why. Design intent, not implementation detail.
+3. **Sketch interfaces:** `@draft` for proposed types, `@ref path#Symbol` for existing types, `@ref path#Symbol @sha abc1234` to pin to a commit. Preview with `lazyspec show -e <id>`.
+4. **Identify Stories:** List vertical slices, each independently shippable.
+5. **Emit ADRs:** For significant decisions: `lazyspec create adr "<decision>"`, `lazyspec link <adr-path> related-to <rfc-path>`.
+6. **Validate:** `lazyspec validate --json`
 
 ## Verification
 
-Before claiming this skill is complete:
-
 - [ ] `lazyspec validate --json` passes
 - [ ] User has explicitly approved the RFC
-- [ ] At least one Story has been identified
-- [ ] Any significant decisions have ADRs
+- [ ] At least one Story identified
+- [ ] Significant decisions have ADRs
 
 ## Rules
 
 - RFCs describe intent, not implementation
-- An RFC is a design record -- it captures thinking at the time of writing
-- Sketch interfaces in prose or TypeScript, not as live code
+- An RFC captures thinking at the time of writing
 - Every RFC should identify at least one Story
