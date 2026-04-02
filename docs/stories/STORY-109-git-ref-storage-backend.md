@@ -1,13 +1,14 @@
 ---
 title: Git-ref storage backend
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-04-01
 tags: []
 related:
 - implements: RFC-035
 ---
+
 
 
 ## Context
