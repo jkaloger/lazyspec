@@ -19,7 +19,7 @@ and use the right skill.
 <NEVER>
 - Do NOT write document files directly. Use `lazyspec create` to create documents and `lazyspec link` to create relationships.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id>` or `Read` a file before modifying it.
-- Do NOT skip the workflow pipeline. Features need RFC -> Story -> Iteration. Bug fixes need Iteration.
+- Do NOT skip the workflow pipeline. Features need RFC -> Story -> Iteration. Bug fixes need Story -> Iteration.
 - Do NOT use /write-rfc, /create-story, or /create-iteration without user approval of the direction first.
 </NEVER>
 
@@ -72,17 +72,17 @@ RFC exists, no Story: Brainstorm slices -> Use /create-story skill
 Story exists, no Iteration: Resolve context -> Use /resolve-context skill
 Iteration with tasks: Ready to build -> Use /build skill
 
-Bug fix / small tweak (lightweight) -> Related Story exists?
-Related Story exists? -> Create iteration against it: yes
-Related Story exists? -> Create standalone iteration: no
+Bug fix / small tweak (lightweight) -> Bug or behavioral mismatch?
+Bug or behavioral mismatch? -> Use /fix-bug skill: yes
+Bug or behavioral mismatch? -> Create standalone iteration: no
 
-Create iteration against it -> Use /create-iteration skill
 Create standalone iteration -> Use /create-iteration skill
 
 Use /write-rfc skill.shape: double_circle
 Use /create-story skill.shape: double_circle
 Use /resolve-context skill.shape: double_circle
 Use /create-iteration skill.shape: double_circle
+Use /fix-bug skill.shape: double_circle
 Use /build skill.shape: double_circle
 ```
 
@@ -102,7 +102,7 @@ Present findings to the user: which RFCs, Stories, Iterations exist, their statu
 | Classification  | Criteria                                                           | Pipeline            |
 | --------------- | ------------------------------------------------------------------ | ------------------- |
 | **New feature** | Adds new capability or behavior. Even small features need a Story. | Full (RFC optional) |
-| **Bug fix**     | Corrects existing behavior that doesn't match intent.              | Iteration only      |
+| **Bug fix**     | Corrects existing behavior that doesn't match intent.              | Story + Iteration   |
 | **Small tweak** | Minor adjustment (config change, copy, styling).                   | Iteration only      |
 | **Refactor**    | Restructures code without changing behavior.                       | Iteration only      |
 
@@ -120,7 +120,14 @@ When unsure, ask the user.
 | Iteration exists with task breakdown    | Use `/build`                                           |
 | Iteration exists without task breakdown | Use `/create-iteration` to add tasks                   |
 
-**Bug fixes, tweaks, refactors** (lightweight pipeline):
+**Bug fixes** (investigation pipeline):
+
+| State                               | Action                                                     |
+| ----------------------------------- | ---------------------------------------------------------- |
+| Bug or behavioral mismatch          | Use `/fix-bug` (handles Story lookup and iteration creation)|
+| Iteration already exists with tasks | Use `/build`                                               |
+
+**Tweaks, refactors** (lightweight pipeline):
 
 | State                               | Action                                            |
 | ----------------------------------- | ------------------------------------------------- |
@@ -146,8 +153,12 @@ Brainstorming is fractal -- it applies at whatever level you're entering:
 **Iteration level (Story exists, no Iteration):**
 - Use `/resolve-context` skill, which chains to `/create-iteration`
 
-**Lightweight iteration (bug fix / tweak):**
-- Confirm the problem or change with the user
+**Bug fix:**
+- Confirm the problem with the user
+- Use `/fix-bug` skill (handles investigation, Story lookup, and iteration creation)
+
+**Lightweight iteration (tweak / refactor):**
+- Confirm the change with the user
 - If a related Story exists, confirm linking to it
 - Use `/create-iteration` skill directly
 
