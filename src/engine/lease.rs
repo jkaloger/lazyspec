@@ -288,7 +288,7 @@ mod tests {
         let mock = MockGitRefClient::new()
             .with_fetch_result(Ok(()))
             .with_resolve_result(Ok(None))
-            .with_create_commit_result(Ok("sha1".to_string()))
+            .with_create_ref_commit_result(Ok("sha1".to_string()))
             .with_push_result(Ok(()));
 
         let engine = LeaseEngine::new(mock, test_config());
@@ -407,7 +407,7 @@ mod tests {
         let mock = MockGitRefClient::new()
             .with_resolve_result(Ok(Some("old-sha".to_string())))
             .with_read_blob_result(Ok(lease_json))
-            .with_create_commit_result(Ok("new-sha".to_string()))
+            .with_create_ref_commit_result(Ok("new-sha".to_string()))
             .with_update_ref_result(Ok(()))
             .with_push_result(Ok(()));
 
@@ -464,7 +464,7 @@ mod tests {
             .with_read_blob_result(Ok(lease_json))
             .with_delete_remote_result(Ok(()))
             .with_delete_ref_result(Ok(()))
-            .with_create_commit_result(Ok("new-sha".to_string()))
+            .with_create_ref_commit_result(Ok("new-sha".to_string()))
             .with_push_result(Ok(()));
 
         let engine = LeaseEngine::new(mock, test_config());

@@ -110,6 +110,8 @@ pub enum StoreBackend {
     Filesystem,
     #[serde(rename = "github-issues")]
     GithubIssues,
+    #[serde(rename = "git-ref")]
+    GitRef,
 }
 
 impl fmt::Display for StoreBackend {
@@ -117,6 +119,7 @@ impl fmt::Display for StoreBackend {
         match self {
             StoreBackend::Filesystem => write!(f, "filesystem"),
             StoreBackend::GithubIssues => write!(f, "github-issues"),
+            StoreBackend::GitRef => write!(f, "git-ref"),
         }
     }
 }
@@ -948,5 +951,56 @@ store = "github-issues"
         let config = Config::parse(toml_str).unwrap();
         let gh = config.documents.github.unwrap();
         assert!(gh.repo.is_none());
+    }
+
+    #[test]
+    fn test_store_backend_display_git_ref() {
+        assert_eq!(StoreBackend::GitRef.to_string(), "git-ref");
+    }
+
+    #[test]
+    fn test_store_backend_parses_git_ref() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+store = "git-ref"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert_eq!(config.documents.types[0].store, StoreBackend::GitRef);
+    }
+
+    #[test]
+    fn test_git_ref_does_not_affect_other_backends() {
+        let toml_str = r#"
+[github]
+repo = "owner/repo"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+store = "git-ref"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+store = "github-issues"
+
+[[types]]
+name = "adr"
+plural = "adrs"
+dir = "docs/adrs"
+prefix = "ADR"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert_eq!(config.documents.types[0].store, StoreBackend::GitRef);
+        assert_eq!(config.documents.types[1].store, StoreBackend::GithubIssues);
+        assert_eq!(config.documents.types[2].store, StoreBackend::Filesystem);
     }
 }

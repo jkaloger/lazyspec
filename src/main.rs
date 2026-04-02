@@ -5,6 +5,7 @@ use lazyspec::cli::{Cli, Commands};
 use lazyspec::engine::config::{Config, StoreBackend};
 use lazyspec::engine::fs::RealFileSystem;
 use lazyspec::engine::gh::GhCli;
+use lazyspec::engine::git_ref::GitCli;
 use lazyspec::engine::github::resolve_repo;
 use lazyspec::engine::issue_cache::IssueCache;
 use lazyspec::engine::issue_map::IssueMap;
@@ -65,7 +66,16 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Init) | Some(Commands::Completions { .. }) => unreachable!(),
         Some(Commands::Fetch { json, doc_type }) => {
             let gh = GhCli::new();
-            lazyspec::cli::fetch::run(&cwd, &config, &gh, doc_type.as_deref(), json)?;
+            let git_ref_ops = GitCli;
+            lazyspec::cli::fetch::run(
+                &cwd,
+                &config,
+                &gh,
+                &git_ref_ops,
+                "origin",
+                doc_type.as_deref(),
+                json,
+            )?;
         }
         Some(Commands::Setup) => {
             let gh = GhCli::new();

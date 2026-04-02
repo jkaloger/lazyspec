@@ -6,6 +6,12 @@ pub trait GitRefOps {
     fn resolve_ref(&self, root: &Path, refname: &str) -> Result<Option<String>>;
     fn list_refs(&self, root: &Path, pattern: &str) -> Result<Vec<(String, String)>>;
     fn read_ref_blob(&self, root: &Path, sha: &str, path: &str) -> Result<String>;
+    fn create_commit(
+        &self,
+        root: &Path,
+        refname: &str,
+        files: &[(&str, &str)],
+    ) -> Result<String>;
     fn create_ref_commit(
         &self,
         root: &Path,
@@ -99,10 +105,10 @@ impl GitRefOps for GitCli {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
-    fn create_ref_commit(
+    fn create_commit(
         &self,
         root: &Path,
-        refname: &str,
+        _refname: &str,
         files: &[(&str, &str)],
     ) -> Result<String> {
         let mut tree_entries = Vec::new();
@@ -132,6 +138,17 @@ impl GitRefOps for GitCli {
             bail!("git commit-tree failed: {}", stderr.trim());
         }
         let commit_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        Ok(commit_sha)
+    }
+
+    fn create_ref_commit(
+        &self,
+        root: &Path,
+        refname: &str,
+        files: &[(&str, &str)],
+    ) -> Result<String> {
+        let commit_sha = self.create_commit(root, refname, files)?;
 
         let output = self.run_git(root, &["update-ref", refname, &commit_sha])?;
         if !output.status.success() {
@@ -206,6 +223,7 @@ pub mod test_support {
         pub list_results: RefCell<Vec<Result<Vec<(String, String)>>>>,
         pub read_blob_results: RefCell<Vec<Result<String>>>,
         pub create_commit_results: RefCell<Vec<Result<String>>>,
+        pub create_ref_commit_results: RefCell<Vec<Result<String>>>,
         pub update_ref_results: RefCell<Vec<Result<()>>>,
         pub delete_ref_results: RefCell<Vec<Result<()>>>,
         pub fetch_results: RefCell<Vec<Result<()>>>,
@@ -227,6 +245,7 @@ pub mod test_support {
                 list_results: RefCell::new(vec![]),
                 read_blob_results: RefCell::new(vec![]),
                 create_commit_results: RefCell::new(vec![]),
+                create_ref_commit_results: RefCell::new(vec![]),
                 update_ref_results: RefCell::new(vec![]),
                 delete_ref_results: RefCell::new(vec![]),
                 fetch_results: RefCell::new(vec![]),
@@ -253,6 +272,11 @@ pub mod test_support {
 
         pub fn with_create_commit_result(self, result: Result<String>) -> Self {
             self.create_commit_results.borrow_mut().push(result);
+            self
+        }
+
+        pub fn with_create_ref_commit_result(self, result: Result<String>) -> Self {
+            self.create_ref_commit_results.borrow_mut().push(result);
             self
         }
 
@@ -313,6 +337,18 @@ pub mod test_support {
             Self::pop_or_default(&self.read_blob_results)
         }
 
+        fn create_commit(
+            &self,
+            _root: &Path,
+            refname: &str,
+            _files: &[(&str, &str)],
+        ) -> Result<String> {
+            self.calls
+                .borrow_mut()
+                .push(format!("create_commit:{}", refname));
+            Self::pop_or_default(&self.create_commit_results)
+        }
+
         fn create_ref_commit(
             &self,
             _root: &Path,
@@ -322,7 +358,7 @@ pub mod test_support {
             self.calls
                 .borrow_mut()
                 .push(format!("create_ref_commit:{}", refname));
-            Self::pop_or_default(&self.create_commit_results)
+            Self::pop_or_default(&self.create_ref_commit_results)
         }
 
         fn update_ref(
@@ -416,7 +452,18 @@ mod tests {
     #[test]
     fn mock_create_commit_returns_configured_sha() {
         let mock =
-            MockGitRefClient::new().with_create_commit_result(Ok("newsha".to_string()));
+            MockGitRefClient::new().with_create_commit_result(Ok("danglingsha".to_string()));
+        let result = mock
+            .create_commit(&dummy_root(), "refs/test", &[("f.txt", "data")])
+            .unwrap();
+        assert_eq!(result, "danglingsha");
+        assert_eq!(mock.calls.borrow()[0], "create_commit:refs/test");
+    }
+
+    #[test]
+    fn mock_create_ref_commit_returns_configured_sha() {
+        let mock =
+            MockGitRefClient::new().with_create_ref_commit_result(Ok("newsha".to_string()));
         let result = mock
             .create_ref_commit(&dummy_root(), "refs/test", &[("f.txt", "data")])
             .unwrap();

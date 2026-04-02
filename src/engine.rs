@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod cache;
+pub mod cache_lock;
 pub mod certification;
 pub mod config;
 pub mod document;
@@ -7,6 +8,7 @@ pub mod fs;
 pub mod fs_ops;
 pub mod gh;
 pub mod git_ref;
+pub mod git_ref_store;
 pub mod git_status;
 pub mod lease;
 pub mod github;
