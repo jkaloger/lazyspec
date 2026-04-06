@@ -217,7 +217,7 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Fetch all github-issues documents from the API
+    /// Fetch remote documents (github-issues and git-ref types)
     Fetch {
         /// Output as JSON
         #[arg(long)]

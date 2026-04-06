@@ -16,8 +16,27 @@ impl CacheLock {
             return Ok(Self::default());
         }
         let content = std::fs::read_to_string(&path)?;
-        let entries: BTreeMap<String, String> = serde_json::from_str(&content)?;
-        Ok(Self { entries })
+        match serde_json::from_str::<BTreeMap<String, String>>(&content) {
+            Ok(entries) => Ok(Self { entries }),
+            Err(_) => {
+                // Migration: old format had { "key": { "cached_at": "..." } } or mixed values.
+                let raw: BTreeMap<String, serde_json::Value> = serde_json::from_str(&content)?;
+                let entries = raw
+                    .into_iter()
+                    .filter_map(|(k, v)| match v {
+                        serde_json::Value::String(s) => Some((k, s)),
+                        serde_json::Value::Object(map) => map
+                            .get("cached_at")
+                            .and_then(|v| v.as_str())
+                            .map(|s| (k, s.to_string())),
+                        _ => None,
+                    })
+                    .collect();
+                let lock = Self { entries };
+                lock.save(root)?;
+                Ok(lock)
+            }
+        }
     }
 
     pub fn save(&self, root: &Path) -> Result<()> {
@@ -105,6 +124,70 @@ mod tests {
         // BTreeMap ensures sorted keys
         let keys: Vec<&String> = obj.keys().collect();
         assert_eq!(keys, vec!["iteration/ITERATION-042", "story/STORY-001"]);
+    }
+
+    #[test]
+    fn test_migration_from_old_cached_at_format() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let dir = root.join(".lazyspec");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Old format: { "key": { "cached_at": "timestamp" } }
+        let old_json = r#"{
+  "STORY-10": { "cached_at": "2026-03-27T10:00:00+00:00" },
+  "STORY-11": { "cached_at": "2026-03-28T12:00:00+00:00" }
+}"#;
+        std::fs::write(dir.join("cache.lock"), old_json).unwrap();
+
+        let lock = CacheLock::load(root).unwrap();
+        assert_eq!(lock.get("STORY-10"), Some("2026-03-27T10:00:00+00:00"));
+        assert_eq!(lock.get("STORY-11"), Some("2026-03-28T12:00:00+00:00"));
+
+        // Verify it was re-saved in new format
+        let raw = std::fs::read_to_string(dir.join("cache.lock")).unwrap();
+        let parsed: BTreeMap<String, String> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn test_migration_mixed_old_and_string_values() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let dir = root.join(".lazyspec");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Mixed format: some old wrapped entries, some plain strings
+        let mixed_json = r#"{
+  "STORY-10": { "cached_at": "2026-03-27T10:00:00+00:00" },
+  "iteration/ITERATION-042": "abc123"
+}"#;
+        std::fs::write(dir.join("cache.lock"), mixed_json).unwrap();
+
+        let lock = CacheLock::load(root).unwrap();
+        assert_eq!(lock.get("STORY-10"), Some("2026-03-27T10:00:00+00:00"));
+        assert_eq!(lock.get("iteration/ITERATION-042"), Some("abc123"));
+    }
+
+    #[test]
+    fn test_both_backends_coexist() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        let mut lock = CacheLock::default();
+        // IssueCache-style: doc ID -> RFC3339 timestamp
+        lock.set("STORY-10", "2026-03-27T10:00:00+00:00");
+        lock.set("STORY-11", "2026-03-28T12:00:00+00:00");
+        // git-ref-style: type/id -> SHA
+        lock.set("iteration/ITERATION-042", "abc123");
+        lock.set("story/STORY-001", "def456");
+        lock.save(root).unwrap();
+
+        let loaded = CacheLock::load(root).unwrap();
+        assert_eq!(loaded.get("STORY-10"), Some("2026-03-27T10:00:00+00:00"));
+        assert_eq!(loaded.get("STORY-11"), Some("2026-03-28T12:00:00+00:00"));
+        assert_eq!(loaded.get("iteration/ITERATION-042"), Some("abc123"));
+        assert_eq!(loaded.get("story/STORY-001"), Some("def456"));
     }
 
     #[test]

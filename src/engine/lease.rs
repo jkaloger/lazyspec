@@ -35,6 +35,20 @@ fn lease_ref(type_name: &str, id: &str) -> String {
     format!("refs/lazyspec/leases/{}/{}", type_name, id)
 }
 
+fn fetch_ref_optional(
+    git: &impl GitRefOps,
+    root: &Path,
+    remote: &str,
+    refname: &str,
+) -> Result<()> {
+    if let Err(e) = git.fetch_refs(root, remote, refname) {
+        if !e.to_string().contains("couldn't find remote ref") {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
 pub struct LeaseEngine<R: GitRefOps> {
     pub git: R,
     pub config: CoordinationConfig,
@@ -55,9 +69,7 @@ impl<R: GitRefOps> LeaseEngine<R> {
     ) -> Result<Lease> {
         let refname = lease_ref(type_name, id);
 
-        // Check if lease already exists on remote
-        self.git
-            .fetch_refs(root, &self.config.remote, &refname)?;
+        fetch_ref_optional(&self.git, root, &self.config.remote, &refname)?;
         let existing = self.git.resolve_ref(root, &refname)?;
         if existing.is_some() {
             bail!("lease held");
@@ -171,8 +183,7 @@ impl<R: GitRefOps> LeaseEngine<R> {
         now: DateTime<Utc>,
     ) -> Result<Lease> {
         let refname = lease_ref(type_name, id);
-        self.git
-            .fetch_refs(root, &self.config.remote, &refname)?;
+        fetch_ref_optional(&self.git, root, &self.config.remote, &refname)?;
         let sha = self
             .git
             .resolve_ref(root, &refname)?
@@ -515,6 +526,71 @@ mod tests {
     }
 
     // --- query tests ---
+
+    #[test]
+    fn acquire_succeeds_when_remote_ref_missing() {
+        let now = fixed_now();
+        let mock = MockGitRefClient::new()
+            .with_fetch_result(Err(anyhow::anyhow!(
+                "fatal: couldn't find remote ref refs/lazyspec/leases/story/STORY-NEW"
+            )))
+            .with_resolve_result(Ok(None))
+            .with_create_ref_commit_result(Ok("sha1".to_string()))
+            .with_push_result(Ok(()));
+
+        let engine = LeaseEngine::new(mock, test_config());
+        let lease = engine
+            .acquire(&dummy_root(), "story", "STORY-NEW", "agent-a", now)
+            .unwrap();
+
+        assert_eq!(lease.agent, "agent-a");
+        assert_eq!(lease.acquired, now);
+        assert_eq!(lease.expires, now + Duration::minutes(60));
+    }
+
+    #[test]
+    fn acquire_propagates_real_network_errors() {
+        let mock = MockGitRefClient::new()
+            .with_fetch_result(Err(anyhow::anyhow!("network timeout")));
+
+        let engine = LeaseEngine::new(mock, test_config());
+        let err = engine
+            .acquire(&dummy_root(), "story", "STORY-001", "agent-a", fixed_now())
+            .unwrap_err();
+
+        assert!(err.to_string().contains("network timeout"));
+    }
+
+    #[test]
+    fn force_acquire_missing_remote_ref_fails_with_no_lease() {
+        let now = fixed_now();
+        let mock = MockGitRefClient::new()
+            .with_fetch_result(Err(anyhow::anyhow!(
+                "fatal: couldn't find remote ref refs/lazyspec/leases/story/STORY-NEW"
+            )))
+            .with_resolve_result(Ok(None));
+
+        let engine = LeaseEngine::new(mock, test_config());
+        let err = engine
+            .force_acquire(&dummy_root(), "story", "STORY-NEW", "agent-b", now)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("no lease found to force-acquire"));
+    }
+
+    #[test]
+    fn force_acquire_propagates_real_network_errors() {
+        let now = fixed_now();
+        let mock = MockGitRefClient::new()
+            .with_fetch_result(Err(anyhow::anyhow!("network timeout")));
+
+        let engine = LeaseEngine::new(mock, test_config());
+        let err = engine
+            .force_acquire(&dummy_root(), "story", "STORY-001", "agent-b", now)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("network timeout"));
+    }
 
     #[test]
     fn query_returns_all_leases() {

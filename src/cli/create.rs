@@ -7,6 +7,8 @@ use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::reservation;
 use crate::engine::store::{Filter, Store};
+use crate::engine::git_ref::GitCli;
+use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
 use anyhow::{anyhow, bail, Result};
 use std::fs;
@@ -65,6 +67,16 @@ pub fn run(
             config: config.clone(),
             issue_map: IssueMap::load(root)?,
             issue_cache: IssueCache::new(root),
+        };
+        let created = store.create(type_def, title, author, "")?;
+        return Ok(root.join(&created.path));
+    }
+
+    if type_def.store == StoreBackend::GitRef {
+        let mut store = GitRefStore {
+            git: GitCli,
+            root: root.to_path_buf(),
+            config: config.clone(),
         };
         let created = store.create(type_def, title, author, "")?;
         return Ok(root.join(&created.path));

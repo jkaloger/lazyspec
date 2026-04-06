@@ -1,9 +1,8 @@
 use chrono::{DateTime, Duration, Utc};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::TypeDef;
 use crate::engine::document::{DocMeta, DocType, Status};
 use crate::engine::gh::{type_label, GhIssue, GhIssueReader};
@@ -30,13 +29,6 @@ pub struct RefreshWarning {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CacheLockEntry {
-    pub cached_at: String,
-}
-
-pub type CacheLock = HashMap<String, CacheLockEntry>;
-
 pub struct IssueCache {
     root: PathBuf,
 }
@@ -44,41 +36,28 @@ pub struct IssueCache {
 impl IssueCache {
     pub fn new(root: &Path) -> Self {
         IssueCache {
-            root: root.join(".lazyspec").join("cache"),
+            root: root.to_path_buf(),
         }
     }
 
-    fn lock_path(&self) -> PathBuf {
-        self.root.parent().unwrap_or(&self.root).join("cache.lock")
+    fn cache_dir(&self) -> PathBuf {
+        self.root.join(".lazyspec").join("cache")
     }
 
     fn doc_path(&self, id: &str, doc_type: &str) -> PathBuf {
-        self.root.join(doc_type).join(format!("{}.md", id))
+        self.cache_dir().join(doc_type).join(format!("{}.md", id))
     }
 
-    pub fn read_lock(&self) -> CacheLock {
-        let path = self.lock_path();
-        let Ok(data) = fs::read_to_string(&path) else {
-            return CacheLock::default();
-        };
-        serde_json::from_str(&data).unwrap_or_default()
-    }
-
-    pub fn write_lock(&self, lock: &CacheLock) {
-        let path = self.lock_path();
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let json = serde_json::to_string_pretty(lock).unwrap_or_default();
-        let _ = fs::write(&path, json);
+    fn load_lock(&self) -> CacheLock {
+        CacheLock::load(&self.root).unwrap_or_default()
     }
 
     pub fn is_fresh(&self, id: &str, ttl: Duration) -> bool {
-        let lock = self.read_lock();
-        let Some(entry) = lock.get(id) else {
+        let lock = self.load_lock();
+        let Some(value) = lock.get(id) else {
             return false;
         };
-        let Ok(cached_at) = entry.cached_at.parse::<DateTime<Utc>>() else {
+        let Ok(cached_at) = value.parse::<DateTime<Utc>>() else {
             return false;
         };
         Utc::now() - cached_at < ttl
@@ -102,34 +81,24 @@ impl IssueCache {
         }
         let _ = fs::write(&path, content);
 
-        let mut lock = self.read_lock();
-        lock.insert(
-            id.to_string(),
-            CacheLockEntry {
-                cached_at: Utc::now().to_rfc3339(),
-            },
-        );
-        self.write_lock(&lock);
+        let mut lock = self.load_lock();
+        lock.set(id, &Utc::now().to_rfc3339());
+        let _ = lock.save(&self.root);
     }
 
     pub fn touch_lock(&self, id: &str) {
-        let mut lock = self.read_lock();
-        lock.insert(
-            id.to_string(),
-            CacheLockEntry {
-                cached_at: Utc::now().to_rfc3339(),
-            },
-        );
-        self.write_lock(&lock);
+        let mut lock = self.load_lock();
+        lock.set(id, &Utc::now().to_rfc3339());
+        let _ = lock.save(&self.root);
     }
 
     pub fn remove(&self, id: &str, doc_type: &str) {
         let path = self.doc_path(id, doc_type);
         let _ = fs::remove_file(&path);
 
-        let mut lock = self.read_lock();
+        let mut lock = self.load_lock();
         lock.remove(id);
-        self.write_lock(&lock);
+        let _ = lock.save(&self.root);
     }
 
     /// Refresh stale cache entries for a given type with a single `issue_list` call.
@@ -195,6 +164,7 @@ impl IssueCache {
 
         let mut refreshed = 0usize;
         let mut unchanged = 0usize;
+        let mut lock = self.load_lock();
 
         for issue in &issues {
             let (meta, body) = parse_issue(issue, &type_def.name, known_types);
@@ -218,17 +188,11 @@ impl IssueCache {
                 refreshed += 1;
             }
 
-            // Update lock timestamp and issue map regardless
-            let mut lock = self.read_lock();
-            lock.insert(
-                id.clone(),
-                CacheLockEntry {
-                    cached_at: Utc::now().to_rfc3339(),
-                },
-            );
-            self.write_lock(&lock);
+            lock.set(&id, &Utc::now().to_rfc3339());
             issue_map.insert(&id, issue.number, &issue.updated_at);
         }
+
+        let _ = lock.save(&self.root);
 
         RefreshResult {
             refreshed,
@@ -238,7 +202,7 @@ impl IssueCache {
     }
 
     pub fn list_cached(&self, doc_type: &str) -> Vec<String> {
-        let dir = self.root.join(doc_type);
+        let dir = self.cache_dir().join(doc_type);
         let Ok(entries) = fs::read_dir(&dir) else {
             return Vec::new();
         };
@@ -287,6 +251,7 @@ impl IssueCache {
         fs::create_dir_all(&cache_dir)?;
 
         let mut new_count = 0usize;
+        let mut lock = self.load_lock();
 
         for issue in &issues {
             let (meta, body) = parse_issue(issue, &type_def.name, known_types);
@@ -302,18 +267,13 @@ impl IssueCache {
 
             store_dispatch::write_cache_file(root, type_def, &meta, &body)?;
 
-            let mut lock = self.read_lock();
-            lock.insert(
-                id.clone(),
-                CacheLockEntry {
-                    cached_at: Utc::now().to_rfc3339(),
-                },
-            );
-            self.write_lock(&lock);
+            lock.set(&id, &Utc::now().to_rfc3339());
 
             issue_map.insert(&id, issue.number, &issue.updated_at);
             fetched_ids.insert(id);
         }
+
+        lock.save(&self.root)?;
 
         let removed: Vec<String> = previously_cached
             .difference(&fetched_ids)
@@ -436,9 +396,7 @@ mod tests {
 
     fn make_cache() -> (IssueCache, TempDir) {
         let tmp = TempDir::new().unwrap();
-        let cache = IssueCache {
-            root: tmp.path().join(".lazyspec").join("cache"),
-        };
+        let cache = IssueCache::new(tmp.path());
         (cache, tmp)
     }
 
@@ -542,8 +500,8 @@ mod tests {
         let doc_path = cache.doc_path("ITERATION-042", "iteration");
         assert!(doc_path.exists());
 
-        let lock = cache.read_lock();
-        assert!(lock.contains_key("ITERATION-042"));
+        let lock = cache.load_lock();
+        assert!(lock.get("ITERATION-042").is_some());
     }
 
     #[test]
@@ -554,10 +512,10 @@ mod tests {
         cache.write("STORY-075", "story", "# Story 075\nStale content");
 
         // Backdate the cached_at to 2 minutes ago
-        let mut lock = cache.read_lock();
+        let mut lock = cache.load_lock();
         let two_min_ago = Utc::now() - Duration::seconds(120);
-        lock.get_mut("STORY-075").unwrap().cached_at = two_min_ago.to_rfc3339();
-        cache.write_lock(&lock);
+        lock.set("STORY-075", &two_min_ago.to_rfc3339());
+        lock.save(&cache.root).unwrap();
 
         let fresh = cache.read_if_fresh("STORY-075", "story", ttl);
         assert_eq!(fresh, None);
@@ -587,23 +545,22 @@ mod tests {
         assert!(!cache.doc_path("ITERATION-001", "iteration").exists());
         assert!(cache.doc_path("ITERATION-002", "iteration").exists());
 
-        let lock = cache.read_lock();
-        assert!(!lock.contains_key("ITERATION-001"));
-        assert!(lock.contains_key("ITERATION-002"));
-        assert_eq!(lock.len(), 1);
+        let lock = cache.load_lock();
+        assert!(lock.get("ITERATION-001").is_none());
+        assert!(lock.get("ITERATION-002").is_some());
     }
 
     // --- refresh_stale tests ---
 
     fn backdate_all(cache: &IssueCache, ids: &[&str]) {
-        let mut lock = cache.read_lock();
+        let mut lock = cache.load_lock();
         let old = (Utc::now() - Duration::seconds(300)).to_rfc3339();
         for id in ids {
-            if let Some(entry) = lock.get_mut(*id) {
-                entry.cached_at = old.clone();
+            if lock.get(id).is_some() {
+                lock.set(id, &old);
             }
         }
-        cache.write_lock(&lock);
+        lock.save(&cache.root).unwrap();
     }
 
     #[test]
@@ -864,10 +821,10 @@ mod tests {
         assert!(!cache_dir.join("STORY-12.md").exists());
 
         // cache.lock should not contain STORY-12
-        let lock = cache.read_lock();
-        assert!(lock.contains_key("STORY-10"));
-        assert!(lock.contains_key("STORY-11"));
-        assert!(!lock.contains_key("STORY-12"));
+        let lock = cache.load_lock();
+        assert!(lock.get("STORY-10").is_some());
+        assert!(lock.get("STORY-11").is_some());
+        assert!(lock.get("STORY-12").is_none());
 
         // issue map should not contain STORY-12
         assert!(issue_map.get("STORY-10").is_some());
