@@ -27,6 +27,7 @@ plan-work → write-rfc → create-story → create-iteration → build → revi
 | `build`            | Execute an Iteration's task breakdown, dispatching per-task with review gates       |
 | `review-iteration` | Two-stage review: AC compliance first, code quality second                          |
 | `resolve-context`  | Gather the full document chain for an agent before it begins work                   |
+| `create-test-plan` | Generate a manual end-user test plan across Stories with AC traceability            |
 | `create-audit`     | Run a criteria-based review and document findings for user triage                   |
 
 ### Usage
