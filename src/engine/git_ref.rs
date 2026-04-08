@@ -278,9 +278,11 @@ pub mod test_support {
     use chrono::{DateTime, Utc};
     use std::cell::RefCell;
 
+    type RefList = Vec<(String, String)>;
+
     pub struct MockGitRefClient {
         pub resolve_results: RefCell<Vec<Result<Option<String>>>>,
-        pub list_results: RefCell<Vec<Result<Vec<(String, String)>>>>,
+        pub list_results: RefCell<Vec<Result<RefList>>>,
         pub read_blob_results: RefCell<Vec<Result<String>>>,
         pub create_commit_results: RefCell<Vec<Result<String>>>,
         pub create_ref_commit_results: RefCell<Vec<Result<String>>>,
