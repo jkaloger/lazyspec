@@ -1258,6 +1258,7 @@ mod tests {
             git: mock,
             root: root.clone(),
             config: Config::default(),
+            reserved_number: None,
         };
 
         let td = test_type_def(StoreBackend::GitRef);
@@ -1288,6 +1289,7 @@ mod tests {
             git: mock,
             root: root.clone(),
             config: Config::default(),
+            reserved_number: None,
         };
 
         let td = test_type_def(StoreBackend::Filesystem);

@@ -1,7 +1,7 @@
 use crate::engine::agent::resolve_agent_id;
 use crate::engine::config::Config;
 use crate::engine::git_ref::{GitCli, GitRefOps};
-use crate::engine::lease::{Lease, LeaseEngine};
+use crate::engine::lease::{fetch_ref_optional, Lease, LeaseEngine};
 use anyhow::{bail, Result};
 use chrono::Utc;
 use serde::Serialize;
@@ -57,15 +57,17 @@ pub fn check_lease_gate_with<R: GitRefOps>(
     git: &R,
     agent: &str,
 ) -> Result<()> {
-    if config.coordination.is_none() {
-        return Ok(());
-    }
+    let coord = match &config.coordination {
+        Some(c) => c,
+        None => return Ok(()),
+    };
 
     if let Some(raw_id) = doc_id {
         let id = extract_doc_id(raw_id, config)
             .unwrap_or_else(|| raw_id.to_string());
         let type_name = resolve_doc_type(config, &id)?;
         let refname = format!("refs/lazyspec/leases/{}/{}", type_name, id);
+        fetch_ref_optional(git, root, &coord.remote, &refname)?;
         let sha = git.resolve_ref(root, &refname)?;
         match sha {
             Some(sha) => {
@@ -86,6 +88,9 @@ pub fn check_lease_gate_with<R: GitRefOps>(
             }
         }
     } else {
+        if let Err(e) = git.fetch_refs(root, &coord.remote, "refs/lazyspec/leases/*") {
+            eprintln!("warning: could not fetch lease refs from remote: {}", e);
+        }
         let refs = git.list_refs(root, "refs/lazyspec/leases/")?;
         let mut has_lease = false;
         for (_, sha) in &refs {
@@ -120,6 +125,7 @@ pub fn run_claim(
     config: &Config,
     doc_id: &str,
     agent_id: Option<&str>,
+    force: bool,
     json: bool,
 ) -> Result<()> {
     let engine = require_coordination(config)?;
@@ -128,7 +134,11 @@ pub fn run_claim(
         Some(id) => id.to_string(),
         None => resolve_agent_id(root)?,
     };
-    let lease = engine.acquire(root, type_name, doc_id, &agent, Utc::now())?;
+    let lease = if force {
+        engine.force_acquire(root, type_name, doc_id, &agent, Utc::now())?
+    } else {
+        engine.acquire(root, type_name, doc_id, &agent, Utc::now())?
+    };
     if json {
         println!("{}", serde_json::to_string_pretty(&lease)?);
     } else {
@@ -450,5 +460,73 @@ mod tests {
         assert!(result.is_ok());
         let calls = mock.calls.borrow();
         assert!(calls[0].contains("refs/lazyspec/leases/rfc/RFC-001"));
+    }
+
+    #[test]
+    fn gate_fetches_before_resolve() {
+        let config = config_with_coordination();
+        let mock = MockGitRefClient::new()
+            .with_fetch_result(Ok(()))
+            .with_resolve_result(Ok(Some("sha1".to_string())))
+            .with_read_blob_result(Ok(make_lease_json("agent-a")));
+        let result = check_lease_gate_with(
+            &dummy_root(), &config, Some("RFC-001"), &mock, "agent-a",
+        );
+        assert!(result.is_ok());
+        let calls = mock.calls.borrow();
+        assert!(calls[0].starts_with("fetch_refs:origin:refs/lazyspec/leases/rfc/RFC-001"));
+        assert!(calls[1].starts_with("resolve_ref:refs/lazyspec/leases/rfc/RFC-001"));
+    }
+
+    #[test]
+    fn gate_falls_back_to_local_on_fetch_failure() {
+        let config = config_with_coordination();
+        let mock = MockGitRefClient::new()
+            .with_fetch_result(Err(anyhow::anyhow!("couldn't find remote ref refs/lazyspec/leases/rfc/RFC-001")))
+            .with_resolve_result(Ok(Some("sha1".to_string())))
+            .with_read_blob_result(Ok(make_lease_json("agent-a")));
+        let result = check_lease_gate_with(
+            &dummy_root(), &config, Some("RFC-001"), &mock, "agent-a",
+        );
+        assert!(result.is_ok());
+        let calls = mock.calls.borrow();
+        assert!(calls[0].starts_with("fetch_refs:"));
+        assert!(calls[1].starts_with("resolve_ref:"));
+    }
+
+    #[test]
+    fn gate_fetches_glob_before_list_for_create() {
+        let config = config_with_coordination();
+        let mock = MockGitRefClient::new()
+            .with_fetch_result(Ok(()))
+            .with_list_result(Ok(vec![
+                ("refs/lazyspec/leases/rfc/RFC-001".to_string(), "sha1".to_string()),
+            ]))
+            .with_read_blob_result(Ok(make_lease_json("agent-a")));
+        let result = check_lease_gate_with(
+            &dummy_root(), &config, None, &mock, "agent-a",
+        );
+        assert!(result.is_ok());
+        let calls = mock.calls.borrow();
+        assert!(calls[0].starts_with("fetch_refs:origin:refs/lazyspec/leases/"));
+        assert!(calls[1].starts_with("list_refs:refs/lazyspec/leases/"));
+    }
+
+    #[test]
+    fn gate_glob_fetch_failure_falls_back_to_local() {
+        let config = config_with_coordination();
+        let mock = MockGitRefClient::new()
+            .with_fetch_result(Err(anyhow::anyhow!("network timeout")))
+            .with_list_result(Ok(vec![
+                ("refs/lazyspec/leases/rfc/RFC-001".to_string(), "sha1".to_string()),
+            ]))
+            .with_read_blob_result(Ok(make_lease_json("agent-a")));
+        let result = check_lease_gate_with(
+            &dummy_root(), &config, None, &mock, "agent-a",
+        );
+        assert!(result.is_ok());
+        let calls = mock.calls.borrow();
+        assert!(calls[0].starts_with("fetch_refs:"));
+        assert!(calls[1].starts_with("list_refs:"));
     }
 }

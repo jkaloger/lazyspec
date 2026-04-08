@@ -1,5 +1,4 @@
 use anyhow::{bail, Result};
-use sqids::Sqids;
 use std::path::Path;
 use std::process::Command;
 
@@ -38,11 +37,7 @@ pub fn resolve_agent_id_with_env(
         bail!("git config user.name is empty; set $LAZYSPEC_AGENT_ID or configure git user.name");
     }
 
-    let pid = std::process::id() as u64;
-    let sqids = Sqids::default();
-    let encoded = sqids.encode(&[pid])?;
-
-    Ok(format!("{}-{}", user_name, encoded))
+    Ok(user_name)
 }
 
 #[cfg(test)]
@@ -95,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_git_config_with_sqids_pid() {
+    fn falls_back_to_git_config_username() {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
 
@@ -111,13 +106,7 @@ mod tests {
             .unwrap();
 
         let result = resolve_agent_id_with_env(root, None, None).unwrap();
-        assert!(
-            result.starts_with("TestUser-"),
-            "expected result to start with 'TestUser-', got: {}",
-            result
-        );
-        let suffix = &result["TestUser-".len()..];
-        assert!(!suffix.is_empty(), "suffix should be non-empty");
+        assert_eq!(result, "TestUser");
     }
 
     #[test]
@@ -138,6 +127,6 @@ mod tests {
 
         let result =
             resolve_agent_id_with_env(root, Some("".into()), Some("".into())).unwrap();
-        assert!(result.starts_with("GitUser-"));
+        assert_eq!(result, "GitUser");
     }
 }

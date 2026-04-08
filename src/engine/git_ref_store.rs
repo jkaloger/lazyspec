@@ -33,6 +33,7 @@ pub struct GitRefStore<R: GitRefOps> {
     pub git: R,
     pub root: PathBuf,
     pub config: Config,
+    pub reserved_number: Option<u32>,
 }
 
 impl<R: GitRefOps> GitRefStore<R> {
@@ -96,7 +97,10 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
     ) -> Result<CreatedDoc> {
         ensure_cache_gitignored(&self.root)?;
 
-        let next_num = self.next_number_from_refs(type_def)?;
+        let next_num = match self.reserved_number {
+            Some(n) => n,
+            None => self.next_number_from_refs(type_def)?,
+        };
         let id = format!("{}-{:03}", type_def.prefix, next_num);
         let date = Local::now().format("%Y-%m-%d").to_string();
 
@@ -106,6 +110,10 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
         let sha = self
             .git
             .create_ref_commit(&self.root, &refname, &[("doc.md", &content)])?;
+
+        if let Some(coord) = &self.config.coordination {
+            self.git.push_ref(&self.root, &coord.remote, &refname)?;
+        }
 
         let meta = DocMeta {
             path: PathBuf::new(),
@@ -194,6 +202,7 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
             &self.root,
             &refname,
             &[("doc.md", &updated_content)],
+            Some(&old_sha),
         )?;
 
         if let Err(e) = self
@@ -201,6 +210,10 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
             .update_ref(&self.root, &refname, &new_sha, &old_sha)
         {
             bail!("conflict updating {}: {}", doc_id, e);
+        }
+
+        if let Some(coord) = &self.config.coordination {
+            self.git.push_ref(&self.root, &coord.remote, &refname)?;
         }
 
         std::fs::write(&cache_path, &updated_content)?;
@@ -214,6 +227,10 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
 
     fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()> {
         let refname = Self::refname(&type_def.name, doc_id);
+        if let Some(coord) = &self.config.coordination {
+            self.git
+                .delete_remote_ref(&self.root, &coord.remote, &refname)?;
+        }
         self.git.delete_ref(&self.root, &refname)?;
 
         let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
@@ -233,8 +250,8 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
 mod tests {
     use super::*;
     use crate::engine::config::{
-        Config, Directories, DocumentConfig, FilesystemConfig, Naming, NumberingStrategy,
-        StoreBackend, Templates, TypeDef, UiConfig,
+        Config, CoordinationConfig, Directories, DocumentConfig, FilesystemConfig, Naming,
+        NumberingStrategy, StoreBackend, Templates, TypeDef, UiConfig,
     };
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use tempfile::TempDir;
@@ -289,6 +306,7 @@ mod tests {
             git: mock,
             root: tmp.path().to_path_buf(),
             config: test_config(),
+            reserved_number: None,
         }
     }
 
@@ -372,11 +390,10 @@ mod tests {
         assert_eq!(lock.get("iteration/ITERATION-042"), Some("newsha456"));
 
         let calls = store.git.calls.borrow();
-        assert!(
-            calls.iter().any(|c| c.starts_with("create_commit:")),
-            "should call create_commit (not create_ref_commit), got: {:?}",
-            *calls
-        );
+        let create_call = calls.iter().find(|c| c.starts_with("create_commit:"))
+            .expect("should call create_commit (not create_ref_commit)");
+        assert!(create_call.contains("parent=Some(\"oldsha\")"),
+            "create_commit should be parented on old SHA, got: {}", create_call);
         assert!(
             !calls.iter().any(|c| c.starts_with("create_ref_commit:")),
             "should NOT call create_ref_commit, got: {:?}",
@@ -511,6 +528,223 @@ mod tests {
         assert!(
             contents.lines().any(|l| l.trim() == "cache/"),
             "should contain cache/"
+        );
+    }
+
+    #[test]
+    fn create_uses_reserved_number_when_set() {
+        let tmp = TempDir::new().unwrap();
+        let mock = MockGitRefClient::new()
+            .with_create_ref_commit_result(Ok("sha_reserved".to_string()));
+
+        let mut store = GitRefStore {
+            git: mock,
+            root: tmp.path().to_path_buf(),
+            config: test_config(),
+            reserved_number: Some(42),
+        };
+        let td = test_type_def();
+        let result = store.create(&td, "Reserved Title", "alice", "").unwrap();
+
+        assert_eq!(result.id, "ITERATION-042");
+
+        let calls = store.git.calls.borrow();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("list_refs:")),
+            "should not call list_refs when reserved_number is set, got: {:?}",
+            *calls
+        );
+        assert!(calls
+            .iter()
+            .any(|c| c.contains("create_ref_commit:refs/lazyspec/iteration/ITERATION-042")));
+    }
+
+    #[test]
+    fn create_falls_back_to_next_number_from_refs_when_no_reservation() {
+        let tmp = TempDir::new().unwrap();
+        let existing_refs = vec![
+            ("refs/lazyspec/iteration/ITERATION-003".to_string(), "sha3".to_string()),
+        ];
+        let mock = MockGitRefClient::new()
+            .with_list_result(Ok(existing_refs))
+            .with_create_ref_commit_result(Ok("sha_fallback".to_string()));
+
+        let mut store = GitRefStore {
+            git: mock,
+            root: tmp.path().to_path_buf(),
+            config: test_config(),
+            reserved_number: None,
+        };
+        let td = test_type_def();
+        let result = store.create(&td, "Fallback Title", "bob", "").unwrap();
+
+        assert_eq!(result.id, "ITERATION-004");
+
+        let calls = store.git.calls.borrow();
+        assert!(
+            calls.iter().any(|c| c.starts_with("list_refs:")),
+            "should call list_refs when no reserved_number"
+        );
+    }
+
+    fn test_config_with_coordination() -> Config {
+        let mut config = test_config();
+        config.coordination = Some(CoordinationConfig {
+            remote: "origin".to_string(),
+            lease_duration: "60m".to_string(),
+            grace_period: "2m".to_string(),
+            max_push_retries: 5,
+        });
+        config
+    }
+
+    #[test]
+    fn create_pushes_ref_when_coordination_configured() {
+        let tmp = TempDir::new().unwrap();
+        let mock = MockGitRefClient::new()
+            .with_list_result(Ok(vec![]))
+            .with_create_ref_commit_result(Ok("abc123sha".to_string()))
+            .with_push_result(Ok(()));
+
+        let mut store = GitRefStore {
+            git: mock,
+            root: tmp.path().to_path_buf(),
+            config: test_config_with_coordination(),
+            reserved_number: None,
+        };
+        let td = test_type_def();
+        store.create(&td, "Pushed Doc", "alice", "").unwrap();
+
+        let calls = store.git.calls.borrow();
+        assert!(
+            calls.iter().any(|c| c == "push_ref:origin:refs/lazyspec/iteration/ITERATION-001"),
+            "should push doc ref to remote, got: {:?}",
+            *calls
+        );
+    }
+
+    #[test]
+    fn create_does_not_push_without_coordination() {
+        let tmp = TempDir::new().unwrap();
+        let mock = MockGitRefClient::new()
+            .with_list_result(Ok(vec![]))
+            .with_create_ref_commit_result(Ok("abc123sha".to_string()));
+
+        let mut store = make_store(&tmp, mock);
+        let td = test_type_def();
+        store.create(&td, "Local Doc", "alice", "").unwrap();
+
+        let calls = store.git.calls.borrow();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("push_ref:")),
+            "should not push without coordination, got: {:?}",
+            *calls
+        );
+    }
+
+    #[test]
+    fn update_pushes_ref_when_coordination_configured() {
+        let tmp = TempDir::new().unwrap();
+        let td = test_type_def();
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(
+            cache_dir.join("ITERATION-042.md"),
+            "---\ntitle: Old Title\ntype: iteration\nstatus: draft\nauthor: alice\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\noriginal body\n",
+        ).unwrap();
+
+        let mut lock = CacheLock::default();
+        lock.set("iteration/ITERATION-042", "oldsha");
+        lock.save(tmp.path()).unwrap();
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha456".to_string()))
+            .with_update_ref_result(Ok(()))
+            .with_push_result(Ok(()));
+
+        let mut store = GitRefStore {
+            git: mock,
+            root: tmp.path().to_path_buf(),
+            config: test_config_with_coordination(),
+            reserved_number: None,
+        };
+        store.update(&td, "ITERATION-042", &[("status", "accepted")]).unwrap();
+
+        let calls = store.git.calls.borrow();
+        assert!(
+            calls.iter().any(|c| c == "push_ref:origin:refs/lazyspec/iteration/ITERATION-042"),
+            "should push updated ref to remote, got: {:?}",
+            *calls
+        );
+    }
+
+    #[test]
+    fn delete_removes_remote_ref_when_coordination_configured() {
+        let tmp = TempDir::new().unwrap();
+        let td = test_type_def();
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(
+            cache_dir.join("ITERATION-042.md"),
+            "---\ntitle: T\ntype: iteration\nstatus: draft\nauthor: a\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n",
+        ).unwrap();
+
+        let mut lock = CacheLock::default();
+        lock.set("iteration/ITERATION-042", "somesha");
+        lock.save(tmp.path()).unwrap();
+
+        let mock = MockGitRefClient::new()
+            .with_delete_remote_result(Ok(()))
+            .with_delete_ref_result(Ok(()));
+
+        let mut store = GitRefStore {
+            git: mock,
+            root: tmp.path().to_path_buf(),
+            config: test_config_with_coordination(),
+            reserved_number: None,
+        };
+        store.delete(&td, "ITERATION-042").unwrap();
+
+        let calls = store.git.calls.borrow();
+        assert!(
+            calls.iter().any(|c| c == "delete_remote_ref:origin:refs/lazyspec/iteration/ITERATION-042"),
+            "should delete remote ref, got: {:?}",
+            *calls
+        );
+        let delete_remote_idx = calls.iter().position(|c| c.starts_with("delete_remote_ref:")).unwrap();
+        let delete_local_idx = calls.iter().position(|c| c.starts_with("delete_ref:")).unwrap();
+        assert!(
+            delete_remote_idx < delete_local_idx,
+            "should delete remote before local"
+        );
+    }
+
+    #[test]
+    fn delete_does_not_touch_remote_without_coordination() {
+        let tmp = TempDir::new().unwrap();
+        let td = test_type_def();
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(
+            cache_dir.join("ITERATION-042.md"),
+            "---\ntitle: T\ntype: iteration\nstatus: draft\nauthor: a\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n",
+        ).unwrap();
+
+        let mut lock = CacheLock::default();
+        lock.set("iteration/ITERATION-042", "somesha");
+        lock.save(tmp.path()).unwrap();
+
+        let mock = MockGitRefClient::new()
+            .with_delete_ref_result(Ok(()));
+
+        let mut store = make_store(&tmp, mock);
+        store.delete(&td, "ITERATION-042").unwrap();
+
+        let calls = store.git.calls.borrow();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("delete_remote_ref:")),
+            "should not touch remote without coordination, got: {:?}",
+            *calls
         );
     }
 }

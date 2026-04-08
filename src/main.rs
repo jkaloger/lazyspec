@@ -148,6 +148,7 @@ fn main() -> anyhow::Result<()> {
             title,
             body,
             body_file,
+            json,
         }) => {
             lazyspec::cli::lease::check_lease_gate(&cwd, &config, Some(&path))?;
             if body.is_some() && body_file.is_some() {
@@ -179,7 +180,14 @@ fn main() -> anyhow::Result<()> {
             }
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
             lazyspec::cli::update::run_with_config(&cwd, &store, &path, &updates, Some(&config))?;
-            println!("Updated {}", resolved.display());
+            if json {
+                let store = Store::load(&cwd, &config)?;
+                let doc = lazyspec::cli::resolve::resolve_shorthand_or_path(&store, &path)?;
+                let json_val = lazyspec::cli::json::doc_to_json(doc);
+                println!("{}", serde_json::to_string_pretty(&json_val)?);
+            } else {
+                println!("Updated {}", resolved.display());
+            }
         }
         Some(Commands::Delete { path }) => {
             lazyspec::cli::lease::check_lease_gate(&cwd, &config, Some(&path))?;
@@ -359,6 +367,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Claim {
             doc_id,
             agent_id,
+            force,
             json,
         }) => {
             if let Err(e) = lazyspec::cli::lease::run_claim(
@@ -366,6 +375,7 @@ fn main() -> anyhow::Result<()> {
                 &config,
                 &doc_id,
                 agent_id.as_deref(),
+                force,
                 json,
             ) {
                 if json {

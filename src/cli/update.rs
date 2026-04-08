@@ -54,6 +54,7 @@ pub fn run_with_config(
                     git: GitCli,
                     root: root.to_path_buf(),
                     config: config.clone(),
+                    reserved_number: None,
                 };
                 return git_store.update(type_def, &doc.id, updates);
             }

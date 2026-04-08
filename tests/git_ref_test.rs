@@ -192,3 +192,195 @@ fn delete_remote_ref_removes_from_remote() {
         "ref should not exist on remote after deletion"
     );
 }
+
+#[test]
+fn update_creates_chained_commit() {
+    let (fixture, _bare) = TestFixture::with_git_remote();
+    let git = GitCli;
+    let refname = "refs/lazyspec/test/chain";
+
+    let original_sha = git
+        .create_ref_commit(fixture.root(), refname, &[("doc.md", "version 1")])
+        .unwrap();
+
+    let updated_sha = git
+        .create_commit(fixture.root(), refname, &[("doc.md", "version 2")], Some(&original_sha))
+        .unwrap();
+
+    let output = std::process::Command::new("git")
+        .args(["cat-file", "-p", &updated_sha])
+        .current_dir(fixture.root())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains(&format!("parent {}", original_sha)),
+        "new commit should have parent pointing to original SHA, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn push_ref_with_lease_succeeds_when_remote_matches() {
+    let (fixture, _bare) = TestFixture::with_git_remote();
+    let git = GitCli;
+    let refname = "refs/lazyspec/test/lease-push";
+
+    let sha = git
+        .create_ref_commit(fixture.root(), refname, &[("v1.txt", "version 1")])
+        .unwrap();
+
+    // Push normally first to establish remote ref
+    git.push_ref(fixture.root(), "origin", refname).unwrap();
+
+    // Create a new commit and update local ref
+    let new_sha = git
+        .create_commit(fixture.root(), refname, &[("v2.txt", "version 2")], Some(&sha))
+        .unwrap();
+    git.update_ref(fixture.root(), refname, &new_sha, &sha)
+        .unwrap();
+
+    // Push with lease using the correct expected old SHA
+    git.push_ref_with_lease(fixture.root(), "origin", refname, Some(&sha))
+        .unwrap();
+
+    // Verify remote has the new SHA by fetching
+    git.delete_ref(fixture.root(), refname).unwrap();
+    git.fetch_refs(fixture.root(), "origin", refname).unwrap();
+    let fetched = git.resolve_ref(fixture.root(), refname).unwrap();
+    assert_eq!(fetched, Some(new_sha));
+}
+
+#[test]
+fn push_ref_with_lease_fails_when_remote_changed() {
+    let (fixture, _bare) = TestFixture::with_git_remote();
+    let git = GitCli;
+    let refname = "refs/lazyspec/test/lease-fail";
+
+    let sha = git
+        .create_ref_commit(fixture.root(), refname, &[("v1.txt", "version 1")])
+        .unwrap();
+
+    // Push to establish remote ref
+    git.push_ref(fixture.root(), "origin", refname).unwrap();
+
+    // Simulate another agent: create a different commit and push it (changing the remote)
+    let interloper_sha = git
+        .create_commit(fixture.root(), refname, &[("v3.txt", "sneaky")], Some(&sha))
+        .unwrap();
+    git.update_ref(fixture.root(), refname, &interloper_sha, &sha)
+        .unwrap();
+    git.push_ref(fixture.root(), "origin", refname).unwrap();
+
+    // Now create our own commit based on the original sha (simulating stale local state)
+    let new_sha = git
+        .create_commit(fixture.root(), refname, &[("v2.txt", "version 2")], Some(&sha))
+        .unwrap();
+    git.update_ref(fixture.root(), refname, &new_sha, &interloper_sha)
+        .unwrap();
+
+    // Push with lease using the stale expected old SHA -- should fail because
+    // remote is at interloper_sha, not sha
+    let result = git.push_ref_with_lease(fixture.root(), "origin", refname, Some(&sha));
+    assert!(
+        result.is_err(),
+        "push_ref_with_lease should fail when remote ref was changed by another agent"
+    );
+}
+
+#[test]
+fn read_commit_timestamp_returns_correct_time() {
+    use chrono::Utc;
+
+    let (fixture, _bare) = TestFixture::with_git_remote();
+    let git = GitCli;
+    let refname = "refs/lazyspec/test/timestamp";
+
+    let before = Utc::now();
+    let sha = git
+        .create_ref_commit(fixture.root(), refname, &[("f.txt", "data")])
+        .unwrap();
+    let after = Utc::now();
+
+    let ts = git.read_commit_timestamp(fixture.root(), &sha).unwrap();
+
+    assert!(
+        ts.timestamp() >= before.timestamp() - 2 && ts.timestamp() <= after.timestamp() + 2,
+        "commit timestamp {} should be close to now (between {} and {})",
+        ts,
+        before,
+        after
+    );
+}
+
+#[test]
+fn create_ref_commit_fails_if_ref_exists() {
+    let (fixture, _bare) = TestFixture::with_git_remote();
+    let git = GitCli;
+    let refname = "refs/lazyspec/test/cas-create";
+
+    git.create_ref_commit(fixture.root(), refname, &[("v1.txt", "first")])
+        .unwrap();
+
+    let result = git.create_ref_commit(fixture.root(), refname, &[("v2.txt", "second")]);
+    assert!(
+        result.is_err(),
+        "second create_ref_commit on same refname should fail due to CAS"
+    );
+}
+
+#[test]
+fn heartbeat_succeeds_and_extends_expiry() {
+    use chrono::{DateTime, Duration, Utc};
+    use lazyspec::engine::config::CoordinationConfig;
+    use lazyspec::engine::lease::LeaseEngine;
+
+    let (fixture, _bare) = TestFixture::with_git_remote();
+    let git = GitCli;
+    let config = CoordinationConfig {
+        remote: "origin".to_string(),
+        lease_duration: "60m".to_string(),
+        grace_period: "2m".to_string(),
+        max_push_retries: 5,
+    };
+
+    let engine = LeaseEngine::new(git, config.clone());
+    // Truncate to seconds to match serde ts_seconds serialization
+    let now = DateTime::from_timestamp(Utc::now().timestamp(), 0).unwrap();
+    let lease = engine
+        .acquire(fixture.root(), "story", "STORY-001", "agent-a", now)
+        .unwrap();
+
+    let heartbeat_time = now + Duration::minutes(30);
+    let git2 = GitCli;
+    let engine2 = LeaseEngine::new(git2, config);
+
+    // Fetch the ref before heartbeat (simulating a fresh client)
+    let updated = engine2
+        .heartbeat(fixture.root(), "story", "STORY-001", "agent-a", heartbeat_time)
+        .unwrap();
+
+    assert_eq!(updated.agent, "agent-a");
+    assert_eq!(updated.acquired, lease.acquired);
+    assert!(
+        updated.expires > lease.expires,
+        "heartbeat should extend expiry: old={}, new={}",
+        lease.expires,
+        updated.expires
+    );
+    assert_eq!(updated.expires, heartbeat_time + Duration::minutes(60));
+
+    // Verify the ref was actually updated (no CAS error occurred)
+    let git3 = GitCli;
+    let refname = "refs/lazyspec/leases/story/STORY-001";
+    let sha = git3.resolve_ref(fixture.root(), refname).unwrap();
+    assert!(sha.is_some(), "ref should still exist after heartbeat");
+
+    // Read the lease back and verify content
+    let blob = git3
+        .read_ref_blob(fixture.root(), &sha.unwrap(), "lease.json")
+        .unwrap();
+    let stored_lease: lazyspec::engine::lease::Lease = serde_json::from_str(&blob).unwrap();
+    assert_eq!(stored_lease.expires, updated.expires);
+}

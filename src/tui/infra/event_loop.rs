@@ -1,6 +1,8 @@
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::document::split_frontmatter;
 use crate::engine::gh::GhCli;
+use crate::engine::git_ref::GitCli;
+use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
@@ -76,6 +78,37 @@ fn try_push_gh_edit(
         .map_err(|e| format!("lock poisoned: {e}"))?;
     gh_store
         .update(type_def, &doc_id, &[("body", body_trimmed)])
+        .map_err(|e| e.to_string())
+}
+
+fn try_push_git_ref_edit(
+    root: &Path,
+    relative: &Path,
+    config: &Config,
+) -> Result<(), String> {
+    let store = Store::load(root, config).map_err(|e| e.to_string())?;
+    let doc = store
+        .get(relative)
+        .ok_or_else(|| "document not found in store".to_string())?;
+    let doc_id = doc.id.clone();
+    let type_name = doc.doc_type.as_str().to_string();
+
+    let type_def = config
+        .type_by_name(&type_name)
+        .ok_or_else(|| format!("type '{}' not found in config", type_name))?;
+
+    if type_def.store != StoreBackend::GitRef {
+        return Ok(());
+    }
+
+    let mut git_store = GitRefStore {
+        git: GitCli,
+        root: root.to_path_buf(),
+        config: config.clone(),
+        reserved_number: None,
+    };
+    git_store
+        .update(type_def, &doc_id, &[])
         .map_err(|e| e.to_string())
 }
 
@@ -456,6 +489,19 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                             try_push_gh_edit(&push_root, &push_relative, &push_config, &push_store);
                         push_flag.store(false, Ordering::Relaxed);
                         let _ = push_tx.send(AppEvent::GhPushResult(result));
+                    });
+                }
+                {
+                    let push_root = root.clone();
+                    let push_relative = relative.to_path_buf();
+                    let push_config = config.clone();
+                    let push_tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let result =
+                            try_push_git_ref_edit(&push_root, &push_relative, &push_config);
+                        if let Err(msg) = result {
+                            let _ = push_tx.send(AppEvent::GhPushResult(Err(msg)));
+                        }
                     });
                 }
             }

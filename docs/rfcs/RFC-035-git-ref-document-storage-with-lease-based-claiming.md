@@ -111,16 +111,16 @@ Error: RFC-042 is not claimed. Run `lazyspec claim RFC-042` first.
 
 #### Lease Operations
 
-All operations use `GitRefOps` for ref manipulation. Creating a lease commit means writing `lease.json` as a blob, building a single-entry tree, creating a commit (parented on the previous lease commit if extending), and updating the ref.
+All operations use `GitRefOps` for ref manipulation. Creating a lease commit means writing `lease.json` as a blob, building a single-entry tree, creating a commit (parented on the previous lease commit if extending), and updating the ref. All operations fetch from remote before acting to ensure they operate on the latest state.
 
 | Operation | Mechanism |
 |-----------|-----------|
-| Acquire | `create_ref_commit` with `lease.json`, push to `refs/lazyspec/leases/{type}/{id}`. Fails if ref already exists on remote. |
-| Release | `delete_remote_ref` on `refs/lazyspec/leases/{type}/{id}`. Verifies caller is the holder. |
-| Admin release | Delete lease ref, bypassing expiry. Requires `--expected-holder` matching current holder. For orchestrators. |
-| Heartbeat | New lease commit with updated expiry, parented on current. `update_ref` with CAS (old SHA), then push. |
-| Force-acquire | Check `now > lease.expires + grace_period`. If expired, delete and reacquire. |
-| Query | `lazyspec leases` lists all held leases via `list_refs` on `refs/lazyspec/leases/*`. |
+| Acquire | Fetch from remote. `create_ref_commit` with `lease.json`, push to `refs/lazyspec/leases/{type}/{id}`. Uses CAS (all-zeros SHA) to fail if ref already exists on remote. |
+| Release | Fetch from remote. `delete_remote_ref` on `refs/lazyspec/leases/{type}/{id}`. Verifies caller is the holder. |
+| Admin release | Fetch from remote. Delete lease ref, bypassing expiry. Requires `--expected-holder` matching current holder. For orchestrators. |
+| Heartbeat | Fetch from remote. New lease commit with updated expiry, parented on current. `update_ref` with CAS (old SHA), then push. |
+| Force-acquire | Fetch from remote. Check `now > lease.expires + grace_period` using commit timestamps for expiry reference. If expired, atomic ref swap via `push --force-with-lease`. |
+| Query | Fetch from remote. `lazyspec leases` lists all held leases via `list_refs` on `refs/lazyspec/leases/*`. |
 
 #### Heartbeat and Lease Management
 
@@ -264,7 +264,7 @@ Priority chain:
 
 1. `$LAZYSPEC_AGENT_ID` (explicit, for orchestrators)
 2. `$CLAUDE_SESSION_ID` (auto-detected in Claude Code)
-3. `git config user.name` + sqids-encoded PID (fallback)
+3. `git config user.name` (fallback)
 
 ### Claude Code Hooks
 
@@ -297,7 +297,9 @@ pub trait GitRefOps {
     fn delete_ref(&self, root: &Path, refname: &str) -> Result<()>;
     fn fetch_refs(&self, root: &Path, remote: &str, pattern: &str) -> Result<()>;
     fn push_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()>;
+    fn push_ref_with_lease(&self, root: &Path, remote: &str, refname: &str, expected_old: Option<&str>) -> Result<()>;
     fn delete_remote_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()>;
+    fn read_commit_timestamp(&self, root: &Path, sha: &str) -> Result<DateTime<Utc>>;
 }
 ```
 
@@ -309,6 +311,16 @@ The `create_ref_commit` implementation pipes content through `git hash-object -w
 This lives in a new `engine/git_ref.rs` module alongside `gh.rs`, following the same structure: data types, trait definition, `GitCli` implementation, `MockGitRefClient` in a `test_support` submodule.
 
 The existing reservation module can be migrated to use `GitRefOps` in a follow-up, giving the trait a second concrete consumer.
+
+### Distributed Safety Properties
+
+The distributed lease protocol relies on the following safety properties:
+
+- **Linearization points**: All document writes use CAS (`git update-ref <ref> <new> <old>`) as their linearization point. Lease operations use `push --force-with-lease` for atomic ref swaps. These ensure that concurrent operations are serialized at the git ref level.
+- **Fetch-before-check**: The lease gate fetches from remote before checking lease state, adding one remote round-trip per gated write. This ensures the lease check operates on the latest remote state rather than potentially stale local refs.
+- **Clock skew tolerance**: The `grace_period` (default 2 minutes) absorbs NTP drift between agents. Force-acquire uses commit timestamps (server-side, written at push time) as the expiry reference rather than relying on the acquiring agent's local clock.
+- **Network partition behavior**: During a partition, local ref commits succeed but push fails. The lease gate falls back to local refs with a warning, allowing the agent to continue working locally. Coordination resumes when connectivity is restored and the next push succeeds.
+- **Initial ref creation**: Uses CAS with all-zeros SHA (`0000000000000000000000000000000000000000`) as the expected old value, preventing a TOCTOU race where two agents both see "ref does not exist" and both attempt to create it. Only one push succeeds; the other gets a ref-update rejection.
 
 ### Fetch Refspecs
 

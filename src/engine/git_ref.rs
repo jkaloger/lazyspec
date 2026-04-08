@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use chrono::{DateTime, Utc};
 use std::path::Path;
 use std::process::Command;
 
@@ -11,6 +12,7 @@ pub trait GitRefOps {
         root: &Path,
         refname: &str,
         files: &[(&str, &str)],
+        parent: Option<&str>,
     ) -> Result<String>;
     fn create_ref_commit(
         &self,
@@ -29,6 +31,14 @@ pub trait GitRefOps {
     fn fetch_refs(&self, root: &Path, remote: &str, pattern: &str) -> Result<()>;
     fn push_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()>;
     fn delete_remote_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()>;
+    fn push_ref_with_lease(
+        &self,
+        root: &Path,
+        remote: &str,
+        refname: &str,
+        expected_old: Option<&str>,
+    ) -> Result<()>;
+    fn read_commit_timestamp(&self, root: &Path, sha: &str) -> Result<DateTime<Utc>>;
 }
 
 pub struct GitCli;
@@ -110,6 +120,7 @@ impl GitRefOps for GitCli {
         root: &Path,
         _refname: &str,
         files: &[(&str, &str)],
+        parent: Option<&str>,
     ) -> Result<String> {
         let mut tree_entries = Vec::new();
 
@@ -132,7 +143,11 @@ impl GitRefOps for GitCli {
         }
         let tree_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-        let output = self.run_git(root, &["commit-tree", &tree_sha, "-m", "ref commit"])?;
+        let output = if let Some(parent_sha) = parent {
+            self.run_git(root, &["commit-tree", &tree_sha, "-p", parent_sha, "-m", "ref commit"])?
+        } else {
+            self.run_git(root, &["commit-tree", &tree_sha, "-m", "ref commit"])?
+        };
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("git commit-tree failed: {}", stderr.trim());
@@ -148,9 +163,10 @@ impl GitRefOps for GitCli {
         refname: &str,
         files: &[(&str, &str)],
     ) -> Result<String> {
-        let commit_sha = self.create_commit(root, refname, files)?;
+        let commit_sha = self.create_commit(root, refname, files, None)?;
 
-        let output = self.run_git(root, &["update-ref", refname, &commit_sha])?;
+        let null_sha = "0000000000000000000000000000000000000000";
+        let output = self.run_git(root, &["update-ref", refname, &commit_sha, null_sha])?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("git update-ref failed: {}", stderr.trim());
@@ -211,11 +227,53 @@ impl GitRefOps for GitCli {
         }
         Ok(())
     }
+
+    fn push_ref_with_lease(
+        &self,
+        root: &Path,
+        remote: &str,
+        refname: &str,
+        expected_old: Option<&str>,
+    ) -> Result<()> {
+        let lease_arg = match expected_old {
+            Some(sha) => format!("--force-with-lease={}:{}", refname, sha),
+            None => format!("--force-with-lease={}", refname),
+        };
+        let output = self.run_git(root, &["push", &lease_arg, remote, refname])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git push --force-with-lease failed: {}", stderr.trim());
+        }
+        Ok(())
+    }
+
+    fn read_commit_timestamp(&self, root: &Path, sha: &str) -> Result<DateTime<Utc>> {
+        let output = self.run_git(root, &["cat-file", "-p", sha])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git cat-file failed: {}", stderr.trim());
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Some(rest) = line.strip_prefix("committer ") {
+                let parts: Vec<&str> = rest.rsplitn(3, ' ').collect();
+                if parts.len() < 3 {
+                    bail!("unexpected committer line format: {}", line);
+                }
+                let timestamp: i64 = parts[1].parse()
+                    .map_err(|_| anyhow::anyhow!("invalid committer timestamp: {}", parts[1]))?;
+                return DateTime::from_timestamp(timestamp, 0)
+                    .ok_or_else(|| anyhow::anyhow!("invalid unix timestamp: {}", timestamp));
+            }
+        }
+        bail!("no committer line found in commit {}", sha)
+    }
 }
 
 #[cfg(test)]
 pub mod test_support {
     use super::*;
+    use chrono::{DateTime, Utc};
     use std::cell::RefCell;
 
     pub struct MockGitRefClient {
@@ -229,6 +287,8 @@ pub mod test_support {
         pub fetch_results: RefCell<Vec<Result<()>>>,
         pub push_results: RefCell<Vec<Result<()>>>,
         pub delete_remote_results: RefCell<Vec<Result<()>>>,
+        pub push_with_lease_results: RefCell<Vec<Result<()>>>,
+        pub read_commit_timestamp_results: RefCell<Vec<Result<DateTime<Utc>>>>,
         pub calls: RefCell<Vec<String>>,
     }
 
@@ -251,6 +311,8 @@ pub mod test_support {
                 fetch_results: RefCell::new(vec![]),
                 push_results: RefCell::new(vec![]),
                 delete_remote_results: RefCell::new(vec![]),
+                push_with_lease_results: RefCell::new(vec![]),
+                read_commit_timestamp_results: RefCell::new(vec![]),
                 calls: RefCell::new(vec![]),
             }
         }
@@ -305,6 +367,16 @@ pub mod test_support {
             self
         }
 
+        pub fn with_push_with_lease_result(self, result: Result<()>) -> Self {
+            self.push_with_lease_results.borrow_mut().push(result);
+            self
+        }
+
+        pub fn with_read_commit_timestamp_result(self, result: Result<DateTime<Utc>>) -> Self {
+            self.read_commit_timestamp_results.borrow_mut().push(result);
+            self
+        }
+
         fn pop_or_default<T: Default>(queue: &RefCell<Vec<Result<T>>>) -> Result<T> {
             let mut q = queue.borrow_mut();
             if q.is_empty() {
@@ -342,10 +414,11 @@ pub mod test_support {
             _root: &Path,
             refname: &str,
             _files: &[(&str, &str)],
+            parent: Option<&str>,
         ) -> Result<String> {
             self.calls
                 .borrow_mut()
-                .push(format!("create_commit:{}", refname));
+                .push(format!("create_commit:{}:parent={:?}", refname, parent));
             Self::pop_or_default(&self.create_commit_results)
         }
 
@@ -401,6 +474,32 @@ pub mod test_support {
                 .push(format!("delete_remote_ref:{}:{}", remote, refname));
             Self::pop_or_default(&self.delete_remote_results)
         }
+
+        fn push_ref_with_lease(
+            &self,
+            _root: &Path,
+            remote: &str,
+            refname: &str,
+            expected_old: Option<&str>,
+        ) -> Result<()> {
+            self.calls.borrow_mut().push(format!(
+                "push_ref_with_lease:{}:{}:expected_old={:?}",
+                remote, refname, expected_old
+            ));
+            Self::pop_or_default(&self.push_with_lease_results)
+        }
+
+        fn read_commit_timestamp(&self, _root: &Path, sha: &str) -> Result<DateTime<Utc>> {
+            self.calls
+                .borrow_mut()
+                .push(format!("read_commit_timestamp:{}", sha));
+            let mut q = self.read_commit_timestamp_results.borrow_mut();
+            if q.is_empty() {
+                bail!("no read_commit_timestamp result configured")
+            } else {
+                q.remove(0)
+            }
+        }
     }
 }
 
@@ -454,10 +553,10 @@ mod tests {
         let mock =
             MockGitRefClient::new().with_create_commit_result(Ok("danglingsha".to_string()));
         let result = mock
-            .create_commit(&dummy_root(), "refs/test", &[("f.txt", "data")])
+            .create_commit(&dummy_root(), "refs/test", &[("f.txt", "data")], None)
             .unwrap();
         assert_eq!(result, "danglingsha");
-        assert_eq!(mock.calls.borrow()[0], "create_commit:refs/test");
+        assert_eq!(mock.calls.borrow()[0], "create_commit:refs/test:parent=None");
     }
 
     #[test]
@@ -508,5 +607,71 @@ mod tests {
         assert_eq!(r1, Some("first".to_string()));
         assert_eq!(r2, Some("second".to_string()));
         assert_eq!(r3, None); // default when queue exhausted
+    }
+
+    #[test]
+    fn create_commit_with_parent_records_parent_arg() {
+        let mock =
+            MockGitRefClient::new().with_create_commit_result(Ok("newsha".to_string()));
+        mock.create_commit(&dummy_root(), "refs/test", &[("f.txt", "data")], Some("abc123"))
+            .unwrap();
+        assert_eq!(
+            mock.calls.borrow()[0],
+            "create_commit:refs/test:parent=Some(\"abc123\")"
+        );
+    }
+
+    #[test]
+    fn mock_push_ref_with_lease_records_call_with_expected_old() {
+        let mock = MockGitRefClient::new().with_push_with_lease_result(Ok(()));
+        mock.push_ref_with_lease(&dummy_root(), "origin", "refs/test", Some("abc123"))
+            .unwrap();
+        assert_eq!(
+            mock.calls.borrow()[0],
+            "push_ref_with_lease:origin:refs/test:expected_old=Some(\"abc123\")"
+        );
+    }
+
+    #[test]
+    fn mock_push_ref_with_lease_records_call_with_none() {
+        let mock = MockGitRefClient::new().with_push_with_lease_result(Ok(()));
+        mock.push_ref_with_lease(&dummy_root(), "origin", "refs/test", None)
+            .unwrap();
+        assert_eq!(
+            mock.calls.borrow()[0],
+            "push_ref_with_lease:origin:refs/test:expected_old=None"
+        );
+    }
+
+    #[test]
+    fn mock_push_ref_with_lease_returns_configured_error() {
+        let mock = MockGitRefClient::new()
+            .with_push_with_lease_result(Err(anyhow::anyhow!("lease mismatch")));
+        let result = mock.push_ref_with_lease(&dummy_root(), "origin", "refs/test", Some("old"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("lease mismatch"));
+    }
+
+    #[test]
+    fn create_commit_without_parent_creates_orphan() {
+        let mock =
+            MockGitRefClient::new().with_create_commit_result(Ok("newsha".to_string()));
+        mock.create_commit(&dummy_root(), "refs/test", &[("f.txt", "data")], None)
+            .unwrap();
+        assert_eq!(
+            mock.calls.borrow()[0],
+            "create_commit:refs/test:parent=None"
+        );
+    }
+
+    #[test]
+    fn read_commit_timestamp_mock_records_call() {
+        use chrono::Utc;
+        let ts = Utc::now();
+        let mock = MockGitRefClient::new()
+            .with_read_commit_timestamp_result(Ok(ts));
+        let result = mock.read_commit_timestamp(&dummy_root(), "abc123").unwrap();
+        assert_eq!(result, ts);
+        assert_eq!(mock.calls.borrow()[0], "read_commit_timestamp:abc123");
     }
 }

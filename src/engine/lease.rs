@@ -35,7 +35,7 @@ fn lease_ref(type_name: &str, id: &str) -> String {
     format!("refs/lazyspec/leases/{}/{}", type_name, id)
 }
 
-fn fetch_ref_optional(
+pub fn fetch_ref_optional(
     git: &impl GitRefOps,
     root: &Path,
     remote: &str,
@@ -124,6 +124,7 @@ impl<R: GitRefOps> LeaseEngine<R> {
         mismatch_msg: impl FnOnce(&str, &str) -> String,
     ) -> Result<()> {
         let refname = lease_ref(type_name, id);
+        fetch_ref_optional(&self.git, root, &self.config.remote, &refname)?;
         let sha = self
             .git
             .resolve_ref(root, &refname)?
@@ -167,7 +168,7 @@ impl<R: GitRefOps> LeaseEngine<R> {
         let json = serde_json::to_string_pretty(&updated)?;
         let new_sha =
             self.git
-                .create_ref_commit(root, &refname, &[("lease.json", &json)])?;
+                .create_commit(root, &refname, &[("lease.json", &json)], Some(&old_sha))?;
         self.git
             .update_ref(root, &refname, &new_sha, &old_sha)?;
         self.git.push_ref(root, &self.config.remote, &refname)?;
@@ -189,31 +190,35 @@ impl<R: GitRefOps> LeaseEngine<R> {
             .resolve_ref(root, &refname)?
             .ok_or_else(|| anyhow::anyhow!("no lease found to force-acquire"))?;
         let blob = self.git.read_ref_blob(root, &sha, "lease.json")?;
-        let lease: Lease = serde_json::from_str(&blob)?;
+        let _lease: Lease = serde_json::from_str(&blob)?;
 
+        let last_touched = self.git.read_commit_timestamp(root, &sha)?;
+        let duration = parse_duration(&self.config.lease_duration)?;
         let grace = parse_duration(&self.config.grace_period)?;
-        if now <= lease.expires + grace {
+        let effective_expiry = last_touched + duration + grace;
+        if now <= effective_expiry {
             bail!("lease not expired beyond grace period");
         }
 
-        self.git
-            .delete_remote_ref(root, &self.config.remote, &refname)?;
-        self.git.delete_ref(root, &refname)?;
-
-        let duration = parse_duration(&self.config.lease_duration)?;
         let new_lease = Lease {
             agent: agent.to_string(),
             acquired: now,
             expires: now + duration,
         };
         let json = serde_json::to_string_pretty(&new_lease)?;
+        let new_sha =
+            self.git
+                .create_commit(root, &refname, &[("lease.json", &json)], Some(&sha))?;
         self.git
-            .create_ref_commit(root, &refname, &[("lease.json", &json)])?;
-        self.git.push_ref(root, &self.config.remote, &refname)?;
+            .push_ref_with_lease(root, &self.config.remote, &refname, Some(&sha))?;
+        self.git.update_ref(root, &refname, &new_sha, &sha)?;
         Ok(new_lease)
     }
 
     pub fn query(&self, root: &Path) -> Result<Vec<(String, Lease)>> {
+        if let Err(e) = self.git.fetch_refs(root, &self.config.remote, "refs/lazyspec/leases/*") {
+            eprintln!("warning: failed to fetch lease refs: {}", e);
+        }
         let refs = self
             .git
             .list_refs(root, "refs/lazyspec/leases/")?;
@@ -339,6 +344,7 @@ mod tests {
         let now = fixed_now();
         let lease_json = make_lease_json("agent-a", now, now + Duration::minutes(60));
         let mock = MockGitRefClient::new()
+            .with_fetch_result(Ok(()))
             .with_resolve_result(Ok(Some("sha1".to_string())))
             .with_read_blob_result(Ok(lease_json))
             .with_delete_remote_result(Ok(()))
@@ -359,6 +365,7 @@ mod tests {
         let now = fixed_now();
         let lease_json = make_lease_json("agent-a", now, now + Duration::minutes(60));
         let mock = MockGitRefClient::new()
+            .with_fetch_result(Ok(()))
             .with_resolve_result(Ok(Some("sha1".to_string())))
             .with_read_blob_result(Ok(lease_json));
 
@@ -378,6 +385,7 @@ mod tests {
         let now = fixed_now();
         let lease_json = make_lease_json("agent-a", now, now + Duration::minutes(60));
         let mock = MockGitRefClient::new()
+            .with_fetch_result(Ok(()))
             .with_resolve_result(Ok(Some("sha1".to_string())))
             .with_read_blob_result(Ok(lease_json))
             .with_delete_remote_result(Ok(()))
@@ -394,6 +402,7 @@ mod tests {
         let now = fixed_now();
         let lease_json = make_lease_json("agent-a", now, now + Duration::minutes(60));
         let mock = MockGitRefClient::new()
+            .with_fetch_result(Ok(()))
             .with_resolve_result(Ok(Some("sha1".to_string())))
             .with_read_blob_result(Ok(lease_json));
 
@@ -418,7 +427,7 @@ mod tests {
         let mock = MockGitRefClient::new()
             .with_resolve_result(Ok(Some("old-sha".to_string())))
             .with_read_blob_result(Ok(lease_json))
-            .with_create_ref_commit_result(Ok("new-sha".to_string()))
+            .with_create_commit_result(Ok("new-sha".to_string()))
             .with_update_ref_result(Ok(()))
             .with_push_result(Ok(()));
 
@@ -432,7 +441,9 @@ mod tests {
         assert_eq!(updated.expires, heartbeat_time + Duration::minutes(60));
 
         let calls = engine.git.calls.borrow();
-        assert!(calls.iter().any(|c| c.contains("create_ref_commit")));
+        assert!(calls.iter().any(|c| c.contains("create_commit:")));
+        assert!(!calls.iter().any(|c| c.contains("create_ref_commit")),
+            "heartbeat should use create_commit, not create_ref_commit");
         let update_call = calls
             .iter()
             .find(|c| c.starts_with("update_ref:"))
@@ -442,6 +453,35 @@ mod tests {
             "update_ref:refs/lazyspec/leases/story/STORY-001:new-sha:old-sha"
         );
         assert!(calls.iter().any(|c| c.contains("push_ref")));
+    }
+
+    #[test]
+    fn heartbeat_uses_create_commit_then_cas() {
+        let acquired = fixed_now();
+        let old_expires = acquired + Duration::minutes(60);
+        let heartbeat_time = acquired + Duration::minutes(30);
+        let lease_json = make_lease_json("agent-a", acquired, old_expires);
+
+        let mock = MockGitRefClient::new()
+            .with_resolve_result(Ok(Some("old-sha".to_string())))
+            .with_read_blob_result(Ok(lease_json))
+            .with_create_commit_result(Ok("new-sha".to_string()))
+            .with_update_ref_result(Ok(()))
+            .with_push_result(Ok(()));
+
+        let engine = LeaseEngine::new(mock, test_config());
+        engine
+            .heartbeat(&dummy_root(), "story", "STORY-001", "agent-a", heartbeat_time)
+            .unwrap();
+
+        let calls = engine.git.calls.borrow();
+        assert_eq!(calls.len(), 5);
+        assert!(calls[0].starts_with("resolve_ref:"));
+        assert!(calls[1].starts_with("read_ref_blob:"));
+        assert!(calls[2].starts_with("create_commit:"));
+        assert!(calls[2].contains("parent=Some(\"old-sha\")"));
+        assert!(calls[3].starts_with("update_ref:"));
+        assert!(calls[4].starts_with("push_ref:"));
     }
 
     #[test]
@@ -468,15 +508,17 @@ mod tests {
         let expired = acquired + Duration::minutes(60);
         let now = expired + Duration::minutes(5); // well beyond 2m grace
         let lease_json = make_lease_json("agent-a", acquired, expired);
+        // commit timestamp = acquired; acquired + 60m(duration) + 2m(grace) = acquired + 62m < now (acquired + 65m)
+        let commit_timestamp = acquired;
 
         let mock = MockGitRefClient::new()
             .with_fetch_result(Ok(()))
             .with_resolve_result(Ok(Some("old-sha".to_string())))
             .with_read_blob_result(Ok(lease_json))
-            .with_delete_remote_result(Ok(()))
-            .with_delete_ref_result(Ok(()))
-            .with_create_ref_commit_result(Ok("new-sha".to_string()))
-            .with_push_result(Ok(()));
+            .with_read_commit_timestamp_result(Ok(commit_timestamp))
+            .with_create_commit_result(Ok("new-sha".to_string()))
+            .with_push_with_lease_result(Ok(()))
+            .with_update_ref_result(Ok(()));
 
         let engine = LeaseEngine::new(mock, test_config());
         let lease = engine
@@ -491,13 +533,15 @@ mod tests {
     fn force_acquire_within_grace_period_fails() {
         let acquired = fixed_now();
         let expired = acquired + Duration::minutes(60);
-        let now = expired + Duration::minutes(1); // within 2m grace
+        let now = expired + Duration::minutes(1); // within 2m grace: acquired + 62m > now (acquired + 61m)
         let lease_json = make_lease_json("agent-a", acquired, expired);
+        let commit_timestamp = acquired;
 
         let mock = MockGitRefClient::new()
             .with_fetch_result(Ok(()))
             .with_resolve_result(Ok(Some("old-sha".to_string())))
-            .with_read_blob_result(Ok(lease_json));
+            .with_read_blob_result(Ok(lease_json))
+            .with_read_commit_timestamp_result(Ok(commit_timestamp));
 
         let engine = LeaseEngine::new(mock, test_config());
         let err = engine
@@ -511,11 +555,14 @@ mod tests {
     fn force_acquire_non_expired_fails() {
         let now = fixed_now();
         let lease_json = make_lease_json("agent-a", now, now + Duration::minutes(60));
+        // commit timestamp = now, so now + 60m + 2m >> now; clearly not expired
+        let commit_timestamp = now;
 
         let mock = MockGitRefClient::new()
             .with_fetch_result(Ok(()))
             .with_resolve_result(Ok(Some("sha1".to_string())))
-            .with_read_blob_result(Ok(lease_json));
+            .with_read_blob_result(Ok(lease_json))
+            .with_read_commit_timestamp_result(Ok(commit_timestamp));
 
         let engine = LeaseEngine::new(mock, test_config());
         let err = engine
@@ -579,6 +626,93 @@ mod tests {
     }
 
     #[test]
+    fn force_acquire_uses_push_with_lease() {
+        let acquired = fixed_now();
+        let expired = acquired + Duration::minutes(60);
+        let now = expired + Duration::minutes(5);
+        let lease_json = make_lease_json("agent-a", acquired, expired);
+        let commit_timestamp = acquired;
+
+        let mock = MockGitRefClient::new()
+            .with_fetch_result(Ok(()))
+            .with_resolve_result(Ok(Some("old-sha".to_string())))
+            .with_read_blob_result(Ok(lease_json))
+            .with_read_commit_timestamp_result(Ok(commit_timestamp))
+            .with_create_commit_result(Ok("new-sha".to_string()))
+            .with_push_with_lease_result(Ok(()))
+            .with_update_ref_result(Ok(()));
+
+        let engine = LeaseEngine::new(mock, test_config());
+        engine
+            .force_acquire(&dummy_root(), "story", "STORY-001", "agent-b", now)
+            .unwrap();
+
+        let calls = engine.git.calls.borrow();
+        assert!(
+            !calls.iter().any(|c| c.contains("delete_remote_ref")),
+            "force_acquire should not call delete_remote_ref"
+        );
+        assert!(
+            !calls.iter().any(|c| c.contains("delete_ref")),
+            "force_acquire should not call delete_ref"
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("create_ref_commit")),
+            "force_acquire should use create_commit, not create_ref_commit"
+        );
+
+        let push_lease_call = calls
+            .iter()
+            .find(|c| c.starts_with("push_ref_with_lease:"))
+            .expect("expected push_ref_with_lease call");
+        assert_eq!(
+            push_lease_call,
+            "push_ref_with_lease:origin:refs/lazyspec/leases/story/STORY-001:expected_old=Some(\"old-sha\")"
+        );
+
+        let update_call = calls
+            .iter()
+            .find(|c| c.starts_with("update_ref:"))
+            .expect("expected update_ref call");
+        assert_eq!(
+            update_call,
+            "update_ref:refs/lazyspec/leases/story/STORY-001:new-sha:old-sha"
+        );
+    }
+
+    #[test]
+    fn force_acquire_fails_if_ref_changed() {
+        let acquired = fixed_now();
+        let expired = acquired + Duration::minutes(60);
+        let now = expired + Duration::minutes(5);
+        let lease_json = make_lease_json("agent-a", acquired, expired);
+        let commit_timestamp = acquired;
+
+        let mock = MockGitRefClient::new()
+            .with_fetch_result(Ok(()))
+            .with_resolve_result(Ok(Some("old-sha".to_string())))
+            .with_read_blob_result(Ok(lease_json))
+            .with_read_commit_timestamp_result(Ok(commit_timestamp))
+            .with_create_commit_result(Ok("new-sha".to_string()))
+            .with_push_with_lease_result(Err(anyhow::anyhow!(
+                "git push --force-with-lease failed: stale info"
+            )));
+
+        let engine = LeaseEngine::new(mock, test_config());
+        let err = engine
+            .force_acquire(&dummy_root(), "story", "STORY-001", "agent-b", now)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("force-with-lease failed"));
+
+        let calls = engine.git.calls.borrow();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("update_ref:")),
+            "update_ref should not be called when push_ref_with_lease fails"
+        );
+    }
+
+    #[test]
     fn force_acquire_propagates_real_network_errors() {
         let now = fixed_now();
         let mock = MockGitRefClient::new()
@@ -610,6 +744,7 @@ mod tests {
         ];
 
         let mock = MockGitRefClient::new()
+            .with_fetch_result(Ok(()))
             .with_list_result(Ok(refs))
             .with_read_blob_result(Ok(lease1_json))
             .with_read_blob_result(Ok(lease2_json));
@@ -622,5 +757,102 @@ mod tests {
         assert_eq!(result[0].1.agent, "agent-a");
         assert_eq!(result[1].0, "refs/lazyspec/leases/rfc/RFC-010");
         assert_eq!(result[1].1.agent, "agent-b");
+    }
+
+    #[test]
+    fn delete_lease_fetches_before_resolve() {
+        let now = fixed_now();
+        let lease_json = make_lease_json("agent-a", now, now + Duration::minutes(60));
+        let mock = MockGitRefClient::new()
+            .with_fetch_result(Ok(()))
+            .with_resolve_result(Ok(Some("sha1".to_string())))
+            .with_read_blob_result(Ok(lease_json))
+            .with_delete_remote_result(Ok(()))
+            .with_delete_ref_result(Ok(()));
+
+        let engine = LeaseEngine::new(mock, test_config());
+        engine
+            .release(&dummy_root(), "story", "STORY-001", "agent-a")
+            .unwrap();
+
+        let calls = engine.git.calls.borrow();
+        assert!(calls[0].starts_with("fetch_refs:"));
+        assert!(calls[1].starts_with("resolve_ref:"));
+    }
+
+    #[test]
+    fn query_fetches_before_list() {
+        let now = fixed_now();
+        let lease_json = make_lease_json("agent-a", now, now + Duration::minutes(60));
+        let refs = vec![(
+            "refs/lazyspec/leases/story/STORY-001".to_string(),
+            "sha1".to_string(),
+        )];
+
+        let mock = MockGitRefClient::new()
+            .with_fetch_result(Ok(()))
+            .with_list_result(Ok(refs))
+            .with_read_blob_result(Ok(lease_json));
+
+        let engine = LeaseEngine::new(mock, test_config());
+        let result = engine.query(&dummy_root()).unwrap();
+
+        assert_eq!(result.len(), 1);
+        let calls = engine.git.calls.borrow();
+        assert!(calls[0].starts_with("fetch_refs:"));
+        assert!(calls[0].contains("refs/lazyspec/leases/*"));
+        assert!(calls[1].starts_with("list_refs:"));
+    }
+
+    #[test]
+    fn query_succeeds_when_fetch_fails() {
+        let now = fixed_now();
+        let lease_json = make_lease_json("agent-a", now, now + Duration::minutes(60));
+        let refs = vec![(
+            "refs/lazyspec/leases/story/STORY-001".to_string(),
+            "sha1".to_string(),
+        )];
+
+        let mock = MockGitRefClient::new()
+            .with_fetch_result(Err(anyhow::anyhow!("network timeout")))
+            .with_list_result(Ok(refs))
+            .with_read_blob_result(Ok(lease_json));
+
+        let engine = LeaseEngine::new(mock, test_config());
+        let result = engine.query(&dummy_root()).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].1.agent, "agent-a");
+    }
+
+    #[test]
+    fn force_acquire_uses_commit_timestamp() {
+        // Verify that force_acquire uses commit timestamp (not lease.expires) for expiry check.
+        // Set lease.expires far in the future but commit timestamp old enough to be expired.
+        let acquired = fixed_now();
+        let far_future_expires = acquired + Duration::hours(24);
+        let lease_json = make_lease_json("agent-a", acquired, far_future_expires);
+        // commit timestamp is old: old_ts + 60m + 2m < now
+        let old_commit_timestamp = acquired - Duration::hours(2);
+        let now = acquired;
+
+        let mock = MockGitRefClient::new()
+            .with_fetch_result(Ok(()))
+            .with_resolve_result(Ok(Some("old-sha".to_string())))
+            .with_read_blob_result(Ok(lease_json))
+            .with_read_commit_timestamp_result(Ok(old_commit_timestamp))
+            .with_create_commit_result(Ok("new-sha".to_string()))
+            .with_push_with_lease_result(Ok(()))
+            .with_update_ref_result(Ok(()));
+
+        let engine = LeaseEngine::new(mock, test_config());
+        let lease = engine
+            .force_acquire(&dummy_root(), "story", "STORY-001", "agent-b", now)
+            .unwrap();
+
+        assert_eq!(lease.agent, "agent-b");
+
+        let calls = engine.git.calls.borrow();
+        assert!(calls.iter().any(|c| c == "read_commit_timestamp:old-sha"));
     }
 }

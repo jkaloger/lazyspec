@@ -105,6 +105,9 @@ pub enum Commands {
         /// Read body from file (use `-` for stdin)
         #[arg(long)]
         body_file: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Delete a document
     Delete {
@@ -253,6 +256,9 @@ pub enum Commands {
         /// Agent identity (defaults to auto-resolved agent ID)
         #[arg(long)]
         agent_id: Option<String>,
+        /// Force-acquire an expired lease held by another agent
+        #[arg(long)]
+        force: bool,
         /// Output as JSON
         #[arg(long)]
         json: bool,
