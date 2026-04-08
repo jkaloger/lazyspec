@@ -18,7 +18,7 @@ fn ensure_cache_gitignored(root: &Path) -> Result<()> {
                 .append(true)
                 .open(&gitignore_path)?;
             if !contents.ends_with('\n') && !contents.is_empty() {
-                write!(file, "\n")?;
+                writeln!(file)?;
             }
             writeln!(file, "cache/")?;
         }
