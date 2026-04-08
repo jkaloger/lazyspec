@@ -14,7 +14,7 @@ use crate::tui::state::AppEvent;
 use crate::tui::views;
 use anyhow::Result;
 use crossterm::{
-    event::Event,
+    event::{Event, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -341,9 +341,11 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             // Poll with short timeout so we re-check paused frequently
             if let Ok(true) = crossterm::event::poll(Duration::from_millis(50)) {
                 if let Ok(Event::Key(key)) = crossterm::event::read() {
-                    perf_log::log(&format!("input_thread: read key {:?}", key.code));
-                    let _ = term_tx.send(AppEvent::Terminal(key));
-                    perf_log::log("input_thread: sent to channel");
+                    if key.kind == KeyEventKind::Press {
+                        perf_log::log(&format!("input_thread: read key {:?}", key.code));
+                        let _ = term_tx.send(AppEvent::Terminal(key));
+                        perf_log::log("input_thread: sent to channel");
+                    }
                 }
             }
         }
