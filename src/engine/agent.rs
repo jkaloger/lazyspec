@@ -47,23 +47,17 @@ mod tests {
 
     #[test]
     fn uses_lazyspec_agent_id_when_set() {
-        let result = resolve_agent_id_with_env(
-            Path::new("/tmp/fake"),
-            Some("my-agent".into()),
-            None,
-        )
-        .unwrap();
+        let result =
+            resolve_agent_id_with_env(Path::new("/tmp/fake"), Some("my-agent".into()), None)
+                .unwrap();
         assert_eq!(result, "my-agent");
     }
 
     #[test]
     fn uses_claude_session_id_when_lazyspec_unset() {
-        let result = resolve_agent_id_with_env(
-            Path::new("/tmp/fake"),
-            None,
-            Some("sess-123".into()),
-        )
-        .unwrap();
+        let result =
+            resolve_agent_id_with_env(Path::new("/tmp/fake"), None, Some("sess-123".into()))
+                .unwrap();
         assert_eq!(result, "sess-123");
     }
 
@@ -80,12 +74,9 @@ mod tests {
 
     #[test]
     fn empty_strings_treated_as_unset() {
-        let result = resolve_agent_id_with_env(
-            Path::new("/tmp/fake"),
-            Some("".into()),
-            Some("sess".into()),
-        )
-        .unwrap();
+        let result =
+            resolve_agent_id_with_env(Path::new("/tmp/fake"), Some("".into()), Some("sess".into()))
+                .unwrap();
         assert_eq!(result, "sess");
     }
 
@@ -125,8 +116,7 @@ mod tests {
             .output()
             .unwrap();
 
-        let result =
-            resolve_agent_id_with_env(root, Some("".into()), Some("".into())).unwrap();
+        let result = resolve_agent_id_with_env(root, Some("".into()), Some("".into())).unwrap();
         assert_eq!(result, "GitUser");
     }
 }

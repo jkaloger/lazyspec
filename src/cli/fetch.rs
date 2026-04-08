@@ -45,10 +45,7 @@ pub fn run(
 
     if let Some(filter) = type_filter {
         if !gh_types.contains(&filter) && !git_ref_types.contains(&filter) {
-            bail!(
-                "type '{}' is not a github-issues or git-ref type",
-                filter
-            );
+            bail!("type '{}' is not a github-issues or git-ref type", filter);
         }
     }
 
@@ -63,8 +60,12 @@ pub fn run(
         let mut issue_map = IssueMap::load(root)?;
         let cache = IssueCache::new(root);
 
-        let all_type_names: Vec<String> =
-            config.documents.types.iter().map(|t| t.name.clone()).collect();
+        let all_type_names: Vec<String> = config
+            .documents
+            .types
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
 
         for type_name in &gh_to_fetch {
             let type_def = config

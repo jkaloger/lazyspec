@@ -20,13 +20,7 @@ pub trait GitRefOps {
         refname: &str,
         files: &[(&str, &str)],
     ) -> Result<String>;
-    fn update_ref(
-        &self,
-        root: &Path,
-        refname: &str,
-        new_sha: &str,
-        old_sha: &str,
-    ) -> Result<()>;
+    fn update_ref(&self, root: &Path, refname: &str, new_sha: &str, old_sha: &str) -> Result<()>;
     fn delete_ref(&self, root: &Path, refname: &str) -> Result<()>;
     fn fetch_refs(&self, root: &Path, remote: &str, pattern: &str) -> Result<()>;
     fn push_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()>;
@@ -45,10 +39,7 @@ pub struct GitCli;
 
 impl GitCli {
     fn run_git(&self, root: &Path, args: &[&str]) -> Result<std::process::Output> {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()?;
+        let output = Command::new("git").args(args).current_dir(root).output()?;
         Ok(output)
     }
 
@@ -88,7 +79,10 @@ impl GitRefOps for GitCli {
 
     fn list_refs(&self, root: &Path, pattern: &str) -> Result<Vec<(String, String)>> {
         let format_arg = "%(refname)\t%(objectname)";
-        let output = self.run_git(root, &["for-each-ref", &format!("--format={}", format_arg), pattern])?;
+        let output = self.run_git(
+            root,
+            &["for-each-ref", &format!("--format={}", format_arg), pattern],
+        )?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("git for-each-ref failed: {}", stderr.trim());
@@ -125,8 +119,11 @@ impl GitRefOps for GitCli {
         let mut tree_entries = Vec::new();
 
         for (path, content) in files {
-            let output =
-                self.run_git_with_stdin(root, &["hash-object", "-w", "--stdin"], content.as_bytes())?;
+            let output = self.run_git_with_stdin(
+                root,
+                &["hash-object", "-w", "--stdin"],
+                content.as_bytes(),
+            )?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 bail!("git hash-object failed: {}", stderr.trim());
@@ -144,7 +141,17 @@ impl GitRefOps for GitCli {
         let tree_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
         let output = if let Some(parent_sha) = parent {
-            self.run_git(root, &["commit-tree", &tree_sha, "-p", parent_sha, "-m", "ref commit"])?
+            self.run_git(
+                root,
+                &[
+                    "commit-tree",
+                    &tree_sha,
+                    "-p",
+                    parent_sha,
+                    "-m",
+                    "ref commit",
+                ],
+            )?
         } else {
             self.run_git(root, &["commit-tree", &tree_sha, "-m", "ref commit"])?
         };
@@ -175,13 +182,7 @@ impl GitRefOps for GitCli {
         Ok(commit_sha)
     }
 
-    fn update_ref(
-        &self,
-        root: &Path,
-        refname: &str,
-        new_sha: &str,
-        old_sha: &str,
-    ) -> Result<()> {
+    fn update_ref(&self, root: &Path, refname: &str, new_sha: &str, old_sha: &str) -> Result<()> {
         let output = self.run_git(root, &["update-ref", refname, new_sha, old_sha])?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -260,7 +261,8 @@ impl GitRefOps for GitCli {
                 if parts.len() < 3 {
                     bail!("unexpected committer line format: {}", line);
                 }
-                let timestamp: i64 = parts[1].parse()
+                let timestamp: i64 = parts[1]
+                    .parse()
                     .map_err(|_| anyhow::anyhow!("invalid committer timestamp: {}", parts[1]))?;
                 return DateTime::from_timestamp(timestamp, 0)
                     .ok_or_else(|| anyhow::anyhow!("invalid unix timestamp: {}", timestamp));
@@ -515,8 +517,7 @@ mod tests {
 
     #[test]
     fn mock_resolve_ref_returns_configured_result() {
-        let mock = MockGitRefClient::new()
-            .with_resolve_result(Ok(Some("abc123".to_string())));
+        let mock = MockGitRefClient::new().with_resolve_result(Ok(Some("abc123".to_string())));
         let result = mock.resolve_ref(&dummy_root(), "refs/test").unwrap();
         assert_eq!(result, Some("abc123".to_string()));
         assert_eq!(mock.calls.borrow()[0], "resolve_ref:refs/test");
@@ -542,27 +543,29 @@ mod tests {
 
     #[test]
     fn mock_read_blob_returns_configured_result() {
-        let mock =
-            MockGitRefClient::new().with_read_blob_result(Ok("file content".to_string()));
-        let result = mock.read_ref_blob(&dummy_root(), "abc", "file.txt").unwrap();
+        let mock = MockGitRefClient::new().with_read_blob_result(Ok("file content".to_string()));
+        let result = mock
+            .read_ref_blob(&dummy_root(), "abc", "file.txt")
+            .unwrap();
         assert_eq!(result, "file content");
     }
 
     #[test]
     fn mock_create_commit_returns_configured_sha() {
-        let mock =
-            MockGitRefClient::new().with_create_commit_result(Ok("danglingsha".to_string()));
+        let mock = MockGitRefClient::new().with_create_commit_result(Ok("danglingsha".to_string()));
         let result = mock
             .create_commit(&dummy_root(), "refs/test", &[("f.txt", "data")], None)
             .unwrap();
         assert_eq!(result, "danglingsha");
-        assert_eq!(mock.calls.borrow()[0], "create_commit:refs/test:parent=None");
+        assert_eq!(
+            mock.calls.borrow()[0],
+            "create_commit:refs/test:parent=None"
+        );
     }
 
     #[test]
     fn mock_create_ref_commit_returns_configured_sha() {
-        let mock =
-            MockGitRefClient::new().with_create_ref_commit_result(Ok("newsha".to_string()));
+        let mock = MockGitRefClient::new().with_create_ref_commit_result(Ok("newsha".to_string()));
         let result = mock
             .create_ref_commit(&dummy_root(), "refs/test", &[("f.txt", "data")])
             .unwrap();
@@ -611,10 +614,14 @@ mod tests {
 
     #[test]
     fn create_commit_with_parent_records_parent_arg() {
-        let mock =
-            MockGitRefClient::new().with_create_commit_result(Ok("newsha".to_string()));
-        mock.create_commit(&dummy_root(), "refs/test", &[("f.txt", "data")], Some("abc123"))
-            .unwrap();
+        let mock = MockGitRefClient::new().with_create_commit_result(Ok("newsha".to_string()));
+        mock.create_commit(
+            &dummy_root(),
+            "refs/test",
+            &[("f.txt", "data")],
+            Some("abc123"),
+        )
+        .unwrap();
         assert_eq!(
             mock.calls.borrow()[0],
             "create_commit:refs/test:parent=Some(\"abc123\")"
@@ -654,8 +661,7 @@ mod tests {
 
     #[test]
     fn create_commit_without_parent_creates_orphan() {
-        let mock =
-            MockGitRefClient::new().with_create_commit_result(Ok("newsha".to_string()));
+        let mock = MockGitRefClient::new().with_create_commit_result(Ok("newsha".to_string()));
         mock.create_commit(&dummy_root(), "refs/test", &[("f.txt", "data")], None)
             .unwrap();
         assert_eq!(
@@ -668,8 +674,7 @@ mod tests {
     fn read_commit_timestamp_mock_records_call() {
         use chrono::Utc;
         let ts = Utc::now();
-        let mock = MockGitRefClient::new()
-            .with_read_commit_timestamp_result(Ok(ts));
+        let mock = MockGitRefClient::new().with_read_commit_timestamp_result(Ok(ts));
         let result = mock.read_commit_timestamp(&dummy_root(), "abc123").unwrap();
         assert_eq!(result, ts);
         assert_eq!(mock.calls.borrow()[0], "read_commit_timestamp:abc123");

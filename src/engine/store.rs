@@ -857,8 +857,7 @@ mod tests {
             .with_read_blob_result(Ok(note_content.to_string()));
 
         let config = git_ref_config();
-        let store =
-            Store::load_with_fs(root, &config, &RealFileSystem, Some(&mock)).unwrap();
+        let store = Store::load_with_fs(root, &config, &RealFileSystem, Some(&mock)).unwrap();
 
         let rel = PathBuf::from(".lazyspec/cache/note/NOTE-001-cold.md");
         let doc = store.get(&rel);
@@ -925,12 +924,14 @@ mod tests {
             .with_read_blob_result(Ok(note_content.to_string()));
 
         let config = git_ref_config();
-        let store =
-            Store::load_with_fs(root, &config, &RealFileSystem, Some(&mock)).unwrap();
+        let store = Store::load_with_fs(root, &config, &RealFileSystem, Some(&mock)).unwrap();
 
         let rel = PathBuf::from(".lazyspec/cache/note/NOTE-002-empty.md");
         let doc = store.get(&rel);
-        assert!(doc.is_some(), "should materialize from refs when cache dir is empty");
+        assert!(
+            doc.is_some(),
+            "should materialize from refs when cache dir is empty"
+        );
         assert_eq!(doc.unwrap().title, "Empty dir note");
 
         let lock = CacheLock::load(root).unwrap();

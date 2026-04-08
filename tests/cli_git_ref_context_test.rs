@@ -142,7 +142,9 @@ fn fs_doc_links_to_git_ref_doc_via_related_to() {
     let forward = store.forward_links_for(&story_path);
 
     let targets: Vec<&std::path::Path> = forward.iter().map(|(_, p)| p.as_path()).collect();
-    let has_iteration = targets.iter().any(|p| p.to_string_lossy().contains("ITERATION-001"));
+    let has_iteration = targets
+        .iter()
+        .any(|p| p.to_string_lossy().contains("ITERATION-001"));
 
     assert!(
         has_iteration,
@@ -159,7 +161,9 @@ fn fs_doc_links_to_git_ref_doc_via_related_to() {
     let reverse = store.reverse_links_for(&iteration_path);
     let reverse_sources: Vec<&std::path::Path> = reverse.iter().map(|(_, p)| p.as_path()).collect();
     assert!(
-        reverse_sources.iter().any(|p| p.to_string_lossy().contains("STORY-001")),
+        reverse_sources
+            .iter()
+            .any(|p| p.to_string_lossy().contains("STORY-001")),
         "git-ref iteration's reverse links should include the FS story; got: {:?}",
         reverse
     );

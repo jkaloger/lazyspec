@@ -26,10 +26,16 @@ fn read_ref_blob_returns_written_content() {
     let refname = "refs/lazyspec/test/blob";
 
     let sha = git
-        .create_ref_commit(fixture.root(), refname, &[("data.json", "{\"key\":\"value\"}")])
+        .create_ref_commit(
+            fixture.root(),
+            refname,
+            &[("data.json", "{\"key\":\"value\"}")],
+        )
         .unwrap();
 
-    let content = git.read_ref_blob(fixture.root(), &sha, "data.json").unwrap();
+    let content = git
+        .read_ref_blob(fixture.root(), &sha, "data.json")
+        .unwrap();
     assert_eq!(content, "{\"key\":\"value\"}");
 }
 
@@ -64,7 +70,11 @@ fn update_ref_cas_succeeds_with_correct_old_sha() {
         .unwrap();
 
     let new_sha = git
-        .create_ref_commit(fixture.root(), "refs/lazyspec/test/cas-tmp", &[("v2.txt", "version 2")])
+        .create_ref_commit(
+            fixture.root(),
+            "refs/lazyspec/test/cas-tmp",
+            &[("v2.txt", "version 2")],
+        )
         .unwrap();
 
     git.update_ref(fixture.root(), refname, &new_sha, &old_sha)
@@ -85,10 +95,19 @@ fn update_ref_cas_fails_with_wrong_old_sha() {
         .unwrap();
 
     let new_sha = git
-        .create_ref_commit(fixture.root(), "refs/lazyspec/test/cas-fail-tmp", &[("v2.txt", "v2")])
+        .create_ref_commit(
+            fixture.root(),
+            "refs/lazyspec/test/cas-fail-tmp",
+            &[("v2.txt", "v2")],
+        )
         .unwrap();
 
-    let result = git.update_ref(fixture.root(), refname, &new_sha, "0000000000000000000000000000000000000000");
+    let result = git.update_ref(
+        fixture.root(),
+        refname,
+        &new_sha,
+        "0000000000000000000000000000000000000000",
+    );
     assert!(result.is_err(), "CAS should fail with wrong old SHA");
 }
 
@@ -183,7 +202,12 @@ fn delete_remote_ref_removes_from_remote() {
     // Verify ref is gone from remote via ls-remote on the bare repo
     git.delete_ref(fixture.root(), refname).unwrap();
     let output = std::process::Command::new("git")
-        .args(["ls-remote", "--refs", bare_dir.path().to_str().unwrap(), refname])
+        .args([
+            "ls-remote",
+            "--refs",
+            bare_dir.path().to_str().unwrap(),
+            refname,
+        ])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -204,7 +228,12 @@ fn update_creates_chained_commit() {
         .unwrap();
 
     let updated_sha = git
-        .create_commit(fixture.root(), refname, &[("doc.md", "version 2")], Some(&original_sha))
+        .create_commit(
+            fixture.root(),
+            refname,
+            &[("doc.md", "version 2")],
+            Some(&original_sha),
+        )
         .unwrap();
 
     let output = std::process::Command::new("git")
@@ -236,7 +265,12 @@ fn push_ref_with_lease_succeeds_when_remote_matches() {
 
     // Create a new commit and update local ref
     let new_sha = git
-        .create_commit(fixture.root(), refname, &[("v2.txt", "version 2")], Some(&sha))
+        .create_commit(
+            fixture.root(),
+            refname,
+            &[("v2.txt", "version 2")],
+            Some(&sha),
+        )
         .unwrap();
     git.update_ref(fixture.root(), refname, &new_sha, &sha)
         .unwrap();
@@ -275,7 +309,12 @@ fn push_ref_with_lease_fails_when_remote_changed() {
 
     // Now create our own commit based on the original sha (simulating stale local state)
     let new_sha = git
-        .create_commit(fixture.root(), refname, &[("v2.txt", "version 2")], Some(&sha))
+        .create_commit(
+            fixture.root(),
+            refname,
+            &[("v2.txt", "version 2")],
+            Some(&sha),
+        )
         .unwrap();
     git.update_ref(fixture.root(), refname, &new_sha, &interloper_sha)
         .unwrap();
@@ -358,7 +397,13 @@ fn heartbeat_succeeds_and_extends_expiry() {
 
     // Fetch the ref before heartbeat (simulating a fresh client)
     let updated = engine2
-        .heartbeat(fixture.root(), "story", "STORY-001", "agent-a", heartbeat_time)
+        .heartbeat(
+            fixture.root(),
+            "story",
+            "STORY-001",
+            "agent-a",
+            heartbeat_time,
+        )
         .unwrap();
 
     assert_eq!(updated.agent, "agent-a");

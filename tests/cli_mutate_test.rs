@@ -69,13 +69,7 @@ fn update_with_json_flag() {
     fixture.write_rfc("RFC-001-test.md", "Test", "draft");
     let store = fixture.store();
 
-    lazyspec::cli::update::run(
-        fixture.root(),
-        &store,
-        "RFC-001",
-        &[("status", "review")],
-    )
-    .unwrap();
+    lazyspec::cli::update::run(fixture.root(), &store, "RFC-001", &[("status", "review")]).unwrap();
 
     // Reload store to pick up changes (mirrors what main.rs does for --json)
     let config = fixture.config();

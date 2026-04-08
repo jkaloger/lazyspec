@@ -522,9 +522,7 @@ mod tests {
         let new_sha = updated_lock.get("note/NOTE-001").unwrap();
         assert_ne!(new_sha, note_sha, "SHA should have changed after link");
 
-        let blob_content = git
-            .read_ref_blob(&root, new_sha, "doc.md")
-            .unwrap();
+        let blob_content = git.read_ref_blob(&root, new_sha, "doc.md").unwrap();
         assert!(
             blob_content.contains("implements: STORY-001"),
             "ref blob should contain the link, got:\n{}",

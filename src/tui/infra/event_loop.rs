@@ -81,11 +81,7 @@ fn try_push_gh_edit(
         .map_err(|e| e.to_string())
 }
 
-fn try_push_git_ref_edit(
-    root: &Path,
-    relative: &Path,
-    config: &Config,
-) -> Result<(), String> {
+fn try_push_git_ref_edit(root: &Path, relative: &Path, config: &Config) -> Result<(), String> {
     let store = Store::load(root, config).map_err(|e| e.to_string())?;
     let doc = store
         .get(relative)

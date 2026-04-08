@@ -51,7 +51,10 @@ fn status_human_includes_git_ref_documents() {
     let (_fixture, store, _config) = setup();
     let output = lazyspec::cli::status::run_human(&store);
 
-    assert!(output.contains("RFC"), "human output should contain RFC header");
+    assert!(
+        output.contains("RFC"),
+        "human output should contain RFC header"
+    );
     assert!(
         output.contains("ITERATION"),
         "human output should contain ITERATION header"

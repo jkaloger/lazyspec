@@ -145,18 +145,10 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
             .unwrap_or(&cache_path)
             .to_path_buf();
 
-        Ok(CreatedDoc {
-            path: relative,
-            id,
-        })
+        Ok(CreatedDoc { path: relative, id })
     }
 
-    fn update(
-        &mut self,
-        type_def: &TypeDef,
-        doc_id: &str,
-        updates: &[(&str, &str)],
-    ) -> Result<()> {
+    fn update(&mut self, type_def: &TypeDef, doc_id: &str, updates: &[(&str, &str)]) -> Result<()> {
         let doc_key = Self::doc_key(&type_def.name, doc_id);
         let lock = CacheLock::load(&self.root)?;
         let old_sha = lock
@@ -319,7 +311,9 @@ mod tests {
 
         let mut store = make_store(&tmp, mock);
         let td = test_type_def();
-        let result = store.create(&td, "My Feature", "alice", "some body").unwrap();
+        let result = store
+            .create(&td, "My Feature", "alice", "some body")
+            .unwrap();
 
         assert_eq!(result.id, "ITERATION-001");
         assert!(result.path.to_string_lossy().contains("ITERATION-001"));
@@ -339,15 +333,23 @@ mod tests {
 
         let calls = store.git.calls.borrow();
         assert!(calls.iter().any(|c| c.starts_with("list_refs:")));
-        assert!(calls.iter().any(|c| c.contains("create_ref_commit:refs/lazyspec/iteration/ITERATION-001")));
+        assert!(calls
+            .iter()
+            .any(|c| c.contains("create_ref_commit:refs/lazyspec/iteration/ITERATION-001")));
     }
 
     #[test]
     fn test_git_ref_store_create_increments_from_existing() {
         let tmp = TempDir::new().unwrap();
         let existing_refs = vec![
-            ("refs/lazyspec/iteration/ITERATION-001".to_string(), "sha1".to_string()),
-            ("refs/lazyspec/iteration/ITERATION-005".to_string(), "sha5".to_string()),
+            (
+                "refs/lazyspec/iteration/ITERATION-001".to_string(),
+                "sha1".to_string(),
+            ),
+            (
+                "refs/lazyspec/iteration/ITERATION-005".to_string(),
+                "sha5".to_string(),
+            ),
         ];
         let mock = MockGitRefClient::new()
             .with_list_result(Ok(existing_refs))
@@ -379,10 +381,16 @@ mod tests {
             .with_update_ref_result(Ok(()));
 
         let mut store = make_store(&tmp, mock);
-        store.update(&td, "ITERATION-042", &[("status", "accepted")]).unwrap();
+        store
+            .update(&td, "ITERATION-042", &[("status", "accepted")])
+            .unwrap();
 
         let updated = std::fs::read_to_string(cache_dir.join("ITERATION-042.md")).unwrap();
-        assert!(updated.contains("status: accepted"), "status should be updated, got: {}", updated);
+        assert!(
+            updated.contains("status: accepted"),
+            "status should be updated, got: {}",
+            updated
+        );
         assert!(updated.contains("title: Old Title"));
         assert!(updated.contains("original body"));
 
@@ -390,10 +398,15 @@ mod tests {
         assert_eq!(lock.get("iteration/ITERATION-042"), Some("newsha456"));
 
         let calls = store.git.calls.borrow();
-        let create_call = calls.iter().find(|c| c.starts_with("create_commit:"))
+        let create_call = calls
+            .iter()
+            .find(|c| c.starts_with("create_commit:"))
             .expect("should call create_commit (not create_ref_commit)");
-        assert!(create_call.contains("parent=Some(\"oldsha\")"),
-            "create_commit should be parented on old SHA, got: {}", create_call);
+        assert!(
+            create_call.contains("parent=Some(\"oldsha\")"),
+            "create_commit should be parented on old SHA, got: {}",
+            create_call
+        );
         assert!(
             !calls.iter().any(|c| c.starts_with("create_ref_commit:")),
             "should NOT call create_ref_commit, got: {:?}",
@@ -430,10 +443,17 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("conflict"));
 
         let unchanged = std::fs::read_to_string(&cache_path).unwrap();
-        assert!(unchanged.contains("status: draft"), "cache should be unchanged on CAS failure");
+        assert!(
+            unchanged.contains("status: draft"),
+            "cache should be unchanged on CAS failure"
+        );
 
         let lock = CacheLock::load(tmp.path()).unwrap();
-        assert_eq!(lock.get("iteration/ITERATION-042"), Some("oldsha"), "lock should be unchanged on CAS failure");
+        assert_eq!(
+            lock.get("iteration/ITERATION-042"),
+            Some("oldsha"),
+            "lock should be unchanged on CAS failure"
+        );
     }
 
     #[test]
@@ -450,8 +470,7 @@ mod tests {
         lock.set("iteration/ITERATION-042", "somesha");
         lock.save(tmp.path()).unwrap();
 
-        let mock = MockGitRefClient::new()
-            .with_delete_ref_result(Ok(()));
+        let mock = MockGitRefClient::new().with_delete_ref_result(Ok(()));
 
         let mut store = make_store(&tmp, mock);
         store.delete(&td, "ITERATION-042").unwrap();
@@ -459,10 +478,15 @@ mod tests {
         assert!(!cache_path.exists(), "cache file should be removed");
 
         let lock = CacheLock::load(tmp.path()).unwrap();
-        assert!(lock.get("iteration/ITERATION-042").is_none(), "lock entry should be removed");
+        assert!(
+            lock.get("iteration/ITERATION-042").is_none(),
+            "lock entry should be removed"
+        );
 
         let calls = store.git.calls.borrow();
-        assert!(calls.iter().any(|c| c == "delete_ref:refs/lazyspec/iteration/ITERATION-042"));
+        assert!(calls
+            .iter()
+            .any(|c| c == "delete_ref:refs/lazyspec/iteration/ITERATION-042"));
     }
 
     #[test]
@@ -524,7 +548,10 @@ mod tests {
         store.create(&td, "Title", "alice", "").unwrap();
 
         let contents = std::fs::read_to_string(tmp.path().join(".lazyspec/.gitignore")).unwrap();
-        assert!(contents.contains("*.tmp"), "should preserve existing entries");
+        assert!(
+            contents.contains("*.tmp"),
+            "should preserve existing entries"
+        );
         assert!(
             contents.lines().any(|l| l.trim() == "cache/"),
             "should contain cache/"
@@ -534,8 +561,8 @@ mod tests {
     #[test]
     fn create_uses_reserved_number_when_set() {
         let tmp = TempDir::new().unwrap();
-        let mock = MockGitRefClient::new()
-            .with_create_ref_commit_result(Ok("sha_reserved".to_string()));
+        let mock =
+            MockGitRefClient::new().with_create_ref_commit_result(Ok("sha_reserved".to_string()));
 
         let mut store = GitRefStore {
             git: mock,
@@ -562,9 +589,10 @@ mod tests {
     #[test]
     fn create_falls_back_to_next_number_from_refs_when_no_reservation() {
         let tmp = TempDir::new().unwrap();
-        let existing_refs = vec![
-            ("refs/lazyspec/iteration/ITERATION-003".to_string(), "sha3".to_string()),
-        ];
+        let existing_refs = vec![(
+            "refs/lazyspec/iteration/ITERATION-003".to_string(),
+            "sha3".to_string(),
+        )];
         let mock = MockGitRefClient::new()
             .with_list_result(Ok(existing_refs))
             .with_create_ref_commit_result(Ok("sha_fallback".to_string()));
@@ -617,7 +645,9 @@ mod tests {
 
         let calls = store.git.calls.borrow();
         assert!(
-            calls.iter().any(|c| c == "push_ref:origin:refs/lazyspec/iteration/ITERATION-001"),
+            calls
+                .iter()
+                .any(|c| c == "push_ref:origin:refs/lazyspec/iteration/ITERATION-001"),
             "should push doc ref to remote, got: {:?}",
             *calls
         );
@@ -668,11 +698,15 @@ mod tests {
             config: test_config_with_coordination(),
             reserved_number: None,
         };
-        store.update(&td, "ITERATION-042", &[("status", "accepted")]).unwrap();
+        store
+            .update(&td, "ITERATION-042", &[("status", "accepted")])
+            .unwrap();
 
         let calls = store.git.calls.borrow();
         assert!(
-            calls.iter().any(|c| c == "push_ref:origin:refs/lazyspec/iteration/ITERATION-042"),
+            calls
+                .iter()
+                .any(|c| c == "push_ref:origin:refs/lazyspec/iteration/ITERATION-042"),
             "should push updated ref to remote, got: {:?}",
             *calls
         );
@@ -707,12 +741,20 @@ mod tests {
 
         let calls = store.git.calls.borrow();
         assert!(
-            calls.iter().any(|c| c == "delete_remote_ref:origin:refs/lazyspec/iteration/ITERATION-042"),
+            calls
+                .iter()
+                .any(|c| c == "delete_remote_ref:origin:refs/lazyspec/iteration/ITERATION-042"),
             "should delete remote ref, got: {:?}",
             *calls
         );
-        let delete_remote_idx = calls.iter().position(|c| c.starts_with("delete_remote_ref:")).unwrap();
-        let delete_local_idx = calls.iter().position(|c| c.starts_with("delete_ref:")).unwrap();
+        let delete_remote_idx = calls
+            .iter()
+            .position(|c| c.starts_with("delete_remote_ref:"))
+            .unwrap();
+        let delete_local_idx = calls
+            .iter()
+            .position(|c| c.starts_with("delete_ref:"))
+            .unwrap();
         assert!(
             delete_remote_idx < delete_local_idx,
             "should delete remote before local"
@@ -734,8 +776,7 @@ mod tests {
         lock.set("iteration/ITERATION-042", "somesha");
         lock.save(tmp.path()).unwrap();
 
-        let mock = MockGitRefClient::new()
-            .with_delete_ref_result(Ok(()));
+        let mock = MockGitRefClient::new().with_delete_ref_result(Ok(()));
 
         let mut store = make_store(&tmp, mock);
         store.delete(&td, "ITERATION-042").unwrap();

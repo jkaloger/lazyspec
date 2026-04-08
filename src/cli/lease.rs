@@ -39,14 +39,11 @@ fn resolve_doc_type<'a>(config: &'a Config, doc_id: &str) -> Result<&'a str> {
 }
 
 fn require_coordination(config: &Config) -> Result<LeaseEngine<GitCli>> {
-    let coord = config
-        .coordination
-        .clone()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "coordination is not configured; add a [coordination] section to .lazyspec.toml"
-            )
-        })?;
+    let coord = config.coordination.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "coordination is not configured; add a [coordination] section to .lazyspec.toml"
+        )
+    })?;
     Ok(LeaseEngine::new(GitCli, coord))
 }
 
@@ -63,8 +60,7 @@ pub fn check_lease_gate_with<R: GitRefOps>(
     };
 
     if let Some(raw_id) = doc_id {
-        let id = extract_doc_id(raw_id, config)
-            .unwrap_or_else(|| raw_id.to_string());
+        let id = extract_doc_id(raw_id, config).unwrap_or_else(|| raw_id.to_string());
         let type_name = resolve_doc_type(config, &id)?;
         let refname = format!("refs/lazyspec/leases/{}/{}", type_name, id);
         fetch_ref_optional(git, root, &coord.remote, &refname)?;
@@ -108,11 +104,7 @@ pub fn check_lease_gate_with<R: GitRefOps>(
     Ok(())
 }
 
-pub fn check_lease_gate(
-    root: &Path,
-    config: &Config,
-    doc_id: Option<&str>,
-) -> Result<()> {
+pub fn check_lease_gate(root: &Path, config: &Config, doc_id: Option<&str>) -> Result<()> {
     if config.coordination.is_none() {
         return Ok(());
     }
@@ -202,10 +194,7 @@ pub fn run_leases(root: &Path, config: &Config, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&entries)?);
     } else {
         for e in &entries {
-            println!(
-                "{}\t{}\t{}\t{}",
-                e.ref_name, e.agent, e.acquired, e.expires
-            );
+            println!("{}\t{}\t{}\t{}", e.ref_name, e.agent, e.acquired, e.expires);
         }
     }
     Ok(())
@@ -240,9 +229,8 @@ pub fn run_heartbeat(
 mod tests {
     use super::*;
     use crate::engine::config::{
-        CoordinationConfig, Config, DocumentConfig, FilesystemConfig, Directories,
-        Templates, Naming, TypeDef, StoreBackend, NumberingStrategy, UiConfig,
-        CertificationConfig,
+        CertificationConfig, Config, CoordinationConfig, Directories, DocumentConfig,
+        FilesystemConfig, Naming, NumberingStrategy, StoreBackend, Templates, TypeDef, UiConfig,
     };
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use crate::engine::lease::Lease;
@@ -282,7 +270,9 @@ mod tests {
                         parent_type: None,
                     },
                 ],
-                naming: Naming { pattern: "{type}-{n:03}-{title}.md".to_string() },
+                naming: Naming {
+                    pattern: "{type}-{n:03}-{title}.md".to_string(),
+                },
                 sqids: None,
                 reserved: None,
                 github: None,
@@ -294,7 +284,9 @@ mod tests {
                     stories: "docs/stories".to_string(),
                     iterations: "docs/iterations".to_string(),
                 },
-                templates: Templates { dir: ".lazyspec/templates".to_string() },
+                templates: Templates {
+                    dir: ".lazyspec/templates".to_string(),
+                },
             },
             ui: UiConfig::default(),
             rules: vec![],
@@ -329,9 +321,8 @@ mod tests {
     fn no_coordination_skips_check() {
         let config = config_without_coordination();
         let mock = MockGitRefClient::new();
-        let result = check_lease_gate_with(
-            &dummy_root(), &config, Some("RFC-001"), &mock, "agent-a",
-        );
+        let result =
+            check_lease_gate_with(&dummy_root(), &config, Some("RFC-001"), &mock, "agent-a");
         assert!(result.is_ok());
         assert!(mock.calls.borrow().is_empty());
     }
@@ -342,9 +333,8 @@ mod tests {
         let mock = MockGitRefClient::new()
             .with_resolve_result(Ok(Some("sha1".to_string())))
             .with_read_blob_result(Ok(make_lease_json("agent-a")));
-        let result = check_lease_gate_with(
-            &dummy_root(), &config, Some("RFC-001"), &mock, "agent-a",
-        );
+        let result =
+            check_lease_gate_with(&dummy_root(), &config, Some("RFC-001"), &mock, "agent-a");
         assert!(result.is_ok());
         let calls = mock.calls.borrow();
         assert!(calls[0].contains("refs/lazyspec/leases/rfc/RFC-001"));
@@ -353,11 +343,9 @@ mod tests {
     #[test]
     fn specific_doc_with_no_lease_errors() {
         let config = config_with_coordination();
-        let mock = MockGitRefClient::new()
-            .with_resolve_result(Ok(None));
-        let result = check_lease_gate_with(
-            &dummy_root(), &config, Some("RFC-001"), &mock, "agent-a",
-        );
+        let mock = MockGitRefClient::new().with_resolve_result(Ok(None));
+        let result =
+            check_lease_gate_with(&dummy_root(), &config, Some("RFC-001"), &mock, "agent-a");
         let err = result.unwrap_err();
         assert!(err.to_string().contains("document is not claimed"));
         assert!(err.to_string().contains("lazyspec claim"));
@@ -369,9 +357,8 @@ mod tests {
         let mock = MockGitRefClient::new()
             .with_resolve_result(Ok(Some("sha1".to_string())))
             .with_read_blob_result(Ok(make_lease_json("agent-b")));
-        let result = check_lease_gate_with(
-            &dummy_root(), &config, Some("RFC-001"), &mock, "agent-a",
-        );
+        let result =
+            check_lease_gate_with(&dummy_root(), &config, Some("RFC-001"), &mock, "agent-a");
         let err = result.unwrap_err();
         assert!(err.to_string().contains("not claimed by you"));
         assert!(err.to_string().contains("agent-b"));
@@ -381,24 +368,20 @@ mod tests {
     fn create_with_any_active_lease_proceeds() {
         let config = config_with_coordination();
         let mock = MockGitRefClient::new()
-            .with_list_result(Ok(vec![
-                ("refs/lazyspec/leases/rfc/RFC-001".to_string(), "sha1".to_string()),
-            ]))
+            .with_list_result(Ok(vec![(
+                "refs/lazyspec/leases/rfc/RFC-001".to_string(),
+                "sha1".to_string(),
+            )]))
             .with_read_blob_result(Ok(make_lease_json("agent-a")));
-        let result = check_lease_gate_with(
-            &dummy_root(), &config, None, &mock, "agent-a",
-        );
+        let result = check_lease_gate_with(&dummy_root(), &config, None, &mock, "agent-a");
         assert!(result.is_ok());
     }
 
     #[test]
     fn create_with_no_leases_errors() {
         let config = config_with_coordination();
-        let mock = MockGitRefClient::new()
-            .with_list_result(Ok(vec![]));
-        let result = check_lease_gate_with(
-            &dummy_root(), &config, None, &mock, "agent-a",
-        );
+        let mock = MockGitRefClient::new().with_list_result(Ok(vec![]));
+        let result = check_lease_gate_with(&dummy_root(), &config, None, &mock, "agent-a");
         let err = result.unwrap_err();
         assert!(err.to_string().contains("no active lease"));
     }
@@ -407,13 +390,12 @@ mod tests {
     fn create_with_only_other_agent_leases_errors() {
         let config = config_with_coordination();
         let mock = MockGitRefClient::new()
-            .with_list_result(Ok(vec![
-                ("refs/lazyspec/leases/rfc/RFC-001".to_string(), "sha1".to_string()),
-            ]))
+            .with_list_result(Ok(vec![(
+                "refs/lazyspec/leases/rfc/RFC-001".to_string(),
+                "sha1".to_string(),
+            )]))
             .with_read_blob_result(Ok(make_lease_json("agent-b")));
-        let result = check_lease_gate_with(
-            &dummy_root(), &config, None, &mock, "agent-a",
-        );
+        let result = check_lease_gate_with(&dummy_root(), &config, None, &mock, "agent-a");
         let err = result.unwrap_err();
         assert!(err.to_string().contains("no active lease"));
     }
@@ -421,8 +403,14 @@ mod tests {
     #[test]
     fn extract_doc_id_from_shorthand() {
         let config = config_with_coordination();
-        assert_eq!(extract_doc_id("RFC-001", &config), Some("RFC-001".to_string()));
-        assert_eq!(extract_doc_id("STORY-042", &config), Some("STORY-042".to_string()));
+        assert_eq!(
+            extract_doc_id("RFC-001", &config),
+            Some("RFC-001".to_string())
+        );
+        assert_eq!(
+            extract_doc_id("STORY-042", &config),
+            Some("STORY-042".to_string())
+        );
     }
 
     #[test]
@@ -469,9 +457,8 @@ mod tests {
             .with_fetch_result(Ok(()))
             .with_resolve_result(Ok(Some("sha1".to_string())))
             .with_read_blob_result(Ok(make_lease_json("agent-a")));
-        let result = check_lease_gate_with(
-            &dummy_root(), &config, Some("RFC-001"), &mock, "agent-a",
-        );
+        let result =
+            check_lease_gate_with(&dummy_root(), &config, Some("RFC-001"), &mock, "agent-a");
         assert!(result.is_ok());
         let calls = mock.calls.borrow();
         assert!(calls[0].starts_with("fetch_refs:origin:refs/lazyspec/leases/rfc/RFC-001"));
@@ -482,12 +469,13 @@ mod tests {
     fn gate_falls_back_to_local_on_fetch_failure() {
         let config = config_with_coordination();
         let mock = MockGitRefClient::new()
-            .with_fetch_result(Err(anyhow::anyhow!("couldn't find remote ref refs/lazyspec/leases/rfc/RFC-001")))
+            .with_fetch_result(Err(anyhow::anyhow!(
+                "couldn't find remote ref refs/lazyspec/leases/rfc/RFC-001"
+            )))
             .with_resolve_result(Ok(Some("sha1".to_string())))
             .with_read_blob_result(Ok(make_lease_json("agent-a")));
-        let result = check_lease_gate_with(
-            &dummy_root(), &config, Some("RFC-001"), &mock, "agent-a",
-        );
+        let result =
+            check_lease_gate_with(&dummy_root(), &config, Some("RFC-001"), &mock, "agent-a");
         assert!(result.is_ok());
         let calls = mock.calls.borrow();
         assert!(calls[0].starts_with("fetch_refs:"));
@@ -499,13 +487,12 @@ mod tests {
         let config = config_with_coordination();
         let mock = MockGitRefClient::new()
             .with_fetch_result(Ok(()))
-            .with_list_result(Ok(vec![
-                ("refs/lazyspec/leases/rfc/RFC-001".to_string(), "sha1".to_string()),
-            ]))
+            .with_list_result(Ok(vec![(
+                "refs/lazyspec/leases/rfc/RFC-001".to_string(),
+                "sha1".to_string(),
+            )]))
             .with_read_blob_result(Ok(make_lease_json("agent-a")));
-        let result = check_lease_gate_with(
-            &dummy_root(), &config, None, &mock, "agent-a",
-        );
+        let result = check_lease_gate_with(&dummy_root(), &config, None, &mock, "agent-a");
         assert!(result.is_ok());
         let calls = mock.calls.borrow();
         assert!(calls[0].starts_with("fetch_refs:origin:refs/lazyspec/leases/"));
@@ -517,13 +504,12 @@ mod tests {
         let config = config_with_coordination();
         let mock = MockGitRefClient::new()
             .with_fetch_result(Err(anyhow::anyhow!("network timeout")))
-            .with_list_result(Ok(vec![
-                ("refs/lazyspec/leases/rfc/RFC-001".to_string(), "sha1".to_string()),
-            ]))
+            .with_list_result(Ok(vec![(
+                "refs/lazyspec/leases/rfc/RFC-001".to_string(),
+                "sha1".to_string(),
+            )]))
             .with_read_blob_result(Ok(make_lease_json("agent-a")));
-        let result = check_lease_gate_with(
-            &dummy_root(), &config, None, &mock, "agent-a",
-        );
+        let result = check_lease_gate_with(&dummy_root(), &config, None, &mock, "agent-a");
         assert!(result.is_ok());
         let calls = mock.calls.borrow();
         assert!(calls[0].starts_with("fetch_refs:"));

@@ -88,13 +88,7 @@ impl<R: GitRefOps> LeaseEngine<R> {
         Ok(lease)
     }
 
-    pub fn release(
-        &self,
-        root: &Path,
-        type_name: &str,
-        id: &str,
-        agent: &str,
-    ) -> Result<()> {
+    pub fn release(&self, root: &Path, type_name: &str, id: &str, agent: &str) -> Result<()> {
         self.delete_lease(root, type_name, id, agent, |holder, expected| {
             format!("lease held by '{}', not '{}'", holder, expected)
         })
@@ -169,8 +163,7 @@ impl<R: GitRefOps> LeaseEngine<R> {
         let new_sha =
             self.git
                 .create_commit(root, &refname, &[("lease.json", &json)], Some(&old_sha))?;
-        self.git
-            .update_ref(root, &refname, &new_sha, &old_sha)?;
+        self.git.update_ref(root, &refname, &new_sha, &old_sha)?;
         self.git.push_ref(root, &self.config.remote, &refname)?;
         Ok(updated)
     }
@@ -216,12 +209,13 @@ impl<R: GitRefOps> LeaseEngine<R> {
     }
 
     pub fn query(&self, root: &Path) -> Result<Vec<(String, Lease)>> {
-        if let Err(e) = self.git.fetch_refs(root, &self.config.remote, "refs/lazyspec/leases/*") {
+        if let Err(e) = self
+            .git
+            .fetch_refs(root, &self.config.remote, "refs/lazyspec/leases/*")
+        {
             eprintln!("warning: failed to fetch lease refs: {}", e);
         }
-        let refs = self
-            .git
-            .list_refs(root, "refs/lazyspec/leases/")?;
+        let refs = self.git.list_refs(root, "refs/lazyspec/leases/")?;
         let mut result = Vec::new();
         for (refname, sha) in refs {
             let blob = self.git.read_ref_blob(root, &sha, "lease.json")?;
@@ -433,7 +427,13 @@ mod tests {
 
         let engine = LeaseEngine::new(mock, test_config());
         let updated = engine
-            .heartbeat(&dummy_root(), "story", "STORY-001", "agent-a", heartbeat_time)
+            .heartbeat(
+                &dummy_root(),
+                "story",
+                "STORY-001",
+                "agent-a",
+                heartbeat_time,
+            )
             .unwrap();
 
         assert_eq!(updated.agent, "agent-a");
@@ -442,8 +442,10 @@ mod tests {
 
         let calls = engine.git.calls.borrow();
         assert!(calls.iter().any(|c| c.contains("create_commit:")));
-        assert!(!calls.iter().any(|c| c.contains("create_ref_commit")),
-            "heartbeat should use create_commit, not create_ref_commit");
+        assert!(
+            !calls.iter().any(|c| c.contains("create_ref_commit")),
+            "heartbeat should use create_commit, not create_ref_commit"
+        );
         let update_call = calls
             .iter()
             .find(|c| c.starts_with("update_ref:"))
@@ -471,7 +473,13 @@ mod tests {
 
         let engine = LeaseEngine::new(mock, test_config());
         engine
-            .heartbeat(&dummy_root(), "story", "STORY-001", "agent-a", heartbeat_time)
+            .heartbeat(
+                &dummy_root(),
+                "story",
+                "STORY-001",
+                "agent-a",
+                heartbeat_time,
+            )
             .unwrap();
 
         let calls = engine.git.calls.borrow();
@@ -597,8 +605,8 @@ mod tests {
 
     #[test]
     fn acquire_propagates_real_network_errors() {
-        let mock = MockGitRefClient::new()
-            .with_fetch_result(Err(anyhow::anyhow!("network timeout")));
+        let mock =
+            MockGitRefClient::new().with_fetch_result(Err(anyhow::anyhow!("network timeout")));
 
         let engine = LeaseEngine::new(mock, test_config());
         let err = engine
@@ -715,8 +723,8 @@ mod tests {
     #[test]
     fn force_acquire_propagates_real_network_errors() {
         let now = fixed_now();
-        let mock = MockGitRefClient::new()
-            .with_fetch_result(Err(anyhow::anyhow!("network timeout")));
+        let mock =
+            MockGitRefClient::new().with_fetch_result(Err(anyhow::anyhow!("network timeout")));
 
         let engine = LeaseEngine::new(mock, test_config());
         let err = engine
