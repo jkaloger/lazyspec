@@ -1,4 +1,17 @@
 [[types]]
+name = "note"
+plural="notes"
+dir="docs/notes"
+prefix="NOTE"
+store = "git-ref"
+
+[coordination]
+remote = "origin"
+lease_duration = "60m"
+grace_period = "2m"
+max_push_retries = 5
+
+[[types]]
 name = "convention"
 plural = "convention"
 dir = "docs/convention"

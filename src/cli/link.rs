@@ -1,8 +1,10 @@
 use crate::cli::resolve::{resolve_to_id, resolve_to_path};
+use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::document::rewrite_frontmatter;
 use crate::engine::fs::FileSystem;
 use crate::engine::gh::{GhCli, GhIssueReader, GhIssueWriter};
+use crate::engine::git_ref::{GitCli, GitRefOps};
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
@@ -64,6 +66,7 @@ fn link_inner<G: GhIssueReader + GhIssueWriter>(
     })?;
 
     push_if_github_backed(root, &resolved_from, config, client_factory)?;
+    push_if_git_ref_backed(root, &resolved_from, config)?;
     Ok(())
 }
 
@@ -106,6 +109,7 @@ pub fn unlink_with_config(
     })?;
 
     push_if_github_backed(root, &resolved_from, config, GhCli::new)?;
+    push_if_git_ref_backed(root, &resolved_from, config)?;
     Ok(())
 }
 
@@ -172,6 +176,59 @@ fn push_if_github_backed<G: GhIssueReader + GhIssueWriter>(
     };
 
     gh_store.push_cache(type_def, &doc_id)
+}
+
+fn push_if_git_ref_backed(root: &Path, doc_path: &Path, config: Option<&Config>) -> Result<()> {
+    let config = match config {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+
+    if !doc_path.starts_with(".lazyspec/cache/") {
+        return Ok(());
+    }
+
+    let type_name = doc_path
+        .components()
+        .nth(2)
+        .and_then(|c| c.as_os_str().to_str())
+        .ok_or_else(|| {
+            anyhow!(
+                "cannot determine type from cache path: {}",
+                doc_path.display()
+            )
+        })?;
+
+    let type_def = config
+        .type_by_name(type_name)
+        .ok_or_else(|| anyhow!("unknown type '{}' from cache path", type_name))?;
+
+    if type_def.store != StoreBackend::GitRef {
+        return Ok(());
+    }
+
+    let doc_id = crate::engine::store::extract_id_from_name(
+        doc_path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
+    );
+
+    let refname = format!("refs/lazyspec/{}/{}", type_name, doc_id);
+    let content = std::fs::read_to_string(root.join(doc_path))?;
+
+    let mut cache_lock = CacheLock::load(root)?;
+    let cache_key = format!("{}/{}", type_name, doc_id);
+    let old_sha = cache_lock
+        .get(&cache_key)
+        .ok_or_else(|| anyhow!("no cache.lock entry for '{}'", cache_key))?
+        .to_string();
+
+    let git = GitCli;
+    let new_sha = git.create_commit(root, &refname, &[("doc.md", &content)], Some(&old_sha))?;
+    git.update_ref(root, &refname, &new_sha, &old_sha)?;
+
+    cache_lock.set(&cache_key, &new_sha);
+    cache_lock.save(root)?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -334,5 +391,256 @@ mod tests {
             entry.updated_at, "",
             "updated_at should be cleared after push, indicating push_cache ran"
         );
+    }
+
+    fn git_ref_config() -> Config {
+        let note_type = TypeDef {
+            name: "note".to_string(),
+            plural: "notes".to_string(),
+            dir: "docs/notes".to_string(),
+            prefix: "NOTE".to_string(),
+            icon: None,
+            numbering: NumberingStrategy::Incremental,
+            subdirectory: false,
+            store: StoreBackend::GitRef,
+            singleton: false,
+            parent_type: None,
+        };
+        let story_type = TypeDef {
+            name: "story".to_string(),
+            plural: "stories".to_string(),
+            dir: "docs/stories".to_string(),
+            prefix: "STORY".to_string(),
+            icon: None,
+            numbering: NumberingStrategy::Incremental,
+            subdirectory: false,
+            store: StoreBackend::GitRef,
+            singleton: false,
+            parent_type: None,
+        };
+
+        let mut config = Config::default();
+        config.documents.types = vec![note_type, story_type];
+        config
+    }
+
+    fn init_git_repo(root: &std::path::Path) {
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+    }
+
+    #[test]
+    fn link_git_ref_doc_persists_to_ref() {
+        let root = tmp_root("link_git_ref");
+        init_git_repo(&root);
+        let config = git_ref_config();
+
+        let note_cache = root.join(".lazyspec/cache/note");
+        let story_cache = root.join(".lazyspec/cache/story");
+        std::fs::create_dir_all(&note_cache).unwrap();
+        std::fs::create_dir_all(&story_cache).unwrap();
+
+        let note_content = concat!(
+            "---\n",
+            "title: My Note\n",
+            "type: note\n",
+            "status: draft\n",
+            "author: agent-7\n",
+            "date: 2026-03-27\n",
+            "tags: []\n",
+            "---\n",
+            "Note body.\n",
+        );
+        std::fs::write(note_cache.join("NOTE-001-my-note.md"), note_content).unwrap();
+
+        let story_content = concat!(
+            "---\n",
+            "title: My Story\n",
+            "type: story\n",
+            "status: draft\n",
+            "author: agent-7\n",
+            "date: 2026-03-27\n",
+            "tags: []\n",
+            "---\n",
+            "Story body.\n",
+        );
+        std::fs::write(story_cache.join("STORY-001-my-story.md"), story_content).unwrap();
+
+        // Create initial git refs for both docs
+        let git = crate::engine::git_ref::GitCli;
+        let note_sha = git
+            .create_ref_commit(
+                &root,
+                "refs/lazyspec/note/NOTE-001",
+                &[("doc.md", note_content)],
+            )
+            .unwrap();
+        let story_sha = git
+            .create_ref_commit(
+                &root,
+                "refs/lazyspec/story/STORY-001",
+                &[("doc.md", story_content)],
+            )
+            .unwrap();
+
+        // Set up cache.lock with the initial SHAs
+        let mut cache_lock = CacheLock::default();
+        cache_lock.set("note/NOTE-001", &note_sha);
+        cache_lock.set("story/STORY-001", &story_sha);
+        cache_lock.save(&root).unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+
+        link_inner(
+            &root,
+            &store,
+            "NOTE-001",
+            "implements",
+            "STORY-001",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+        )
+        .unwrap();
+
+        // Read the ref blob and verify it contains the relationship
+        let updated_lock = CacheLock::load(&root).unwrap();
+        let new_sha = updated_lock.get("note/NOTE-001").unwrap();
+        assert_ne!(new_sha, note_sha, "SHA should have changed after link");
+
+        let blob_content = git.read_ref_blob(&root, new_sha, "doc.md").unwrap();
+        assert!(
+            blob_content.contains("implements: STORY-001"),
+            "ref blob should contain the link, got:\n{}",
+            blob_content
+        );
+    }
+
+    #[test]
+    fn link_git_ref_doc_survives_cold_cache() {
+        let root = tmp_root("link_git_ref_cold");
+        init_git_repo(&root);
+        let config = git_ref_config();
+
+        let note_cache = root.join(".lazyspec/cache/note");
+        let story_cache = root.join(".lazyspec/cache/story");
+        std::fs::create_dir_all(&note_cache).unwrap();
+        std::fs::create_dir_all(&story_cache).unwrap();
+
+        let note_content = concat!(
+            "---\n",
+            "title: My Note\n",
+            "type: note\n",
+            "status: draft\n",
+            "author: agent-7\n",
+            "date: 2026-03-27\n",
+            "tags: []\n",
+            "---\n",
+            "Note body.\n",
+        );
+        std::fs::write(note_cache.join("NOTE-001-my-note.md"), note_content).unwrap();
+
+        let story_content = concat!(
+            "---\n",
+            "title: My Story\n",
+            "type: story\n",
+            "status: draft\n",
+            "author: agent-7\n",
+            "date: 2026-03-27\n",
+            "tags: []\n",
+            "---\n",
+            "Story body.\n",
+        );
+        std::fs::write(story_cache.join("STORY-001-my-story.md"), story_content).unwrap();
+
+        let git = crate::engine::git_ref::GitCli;
+        let note_sha = git
+            .create_ref_commit(
+                &root,
+                "refs/lazyspec/note/NOTE-001",
+                &[("doc.md", note_content)],
+            )
+            .unwrap();
+        let story_sha = git
+            .create_ref_commit(
+                &root,
+                "refs/lazyspec/story/STORY-001",
+                &[("doc.md", story_content)],
+            )
+            .unwrap();
+
+        let mut cache_lock = CacheLock::default();
+        cache_lock.set("note/NOTE-001", &note_sha);
+        cache_lock.set("story/STORY-001", &story_sha);
+        cache_lock.save(&root).unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+
+        link_inner(
+            &root,
+            &store,
+            "NOTE-001",
+            "implements",
+            "STORY-001",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+        )
+        .unwrap();
+
+        // Delete the cache file to simulate cold cache
+        std::fs::remove_file(note_cache.join("NOTE-001-my-note.md")).unwrap();
+
+        // Re-materialize from the ref
+        let updated_lock = CacheLock::load(&root).unwrap();
+        let new_sha = updated_lock.get("note/NOTE-001").unwrap();
+        let blob_content = git.read_ref_blob(&root, new_sha, "doc.md").unwrap();
+
+        assert!(
+            blob_content.contains("implements: STORY-001"),
+            "relationship should survive cold cache, got:\n{}",
+            blob_content
+        );
+    }
+
+    #[test]
+    fn push_if_git_ref_backed_skips_non_cache_path() {
+        let root = tmp_root("git_ref_skip_noncache");
+        let config = git_ref_config();
+        let doc_path = std::path::Path::new("docs/notes/NOTE-001-my-note.md");
+        let result = push_if_git_ref_backed(&root, doc_path, Some(&config));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn push_if_git_ref_backed_skips_non_git_ref_type() {
+        let root = tmp_root("git_ref_skip_ghtype");
+        let config = gh_config_with_rfc_type();
+        let doc_path = std::path::Path::new(".lazyspec/cache/rfc/RFC-001-my-rfc.md");
+        let result = push_if_git_ref_backed(&root, doc_path, Some(&config));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn push_if_git_ref_backed_skips_when_no_config() {
+        let root = tmp_root("git_ref_skip_noconfig");
+        let doc_path = std::path::Path::new(".lazyspec/cache/note/NOTE-001-my-note.md");
+        let result = push_if_git_ref_backed(&root, doc_path, None);
+        assert!(result.is_ok());
     }
 }

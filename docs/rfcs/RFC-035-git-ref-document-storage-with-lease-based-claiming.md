@@ -29,16 +29,14 @@ The existing reservation system (RFC-030) prevents numbering collisions. This RF
 
 ## Intent
 
-Add a `store` field to each document type, controlling where its documents are persisted:
+The `store` field on each document type already supports `filesystem` (default) and `github-issues` (RFC-037). This RFC adds two capabilities:
 
-- `filesystem` (default): documents live in the working tree as they do today. Visible in `git log`, diffs, and PRs. Protected by hard-gated locks when coordination is enabled.
-- `git-ref`: documents live in git custom refs (`refs/lazyspec/{type}/{id}`). Invisible to the working tree, `git log`, and PRs. Visible to `lazyspec` CLI and TUI. Protected by the same lock mechanism.
+- `git-ref`: documents live in git custom refs (`refs/lazyspec/{type}/{id}`). Invisible to the working tree, `git log`, and PRs. Visible to `lazyspec` CLI and TUI. No external service dependency.
+- **Lease-based coordination**: leases backed by git refs (`refs/lazyspec/leases/{type}/{id}`) that gate writes through `lazyspec` CLI and TUI, regardless of storage backend. Agent identity, heartbeat, crash recovery via lease expiry.
 
-The `store` field is a storage backend selector, not a semantic classification. Any document type can use any backend. The typical configuration puts specs (RFCs, stories, ADRs) in `filesystem` and tasks (iterations) in `git-ref`, but this is convention, not constraint.
+The typical configuration puts specs (RFCs, stories, ADRs) in `filesystem` and tasks (iterations) in `git-ref`, but any document type can use any backend.
 
-The `store` field is designed to be extensible. Future backends (e.g. `sqlite`, `github-issues`) can be added without changing the document model, relationship system, or validation rules.
-
-Both backends share the same coordination primitives: lease-based locks backed by git refs, agent identity, crash recovery via lease expiry.
+Both backends share the same coordination primitives: leases backed by git refs, agent identity, crash recovery via lease expiry.
 
 Claude Code hooks handle orchestration: boot coordination, heartbeat leases, claim/release on session boundaries.
 
@@ -64,10 +62,10 @@ store = "git-ref"
 
 @ref src/engine/config.rs#TypeDef
 
-@draft Store {
-    Filesystem,   // default: working tree files
-    GitRef,       // git custom refs
-    // future: Sqlite, GithubIssues, etc.
+@draft StoreBackend {
+    Filesystem,     // default: working tree files (existing)
+    GithubIssues,   // GitHub Issues API (existing, RFC-037)
+    GitRef,         // git custom refs (this RFC)
 }
 
 The backend controls _where_ the document lives. Everything else -- frontmatter schema, relationships, validation rules, status tracking -- is the same regardless of backend. An iteration stored in `git-ref` has the same fields, the same `implements` link to a story, and the same validation as one stored in `filesystem`.
@@ -75,17 +73,18 @@ The backend controls _where_ the document lives. Everything else -- frontmatter 
 | | `filesystem` | `git-ref` |
 |---|---|---|
 | Storage | Working tree (`docs/rfcs/`, etc.) | `refs/lazyspec/{type}/{id}` |
+| Cache | N/A | `.lazyspec/cache/{type}/` (same path as `github-issues`) |
 | In working tree | Yes | No |
 | In `git log` / PRs | Yes | No |
 | In TUI | Yes | Yes |
 | In `lazyspec show/list/context` | Yes | Yes |
 | Has frontmatter & relationships | Yes | Yes |
-| Write protection | Hard-gated lock | Hard-gated lock |
+| Write protection | Lease-gated | Lease-gated |
 | Lifetime | Permanent in git history | Permanent in refs |
 
-### Hard-Gated Locks
+### Lease-Gated Writes
 
-Locks live in `refs/lazyspec/locks/{type}/{id}`. Each lock ref points at a commit containing `lock.json`:
+Leases live in `refs/lazyspec/leases/{type}/{id}`. Each lease ref points at a commit containing `lease.json`:
 
 ```json
 {
@@ -95,9 +94,12 @@ Locks live in `refs/lazyspec/locks/{type}/{id}`. Each lock ref points at a commi
 }
 ```
 
-Lock refs use commits (not bare blobs) because hosted git platforms reject non-commit refs.
+Lease refs use commits (not bare blobs) because hosted git platforms reject non-commit refs.
 
-When coordination is configured, the lock is a hard gate. `lazyspec create`, `lazyspec update`, and `lazyspec delete` refuse to write without a held lock, regardless of storage backend:
+> [!NOTE]
+> This is distinct from the optimistic locking in `GithubIssuesStore`, which uses GitHub's `updated_at` timestamps to detect concurrent edits. Leases coordinate between lazyspec clients; optimistic locks coordinate between lazyspec and direct GitHub edits. Both mechanisms can be active simultaneously for `github-issues` documents (see RFC-037 § Interaction with RFC-035 Coordination).
+
+When coordination is configured, the lease is a hard gate. `lazyspec create`, `lazyspec update`, and `lazyspec delete` refuse to write without a held lease, regardless of storage backend:
 
 ```
 $ lazyspec update RFC-042 --set-status accepted
@@ -105,18 +107,20 @@ Error: RFC-042 is not claimed. Run `lazyspec claim RFC-042` first.
 ```
 
 > [!NOTE]
-> For `filesystem` documents, direct file edits (`vim docs/rfcs/RFC-042.md`) bypass the gate because git can't enforce ref-based locks on working tree files. `lazyspec validate` detects unlocked modifications and warns. The gate covers all writes through `lazyspec` CLI and TUI.
+> For `filesystem` documents, direct file edits (`vim docs/rfcs/RFC-042.md`) bypass the gate because git can't enforce ref-based leases on working tree files. `lazyspec validate` detects unclaimed modifications and warns. The gate covers all writes through `lazyspec` CLI and TUI.
 
-#### Lock Operations
+#### Lease Operations
+
+All operations use `GitRefOps` for ref manipulation. Creating a lease commit means writing `lease.json` as a blob, building a single-entry tree, creating a commit (parented on the previous lease commit if extending), and updating the ref. All operations fetch from remote before acting to ensure they operate on the latest state.
 
 | Operation | Mechanism |
 |-----------|-----------|
-| Acquire | Create lock commit, push to `refs/lazyspec/locks/{type}/{id}`. Fails if ref exists. |
-| Release | Delete lock ref on remote. Verifies caller is the holder. |
-| Admin release | Delete lock ref, bypassing expiry. Requires `--expected-holder` matching current holder. For orchestrators. |
-| Heartbeat | New lock commit with updated expiry, parented on current. Push with `--force-with-lease` (CAS). |
-| Force-acquire | Check `now > lock.expires + grace_period`. If expired, delete and reacquire. |
-| Query | `lazyspec locks` lists all held locks. |
+| Acquire | Fetch from remote. `create_ref_commit` with `lease.json`, push to `refs/lazyspec/leases/{type}/{id}`. Uses CAS (all-zeros SHA) to fail if ref already exists on remote. |
+| Release | Fetch from remote. `delete_remote_ref` on `refs/lazyspec/leases/{type}/{id}`. Verifies caller is the holder. |
+| Admin release | Fetch from remote. Delete lease ref, bypassing expiry. Requires `--expected-holder` matching current holder. For orchestrators. |
+| Heartbeat | Fetch from remote. New lease commit with updated expiry, parented on current. `update_ref` with CAS (old SHA), then push. |
+| Force-acquire | Fetch from remote. Check `now > lease.expires + grace_period` using commit timestamps for expiry reference. If expired, atomic ref swap via `push --force-with-lease`. |
+| Query | Fetch from remote. `lazyspec leases` lists all held leases via `list_refs` on `refs/lazyspec/leases/*`. |
 
 #### Heartbeat and Lease Management
 
@@ -124,7 +128,7 @@ The CLI is stateless. Heartbeat is caller-driven:
 
 - _Claude Code hooks_: a `post-tool-use` hook runs `lazyspec heartbeat` after each tool invocation, extending the lease while the agent is active. Session start hook claims, session end hook releases.
 - _Orchestrators_: run `lazyspec heartbeat <doc> --agent-id <id>` on a timer.
-- _TUI_: heartbeats held locks on its poll interval.
+- _TUI_: heartbeats held leases on its poll interval.
 - _Humans_: don't use the iteration workflow. For spec edits, set a long lease (`60m`+).
 
 Default lease duration is 60 minutes. Grace period for force-acquire is 2 minutes (absorbs NTP drift).
@@ -138,7 +142,7 @@ refs/lazyspec/iteration/042   → commit chain containing ITERATION-042.md
 refs/lazyspec/iteration/043   → commit chain containing ITERATION-043.md
 ```
 
-Each ref points at a commit whose tree contains the document markdown. Updates create new commits parented on the previous, giving per-document history. `git update-ref` uses the three-argument CAS form to prevent concurrent overwrites.
+Each ref points at a commit whose tree contains the document markdown. Updates create new commits parented on the previous, giving per-document history. `GitRefOps::update_ref` uses the three-argument CAS form (`git update-ref <ref> <new> <old>`) to prevent concurrent overwrites.
 
 Git-ref documents are invisible to:
 - `git log` (commits are in custom refs, not branch history)
@@ -153,7 +157,7 @@ Git-ref documents are visible to:
 
 ### Local Shadow Cache
 
-Git-ref documents live in refs, not in the working tree. Reading a ref requires git2 calls (resolve ref, read commit, read tree, read blob) on every access. For CLI commands that scan all documents (`list`, `search`, `status`, `validate`), this adds up. The TUI re-reads on every poll cycle.
+Git-ref documents live in refs, not in the working tree. Reading a ref requires multiple git CLI calls (`resolve_ref`, `read_ref_blob`) on every access. For CLI commands that scan all documents (`list`, `search`, `status`, `validate`), this adds up. The TUI re-reads on every poll cycle.
 
 A local shadow cache materializes git-ref documents into `.lazyspec/cache/{type}/{id}.md`, giving the engine a fast filesystem read path identical to how it reads `filesystem`-backend documents. The cache is gitignored and read-only.
 
@@ -181,7 +185,7 @@ A local shadow cache materializes git-ref documents into `.lazyspec/cache/{type}
 
 `lazyspec fetch` updates local refs from the remote _and_ rematerializes the cache in one operation:
 
-1. `git fetch origin refs/lazyspec/*` (via git2)
+1. `GitRefOps::fetch_refs(root, remote, "refs/lazyspec/*")`
 2. For each ref whose SHA differs from `cache.lock`: read the blob from the ref's commit tree, write it to `.lazyspec/cache/{type}/{id}.md`, update `cache.lock`
 3. Remove cache files for refs that no longer exist on the remote
 
@@ -189,16 +193,27 @@ Between fetches, reads hit the cache directory. The cache may be stale relative 
 
 #### Read path
 
-The unified document engine reads `git-ref` types from `.lazyspec/cache/{type}/` rather than calling git2 per document. From the engine's perspective, it's just another directory of markdown files, dispatched by `store` type. If the cache directory is empty (no fetch yet), the engine falls back to reading refs directly via git2, so the system works without a cache, just slower.
+The unified document engine reads `git-ref` types from `.lazyspec/cache/{type}/`, the same cache path used by `github-issues` types. `Store::load_with_fs` already dispatches on `StoreBackend` to select the read directory:
+
+```rust
+// existing pattern in store.rs
+let full_path = match type_def.store {
+    StoreBackend::Filesystem => root.join(&type_def.dir),
+    StoreBackend::GithubIssues => root.join(".lazyspec/cache").join(&type_def.name),
+    StoreBackend::GitRef => root.join(".lazyspec/cache").join(&type_def.name),
+};
+```
+
+From the engine's perspective, cached git-ref documents are just another directory of markdown files. If the cache directory is empty (no fetch yet), the engine falls back to reading refs directly via `GitRefOps`, so the system works without a cache, just slower.
 
 #### Write path
 
 The cache is read-only. All mutations go through `lazyspec create`, `lazyspec update`, or `lazyspec delete`:
 
-1. The CLI creates a new blob, tree, and commit on the ref via git2
-2. `update-ref` with CAS (old SHA from `cache.lock`) prevents concurrent overwrites
+1. The CLI creates a new blob, tree, and commit on the ref via `GitRefOps::create_ref_commit`
+2. `GitRefOps::update_ref` with CAS (old SHA from `cache.lock`) prevents concurrent overwrites
 3. The CLI rematerializes the affected cache file and updates `cache.lock`
-4. The CLI pushes the ref to the remote
+4. `GitRefOps::push_ref` pushes the ref to the remote
 
 Because the cache is never edited directly, there is no risk of orphaned edits being silently overwritten on the next fetch. Agents and humans interact with git-ref documents exclusively through the CLI or TUI.
 
@@ -233,12 +248,13 @@ RFC-030 (Git-Based Document Number Reservation)
 
 ### Unified Document Engine
 
-The document engine currently reads from configured `dir` paths on the filesystem. With `git-ref` documents in refs, the engine needs a unified read path dispatched by `store`:
+The read side (`Store::load_with_fs`) already dispatches on `StoreBackend` to select the directory. Adding `GitRef` extends the match arm to read from `.lazyspec/cache/{type}/`, identical to `GithubIssues`. No new read-path abstraction is needed.
 
-- `filesystem`: read from `TypeDef.dir`, as today
-- `git-ref`: read from `.lazyspec/cache/{type}/` (the shadow cache), falling back to `refs/lazyspec/{type}/*` via git2 if the cache is cold
+The write side uses `dispatch_for_type`, which currently takes `&mut FilesystemStore` and `Option<&mut GithubIssuesStore<G>>` as separate arguments. Adding a third `Option<&mut GitRefStore<R>>` parameter is workable but signals that the dispatch mechanism should evolve. The pragmatic path: add the third parameter for now, note it as tech debt. A future refactor could replace the positional arguments with a store registry, but that's not justified until there's a fourth backend.
 
-`lazyspec list`, `lazyspec search`, `lazyspec show`, `lazyspec validate`, `lazyspec context`, and `lazyspec status` all operate across backends. The TUI's document tree merges both sources.
+@ref src/engine/store_dispatch.rs#dispatch_for_type
+
+`lazyspec list`, `lazyspec search`, `lazyspec show`, `lazyspec validate`, `lazyspec context`, and `lazyspec status` all operate across backends. The TUI's document tree merges all sources.
 
 `lazyspec validate` runs the same rules across backends: "iterations need stories" checks that an iteration has an `implements` link to a story, regardless of where each lives.
 
@@ -248,7 +264,7 @@ Priority chain:
 
 1. `$LAZYSPEC_AGENT_ID` (explicit, for orchestrators)
 2. `$CLAUDE_SESSION_ID` (auto-detected in Claude Code)
-3. `git config user.name` + sqids-encoded PID (fallback)
+3. `git config user.name` (fallback)
 
 ### Claude Code Hooks
 
@@ -267,13 +283,44 @@ Claude Code hooks automate the coordination lifecycle:
 
 The orchestrator sets `$ASSIGNED_TASK` when spawning the agent. The hooks handle claim, heartbeat, and release without the agent needing to know about coordination.
 
-### Git2 Crate
+### Git Ref Operations Trait
 
-All git ref operations use the `git2` crate (libgit2 bindings) rather than shelling out. This eliminates process spawn overhead, `.git/FETCH_HEAD.lock` contention from concurrent fetches, and stderr parsing.
+All git ref operations shell out to the `git` CLI behind a trait, following the same pattern as `GhIssueReader`/`GhIssueWriter` in `gh.rs`. A `GitRefOps` trait defines the I/O boundary; `GitCli` is the real implementation, tests inject a mock.
+
+```rust
+pub trait GitRefOps {
+    fn resolve_ref(&self, root: &Path, refname: &str) -> Result<Option<String>>;
+    fn list_refs(&self, root: &Path, pattern: &str) -> Result<Vec<(String, String)>>;
+    fn read_ref_blob(&self, root: &Path, sha: &str, path: &str) -> Result<String>;
+    fn create_ref_commit(&self, root: &Path, refname: &str, files: &[(&str, &str)]) -> Result<String>;
+    fn update_ref(&self, root: &Path, refname: &str, new_sha: &str, old_sha: &str) -> Result<()>;
+    fn delete_ref(&self, root: &Path, refname: &str) -> Result<()>;
+    fn fetch_refs(&self, root: &Path, remote: &str, pattern: &str) -> Result<()>;
+    fn push_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()>;
+    fn push_ref_with_lease(&self, root: &Path, remote: &str, refname: &str, expected_old: Option<&str>) -> Result<()>;
+    fn delete_remote_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()>;
+    fn read_commit_timestamp(&self, root: &Path, sha: &str) -> Result<DateTime<Utc>>;
+}
+```
+
+The `create_ref_commit` implementation pipes content through `git hash-object -w --stdin`, builds a tree with `git mktree`, creates a commit with `git commit-tree`, and points the ref with `git update-ref`. This is the same sequence the reservation module uses for ref-based number claims.
 
 @ref src/engine/reservation.rs#reserve_next
+@ref src/engine/gh.rs#GhIssueReader
 
-The existing reservation module can be migrated to git2 in a follow-up.
+This lives in a new `engine/git_ref.rs` module alongside `gh.rs`, following the same structure: data types, trait definition, `GitCli` implementation, `MockGitRefClient` in a `test_support` submodule.
+
+The existing reservation module can be migrated to use `GitRefOps` in a follow-up, giving the trait a second concrete consumer.
+
+### Distributed Safety Properties
+
+The distributed lease protocol relies on the following safety properties:
+
+- **Linearization points**: All document writes use CAS (`git update-ref <ref> <new> <old>`) as their linearization point. Lease operations use `push --force-with-lease` for atomic ref swaps. These ensure that concurrent operations are serialized at the git ref level.
+- **Fetch-before-check**: The lease gate fetches from remote before checking lease state, adding one remote round-trip per gated write. This ensures the lease check operates on the latest remote state rather than potentially stale local refs.
+- **Clock skew tolerance**: The `grace_period` (default 2 minutes) absorbs NTP drift between agents. Force-acquire uses commit timestamps (server-side, written at push time) as the expiry reference rather than relying on the acquiring agent's local clock.
+- **Network partition behavior**: During a partition, local ref commits succeed but push fails. The lease gate falls back to local refs with a warning, allowing the agent to continue working locally. Coordination resumes when connectivity is restored and the next push succeeds.
+- **Initial ref creation**: Uses CAS with all-zeros SHA (`0000000000000000000000000000000000000000`) as the expected old value, preventing a TOCTOU race where two agents both see "ref does not exist" and both attempt to create it. Only one push succeeds; the other gets a ref-update rejection.
 
 ### Fetch Refspecs
 
@@ -337,29 +384,28 @@ max_push_retries = 5
 ### Graceful Degradation
 
 If the remote is unreachable:
-- _Claim, release, heartbeat_: fail. Coordination requires a coordinator.
+- _Claim, release, heartbeat_: fail. Coordination requires a remote.
 - _Git-ref create/update_: local ref commit succeeds. Push fails but document is readable locally.
 - _Git-ref read_: works from the shadow cache (as fresh as the last successful fetch). Falls back to locally fetched refs if cache is cold.
 - _Filesystem reads_: always work.
-- _Filesystem writes (via lazyspec)_: fail if lock check requires remote.
+- _Filesystem writes (via lazyspec)_: fail if lease check requires remote.
 
 ### Future Backends
 
-The `store` field is an enum that can grow. Potential future backends:
+The `store` field is an enum that can grow. `github-issues` was added in RFC-037. Potential future backends:
 
 - `sqlite`: local database for fast queries, bulk operations, and offline-first workflows. No remote coordination, but useful for large projects where filesystem scanning is slow.
-- `github-issues`: documents backed by GitHub Issues or Discussions. Built-in commenting, review, and search. Requires network and couples to GitHub, but gives native reviewability.
 
-Each backend implements the same trait: create, read, update, delete, list, search. The document model, relationships, and validation are backend-agnostic.
+Each backend implements `DocumentStore` (create, update, delete) and uses `.lazyspec/cache/{type}/` for non-filesystem reads. The document model, relationships, and validation are backend-agnostic.
 
 ## Stories
 
-1. Lock engine and CLI -- git2-based lease locks on `refs/lazyspec/locks/{type}/{id}` using commit objects. Acquire, release, admin-release, heartbeat, force-acquire with grace period, query. Agent identity resolution. `lazyspec claim/release/locks/heartbeat` subcommands. Hard-gate enforcement on writes via lazyspec (both backends).
+1. `GitRefOps` trait and lease engine -- `GitRefOps` trait in `engine/git_ref.rs` (data types, trait, `GitCli` impl, `MockGitRefClient`). Lease CRUD on `refs/lazyspec/leases/{type}/{id}` using commit objects via `GitRefOps`. Acquire, release, admin-release, heartbeat, force-acquire with grace period, query. Agent identity resolution. `lazyspec claim/release/leases/heartbeat` CLI subcommands with `--json`. Lease-gate enforcement on writes via lazyspec (all backends).
 
-2. Git-ref storage backend and unified engine -- git2-based commit-chain CRUD on `refs/lazyspec/{type}/{id}`. `Store` enum and backend dispatch trait. Unified document engine that reads from filesystem or refs based on type config. Extend `list/show/search/validate/context/status` to operate across backends. Relationship resolution across backends.
+2. Git-ref storage backend -- `StoreBackend::GitRef` variant. `GitRefStore<R: GitRefOps>` implementing `DocumentStore` (create/update/delete via commit-chain CRUD on `refs/lazyspec/{type}/{id}`). Shadow cache in `.lazyspec/cache/{type}/`. `Store::load_with_fs` dispatch for `GitRef`. `dispatch_for_type` extended with third parameter. `lazyspec fetch` materializes cache. Extend `list/show/search/validate/context/status` to operate across all three backends.
 
-3. Init, setup, and config -- `store` field on `TypeDef`. `[coordination]` config section. `lazyspec init` wizard with store selection. `lazyspec setup` for new clones. Fetch refspec management. `.gitignore` for git-ref type dirs. Shallow clone detection. Shared remote validation with `[numbering.reserved]`.
+3. Init, setup, and config -- `store = "git-ref"` on `TypeDef`. `[coordination]` config section. `lazyspec init` wizard with store selection. `lazyspec setup` for new clones. Fetch refspec management. `.gitignore` for `.lazyspec/cache/` when git-ref types configured. Shallow clone detection. Shared remote validation with `[numbering.reserved]`.
 
-4. TUI integration -- display git-ref documents alongside filesystem documents. Lock status indicators. Claim/release from TUI. Heartbeat on poll. Context chain display across backends (RFC -> Story -> Iteration). Status filtering.
+4. TUI integration -- display git-ref documents alongside filesystem documents. Lease status indicators. Claim/release from TUI. Heartbeat on poll. Context chain display across backends (RFC -> Story -> Iteration). Status filtering.
 
 5. Claude Code hooks -- hook definitions for session-start (claim), post-tool-use (heartbeat), session-end (release). Documentation for orchestrator integration. `$ASSIGNED_TASK` convention.

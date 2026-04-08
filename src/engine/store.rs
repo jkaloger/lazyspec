@@ -1,9 +1,11 @@
 mod links;
 mod loader;
 
+use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::document::{DocMeta, DocType, RelationType, Status};
 use crate::engine::fs::{FileSystem, RealFileSystem};
+use crate::engine::git_ref::GitRefOps;
 use crate::engine::refs::RefExpander;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -34,24 +36,47 @@ pub struct Store {
 
 impl Store {
     pub fn load(root: &Path, config: &Config) -> Result<Self> {
-        Self::load_with_fs(root, config, &RealFileSystem)
+        let git_cli = crate::engine::git_ref::GitCli;
+        Self::load_with_fs(root, config, &RealFileSystem, Some(&git_cli))
     }
 
-    pub fn load_with_fs(root: &Path, config: &Config, fs: &dyn FileSystem) -> Result<Self> {
+    pub fn load_with_fs(
+        root: &Path,
+        config: &Config,
+        fs: &dyn FileSystem,
+        git_ref_ops: Option<&dyn GitRefOps>,
+    ) -> Result<Self> {
         let mut docs = HashMap::new();
         let mut children: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
         let mut parent_of: HashMap<PathBuf, PathBuf> = HashMap::new();
         let mut parse_errors: Vec<ParseError> = Vec::new();
 
         for type_def in &config.documents.types {
-            let full_path = if type_def.store == StoreBackend::GithubIssues {
-                root.join(".lazyspec/cache").join(&type_def.name)
-            } else {
-                root.join(&type_def.dir)
+            let full_path = match type_def.store {
+                StoreBackend::GithubIssues | StoreBackend::GitRef => {
+                    root.join(".lazyspec/cache").join(&type_def.name)
+                }
+                _ => root.join(&type_def.dir),
             };
+
             if !fs.exists(&full_path) {
-                continue;
+                if type_def.store == StoreBackend::GitRef {
+                    if let Some(ops) = git_ref_ops {
+                        materialize_git_ref_cache(root, &type_def.name, ops, fs)?;
+                    }
+                }
+                if !fs.exists(&full_path) {
+                    continue;
+                }
+            } else if type_def.store == StoreBackend::GitRef {
+                let entries = fs.read_dir(&full_path)?;
+                if entries.is_empty() {
+                    if let Some(ops) = git_ref_ops {
+                        materialize_git_ref_cache(root, &type_def.name, ops, fs)?;
+                    }
+                }
             }
+
             loader::load_type_directory(
                 root,
                 &full_path,
@@ -317,6 +342,39 @@ impl Store {
     }
 }
 
+fn materialize_git_ref_cache(
+    root: &Path,
+    type_name: &str,
+    ops: &dyn GitRefOps,
+    fs: &dyn FileSystem,
+) -> Result<()> {
+    let ref_prefix = format!("refs/lazyspec/{}/", type_name);
+    let refs = ops.list_refs(root, &ref_prefix)?;
+    if refs.is_empty() {
+        return Ok(());
+    }
+
+    let cache_dir = root.join(".lazyspec/cache").join(type_name);
+    fs.create_dir_all(&cache_dir)?;
+
+    for (refname, sha) in &refs {
+        let id = refname.strip_prefix(&ref_prefix).unwrap_or(refname);
+        let content = ops.read_ref_blob(root, sha, "doc.md")?;
+        let cache_file = cache_dir.join(format!("{}.md", id));
+        fs.write(&cache_file, &content)?;
+    }
+
+    let mut lock = CacheLock::load(root)?;
+    for (refname, sha) in &refs {
+        let id = refname.strip_prefix(&ref_prefix).unwrap_or(refname);
+        let doc_key = format!("{}/{}", type_name, id);
+        lock.set(&doc_key, sha);
+    }
+    lock.save(root)?;
+
+    Ok(())
+}
+
 fn canonical_name(path: &Path) -> Option<&str> {
     let file_name = path.file_name().and_then(|f| f.to_str())?;
     if file_name == "index.md" || file_name == ".virtual" {
@@ -574,7 +632,7 @@ mod tests {
         );
 
         let config = Config::default();
-        let store = Store::load_with_fs(&root, &config, &fs).unwrap();
+        let store = Store::load_with_fs(&root, &config, &fs, None).unwrap();
 
         assert_eq!(store.docs.len(), 2);
 
@@ -635,7 +693,7 @@ mod tests {
         );
 
         let config = github_issues_config();
-        let store = Store::load_with_fs(&root, &config, &fs).unwrap();
+        let store = Store::load_with_fs(&root, &config, &fs, None).unwrap();
 
         assert_eq!(store.docs.len(), 1);
 
@@ -671,11 +729,66 @@ mod tests {
         );
 
         let config = github_issues_config();
-        let store = Store::load_with_fs(&root, &config, &fs).unwrap();
+        let store = Store::load_with_fs(&root, &config, &fs, None).unwrap();
 
         let rel = PathBuf::from(".lazyspec/cache/issue/ISSUE-007-fix-auth.md");
         let body = store.get_body_raw(&rel, &fs).unwrap();
         assert_eq!(body.trim(), "Auth tokens expire too quickly.");
+    }
+
+    fn git_ref_config() -> Config {
+        use crate::engine::config::{NumberingStrategy, StoreBackend, TypeDef};
+
+        let ref_type = TypeDef {
+            name: "note".to_string(),
+            plural: "notes".to_string(),
+            dir: "docs/notes".to_string(),
+            prefix: "NOTE".to_string(),
+            icon: Some("📝".to_string()),
+            numbering: NumberingStrategy::default(),
+            subdirectory: false,
+            store: StoreBackend::GitRef,
+            singleton: false,
+            parent_type: None,
+        };
+
+        let mut config = Config::default();
+        config.documents.types.push(ref_type);
+        config
+    }
+
+    #[test]
+    fn test_load_includes_git_ref_cache() {
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+
+        let cache_dir = root.join(".lazyspec/cache/note");
+        fs.add_dir(cache_dir.clone());
+
+        let note_path = cache_dir.join("NOTE-001-hello.md");
+        fs.add_file(
+            &note_path,
+            concat!(
+                "---\n",
+                "title: \"Hello note\"\n",
+                "type: note\n",
+                "status: draft\n",
+                "author: \"tester\"\n",
+                "date: 2026-04-01\n",
+                "tags: []\n",
+                "---\n",
+                "A git-ref backed note.\n",
+            ),
+        );
+
+        let config = git_ref_config();
+        let store = Store::load_with_fs(&root, &config, &fs, None).unwrap();
+
+        let rel = PathBuf::from(".lazyspec/cache/note/NOTE-001-hello.md");
+        let doc = store.get(&rel);
+        assert!(doc.is_some(), "git-ref doc should be loaded from cache dir");
+        assert_eq!(doc.unwrap().title, "Hello note");
+        assert_eq!(doc.unwrap().id, "NOTE-001");
     }
 
     #[test]
@@ -703,7 +816,7 @@ mod tests {
         );
 
         let config = github_issues_config();
-        let store = Store::load_with_fs(&root, &config, &fs).unwrap();
+        let store = Store::load_with_fs(&root, &config, &fs, None).unwrap();
 
         let doc = store
             .resolve_shorthand("ISSUE-001")
@@ -713,6 +826,119 @@ mod tests {
         assert_eq!(
             doc.path,
             PathBuf::from(".lazyspec/cache/issue/ISSUE-001-example.md")
+        );
+    }
+
+    #[test]
+    fn test_cold_cache_fallback_materializes_from_git_refs() {
+        use crate::engine::git_ref::test_support::MockGitRefClient;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        let note_content = concat!(
+            "---\n",
+            "title: \"Cold note\"\n",
+            "type: note\n",
+            "status: draft\n",
+            "author: \"tester\"\n",
+            "date: 2026-04-01\n",
+            "tags: []\n",
+            "---\n",
+            "A note from a cold cache.\n",
+        );
+
+        let mock = MockGitRefClient::new()
+            .with_list_result(Ok(vec![(
+                "refs/lazyspec/note/NOTE-001-cold".to_string(),
+                "abc123".to_string(),
+            )]))
+            .with_read_blob_result(Ok(note_content.to_string()));
+
+        let config = git_ref_config();
+        let store = Store::load_with_fs(root, &config, &RealFileSystem, Some(&mock)).unwrap();
+
+        let rel = PathBuf::from(".lazyspec/cache/note/NOTE-001-cold.md");
+        let doc = store.get(&rel);
+        assert!(doc.is_some(), "cold cache fallback should materialize doc");
+        assert_eq!(doc.unwrap().title, "Cold note");
+        assert_eq!(doc.unwrap().id, "NOTE-001");
+
+        assert!(
+            root.join(".lazyspec/cache/note/NOTE-001-cold.md").exists(),
+            "cache file should be written to filesystem"
+        );
+
+        let lock = CacheLock::load(root).unwrap();
+        assert_eq!(
+            lock.get("note/NOTE-001-cold"),
+            Some("abc123"),
+            "cache.lock should contain materialized entry"
+        );
+
+        let calls = mock.calls.borrow();
+        assert!(calls.iter().any(|c| c.starts_with("list_refs:")));
+        assert!(calls.iter().any(|c| c.starts_with("read_ref_blob:")));
+    }
+
+    #[test]
+    fn test_cold_cache_fallback_skipped_when_no_git_ref_ops() {
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+
+        let config = git_ref_config();
+        let store = Store::load_with_fs(&root, &config, &fs, None).unwrap();
+
+        assert_eq!(store.docs.len(), 0);
+    }
+
+    #[test]
+    fn test_cold_cache_fallback_with_empty_cache_dir() {
+        use crate::engine::git_ref::test_support::MockGitRefClient;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        let cache_dir = root.join(".lazyspec/cache/note");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+
+        let note_content = concat!(
+            "---\n",
+            "title: \"Empty dir note\"\n",
+            "type: note\n",
+            "status: draft\n",
+            "author: \"tester\"\n",
+            "date: 2026-04-01\n",
+            "tags: []\n",
+            "---\n",
+            "Materialized from empty cache dir.\n",
+        );
+
+        let mock = MockGitRefClient::new()
+            .with_list_result(Ok(vec![(
+                "refs/lazyspec/note/NOTE-002-empty".to_string(),
+                "def456".to_string(),
+            )]))
+            .with_read_blob_result(Ok(note_content.to_string()));
+
+        let config = git_ref_config();
+        let store = Store::load_with_fs(root, &config, &RealFileSystem, Some(&mock)).unwrap();
+
+        let rel = PathBuf::from(".lazyspec/cache/note/NOTE-002-empty.md");
+        let doc = store.get(&rel);
+        assert!(
+            doc.is_some(),
+            "should materialize from refs when cache dir is empty"
+        );
+        assert_eq!(doc.unwrap().title, "Empty dir note");
+
+        let lock = CacheLock::load(root).unwrap();
+        assert_eq!(
+            lock.get("note/NOTE-002-empty"),
+            Some("def456"),
+            "cache.lock should contain materialized entry"
         );
     }
 }

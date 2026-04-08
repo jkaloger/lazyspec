@@ -3,6 +3,8 @@ use crate::engine::config::{Config, StoreBackend};
 use crate::engine::document::{DocMeta, DocType};
 use crate::engine::fs_ops;
 use crate::engine::gh::GhCli;
+use crate::engine::git_ref::GitCli;
+use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::reservation;
@@ -65,6 +67,31 @@ pub fn run(
             config: config.clone(),
             issue_map: IssueMap::load(root)?,
             issue_cache: IssueCache::new(root),
+        };
+        let created = store.create(type_def, title, author, "")?;
+        return Ok(root.join(&created.path));
+    }
+
+    if type_def.store == StoreBackend::GitRef {
+        let reserved_number = if let Some(coord) = &config.coordination {
+            let cache_dir = root.join(".lazyspec/cache").join(&type_def.name);
+            std::fs::create_dir_all(&cache_dir)?;
+            Some(reservation::reserve_next(
+                root,
+                &coord.remote,
+                &type_def.prefix,
+                coord.max_push_retries,
+                &cache_dir,
+                &on_progress,
+            )?)
+        } else {
+            None
+        };
+        let mut store = GitRefStore {
+            git: GitCli,
+            root: root.to_path_buf(),
+            config: config.clone(),
+            reserved_number,
         };
         let created = store.create(type_def, title, author, "")?;
         return Ok(root.join(&created.path));

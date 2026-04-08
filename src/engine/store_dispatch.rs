@@ -8,6 +8,8 @@ use serde::Serialize;
 use crate::engine::config::{Config, StoreBackend, TypeDef};
 use crate::engine::document::{DocMeta, DocType, Status};
 use crate::engine::gh::{self, GhIssueReader, GhIssueWriter};
+use crate::engine::git_ref::GitRefOps;
+use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::issue_body;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
@@ -374,7 +376,7 @@ pub fn write_cache_file(
     Ok(())
 }
 
-fn find_cache_file(cache_dir: &std::path::Path, doc_id: &str) -> Option<PathBuf> {
+pub(crate) fn find_cache_file(cache_dir: &std::path::Path, doc_id: &str) -> Option<PathBuf> {
     let prefix = format!("{}-", doc_id);
     let exact = format!("{}.md", doc_id);
     std::fs::read_dir(cache_dir).ok()?.find_map(|entry| {
@@ -388,10 +390,11 @@ fn find_cache_file(cache_dir: &std::path::Path, doc_id: &str) -> Option<PathBuf>
     })
 }
 
-pub fn dispatch_for_type<'a, G: GhIssueReader + GhIssueWriter>(
+pub fn dispatch_for_type<'a, G: GhIssueReader + GhIssueWriter, R: GitRefOps>(
     type_def: &TypeDef,
     fs_store: &'a mut FilesystemStore,
     gh_store: Option<&'a mut GithubIssuesStore<G>>,
+    git_ref_store: Option<&'a mut GitRefStore<R>>,
 ) -> Result<&'a mut dyn DocumentStore> {
     match type_def.store {
         StoreBackend::Filesystem => Ok(fs_store as &mut dyn DocumentStore),
@@ -403,6 +406,13 @@ pub fn dispatch_for_type<'a, G: GhIssueReader + GhIssueWriter>(
                 type_def.store
             ),
         },
+        StoreBackend::GitRef => match git_ref_store {
+            Some(s) => Ok(s as &mut dyn DocumentStore),
+            None => bail!(
+                "type '{}' uses git-ref store but no git-ref backend is configured",
+                type_def.name,
+            ),
+        },
     }
 }
 
@@ -411,6 +421,7 @@ mod tests {
     use super::*;
     use crate::engine::config::{Config, NumberingStrategy, StoreBackend, TypeDef};
     use crate::engine::gh::{test_support::MockGhClient, GhIssue, GhLabel};
+    use crate::engine::git_ref::test_support::MockGitRefClient;
     use crate::engine::issue_map::IssueMap;
 
     fn test_type_def(store: StoreBackend) -> TypeDef {
@@ -995,7 +1006,9 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::Filesystem);
-        let store = dispatch_for_type::<MockGhClient>(&td, &mut fs_store, None).unwrap();
+        let store =
+            dispatch_for_type::<MockGhClient, MockGitRefClient>(&td, &mut fs_store, None, None)
+                .unwrap();
 
         // Should succeed (routed to filesystem)
         let result = store.create(&td, "dispatched", "author", "");
@@ -1022,7 +1035,9 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
-        let store = dispatch_for_type(&td, &mut fs_store, Some(&mut gh_store)).unwrap();
+        let store =
+            dispatch_for_type::<_, MockGitRefClient>(&td, &mut fs_store, Some(&mut gh_store), None)
+                .unwrap();
 
         let result = store.create(&td, "dispatched", "author", "");
         assert!(result.is_ok());
@@ -1216,13 +1231,103 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
-        let result = dispatch_for_type::<MockGhClient>(&td, &mut fs_store, None);
+        let result =
+            dispatch_for_type::<MockGhClient, MockGitRefClient>(&td, &mut fs_store, None, None);
         assert!(result.is_err());
         assert!(result
             .err()
             .unwrap()
             .to_string()
             .contains("no GitHub backend"));
+    }
+
+    #[test]
+    fn dispatch_routes_to_git_ref() {
+        let root = tmp_root("dispatch_gitref");
+        let config = Config::default();
+
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config,
+        };
+
+        let mock = MockGitRefClient::new()
+            .with_list_result(Ok(vec![]))
+            .with_create_ref_commit_result(Ok("abc123".into()));
+        let mut git_ref_store = GitRefStore {
+            git: mock,
+            root: root.clone(),
+            config: Config::default(),
+            reserved_number: None,
+        };
+
+        let td = test_type_def(StoreBackend::GitRef);
+        let store = dispatch_for_type::<MockGhClient, _>(
+            &td,
+            &mut fs_store,
+            None,
+            Some(&mut git_ref_store),
+        )
+        .unwrap();
+
+        let result = store.create(&td, "dispatched", "author", "");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_filesystem_ignores_git_ref_store() {
+        let root = tmp_root("dispatch_fs_ignores_gitref");
+        let config = Config::default();
+
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config,
+        };
+
+        let mock = MockGitRefClient::new();
+        let mut git_ref_store = GitRefStore {
+            git: mock,
+            root: root.clone(),
+            config: Config::default(),
+            reserved_number: None,
+        };
+
+        let td = test_type_def(StoreBackend::Filesystem);
+        let store = dispatch_for_type::<MockGhClient, _>(
+            &td,
+            &mut fs_store,
+            None,
+            Some(&mut git_ref_store),
+        )
+        .unwrap();
+
+        let result = store.create(&td, "dispatched", "author", "");
+        assert!(result.is_ok());
+        assert!(
+            git_ref_store.git.calls.borrow().is_empty(),
+            "GitRefStore should not have been invoked for a Filesystem type"
+        );
+    }
+
+    #[test]
+    fn dispatch_git_ref_without_backend_errors() {
+        let root = tmp_root("dispatch_no_gitref");
+        let config = Config::default();
+
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config,
+        };
+
+        let td = test_type_def(StoreBackend::GitRef);
+        let result =
+            dispatch_for_type::<MockGhClient, MockGitRefClient>(&td, &mut fs_store, None, None);
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("no git-ref backend"));
     }
 
     #[test]

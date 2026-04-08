@@ -5,6 +5,7 @@ use lazyspec::cli::{Cli, Commands};
 use lazyspec::engine::config::{Config, StoreBackend};
 use lazyspec::engine::fs::RealFileSystem;
 use lazyspec::engine::gh::GhCli;
+use lazyspec::engine::git_ref::GitCli;
 use lazyspec::engine::github::resolve_repo;
 use lazyspec::engine::issue_cache::IssueCache;
 use lazyspec::engine::issue_map::IssueMap;
@@ -65,7 +66,16 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Init) | Some(Commands::Completions { .. }) => unreachable!(),
         Some(Commands::Fetch { json, doc_type }) => {
             let gh = GhCli::new();
-            lazyspec::cli::fetch::run(&cwd, &config, &gh, doc_type.as_deref(), json)?;
+            let git_ref_ops = GitCli;
+            lazyspec::cli::fetch::run(
+                &cwd,
+                &config,
+                &gh,
+                &git_ref_ops,
+                "origin",
+                doc_type.as_deref(),
+                json,
+            )?;
         }
         Some(Commands::Setup) => {
             let gh = GhCli::new();
@@ -77,6 +87,7 @@ fn main() -> anyhow::Result<()> {
             author,
             json,
         }) => {
+            lazyspec::cli::lease::check_lease_gate(&cwd, &config, None)?;
             let store = Store::load(&cwd, &config)?;
             if json {
                 let output = lazyspec::cli::create::run_json(
@@ -137,7 +148,9 @@ fn main() -> anyhow::Result<()> {
             title,
             body,
             body_file,
+            json,
         }) => {
+            lazyspec::cli::lease::check_lease_gate(&cwd, &config, Some(&path))?;
             if body.is_some() && body_file.is_some() {
                 anyhow::bail!("cannot use both --body and --body-file");
             }
@@ -167,9 +180,17 @@ fn main() -> anyhow::Result<()> {
             }
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
             lazyspec::cli::update::run_with_config(&cwd, &store, &path, &updates, Some(&config))?;
-            println!("Updated {}", resolved.display());
+            if json {
+                let store = Store::load(&cwd, &config)?;
+                let doc = lazyspec::cli::resolve::resolve_shorthand_or_path(&store, &path)?;
+                let json_val = lazyspec::cli::json::doc_to_json(doc);
+                println!("{}", serde_json::to_string_pretty(&json_val)?);
+            } else {
+                println!("Updated {}", resolved.display());
+            }
         }
         Some(Commands::Delete { path }) => {
+            lazyspec::cli::lease::check_lease_gate(&cwd, &config, Some(&path))?;
             let store = Store::load(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
             lazyspec::cli::delete::run_with_config(&cwd, &store, &path, Some(&config))?;
@@ -343,6 +364,80 @@ fn main() -> anyhow::Result<()> {
                 )?;
             }
         },
+        Some(Commands::Claim {
+            doc_id,
+            agent_id,
+            force,
+            json,
+        }) => {
+            if let Err(e) = lazyspec::cli::lease::run_claim(
+                &cwd,
+                &config,
+                &doc_id,
+                agent_id.as_deref(),
+                force,
+                json,
+            ) {
+                if json {
+                    println!("{}", serde_json::json!({"error": e.to_string()}));
+                    std::process::exit(1);
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+        Some(Commands::Release {
+            doc_id,
+            agent_id,
+            expected_holder,
+            json,
+        }) => {
+            if let Err(e) = lazyspec::cli::lease::run_release(
+                &cwd,
+                &config,
+                &doc_id,
+                agent_id.as_deref(),
+                expected_holder.as_deref(),
+                json,
+            ) {
+                if json {
+                    println!("{}", serde_json::json!({"error": e.to_string()}));
+                    std::process::exit(1);
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+        Some(Commands::Leases { json }) => {
+            if let Err(e) = lazyspec::cli::lease::run_leases(&cwd, &config, json) {
+                if json {
+                    println!("{}", serde_json::json!({"error": e.to_string()}));
+                    std::process::exit(1);
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+        Some(Commands::Heartbeat {
+            doc_id,
+            agent_id,
+            json,
+        }) => {
+            if let Err(e) = lazyspec::cli::lease::run_heartbeat(
+                &cwd,
+                &config,
+                &doc_id,
+                agent_id.as_deref(),
+                json,
+            ) {
+                if json {
+                    println!("{}", serde_json::json!({"error": e.to_string()}));
+                    std::process::exit(1);
+                } else {
+                    return Err(e);
+                }
+            }
+        }
         None => {
             let store = Store::load(&cwd, &config)?;
             lazyspec::tui::run(store, &config)?;

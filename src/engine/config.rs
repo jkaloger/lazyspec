@@ -75,6 +75,34 @@ fn default_reserved_max_retries() -> u8 {
     5
 }
 
+fn default_coordination_remote() -> String {
+    "origin".to_string()
+}
+
+fn default_coordination_lease_duration() -> String {
+    "60m".to_string()
+}
+
+fn default_coordination_grace_period() -> String {
+    "2m".to_string()
+}
+
+fn default_coordination_max_push_retries() -> u8 {
+    5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CoordinationConfig {
+    #[serde(default = "default_coordination_remote")]
+    pub remote: String,
+    #[serde(default = "default_coordination_lease_duration")]
+    pub lease_duration: String,
+    #[serde(default = "default_coordination_grace_period")]
+    pub grace_period: String,
+    #[serde(default = "default_coordination_max_push_retries")]
+    pub max_push_retries: u8,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum StoreBackend {
     #[default]
@@ -82,6 +110,8 @@ pub enum StoreBackend {
     Filesystem,
     #[serde(rename = "github-issues")]
     GithubIssues,
+    #[serde(rename = "git-ref")]
+    GitRef,
 }
 
 impl fmt::Display for StoreBackend {
@@ -89,6 +119,7 @@ impl fmt::Display for StoreBackend {
         match self {
             StoreBackend::Filesystem => write!(f, "filesystem"),
             StoreBackend::GithubIssues => write!(f, "github-issues"),
+            StoreBackend::GitRef => write!(f, "git-ref"),
         }
     }
 }
@@ -180,6 +211,8 @@ pub struct Config {
     pub ref_count_ceiling: usize,
     #[serde(default)]
     pub certification: CertificationConfig,
+    #[serde(skip)]
+    pub coordination: Option<CoordinationConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,6 +299,8 @@ struct RawConfig {
     #[serde(default)]
     certification: Option<CertificationConfig>,
     github: Option<GithubConfig>,
+    #[serde(default)]
+    coordination: Option<CoordinationConfig>,
 }
 
 fn build_type_def(name: &str, dir: &str, prefix: &str, icon: &str) -> TypeDef {
@@ -395,6 +430,7 @@ impl Default for Config {
             rules: default_rules(),
             ref_count_ceiling: 15,
             certification: CertificationConfig::default(),
+            coordination: None,
         }
     }
 }
@@ -511,6 +547,7 @@ impl Config {
             rules,
             ref_count_ceiling,
             certification: raw.certification.unwrap_or_default(),
+            coordination: raw.coordination,
         })
     }
 
@@ -853,6 +890,52 @@ store = "github-issues"
     }
 
     #[test]
+    fn test_coordination_explicit_values() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[coordination]
+remote = "upstream"
+lease_duration = "30m"
+grace_period = "5m"
+max_push_retries = 10
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let coord = config.coordination.unwrap();
+        assert_eq!(coord.remote, "upstream");
+        assert_eq!(coord.lease_duration, "30m");
+        assert_eq!(coord.grace_period, "5m");
+        assert_eq!(coord.max_push_retries, 10);
+    }
+
+    #[test]
+    fn test_coordination_defaults_when_empty_section() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[coordination]
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let coord = config.coordination.unwrap();
+        assert_eq!(coord.remote, "origin");
+        assert_eq!(coord.lease_duration, "60m");
+        assert_eq!(coord.grace_period, "2m");
+        assert_eq!(coord.max_push_retries, 5);
+    }
+
+    #[test]
+    fn test_coordination_none_when_absent() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert!(config.coordination.is_none());
+    }
+
+    #[test]
     fn test_github_issues_without_repo_parses() {
         let toml_str = r#"
 [github]
@@ -868,5 +951,56 @@ store = "github-issues"
         let config = Config::parse(toml_str).unwrap();
         let gh = config.documents.github.unwrap();
         assert!(gh.repo.is_none());
+    }
+
+    #[test]
+    fn test_store_backend_display_git_ref() {
+        assert_eq!(StoreBackend::GitRef.to_string(), "git-ref");
+    }
+
+    #[test]
+    fn test_store_backend_parses_git_ref() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+store = "git-ref"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert_eq!(config.documents.types[0].store, StoreBackend::GitRef);
+    }
+
+    #[test]
+    fn test_git_ref_does_not_affect_other_backends() {
+        let toml_str = r#"
+[github]
+repo = "owner/repo"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+store = "git-ref"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+store = "github-issues"
+
+[[types]]
+name = "adr"
+plural = "adrs"
+dir = "docs/adrs"
+prefix = "ADR"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert_eq!(config.documents.types[0].store, StoreBackend::GitRef);
+        assert_eq!(config.documents.types[1].store, StoreBackend::GithubIssues);
+        assert_eq!(config.documents.types[2].store, StoreBackend::Filesystem);
     }
 }

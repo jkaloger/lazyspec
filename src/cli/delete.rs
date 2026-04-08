@@ -1,6 +1,8 @@
 use crate::cli::resolve::resolve_shorthand_or_path;
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::gh::GhCli;
+use crate::engine::git_ref::GitCli;
+use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
@@ -44,6 +46,15 @@ pub fn run_with_config(
                     issue_cache: IssueCache::new(root),
                 };
                 return gh_store.delete(type_def, &doc.id);
+            }
+            if type_def.store == StoreBackend::GitRef {
+                let mut git_store = GitRefStore {
+                    git: GitCli,
+                    root: root.to_path_buf(),
+                    config: config.clone(),
+                    reserved_number: None,
+                };
+                return git_store.delete(type_def, &doc.id);
             }
         }
     }
