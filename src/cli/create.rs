@@ -23,7 +23,16 @@ pub fn run(
     author: &str,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<PathBuf> {
-    run_with_body(root, config, store, doc_type, title, author, None, on_progress)
+    run_with_body(
+        root,
+        config,
+        store,
+        doc_type,
+        title,
+        author,
+        None,
+        on_progress,
+    )
 }
 
 pub fn run_with_body(
@@ -142,7 +151,16 @@ pub fn run_json(
     author: &str,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<String> {
-    run_json_with_body(root, config, store, doc_type, title, author, None, on_progress)
+    run_json_with_body(
+        root,
+        config,
+        store,
+        doc_type,
+        title,
+        author,
+        None,
+        on_progress,
+    )
 }
 
 pub fn run_json_with_body(
@@ -155,7 +173,16 @@ pub fn run_json_with_body(
     body: Option<&str>,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<String> {
-    let path = run_with_body(root, config, store, doc_type, title, author, body, on_progress)?;
+    let path = run_with_body(
+        root,
+        config,
+        store,
+        doc_type,
+        title,
+        author,
+        body,
+        on_progress,
+    )?;
     let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
 
     let content = fs::read_to_string(&path)?;
