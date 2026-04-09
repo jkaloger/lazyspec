@@ -173,6 +173,13 @@ pub struct AgentDialog {
 }
 
 #[cfg(feature = "agent")]
+impl Default for AgentDialog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "agent")]
 impl AgentDialog {
     pub fn new() -> Self {
         AgentDialog {

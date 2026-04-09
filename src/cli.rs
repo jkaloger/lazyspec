@@ -24,6 +24,28 @@ pub mod validate;
 
 use crate::cli::reservations::ReservationsCommand;
 use clap::{Parser, Subcommand, ValueEnum};
+
+pub fn resolve_body(
+    body: &Option<String>,
+    body_file: &Option<String>,
+) -> anyhow::Result<Option<String>> {
+    if body.is_some() && body_file.is_some() {
+        anyhow::bail!("cannot use both --body and --body-file");
+    }
+    if let Some(b) = body {
+        Ok(Some(b.clone()))
+    } else if let Some(bf) = body_file {
+        if bf == "-" {
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+            Ok(Some(buf))
+        } else {
+            Ok(Some(std::fs::read_to_string(bf)?))
+        }
+    } else {
+        Ok(None)
+    }
+}
 use clap_complete::engine::ArgValueCompleter;
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -57,6 +79,12 @@ pub enum Commands {
         /// Author name
         #[arg(long, default_value = "unknown")]
         author: String,
+        /// Set body content inline
+        #[arg(long)]
+        body: Option<String>,
+        /// Read body from file (use `-` for stdin)
+        #[arg(long)]
+        body_file: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -90,7 +118,7 @@ pub enum Commands {
     },
     /// Update document frontmatter
     Update {
-        /// Document path
+        /// Document path or shorthand ID (e.g. RFC-001)
         #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         path: String,
         /// Set status
@@ -111,31 +139,31 @@ pub enum Commands {
     },
     /// Delete a document
     Delete {
-        /// Document path
+        /// Document path or shorthand ID (e.g. RFC-001)
         #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         path: String,
     },
     /// Add a relationship between documents
     Link {
-        /// Source document path
+        /// Source document path or shorthand ID (e.g. RFC-001)
         #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         from: String,
         /// Relationship type (implements, supersedes, blocks, related-to)
         #[arg(add = ArgValueCompleter::new(completions::complete_rel_type))]
         rel_type: String,
-        /// Target document path
+        /// Target document path or shorthand ID (e.g. RFC-001)
         #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         to: String,
     },
     /// Remove a relationship between documents
     Unlink {
-        /// Source document path
+        /// Source document path or shorthand ID (e.g. RFC-001)
         #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         from: String,
         /// Relationship type
         #[arg(add = ArgValueCompleter::new(completions::complete_rel_type))]
         rel_type: String,
-        /// Target document path
+        /// Target document path or shorthand ID (e.g. RFC-001)
         #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         to: String,
     },

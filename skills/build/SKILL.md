@@ -22,6 +22,14 @@ ALWAYS use subagents for development.
 - Do NOT implement tasks yourself. Dispatch a subagent per task. Do NOT dispatch parallel implementers.
 </NEVER>
 
+<GITHUB-ISSUES-DOCUMENTS>
+Documents stored in GitHub Issues (store = "github-issues") are managed through the GitHub API. The `.lazyspec/cache/` directory contains read-only mirrors.
+- Never edit files under `.lazyspec/cache/`. Use `lazyspec update <ID> --body` to modify content.
+- Always use shorthand IDs (e.g. STORY-095) not cache file paths when referencing documents in `lazyspec link`, `lazyspec update`, `lazyspec show`, etc.
+- To set body content at creation: `lazyspec create <type> <title> --body "content"` or `--body-file <path>`.
+- To modify after creation: `lazyspec update <ID> --body "new content"` or `--body-file <path>`.
+</GITHUB-ISSUES-DOCUMENTS>
+
 Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. On failure, check `--help` before retrying.
 
 ## Workflow
