@@ -85,29 +85,34 @@ fn main() -> anyhow::Result<()> {
             doc_type,
             title,
             author,
+            body,
+            body_file,
             json,
         }) => {
+            let body_content = lazyspec::cli::resolve_body(&body, &body_file)?;
             lazyspec::cli::lease::check_lease_gate(&cwd, &config, None)?;
             let store = Store::load(&cwd, &config)?;
             if json {
-                let output = lazyspec::cli::create::run_json(
+                let output = lazyspec::cli::create::run_json_with_body(
                     &cwd,
                     &config,
                     &store,
                     &doc_type,
                     &title,
                     &author,
+                    body_content.as_deref(),
                     |_| {},
                 )?;
                 println!("{}", output);
             } else {
-                let path = lazyspec::cli::create::run(
+                let path = lazyspec::cli::create::run_with_body(
                     &cwd,
                     &config,
                     &store,
                     &doc_type,
                     &title,
                     &author,
+                    body_content.as_deref(),
                     |_| {},
                 )?;
                 println!("{}", path.display());
@@ -151,22 +156,7 @@ fn main() -> anyhow::Result<()> {
             json,
         }) => {
             lazyspec::cli::lease::check_lease_gate(&cwd, &config, Some(&path))?;
-            if body.is_some() && body_file.is_some() {
-                anyhow::bail!("cannot use both --body and --body-file");
-            }
-            let body_content = if let Some(ref b) = body {
-                Some(b.clone())
-            } else if let Some(ref bf) = body_file {
-                if bf == "-" {
-                    let mut buf = String::new();
-                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
-                    Some(buf)
-                } else {
-                    Some(std::fs::read_to_string(bf)?)
-                }
-            } else {
-                None
-            };
+            let body_content = lazyspec::cli::resolve_body(&body, &body_file)?;
             let store = Store::load(&cwd, &config)?;
             let mut updates = Vec::new();
             if let Some(ref s) = status {

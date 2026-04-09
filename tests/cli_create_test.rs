@@ -306,6 +306,86 @@ fn singleton_create_second_fails() {
 }
 
 #[test]
+fn create_with_body_sets_content() {
+    let fixture = common::TestFixture::new();
+    let config = fixture.config();
+    let store = fixture.store();
+
+    let body_content = "This is the body content.";
+    let path = lazyspec::cli::create::run_with_body(
+        fixture.root(),
+        &config,
+        &store,
+        "rfc",
+        "Body Test",
+        "agent",
+        Some(body_content),
+        |_| {},
+    )
+    .unwrap();
+
+    let content = fs::read_to_string(&path).unwrap();
+    assert!(
+        content.contains("title: \"Body Test\""),
+        "should have title, got: {}",
+        content
+    );
+    assert!(
+        content.contains(body_content),
+        "should have body content, got: {}",
+        content
+    );
+}
+
+#[test]
+fn create_with_body_file_sets_content() {
+    let fixture = common::TestFixture::new();
+    let config = fixture.config();
+    let store = fixture.store();
+
+    let body_file = fixture.root().join("body.txt");
+    fs::write(&body_file, "Body from file.").unwrap();
+
+    let body_content = fs::read_to_string(&body_file).unwrap();
+
+    let path = lazyspec::cli::create::run_with_body(
+        fixture.root(),
+        &config,
+        &store,
+        "rfc",
+        "Body File Test",
+        "agent",
+        Some(body_content.as_str()),
+        |_| {},
+    )
+    .unwrap();
+
+    let content = fs::read_to_string(&path).unwrap();
+    assert!(
+        content.contains("title: \"Body File Test\""),
+        "should have title, got: {}",
+        content
+    );
+    assert!(
+        content.contains("Body from file."),
+        "should have body from file, got: {}",
+        content
+    );
+}
+
+#[test]
+fn resolve_body_rejects_both_flags() {
+    let body = Some("inline".to_string());
+    let body_file = Some("file.txt".to_string());
+    let result = lazyspec::cli::resolve_body(&body, &body_file);
+    assert!(result.is_err());
+    assert!(
+        result.unwrap_err().to_string().contains("cannot use both"),
+        "should reject both flags"
+    );
+}
+
+#[test]
 fn non_singleton_create_multiple_succeeds() {
     let fixture = common::TestFixture::new();
     let config = fixture.config();

@@ -1,6 +1,6 @@
 use crate::cli::json::doc_to_json;
 use crate::engine::config::{Config, StoreBackend};
-use crate::engine::document::{DocMeta, DocType};
+use crate::engine::document::{split_frontmatter, DocMeta, DocType};
 use crate::engine::fs_ops;
 use crate::engine::gh::GhCli;
 use crate::engine::git_ref::GitCli;
@@ -21,6 +21,19 @@ pub fn run(
     doc_type: &str,
     title: &str,
     author: &str,
+    on_progress: impl Fn(reservation::ReservationProgress),
+) -> Result<PathBuf> {
+    run_with_body(root, config, store, doc_type, title, author, None, on_progress)
+}
+
+pub fn run_with_body(
+    root: &Path,
+    config: &Config,
+    store: &Store,
+    doc_type: &str,
+    title: &str,
+    author: &str,
+    body: Option<&str>,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<PathBuf> {
     let type_def = config.type_by_name(doc_type).ok_or_else(|| {
@@ -68,7 +81,7 @@ pub fn run(
             issue_map: IssueMap::load(root)?,
             issue_cache: IssueCache::new(root),
         };
-        let created = store.create(type_def, title, author, "")?;
+        let created = store.create(type_def, title, author, body.unwrap_or(""))?;
         return Ok(root.join(&created.path));
     }
 
@@ -93,11 +106,11 @@ pub fn run(
             config: config.clone(),
             reserved_number,
         };
-        let created = store.create(type_def, title, author, "")?;
+        let created = store.create(type_def, title, author, body.unwrap_or(""))?;
         return Ok(root.join(&created.path));
     }
 
-    fs_ops::create_document(
+    let path = fs_ops::create_document(
         root,
         config,
         doc_type,
@@ -108,7 +121,16 @@ pub fn run(
         &type_def.numbering,
         type_def.subdirectory,
         on_progress,
-    )
+    )?;
+
+    if let Some(body_text) = body {
+        let content = fs::read_to_string(&path)?;
+        let (yaml, _) = split_frontmatter(&content)?;
+        let new_content = format!("---\n{}\n---\n\n{}\n", yaml.trim(), body_text);
+        fs::write(&path, new_content)?;
+    }
+
+    Ok(path)
 }
 
 pub fn run_json(
@@ -120,7 +142,20 @@ pub fn run_json(
     author: &str,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<String> {
-    let path = run(root, config, store, doc_type, title, author, on_progress)?;
+    run_json_with_body(root, config, store, doc_type, title, author, None, on_progress)
+}
+
+pub fn run_json_with_body(
+    root: &Path,
+    config: &Config,
+    store: &Store,
+    doc_type: &str,
+    title: &str,
+    author: &str,
+    body: Option<&str>,
+    on_progress: impl Fn(reservation::ReservationProgress),
+) -> Result<String> {
+    let path = run_with_body(root, config, store, doc_type, title, author, body, on_progress)?;
     let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
 
     let content = fs::read_to_string(&path)?;
