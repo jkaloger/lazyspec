@@ -35,6 +35,7 @@ pub fn run(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_with_body(
     root: &Path,
     config: &Config,
@@ -163,6 +164,7 @@ pub fn run_json(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_json_with_body(
     root: &Path,
     config: &Config,

@@ -121,6 +121,12 @@ pub struct AgentSpawner {
     pub records: Vec<AgentRecord>,
 }
 
+impl Default for AgentSpawner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AgentSpawner {
     pub fn new() -> Self {
         let records = load_all_records(None).unwrap_or_default();
