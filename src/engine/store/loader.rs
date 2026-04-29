@@ -150,6 +150,7 @@ fn load_subdirectory(
         author: "".to_string(),
         date: Utc::now().date_naive(),
         tags: vec![],
+        provenance: vec![],
         related: vec![],
         validate_ignore: false,
         virtual_doc: true,

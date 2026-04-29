@@ -12,6 +12,7 @@ pub mod lease;
 pub mod link;
 pub mod list;
 pub mod pin;
+pub mod provenance;
 pub mod reservations;
 pub mod resolve;
 pub mod search;
@@ -22,6 +23,7 @@ pub mod style;
 pub mod update;
 pub mod validate;
 
+use crate::cli::provenance::ProvenanceCommand;
 use crate::cli::reservations::ReservationsCommand;
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -275,6 +277,11 @@ pub enum Commands {
     Reservations {
         #[command(subcommand)]
         command: ReservationsCommand,
+    },
+    /// Manage document provenance citations
+    Provenance {
+        #[command(subcommand)]
+        command: ProvenanceCommand,
     },
     /// Acquire a lease on a document
     Claim {

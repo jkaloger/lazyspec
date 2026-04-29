@@ -1,5 +1,6 @@
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
+use lazyspec::cli::provenance::ProvenanceCommand;
 use lazyspec::cli::reservations::ReservationsCommand;
 use lazyspec::cli::{Cli, Commands};
 use lazyspec::engine::config::{Config, StoreBackend};
@@ -354,6 +355,42 @@ fn main() -> anyhow::Result<()> {
                 )?;
             }
         },
+        Some(Commands::Provenance { command }) => {
+            let store = Store::load(&cwd, &config)?;
+            let mut stdout = std::io::stdout();
+            match command {
+                ProvenanceCommand::Add { id, citation, json } => {
+                    lazyspec::cli::provenance::run_add(
+                        &cwd,
+                        &store,
+                        &config,
+                        &id,
+                        &citation,
+                        json,
+                        &mut stdout,
+                    )?;
+                }
+                ProvenanceCommand::Remove { id, citation, json } => {
+                    lazyspec::cli::provenance::run_remove(
+                        &cwd,
+                        &store,
+                        &config,
+                        &id,
+                        &citation,
+                        json,
+                        &mut stdout,
+                    )?;
+                }
+                ProvenanceCommand::List { id, json } => {
+                    lazyspec::cli::provenance::run_list(
+                        &store,
+                        id.as_deref(),
+                        json,
+                        &mut stdout,
+                    )?;
+                }
+            }
+        }
         Some(Commands::Claim {
             doc_id,
             agent_id,

@@ -25,6 +25,7 @@ struct CacheFrontmatter {
     author: String,
     date: String,
     tags: Vec<String>,
+    provenance: Vec<String>,
     related: Vec<BTreeMap<String, String>>,
 }
 
@@ -46,6 +47,13 @@ pub trait DocumentStore {
     fn update(&mut self, type_def: &TypeDef, doc_id: &str, updates: &[(&str, &str)]) -> Result<()>;
 
     fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()>;
+
+    fn set_provenance(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        provenance: &[String],
+    ) -> Result<()>;
 }
 
 pub struct FilesystemStore {
@@ -95,6 +103,40 @@ impl DocumentStore for FilesystemStore {
     fn delete(&mut self, _type_def: &TypeDef, doc_id: &str) -> Result<()> {
         let store = Store::load(&self.root, &self.config)?;
         crate::engine::fs_ops::delete_document(&self.root, &store, doc_id)
+    }
+
+    fn set_provenance(
+        &mut self,
+        _type_def: &TypeDef,
+        doc_id: &str,
+        provenance: &[String],
+    ) -> Result<()> {
+        let store = Store::load(&self.root, &self.config)?;
+        let doc = store
+            .get(std::path::Path::new(doc_id))
+            .or_else(|| store.resolve_shorthand(doc_id).ok())
+            .ok_or_else(|| anyhow::anyhow!("could not resolve document: {}", doc_id))?;
+        let full_path = self.root.join(&doc.path);
+
+        let entries: Vec<serde_yaml::Value> = provenance
+            .iter()
+            .map(|s| serde_yaml::Value::String(s.clone()))
+            .collect();
+
+        crate::engine::document::rewrite_frontmatter(
+            &full_path,
+            &crate::engine::fs::RealFileSystem,
+            |val| {
+                let map = val.as_mapping_mut().ok_or_else(|| {
+                    anyhow::anyhow!("frontmatter root must be a mapping")
+                })?;
+                map.insert(
+                    serde_yaml::Value::String("provenance".to_string()),
+                    serde_yaml::Value::Sequence(entries.clone()),
+                );
+                Ok(())
+            },
+        )
     }
 }
 
@@ -192,6 +234,7 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
             author: author.to_string(),
             date,
             tags: vec![],
+            provenance: vec![],
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
@@ -311,6 +354,47 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
         Ok(())
     }
 
+    fn set_provenance(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        provenance: &[String],
+    ) -> Result<()> {
+        let (issue_number, remote_issue) = self.check_lock(doc_id)?;
+
+        let ctx = issue_body::IssueContext {
+            title: remote_issue.title.clone(),
+            labels: remote_issue.labels.iter().map(|l| l.name.clone()).collect(),
+            is_open: remote_issue.state == "OPEN",
+            known_types: self
+                .config
+                .documents
+                .types
+                .iter()
+                .map(|t| t.name.clone())
+                .collect(),
+            default_type: type_def.name.clone(),
+        };
+        let (mut meta, body) = issue_body::deserialize(&remote_issue.body, &ctx)?;
+        meta.provenance = provenance.to_vec();
+
+        let new_body = issue_body::serialize(&meta, &body);
+        self.client
+            .issue_edit(&self.repo, issue_number, None, Some(&new_body), &[], &[])?;
+
+        self.issue_map.insert(doc_id, issue_number, "");
+        self.issue_map.save(&self.root)?;
+
+        let meta = DocMeta {
+            id: doc_id.to_string(),
+            ..meta
+        };
+        write_cache_file(&self.root, type_def, &meta, &body)?;
+        self.issue_cache.touch_lock(doc_id);
+
+        Ok(())
+    }
+
     fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()> {
         let (issue_number, remote_issue) = self.check_lock(doc_id)?;
 
@@ -354,6 +438,7 @@ pub fn write_cache_file(
         author: meta.author.clone(),
         date: meta.date.to_string(),
         tags: meta.tags.clone(),
+        provenance: meta.provenance.clone(),
         related: meta
             .related
             .iter()
@@ -1346,6 +1431,7 @@ mod tests {
             author: "O'Brien".to_string(),
             date: NaiveDate::from_ymd_opt(2026, 3, 28).unwrap(),
             tags: vec!["tag:with:colons".to_string(), "tag \"quoted\"".to_string()],
+            provenance: vec![],
             related: vec![Relation {
                 rel_type: RelationType::Implements,
                 target: "STORY: special & \"fun\"".to_string(),
@@ -1455,6 +1541,173 @@ mod tests {
         // updated_at should be cleared (we just pushed)
         let entry = gh_store.issue_map.get("RFC-001").unwrap();
         assert_eq!(entry.updated_at, "");
+    }
+
+    #[test]
+    fn gh_set_provenance_pushes_via_issue_edit() {
+        let root = tmp_root("gh_set_prov");
+        let issue_body = make_issue_body("agent-7", "2026-03-27", None, "body");
+        let view_issue = GhIssue {
+            number: 42,
+            url: String::new(),
+            title: "My RFC".to_string(),
+            body: issue_body,
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+
+        let mut gh_store = GithubIssuesStore {
+            client,
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        gh_store
+            .set_provenance(&td, "RFC-001", &["A".to_string()])
+            .unwrap();
+
+        let captured = gh_store.client.last_edit_body.borrow();
+        let body_str = captured
+            .as_deref()
+            .expect("issue_edit should have been called");
+        assert!(
+            body_str.contains("provenance:"),
+            "body should contain provenance block, got: {}",
+            body_str
+        );
+        assert!(body_str.contains("- A"));
+
+        // Cache file should reflect the same
+        let cache_path = root.join(".lazyspec/cache/rfc/RFC-001.md");
+        let cache_content = std::fs::read_to_string(&cache_path).unwrap();
+        let (yaml, _) = crate::engine::document::split_frontmatter(&cache_content).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let prov = parsed["provenance"].as_sequence().expect("provenance seq");
+        assert_eq!(prov.len(), 1);
+        assert_eq!(prov[0].as_str().unwrap(), "A");
+    }
+
+    #[test]
+    fn gh_set_provenance_clears_when_empty() {
+        let root = tmp_root("gh_set_prov_empty");
+        let issue_body_str = "<!-- lazyspec\n---\ndate: 2026-03-27\nprovenance:\n- old\n---\n-->\n\nbody";
+        let view_issue = GhIssue {
+            number: 42,
+            url: String::new(),
+            title: "My RFC".to_string(),
+            body: issue_body_str.to_string(),
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+
+        let mut gh_store = GithubIssuesStore {
+            client,
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        gh_store.set_provenance(&td, "RFC-001", &[]).unwrap();
+
+        let captured = gh_store.client.last_edit_body.borrow();
+        let body_str = captured
+            .as_deref()
+            .expect("issue_edit should have been called");
+        assert!(
+            !body_str.contains("provenance:"),
+            "empty provenance should not emit block, got: {}",
+            body_str
+        );
+    }
+
+    #[test]
+    fn cache_frontmatter_round_trips_provenance() {
+        use crate::engine::config::{
+            Config, Directories, DocumentConfig, FilesystemConfig, Naming, Templates, UiConfig,
+        };
+        use chrono::NaiveDate;
+
+        let root = tmp_root("cache_prov_roundtrip");
+        let td = test_type_def(StoreBackend::GithubIssues);
+
+        let meta = DocMeta {
+            path: PathBuf::new(),
+            title: "Title".to_string(),
+            doc_type: DocType::new("rfc"),
+            status: Status::Draft,
+            author: "alice".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 3, 28).unwrap(),
+            tags: vec![],
+            provenance: vec!["Workshop 2026-04-12".to_string(), "Jane Doe".to_string()],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            id: "RFC-099".to_string(),
+        };
+
+        write_cache_file(&root, &td, &meta, "body").unwrap();
+
+        let config = Config {
+            documents: DocumentConfig {
+                types: vec![td.clone()],
+                naming: Naming {
+                    pattern: "{type}-{n:03}-{title}.md".to_string(),
+                },
+                sqids: None,
+                reserved: None,
+                github: None,
+            },
+            filesystem: FilesystemConfig {
+                directories: Directories {
+                    rfcs: "docs/rfcs".to_string(),
+                    adrs: "docs/adrs".to_string(),
+                    stories: "docs/stories".to_string(),
+                    iterations: "docs/iterations".to_string(),
+                },
+                templates: Templates {
+                    dir: ".lazyspec/templates".to_string(),
+                },
+            },
+            ui: UiConfig::default(),
+            rules: vec![],
+            ref_count_ceiling: 0,
+            certification: Default::default(),
+            coordination: None,
+        };
+
+        let store = Store::load(&root, &config).unwrap();
+        let loaded = store.resolve_shorthand("RFC-099").unwrap();
+        assert_eq!(
+            loaded.provenance,
+            vec!["Workshop 2026-04-12".to_string(), "Jane Doe".to_string()]
+        );
     }
 
     #[test]
