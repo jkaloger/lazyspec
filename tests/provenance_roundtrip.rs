@@ -13,7 +13,8 @@ fn doc_with_provenance(doc_type: &str, provenance_block: &str) -> String {
 
 #[test]
 fn provenance_round_trips_via_rewriter() -> Result<()> {
-    let block = "provenance:\n  - \"Workshop 2026-04-12\"\n  - \"Jane Doe\"\n  - \"Privacy Act 1988\"\n";
+    let block =
+        "provenance:\n  - \"Workshop 2026-04-12\"\n  - \"Jane Doe\"\n  - \"Privacy Act 1988\"\n";
     let content = doc_with_provenance("rfc", block);
 
     let mut file = NamedTempFile::new()?;

@@ -1,13 +1,14 @@
 ---
 title: TUI provenance column and detail
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-04-29
 tags: []
 related:
 - implements: RFC-039
 ---
+
 
 
 ## Context

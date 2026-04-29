@@ -1,11 +1,12 @@
 ---
 title: "Document Provenance"
 type: rfc
-status: draft
+status: accepted
 author: "jkaloger"
 date: 2026-04-29
 tags: []
 ---
+
 
 ## Intent
 

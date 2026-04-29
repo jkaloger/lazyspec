@@ -357,14 +357,8 @@ fn list_json_global_shape() {
     let entry = &documents[0];
     assert_eq!(entry["id"], "RFC-001");
     assert!(entry["path"].is_string());
-    assert!(entry["path"]
-        .as_str()
-        .unwrap()
-        .contains("RFC-001-test.md"));
-    assert_eq!(
-        entry["provenance"],
-        serde_json::json!(["A".to_string()])
-    );
+    assert!(entry["path"].as_str().unwrap().contains("RFC-001-test.md"));
+    assert_eq!(entry["provenance"], serde_json::json!(["A".to_string()]));
 }
 
 #[test]

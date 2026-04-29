@@ -213,12 +213,7 @@ pub fn run_remove(
     Ok(())
 }
 
-pub fn run_list(
-    store: &Store,
-    id: Option<&str>,
-    json: bool,
-    writer: &mut dyn Write,
-) -> Result<()> {
+pub fn run_list(store: &Store, id: Option<&str>, json: bool, writer: &mut dyn Write) -> Result<()> {
     match id {
         Some(id) => {
             let doc = resolve_shorthand_or_path(store, id)?;

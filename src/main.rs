@@ -382,12 +382,7 @@ fn main() -> anyhow::Result<()> {
                     )?;
                 }
                 ProvenanceCommand::List { id, json } => {
-                    lazyspec::cli::provenance::run_list(
-                        &store,
-                        id.as_deref(),
-                        json,
-                        &mut stdout,
-                    )?;
+                    lazyspec::cli::provenance::run_list(&store, id.as_deref(), json, &mut stdout)?;
                 }
             }
         }

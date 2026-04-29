@@ -127,9 +127,9 @@ impl DocumentStore for FilesystemStore {
             &full_path,
             &crate::engine::fs::RealFileSystem,
             |val| {
-                let map = val.as_mapping_mut().ok_or_else(|| {
-                    anyhow::anyhow!("frontmatter root must be a mapping")
-                })?;
+                let map = val
+                    .as_mapping_mut()
+                    .ok_or_else(|| anyhow::anyhow!("frontmatter root must be a mapping"))?;
                 map.insert(
                     serde_yaml::Value::String("provenance".to_string()),
                     serde_yaml::Value::Sequence(entries.clone()),
@@ -1604,7 +1604,8 @@ mod tests {
     #[test]
     fn gh_set_provenance_clears_when_empty() {
         let root = tmp_root("gh_set_prov_empty");
-        let issue_body_str = "<!-- lazyspec\n---\ndate: 2026-03-27\nprovenance:\n- old\n---\n-->\n\nbody";
+        let issue_body_str =
+            "<!-- lazyspec\n---\ndate: 2026-03-27\nprovenance:\n- old\n---\n-->\n\nbody";
         let view_issue = GhIssue {
             number: 42,
             url: String::new(),
