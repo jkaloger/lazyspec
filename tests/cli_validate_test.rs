@@ -296,6 +296,8 @@ fn singleton_type(name: &str, dir: &str, prefix: &str) -> TypeDef {
         store: Default::default(),
         singleton: true,
         parent_type: None,
+        requires_priority: None,
+        terminal_statuses: None,
     }
 }
 
@@ -311,6 +313,8 @@ fn child_type(name: &str, dir: &str, prefix: &str, parent: &str) -> TypeDef {
         store: Default::default(),
         singleton: false,
         parent_type: Some(parent.to_string()),
+        requires_priority: None,
+        terminal_statuses: None,
     }
 }
 
@@ -463,6 +467,8 @@ fn parent_type_references_non_singleton_error() {
         store: Default::default(),
         singleton: false,
         parent_type: None,
+        requires_priority: None,
+        terminal_statuses: None,
     };
     let config = config_with_extra_types(vec![
         non_singleton_parent,

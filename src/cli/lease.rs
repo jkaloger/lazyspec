@@ -256,6 +256,8 @@ mod tests {
                         store: StoreBackend::default(),
                         singleton: false,
                         parent_type: None,
+                        requires_priority: None,
+                        terminal_statuses: None,
                     },
                     TypeDef {
                         name: "story".to_string(),
@@ -268,6 +270,8 @@ mod tests {
                         store: StoreBackend::default(),
                         singleton: false,
                         parent_type: None,
+                        requires_priority: None,
+                        terminal_statuses: None,
                     },
                 ],
                 naming: Naming {
@@ -276,6 +280,7 @@ mod tests {
                 sqids: None,
                 reserved: None,
                 github: None,
+                priorities: std::collections::BTreeMap::new(),
             },
             filesystem: FilesystemConfig {
                 directories: Directories {

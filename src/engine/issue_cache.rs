@@ -343,6 +343,7 @@ fn parse_issue(issue: &GhIssue, type_name: &str, known_types: &[String]) -> (Doc
         validate_ignore: false,
         virtual_doc: false,
         id: String::new(),
+        priority: None,
     };
 
     (meta, issue.body.clone())
@@ -413,6 +414,8 @@ mod tests {
             store: StoreBackend::GithubIssues,
             singleton: false,
             parent_type: None,
+            requires_priority: None,
+            terminal_statuses: None,
         }
     }
 

@@ -68,7 +68,7 @@ impl TestFixture {
             None => String::new(),
         };
         let content = format!(
-            "---\ntitle: \"{}\"\ntype: story\nstatus: {}\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n{}\n---\n",
+            "---\ntitle: \"{}\"\ntype: story\nstatus: {}\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\npriority: should\n{}\n---\n",
             title, status, related
         );
         self.write_doc(&format!("docs/stories/{}", filename), &content)
@@ -86,7 +86,7 @@ impl TestFixture {
             None => String::new(),
         };
         let content = format!(
-            "---\ntitle: \"{}\"\ntype: iteration\nstatus: {}\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n{}\n---\n",
+            "---\ntitle: \"{}\"\ntype: iteration\nstatus: {}\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\npriority: should\n{}\n---\n",
             title, status, related
         );
         self.write_doc(&format!("docs/iterations/{}", filename), &content)

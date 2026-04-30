@@ -239,6 +239,7 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
             validate_ignore: false,
             virtual_doc: false,
             id: String::new(),
+            priority: None,
         };
 
         let issue_body = issue_body::serialize(&placeholder_meta, body);
@@ -521,6 +522,8 @@ mod tests {
             store,
             singleton: false,
             parent_type: None,
+            requires_priority: None,
+            terminal_statuses: None,
         }
     }
 
@@ -728,6 +731,8 @@ mod tests {
             store: StoreBackend::GithubIssues,
             singleton: false,
             parent_type: None,
+            requires_priority: None,
+            terminal_statuses: None,
         };
 
         let result = gh_store.create(&td, "test prefix", "author", "").unwrap();
@@ -1439,6 +1444,7 @@ mod tests {
             validate_ignore: false,
             virtual_doc: false,
             id: "RFC-099".to_string(),
+            priority: None,
         };
 
         write_cache_file(&root, &td, &meta, "body").unwrap();
@@ -1671,6 +1677,7 @@ mod tests {
             validate_ignore: false,
             virtual_doc: false,
             id: "RFC-099".to_string(),
+            priority: None,
         };
 
         write_cache_file(&root, &td, &meta, "body").unwrap();
@@ -1684,6 +1691,7 @@ mod tests {
                 sqids: None,
                 reserved: None,
                 github: None,
+                priorities: std::collections::BTreeMap::new(),
             },
             filesystem: FilesystemConfig {
                 directories: Directories {

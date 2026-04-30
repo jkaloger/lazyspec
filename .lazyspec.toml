@@ -75,3 +75,23 @@ pattern = "{type}-{n:03}-{title}.md"
 left = ["mode", "git_branch"]
 right = ["version", "help_hint"]
 
+# Priority vocabulary — defaults to MoSCoW when omitted.
+# Uncomment to override; defining any [priorities.*] block replaces the
+# defaults entirely (no merge with MoSCoW).
+# [priorities.must]
+# weight = 4
+# [priorities.should]
+# weight = 3
+# [priorities.could]
+# weight = 2
+# [priorities.wont]
+# weight = 1
+
+# Per-type overrides for `requires_priority` and `terminal_statuses`.
+# Both fall back to spec defaults (RFC-041) when omitted: story + iteration
+# require a priority; terminal sets follow the document's lifecycle table.
+# [[types]]
+# name = "rfc"
+# requires_priority = false
+# terminal_statuses = ["complete", "superseded", "rejected"]
+

@@ -1845,6 +1845,7 @@ mod tests {
             validate_ignore: false,
             virtual_doc: false,
             id: "RFC-001".to_string(),
+            priority: None,
         };
         let meta_b = DocMeta {
             path: PathBuf::from("docs/rfcs/RFC-001-dup.md"),
@@ -1859,6 +1860,7 @@ mod tests {
             validate_ignore: false,
             virtual_doc: false,
             id: "RFC-001".to_string(),
+            priority: None,
         };
 
         store.docs.insert(meta_a.path.clone(), meta_a);
@@ -2007,6 +2009,7 @@ mod tests {
                     related: Vec::new(),
                     validate_ignore: false,
                     virtual_doc: false,
+                    priority: None,
                 },
             );
             app.doc_tree[0].path = path.clone();

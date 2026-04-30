@@ -263,6 +263,8 @@ mod tests {
             store: StoreBackend::GithubIssues,
             singleton: false,
             parent_type: None,
+            requires_priority: None,
+            terminal_statuses: None,
         };
         let story_type = TypeDef {
             name: "story".to_string(),
@@ -275,6 +277,8 @@ mod tests {
             store: StoreBackend::GithubIssues,
             singleton: false,
             parent_type: None,
+            requires_priority: None,
+            terminal_statuses: None,
         };
 
         let mut config = Config::default();
@@ -405,6 +409,8 @@ mod tests {
             store: StoreBackend::GitRef,
             singleton: false,
             parent_type: None,
+            requires_priority: None,
+            terminal_statuses: None,
         };
         let story_type = TypeDef {
             name: "story".to_string(),
@@ -417,6 +423,8 @@ mod tests {
             store: StoreBackend::GitRef,
             singleton: false,
             parent_type: None,
+            requires_priority: None,
+            terminal_statuses: None,
         };
 
         let mut config = Config::default();

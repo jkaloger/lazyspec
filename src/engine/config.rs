@@ -1,6 +1,7 @@
+use crate::engine::document::Status;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -141,6 +142,15 @@ pub struct TypeDef {
     pub singleton: bool,
     #[serde(default)]
     pub parent_type: Option<String>,
+    #[serde(default)]
+    pub requires_priority: Option<bool>,
+    #[serde(default)]
+    pub terminal_statuses: Option<Vec<Status>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PriorityDef {
+    pub weight: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +164,17 @@ pub struct DocumentConfig {
     pub reserved: Option<ReservedConfig>,
     #[serde(skip)]
     pub github: Option<GithubConfig>,
+    #[serde(skip)]
+    pub priorities: BTreeMap<String, u32>,
+}
+
+fn default_priorities() -> BTreeMap<String, u32> {
+    let mut m = BTreeMap::new();
+    m.insert("must".to_string(), 4);
+    m.insert("should".to_string(), 3);
+    m.insert("could".to_string(), 2);
+    m.insert("wont".to_string(), 1);
+    m
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -301,6 +322,8 @@ struct RawConfig {
     github: Option<GithubConfig>,
     #[serde(default)]
     coordination: Option<CoordinationConfig>,
+    #[serde(default)]
+    priorities: Option<HashMap<String, PriorityDef>>,
 }
 
 fn build_type_def(name: &str, dir: &str, prefix: &str, icon: &str) -> TypeDef {
@@ -319,6 +342,8 @@ fn build_type_def(name: &str, dir: &str, prefix: &str, icon: &str) -> TypeDef {
         store: StoreBackend::default(),
         singleton: false,
         parent_type: None,
+        requires_priority: None,
+        terminal_statuses: None,
     }
 }
 
@@ -329,6 +354,7 @@ fn default_types() -> Vec<TypeDef> {
         build_type_def("iteration", "docs/iterations", "ITERATION", "◆"),
         build_type_def("adr", "docs/adrs", "ADR", "■"),
         build_type_def("spec", "docs/specs", "SPEC", "📋"),
+        build_type_def("audit", "docs/audits", "AUDIT", "✓"),
         TypeDef {
             name: "convention".to_string(),
             plural: "convention".to_string(),
@@ -340,6 +366,8 @@ fn default_types() -> Vec<TypeDef> {
             store: StoreBackend::default(),
             singleton: true,
             parent_type: None,
+            requires_priority: None,
+            terminal_statuses: None,
         },
         TypeDef {
             name: "dictum".to_string(),
@@ -352,6 +380,8 @@ fn default_types() -> Vec<TypeDef> {
             store: StoreBackend::default(),
             singleton: false,
             parent_type: Some("convention".to_string()),
+            requires_priority: None,
+            terminal_statuses: None,
         },
     ]
 }
@@ -419,6 +449,7 @@ impl Default for Config {
                 sqids: None,
                 reserved: None,
                 github: None,
+                priorities: default_priorities(),
             },
             filesystem: FilesystemConfig {
                 directories,
@@ -527,6 +558,11 @@ impl Config {
 
         let ref_count_ceiling = raw.ref_count_ceiling.unwrap_or(15);
 
+        let priorities = raw
+            .priorities
+            .map(|m| m.into_iter().map(|(k, v)| (k, v.weight)).collect())
+            .unwrap_or_else(default_priorities);
+
         Ok(Config {
             documents: DocumentConfig {
                 types,
@@ -536,6 +572,7 @@ impl Config {
                 sqids,
                 reserved,
                 github: raw.github,
+                priorities,
             },
             filesystem: FilesystemConfig {
                 directories,
@@ -570,11 +607,39 @@ impl Config {
     pub fn type_by_name(&self, name: &str) -> Option<&TypeDef> {
         self.documents.types.iter().find(|t| t.name == name)
     }
+
+    pub fn priority_weights(&self) -> &BTreeMap<String, u32> {
+        &self.documents.priorities
+    }
+}
+
+fn default_requires_priority(type_name: &str) -> bool {
+    matches!(type_name, "story" | "iteration")
+}
+
+fn default_terminal_statuses(type_name: &str) -> Vec<Status> {
+    match type_name {
+        "rfc" | "story" => vec![Status::Complete, Status::Superseded, Status::Rejected],
+        "iteration" | "audit" => vec![Status::Complete],
+        "adr" | "convention" | "dictum" => vec![Status::Accepted, Status::Superseded],
+        _ => vec![],
+    }
 }
 
 impl TypeDef {
     pub fn make_id(&self, suffix: impl std::fmt::Display) -> String {
         format!("{}-{}", self.prefix, suffix)
+    }
+
+    pub fn resolved_requires_priority(&self) -> bool {
+        self.requires_priority
+            .unwrap_or_else(|| default_requires_priority(&self.name))
+    }
+
+    pub fn resolved_terminal_statuses(&self) -> Vec<Status> {
+        self.terminal_statuses
+            .clone()
+            .unwrap_or_else(|| default_terminal_statuses(&self.name))
     }
 }
 
@@ -592,6 +657,8 @@ impl TypeDef {
             store,
             singleton: false,
             parent_type: None,
+            requires_priority: None,
+            terminal_statuses: None,
         }
     }
 }
@@ -970,6 +1037,259 @@ store = "git-ref"
 "#;
         let config = Config::parse(toml_str).unwrap();
         assert_eq!(config.documents.types[0].store, StoreBackend::GitRef);
+    }
+
+    #[test]
+    fn test_priority_weights_custom_replaces_default() {
+        let toml_str = r#"
+[priorities.high]
+weight = 10
+
+[priorities.low]
+weight = 1
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let weights = config.priority_weights();
+        let keys: std::collections::BTreeSet<&str> =
+            weights.keys().map(|s| s.as_str()).collect();
+        let expected_keys: std::collections::BTreeSet<&str> =
+            ["high", "low"].into_iter().collect();
+        assert_eq!(keys, expected_keys);
+        assert!(!weights.contains_key("must"));
+        assert!(!weights.contains_key("should"));
+        assert!(!weights.contains_key("could"));
+        assert!(!weights.contains_key("wont"));
+    }
+
+    #[test]
+    fn test_priority_weights_returns_parsed_map() {
+        let toml_str = r#"
+[priorities.critical]
+weight = 100
+
+[priorities.normal]
+weight = 50
+
+[priorities.minor]
+weight = 10
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let weights = config.priority_weights();
+        let expected: BTreeMap<String, u32> = [
+            ("critical".to_string(), 100),
+            ("normal".to_string(), 50),
+            ("minor".to_string(), 10),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(weights, &expected);
+    }
+
+    #[test]
+    fn test_priority_weights_default_when_absent() {
+        let config = Config::parse("").unwrap();
+        let weights = config.priority_weights();
+        let expected: BTreeMap<String, u32> = [
+            ("must".to_string(), 4),
+            ("should".to_string(), 3),
+            ("could".to_string(), 2),
+            ("wont".to_string(), 1),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(weights, &expected);
+    }
+
+    fn sorted_statuses(v: Vec<crate::engine::document::Status>) -> Vec<String> {
+        let mut s: Vec<String> = v.into_iter().map(|x| x.to_string()).collect();
+        s.sort();
+        s
+    }
+
+    fn sorted_strs(v: &[&str]) -> Vec<String> {
+        let mut s: Vec<String> = v.iter().map(|x| x.to_string()).collect();
+        s.sort();
+        s
+    }
+
+    #[test]
+    fn ac7_default_terminal_statuses_rfc() {
+        let cfg = Config::default();
+        let td = cfg.type_by_name("rfc").unwrap();
+        assert_eq!(
+            sorted_statuses(td.resolved_terminal_statuses()),
+            sorted_strs(&["complete", "superseded", "rejected"])
+        );
+    }
+
+    #[test]
+    fn ac7_default_terminal_statuses_story() {
+        let cfg = Config::default();
+        let td = cfg.type_by_name("story").unwrap();
+        assert_eq!(
+            sorted_statuses(td.resolved_terminal_statuses()),
+            sorted_strs(&["complete", "superseded", "rejected"])
+        );
+    }
+
+    #[test]
+    fn ac7_default_terminal_statuses_iteration() {
+        let cfg = Config::default();
+        let td = cfg.type_by_name("iteration").unwrap();
+        assert_eq!(
+            sorted_statuses(td.resolved_terminal_statuses()),
+            sorted_strs(&["complete"])
+        );
+    }
+
+    #[test]
+    fn ac7_default_terminal_statuses_audit() {
+        let cfg = Config::default();
+        let td = cfg.type_by_name("audit").unwrap();
+        assert_eq!(
+            sorted_statuses(td.resolved_terminal_statuses()),
+            sorted_strs(&["complete"])
+        );
+    }
+
+    #[test]
+    fn ac7_default_terminal_statuses_adr() {
+        let cfg = Config::default();
+        let td = cfg.type_by_name("adr").unwrap();
+        assert_eq!(
+            sorted_statuses(td.resolved_terminal_statuses()),
+            sorted_strs(&["accepted", "superseded"])
+        );
+    }
+
+    #[test]
+    fn ac7_default_terminal_statuses_convention() {
+        let cfg = Config::default();
+        let td = cfg.type_by_name("convention").unwrap();
+        assert_eq!(
+            sorted_statuses(td.resolved_terminal_statuses()),
+            sorted_strs(&["accepted", "superseded"])
+        );
+    }
+
+    #[test]
+    fn ac7_default_terminal_statuses_dictum() {
+        let cfg = Config::default();
+        let td = cfg.type_by_name("dictum").unwrap();
+        assert_eq!(
+            sorted_statuses(td.resolved_terminal_statuses()),
+            sorted_strs(&["accepted", "superseded"])
+        );
+    }
+
+    #[test]
+    fn ac7_default_terminal_statuses_unknown_type_empty() {
+        let td = build_type_def("note", "docs/notes", "NOTE", "📝");
+        assert!(td.resolved_terminal_statuses().is_empty());
+    }
+
+    #[test]
+    fn ac8_terminal_statuses_override_replaces_default_no_merge() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+terminal_statuses = ["accepted"]
+"#;
+        let cfg = Config::parse(toml_str).unwrap();
+        let td = cfg.type_by_name("rfc").unwrap();
+        assert_eq!(
+            sorted_statuses(td.resolved_terminal_statuses()),
+            sorted_strs(&["accepted"])
+        );
+    }
+
+    #[test]
+    fn ac8b_partial_override_other_types_keep_defaults() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+terminal_statuses = ["accepted"]
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+"#;
+        let cfg = Config::parse(toml_str).unwrap();
+        let story = cfg.type_by_name("story").unwrap();
+        assert_eq!(
+            sorted_statuses(story.resolved_terminal_statuses()),
+            sorted_strs(&["complete", "superseded", "rejected"])
+        );
+    }
+
+    #[test]
+    fn requires_priority_defaults_story_true() {
+        let cfg = Config::default();
+        assert!(cfg.type_by_name("story").unwrap().resolved_requires_priority());
+    }
+
+    #[test]
+    fn requires_priority_defaults_iteration_true() {
+        let cfg = Config::default();
+        assert!(cfg.type_by_name("iteration").unwrap().resolved_requires_priority());
+    }
+
+    #[test]
+    fn requires_priority_defaults_rfc_false() {
+        let cfg = Config::default();
+        assert!(!cfg.type_by_name("rfc").unwrap().resolved_requires_priority());
+    }
+
+    #[test]
+    fn requires_priority_defaults_adr_false() {
+        let cfg = Config::default();
+        assert!(!cfg.type_by_name("adr").unwrap().resolved_requires_priority());
+    }
+
+    #[test]
+    fn requires_priority_defaults_audit_false() {
+        let cfg = Config::default();
+        assert!(!cfg.type_by_name("audit").unwrap().resolved_requires_priority());
+    }
+
+    #[test]
+    fn requires_priority_defaults_convention_false() {
+        let cfg = Config::default();
+        assert!(!cfg.type_by_name("convention").unwrap().resolved_requires_priority());
+    }
+
+    #[test]
+    fn requires_priority_defaults_dictum_false() {
+        let cfg = Config::default();
+        assert!(!cfg.type_by_name("dictum").unwrap().resolved_requires_priority());
+    }
+
+    #[test]
+    fn requires_priority_defaults_spec_false() {
+        let cfg = Config::default();
+        assert!(!cfg.type_by_name("spec").unwrap().resolved_requires_priority());
+    }
+
+    #[test]
+    fn requires_priority_override_rfc_true() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+requires_priority = true
+"#;
+        let cfg = Config::parse(toml_str).unwrap();
+        assert!(cfg.type_by_name("rfc").unwrap().resolved_requires_priority());
     }
 
     #[test]

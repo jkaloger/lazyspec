@@ -128,6 +128,7 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
             validate_ignore: false,
             virtual_doc: false,
             id: id.clone(),
+            priority: None,
         };
 
         write_cache_file(&self.root, type_def, &meta, body)?;
@@ -330,6 +331,8 @@ mod tests {
             store: StoreBackend::GitRef,
             singleton: false,
             parent_type: None,
+            requires_priority: None,
+            terminal_statuses: None,
         }
     }
 
@@ -343,6 +346,7 @@ mod tests {
                 sqids: None,
                 reserved: None,
                 github: None,
+                priorities: std::collections::BTreeMap::new(),
             },
             filesystem: FilesystemConfig {
                 directories: Directories {

@@ -1,4 +1,5 @@
-use crate::engine::document::{DocMeta, RelationType, Status};
+use crate::engine::config::Config;
+use crate::engine::document::{DocMeta, RelationType};
 use crate::engine::store::Store;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
@@ -306,6 +307,7 @@ pub fn next_ready(
     docs: &[DocMeta],
     opts: &NextOpts,
     leases: &LeaseView,
+    config: &Config,
 ) -> NextResult {
     let docs_by_id: HashMap<&str, &DocMeta> =
         docs.iter().map(|d| (d.id.as_str(), d)).collect();
@@ -355,7 +357,10 @@ pub fn next_ready(
 
     let is_node_terminal = |idx: NodeIndex| -> bool {
         let id = graph.id_of(idx);
-        docs_by_id.get(id).map(|d| is_terminal(d)).unwrap_or(false)
+        docs_by_id
+            .get(id)
+            .map(|d| is_terminal(d, config))
+            .unwrap_or(false)
     };
 
     let blocks_cleared = |idx: NodeIndex| -> bool {
@@ -502,7 +507,7 @@ pub fn next_ready(
     ready.sort_by(|a, b| a.id.cmp(&b.id));
     ready.dedup_by(|a, b| a.id == b.id);
 
-    let bottlenecks = compute_bottlenecks(graph, &docs_by_id, &excluded);
+    let bottlenecks = compute_bottlenecks(graph, &docs_by_id, &excluded, config);
 
     NextResult {
         ready,
@@ -515,10 +520,14 @@ fn compute_bottlenecks(
     graph: &Graph,
     docs_by_id: &HashMap<&str, &DocMeta>,
     excluded: &HashSet<NodeIndex>,
+    config: &Config,
 ) -> Vec<Bottleneck> {
     let is_term = |idx: NodeIndex| -> bool {
         let id = graph.inner.node_weight(idx).unwrap().as_str();
-        docs_by_id.get(id).map(|d| is_terminal(d)).unwrap_or(false)
+        docs_by_id
+            .get(id)
+            .map(|d| is_terminal(d, config))
+            .unwrap_or(false)
     };
 
     let mut counts: Vec<Bottleneck> = Vec::new();
@@ -564,24 +573,17 @@ fn compute_bottlenecks(
     counts
 }
 
-pub fn is_terminal(doc: &DocMeta) -> bool {
-    match doc.doc_type.as_str() {
-        "rfc" | "story" => matches!(
-            doc.status,
-            Status::Complete | Status::Superseded | Status::Rejected
-        ),
-        "iteration" | "audit" => matches!(doc.status, Status::Complete),
-        "adr" | "convention" | "dictum" => {
-            matches!(doc.status, Status::Accepted | Status::Superseded)
-        }
-        _ => false,
-    }
+pub fn is_terminal(doc: &DocMeta, config: &Config) -> bool {
+    let Some(td) = config.type_by_name(doc.doc_type.as_str()) else {
+        return false;
+    };
+    td.resolved_terminal_statuses().contains(&doc.status)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::document::{DocType, Relation};
+    use crate::engine::document::{DocType, Relation, Status};
     use chrono::NaiveDate;
     use std::path::PathBuf;
 
@@ -618,6 +620,7 @@ mod tests {
             validate_ignore: false,
             path: PathBuf::from(format!("docs/{}.md", id)),
             virtual_doc: false,
+            priority: None,
         }
     }
 
@@ -772,14 +775,13 @@ mod tests {
             ("adr", Status::Complete, false),
             ("convention", Status::Superseded, true),
             ("dictum", Status::Accepted, true),
-            ("audit", Status::Complete, true),
-            ("audit", Status::Accepted, false),
         ];
 
+        let cfg = crate::engine::config::Config::default();
         for (ty, status, expected) in cases {
             let d = doc("X", ty, status.clone(), &[], &[]);
             assert_eq!(
-                is_terminal(&d),
+                is_terminal(&d, &cfg),
                 expected,
                 "expected is_terminal({}, {:?}) == {}",
                 ty,
@@ -790,12 +792,57 @@ mod tests {
     }
 
     #[test]
+    fn is_terminal_audit_uses_spec_defaults_when_type_in_config() {
+        let cfg = crate::engine::config::Config::default();
+        let complete = doc("A-1", "audit", Status::Complete, &[], &[]);
+        let accepted = doc("A-2", "audit", Status::Accepted, &[], &[]);
+
+        assert!(is_terminal(&complete, &cfg));
+        assert!(!is_terminal(&accepted, &cfg));
+    }
+
+    #[test]
+    fn is_terminal_unknown_type_returns_false() {
+        let cfg = crate::engine::config::Config::default();
+        let d = doc("X", "ghost", Status::Complete, &[], &[]);
+        assert!(!is_terminal(&d, &cfg));
+    }
+
+    #[test]
     fn is_terminal_rejects_accepted_for_work_item_types() {
         let story = doc("S", "story", Status::Accepted, &[], &[]);
         let iter = doc("I", "iteration", Status::Accepted, &[], &[]);
 
-        assert!(!is_terminal(&story));
-        assert!(!is_terminal(&iter));
+        let cfg = crate::engine::config::Config::default();
+        assert!(!is_terminal(&story, &cfg));
+        assert!(!is_terminal(&iter, &cfg));
+    }
+
+    #[test]
+    fn ac9b_is_terminal_honours_config_override() {
+        // Override: story is terminal at status=accepted.
+        let toml_str = r#"
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+terminal_statuses = ["accepted"]
+"#;
+        let cfg = crate::engine::config::Config::parse(toml_str).unwrap();
+        let story_accepted = doc("S-1", "story", Status::Accepted, &[], &[]);
+        assert!(
+            is_terminal(&story_accepted, &cfg),
+            "config override should make story=accepted terminal"
+        );
+
+        // Same doc under default config: still non-terminal (accepted is not in the
+        // RFC-041 spec defaults for story).
+        let default_cfg = crate::engine::config::Config::default();
+        assert!(
+            !is_terminal(&story_accepted, &default_cfg),
+            "default config: story=accepted is not terminal"
+        );
     }
 
     fn sorted_ids(result: &NextResult) -> Vec<String> {
@@ -811,7 +858,7 @@ mod tests {
             doc("I-2", "iteration", Status::Draft, &[], &[]),
         ];
         let g = Graph::from_documents(&docs);
-        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default());
+        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default(), &Config::default());
 
         assert_eq!(sorted_ids(&result), vec!["I-1", "I-2"]);
         for cand in &result.ready {
@@ -825,7 +872,7 @@ mod tests {
         let docs = vec![doc("S-1", "story", Status::Draft, &[], &[])];
         let g = Graph::from_documents(&docs);
 
-        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default());
+        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default(), &Config::default());
 
         assert_eq!(result.ready.len(), 1);
         assert_eq!(result.ready[0].id, "S-1");
@@ -841,7 +888,7 @@ mod tests {
         ];
         let g = Graph::from_documents(&docs);
 
-        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default());
+        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default(), &Config::default());
 
         assert_eq!(result.ready.len(), 1);
         assert_eq!(result.ready[0].id, "S-1");
@@ -857,7 +904,7 @@ mod tests {
         ];
         let g = Graph::from_documents(&docs);
 
-        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default());
+        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default(), &Config::default());
 
         assert_eq!(sorted_ids(&result), vec!["I-2"]);
         assert_eq!(result.ready[0].kind, ReadyKind::Claimable);
@@ -872,7 +919,7 @@ mod tests {
             .held
             .insert("I-1".to_string(), "agent-x".to_string());
 
-        let result = next_ready(&g, &docs, &NextOpts::default(), &leases);
+        let result = next_ready(&g, &docs, &NextOpts::default(), &leases, &Config::default());
 
         assert!(result.ready.is_empty());
     }
@@ -890,7 +937,7 @@ mod tests {
             scope: None,
         };
 
-        let result = next_ready(&g, &docs, &opts, &leases);
+        let result = next_ready(&g, &docs, &opts, &leases, &Config::default());
 
         assert_eq!(result.ready.len(), 1);
         assert_eq!(result.ready[0].id, "I-1");
@@ -909,7 +956,7 @@ mod tests {
         ];
         let g = Graph::from_documents(&docs);
 
-        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default());
+        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default(), &Config::default());
 
         assert_eq!(result.bottlenecks.len(), 3);
         let ids: Vec<&str> = result.bottlenecks.iter().map(|b| b.id.as_str()).collect();
@@ -926,7 +973,7 @@ mod tests {
         ];
         let g = Graph::from_documents(&docs);
 
-        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default());
+        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default(), &Config::default());
 
         assert_eq!(result.bottlenecks.len(), 1);
         assert_eq!(result.bottlenecks[0].id, "A");
@@ -940,7 +987,7 @@ mod tests {
         ];
         let g = Graph::from_documents(&docs);
 
-        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default());
+        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default(), &Config::default());
 
         assert!(result.bottlenecks.is_empty());
     }
@@ -957,7 +1004,7 @@ mod tests {
         let mut leases = LeaseView::default();
         leases.held.insert("C2".to_string(), "alice".to_string());
 
-        let result = next_ready(&g, &docs, &NextOpts::default(), &leases);
+        let result = next_ready(&g, &docs, &NextOpts::default(), &leases, &Config::default());
 
         // C2: leased, default opts → excluded.
         // P: has non-terminal descendant C2 → hidden via AC8.

@@ -1,7 +1,7 @@
 ---
 title: Priority field and TOML config
 type: story
-status: draft
+status: complete
 author: jkaloger
 date: 2026-04-30
 tags: []
@@ -11,6 +11,7 @@ related:
 - blocks: STORY-123
 - blocks: STORY-114
 ---
+
 
 
 

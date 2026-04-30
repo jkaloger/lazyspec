@@ -76,6 +76,16 @@ pub enum ValidationIssue {
         type_name: String,
         parent_type: String,
     },
+    UnknownPriority {
+        path: PathBuf,
+        doc_id: String,
+        key: String,
+    },
+    MissingPriority {
+        path: PathBuf,
+        doc_id: String,
+        type_name: String,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -240,6 +250,18 @@ impl std::fmt::Display for ValidationIssue {
                     f,
                     "parent type not singleton: type \"{}\" references parent type \"{}\" which is not a singleton",
                     type_name, parent_type
+                )
+            }
+            ValidationIssue::UnknownPriority { doc_id, key, .. } => {
+                write!(f, "unknown priority key '{}' on document {}", key, doc_id)
+            }
+            ValidationIssue::MissingPriority {
+                doc_id, type_name, ..
+            } => {
+                write!(
+                    f,
+                    "priority field required for type '{}' on document {}",
+                    type_name, doc_id
                 )
             }
         }
@@ -864,6 +886,57 @@ impl Checker for TypeConstraintChecker {
     }
 }
 
+pub struct PriorityRule;
+
+impl Checker for PriorityRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        let mut issues = Vec::new();
+        let weights = config.priority_weights();
+
+        for (path, meta) in &store.docs {
+            if meta.validate_ignore {
+                continue;
+            }
+
+            match &meta.priority {
+                Some(key) => {
+                    if !weights.contains_key(key) {
+                        issues.push((
+                            Severity::Error,
+                            ValidationIssue::UnknownPriority {
+                                path: path.clone(),
+                                doc_id: meta.id.clone(),
+                                key: key.clone(),
+                            },
+                        ));
+                    }
+                }
+                None => {
+                    let Some(td) = config.type_by_name(meta.doc_type.as_str()) else {
+                        continue;
+                    };
+                    if td.resolved_requires_priority() {
+                        issues.push((
+                            Severity::Error,
+                            ValidationIssue::MissingPriority {
+                                path: path.clone(),
+                                doc_id: meta.id.clone(),
+                                type_name: meta.doc_type.as_str().to_string(),
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+
+        issues
+    }
+}
+
 fn default_checkers() -> Vec<Box<dyn Checker>> {
     vec![
         Box::new(BrokenLinkRule),
@@ -874,6 +947,7 @@ fn default_checkers() -> Vec<Box<dyn Checker>> {
         Box::new(RefScopeRule),
         Box::new(OrphanRefRule),
         Box::new(TypeConstraintChecker),
+        Box::new(PriorityRule),
     ]
 }
 
@@ -893,4 +967,122 @@ pub fn validate_full(store: &super::store::Store, config: &Config) -> Validation
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::store::Store;
+    use chrono::NaiveDate;
+    use std::collections::HashMap;
+
+    fn doc(path: &str, doc_type: &str, priority: Option<&str>) -> DocMeta {
+        DocMeta {
+            path: PathBuf::from(path),
+            title: "t".into(),
+            doc_type: DocType::new(doc_type),
+            status: Status::Draft,
+            author: "a".into(),
+            date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            id: format!("{}-1", doc_type),
+            priority: priority.map(|s| s.to_string()),
+        }
+    }
+
+    fn store_with(docs: Vec<DocMeta>) -> Store {
+        let mut map = HashMap::new();
+        for d in docs {
+            map.insert(d.path.clone(), d);
+        }
+        Store {
+            root: PathBuf::from("/tmp"),
+            docs: map,
+            forward_links: HashMap::new(),
+            reverse_links: HashMap::new(),
+            children: HashMap::new(),
+            parent_of: HashMap::new(),
+            parse_errors: vec![],
+        }
+    }
+
+    fn priority_issues(result: &ValidationResult) -> Vec<String> {
+        result
+            .errors
+            .iter()
+            .chain(result.warnings.iter())
+            .map(|i| i.to_string())
+            .filter(|s| s.contains("priority"))
+            .collect()
+    }
+
+    #[test]
+    fn ac3_unknown_priority_key_is_error() {
+        let store = store_with(vec![doc("s.md", "story", Some("bogus"))]);
+        let config = Config::default();
+        let result = validate_full(&store, &config);
+        let priority_msgs = priority_issues(&result);
+        assert!(
+            priority_msgs.iter().any(|m| m.contains("bogus")),
+            "expected priority error mentioning 'bogus', got: {:?}",
+            priority_msgs
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|i| matches!(i, ValidationIssue::UnknownPriority { key, .. } if key == "bogus")),
+            "expected UnknownPriority error in errors list"
+        );
+    }
+
+    #[test]
+    fn ac4_missing_priority_for_required_type_is_error() {
+        let store = store_with(vec![doc("s.md", "story", None)]);
+        let config = Config::default();
+        let result = validate_full(&store, &config);
+        let priority_msgs = priority_issues(&result);
+        assert!(
+            priority_msgs.iter().any(|m| m.contains("story")),
+            "expected priority error mentioning 'story', got: {:?}",
+            priority_msgs
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|i| matches!(i, ValidationIssue::MissingPriority { type_name, .. } if type_name == "story")),
+            "expected MissingPriority error in errors list"
+        );
+    }
+
+    #[test]
+    fn ac5_missing_priority_for_non_required_type_is_accepted() {
+        let store = store_with(vec![doc("r.md", "rfc", None)]);
+        let config = Config::default();
+        let result = validate_full(&store, &config);
+        let priority_msgs = priority_issues(&result);
+        assert!(
+            priority_msgs.is_empty(),
+            "expected no priority issues for rfc with no priority, got: {:?}",
+            priority_msgs
+        );
+    }
+
+    #[test]
+    fn ac5b_valid_priority_on_required_type_is_accepted() {
+        let store = store_with(vec![doc("s.md", "story", Some("must"))]);
+        let config = Config::default();
+        let result = validate_full(&store, &config);
+        let priority_msgs = priority_issues(&result);
+        assert!(
+            priority_msgs.is_empty(),
+            "expected no priority issues for story w/ valid priority 'must', got: {:?}",
+            priority_msgs
+        );
+    }
 }

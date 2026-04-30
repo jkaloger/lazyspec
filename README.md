@@ -281,6 +281,29 @@ require = "any-relation"
 severity = "error"
 ```
 
+### Priorities
+
+Documents may carry a `priority` frontmatter key. The vocabulary defaults to MoSCoW (`must=4`, `should=3`, `could=2`, `wont=1`) and feeds into work-graph weighting. Define `[priorities.<key>]` blocks to replace the defaults with your own scheme; defining any block disables the MoSCoW fallback.
+
+```toml
+[priorities.must]
+weight = 4
+[priorities.should]
+weight = 3
+```
+
+Each `[[types]]` accepts two related fields:
+
+- `requires_priority` -- when `true`, validation rejects documents of that type with no `priority`. Defaults to `true` for `story` and `iteration`, `false` otherwise.
+- `terminal_statuses` -- the status values that mark a document as done for sequencing purposes. Falls back to per-type defaults (RFC-041): `complete`/`superseded`/`rejected` for RFCs and stories, `complete` for iterations and audits, `accepted`/`superseded` for ADRs and conventions. An override replaces the defaults rather than merging.
+
+```toml
+[[types]]
+name = "rfc"
+requires_priority = false
+terminal_statuses = ["complete", "superseded", "rejected"]
+```
+
 ### Numbering
 
 Document numbers are assigned automatically during `create`. Three strategies are available per type:

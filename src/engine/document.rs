@@ -85,7 +85,7 @@ impl<'de> Deserialize<'de> for DocType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     Draft,
@@ -198,6 +198,7 @@ pub struct DocMeta {
     pub validate_ignore: bool,
     pub virtual_doc: bool,
     pub id: String,
+    pub priority: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -216,6 +217,8 @@ struct RawFrontmatter {
     related: Vec<serde_yaml::Value>,
     #[serde(default, rename = "validate-ignore")]
     validate_ignore: bool,
+    #[serde(default)]
+    priority: Option<String>,
 }
 
 pub fn rewrite_frontmatter<F>(path: &Path, fs: &dyn FileSystem, mutate: F) -> Result<()>
@@ -306,6 +309,7 @@ impl DocMeta {
             validate_ignore: raw.validate_ignore,
             virtual_doc: false,
             id: String::new(),
+            priority: raw.priority,
         })
     }
 
@@ -342,6 +346,7 @@ mod tests {
             validate_ignore: false,
             virtual_doc: false,
             id: String::new(),
+            priority: None,
         }
     }
 
@@ -437,6 +442,41 @@ Body.
 "#;
         let meta = DocMeta::parse(content).unwrap();
         assert!(meta.provenance.is_empty());
+    }
+
+    #[test]
+    fn parse_frontmatter_extracts_priority() {
+        let content = r#"---
+title: "Doc"
+type: rfc
+status: draft
+author: a
+date: 2026-01-01
+tags: []
+priority: must
+---
+
+Body.
+"#;
+        let meta = DocMeta::parse(content).unwrap();
+        assert_eq!(meta.priority, Some("must".to_string()));
+    }
+
+    #[test]
+    fn parse_frontmatter_priority_absent_is_none() {
+        let content = r#"---
+title: "Doc"
+type: rfc
+status: draft
+author: a
+date: 2026-01-01
+tags: []
+---
+
+Body.
+"#;
+        let meta = DocMeta::parse(content).unwrap();
+        assert_eq!(meta.priority, None);
     }
 
     #[test]

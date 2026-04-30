@@ -37,7 +37,7 @@ fn default_config() {
 #[test]
 fn default_config_has_four_type_defs() {
     let config = Config::default();
-    assert_eq!(config.documents.types.len(), 7);
+    assert_eq!(config.documents.types.len(), 8);
 
     let rfc = config.type_by_name("rfc").unwrap();
     assert_eq!(rfc.plural, "rfcs");
@@ -134,7 +134,7 @@ pattern = "{type}-{n:03}-{title}.md"
 "#;
 
     let config = Config::parse(toml_str).unwrap();
-    assert_eq!(config.documents.types.len(), 7);
+    assert_eq!(config.documents.types.len(), 8);
     assert_eq!(config.type_by_name("rfc").unwrap().dir, "docs/rfcs");
     assert_eq!(config.filesystem.directories.rfcs, "docs/rfcs");
 }
