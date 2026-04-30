@@ -12,8 +12,9 @@ This skill creates the iteration document. It does NOT write code.
 <HARD-GATE>
 Do NOT write test code or production code. Plan tests and tasks only.
 For feature work linked to a Story, use `/resolve-context` first if you haven't already.
-Standalone iterations (bug fixes, tweaks, refactors) do not require a parent Story.
+Standalone Iterations RESERVED for lightweight pipeline only: bug fixes, tiny tweaks, refactors. Substantial dev work MUST `implements` one or more Stories.
 After identifying multiple AC groups, partition upfront and get user approval before dispatching subagents.
+In Sweep Mode (RFC w/ 2+ child Stories, no Iterations), produce 2-3 candidate plans, get user approval, then dispatch subagents in parallel.
 After completion: present the iteration to the user. Only use `/build` after explicit confirmation.
 </HARD-GATE>
 
@@ -22,7 +23,7 @@ After completion: present the iteration to the user. Only use `/build` after exp
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
 - Do NOT skip the workflow pipeline. Features need RFC -> Story -> Iteration. Bug fixes need Iteration.
 - Do NOT write test or production code. This skill produces a plan document only.
-- Do NOT dispatch subagents without user approval of the AC grouping.
+- Do NOT dispatch subagents without user approval of the AC grouping or sweep candidate plan.
 </NEVER>
 
 <GITHUB-ISSUES-DOCUMENTS>
@@ -39,9 +40,20 @@ Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always
 
 ```d2
 Context resolved? -> Gather context: no
-Context resolved? -> Read Story ACs: yes
+Context resolved? -> Entry mode?: yes
 
 Gather context.shape: hexagon
+
+Entry mode?.shape: diamond
+Entry mode? -> Sweep RFC -> child Stories: rfc sweep
+Entry mode? -> Read Story ACs: single story
+Entry mode? -> Standalone plan: standalone
+
+Sweep RFC -> child Stories -> Walk Stories, classify Iters -> Draft 2-3 candidate plans -> User approves plan?
+User approves plan?.shape: diamond
+User approves plan? -> Dispatch N subagents: yes
+User approves plan? -> Revise candidates: no
+Revise candidates -> Draft 2-3 candidate plans
 
 Read Story ACs -> Multiple iteration groups?
 
@@ -56,6 +68,7 @@ Revise groups -> Define AC groups
 
 Dispatch N subagents -> Collect results -> Validate -> Present to user
 Create single iteration (inline) -> Link to story -> Plan tests -> Write task breakdown -> Present to user
+Standalone plan -> Plan tests
 
 Present to user -> User confirms -> Use /build skill: approved
 Present to user -> Revise: changes requested
@@ -81,6 +94,37 @@ Use /build skill.shape: double_circle
 6. Dispatch one subagent (general-purpose, Opus) per iteration in parallel
 
 Each subagent receives: full Story body, RFC design intent, its AC group, other groups' boundaries, and instructions to use `lazyspec create iteration`, `lazyspec link`, Explore agents for code discovery, and `lazyspec validate --json`.
+
+## Sweep Mode (RFC + multiple Stories)
+
+TRIGGER: RFC w/ 2+ child Stories, zero Iterations. Plan all Iters across whole RFC in one pass.
+
+WALK every child Story. Classify Iters into 4 kinds:
+
+1. **Per-Story Iters** — slice work scoped to one Story. 1+ per Story. `implements` -> single Story.
+2. **Shared-contract Iters** — interface stubs, type defs, schemas, route stubs consumed by 2+ Stories. `implements` -> all consumer Stories.
+3. **Cross-cutting infra Iters** — data pipeline, migrations, shared backend wiring. `implements` -> consumer Stories that use the data.
+4. **Polish/cleanup Iters** — final pass, dead code, doc tidy. `implements` -> Stories touched.
+
+Slice categories per Iter (extends the /create-story vocab with dev-only kinds): `route-stub` / `data-integration` / `ui-presentation` / `functional` / `polish` (user-facing, same as Stories) plus `interface-stub` / `cleanup` (dev-only, Iter-only). Pick one.
+
+WIRE `blocks` edges (RFC-041 priority + blocks DAG):
+- contract Iter `blocks` consumer Iters that depend on the interface
+- infra Iter `blocks` data-using Iters
+- polish/cleanup Iters blocked by all Iters they touch
+
+OUTPUT 2-3 candidate Iter plans. Vary contract granularity:
+- Plan A: one fat "all interfaces" Iter up front, thin per-Story Iters after
+- Plan B: contracts split per consumer pair, medium per-Story Iters
+- Plan C: contracts inlined into earliest consuming Iter, no shared contract Iter
+
+Each candidate lists: Iter titles, kind, `implements` edges, `blocks` edges, rough size. Show tradeoffs (parallelism vs rework risk vs review surface).
+
+PRESENT all candidates to user. WAIT for explicit pick + approval. Revise if asked.
+
+ON APPROVAL: dispatch one subagent per Iter in parallel. Each gets RFC body, full Story bodies it implements, sibling Iter titles + edges, and instructions to use `lazyspec create iteration`, `lazyspec link <iter> implements <story>` (repeat per Story), `lazyspec link <iter> blocks <other-iter>` per DAG edge, and `lazyspec validate --json`.
+
+NEVER dispatch before approval. NEVER skip the candidate-plan step (no single forced plan).
 
 ## Single-iteration / Standalone Path
 

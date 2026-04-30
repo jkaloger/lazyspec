@@ -69,14 +69,19 @@ New feature (full pipeline) -> Determine entry point
 
 Determine entry point -> No RFC: Brainstorm design
 Determine entry point -> RFC exists, no Story: Brainstorm slices
+Determine entry point -> RFC + Stories, no Iterations: Sweep iterations
 Determine entry point -> Story exists, no Iteration: Resolve context
 Determine entry point -> Iteration with tasks: Ready to build
+
+Project-level work (SOW / multi-RFC) -> Use /project-plan skill
+Project-level work (SOW / multi-RFC) -> Determine entry point
 
 No RFC: Brainstorm design -> User approves direction? -> Use /write-rfc skill: yes
 User approves direction? -> Revise: no
 Revise -> No RFC: Brainstorm design
 
 RFC exists, no Story: Brainstorm slices -> Use /create-story skill
+RFC + Stories, no Iterations: Sweep iterations -> Use /create-iteration sweep mode
 Story exists, no Iteration: Resolve context -> Use /resolve-context skill
 Iteration with tasks: Ready to build -> Use /build skill
 
@@ -91,6 +96,8 @@ Use /write-rfc skill.shape: double_circle
 Use /create-story skill.shape: double_circle
 Use /resolve-context skill.shape: double_circle
 Use /create-iteration skill.shape: double_circle
+Use /create-iteration sweep mode.shape: double_circle
+Use /project-plan skill.shape: double_circle
 Use /build skill.shape: double_circle
 ```
 
@@ -124,11 +131,12 @@ When unsure, ask the user.
 | --------------------------------------- | ------------------------------------------------------ |
 | Nothing exists                          | Brainstorm the design, then use `/write-rfc`           |
 | RFC exists, no Stories                  | Brainstorm vertical slices, then use `/create-story`   |
+| RFC exists, Stories exist, no Iterations | Use `/create-iteration` sweep mode                    |
 | Story exists, no Iteration              | Use `/resolve-context` (chains to `/create-iteration`) |
 | Iteration exists with task breakdown    | Use `/build`                                           |
 | Iteration exists without task breakdown | Use `/create-iteration` to add tasks                   |
 
-**Bug fixes, tweaks, refactors** (lightweight pipeline):
+**Bug fixes, tweaks, refactors** (lightweight pipeline). Standalone Iterations RESERVED for this lightweight pipeline only: bug fixes, tiny tweaks, refactors. Substantial dev work MUST `implements` one or more Stories.
 
 | State                               | Action                                            |
 | ----------------------------------- | ------------------------------------------------- |
@@ -152,12 +160,16 @@ Brainstorming is fractal -- it applies at whatever level you're entering:
 - Get user approval before invoking `/create-story`
 
 **Iteration level (Story exists, no Iteration):**
-- Use `/resolve-context` skill, which chains to `/create-iteration`
+- Single-Story path: use `/resolve-context` skill, which chains to `/create-iteration`
+- RFC sweep path (RFC + multiple Stories, no Iterations): use `/create-iteration` sweep mode to walk all Stories and propose per-Story / shared-contract / cross-cutting / polish Iterations as a batch
 
 **Lightweight iteration (bug fix / tweak):**
 - Confirm the problem or change with the user
 - If a related Story exists, confirm linking to it
 - Use `/create-iteration` skill directly
+
+**Project level (SOW / multi-RFC scope):**
+- If the work spans multiple RFCs or starts from a SOW / project brief, defer to `/project-plan` first. It decomposes the project into RFCs, then each RFC re-enters this skill at the RFC level.
 
 ## Guardrails
 

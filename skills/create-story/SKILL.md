@@ -71,11 +71,21 @@ Use /create-iteration skill.shape: double_circle
 
 ## Multi-slice RFCs
 
-1. Extract vertical slices from RFC. For each: define title, in-scope, out-of-scope, RFC sections addressed.
-2. Verify non-overlapping scope.
-3. Present partition table to user. Wait for explicit approval.
-4. Dispatch one subagent (general-purpose, Opus) per story in parallel. Each receives: full RFC body, its slice definition, other slices' boundaries, and instructions to use `lazyspec create story`, write given/when/then ACs, `lazyspec link`, and `lazyspec validate --json`.
-5. Collect results. Run `lazyspec validate --json`. Present all stories to user.
+Stories are user-facing slices only. Each must be expressible as G/W/T from a user's perspective. Dev-only work (interface stubs, infra scaffolding, cleanup, refactors) does NOT become a Story — defer to `/create-iteration` with `implements` linking to one or more Stories.
+
+1. Extract user-facing slices from RFC. Filter out dev-only work (note it for later iteration sweep).
+2. Generate **2-3 candidate partitions**, not one. Different axes: by user journey, by surface area, by data flow, by priority tier. Presenting one partition causes the user to anchor on it rather than evaluate trade-offs.
+3. For each candidate: list Stories with title, in-scope, out-of-scope, RFC sections addressed, slice category, and RFC-041 priority (must / should / could).
+4. Slice category tag per Story (pick one):
+   - `route-stub` — user-reachable surface with placeholder content
+   - `data-integration` — wires real data into an existing surface
+   - `ui-presentation` — visual/interaction layer on existing data
+   - `functional` — end-to-end user capability
+   - `polish` — UX refinements on shipped capability
+5. Present all candidate partitions side-by-side. User compares, picks one, or remixes (e.g. "partition B but split Story 2 like in partition A"). Wait for explicit approval.
+6. Dispatch one subagent (general-purpose, Opus) per Story in parallel. Each receives: full RFC body, its slice definition, slice category, priority, other slices' boundaries, and instructions to use `lazyspec create story`, write given/when/then ACs, `lazyspec link`, and `lazyspec validate --json`.
+7. Collect results. Run `lazyspec validate --json`. Present all Stories to user.
+8. Hand off the dev-only work list to `/create-iteration` for the iteration sweep — those Iterations attach via `implements` to whichever Stories they support.
 
 ## Single-slice RFCs
 
@@ -87,9 +97,12 @@ Use /create-iteration skill.shape: double_circle
 
 ## Rules
 
+- A Story must be user-facing. If you can't write G/W/T from a user's POV, it's not a Story — it's an Iteration.
 - A Story must be readable without implementation specifics
 - Each AC must be independently testable
 - Each AC must have given/when/then structure
+- Each Story carries a slice category (route-stub / data-integration / ui-presentation / functional / polish) and an RFC-041 priority (must / should / could)
 - Keep stories small enough to complete in 1-3 iterations
-- For multi-slice RFCs, always get user approval of the partition before dispatching
+- For multi-slice RFCs, generate 2-3 candidate partitions and let the user compare/remix before dispatching
+- Dev-only work (stubs, infra, cleanup) belongs in Iterations with `implements` to Stories — never create a Story for dev-only work
 - Subagents receive full RFC text, not file references
