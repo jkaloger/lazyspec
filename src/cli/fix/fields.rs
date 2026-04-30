@@ -44,37 +44,25 @@ fn fix_file(
     let full_path = root.join(path);
     let content = fs.read_to_string(&full_path)?;
 
-    let (yaml_str, body) = match split_frontmatter(&content) {
+    let (mut yaml_text, body) = match split_frontmatter(&content) {
         Ok((y, b)) => (y, b),
-        Err(_) => (String::new(), content.clone()),
-    };
-
-    let mut mapping = if yaml_str.is_empty() {
-        serde_yaml::Mapping::new()
-    } else {
-        let value: serde_yaml::Value = serde_yaml::from_str(&yaml_str)?;
-        match value {
-            serde_yaml::Value::Mapping(m) => m,
-            _ => serde_yaml::Mapping::new(),
-        }
+        Err(_) => (String::new(), format!("\n{}", content)),
     };
 
     let mut fields_added = Vec::new();
-
     for &field in REQUIRED_FIELDS {
-        let key = serde_yaml::Value::String(field.to_string());
-        if mapping.contains_key(&key) {
+        if has_field(&yaml_text, field) {
             continue;
         }
-
-        let value = default_for_field(field, path, config);
-        mapping.insert(key, value);
+        yaml_text = insert_yaml_field(&yaml_text, field, &default_yaml(field, path, config));
         fields_added.push(field.to_string());
     }
 
     let written = if !dry_run && !fields_added.is_empty() {
-        let new_yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(mapping))?;
-        let output = format!("---\n{}---\n{}", new_yaml, body);
+        if !yaml_text.ends_with('\n') {
+            yaml_text.push('\n');
+        }
+        let output = format!("---\n{yaml_text}---{body}");
         fs.write(&full_path, &output)?;
         true
     } else {
@@ -88,16 +76,37 @@ fn fix_file(
     })
 }
 
-fn default_for_field(field: &str, path: &str, config: &Config) -> serde_yaml::Value {
+fn has_field(yaml_text: &str, key: &str) -> bool {
+    let prefix = format!("{}:", key);
+    yaml_text
+        .lines()
+        .any(|l| l.trim_start().starts_with(&prefix))
+}
+
+fn default_yaml(field: &str, path: &str, config: &Config) -> String {
     match field {
-        "title" => serde_yaml::Value::String(title_from_filename(path)),
-        "type" => serde_yaml::Value::String(type_from_path(path, config)),
-        "status" => serde_yaml::Value::String("draft".to_string()),
-        "author" => serde_yaml::Value::String(git_author()),
-        "date" => serde_yaml::Value::String(chrono::Utc::now().format("%Y-%m-%d").to_string()),
-        "tags" => serde_yaml::Value::Sequence(vec![]),
-        _ => serde_yaml::Value::Null,
+        "title" => yaml_double_quote(&title_from_filename(path)),
+        "type" => type_from_path(path, config),
+        "status" => "draft".to_string(),
+        "author" => yaml_double_quote(&git_author()),
+        "date" => chrono::Utc::now().format("%Y-%m-%d").to_string(),
+        "tags" => "[]".to_string(),
+        _ => "null".to_string(),
     }
+}
+
+fn yaml_double_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn title_from_filename(path: &str) -> String {
@@ -166,6 +175,32 @@ fn type_from_path(path: &str, config: &Config) -> String {
         }
     }
     "rfc".to_string()
+}
+
+pub(super) fn insert_yaml_field(yaml_text: &str, key: &str, value_yaml: &str) -> String {
+    debug_assert!(!value_yaml.contains('\n'), "value_yaml must be single-line");
+
+    let key_prefix = format!("{}:", key);
+    for line in yaml_text.lines() {
+        if line.trim_start().starts_with(&key_prefix) {
+            return yaml_text.to_string();
+        }
+    }
+
+    if yaml_text.is_empty() {
+        return format!("{}: {}\n", key, value_yaml);
+    }
+
+    let mut out = String::with_capacity(yaml_text.len() + key.len() + value_yaml.len() + 4);
+    out.push_str(yaml_text);
+    if !yaml_text.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(key);
+    out.push_str(": ");
+    out.push_str(value_yaml);
+    out.push('\n');
+    out
 }
 
 fn git_author() -> String {
@@ -237,26 +272,19 @@ fn fix_priority_file(
     let full_path = root.join(path);
     let content = fs.read_to_string(&full_path)?;
 
-    let (yaml_str, body) = split_frontmatter(&content)?;
-    let value: serde_yaml::Value = serde_yaml::from_str(&yaml_str)?;
-    let mut mapping = match value {
-        serde_yaml::Value::Mapping(m) => m,
-        _ => serde_yaml::Mapping::new(),
-    };
+    let (mut yaml_text, body) = split_frontmatter(&content)?;
 
-    let key = serde_yaml::Value::String("priority".to_string());
     let mut fields_added = Vec::new();
-    if !mapping.contains_key(&key) {
-        mapping.insert(
-            key,
-            serde_yaml::Value::String(PRIORITY_DEFAULT.to_string()),
-        );
+    if !has_field(&yaml_text, "priority") {
+        yaml_text = insert_yaml_field(&yaml_text, "priority", PRIORITY_DEFAULT);
         fields_added.push("priority".to_string());
     }
 
     let written = if !dry_run && !fields_added.is_empty() {
-        let new_yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(mapping))?;
-        let output = format!("---\n{}---\n{}", new_yaml, body);
+        if !yaml_text.ends_with('\n') {
+            yaml_text.push('\n');
+        }
+        let output = format!("---\n{yaml_text}---{body}");
         fs.write(&full_path, &output)?;
         true
     } else {
@@ -379,6 +407,223 @@ mod tests {
         }
         let after = fs::read_to_string(root.join(rel)).unwrap();
         assert_eq!(original, after);
+    }
+
+    #[test]
+    fn insert_yaml_field_empty_input_returns_key_value_with_newline() {
+        let out = insert_yaml_field("", "priority", "should");
+        assert_eq!(out, "priority: should\n");
+    }
+
+    #[test]
+    fn insert_yaml_field_preserves_trailing_newline() {
+        let input = "title: foo\ntype: story\n";
+        let out = insert_yaml_field(input, "tags", "[]");
+        assert_eq!(out, "title: foo\ntype: story\ntags: []\n");
+    }
+
+    #[test]
+    fn insert_yaml_field_adds_newline_when_input_lacks_one() {
+        let input = "title: foo\ntype: story";
+        let out = insert_yaml_field(input, "status", "draft");
+        assert_eq!(out, "title: foo\ntype: story\nstatus: draft\n");
+    }
+
+    #[test]
+    fn insert_yaml_field_skips_when_key_already_present() {
+        let input = "title: foo\ntags: [a, b]\n";
+        let out = insert_yaml_field(input, "tags", "[]");
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn insert_yaml_field_does_not_match_key_prefix_only() {
+        let input = "tags_extra: foo\n";
+        let out = insert_yaml_field(input, "tags", "[]");
+        assert_eq!(out, "tags_extra: foo\ntags: []\n");
+    }
+
+    fn run_fix_file(root: &Path, rel: &str) -> FieldFixResult {
+        let config = Config::default();
+        fix_file(root, &config, rel, false, &RealFileSystem).unwrap()
+    }
+
+    #[test]
+    fn fix_file_ac1_appends_missing_tags_without_blank_line() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let rel = "docs/rfcs/RFC-001-thing.md";
+        let original = concat!(
+            "---\n",
+            "title: \"Some RFC\"\n",
+            "type: rfc\n",
+            "status: draft\n",
+            "author: \"alice\"\n",
+            "date: 2026-01-01\n",
+            "---\n",
+            "Line one of body.\n",
+            "\n",
+            "Line three after blank.\n",
+        );
+        write_doc(root, rel, original);
+
+        let result = run_fix_file(root, rel);
+        assert!(result.fields_added.contains(&"tags".to_string()));
+        assert!(result.written);
+
+        let after = fs::read_to_string(root.join(rel)).unwrap();
+        let expected = concat!(
+            "---\n",
+            "title: \"Some RFC\"\n",
+            "type: rfc\n",
+            "status: draft\n",
+            "author: \"alice\"\n",
+            "date: 2026-01-01\n",
+            "tags: []\n",
+            "---\n",
+            "Line one of body.\n",
+            "\n",
+            "Line three after blank.\n",
+        );
+        assert_eq!(after, expected);
+    }
+
+    #[test]
+    fn fix_file_ac3_complete_doc_is_byte_identical() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let rel = "docs/rfcs/RFC-001-thing.md";
+        write_doc(root, rel, rfc_no_priority());
+        let before = fs::read_to_string(root.join(rel)).unwrap();
+
+        let result = run_fix_file(root, rel);
+        assert!(result.fields_added.is_empty());
+        assert!(!result.written);
+
+        let after = fs::read_to_string(root.join(rel)).unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn fix_file_ac4_preserves_double_quoted_title() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let rel = "docs/rfcs/RFC-001-thing.md";
+        let original = concat!(
+            "---\n",
+            "title: \"Quoted Title\"\n",
+            "type: rfc\n",
+            "status: draft\n",
+            "author: \"alice\"\n",
+            "date: 2026-01-01\n",
+            "---\n",
+            "Body.\n",
+        );
+        write_doc(root, rel, original);
+
+        run_fix_file(root, rel);
+
+        let after = fs::read_to_string(root.join(rel)).unwrap();
+        assert!(after.contains("title: \"Quoted Title\"\n"));
+        assert!(after.contains("tags: []\n"));
+    }
+
+    #[test]
+    fn fix_file_ac5_preserves_single_quoted_author() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let rel = "docs/rfcs/RFC-001-thing.md";
+        let original = concat!(
+            "---\n",
+            "title: \"Some RFC\"\n",
+            "type: rfc\n",
+            "status: draft\n",
+            "author: 'jkaloger'\n",
+            "date: 2026-01-01\n",
+            "---\n",
+            "Body.\n",
+        );
+        write_doc(root, rel, original);
+
+        run_fix_file(root, rel);
+
+        let after = fs::read_to_string(root.join(rel)).unwrap();
+        assert!(after.contains("author: 'jkaloger'\n"));
+    }
+
+    #[test]
+    fn fix_file_ac6_preserves_existing_empty_tags_when_inserting_author() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let rel = "docs/rfcs/RFC-001-thing.md";
+        let original = concat!(
+            "---\n",
+            "title: \"Some RFC\"\n",
+            "type: rfc\n",
+            "status: draft\n",
+            "date: 2026-01-01\n",
+            "tags: []\n",
+            "---\n",
+            "Body.\n",
+        );
+        write_doc(root, rel, original);
+
+        let result = run_fix_file(root, rel);
+        assert!(result.fields_added.contains(&"author".to_string()));
+
+        let after = fs::read_to_string(root.join(rel)).unwrap();
+        assert!(after.contains("tags: []\n"));
+        assert!(!after.contains("\n\n---\n"), "no extra blank line before closing fence");
+    }
+
+    #[test]
+    fn fix_priority_ac2_byte_level_diff() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let rel = "docs/stories/STORY-001-login.md";
+        let original = concat!(
+            "---\n",
+            "title: \"Login flow\"\n",
+            "type: story\n",
+            "status: draft\n",
+            "author: \"alice\"\n",
+            "date: 2026-01-01\n",
+            "tags: []\n",
+            "---\n",
+            "Story body line one.\n",
+            "\n",
+            "Story body line three.\n",
+        );
+        write_doc(root, rel, original);
+        let before = fs::read_to_string(root.join(rel)).unwrap();
+
+        let config = Config::default();
+        let store = Store::load_with_fs(root, &config, &RealFileSystem, None).unwrap();
+
+        let results =
+            collect_priority_fills(root, &store, &config, &[], false, &RealFileSystem);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].fields_added, vec!["priority".to_string()]);
+        assert!(results[0].written);
+
+        let after = fs::read_to_string(root.join(rel)).unwrap();
+        let expected = concat!(
+            "---\n",
+            "title: \"Login flow\"\n",
+            "type: story\n",
+            "status: draft\n",
+            "author: \"alice\"\n",
+            "date: 2026-01-01\n",
+            "tags: []\n",
+            "priority: should\n",
+            "---\n",
+            "Story body line one.\n",
+            "\n",
+            "Story body line three.\n",
+        );
+        assert_eq!(after, expected);
+        assert_eq!(after.len(), before.len() + "priority: should\n".len());
     }
 
     #[test]

@@ -600,6 +600,87 @@ fn fix_priority_then_validate_clean() {
 }
 
 #[test]
+fn fix_surgical_inserts_only_named_fields() {
+    // Iter 169 AC1+AC2 integration: story missing both `tags` and `priority`.
+    // `tags` is a required field (parse error blocks store load), so priority
+    // backfill needs the doc to parse. Run fix twice: first pass adds `tags`,
+    // second pass (with reloaded store) adds `priority`. After both passes,
+    // file must be byte-equal to original except for the two inserted lines.
+    let fixture = common::TestFixture::new();
+    let rel = "docs/stories/STORY-001-surgical.md";
+    let original = "---\ntitle: \"Quoted Title\"\ntype: story\nstatus: draft\nauthor: 'jkaloger'\ndate: 2026-04-30\n---\n\n# Body\n\nMulti-line body content.\nWith blank lines.\n";
+    fixture.write_doc(rel, original);
+
+    let store1 = fixture.store();
+    let output1 = lazyspec::cli::fix::run_json(
+        fixture.root(),
+        &store1,
+        &fixture.config(),
+        &[],
+        false,
+        &RealFileSystem,
+    );
+    let parsed1: serde_json::Value = serde_json::from_str(&output1).unwrap();
+    let added1: std::collections::HashSet<String> = parsed1["field_fixes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|e| {
+            e["fields_added"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|f| f.as_str().map(String::from))
+        })
+        .collect();
+    assert!(added1.contains("tags"), "first pass should add tags");
+
+    let store2 = fixture.store();
+    let output2 = lazyspec::cli::fix::run_json(
+        fixture.root(),
+        &store2,
+        &fixture.config(),
+        &[],
+        false,
+        &RealFileSystem,
+    );
+    let parsed2: serde_json::Value = serde_json::from_str(&output2).unwrap();
+    let added2: std::collections::HashSet<String> = parsed2["field_fixes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|e| {
+            e["fields_added"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|f| f.as_str().map(String::from))
+        })
+        .collect();
+    assert!(
+        added2.contains("priority"),
+        "second pass should add priority"
+    );
+
+    let after = std::fs::read_to_string(fixture.root().join(rel)).unwrap();
+
+    // Strip the two inserted lines from `after`; result must equal `original`.
+    let stripped: String = after
+        .lines()
+        .filter(|l| *l != "tags: []" && *l != "priority: should")
+        .map(|l| format!("{}\n", l))
+        .collect();
+    assert_eq!(
+        stripped, original,
+        "everything except the two inserted lines must be byte-equal to original"
+    );
+
+    // Sanity: each inserted line appears exactly once.
+    assert_eq!(after.matches("\ntags: []\n").count(), 1);
+    assert_eq!(after.matches("\npriority: should\n").count(), 1);
+}
+
+#[test]
 fn fix_human_output_relation_migration() {
     let fixture = common::TestFixture::new();
 
