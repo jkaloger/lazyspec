@@ -1,6 +1,8 @@
 #[cfg(feature = "agent")]
 use super::forms::AgentDialog;
-use super::forms::{CreateForm, DeleteConfirm, LinkEditor, StatusPicker, REL_TYPES};
+use super::forms::{
+    CreateForm, DeleteConfirm, LinkEditor, ProvenanceEditor, StatusPicker, REL_TYPES,
+};
 use super::graph::traverse_dependency_chain;
 
 use crate::engine::cache::DiskCache;
@@ -211,6 +213,7 @@ pub struct App {
     pub delete_confirm: DeleteConfirm,
     pub status_picker: StatusPicker,
     pub link_editor: LinkEditor,
+    pub provenance_editor: ProvenanceEditor,
     #[cfg(feature = "agent")]
     pub agent_dialog: AgentDialog,
     #[cfg(feature = "agent")]
@@ -335,6 +338,7 @@ impl App {
             delete_confirm: DeleteConfirm::new(),
             status_picker: StatusPicker::new(),
             link_editor: LinkEditor::new(),
+            provenance_editor: ProvenanceEditor::new(),
             #[cfg(feature = "agent")]
             agent_dialog: AgentDialog::new(),
             #[cfg(feature = "agent")]
@@ -1292,6 +1296,92 @@ impl App {
         self.link_editor.selected = 0;
     }
 
+    pub fn open_provenance_editor(&mut self) {
+        let doc = if self.view_mode == ViewMode::Filters {
+            match self.selected_filtered_doc() {
+                Some(d) => d,
+                None => return,
+            }
+        } else {
+            match self.selected_doc_meta() {
+                Some(d) => d,
+                None => return,
+            }
+        };
+
+        let path = doc.path.clone();
+
+        self.provenance_editor.active = true;
+        self.provenance_editor.doc_path = path;
+        self.provenance_editor.input.clear();
+        self.provenance_editor.error = None;
+    }
+
+    pub fn close_provenance_editor(&mut self) {
+        self.provenance_editor.active = false;
+        self.provenance_editor.doc_path = PathBuf::new();
+        self.provenance_editor.input.clear();
+        self.provenance_editor.error = None;
+    }
+
+    pub fn provenance_type_char(&mut self, c: char) {
+        self.provenance_editor.input.push(c);
+        self.provenance_editor.error = None;
+    }
+
+    pub fn provenance_backspace(&mut self) {
+        self.provenance_editor.input.pop();
+        self.provenance_editor.error = None;
+    }
+
+    pub fn submit_provenance(&mut self, root: &Path, config: &Config) -> Result<()> {
+        let trimmed = self.provenance_editor.input.trim().to_string();
+        if trimmed.is_empty() {
+            self.provenance_editor.error = Some("citation must not be empty".into());
+            return Ok(());
+        }
+
+        let doc_path = self.provenance_editor.doc_path.clone();
+        let doc = match self
+            .store
+            .all_docs()
+            .iter()
+            .find(|d| d.path == doc_path)
+            .copied()
+            .cloned()
+        {
+            Some(d) => d,
+            None => {
+                self.provenance_editor.error = Some("document not found".into());
+                return Ok(());
+            }
+        };
+
+        if doc.provenance.iter().any(|c| c == &trimmed) {
+            self.provenance_editor.error = Some("citation already present".into());
+            return Ok(());
+        }
+
+        let type_name = doc.doc_type.as_str().to_string();
+        let doc_id = doc.id.clone();
+        let mut new_list = doc.provenance.clone();
+        new_list.push(trimmed);
+
+        if let Err(e) = crate::engine::provenance::set_provenance(
+            root, config, &type_name, &doc_id, &new_list,
+        ) {
+            self.provenance_editor.error = Some(e.to_string());
+            return Ok(());
+        }
+
+        self.store.reload_file(root, &doc_path, &*self.fs)?;
+        self.filtered_docs_cache = None;
+        self.rebuild_search_index();
+        self.build_doc_tree();
+        self.close_provenance_editor();
+        Ok(())
+    }
+
     pub fn update_link_search(&mut self) {
         let query = self.link_editor.query.to_lowercase();
         let doc_path = self.link_editor.doc_path.clone();
@@ -1471,6 +1561,7 @@ mod tests {
             delete_confirm: DeleteConfirm::new(),
             status_picker: StatusPicker::new(),
             link_editor: LinkEditor::new(),
+            provenance_editor: ProvenanceEditor::new(),
             #[cfg(feature = "agent")]
             agent_dialog: AgentDialog::new(),
             #[cfg(feature = "agent")]

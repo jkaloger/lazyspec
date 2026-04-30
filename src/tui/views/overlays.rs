@@ -16,7 +16,7 @@ pub fn draw_help_overlay(f: &mut Frame) {
     let area = f.area();
 
     let popup_width = 50.min(area.width.saturating_sub(4));
-    let popup_height = 24.min(area.height.saturating_sub(4));
+    let popup_height = 26.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(popup_width)) / 2;
     let y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -53,6 +53,7 @@ pub fn draw_help_overlay(f: &mut Frame) {
         )),
         Line::from(""),
         Line::from("  r         Add relation"),
+        Line::from("  p         Add provenance entry"),
         Line::from(""),
         Line::from(Span::styled(
             "Fullscreen",
@@ -346,6 +347,64 @@ pub fn draw_link_editor(f: &mut Frame, app: &App) {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Cyan))
             .title(" Add Relation "),
+    );
+    f.render_widget(paragraph, popup_area);
+}
+
+pub fn draw_provenance_editor(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let editor = &app.provenance_editor;
+
+    let popup_width = 60u16.min(area.width.saturating_sub(4));
+    let popup_height = 8u16.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let doc_id = app
+        .store
+        .get(&editor.doc_path)
+        .map(|d| d.id.to_uppercase())
+        .unwrap_or_else(|| {
+            editor
+                .doc_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+                .to_string()
+        });
+
+    let title = format!(" Add Provenance \u{2014} {} ", doc_id);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  Citation: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(editor.input.clone()),
+        Span::styled(" ", Style::default().bg(Color::White)),
+    ]));
+    lines.push(Line::from(""));
+
+    if let Some(ref err) = editor.error {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", err),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    lines.push(Line::from(Span::styled(
+        "  Enter to add, Esc to cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(title),
     );
     f.render_widget(paragraph, popup_area);
 }

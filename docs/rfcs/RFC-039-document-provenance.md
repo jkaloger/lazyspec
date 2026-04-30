@@ -20,7 +20,7 @@ Add a free-form frontmatter field on every document that cites sources of truth.
 - Typed source kinds (person/workshop/legislation as enum). Free-form strings; the citation text says what it is.
 - Sources as first-class lazyspec document types.
 - Validating reachability or format of citations.
-- TUI editing affordance. Read-only display.
+- General TUI frontmatter editing (author/tags/related). Provenance editing is in scope (see Story 4); other field editing remains deferred.
 
 ## Design
 
@@ -52,9 +52,9 @@ All operations mutate frontmatter only. Reuse existing frontmatter writer.
 
 ### TUI
 
-Add a `Provenance` column to document list views, alongside `Author`. Renders comma-joined entries, truncated to fit. Empty cell when none. Read-only.
+Add a `Provenance` column to document list views, alongside `Author`. Renders comma-joined entries, truncated to fit. Empty cell when none.
 
-Document detail panel lists entries when present.
+Document detail panel lists entries when present. From the detail panel, users may add a new provenance entry via a dedicated overlay (see Story 4); the overlay accepts a single free-form line and persists via the same engine path the CLI uses. Removing entries from the TUI is deferred — use the CLI for now.
 
 ### Search
 
@@ -70,8 +70,9 @@ Existing `lazyspec search` matches body and title. Extending to provenance strin
 1. **Engine support for provenance frontmatter** — `DocMeta` carries `provenance: Vec<String>`, serde round-trip, load-time validation, no CLI surface.
 2. **CLI provenance subcommand** — `add` / `remove` / `list` (per-doc and global), all `--json`.
 3. **TUI provenance column and detail** — list views show `Provenance` column; detail panel lists entries.
+4. **TUI provenance add affordance** — detail-panel keybinding opens single-line overlay, appends entry to document frontmatter via engine. Add-only; remove deferred.
 
-Story 1 blocks 2 and 3. Stories 2 and 3 are parallel.
+Story 1 blocks 2, 3, 4. Stories 2 and 3 parallel. Story 4 depends on Story 3 (detail panel must already render provenance).
 
 ## ADR candidates
 

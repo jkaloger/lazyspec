@@ -26,7 +26,7 @@ use status_bar::draw_status_bar;
 use overlays::draw_agent_dialog;
 use overlays::{
     draw_create_form, draw_delete_confirm, draw_gh_conflict, draw_help_overlay, draw_link_editor,
-    draw_search_overlay, draw_status_picker, draw_warnings_panel,
+    draw_provenance_editor, draw_search_overlay, draw_status_picker, draw_warnings_panel,
 };
 #[cfg(feature = "agent")]
 use panels::draw_agents_screen;
@@ -218,6 +218,10 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
 
     if app.link_editor.active {
         draw_link_editor(f, app);
+    }
+
+    if app.provenance_editor.active {
+        draw_provenance_editor(f, app);
     }
 
     #[cfg(feature = "agent")]
