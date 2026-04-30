@@ -123,6 +123,7 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
             author: author.to_string(),
             date: Local::now().date_naive(),
             tags: vec![],
+            provenance: vec![],
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
@@ -188,6 +189,75 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
             format!("\n{}\n", body_trimmed)
         };
         let updated_content = format!("---\n{}\n---\n{}", updated_yaml, body_section);
+
+        let refname = Self::refname(&type_def.name, doc_id);
+        let new_sha = self.git.create_commit(
+            &self.root,
+            &refname,
+            &[("doc.md", &updated_content)],
+            Some(&old_sha),
+        )?;
+
+        if let Err(e) = self
+            .git
+            .update_ref(&self.root, &refname, &new_sha, &old_sha)
+        {
+            bail!("conflict updating {}: {}", doc_id, e);
+        }
+
+        if let Some(coord) = &self.config.coordination {
+            self.git.push_ref(&self.root, &coord.remote, &refname)?;
+        }
+
+        std::fs::write(&cache_path, &updated_content)?;
+
+        let mut lock = CacheLock::load(&self.root)?;
+        lock.set(&doc_key, &new_sha);
+        lock.save(&self.root)?;
+
+        Ok(())
+    }
+
+    fn set_provenance(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        provenance: &[String],
+    ) -> Result<()> {
+        let doc_key = Self::doc_key(&type_def.name, doc_id);
+        let lock = CacheLock::load(&self.root)?;
+        let old_sha = lock
+            .get(&doc_key)
+            .ok_or_else(|| anyhow::anyhow!("{} not found in cache.lock", doc_id))?
+            .to_string();
+
+        let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
+        let cache_path = find_cache_file(&cache_dir, doc_id)
+            .ok_or_else(|| anyhow::anyhow!("cache file not found for {}", doc_id))?;
+        let content = std::fs::read_to_string(&cache_path)?;
+
+        let (yaml, existing_body) = split_frontmatter(&content)?;
+        let mut value: serde_yaml::Value = serde_yaml::from_str(&yaml)?;
+        let entries: Vec<serde_yaml::Value> = provenance
+            .iter()
+            .map(|s| serde_yaml::Value::String(s.clone()))
+            .collect();
+        let map = value
+            .as_mapping_mut()
+            .ok_or_else(|| anyhow::anyhow!("frontmatter root must be a mapping"))?;
+        map.insert(
+            serde_yaml::Value::String("provenance".to_string()),
+            serde_yaml::Value::Sequence(entries),
+        );
+        let new_yaml = serde_yaml::to_string(&value)?;
+
+        let body_trimmed = existing_body.trim_start_matches('\n');
+        let body_section = if body_trimmed.is_empty() {
+            String::new()
+        } else {
+            format!("\n{}\n", body_trimmed)
+        };
+        let updated_content = format!("---\n{}---\n{}", new_yaml, body_section);
 
         let refname = Self::refname(&type_def.name, doc_id);
         let new_sha = self.git.create_commit(
@@ -759,6 +829,105 @@ mod tests {
             delete_remote_idx < delete_local_idx,
             "should delete remote before local"
         );
+    }
+
+    #[test]
+    fn git_ref_set_provenance_writes_yaml_list() {
+        let tmp = TempDir::new().unwrap();
+        let td = test_type_def();
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache_content = "---\ntitle: Title\ntype: iteration\nstatus: draft\nauthor: alice\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\nbody\n";
+        std::fs::write(cache_dir.join("ITERATION-042.md"), cache_content).unwrap();
+
+        let mut lock = CacheLock::default();
+        lock.set("iteration/ITERATION-042", "oldsha");
+        lock.save(tmp.path()).unwrap();
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha789".to_string()))
+            .with_update_ref_result(Ok(()));
+
+        let mut store = make_store(&tmp, mock);
+        store
+            .set_provenance(&td, "ITERATION-042", &["A".to_string(), "B".to_string()])
+            .unwrap();
+
+        let updated = std::fs::read_to_string(cache_dir.join("ITERATION-042.md")).unwrap();
+        let (yaml, _) = split_frontmatter(&updated).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let prov = parsed["provenance"].as_sequence().expect("provenance seq");
+        assert_eq!(prov.len(), 2);
+        assert_eq!(prov[0].as_str().unwrap(), "A");
+        assert_eq!(prov[1].as_str().unwrap(), "B");
+    }
+
+    #[test]
+    fn git_ref_set_provenance_replaces_existing() {
+        let tmp = TempDir::new().unwrap();
+        let td = test_type_def();
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache_content = "---\ntitle: Title\ntype: iteration\nstatus: draft\nauthor: alice\ndate: 2026-04-01\ntags: []\nprovenance:\n- X\nrelated: []\n---\n\nbody\n";
+        std::fs::write(cache_dir.join("ITERATION-042.md"), cache_content).unwrap();
+
+        let mut lock = CacheLock::default();
+        lock.set("iteration/ITERATION-042", "oldsha");
+        lock.save(tmp.path()).unwrap();
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha".to_string()))
+            .with_update_ref_result(Ok(()));
+
+        let mut store = make_store(&tmp, mock);
+        store
+            .set_provenance(&td, "ITERATION-042", &["Y".to_string(), "Z".to_string()])
+            .unwrap();
+
+        let updated = std::fs::read_to_string(cache_dir.join("ITERATION-042.md")).unwrap();
+        let (yaml, _) = split_frontmatter(&updated).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let prov = parsed["provenance"].as_sequence().expect("provenance seq");
+        assert_eq!(prov.len(), 2);
+        assert_eq!(prov[0].as_str().unwrap(), "Y");
+        assert_eq!(prov[1].as_str().unwrap(), "Z");
+    }
+
+    #[test]
+    fn git_ref_set_provenance_uses_old_sha_for_ff() {
+        let tmp = TempDir::new().unwrap();
+        let td = test_type_def();
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache_content = "---\ntitle: Title\ntype: iteration\nstatus: draft\nauthor: alice\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\nbody\n";
+        std::fs::write(cache_dir.join("ITERATION-042.md"), cache_content).unwrap();
+
+        let mut lock = CacheLock::default();
+        lock.set("iteration/ITERATION-042", "abc123");
+        lock.save(tmp.path()).unwrap();
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha".to_string()))
+            .with_update_ref_result(Ok(()));
+
+        let mut store = make_store(&tmp, mock);
+        store
+            .set_provenance(&td, "ITERATION-042", &["A".to_string()])
+            .unwrap();
+
+        let calls = store.git.calls.borrow();
+        let create_call = calls
+            .iter()
+            .find(|c| c.starts_with("create_commit:"))
+            .expect("create_commit should be called");
+        assert!(
+            create_call.contains("parent=Some(\"abc123\")"),
+            "create_commit should be parented on old SHA, got: {}",
+            create_call
+        );
+
+        let lock = CacheLock::load(tmp.path()).unwrap();
+        assert_eq!(lock.get("iteration/ITERATION-042"), Some("newsha"));
     }
 
     #[test]

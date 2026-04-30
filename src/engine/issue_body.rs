@@ -31,6 +31,14 @@ pub fn serialize(doc: &DocMeta, body: &str) -> String {
         yaml_lines.push(format!("status: {}", doc.status));
     }
 
+    if !doc.provenance.is_empty() {
+        yaml_lines.push("provenance:".to_string());
+        for entry in &doc.provenance {
+            let yaml_value = serde_yaml::to_string(entry).unwrap_or_else(|_| entry.clone());
+            yaml_lines.push(format!("- {}", yaml_value.trim_end()));
+        }
+    }
+
     if !doc.related.is_empty() {
         yaml_lines.push("related:".to_string());
         for rel in &doc.related {
@@ -80,6 +88,7 @@ pub fn deserialize(issue_body: &str, ctx: &IssueContext) -> Result<(DocMeta, Str
         author: parsed.author.unwrap_or_else(|| "unknown".to_string()),
         date: parsed.date,
         tags,
+        provenance: parsed.provenance.unwrap_or_default(),
         related,
         validate_ignore: false,
         virtual_doc: false,
@@ -146,6 +155,8 @@ struct CommentFrontmatter {
     #[serde(default)]
     status: Option<String>,
     #[serde(default)]
+    provenance: Option<Vec<String>>,
+    #[serde(default)]
     related: Option<Vec<serde_yaml::Value>>,
 }
 
@@ -184,6 +195,7 @@ mod tests {
             author: "agent-7".to_string(),
             date: NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
             tags: vec!["performance".to_string()],
+            provenance: vec![],
             related: vec![Relation {
                 rel_type: RelationType::Implements,
                 target: "STORY-075".to_string(),
@@ -548,6 +560,63 @@ mod tests {
         let (meta, body) = deserialize(input, &ctx).unwrap();
         assert_eq!(meta.author, "old-value");
         assert_eq!(body, "body");
+    }
+
+    #[test]
+    fn serialize_emits_provenance_block() {
+        let mut doc = sample_doc();
+        doc.provenance = vec!["A".to_string(), "B".to_string()];
+        let result = serialize(&doc, "");
+        assert!(
+            result.contains("provenance:"),
+            "expected provenance block, got: {}",
+            result
+        );
+        assert!(result.contains("- A"));
+        assert!(result.contains("- B"));
+    }
+
+    #[test]
+    fn serialize_omits_provenance_when_empty() {
+        let doc = sample_doc();
+        let result = serialize(&doc, "");
+        assert!(
+            !result.contains("provenance:"),
+            "should not emit empty provenance, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn deserialize_reads_provenance() {
+        let input = "<!-- lazyspec\n---\nauthor: agent-7\ndate: 2026-03-27\nprovenance:\n- Workshop 2026-04-12\n- Jane Doe\n---\n-->\n\nbody";
+        let ctx = sample_context();
+        let (meta, _) = deserialize(input, &ctx).unwrap();
+        assert_eq!(
+            meta.provenance,
+            vec!["Workshop 2026-04-12".to_string(), "Jane Doe".to_string()]
+        );
+    }
+
+    #[test]
+    fn deserialize_missing_provenance_defaults_empty() {
+        let input = "<!-- lazyspec\n---\nauthor: agent-7\ndate: 2026-03-27\n---\n-->\n\nbody";
+        let ctx = sample_context();
+        let (meta, _) = deserialize(input, &ctx).unwrap();
+        assert!(meta.provenance.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_preserves_provenance() {
+        let mut doc = sample_doc();
+        doc.provenance = vec![
+            "Workshop 2026-04-12".to_string(),
+            "Privacy Act 1988".to_string(),
+        ];
+        let serialized = serialize(&doc, "body");
+        let ctx = sample_context();
+        let (meta, _) = deserialize(&serialized, &ctx).unwrap();
+        assert_eq!(meta.provenance, doc.provenance);
     }
 
     #[test]

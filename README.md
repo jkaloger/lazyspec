@@ -134,6 +134,9 @@ All document management is available as subcommands. Most accept `--json` for ma
 | `validate [--warnings]`              | Check document integrity and link consistency                         |
 | `fix [paths] [--dry-run]`            | Fix documents with broken or incomplete frontmatter                   |
 | `pin <id>`                           | Pin blob hashes onto `@ref` directives in a document                  |
+| `provenance add <id> <citation>`     | Append a citation to a document's provenance list                     |
+| `provenance remove <id> <citation>`  | Remove an exact-match citation from a document's provenance list      |
+| `provenance list [id]`               | List citations for a document, or for all documents grouped by id     |
 | `reservations list`                  | Show all reservation refs on the remote                               |
 | `reservations prune [--dry-run]`     | Remove refs for documents that already exist locally                  |
 
@@ -143,6 +146,30 @@ All document management is available as subcommands. Most accept `--json` for ma
 | --------------------------- | ------------------------------------------------ |
 | `-e`, `--expand-references` | Expand `@ref` directives into fenced code blocks |
 | `--max-ref-lines N`         | Max lines per expanded ref (default: 25)         |
+
+#### `provenance` Subcommands
+
+Cite the sources of truth that informed a document. Citations are free-form strings stored as a YAML list in frontmatter.
+
+```sh
+lazyspec provenance add RFC-001 "Workshop 2026-04-12"
+lazyspec provenance add RFC-001 "Privacy Act 1988"
+lazyspec provenance list RFC-001
+# Workshop 2026-04-12
+# Privacy Act 1988
+
+lazyspec provenance remove RFC-001 "Privacy Act 1988"
+lazyspec provenance list
+# RFC-001	Workshop 2026-04-12
+```
+
+All three subcommands accept `--json`. Shapes:
+
+- `add` / `remove`: `{ "doc": "...", "added"|"removed": "...", "provenance": [...] }`
+- `list <id>`: `{ "doc": "...", "provenance": [...] }`
+- `list` (no id): `{ "documents": [{ "id": "...", "path": "...", "provenance": [...] }, ...] }`
+
+`add` rejects empty citations. `remove` is exact-match and errors when the citation is absent.
 
 </details>
 

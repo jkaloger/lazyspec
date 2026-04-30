@@ -41,6 +41,9 @@ impl App {
         if self.link_editor.active {
             return self.handle_link_editor_key(code, root, config);
         }
+        if self.provenance_editor.active {
+            return self.handle_provenance_editor_key(code, root, config);
+        }
         #[cfg(feature = "agent")]
         if self.agent_dialog.active {
             return self.handle_agent_dialog_key(code, config);
@@ -133,6 +136,18 @@ impl App {
                 self.link_editor.query.push(c);
                 self.update_link_search();
             }
+            _ => {}
+        }
+    }
+
+    fn handle_provenance_editor_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
+        match code {
+            KeyCode::Esc => self.close_provenance_editor(),
+            KeyCode::Enter => {
+                let _ = self.submit_provenance(root, config);
+            }
+            KeyCode::Backspace => self.provenance_backspace(),
+            KeyCode::Char(c) => self.provenance_type_char(c),
             _ => {}
         }
     }
@@ -619,6 +634,7 @@ impl App {
             (KeyCode::Char('`'), _) => self.cycle_mode(),
             (KeyCode::Char('w'), _) => self.open_warnings(),
             (KeyCode::Char('s'), _) => self.open_status_picker(),
+            (KeyCode::Char('p'), _) => self.open_provenance_editor(),
             (KeyCode::Char('r'), _) if self.preview_tab == PreviewTab::Relations => {
                 self.open_link_editor();
             }

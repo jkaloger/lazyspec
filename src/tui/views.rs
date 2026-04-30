@@ -26,7 +26,7 @@ use status_bar::draw_status_bar;
 use overlays::draw_agent_dialog;
 use overlays::{
     draw_create_form, draw_delete_confirm, draw_gh_conflict, draw_help_overlay, draw_link_editor,
-    draw_search_overlay, draw_status_picker, draw_warnings_panel,
+    draw_provenance_editor, draw_search_overlay, draw_status_picker, draw_warnings_panel,
 };
 #[cfg(feature = "agent")]
 use panels::draw_agents_screen;
@@ -220,6 +220,10 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
         draw_link_editor(f, app);
     }
 
+    if app.provenance_editor.active {
+        draw_provenance_editor(f, app);
+    }
+
     #[cfg(feature = "agent")]
     if app.agent_dialog.active {
         draw_agent_dialog(f, app);
@@ -288,11 +292,12 @@ mod tests {
             "Test Title",
             &Status::Draft,
             &tags,
+            &[],
             false,
             false,
         );
 
-        assert_eq!(cells.len(), 4);
+        assert_eq!(cells.len(), 5);
 
         let id_dbg = cell_debug(&cells[0]);
         assert!(
@@ -343,11 +348,12 @@ mod tests {
             "Virtual Doc",
             &Status::Draft,
             &[],
+            &[],
             true,
             false,
         );
 
-        assert_eq!(cells.len(), 4);
+        assert_eq!(cells.len(), 5);
 
         let title_dbg = cell_debug(&cells[1]);
         assert!(
@@ -366,8 +372,15 @@ mod tests {
             "d".to_string(),
             "e".to_string(),
         ];
-        let cells =
-            panels::doc_row_cells_for_test("RFC-003", "Tags", &Status::Draft, &tags, false, false);
+        let cells = panels::doc_row_cells_for_test(
+            "RFC-003",
+            "Tags",
+            &Status::Draft,
+            &tags,
+            &[],
+            false,
+            false,
+        );
 
         let tags_dbg = cell_debug(&cells[3]);
         assert!(
@@ -409,12 +422,13 @@ mod tests {
             "GH Doc",
             &Status::Draft,
             &[],
+            &[],
             false,
             false,
             true,
         );
 
-        assert_eq!(cells.len(), 4);
+        assert_eq!(cells.len(), 5);
         let id_dbg = cell_debug(&cells[0]);
         assert!(
             id_dbg.contains("[gh]"),
@@ -435,6 +449,7 @@ mod tests {
             "FS Doc",
             &Status::Draft,
             &[],
+            &[],
             false,
             false,
             false,
@@ -454,6 +469,7 @@ mod tests {
             "ISSUE-002",
             "Dim GH",
             &Status::Draft,
+            &[],
             &[],
             false,
             true,
@@ -477,8 +493,15 @@ mod tests {
     #[test]
     fn doc_row_cells_dim_when_relations_focused() {
         let tags = vec!["x".to_string()];
-        let cells =
-            panels::doc_row_cells_for_test("RFC-004", "Dim", &Status::Accepted, &tags, false, true);
+        let cells = panels::doc_row_cells_for_test(
+            "RFC-004",
+            "Dim",
+            &Status::Accepted,
+            &tags,
+            &[],
+            false,
+            true,
+        );
 
         for (i, cell) in cells.iter().enumerate() {
             let dbg = cell_debug(cell);

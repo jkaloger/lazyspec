@@ -193,6 +193,7 @@ pub struct DocMeta {
     pub author: String,
     pub date: NaiveDate,
     pub tags: Vec<String>,
+    pub provenance: Vec<String>,
     pub related: Vec<Relation>,
     pub validate_ignore: bool,
     pub virtual_doc: bool,
@@ -209,6 +210,8 @@ struct RawFrontmatter {
     #[serde(deserialize_with = "deserialize_naive_date")]
     date: NaiveDate,
     tags: Vec<String>,
+    #[serde(default)]
+    provenance: Vec<String>,
     #[serde(default)]
     related: Vec<serde_yaml::Value>,
     #[serde(default, rename = "validate-ignore")]
@@ -275,6 +278,15 @@ impl DocMeta {
         let (frontmatter, _) = split_frontmatter(content)?;
         let raw: RawFrontmatter = serde_yaml::from_str(&frontmatter)?;
 
+        for entry in &raw.provenance {
+            if entry.is_empty() {
+                return Err(anyhow!(
+                    "provenance entry must not be empty (title: {})",
+                    raw.title
+                ));
+            }
+        }
+
         let related = raw
             .related
             .iter()
@@ -289,6 +301,7 @@ impl DocMeta {
             author: raw.author,
             date: raw.date,
             tags: raw.tags,
+            provenance: raw.provenance,
             related,
             validate_ignore: raw.validate_ignore,
             virtual_doc: false,
@@ -324,6 +337,7 @@ mod tests {
             author: String::new(),
             date: NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
             tags: vec![],
+            provenance: vec![],
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
@@ -360,5 +374,92 @@ mod tests {
         let mut single = [make_doc("2026-01-01", "only.md")];
         single.sort_by(DocMeta::sort_by_date);
         assert_eq!(single.len(), 1);
+    }
+
+    #[test]
+    fn provenance_loads_in_order() {
+        let content = r#"---
+title: "Doc"
+type: rfc
+status: draft
+author: a
+date: 2026-01-01
+tags: []
+provenance:
+  - "Workshop 2026-04-12"
+  - "Jane Doe"
+  - "Privacy Act 1988"
+---
+
+Body.
+"#;
+        let meta = DocMeta::parse(content).unwrap();
+        assert_eq!(
+            meta.provenance,
+            vec![
+                "Workshop 2026-04-12".to_string(),
+                "Jane Doe".to_string(),
+                "Privacy Act 1988".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn provenance_missing_defaults_empty() {
+        let content = r#"---
+title: "Doc"
+type: rfc
+status: draft
+author: a
+date: 2026-01-01
+tags: []
+---
+
+Body.
+"#;
+        let meta = DocMeta::parse(content).unwrap();
+        assert!(meta.provenance.is_empty());
+    }
+
+    #[test]
+    fn provenance_empty_list_loads() {
+        let content = r#"---
+title: "Doc"
+type: rfc
+status: draft
+author: a
+date: 2026-01-01
+tags: []
+provenance: []
+---
+
+Body.
+"#;
+        let meta = DocMeta::parse(content).unwrap();
+        assert!(meta.provenance.is_empty());
+    }
+
+    #[test]
+    fn provenance_empty_string_rejected() {
+        let content = r#"---
+title: "Doc"
+type: rfc
+status: draft
+author: a
+date: 2026-01-01
+tags: []
+provenance:
+  - ""
+  - "ok"
+---
+
+Body.
+"#;
+        let err = DocMeta::parse(content).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("empty"),
+            "expected error to mention empty, got: {}",
+            err
+        );
     }
 }

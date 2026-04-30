@@ -8,6 +8,7 @@ use ratatui::{
     },
     Frame,
 };
+use unicode_width::UnicodeWidthChar;
 
 use std::path::PathBuf;
 
@@ -212,15 +213,52 @@ fn display_name(path: &std::path::Path) -> &str {
     }
 }
 
-fn doc_table_widths() -> [Constraint; 6] {
+fn doc_table_widths() -> [Constraint; 7] {
     [
         Constraint::Length(1),  // gutter
         Constraint::Length(4),  // tree
         Constraint::Length(18), // ID
         Constraint::Fill(1),    // title
         Constraint::Length(12), // status
-        Constraint::Min(20),    // tags
+        Constraint::Length(24), // tags
+        Constraint::Min(20),    // provenance
     ]
+}
+
+fn truncate_with_ellipsis(s: &str, max_cols: usize) -> String {
+    if max_cols == 0 {
+        return String::new();
+    }
+    let total: usize = s
+        .chars()
+        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum();
+    if total <= max_cols {
+        return s.to_string();
+    }
+    if max_cols == 1 {
+        return "…".to_string();
+    }
+    let budget = max_cols - 1;
+    let mut acc = 0usize;
+    let mut out = String::new();
+    for c in s.chars() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if acc + w > budget {
+            break;
+        }
+        acc += w;
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
+fn provenance_cell_text(provenance: &[String], max_cols: usize) -> String {
+    if provenance.is_empty() {
+        return String::new();
+    }
+    truncate_with_ellipsis(&provenance.join(", "), max_cols)
 }
 
 /// Returns `true` when `elapsed_secs` exceeds twice the given `cache_ttl`.
@@ -258,6 +296,7 @@ fn doc_row_cells(
     title: &str,
     status: &Status,
     tags: &[String],
+    provenance: &[String],
     is_virtual: bool,
     dim: bool,
     is_gh: bool,
@@ -321,7 +360,11 @@ fn doc_row_cells(
     }
     let tags_cell = Cell::new(Line::from(tag_spans));
 
-    vec![id_cell, title_cell, status_cell, tags_cell]
+    let prov_text = provenance_cell_text(provenance, 20);
+    let prov_style = if dim { dim_style } else { normal_style };
+    let provenance_cell = Cell::new(Span::styled(prov_text, prov_style));
+
+    vec![id_cell, title_cell, status_cell, tags_cell, provenance_cell]
 }
 
 fn doc_row_for_node(
@@ -365,6 +408,11 @@ fn doc_row_for_node(
         .get(&node.path)
         .map(|doc| doc.tags.clone())
         .unwrap_or_default();
+    let provenance = app
+        .store
+        .get(&node.path)
+        .map(|doc| doc.provenance.clone())
+        .unwrap_or_default();
 
     let display_id = if node.has_duplicate_id {
         format!("! {}", node.id)
@@ -380,6 +428,7 @@ fn doc_row_for_node(
         &node.title,
         &node.status,
         &tags,
+        &provenance,
         node.is_virtual,
         dim,
         is_gh,
@@ -520,6 +569,68 @@ pub fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+pub(super) fn build_preview_header_lines(doc: &DocMeta, expanding: bool) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::from(Span::styled(
+            format!(" {}", doc.title),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::raw(" Type: "),
+            Span::styled(
+                format!("{}", doc.doc_type),
+                Style::default().fg(Color::White),
+            ),
+            Span::raw("  Status: "),
+            Span::styled(
+                format!("{}", doc.status),
+                Style::default().fg(status_color(&doc.status)),
+            ),
+            Span::raw("  Author: "),
+            Span::raw(doc.author.clone()),
+        ]),
+        Line::from(vec![Span::raw(format!(" Date: {}", doc.date))]),
+    ];
+
+    if !doc.tags.is_empty() {
+        let mut tag_spans: Vec<Span<'static>> = vec![Span::raw(" Tags: ")];
+        for (idx, tag) in doc.tags.iter().enumerate() {
+            if idx > 0 {
+                tag_spans.push(Span::raw(" "));
+            }
+            tag_spans.push(Span::styled(
+                format!("[{}]", tag),
+                Style::default().fg(tag_color(tag)),
+            ));
+        }
+        lines.push(Line::from(tag_spans));
+    }
+
+    if !doc.provenance.is_empty() {
+        let mut spans: Vec<Span<'static>> = vec![Span::raw(" Provenance: ")];
+        for (idx, entry) in doc.provenance.iter().enumerate() {
+            if idx > 0 {
+                spans.push(Span::raw(", "));
+            }
+            spans.push(Span::raw(entry.clone()));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    lines.push(Line::from(""));
+
+    if expanding {
+        lines.push(Line::from(Span::styled(
+            " [expanding refs...]",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    lines
+}
+
 pub fn render_document_preview(
     f: &mut Frame,
     app: &mut App,
@@ -541,54 +652,9 @@ pub fn render_document_preview(
         .cloned()
         .unwrap_or_default();
 
-    let mut lines = vec![
-        Line::from(Span::styled(
-            format!(" {}", doc.title),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::raw(" Type: "),
-            Span::styled(
-                format!("{}", doc.doc_type),
-                Style::default().fg(Color::White),
-            ),
-            Span::raw("  Status: "),
-            Span::styled(
-                format!("{}", doc.status),
-                Style::default().fg(status_color(&doc.status)),
-            ),
-            Span::raw("  Author: "),
-            Span::raw(&doc.author),
-        ]),
-        Line::from(vec![Span::raw(format!(" Date: {}", doc.date))]),
-    ];
-
-    if !doc.tags.is_empty() {
-        let mut tag_spans = vec![Span::raw(" Tags: ")];
-        for (idx, tag) in doc.tags.iter().enumerate() {
-            if idx > 0 {
-                tag_spans.push(Span::raw(" "));
-            }
-            tag_spans.push(Span::styled(
-                format!("[{}]", tag),
-                Style::default().fg(tag_color(tag)),
-            ));
-        }
-        lines.push(Line::from(tag_spans));
-    }
-
-    lines.push(Line::from(""));
-
-    if app.expansion_in_flight.as_ref() == Some(&doc.path) {
-        lines.push(Line::from(Span::styled(
-            " [expanding refs...]",
-            Style::default().fg(Color::Yellow),
-        )));
-    }
-
-    let header_lines: Vec<Line> = lines.clone();
+    let expanding = app.expansion_in_flight.as_ref() == Some(&doc.path);
+    let header_lines = build_preview_header_lines(doc, expanding);
+    let mut lines = header_lines.clone();
 
     let diagram_blocks = match &app.diagram_blocks_cache {
         Some((p, _, b)) if p == &doc.path => b.clone(),
@@ -989,6 +1055,7 @@ pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect, config: &Co
                 &doc.title,
                 &doc.status,
                 &doc.tags,
+                &doc.provenance,
                 doc.virtual_doc,
                 dim,
                 is_gh,
@@ -1284,23 +1351,30 @@ pub(super) fn doc_row_cells_for_test(
     title: &str,
     status: &Status,
     tags: &[String],
+    provenance: &[String],
     is_virtual: bool,
     dim: bool,
 ) -> Vec<Cell<'static>> {
-    doc_row_cells(id, title, status, tags, is_virtual, dim, false, false)
+    doc_row_cells(
+        id, title, status, tags, provenance, is_virtual, dim, false, false,
+    )
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn doc_row_cells_gh_for_test(
     id: &str,
     title: &str,
     status: &Status,
     tags: &[String],
+    provenance: &[String],
     is_virtual: bool,
     dim: bool,
     is_gh: bool,
 ) -> Vec<Cell<'static>> {
-    doc_row_cells(id, title, status, tags, is_virtual, dim, is_gh, false)
+    doc_row_cells(
+        id, title, status, tags, provenance, is_virtual, dim, is_gh, false,
+    )
 }
 
 #[cfg(test)]
@@ -1333,5 +1407,133 @@ mod tests {
         assert!(!is_cache_stale(3599, 1800));
         assert!(is_cache_stale(3600, 1800));
         assert!(is_cache_stale(3601, 1800));
+    }
+
+    #[test]
+    fn truncate_no_change_when_fits() {
+        assert_eq!(truncate_with_ellipsis("ab", 5), "ab");
+    }
+
+    #[test]
+    fn truncate_appends_ellipsis_when_overflows() {
+        assert_eq!(truncate_with_ellipsis("abcdef", 4), "abc…");
+    }
+
+    #[test]
+    fn truncate_zero_width_returns_empty() {
+        assert_eq!(truncate_with_ellipsis("abc", 0), "");
+    }
+
+    #[test]
+    fn truncate_one_width_returns_ellipsis() {
+        assert_eq!(truncate_with_ellipsis("abc", 1), "…");
+    }
+
+    fn cell_text(cell: &Cell) -> String {
+        format!("{:?}", cell)
+    }
+
+    #[test]
+    fn doc_row_cells_appends_provenance_cell() {
+        let provenance = vec!["Alice".to_string()];
+        let cells = doc_row_cells_for_test(
+            "RFC-001",
+            "Title",
+            &Status::Draft,
+            &[],
+            &provenance,
+            false,
+            false,
+        );
+        assert_eq!(cells.len(), 5);
+        let dbg = cell_text(&cells[4]);
+        assert!(
+            dbg.contains("Alice"),
+            "provenance cell should contain joined entries, got: {}",
+            dbg
+        );
+    }
+
+    #[test]
+    fn doc_row_cells_provenance_empty_when_list_empty() {
+        let cells =
+            doc_row_cells_for_test("RFC-001", "Title", &Status::Draft, &[], &[], false, false);
+        let dbg = cell_text(&cells[4]);
+        assert!(
+            !dbg.contains("Alice") && !dbg.contains('…'),
+            "empty provenance cell should not show entries, got: {}",
+            dbg
+        );
+        assert_eq!(provenance_cell_text(&[], 20), "");
+    }
+
+    #[test]
+    fn doc_row_cells_provenance_comma_joined() {
+        let provenance = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let text = provenance_cell_text(&provenance, 20);
+        assert_eq!(text, "A, B, C");
+    }
+
+    #[test]
+    fn doc_row_cells_provenance_truncated_overflow() {
+        let provenance = vec!["aaaaaaaaaaaaaaa".to_string(), "bbbbbbbbbbbbbbb".to_string()];
+        let text = provenance_cell_text(&provenance, 20);
+        assert!(
+            text.ends_with('…'),
+            "overflowing provenance should end with ellipsis, got: {}",
+            text
+        );
+    }
+
+    fn line_text(line: &Line) -> String {
+        line.spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>()
+    }
+
+    fn fixture_doc_meta() -> DocMeta {
+        use crate::engine::document::DocType;
+        use chrono::NaiveDate;
+        DocMeta {
+            id: "RFC-001".to_string(),
+            doc_type: DocType::new("rfc"),
+            title: "Test".to_string(),
+            status: Status::Draft,
+            author: "jkaloger".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 4, 29).unwrap(),
+            tags: vec![],
+            related: vec![],
+            provenance: vec![],
+            validate_ignore: false,
+            path: PathBuf::from("docs/rfcs/RFC-001.md"),
+            virtual_doc: false,
+        }
+    }
+
+    #[test]
+    fn preview_header_includes_provenance_when_present() {
+        let mut doc = fixture_doc_meta();
+        doc.provenance = vec!["X".to_string(), "Y".to_string()];
+        let lines = build_preview_header_lines(&doc, false);
+        let prov_line = lines
+            .iter()
+            .find(|l| line_text(l).contains("Provenance:"))
+            .expect("provenance line should be present");
+        let text = line_text(prov_line);
+        assert!(text.contains('X'), "should contain X, got: {}", text);
+        assert!(text.contains('Y'), "should contain Y, got: {}", text);
+    }
+
+    #[test]
+    fn preview_header_omits_provenance_when_empty() {
+        let doc = fixture_doc_meta();
+        let lines = build_preview_header_lines(&doc, false);
+        for line in &lines {
+            assert!(
+                !line_text(line).contains("Provenance:"),
+                "no line should mention Provenance when empty"
+            );
+        }
     }
 }

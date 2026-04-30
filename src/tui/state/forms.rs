@@ -162,6 +162,30 @@ impl LinkEditor {
     }
 }
 
+pub struct ProvenanceEditor {
+    pub active: bool,
+    pub doc_path: PathBuf,
+    pub input: String,
+    pub error: Option<String>,
+}
+
+impl Default for ProvenanceEditor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProvenanceEditor {
+    pub fn new() -> Self {
+        ProvenanceEditor {
+            active: false,
+            doc_path: PathBuf::new(),
+            input: String::new(),
+            error: None,
+        }
+    }
+}
+
 #[cfg(feature = "agent")]
 pub struct AgentDialog {
     pub active: bool,

@@ -338,6 +338,7 @@ fn parse_issue(issue: &GhIssue, type_name: &str, known_types: &[String]) -> (Doc
             .filter(|l| !l.name.starts_with("lazyspec:"))
             .map(|l| l.name.clone())
             .collect(),
+        provenance: vec![],
         related: vec![],
         validate_ignore: false,
         virtual_doc: false,
