@@ -3,7 +3,7 @@
   <br>lazyspec
 </h1>
 <p align="center">
-    A little TUI & CLI for project documentation.
+    A TUI+CLI for keeping track of project specs.
 </p>
 
 <p align="center">
@@ -15,6 +15,7 @@
   <a href="https://github.com/jkaloger/lazyspec/blob/main/flake.nix"><img src="https://img.shields.io/badge/nix-flake-5277C3?logo=nixos&logoColor=white" alt="Nix Flake"></a>
 </p>
 
+<!-- TODO: replace with VHS gif of TUI + workflow -->
 <img width="1864" height="1147" alt="screenshot of a terminal interface displaying codebase documentation, categorised by type" src="https://github.com/user-attachments/assets/91f308d1-8d03-4815-b2ec-fa445159c563" />
 
 > [!WARNING]
@@ -22,14 +23,15 @@
 
 ## Features
 
-Lazyspec manages project documentation as version-controlled markdown files with YAML frontmatter. Documents live in your repo, so agents and humans read from the same source of truth.
+- **Pluggable storage backends.** Filesystem, git refs, or GitHub Issues per document type. Same commands, same validation, mix-and-match.
+- **Distributed numbering via git refs.** Lease-based reservation prevents collisions across branches and agents.
+- **Typed links + cross-backend validation.** `implements`, `blocks`, `supersedes`, `related-to`. `lazyspec validate` exits non-zero in CI.
+- **`@ref` source expansion.** Embed `@ref src/foo.rs#Bar` in specs; `show -e` inlines code from git history. Symbol extraction for Rust and TypeScript. Pin hashes to lock to commits.
+- **DAG-driven work sequencing.** Derives a work graph from `blocks` relationships. `lazyspec next` surfaces unblocked work; the TUI has a planning view.
+- **TUI dashboard.** Fuzzy search, markdown preview, live file watching, git status gutters. No config to start.
+- **Customisable!** Config based setup allows you to customise types, relationships, validation, backends, and more.
 
-- Create, update, link, and validate documents. Typed relationships (`implements`, `supersedes`, `blocks`, `related-to`) keep the chain explicit.
-- Catch broken links, orphaned documents, and incomplete frontmatter before they rot. `lazyspec validate` exits non-zero on errors, so it slots into CI.
-- Embed `@ref` directives in your specs to point at source code. Lazyspec expands them inline using `git show`, with symbol-level extraction for Rust and TypeScript.
-- Fuzzy search, markdown preview, live file watching, and document creation without leaving the terminal.
-- Every command supports `--json` output for automation and agent integration.
-- Define your own types, templates, and directory layout in `.lazyspec.toml`.
+Every command supports `--json`. Document content and metadata are retrievable programmatically, so agents and humans share one interface.
 
 ## Install
 
@@ -78,29 +80,19 @@ Add the appropriate line to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.) t
 
 ## Skills
 
-Lazyspec includes a set of agent skills that enforce its workflow:
-
-| Skill              | Purpose                                                              |
-| ------------------ | -------------------------------------------------------------------- |
-| `plan-work`        | Detect existing artifacts and determine the right entry point       |
-| `write-rfc`        | Propose a design with intent, interface sketches, and identify stories |
-| `create-story`     | Create stories with acceptance criteria linked to an RFC             |
-| `resolve-context`  | Gather full document chain (RFC -> Story -> Iteration) before work  |
-| `create-iteration` | Plan an iteration with task breakdown and test plan                 |
-| `build`            | Implement tasks from an iteration with subagent dispatch             |
-| `review-iteration` | Two-stage review -- AC compliance first, then code quality           |
-| `create-audit`     | Criteria-based review (health check, security, accessibility, etc.)  |
-
+Lazyspec ships agent skills that drive its workflow (RFC -> Story -> Iteration -> build -> review). See [`skills/README.md`](skills/README.md).
 
 ## Usage
 
 ### Quick Start
 
-Initialise a new project, then launch the TUI:
-
 ```sh
 lazyspec init
-lazyspec
+lazyspec create rfc "auth redesign"
+lazyspec create story "login form"
+lazyspec link STORY-001 implements RFC-001
+lazyspec validate
+lazyspec                      # launch TUI
 ```
 
 > [!TIP]
@@ -109,12 +101,14 @@ lazyspec
 
 ### TUI
 
-Running `lazyspec` with no subcommand opens the interactive dashboard. It provides fuzzy search, markdown preview, document creation, and live file watching -- documents update automatically when changed on disk.
+Running `lazyspec` with no subcommand opens the interactive dashboard. Fuzzy search, markdown preview, document creation, and live file watching -- documents update automatically when changed on disk.
+
+<img width="1864" height="1147" alt="screenshot of a terminal interface displaying codebase documentation, categorised by type" src="https://github.com/user-attachments/assets/91f308d1-8d03-4815-b2ec-fa445159c563" />
 
 <details>
 <summary><h3>CLI</h3></summary>
 
-All document management is available as subcommands. Most accept `--json` for machine-readable output.
+All document management is available as subcommands. Most accept `--json` for machine-readable output. See `lazyspec help <command>` for full flag reference.
 
 | Command                              | Description                                                           |
 | ------------------------------------ | --------------------------------------------------------------------- |
@@ -147,29 +141,15 @@ All document management is available as subcommands. Most accept `--json` for ma
 | `-e`, `--expand-references` | Expand `@ref` directives into fenced code blocks |
 | `--max-ref-lines N`         | Max lines per expanded ref (default: 25)         |
 
-#### `provenance` Subcommands
+#### Provenance
 
 Cite the sources of truth that informed a document. Citations are free-form strings stored as a YAML list in frontmatter.
 
 ```sh
 lazyspec provenance add RFC-001 "Workshop 2026-04-12"
-lazyspec provenance add RFC-001 "Privacy Act 1988"
 lazyspec provenance list RFC-001
 # Workshop 2026-04-12
-# Privacy Act 1988
-
-lazyspec provenance remove RFC-001 "Privacy Act 1988"
-lazyspec provenance list
-# RFC-001	Workshop 2026-04-12
 ```
-
-All three subcommands accept `--json`. Shapes:
-
-- `add` / `remove`: `{ "doc": "...", "added"|"removed": "...", "provenance": [...] }`
-- `list <id>`: `{ "doc": "...", "provenance": [...] }`
-- `list` (no id): `{ "documents": [{ "id": "...", "path": "...", "provenance": [...] }, ...] }`
-
-`add` rejects empty citations. `remove` is exact-match and errors when the citation is absent.
 
 </details>
 
@@ -253,6 +233,30 @@ prefix = "SPEC"
 icon = "◆"
 ```
 
+### Storage Backends
+
+Each type can be stored on a different backend via `store`. The same commands and validation work across all of them.
+
+| Backend         | When to use                                                             |
+| --------------- | ----------------------------------------------------------------------- |
+| `filesystem`    | Default. Markdown files committed to the repo.                          |
+| `git-ref`       | Documents stored as git refs. Useful for transient or high-churn types. |
+| `github-issues` | Documents stored as GitHub Issues. Surfaces state in the GitHub UI.     |
+
+```toml
+[[types]]
+name = "rfc"
+store = "filesystem"
+
+[[types]]
+name = "iteration"
+store = "github-issues"
+
+[github]
+owner = "jkaloger"
+repo = "lazyspec"
+```
+
 ### Validation Rules
 
 Validation rules define structural constraints between document types. Two shapes are supported:
@@ -281,10 +285,10 @@ severity = "error"
 
 Document numbers are assigned automatically during `create`. Three strategies are available per type:
 
-| Strategy      | Behaviour |
-|---------------|-----------|
-| `incremental` | Next sequential integer from existing files (default) |
-| `sqids`       | Short hash-like IDs derived from a timestamp, configured via `[numbering.sqids]` |
+| Strategy      | Behaviour                                                                                 |
+| ------------- | ----------------------------------------------------------------------------------------- |
+| `incremental` | Next sequential integer from existing files (default)                                     |
+| `sqids`       | Short hash-like IDs derived from a timestamp, configured via `[numbering.sqids]`          |
 | `reserved`    | Reserves numbers on a git remote before creating files, preventing distributed collisions |
 
 Reserved numbering uses git custom refs (`refs/reservations/*`) to coordinate across branches. It wraps either incremental or sqids formatting with an atomic push-based lock, so two people never get the same number.
