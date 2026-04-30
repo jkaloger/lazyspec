@@ -1367,9 +1367,9 @@ impl App {
         let mut new_list = doc.provenance.clone();
         new_list.push(trimmed);
 
-        if let Err(e) = crate::engine::provenance::set_provenance(
-            root, config, &type_name, &doc_id, &new_list,
-        ) {
+        if let Err(e) =
+            crate::engine::provenance::set_provenance(root, config, &type_name, &doc_id, &new_list)
+        {
             self.provenance_editor.error = Some(e.to_string());
             return Ok(());
         }

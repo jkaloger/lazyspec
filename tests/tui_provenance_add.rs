@@ -197,8 +197,7 @@ fn close_provenance_editor_clears_state() {
 #[test]
 fn submit_provenance_engine_error_keeps_overlay_open() {
     let fixture = TestFixture::new();
-    let path =
-        write_rfc_with_provenance(&fixture, "RFC-001-test.md", "Test RFC", &[]);
+    let path = write_rfc_with_provenance(&fixture, "RFC-001-test.md", "Test RFC", &[]);
     let mut app = make_app(&fixture);
 
     app.selected_type = 0;
