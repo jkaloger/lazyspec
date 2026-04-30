@@ -8,6 +8,7 @@ use crate::engine::store::Store;
 use super::FieldFixResult;
 
 const REQUIRED_FIELDS: &[&str] = &["title", "type", "status", "author", "date", "tags"];
+const PRIORITY_DEFAULT: &str = "should";
 
 pub(super) fn collect_field_fixes(
     root: &Path,
@@ -182,4 +183,223 @@ fn git_author() -> String {
             }
         })
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+pub(super) fn collect_priority_fills(
+    root: &Path,
+    store: &Store,
+    config: &Config,
+    paths: &[String],
+    dry_run: bool,
+    fs: &dyn FileSystem,
+) -> Vec<FieldFixResult> {
+    let path_filter: Option<std::collections::HashSet<&str>> = if paths.is_empty() {
+        None
+    } else {
+        Some(paths.iter().map(|s| s.as_str()).collect())
+    };
+
+    let mut results = Vec::new();
+    for doc in store.all_docs() {
+        if doc.validate_ignore {
+            continue;
+        }
+        if doc.priority.is_some() {
+            continue;
+        }
+        let Some(td) = config.type_by_name(doc.doc_type.as_str()) else {
+            continue;
+        };
+        if !td.resolved_requires_priority() {
+            continue;
+        }
+
+        let path_str = doc.path.to_string_lossy().to_string();
+        if let Some(ref filter) = path_filter {
+            if !filter.contains(path_str.as_str()) {
+                continue;
+            }
+        }
+
+        if let Ok(result) = fix_priority_file(root, &path_str, dry_run, fs) {
+            results.push(result);
+        }
+    }
+    results
+}
+
+fn fix_priority_file(
+    root: &Path,
+    path: &str,
+    dry_run: bool,
+    fs: &dyn FileSystem,
+) -> anyhow::Result<FieldFixResult> {
+    let full_path = root.join(path);
+    let content = fs.read_to_string(&full_path)?;
+
+    let (yaml_str, body) = split_frontmatter(&content)?;
+    let value: serde_yaml::Value = serde_yaml::from_str(&yaml_str)?;
+    let mut mapping = match value {
+        serde_yaml::Value::Mapping(m) => m,
+        _ => serde_yaml::Mapping::new(),
+    };
+
+    let key = serde_yaml::Value::String("priority".to_string());
+    let mut fields_added = Vec::new();
+    if !mapping.contains_key(&key) {
+        mapping.insert(
+            key,
+            serde_yaml::Value::String(PRIORITY_DEFAULT.to_string()),
+        );
+        fields_added.push("priority".to_string());
+    }
+
+    let written = if !dry_run && !fields_added.is_empty() {
+        let new_yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(mapping))?;
+        let output = format!("---\n{}---\n{}", new_yaml, body);
+        fs.write(&full_path, &output)?;
+        true
+    } else {
+        false
+    };
+
+    Ok(FieldFixResult {
+        path: path.to_string(),
+        fields_added,
+        written,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::config::Config;
+    use crate::engine::fs::RealFileSystem;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn write_doc(root: &Path, rel: &str, content: &str) {
+        let full = root.join(rel);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&full, content).unwrap();
+    }
+
+    fn story_no_priority() -> &'static str {
+        concat!(
+            "---\n",
+            "title: \"Login flow\"\n",
+            "type: story\n",
+            "status: draft\n",
+            "author: \"alice\"\n",
+            "date: 2026-01-01\n",
+            "tags: []\n",
+            "---\n",
+            "Story body content here.\n",
+        )
+    }
+
+    fn story_with_priority() -> &'static str {
+        concat!(
+            "---\n",
+            "title: \"Login flow\"\n",
+            "type: story\n",
+            "status: draft\n",
+            "author: \"alice\"\n",
+            "date: 2026-01-01\n",
+            "tags: []\n",
+            "priority: must\n",
+            "---\n",
+            "Story body content here.\n",
+        )
+    }
+
+    fn rfc_no_priority() -> &'static str {
+        concat!(
+            "---\n",
+            "title: \"Some RFC\"\n",
+            "type: rfc\n",
+            "status: draft\n",
+            "author: \"alice\"\n",
+            "date: 2026-01-01\n",
+            "tags: []\n",
+            "---\n",
+            "RFC body.\n",
+        )
+    }
+
+    #[test]
+    fn ac1_story_without_priority_gets_should_inserted() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let rel = "docs/stories/STORY-001-login.md";
+        write_doc(root, rel, story_no_priority());
+
+        let config = Config::default();
+        let store = Store::load_with_fs(root, &config, &RealFileSystem, None).unwrap();
+
+        let results =
+            collect_priority_fills(root, &store, &config, &[], false, &RealFileSystem);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].fields_added, vec!["priority".to_string()]);
+        assert!(results[0].written);
+
+        let new_content = fs::read_to_string(root.join(rel)).unwrap();
+        let (yaml_str, body) = split_frontmatter(&new_content).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml_str).unwrap();
+        assert_eq!(
+            parsed.get("priority").and_then(|v| v.as_str()),
+            Some("should")
+        );
+        assert_eq!(body.trim(), "Story body content here.");
+    }
+
+    #[test]
+    fn ac2_story_with_existing_priority_is_noop() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let rel = "docs/stories/STORY-001-login.md";
+        write_doc(root, rel, story_with_priority());
+        let original = fs::read_to_string(root.join(rel)).unwrap();
+
+        let config = Config::default();
+        let store = Store::load_with_fs(root, &config, &RealFileSystem, None).unwrap();
+
+        let results =
+            collect_priority_fills(root, &store, &config, &[], false, &RealFileSystem);
+
+        // Either the doc is filtered (priority Some) so no result is produced,
+        // or a result is produced with empty fields_added. Both are acceptable
+        // no-ops; either way file content must be unchanged.
+        for r in &results {
+            assert!(r.fields_added.is_empty());
+            assert!(!r.written);
+        }
+        let after = fs::read_to_string(root.join(rel)).unwrap();
+        assert_eq!(original, after);
+    }
+
+    #[test]
+    fn ac3_rfc_without_priority_is_noop() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let rel = "docs/rfcs/RFC-001-thing.md";
+        write_doc(root, rel, rfc_no_priority());
+        let original = fs::read_to_string(root.join(rel)).unwrap();
+
+        let config = Config::default();
+        let store = Store::load_with_fs(root, &config, &RealFileSystem, None).unwrap();
+
+        let results =
+            collect_priority_fills(root, &store, &config, &[], false, &RealFileSystem);
+
+        assert!(
+            results.is_empty(),
+            "rfc should not appear in priority fill results"
+        );
+        let after = fs::read_to_string(root.join(rel)).unwrap();
+        assert_eq!(original, after);
+    }
 }

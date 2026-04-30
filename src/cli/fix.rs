@@ -14,7 +14,7 @@ use crate::engine::fs::FileSystem;
 use crate::engine::store::Store;
 
 use conflicts::collect_conflict_fixes;
-use fields::collect_field_fixes;
+use fields::{collect_field_fixes, collect_priority_fills};
 use output::format_human;
 use relations::collect_relation_fixes;
 use renumber::collect_renumber_output;
@@ -218,7 +218,9 @@ fn plan_field_and_conflict_fixes(
     dry_run: bool,
     fs: &dyn FileSystem,
 ) -> FixOutput {
-    let field_fixes = collect_field_fixes(root, store, config, paths, dry_run, fs);
+    let mut field_fixes = collect_field_fixes(root, store, config, paths, dry_run, fs);
+    let priority_fixes = collect_priority_fills(root, store, config, paths, dry_run, fs);
+    field_fixes.extend(priority_fixes);
     let conflict_fixes = collect_conflict_fixes(root, store, config, dry_run, fs);
     let relation_fixes = collect_relation_fixes(root, store, dry_run, fs);
     FixOutput {

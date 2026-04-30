@@ -10,7 +10,9 @@ tags:
 - mermaid
 related:
 - implements: RFC-017
+priority: should
 ---
+
 
 
 

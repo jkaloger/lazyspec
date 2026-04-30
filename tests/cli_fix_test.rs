@@ -476,6 +476,130 @@ fn fix_no_relation_fixes_when_already_ids() {
 }
 
 #[test]
+fn fix_priority_dry_run_reports_fill_without_writing() {
+    // AC4: --dry-run reports planned fills, file unchanged on disk.
+    let fixture = common::TestFixture::new();
+    let rel = "docs/stories/STORY-001-login.md";
+    let original = "---\ntitle: \"Login\"\ntype: story\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\nbody\n";
+    fixture.write_doc(rel, original);
+
+    let store = fixture.store();
+    let output = lazyspec::cli::fix::run_json(
+        fixture.root(),
+        &store,
+        &fixture.config(),
+        &[],
+        true,
+        &RealFileSystem,
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let arr = parsed["field_fixes"].as_array().unwrap();
+    let entry = arr
+        .iter()
+        .find(|e| {
+            e["fields_added"]
+                .as_array()
+                .map(|fs| fs.iter().any(|f| f.as_str() == Some("priority")))
+                .unwrap_or(false)
+        })
+        .expect("a field_fixes entry should report priority backfill");
+    assert!(!entry["written"].as_bool().unwrap());
+
+    let after = std::fs::read_to_string(fixture.root().join(rel)).unwrap();
+    assert_eq!(after, original, "dry run must not modify file on disk");
+}
+
+#[test]
+fn fix_priority_writes_should_to_story_frontmatter() {
+    // AC5: --json output reports each backfill, file content has priority: should.
+    let fixture = common::TestFixture::new();
+    let rel = "docs/stories/STORY-001-login.md";
+    fixture.write_doc(
+        rel,
+        "---\ntitle: \"Login\"\ntype: story\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\nbody\n",
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::fix::run_json(
+        fixture.root(),
+        &store,
+        &fixture.config(),
+        &[],
+        false,
+        &RealFileSystem,
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let arr = parsed["field_fixes"].as_array().unwrap();
+    let entry = arr
+        .iter()
+        .find(|e| {
+            e["fields_added"]
+                .as_array()
+                .map(|fs| fs.iter().any(|f| f.as_str() == Some("priority")))
+                .unwrap_or(false)
+        })
+        .expect("a field_fixes entry should report priority backfill");
+    assert!(entry["written"].as_bool().unwrap());
+
+    let content = std::fs::read_to_string(fixture.root().join(rel)).unwrap();
+    let (yaml_str, _) = split_frontmatter(&content).unwrap();
+    let value: serde_yaml::Value = serde_yaml::from_str(&yaml_str).unwrap();
+    assert_eq!(
+        value.get("priority").and_then(|v| v.as_str()),
+        Some("should"),
+    );
+}
+
+#[test]
+fn fix_priority_then_validate_clean() {
+    // AC6: post-fix repo validates with no `priority field required` errors.
+    let fixture = common::TestFixture::new();
+    fixture.write_doc(
+        "docs/stories/STORY-001-a.md",
+        "---\ntitle: \"A\"\ntype: story\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_doc(
+        "docs/stories/STORY-002-b.md",
+        "---\ntitle: \"B\"\ntype: story\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_doc(
+        "docs/iterations/ITERATION-001-c.md",
+        "---\ntitle: \"C\"\ntype: iteration\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-d.md",
+        "---\ntitle: \"D\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    let store = fixture.store();
+    lazyspec::cli::fix::run_json(
+        fixture.root(),
+        &store,
+        &fixture.config(),
+        &[],
+        false,
+        &RealFileSystem,
+    );
+
+    // Reload store post-fix and run validation.
+    let store_after = fixture.store();
+    let validate_json =
+        lazyspec::cli::validate::run_json(&store_after, &fixture.config(), &[]);
+    let parsed: serde_json::Value = serde_json::from_str(&validate_json).unwrap();
+    let errors = parsed["errors"].as_array().unwrap();
+    for err in errors {
+        let s = err.as_str().unwrap_or("");
+        assert!(
+            !s.contains("priority field required"),
+            "unexpected priority error post-fix: {}",
+            s
+        );
+    }
+}
+
+#[test]
 fn fix_human_output_relation_migration() {
     let fixture = common::TestFixture::new();
 

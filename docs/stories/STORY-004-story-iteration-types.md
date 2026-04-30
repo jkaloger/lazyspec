@@ -10,7 +10,9 @@ tags:
 - validation
 related:
 - implements: RFC-002
+priority: should
 ---
+
 
 
 ## Context

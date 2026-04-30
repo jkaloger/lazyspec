@@ -10,7 +10,9 @@ tags:
 - dashboard
 related:
 - implements: RFC-001
+priority: should
 ---
+
 
 
 ## Context

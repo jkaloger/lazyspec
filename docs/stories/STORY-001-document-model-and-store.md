@@ -10,7 +10,9 @@ tags:
 - store
 related:
 - implements: RFC-001
+priority: should
 ---
+
 
 
 ## Context

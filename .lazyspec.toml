@@ -47,6 +47,7 @@ plural = "iterations"
 dir = "docs/iterations"
 prefix = "ITERATION"
 icon = "◆"
+requires_priority = false
 
 [[types]]
 name = "adr"

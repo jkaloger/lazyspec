@@ -7,7 +7,9 @@ date: 2026-03-20
 tags: []
 related:
 - implements: docs/rfcs/RFC-028-git-based-document-number-reservation.md
+priority: should
 ---
+
 
 
 
