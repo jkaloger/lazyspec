@@ -29,6 +29,7 @@ unicode-width = "0.2"
 sqids = "0.4"
 pulldown-cmark = "0.13"
 indicatif = "0.17"
+petgraph = "0.8"
 
 [features]
 default = []

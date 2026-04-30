@@ -19,6 +19,7 @@ pub mod lease;
 pub mod provenance;
 pub mod refs;
 pub mod reservation;
+pub mod sequencing;
 pub mod store;
 pub mod store_dispatch;
 pub mod symbols;
