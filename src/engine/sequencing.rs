@@ -2,7 +2,8 @@ use crate::engine::document::{DocMeta, RelationType, Status};
 use crate::engine::store::Store;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
-use std::collections::HashMap;
+use petgraph::Direction;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EdgeKind {
@@ -46,9 +47,51 @@ pub struct CycleError {
     pub ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct NextOpts {
+    pub include_leased: bool,
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadyKind {
+    Claimable,
+    NeedsChildren,
+    NeedsStatusUpdate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadyCandidate {
+    pub id: String,
+    pub kind: ReadyKind,
+    pub lessee: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bottleneck {
+    pub id: String,
+    pub gates: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphWarning {
+    Cycle { ids: Vec<String> },
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NextResult {
+    pub ready: Vec<ReadyCandidate>,
+    pub bottlenecks: Vec<Bottleneck>,
+    pub warnings: Vec<GraphWarning>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LeaseView {
+    pub held: HashMap<String, String>,
+}
+
 pub struct Graph {
     inner: petgraph::Graph<String, EdgeKind>,
-    #[allow(dead_code)]
     index: HashMap<String, NodeIndex>,
 }
 
@@ -140,6 +183,14 @@ impl Graph {
             })
     }
 
+    fn node_idx(&self, id: &str) -> Option<NodeIndex> {
+        self.index.get(id).copied()
+    }
+
+    fn id_of(&self, idx: NodeIndex) -> &str {
+        self.inner.node_weight(idx).unwrap().as_str()
+    }
+
     fn edges_of(&self, kind: EdgeKind) -> impl Iterator<Item = (&str, &str)> {
         self.inner
             .edge_references()
@@ -228,6 +279,289 @@ impl Graph {
             .map(|idx| NodeRef(self.inner.node_weight(idx).unwrap().clone()))
             .collect()
     }
+}
+
+/// Smart-traversal entry point. Pure: same input → same output.
+///
+/// Algorithm summary (RFC-041):
+/// 1. Cycle-check first; cycles are reported as warnings and excluded from
+///    candidate consideration but do not abort the traversal.
+/// 2. Optional `opts.scope` restricts the considered node set to the scope id
+///    plus its `Implements`-descendants (transitive children).
+/// 3. A node is a candidate iff every incoming `Blocks` edge originates at a
+///    terminal node and the node itself is non-terminal.
+/// 4. For each candidate, examine its `Implements`-descendants (incoming
+///    `Implements` edges, transitive). If any descendant is itself a non-
+///    terminal viable candidate, hide the parent and surface those descendants
+///    instead. If all descendants are terminal but self is non-terminal,
+///    classify as `NeedsStatusUpdate`. Leaf candidates classify by doc type:
+///    decomposing types (`rfc`, `story`) → `NeedsChildren`, others →
+///    `Claimable`.
+/// 5. Apply lease filtering per `opts.include_leased`.
+/// 6. Bottlenecks: for each non-terminal node, count downstream non-terminal
+///    nodes reachable via outgoing `Blocks` edges. Top three by count
+///    (desc, id-asc tiebreak); no padding.
+pub fn next_ready(
+    graph: &Graph,
+    docs: &[DocMeta],
+    opts: &NextOpts,
+    leases: &LeaseView,
+) -> NextResult {
+    let docs_by_id: HashMap<&str, &DocMeta> =
+        docs.iter().map(|d| (d.id.as_str(), d)).collect();
+
+    let mut warnings: Vec<GraphWarning> = Vec::new();
+    let mut excluded: HashSet<NodeIndex> = HashSet::new();
+    if let Err(cycle) = graph.cycle_check() {
+        let mut ids = cycle.ids.clone();
+        ids.sort();
+        ids.dedup();
+        for id in &ids {
+            if let Some(idx) = graph.node_idx(id) {
+                excluded.insert(idx);
+            }
+        }
+        warnings.push(GraphWarning::Cycle { ids });
+    }
+
+    let scope_set: Option<HashSet<NodeIndex>> = opts.scope.as_deref().and_then(|root| {
+        graph.node_idx(root).map(|root_idx| {
+            let mut set = HashSet::new();
+            set.insert(root_idx);
+            let mut stack = vec![root_idx];
+            while let Some(n) = stack.pop() {
+                for e in graph.inner.edges_directed(n, Direction::Incoming) {
+                    if *e.weight() == EdgeKind::Implements {
+                        let child = e.source();
+                        if set.insert(child) {
+                            stack.push(child);
+                        }
+                    }
+                }
+            }
+            set
+        })
+    });
+
+    let in_scope = |idx: NodeIndex| -> bool {
+        if excluded.contains(&idx) {
+            return false;
+        }
+        match &scope_set {
+            Some(s) => s.contains(&idx),
+            None => true,
+        }
+    };
+
+    let is_node_terminal = |idx: NodeIndex| -> bool {
+        let id = graph.id_of(idx);
+        docs_by_id.get(id).map(|d| is_terminal(d)).unwrap_or(false)
+    };
+
+    let blocks_cleared = |idx: NodeIndex| -> bool {
+        graph
+            .inner
+            .edges_directed(idx, Direction::Incoming)
+            .filter(|e| *e.weight() == EdgeKind::Blocks)
+            .all(|e| is_node_terminal(e.source()))
+    };
+
+    let implements_children = |idx: NodeIndex| -> Vec<NodeIndex> {
+        graph
+            .inner
+            .edges_directed(idx, Direction::Incoming)
+            .filter(|e| *e.weight() == EdgeKind::Implements)
+            .map(|e| e.source())
+            .collect()
+    };
+
+    let implements_descendants = |idx: NodeIndex| -> Vec<NodeIndex> {
+        let mut out: Vec<NodeIndex> = Vec::new();
+        let mut seen: HashSet<NodeIndex> = HashSet::new();
+        let mut queue: VecDeque<NodeIndex> = VecDeque::new();
+        for c in implements_children(idx) {
+            if seen.insert(c) {
+                queue.push_back(c);
+            }
+        }
+        while let Some(n) = queue.pop_front() {
+            out.push(n);
+            for c in implements_children(n) {
+                if seen.insert(c) {
+                    queue.push_back(c);
+                }
+            }
+        }
+        out
+    };
+
+    let classify_leaf = |idx: NodeIndex| -> ReadyKind {
+        let id = graph.id_of(idx);
+        match docs_by_id.get(id).map(|d| d.doc_type.as_str()) {
+            Some("rfc") | Some("story") => ReadyKind::NeedsChildren,
+            _ => ReadyKind::Claimable,
+        }
+    };
+
+    #[allow(clippy::too_many_arguments)]
+    fn surface(
+        idx: NodeIndex,
+        excluded: &HashSet<NodeIndex>,
+        scope_check: &dyn Fn(NodeIndex) -> bool,
+        is_term: &dyn Fn(NodeIndex) -> bool,
+        blocks_ok: &dyn Fn(NodeIndex) -> bool,
+        impl_desc: &dyn Fn(NodeIndex) -> Vec<NodeIndex>,
+        leaf_kind: &dyn Fn(NodeIndex) -> ReadyKind,
+        out: &mut Vec<(NodeIndex, ReadyKind)>,
+        seen: &mut HashSet<NodeIndex>,
+    ) {
+        if excluded.contains(&idx) || !scope_check(idx) {
+            return;
+        }
+        if is_term(idx) {
+            return;
+        }
+        if !blocks_ok(idx) {
+            return;
+        }
+
+        let descendants = impl_desc(idx);
+        let nonterm_desc: Vec<NodeIndex> = descendants
+            .iter()
+            .copied()
+            .filter(|d| !is_term(*d))
+            .collect();
+
+        if nonterm_desc.is_empty() {
+            let kind = if descendants.is_empty() {
+                leaf_kind(idx)
+            } else {
+                ReadyKind::NeedsStatusUpdate
+            };
+            if seen.insert(idx) {
+                out.push((idx, kind));
+            }
+            return;
+        }
+
+        for d in nonterm_desc {
+            surface(
+                d, excluded, scope_check, is_term, blocks_ok, impl_desc, leaf_kind, out, seen,
+            );
+        }
+    }
+
+    let mut surfaced: Vec<(NodeIndex, ReadyKind)> = Vec::new();
+    let mut seen: HashSet<NodeIndex> = HashSet::new();
+    for idx in graph.inner.node_indices() {
+        if !in_scope(idx) {
+            continue;
+        }
+        if is_node_terminal(idx) {
+            continue;
+        }
+        if !blocks_cleared(idx) {
+            continue;
+        }
+        // Only kick off surface from a candidate parent; descendants are
+        // surfaced recursively from within. To avoid double-walking the same
+        // subtree, `seen` dedupes.
+        surface(
+            idx,
+            &excluded,
+            &in_scope,
+            &is_node_terminal,
+            &blocks_cleared,
+            &implements_descendants,
+            &classify_leaf,
+            &mut surfaced,
+            &mut seen,
+        );
+    }
+
+    let mut ready: Vec<ReadyCandidate> = Vec::new();
+    for (idx, kind) in surfaced {
+        let id = graph.id_of(idx).to_string();
+        match leases.held.get(&id) {
+            Some(agent) => {
+                if opts.include_leased {
+                    ready.push(ReadyCandidate {
+                        id,
+                        kind,
+                        lessee: Some(agent.clone()),
+                    });
+                }
+            }
+            None => ready.push(ReadyCandidate {
+                id,
+                kind,
+                lessee: None,
+            }),
+        }
+    }
+    ready.sort_by(|a, b| a.id.cmp(&b.id));
+    ready.dedup_by(|a, b| a.id == b.id);
+
+    let bottlenecks = compute_bottlenecks(graph, &docs_by_id, &excluded);
+
+    NextResult {
+        ready,
+        bottlenecks,
+        warnings,
+    }
+}
+
+fn compute_bottlenecks(
+    graph: &Graph,
+    docs_by_id: &HashMap<&str, &DocMeta>,
+    excluded: &HashSet<NodeIndex>,
+) -> Vec<Bottleneck> {
+    let is_term = |idx: NodeIndex| -> bool {
+        let id = graph.inner.node_weight(idx).unwrap().as_str();
+        docs_by_id.get(id).map(|d| is_terminal(d)).unwrap_or(false)
+    };
+
+    let mut counts: Vec<Bottleneck> = Vec::new();
+    for n in graph.inner.node_indices() {
+        if excluded.contains(&n) {
+            continue;
+        }
+        if is_term(n) {
+            continue;
+        }
+        let mut seen: HashSet<NodeIndex> = HashSet::new();
+        let mut queue: VecDeque<NodeIndex> = VecDeque::new();
+        for e in graph.inner.edges_directed(n, Direction::Outgoing) {
+            if *e.weight() == EdgeKind::Blocks {
+                let t = e.target();
+                if !excluded.contains(&t) && seen.insert(t) {
+                    queue.push_back(t);
+                }
+            }
+        }
+        let mut gates: usize = 0;
+        while let Some(m) = queue.pop_front() {
+            if !is_term(m) {
+                gates += 1;
+            }
+            for e in graph.inner.edges_directed(m, Direction::Outgoing) {
+                if *e.weight() == EdgeKind::Blocks {
+                    let t = e.target();
+                    if !excluded.contains(&t) && seen.insert(t) {
+                        queue.push_back(t);
+                    }
+                }
+            }
+        }
+        if gates > 0 {
+            let id = graph.inner.node_weight(n).unwrap().clone();
+            counts.push(Bottleneck { id, gates });
+        }
+    }
+
+    counts.sort_by(|a, b| b.gates.cmp(&a.gates).then_with(|| a.id.cmp(&b.id)));
+    counts.truncate(3);
+    counts
 }
 
 pub fn is_terminal(doc: &DocMeta) -> bool {
@@ -462,5 +796,186 @@ mod tests {
 
         assert!(!is_terminal(&story));
         assert!(!is_terminal(&iter));
+    }
+
+    fn sorted_ids(result: &NextResult) -> Vec<String> {
+        let mut ids: Vec<String> = result.ready.iter().map(|r| r.id.clone()).collect();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn next_ready_returns_claimable_for_unblocked_leaf_iterations() {
+        let docs = vec![
+            doc("I-1", "iteration", Status::Draft, &[], &[]),
+            doc("I-2", "iteration", Status::Draft, &[], &[]),
+        ];
+        let g = Graph::from_documents(&docs);
+        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default());
+
+        assert_eq!(sorted_ids(&result), vec!["I-1", "I-2"]);
+        for cand in &result.ready {
+            assert_eq!(cand.kind, ReadyKind::Claimable, "id={}", cand.id);
+            assert!(cand.lessee.is_none(), "id={}", cand.id);
+        }
+    }
+
+    #[test]
+    fn next_ready_classifies_leaf_story_with_no_children_as_needs_children() {
+        let docs = vec![doc("S-1", "story", Status::Draft, &[], &[])];
+        let g = Graph::from_documents(&docs);
+
+        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default());
+
+        assert_eq!(result.ready.len(), 1);
+        assert_eq!(result.ready[0].id, "S-1");
+        assert_eq!(result.ready[0].kind, ReadyKind::NeedsChildren);
+    }
+
+    #[test]
+    fn next_ready_classifies_parent_with_all_terminal_children_as_needs_status_update() {
+        let docs = vec![
+            doc("S-1", "story", Status::Draft, &[], &[]),
+            doc("I-1", "iteration", Status::Complete, &[], &["S-1"]),
+            doc("I-2", "iteration", Status::Complete, &[], &["S-1"]),
+        ];
+        let g = Graph::from_documents(&docs);
+
+        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default());
+
+        assert_eq!(result.ready.len(), 1);
+        assert_eq!(result.ready[0].id, "S-1");
+        assert_eq!(result.ready[0].kind, ReadyKind::NeedsStatusUpdate);
+    }
+
+    #[test]
+    fn next_ready_hides_parent_and_surfaces_non_terminal_descendants() {
+        let docs = vec![
+            doc("S-1", "story", Status::Draft, &[], &[]),
+            doc("I-1", "iteration", Status::Complete, &[], &["S-1"]),
+            doc("I-2", "iteration", Status::Draft, &[], &["S-1"]),
+        ];
+        let g = Graph::from_documents(&docs);
+
+        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default());
+
+        assert_eq!(sorted_ids(&result), vec!["I-2"]);
+        assert_eq!(result.ready[0].kind, ReadyKind::Claimable);
+    }
+
+    #[test]
+    fn next_ready_excludes_leased_candidates_by_default() {
+        let docs = vec![doc("I-1", "iteration", Status::Draft, &[], &[])];
+        let g = Graph::from_documents(&docs);
+        let mut leases = LeaseView::default();
+        leases
+            .held
+            .insert("I-1".to_string(), "agent-x".to_string());
+
+        let result = next_ready(&g, &docs, &NextOpts::default(), &leases);
+
+        assert!(result.ready.is_empty());
+    }
+
+    #[test]
+    fn next_ready_with_include_leased_returns_leased_doc_with_lessee() {
+        let docs = vec![doc("I-1", "iteration", Status::Draft, &[], &[])];
+        let g = Graph::from_documents(&docs);
+        let mut leases = LeaseView::default();
+        leases
+            .held
+            .insert("I-1".to_string(), "agent-x".to_string());
+        let opts = NextOpts {
+            include_leased: true,
+            scope: None,
+        };
+
+        let result = next_ready(&g, &docs, &opts, &leases);
+
+        assert_eq!(result.ready.len(), 1);
+        assert_eq!(result.ready[0].id, "I-1");
+        assert_eq!(result.ready[0].lessee, Some("agent-x".to_string()));
+    }
+
+    #[test]
+    fn next_ready_returns_top_three_bottlenecks_in_descending_gate_order() {
+        // Chain: A→B→C→D→E (Blocks). All non-terminal stories.
+        let docs = vec![
+            doc("A", "story", Status::Draft, &["B"], &[]),
+            doc("B", "story", Status::Draft, &["C"], &[]),
+            doc("C", "story", Status::Draft, &["D"], &[]),
+            doc("D", "story", Status::Draft, &["E"], &[]),
+            doc("E", "story", Status::Draft, &[], &[]),
+        ];
+        let g = Graph::from_documents(&docs);
+
+        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default());
+
+        assert_eq!(result.bottlenecks.len(), 3);
+        let ids: Vec<&str> = result.bottlenecks.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, vec!["A", "B", "C"]);
+        let gates: Vec<usize> = result.bottlenecks.iter().map(|b| b.gates).collect();
+        assert_eq!(gates, vec![4, 3, 2]);
+    }
+
+    #[test]
+    fn next_ready_returns_fewer_than_three_bottlenecks_when_only_one_gates_downstream() {
+        let docs = vec![
+            doc("A", "story", Status::Draft, &["B"], &[]),
+            doc("B", "story", Status::Draft, &[], &[]),
+        ];
+        let g = Graph::from_documents(&docs);
+
+        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default());
+
+        assert_eq!(result.bottlenecks.len(), 1);
+        assert_eq!(result.bottlenecks[0].id, "A");
+    }
+
+    #[test]
+    fn next_ready_returns_no_bottlenecks_when_no_node_gates_downstream() {
+        let docs = vec![
+            doc("I-1", "iteration", Status::Draft, &[], &[]),
+            doc("I-2", "iteration", Status::Draft, &[], &[]),
+        ];
+        let g = Graph::from_documents(&docs);
+
+        let result = next_ready(&g, &docs, &NextOpts::default(), &LeaseView::default());
+
+        assert!(result.bottlenecks.is_empty());
+    }
+
+    #[test]
+    fn next_ready_combines_lease_filter_descent_hide_and_bottleneck_surfacing() {
+        let docs = vec![
+            doc("P", "story", Status::Draft, &["X"], &[]),
+            doc("C1", "iteration", Status::Complete, &[], &["P"]),
+            doc("C2", "iteration", Status::Draft, &[], &["P"]),
+            doc("X", "iteration", Status::Draft, &[], &[]),
+        ];
+        let g = Graph::from_documents(&docs);
+        let mut leases = LeaseView::default();
+        leases.held.insert("C2".to_string(), "alice".to_string());
+
+        let result = next_ready(&g, &docs, &NextOpts::default(), &leases);
+
+        // C2: leased, default opts → excluded.
+        // P: has non-terminal descendant C2 → hidden via AC8.
+        // X: blocked by non-terminal P → not a candidate.
+        // C1: terminal → not a candidate.
+        assert!(
+            result.ready.is_empty(),
+            "expected empty ready, got {:?}",
+            result.ready
+        );
+
+        // P gates X (downstream non-terminal via Blocks edge).
+        let bottleneck_ids: Vec<&str> =
+            result.bottlenecks.iter().map(|b| b.id.as_str()).collect();
+        assert!(
+            bottleneck_ids.contains(&"P"),
+            "expected P in bottlenecks, got {:?}",
+            bottleneck_ids
+        );
     }
 }

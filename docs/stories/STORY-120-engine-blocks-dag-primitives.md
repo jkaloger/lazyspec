@@ -1,7 +1,7 @@
 ---
 title: Engine blocks DAG primitives
 type: story
-status: draft
+status: complete
 author: jkaloger
 date: 2026-04-30
 tags: []
@@ -12,6 +12,7 @@ related:
 - blocks: STORY-114
 - blocks: STORY-125
 ---
+
 
 
 
