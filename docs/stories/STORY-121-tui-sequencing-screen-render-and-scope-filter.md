@@ -1,7 +1,7 @@
 ---
 title: TUI sequencing screen render and scope filter
 type: story
-status: draft
+status: complete
 author: jkaloger
 date: 2026-04-30
 tags: []
@@ -12,6 +12,7 @@ related:
 - blocks: STORY-115
 priority: should
 ---
+
 
 
 

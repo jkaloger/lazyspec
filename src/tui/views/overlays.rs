@@ -16,7 +16,7 @@ pub fn draw_help_overlay(f: &mut Frame) {
     let area = f.area();
 
     let popup_width = 50.min(area.width.saturating_sub(4));
-    let popup_height = 26.min(area.height.saturating_sub(4));
+    let popup_height = 38.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(popup_width)) / 2;
     let y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -64,6 +64,22 @@ pub fn draw_help_overlay(f: &mut Frame) {
         Line::from(""),
         Line::from("  j/k       Scroll"),
         Line::from("  Esc/q     Back to dashboard"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Sequencing",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("  s         Scope under <id>"),
+        Line::from("  f         Scope after <id>"),
+        Line::from("  c         Clear scope"),
+        Line::from("  j/k       Navigate up/down"),
+        Line::from("  Enter     Submit scope id"),
+        Line::from("  Esc       Cancel scope input"),
+        Line::from("  `         Cycle view"),
+        Line::from("  (read-only; edits coming in STORY-119)"),
     ];
 
     let paragraph = Paragraph::new(help_text).block(

@@ -6,7 +6,7 @@ use std::path::Path;
 use crate::tui::agent::AgentStatus;
 
 use crate::tui::state::forms::REL_TYPES;
-use crate::tui::state::{App, FilterField, PreviewTab, ViewMode};
+use crate::tui::state::{App, FilterField, PreviewTab, ScopeInputMode, ViewMode};
 
 impl App {
     pub fn handle_key(
@@ -533,6 +533,72 @@ impl App {
         }
     }
 
+    fn handle_sequencing_key(&mut self, code: KeyCode) {
+        // If a scope-input is in progress, route keys to the input.
+        if self.sequencing.scope_input.is_some() {
+            match code {
+                KeyCode::Esc => {
+                    self.sequencing.scope_input = None;
+                }
+                KeyCode::Enter => {
+                    let (mode, buf) = self.sequencing.scope_input.take().unwrap();
+                    let id = buf.trim().to_string();
+                    if id.is_empty() {
+                        return;
+                    }
+                    match mode {
+                        ScopeInputMode::Under => self.sequencing.set_scope_under(&id, &self.store),
+                        ScopeInputMode::After => self.sequencing.set_scope_after(&id, &self.store),
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some((_, buf)) = self.sequencing.scope_input.as_mut() {
+                        buf.pop();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some((_, buf)) = self.sequencing.scope_input.as_mut() {
+                        buf.push(c);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match code {
+            KeyCode::Char('s') => {
+                self.sequencing.scope_input = Some((ScopeInputMode::Under, String::new()));
+                self.sequencing.error = None;
+                self.sequencing.info = None;
+            }
+            KeyCode::Char('f') => {
+                self.sequencing.scope_input = Some((ScopeInputMode::After, String::new()));
+                self.sequencing.error = None;
+                self.sequencing.info = None;
+            }
+            KeyCode::Char('c') => {
+                self.sequencing.clear_scope(&self.store);
+                self.sequencing.info = None;
+            }
+            // Edit gestures are deferred (STORY-119); surface a read-only notice.
+            KeyCode::Char('a')
+            | KeyCode::Char('d')
+            | KeyCode::Char('1')
+            | KeyCode::Char('2')
+            | KeyCode::Char('3') => {
+                self.sequencing.info = Some("read-only screen".to_string());
+            }
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+            }
+            KeyCode::Char('`') => {
+                self.cycle_mode();
+            }
+            _ => {}
+        }
+    }
+
     #[allow(unused_variables)]
     fn handle_normal_key(
         &mut self,
@@ -544,6 +610,7 @@ impl App {
         match self.view_mode {
             ViewMode::Filters => return self.handle_filters_key(code, modifiers, root),
             ViewMode::Graph => return self.handle_graph_key(code, modifiers, root),
+            ViewMode::Sequencing => return self.handle_sequencing_key(code),
             #[cfg(feature = "agent")]
             ViewMode::Agents => return self.handle_agents_key(code, modifiers),
             _ => {}
@@ -667,5 +734,192 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::sequencing::Scope;
+    use crate::engine::store::Store;
+    use crate::tui::state::App;
+    use std::collections::BTreeMap;
+    use std::path::Path as StdPath;
+    use tempfile::TempDir;
+
+    fn write(root: &StdPath, rel: &str, body: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    /// Build a small docs tree: RFC-1 -> STORY-1 -> ITERATION-1.
+    fn make_app() -> (TempDir, App) {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("docs/rfcs")).unwrap();
+        std::fs::create_dir_all(root.join("docs/stories")).unwrap();
+        std::fs::create_dir_all(root.join("docs/iterations")).unwrap();
+
+        write(
+            root,
+            "docs/rfcs/RFC-1-root.md",
+            "---\ntitle: \"Root\"\ntype: rfc\nstatus: draft\nauthor: \"t\"\ndate: 2026-01-01\ntags: []\n---\n",
+        );
+        write(
+            root,
+            "docs/stories/STORY-1-feat.md",
+            "---\ntitle: \"Feat\"\ntype: story\nstatus: draft\nauthor: \"t\"\ndate: 2026-01-01\ntags: []\npriority: should\nrelated:\n- implements: RFC-1\n---\n",
+        );
+        write(
+            root,
+            "docs/iterations/ITERATION-1-impl.md",
+            "---\ntitle: \"Impl\"\ntype: iteration\nstatus: draft\nauthor: \"t\"\ndate: 2026-01-01\ntags: []\npriority: should\nrelated:\n- implements: STORY-1\n---\n",
+        );
+
+        let cfg = Config::default();
+        let store = Store::load(root, &cfg).unwrap();
+        let picker = ratatui_image::picker::Picker::halfblocks();
+        let fs = Box::new(crate::engine::fs::RealFileSystem);
+        let mut app = App::new(store, &cfg, picker, fs);
+        app.view_mode = ViewMode::Sequencing;
+        (tmp, app)
+    }
+
+    fn doc_paths(root: &StdPath) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for sub in ["docs/rfcs", "docs/stories", "docs/iterations"] {
+            for entry in std::fs::read_dir(root.join(sub)).unwrap() {
+                out.push(entry.unwrap().path());
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn snapshot_disk(root: &StdPath) -> BTreeMap<std::path::PathBuf, (std::time::SystemTime, Vec<u8>)> {
+        let mut out = BTreeMap::new();
+        for p in doc_paths(root) {
+            let meta = std::fs::metadata(&p).unwrap();
+            let mtime = meta.modified().unwrap();
+            let bytes = std::fs::read(&p).unwrap();
+            out.insert(p, (mtime, bytes));
+        }
+        out
+    }
+
+    fn type_chars(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.handle_sequencing_key(KeyCode::Char(c));
+        }
+    }
+
+    /// AC6: pressing `s`, typing a story id, and pressing Enter sets `Under`.
+    #[test]
+    fn s_key_sets_scope_under_with_typed_story_id() {
+        let (_tmp, mut app) = make_app();
+
+        app.handle_sequencing_key(KeyCode::Char('s'));
+        type_chars(&mut app, "STORY-1");
+        app.handle_sequencing_key(KeyCode::Enter);
+
+        assert_eq!(app.sequencing.scope, Scope::Under("STORY-1".to_string()));
+        assert!(app.sequencing.scope_input.is_none());
+        assert!(app.sequencing.error.is_none());
+    }
+
+    /// AC6: typing an iteration id is rejected; previous scope and membership
+    /// are preserved and `error` is populated.
+    #[test]
+    fn iteration_id_rejected_preserves_prior_scope_and_sets_error() {
+        let (_tmp, mut app) = make_app();
+        // Establish a prior scope first.
+        app.handle_sequencing_key(KeyCode::Char('s'));
+        type_chars(&mut app, "STORY-1");
+        app.handle_sequencing_key(KeyCode::Enter);
+        let prior_scope = app.sequencing.scope.clone();
+        let prior_membership = app.sequencing.in_scope.clone();
+
+        // Now try to scope to an iteration.
+        app.handle_sequencing_key(KeyCode::Char('s'));
+        type_chars(&mut app, "ITERATION-1");
+        app.handle_sequencing_key(KeyCode::Enter);
+
+        assert_eq!(app.sequencing.scope, prior_scope, "scope must not change");
+        assert_eq!(
+            app.sequencing.in_scope, prior_membership,
+            "membership must not change"
+        );
+        let err = app.sequencing.error.as_ref().expect("expected error");
+        assert!(
+            err.to_lowercase().contains("iteration"),
+            "error should mention iteration: {:?}",
+            err
+        );
+    }
+
+    /// AC6: `f` opens the After-scope input.
+    #[test]
+    fn f_key_sets_scope_after_with_typed_id() {
+        let (_tmp, mut app) = make_app();
+
+        app.handle_sequencing_key(KeyCode::Char('f'));
+        type_chars(&mut app, "RFC-1");
+        app.handle_sequencing_key(KeyCode::Enter);
+
+        assert_eq!(app.sequencing.scope, Scope::After("RFC-1".to_string()));
+    }
+
+    /// AC6: `c` clears the active scope back to `All`.
+    #[test]
+    fn c_key_clears_scope() {
+        let (_tmp, mut app) = make_app();
+        app.handle_sequencing_key(KeyCode::Char('s'));
+        type_chars(&mut app, "STORY-1");
+        app.handle_sequencing_key(KeyCode::Enter);
+        assert_ne!(app.sequencing.scope, Scope::All);
+
+        app.handle_sequencing_key(KeyCode::Char('c'));
+
+        assert_eq!(app.sequencing.scope, Scope::All);
+    }
+
+    /// AC6: `Esc` cancels an in-progress scope-input without applying it.
+    #[test]
+    fn esc_cancels_scope_input_buffer() {
+        let (_tmp, mut app) = make_app();
+        let prior_scope = app.sequencing.scope.clone();
+
+        app.handle_sequencing_key(KeyCode::Char('s'));
+        type_chars(&mut app, "STORY-1");
+        app.handle_sequencing_key(KeyCode::Esc);
+
+        assert!(app.sequencing.scope_input.is_none());
+        assert_eq!(app.sequencing.scope, prior_scope);
+    }
+
+    /// AC7: edit gestures (`a`, `d`, priority keys `1`/`2`/`3`) MUST NOT
+    /// mutate any document on disk. They surface an info message instead.
+    #[test]
+    fn edit_gestures_do_not_mutate_docs_on_disk() {
+        let (tmp, mut app) = make_app();
+        let root = tmp.path().to_path_buf();
+        let before = snapshot_disk(&root);
+
+        for c in ['a', 'd', '1', '2', '3'] {
+            app.handle_sequencing_key(KeyCode::Char(c));
+        }
+
+        let after = snapshot_disk(&root);
+        assert_eq!(
+            before, after,
+            "edit gestures must not modify any doc on disk"
+        );
+        let info = app.sequencing.info.as_ref().expect("expected info msg");
+        assert!(
+            info.to_lowercase().contains("read-only"),
+            "info should mention read-only: {:?}",
+            info
+        );
     }
 }

@@ -33,8 +33,8 @@ use panels::draw_agents_screen;
 #[cfg(feature = "metrics")]
 use panels::draw_metrics_skeleton;
 use panels::{
-    draw_doc_list, draw_graph, draw_preview, draw_type_panel, render_filter_panel,
-    render_fullscreen_document,
+    draw_doc_list, draw_graph, draw_preview, draw_sequencing, draw_type_panel,
+    render_filter_panel, render_fullscreen_document,
 };
 
 pub fn sync_indicator_text(elapsed_secs: u64, cache_ttl: u64) -> (String, Color) {
@@ -200,6 +200,7 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
         #[cfg(feature = "metrics")]
         ViewMode::Metrics => draw_metrics_skeleton(f, outer[1]),
         ViewMode::Graph => draw_graph(f, app, outer[1]),
+        ViewMode::Sequencing => draw_sequencing(f, app, outer[1]),
         #[cfg(feature = "agent")]
         ViewMode::Agents => draw_agents_screen(f, app, outer[1]),
     }

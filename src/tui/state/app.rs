@@ -149,6 +149,7 @@ pub enum ViewMode {
     #[cfg(feature = "metrics")]
     Metrics,
     Graph,
+    Sequencing,
     #[cfg(feature = "agent")]
     Agents,
 }
@@ -163,10 +164,11 @@ impl ViewMode {
             ViewMode::Metrics => ViewMode::Graph,
             #[cfg(not(feature = "metrics"))]
             ViewMode::Filters => ViewMode::Graph,
+            ViewMode::Graph => ViewMode::Sequencing,
             #[cfg(feature = "agent")]
-            ViewMode::Graph => ViewMode::Agents,
+            ViewMode::Sequencing => ViewMode::Agents,
             #[cfg(not(feature = "agent"))]
-            ViewMode::Graph => ViewMode::Types,
+            ViewMode::Sequencing => ViewMode::Types,
             #[cfg(feature = "agent")]
             ViewMode::Agents => ViewMode::Types,
         }
@@ -179,6 +181,7 @@ impl ViewMode {
             #[cfg(feature = "metrics")]
             ViewMode::Metrics => "Metrics",
             ViewMode::Graph => "Graph",
+            ViewMode::Sequencing => "Sequencing",
             #[cfg(feature = "agent")]
             ViewMode::Agents => "Agents",
         }
@@ -221,6 +224,7 @@ pub struct App {
     pub view_mode: ViewMode,
     pub graph_nodes: Vec<GraphNode>,
     pub graph_selected: usize,
+    pub sequencing: super::SequencingState,
     pub editor_request: Option<PathBuf>,
     pub filter_focused: FilterField,
     pub filter_status: Option<Status>,
@@ -313,6 +317,9 @@ impl App {
         let (status_bar_components, status_bar_warnings) =
             StatusBarComponents::from_config(&config.ui.statusbar);
 
+        let sequencing =
+            super::SequencingState::rebuild(&store, crate::engine::sequencing::Scope::All);
+
         let mut app = App {
             fs,
             store,
@@ -346,6 +353,7 @@ impl App {
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
+            sequencing,
             editor_request: None,
             filter_focused: FilterField::Status,
             filter_status: None,
@@ -1541,6 +1549,11 @@ mod tests {
 
         let (tx, _rx) = crossbeam_channel::unbounded();
 
+        let sequencing = crate::tui::state::SequencingState::rebuild(
+            &store,
+            crate::engine::sequencing::Scope::All,
+        );
+
         let app = App {
             fs: Box::new(crate::engine::fs::RealFileSystem),
             store,
@@ -1569,6 +1582,7 @@ mod tests {
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
+            sequencing,
             editor_request: None,
             filter_focused: FilterField::Status,
             filter_status: None,

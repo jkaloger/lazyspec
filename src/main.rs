@@ -127,6 +127,67 @@ fn main() -> anyhow::Result<()> {
             let store = Store::load(&cwd, &config)?;
             lazyspec::cli::list::run(&store, doc_type.as_deref(), status.as_deref(), json);
         }
+        Some(Commands::Next {
+            scope,
+            after,
+            type_filter,
+            include_leased,
+            json,
+        }) => {
+            let store = Store::load(&cwd, &config)?;
+            let exit_code = lazyspec::cli::next::run(
+                &store,
+                &config,
+                lazyspec::cli::next::NextArgs {
+                    scope,
+                    after,
+                    type_filter,
+                    include_leased,
+                    json,
+                },
+            );
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+        }
+        Some(Commands::CriticalPath {
+            scope,
+            after,
+            json,
+        }) => {
+            let store = Store::load(&cwd, &config)?;
+            let exit_code = lazyspec::cli::critical_path::run(
+                &store,
+                &config,
+                lazyspec::cli::critical_path::CriticalPathArgs {
+                    scope,
+                    after,
+                    json,
+                },
+            );
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+        }
+        Some(Commands::Graph {
+            scope,
+            after,
+            format,
+        }) => {
+            let store = Store::load(&cwd, &config)?;
+            let exit_code = lazyspec::cli::graph::run(
+                &store,
+                &config,
+                lazyspec::cli::graph::GraphArgs {
+                    scope,
+                    after,
+                    format,
+                },
+            );
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+        }
         Some(Commands::Show {
             id,
             json,

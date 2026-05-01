@@ -2,20 +2,24 @@ pub mod completions;
 pub mod context;
 pub mod convention;
 pub mod create;
+pub mod critical_path;
 pub mod delete;
 pub mod fetch;
 pub mod fix;
+pub mod graph;
 pub mod ignore;
 pub mod init;
 pub mod json;
 pub mod lease;
 pub mod link;
 pub mod list;
+pub mod next;
 pub mod pin;
 pub mod provenance;
 pub mod reservations;
 pub mod resolve;
 pub mod search;
+pub mod sequencing_args;
 pub mod setup;
 pub mod show;
 pub mod status;
@@ -102,6 +106,49 @@ pub enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Show the next ready work items based on the dependency graph
+    Next {
+        /// Restrict the ready set to a scope anchor (RFC or Story id). Mutually exclusive with --after.
+        #[arg(long, add = ArgValueCompleter::new(completions::complete_doc_id))]
+        scope: Option<String>,
+        /// Restrict the ready set to documents downstream of an anchor (transitive blocks). Mutually exclusive with --scope.
+        #[arg(long, add = ArgValueCompleter::new(completions::complete_doc_id))]
+        after: Option<String>,
+        /// Filter ready[] by document type (e.g. story, iteration, rfc)
+        #[arg(long = "type", name = "type")]
+        type_filter: Option<String>,
+        /// Include candidates that are currently leased (default: hide them)
+        #[arg(long)]
+        include_leased: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the longest weighted path through the dependency graph
+    #[command(name = "critical-path")]
+    CriticalPath {
+        /// Restrict the path search to the implements-subtree of an anchor (RFC or Story id). Mutually exclusive with --after.
+        #[arg(long, add = ArgValueCompleter::new(completions::complete_doc_id))]
+        scope: Option<String>,
+        /// Restrict the path search to documents downstream of an anchor (transitive blocks). Mutually exclusive with --scope.
+        #[arg(long, add = ArgValueCompleter::new(completions::complete_doc_id))]
+        after: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Render the document dependency graph as d2, dot, or JSON
+    Graph {
+        /// Restrict the graph to the implements-subtree of an anchor (RFC or Story id). Mutually exclusive with --after.
+        #[arg(long, add = ArgValueCompleter::new(completions::complete_doc_id))]
+        scope: Option<String>,
+        /// Restrict the graph to documents downstream of an anchor (transitive blocks). Mutually exclusive with --scope.
+        #[arg(long, add = ArgValueCompleter::new(completions::complete_doc_id))]
+        after: Option<String>,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = graph::GraphFormat::D2)]
+        format: graph::GraphFormat,
     },
     /// Show a document
     Show {

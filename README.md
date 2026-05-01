@@ -127,6 +127,9 @@ All document management is available as subcommands. Most accept `--json` for ma
 | `unignore <path>`                    | Remove validation skip from a document                                |
 | `validate [--warnings]`              | Check document integrity and link consistency                         |
 | `fix [paths] [--dry-run]`            | Fix documents with broken or incomplete frontmatter                   |
+| `next`                               | Show the next ready work items based on the dependency graph          |
+| `graph`                              | Render the document dependency graph as d2, dot, or JSON              |
+| `critical-path`                      | Show the longest weighted path through the dependency graph           |
 | `pin <id>`                           | Pin blob hashes onto `@ref` directives in a document                  |
 | `provenance add <id> <citation>`     | Append a citation to a document's provenance list                     |
 | `provenance remove <id> <citation>`  | Remove an exact-match citation from a document's provenance list      |
@@ -140,6 +143,32 @@ All document management is available as subcommands. Most accept `--json` for ma
 | --------------------------- | ------------------------------------------------ |
 | `-e`, `--expand-references` | Expand `@ref` directives into fenced code blocks |
 | `--max-ref-lines N`         | Max lines per expanded ref (default: 25)         |
+
+#### `next` Flags
+
+| Flag                | Description                                                                                              |
+| ------------------- | -------------------------------------------------------------------------------------------------------- |
+| `--scope <SCOPE>`   | Restrict the ready set to a scope anchor (RFC or Story id). Mutually exclusive with `--after`            |
+| `--after <AFTER>`   | Restrict the ready set to documents downstream of an anchor (transitive blocks). Mutually exclusive with `--scope` |
+| `--type <type>`     | Filter ready[] by document type (e.g. story, iteration, rfc)                                             |
+| `--include-leased`  | Include candidates that are currently leased (default: hide them)                                        |
+| `--json`            | Output as JSON                                                                                           |
+
+#### `graph` Flags
+
+| Flag                | Description                                                                                                          |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `--scope <SCOPE>`   | Restrict the graph to the implements-subtree of an anchor (RFC or Story id). Mutually exclusive with `--after`       |
+| `--after <AFTER>`   | Restrict the graph to documents downstream of an anchor (transitive blocks). Mutually exclusive with `--scope`       |
+| `--format <FORMAT>` | Output format. One of `d2`, `json`, `dot` (default: `d2`)                                                            |
+
+#### `critical-path` Flags
+
+| Flag              | Description                                                                                                              |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `--scope <SCOPE>` | Restrict the path search to the implements-subtree of an anchor (RFC or Story id). Mutually exclusive with `--after`     |
+| `--after <AFTER>` | Restrict the path search to documents downstream of an anchor (transitive blocks). Mutually exclusive with `--scope`     |
+| `--json`          | Output as JSON                                                                                                           |
 
 #### Provenance
 
@@ -280,6 +309,12 @@ type = "adr"
 require = "any-relation"
 severity = "error"
 ```
+
+In addition to user-defined rules, `validate` ships built-in diagnostics derived from the work graph:
+
+- **Cycle in `blocks` graph** (error) -- fires when `blocks` relationships form a directed cycle. The diagnostic message names the cycle members.
+- **RFC accepted but all implementing stories complete** (warning) -- fires when an RFC is `accepted` and every implementing story is in a terminal state. Suggests promoting the RFC to `complete`.
+- **Rejected upstream blocker** (warning) -- fires when a document declares `blocks: <X>` and `X` is `rejected`. Indicates the downstream may be stale.
 
 ### Priorities
 

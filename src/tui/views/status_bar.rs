@@ -151,6 +151,7 @@ fn lookup_component(name: &str) -> Option<StatusComponent> {
         "help_hint" => Some(help_hint_component),
         "search" => Some(search_component),
         "git_branch" => Some(git_branch_component),
+        "sequencing_status" => Some(sequencing_status_component),
         _ => None,
     }
 }
@@ -200,7 +201,11 @@ impl Default for StatusBarComponents {
     fn default() -> Self {
         Self {
             left: vec![mode_component, type_filter_component, doc_count_component],
-            center: vec![warnings_component, errors_component],
+            center: vec![
+                warnings_component,
+                errors_component,
+                sequencing_status_component,
+            ],
             right: vec![
                 git_branch_component,
                 search_component,
@@ -218,6 +223,7 @@ fn mode_bg(mode: &ViewMode) -> Color {
         #[cfg(feature = "metrics")]
         ViewMode::Metrics => Color::Cyan,
         ViewMode::Graph => Color::Green,
+        ViewMode::Sequencing => Color::LightGreen,
         #[cfg(feature = "agent")]
         ViewMode::Agents => Color::Yellow,
     }
@@ -296,6 +302,31 @@ pub fn type_filter_component(app: &App) -> Option<Span<'static>> {
         return None;
     }
     Some(Span::raw(app.current_type().to_string()))
+}
+
+/// Status-bar slot for the Sequencing screen: scope summary plus any error
+/// from the last scope action. Hidden outside `ViewMode::Sequencing`.
+pub fn sequencing_status_component(app: &App) -> Option<Span<'static>> {
+    if app.view_mode != ViewMode::Sequencing {
+        return None;
+    }
+    use crate::engine::sequencing::Scope;
+    let state = &app.sequencing;
+    let scope_text = match &state.scope {
+        Scope::All => "scope: none".to_string(),
+        Scope::Under(id) => format!("scope: under {}", id),
+        Scope::After(id) => format!("scope: after {}", id),
+    };
+    let text = match state.error.as_ref() {
+        Some(err) => format!("{}  ✗ {}", scope_text, err),
+        None => scope_text,
+    };
+    let style = if state.error.is_some() {
+        Style::default().fg(Color::Red)
+    } else {
+        Style::default().fg(Color::LightGreen)
+    };
+    Some(Span::styled(text, style))
 }
 
 #[cfg(test)]

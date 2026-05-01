@@ -1,7 +1,7 @@
 ---
 title: CLI next graph critical-path commands
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-04-30
 tags: []
@@ -11,6 +11,7 @@ related:
 - blocks: STORY-118
 priority: should
 ---
+
 
 
 

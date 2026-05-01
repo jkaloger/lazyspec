@@ -86,6 +86,17 @@ pub enum ValidationIssue {
         doc_id: String,
         type_name: String,
     },
+    Cycle {
+        ids: Vec<String>,
+    },
+    AcceptedRfcChildrenComplete {
+        rfc: PathBuf,
+        children: Vec<PathBuf>,
+    },
+    RejectedUpstreamBlocker {
+        path: PathBuf,
+        upstream: String,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -262,6 +273,24 @@ impl std::fmt::Display for ValidationIssue {
                     f,
                     "priority field required for type '{}' on document {}",
                     type_name, doc_id
+                )
+            }
+            ValidationIssue::Cycle { ids } => {
+                write!(f, "cycle in blocks graph: {}", ids.join(", "))
+            }
+            ValidationIssue::AcceptedRfcChildrenComplete { rfc, .. } => {
+                write!(
+                    f,
+                    "RFC accepted but all implementing stories complete: {}",
+                    rfc.display()
+                )
+            }
+            ValidationIssue::RejectedUpstreamBlocker { path, upstream } => {
+                write!(
+                    f,
+                    "upstream blocker rejected: {} blocked by {}",
+                    path.display(),
+                    upstream
                 )
             }
         }
@@ -937,6 +966,146 @@ impl Checker for PriorityRule {
     }
 }
 
+pub struct AcceptedRfcChildrenCompleteRule;
+
+impl Checker for AcceptedRfcChildrenCompleteRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        let mut issues = Vec::new();
+
+        for (rfc_path, rfc_meta) in &store.docs {
+            if rfc_meta.validate_ignore {
+                continue;
+            }
+            if rfc_meta.doc_type != DocType::new(DocType::RFC) {
+                continue;
+            }
+            if rfc_meta.status != Status::Accepted {
+                continue;
+            }
+
+            let mut children: Vec<PathBuf> = store
+                .docs
+                .values()
+                .filter(|child| {
+                    !child.validate_ignore
+                        && child.related.iter().any(|rel| {
+                            rel.rel_type == super::document::RelationType::Implements
+                                && rel.target == rfc_meta.id
+                        })
+                })
+                .map(|child| child.path.clone())
+                .collect();
+
+            if children.is_empty() {
+                continue;
+            }
+
+            let all_terminal = children.iter().all(|cp| {
+                store
+                    .docs
+                    .get(cp)
+                    .map(|c| super::sequencing::is_terminal(c, config))
+                    .unwrap_or(false)
+            });
+
+            if !all_terminal {
+                continue;
+            }
+
+            children.sort();
+            issues.push((
+                Severity::Warning,
+                ValidationIssue::AcceptedRfcChildrenComplete {
+                    rfc: rfc_path.clone(),
+                    children,
+                },
+            ));
+        }
+
+        issues
+    }
+}
+
+pub struct RejectedUpstreamBlockerRule;
+
+impl Checker for RejectedUpstreamBlockerRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        _config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        let mut issues = Vec::new();
+
+        let id_to_path: HashMap<String, PathBuf> = store
+            .docs
+            .values()
+            .map(|doc| (doc.id.clone(), doc.path.clone()))
+            .collect();
+
+        for (path, meta) in &store.docs {
+            if meta.validate_ignore {
+                continue;
+            }
+
+            for rel in &meta.related {
+                if rel.rel_type != super::document::RelationType::Blocks {
+                    continue;
+                }
+
+                let Some(target_path) = id_to_path.get(&rel.target).cloned().or_else(|| {
+                    let p = PathBuf::from(&rel.target);
+                    if store.docs.contains_key(&p) {
+                        Some(p)
+                    } else {
+                        None
+                    }
+                }) else {
+                    continue;
+                };
+
+                let Some(target_doc) = store.docs.get(&target_path) else {
+                    continue;
+                };
+
+                if target_doc.status == Status::Rejected {
+                    issues.push((
+                        Severity::Warning,
+                        ValidationIssue::RejectedUpstreamBlocker {
+                            path: path.clone(),
+                            upstream: target_doc.id.clone(),
+                        },
+                    ));
+                }
+            }
+        }
+
+        issues
+    }
+}
+
+pub struct CycleRule;
+
+impl Checker for CycleRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        _config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        let graph = super::sequencing::Graph::from_store(store);
+        match graph.cycle_check() {
+            Ok(()) => Vec::new(),
+            Err(super::sequencing::CycleError { mut ids }) => {
+                ids.sort();
+                vec![(Severity::Error, ValidationIssue::Cycle { ids })]
+            }
+        }
+    }
+}
+
 fn default_checkers() -> Vec<Box<dyn Checker>> {
     vec![
         Box::new(BrokenLinkRule),
@@ -948,6 +1117,9 @@ fn default_checkers() -> Vec<Box<dyn Checker>> {
         Box::new(OrphanRefRule),
         Box::new(TypeConstraintChecker),
         Box::new(PriorityRule),
+        Box::new(CycleRule),
+        Box::new(AcceptedRfcChildrenCompleteRule),
+        Box::new(RejectedUpstreamBlockerRule),
     ]
 }
 
@@ -972,6 +1144,7 @@ pub fn validate_full(store: &super::store::Store, config: &Config) -> Validation
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::document::{Relation, RelationType};
     use crate::engine::store::Store;
     use chrono::NaiveDate;
     use std::collections::HashMap;
@@ -992,6 +1165,39 @@ mod tests {
             id: format!("{}-1", doc_type),
             priority: priority.map(|s| s.to_string()),
         }
+    }
+
+    fn doc_with(path: &str, doc_type: &str, id: &str, blocks: &[&str]) -> DocMeta {
+        let mut d = doc(path, doc_type, None);
+        d.id = id.to_string();
+        d.related = blocks
+            .iter()
+            .map(|t| Relation {
+                rel_type: RelationType::Blocks,
+                target: (*t).to_string(),
+            })
+            .collect();
+        d
+    }
+
+    fn doc_full(
+        path: &str,
+        doc_type: &str,
+        id: &str,
+        status: Status,
+        relations: &[(RelationType, &str)],
+    ) -> DocMeta {
+        let mut d = doc(path, doc_type, None);
+        d.id = id.to_string();
+        d.status = status;
+        d.related = relations
+            .iter()
+            .map(|(rt, t)| Relation {
+                rel_type: rt.clone(),
+                target: (*t).to_string(),
+            })
+            .collect();
+        d
     }
 
     fn store_with(docs: Vec<DocMeta>) -> Store {
@@ -1083,6 +1289,239 @@ mod tests {
             priority_msgs.is_empty(),
             "expected no priority issues for story w/ valid priority 'must', got: {:?}",
             priority_msgs
+        );
+    }
+
+    #[test]
+    fn ac10_cycle_in_blocks_is_error() {
+        let store = store_with(vec![
+            doc_with("a.md", "story", "STORY-A", &["STORY-B"]),
+            doc_with("b.md", "story", "STORY-B", &["STORY-A"]),
+        ]);
+        let config = Config::default();
+        let result = validate_full(&store, &config);
+
+        let cycle_ids: Option<&Vec<String>> = result.errors.iter().find_map(|i| match i {
+            ValidationIssue::Cycle { ids } => Some(ids),
+            _ => None,
+        });
+        let ids = cycle_ids.expect("expected a Cycle error in errors list");
+        let got: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let want: HashSet<&str> = ["STORY-A", "STORY-B"].into_iter().collect();
+        assert_eq!(got, want, "cycle ids mismatch: {:?}", ids);
+    }
+
+    #[test]
+    fn ac10_cycle_ids_are_sorted() {
+        let store = store_with(vec![
+            doc_with("a.md", "story", "STORY-B", &["STORY-A"]),
+            doc_with("b.md", "story", "STORY-A", &["STORY-B"]),
+        ]);
+        let config = Config::default();
+        let result = validate_full(&store, &config);
+        let ids = result
+            .errors
+            .iter()
+            .find_map(|i| match i {
+                ValidationIssue::Cycle { ids } => Some(ids.clone()),
+                _ => None,
+            })
+            .expect("expected a Cycle error");
+        let mut sorted = ids.clone();
+        sorted.sort();
+        assert_eq!(ids, sorted, "cycle ids must be sorted for determinism");
+    }
+
+    #[test]
+    fn accepted_rfc_with_all_complete_children_warns() {
+        let store = store_with(vec![
+            doc_full("r.md", "rfc", "RFC-1", Status::Accepted, &[]),
+            doc_full(
+                "a.md",
+                "story",
+                "STORY-A",
+                Status::Complete,
+                &[(RelationType::Implements, "RFC-1")],
+            ),
+            doc_full(
+                "b.md",
+                "story",
+                "STORY-B",
+                Status::Complete,
+                &[(RelationType::Implements, "RFC-1")],
+            ),
+        ]);
+        let config = Config::default();
+        let result = validate_full(&store, &config);
+
+        let found = result.warnings.iter().find_map(|i| match i {
+            ValidationIssue::AcceptedRfcChildrenComplete { rfc, children } => {
+                Some((rfc.clone(), children.clone()))
+            }
+            _ => None,
+        });
+        let (rfc, children) = found.expect("expected AcceptedRfcChildrenComplete warning");
+        assert_eq!(rfc, PathBuf::from("r.md"));
+        let got: HashSet<PathBuf> = children.into_iter().collect();
+        let want: HashSet<PathBuf> = ["a.md", "b.md"].iter().map(PathBuf::from).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn accepted_rfc_with_draft_child_does_not_warn() {
+        let store = store_with(vec![
+            doc_full("r.md", "rfc", "RFC-1", Status::Accepted, &[]),
+            doc_full(
+                "a.md",
+                "story",
+                "STORY-A",
+                Status::Draft,
+                &[(RelationType::Implements, "RFC-1")],
+            ),
+        ]);
+        let config = Config::default();
+        let result = validate_full(&store, &config);
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|i| matches!(i, ValidationIssue::AcceptedRfcChildrenComplete { .. })),
+            "did not expect AcceptedRfcChildrenComplete warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn accepted_rfc_rule_skips_non_accepted_rfc() {
+        let store = store_with(vec![
+            doc_full("r.md", "rfc", "RFC-1", Status::Complete, &[]),
+            doc_full(
+                "a.md",
+                "story",
+                "STORY-A",
+                Status::Complete,
+                &[(RelationType::Implements, "RFC-1")],
+            ),
+        ]);
+        let config = Config::default();
+        let result = validate_full(&store, &config);
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|i| matches!(i, ValidationIssue::AcceptedRfcChildrenComplete { .. })),
+            "did not expect AcceptedRfcChildrenComplete warning for non-accepted rfc, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn accepted_rfc_with_no_children_does_not_warn() {
+        let store = store_with(vec![doc_full(
+            "r.md",
+            "rfc",
+            "RFC-1",
+            Status::Accepted,
+            &[],
+        )]);
+        let config = Config::default();
+        let result = validate_full(&store, &config);
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|i| matches!(i, ValidationIssue::AcceptedRfcChildrenComplete { .. })),
+            "did not expect AcceptedRfcChildrenComplete warning when rfc has no children, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn rejected_upstream_blocker_warns_on_rejected_target() {
+        let store = store_with(vec![
+            doc_full("a.md", "story", "STORY-A", Status::Rejected, &[]),
+            doc_full(
+                "b.md",
+                "story",
+                "STORY-B",
+                Status::Draft,
+                &[(RelationType::Blocks, "STORY-A")],
+            ),
+        ]);
+        let config = Config::default();
+        let result = validate_full(&store, &config);
+
+        let found = result.warnings.iter().find_map(|i| match i {
+            ValidationIssue::RejectedUpstreamBlocker { path, upstream } => {
+                Some((path.clone(), upstream.clone()))
+            }
+            _ => None,
+        });
+        let (path, upstream) = found.expect("expected RejectedUpstreamBlocker warning");
+        assert_eq!(path, PathBuf::from("b.md"));
+        assert_eq!(upstream, "STORY-A");
+    }
+
+    #[test]
+    fn rejected_upstream_blocker_silent_on_non_rejected_target() {
+        let store = store_with(vec![
+            doc_full("a.md", "story", "STORY-A", Status::Complete, &[]),
+            doc_full(
+                "b.md",
+                "story",
+                "STORY-B",
+                Status::Draft,
+                &[(RelationType::Blocks, "STORY-A")],
+            ),
+        ]);
+        let config = Config::default();
+        let result = validate_full(&store, &config);
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|i| matches!(i, ValidationIssue::RejectedUpstreamBlocker { .. })),
+            "did not expect RejectedUpstreamBlocker warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn rejected_upstream_blocker_skips_unresolved_target() {
+        let store = store_with(vec![doc_full(
+            "b.md",
+            "story",
+            "STORY-B",
+            Status::Draft,
+            &[(RelationType::Blocks, "STORY-MISSING")],
+        )]);
+        let config = Config::default();
+        let result = validate_full(&store, &config);
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|i| matches!(i, ValidationIssue::RejectedUpstreamBlocker { .. })),
+            "should silently skip unresolved blocks target, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn ac10_acyclic_blocks_graph_has_no_cycle_error() {
+        let store = store_with(vec![
+            doc_with("a.md", "story", "STORY-A", &["STORY-B"]),
+            doc_with("b.md", "story", "STORY-B", &[]),
+        ]);
+        let config = Config::default();
+        let result = validate_full(&store, &config);
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|i| matches!(i, ValidationIssue::Cycle { .. })),
+            "expected no Cycle error for acyclic graph, got: {:?}",
+            result.errors
         );
     }
 }

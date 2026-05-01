@@ -19,7 +19,7 @@ use crate::engine::git_status::GitFileStatus;
 use crate::tui::agent::AgentStatus;
 use crate::tui::state::{App, DocListNode, FilterField, PreviewTab};
 
-use super::colors::{status_color, tag_color};
+use super::colors::{dimmed, edge_render, node_style, status_color, tag_color};
 use super::layout::{calculate_image_height, wrapped_line_count, wrapped_lines_total};
 
 fn get_image_dimensions_cached(app: &mut App, path: &std::path::Path) -> Option<(u32, u32)> {
@@ -1343,6 +1343,173 @@ pub fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
 
     let mut state = ListState::default().with_selected(Some(app.graph_selected));
     f.render_stateful_widget(list, layout[1], &mut state);
+}
+
+/// Sequencing screen — read-only DAG render (RFC-041 / STORY-121 Task 4).
+///
+/// Layout: layers are rendered top-to-bottom; nodes within a layer are spaced
+/// horizontally. Picked top-to-bottom because variable-width labels (`<id>
+/// <title>`) pack better as rows, and the dependency-flow direction reads as
+/// "earlier work above, later work below", matching typical DAG diagrams.
+///
+/// Edges:
+/// - Adjacent-layer blocks/implements edges are drawn as a small connector
+///   row between rows (`──▶` / `╌╌▷`) at the source's column.
+/// - Multi-layer edges (source layer + 1 < target layer) are represented by
+///   a small badge on the source node ("→…") rather than a routed line. This
+///   slice intentionally avoids routing to keep the renderer simple; the AC
+///   set is satisfied by edge-style and node-style helpers.
+///
+/// Out-of-scope nodes are rendered with `Modifier::DIM` and `Color::DarkGray`
+/// (AC3/AC4). Under `Scope::All` every node is in scope, so nothing is dimmed
+/// (AC5).
+pub fn draw_sequencing(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::LightGreen))
+        .title(" Sequencing ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let state = &app.sequencing;
+    let layers = &state.layout.layers;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Header: scope summary + any error/info from last action. The status bar
+    // is the canonical surface for these (see `mode` extension), but a
+    // lightweight in-panel echo helps when the bar is collapsed.
+    lines.push(Line::from(vec![Span::styled(
+        scope_summary(state),
+        Style::default()
+            .fg(Color::LightGreen)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    if let Some(err) = state.error.as_ref() {
+        lines.push(Line::from(vec![Span::styled(
+            format!("error: {}", err),
+            Style::default().fg(Color::Red),
+        )]));
+    }
+    if let Some(info) = state.info.as_ref() {
+        lines.push(Line::from(vec![Span::styled(
+            format!("info: {}", info),
+            Style::default().fg(Color::Gray),
+        )]));
+    }
+    if let Some((mode, buf)) = state.scope_input.as_ref() {
+        let label = match mode {
+            crate::tui::state::ScopeInputMode::Under => "scope under",
+            crate::tui::state::ScopeInputMode::After => "scope after",
+        };
+        lines.push(Line::from(vec![Span::styled(
+            format!("{}: {}_", label, buf),
+            Style::default().fg(Color::Yellow),
+        )]));
+    }
+
+    if layers.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            "no nodes to display (graph empty or all-cyclic)",
+            Style::default().fg(Color::DarkGray),
+        )]));
+        f.render_widget(Paragraph::new(lines), inner);
+        return;
+    }
+
+    // Pre-index edges by source for badge generation.
+    let mut multi_layer_out: std::collections::HashMap<String, Vec<&str>> =
+        std::collections::HashMap::new();
+    let layer_of: std::collections::HashMap<&str, usize> = layers
+        .iter()
+        .enumerate()
+        .flat_map(|(i, layer)| layer.iter().map(move |n| (n.as_str(), i)))
+        .collect();
+
+    for (src, dst, _kind) in &state.layout.edges {
+        let s_layer = layer_of.get(src.as_str()).copied();
+        let d_layer = layer_of.get(dst.as_str()).copied();
+        if let (Some(s), Some(d)) = (s_layer, d_layer) {
+            if d > s + 1 {
+                multi_layer_out
+                    .entry(src.0.clone())
+                    .or_default()
+                    .push(dst.as_str());
+            }
+        }
+    }
+
+    for (li, layer) in layers.iter().enumerate() {
+        let mut node_spans: Vec<Span<'static>> = Vec::new();
+        for (ni, node) in layer.iter().enumerate() {
+            if ni > 0 {
+                node_spans.push(Span::raw("   "));
+            }
+            let id = node.as_str();
+            let (title, status_opt) = lookup_doc(app, id);
+            let base = match status_opt.as_ref() {
+                Some(status) => node_style(status),
+                None => Style::default().fg(Color::White),
+            };
+            let in_scope = state.in_scope.contains(node);
+            let label = format!("{} {}", id, title);
+            let style = dimmed(base, !in_scope);
+            node_spans.push(Span::styled(label, style));
+
+            if let Some(targets) = multi_layer_out.get(id) {
+                let badge = format!(" →…({})", targets.len());
+                node_spans.push(Span::styled(
+                    badge,
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+        }
+        lines.push(Line::from(node_spans));
+
+        // Adjacent-layer edge connector row: render a glyph per edge whose
+        // source sits in this layer and target sits in li+1.
+        if li + 1 < layers.len() {
+            let mut edge_spans: Vec<Span<'static>> = Vec::new();
+            let mut first = true;
+            for (src, dst, kind) in &state.layout.edges {
+                let s_layer = layer_of.get(src.as_str()).copied();
+                let d_layer = layer_of.get(dst.as_str()).copied();
+                if s_layer == Some(li) && d_layer == Some(li + 1) {
+                    if !first {
+                        edge_spans.push(Span::raw("  "));
+                    }
+                    first = false;
+                    let render = edge_render(*kind);
+                    edge_spans.push(Span::styled(
+                        format!("{} {} {}", src.as_str(), render.glyph, dst.as_str()),
+                        render.style,
+                    ));
+                }
+            }
+            if !edge_spans.is_empty() {
+                lines.push(Line::from(edge_spans));
+            }
+        }
+    }
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn scope_summary(state: &crate::tui::state::SequencingState) -> String {
+    use crate::engine::sequencing::Scope;
+    match &state.scope {
+        Scope::All => "scope: none (showing all nodes)".to_string(),
+        Scope::Under(id) => format!("scope: under {}", id),
+        Scope::After(id) => format!("scope: after {}", id),
+    }
+}
+
+fn lookup_doc(app: &App, id: &str) -> (String, Option<Status>) {
+    match app.store.resolve_shorthand(id) {
+        Ok(meta) => (meta.title.clone(), Some(meta.status.clone())),
+        Err(_) => (String::new(), None),
+    }
 }
 
 #[cfg(test)]

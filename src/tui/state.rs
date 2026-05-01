@@ -1,6 +1,7 @@
 mod expansion;
 pub mod forms;
 mod graph;
+mod sequencing;
 
 mod app;
 
@@ -12,3 +13,4 @@ pub use app::{
 pub use forms::AgentDialog;
 pub use forms::{CreateForm, DeleteConfirm, FormField, LinkEditor, ProvenanceEditor, StatusPicker};
 pub use graph::traverse_dependency_chain;
+pub use sequencing::{ScopeInputMode, SequencingState};
