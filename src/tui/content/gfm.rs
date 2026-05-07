@@ -79,6 +79,38 @@ mod tests {
     }
 
     #[test]
+    fn admonition_soft_break_renders_as_space() {
+        let input = "> [!NOTE]\n> first\n> second";
+        let segments = extract_gfm_segments(input);
+
+        let body = segments
+            .iter()
+            .find_map(|s| match s {
+                GfmSegment::Admonition { body, .. } => Some(body.clone()),
+                _ => None,
+            })
+            .expect("should contain an Admonition segment");
+
+        assert_eq!(body, "first second");
+    }
+
+    #[test]
+    fn admonition_hard_break_renders_as_newline() {
+        let input = "> [!NOTE]\n> first  \n> second";
+        let segments = extract_gfm_segments(input);
+
+        let body = segments
+            .iter()
+            .find_map(|s| match s {
+                GfmSegment::Admonition { body, .. } => Some(body.clone()),
+                _ => None,
+            })
+            .expect("should contain an Admonition segment");
+
+        assert_eq!(body, "first\nsecond");
+    }
+
+    #[test]
     fn test_extract_footnotes() {
         let input = "Text with a reference[^1].\n\n[^1]: This is the footnote definition.\n";
         let segments = extract_gfm_segments(input);
@@ -273,6 +305,53 @@ More text at the end.
     }
 
     #[test]
+    fn tui_markdown_preserves_hard_break() {
+        let md = tui_markdown::from_str("foo  \nbar\n");
+        assert!(
+            md.lines.len() >= 2,
+            "expected ≥2 lines from hard break, got {}: {:?}",
+            md.lines.len(),
+            md.lines
+                .iter()
+                .map(|l| l
+                    .spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect::<String>())
+                .collect::<Vec<_>>()
+        );
+
+        let line_texts: Vec<String> = md
+            .lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            line_texts.iter().any(|t| t.contains("foo")),
+            "expected a line containing 'foo', got {:?}",
+            line_texts
+        );
+        assert!(
+            line_texts.iter().any(|t| t.contains("bar")),
+            "expected a line containing 'bar', got {:?}",
+            line_texts
+        );
+
+        let segments = extract_gfm_segments("foo  \nbar");
+        let rendered = render_gfm_segments(&segments, 80);
+        assert!(
+            rendered.len() >= 2,
+            "expected render_gfm_segments to produce ≥2 lines, got {}",
+            rendered.len()
+        );
+    }
+
+    #[test]
     fn test_line_level_styles_preserved() {
         let input = "# Heading 1\n\n## Heading 2\n\nBody text.\n";
 
@@ -295,6 +374,116 @@ More text at the end.
             h1_style.add_modifier.contains(Modifier::BOLD),
             "H1 should be bold, got {:?}",
             h1_style
+        );
+    }
+
+    #[test]
+    fn code_block_preserves_newlines() {
+        let input = "```\nfn a()\nfn b()\n```";
+        let segments = extract_gfm_segments(input);
+        let lines = render_gfm_segments(&segments, 80);
+
+        let line_texts: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect::<String>()
+            })
+            .collect();
+
+        assert!(
+            line_texts.iter().any(|t| t.contains("fn a()")),
+            "expected a line containing 'fn a()', got {:?}",
+            line_texts
+        );
+        assert!(
+            line_texts.iter().any(|t| t.contains("fn b()")),
+            "expected a line containing 'fn b()', got {:?}",
+            line_texts
+        );
+        assert!(
+            !line_texts.iter().any(|t| t.contains("fn a()") && t.contains("fn b()")),
+            "code block lines should be separate, got {:?}",
+            line_texts
+        );
+    }
+
+    #[test]
+    fn mixed_paragraphs_and_hard_breaks() {
+        let input = "para1 line  \npara1 line2\n\npara2";
+        let segments = extract_gfm_segments(input);
+        let lines = render_gfm_segments(&segments, 80);
+
+        let line_texts: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect::<String>()
+            })
+            .collect();
+
+        let non_empty: Vec<&String> = line_texts.iter().filter(|t| !t.trim().is_empty()).collect();
+        assert!(
+            non_empty.len() >= 3,
+            "expected ≥3 non-empty lines, got {}: {:?}",
+            non_empty.len(),
+            line_texts
+        );
+
+        let para1_line_idx = line_texts
+            .iter()
+            .position(|t| t.contains("para1 line2"))
+            .expect("expected a line containing 'para1 line2'");
+        let para2_idx = line_texts
+            .iter()
+            .position(|t| t.contains("para2"))
+            .expect("expected a line containing 'para2'");
+        assert!(
+            line_texts[para1_line_idx + 1..para2_idx]
+                .iter()
+                .any(|t| t.trim().is_empty()),
+            "expected blank line between paragraphs, got {:?}",
+            line_texts
+        );
+    }
+
+    #[test]
+    fn hard_break_survives_long_lines() {
+        let max_width = 20;
+        let long_first =
+            "this line is definitely longer than twenty characters wide and keeps going";
+        let input = format!("{long_first}  \nsecond");
+        let segments = extract_gfm_segments(&input);
+        let lines = render_gfm_segments(&segments, max_width);
+
+        // Note: render_gfm_segments emits one Line per source line (split on hard
+        // breaks). Line widths may exceed max_width — `Paragraph::wrap` operates
+        // within a Line at render time and never merges across Lines, so asserting
+        // Line boundary count here is sufficient to verify hard-break preservation.
+        assert!(
+            lines.len() >= 2,
+            "expected ≥2 Lines from hard break, got {}",
+            lines.len()
+        );
+
+        let line_texts: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect::<String>()
+            })
+            .collect();
+
+        assert!(
+            line_texts.iter().any(|t| t.contains("second")),
+            "expected a Line containing 'second', got {:?}",
+            line_texts
         );
     }
 }

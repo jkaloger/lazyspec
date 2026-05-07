@@ -151,7 +151,8 @@ impl GfmExtractor for AdmonitionExtractor {
                 self.depth -= 1;
             }
             Event::Text(t) | Event::Code(t) => self.body.push_str(t),
-            Event::SoftBreak | Event::HardBreak => self.body.push('\n'),
+            Event::SoftBreak => self.body.push(' '),
+            Event::HardBreak => self.body.push('\n'),
             _ => {}
         }
         Some(ExtractorResult::Consumed)
