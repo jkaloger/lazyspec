@@ -399,6 +399,42 @@ fn check_doc_stale(path: &std::path::Path, doc_type: &str, config: &Config) -> (
     (is_gh, is_stale)
 }
 
+/// Tags column width (must match `Constraint::Length(24)` in `doc_table_widths`).
+const TAGS_CELL_WIDTH: usize = 24;
+
+/// Greedy-pack tags into the given width budget. Returns (taken, dropped).
+/// When some tags are dropped, reserves space for a ` +N` overflow indicator
+/// so the indicator never gets clipped at the cell boundary.
+fn pack_tags_to_width(tags: &[String], width: usize) -> (usize, usize) {
+    fn token_width(tag: &str) -> usize {
+        tag.chars()
+            .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+            .sum::<usize>()
+            + 2 // brackets
+    }
+    let pack = |reserve: usize| -> usize {
+        let mut consumed = 0usize;
+        let mut taken = 0usize;
+        for tag in tags {
+            let tw = token_width(tag);
+            let needed = if taken == 0 { tw } else { tw + 1 };
+            if consumed + needed + reserve > width {
+                break;
+            }
+            consumed += needed;
+            taken += 1;
+        }
+        taken
+    };
+    let no_reserve = pack(0);
+    if no_reserve == tags.len() {
+        return (no_reserve, 0);
+    }
+    let indicator_width = format!(" +{}", tags.len()).chars().count();
+    let with_reserve = pack(indicator_width);
+    (with_reserve, tags.len() - with_reserve)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn doc_row_cells(
     id: &str,
@@ -456,16 +492,17 @@ fn doc_row_cells(
         Cell::new(Span::styled(format!("{:<12}", status), status_style))
     };
 
+    let (take_count, dropped) = pack_tags_to_width(tags, TAGS_CELL_WIDTH);
     let mut tag_spans: Vec<Span<'static>> = Vec::new();
-    for (idx, tag) in tags.iter().take(3).enumerate() {
+    for (idx, tag) in tags.iter().take(take_count).enumerate() {
         if idx > 0 {
             tag_spans.push(Span::raw(" "));
         }
         let tc = if dim { Color::DarkGray } else { tag_color(tag) };
         tag_spans.push(Span::styled(format!("[{}]", tag), Style::default().fg(tc)));
     }
-    if tags.len() > 3 {
-        tag_spans.push(Span::styled(format!(" +{}", tags.len() - 3), dim_style));
+    if dropped > 0 {
+        tag_spans.push(Span::styled(format!(" +{}", dropped), dim_style));
     }
     let tags_cell = Cell::new(Line::from(tag_spans));
 
@@ -1817,6 +1854,54 @@ mod tests {
     fn tag_wrapped_lines_empty_returns_one_blank_line() {
         let lines = tag_wrapped_lines(&[], 24, false);
         assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn pack_tags_all_fit_returns_zero_dropped() {
+        let tags = vec!["a".to_string(), "b".to_string()];
+        let (taken, dropped) = pack_tags_to_width(&tags, 24);
+        assert_eq!(taken, 2);
+        assert_eq!(dropped, 0);
+    }
+
+    #[test]
+    fn pack_tags_count_overflow_drops_remainder() {
+        // Many short tags whose combined width exceeds the cell.
+        let tags: Vec<String> = (0..10).map(|i| format!("tag-{}", i)).collect();
+        let (taken, dropped) = pack_tags_to_width(&tags, 24);
+        assert!(taken >= 1);
+        assert_eq!(taken + dropped, tags.len());
+        assert!(dropped > 0);
+    }
+
+    #[test]
+    fn pack_tags_width_overflow_with_few_tags_drops_some() {
+        // Two long tags exceeding the cell width — must drop at least one
+        // and leave space for the indicator.
+        let tags = vec![
+            "needs-architecture-review".to_string(),
+            "blocked-on-upstream".to_string(),
+        ];
+        let (taken, dropped) = pack_tags_to_width(&tags, 24);
+        assert!(dropped > 0, "expected width overflow to drop at least one tag");
+        assert_eq!(taken + dropped, tags.len());
+    }
+
+    #[test]
+    fn pack_tags_reserves_space_for_indicator() {
+        // 3 tags that just-barely fit without indicator must still leave
+        // room for the indicator when at least one is dropped.
+        let tags = vec![
+            "aaaaa".to_string(), // [aaaaa] = 7
+            "bbbbb".to_string(), // [bbbbb] = 7 (+1 sep = 8)
+            "ccccc".to_string(), // [ccccc] = 7 (+1 sep = 8); total = 23
+            "dddd".to_string(),
+        ];
+        let (taken, dropped) = pack_tags_to_width(&tags, 24);
+        // Without reservation 3 tags fit (23 ≤ 24); with reservation for
+        // " +1" (3 cols) the third must drop so total ≤ 21.
+        assert!(taken < 3, "should reserve indicator space, got taken={}", taken);
+        assert!(dropped >= 2);
     }
 
     #[test]

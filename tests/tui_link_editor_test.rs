@@ -114,9 +114,9 @@ fn test_r_key_opens_link_editor_on_relations_tab() {
     assert!(app.link_editor.active);
 }
 
-// AC1: 'r' key does NOT open link editor when on Preview tab
+// 'r' key opens link editor regardless of preview tab
 #[test]
-fn test_r_key_noop_on_preview_tab() {
+fn test_r_key_opens_link_editor_on_preview_tab() {
     let (fixture, mut app) = setup_app_with_rfc("Test RFC", "draft");
 
     app.selected_type = 0;
@@ -130,7 +130,7 @@ fn test_r_key_noop_on_preview_tab() {
         &fixture.config(),
     );
 
-    assert!(!app.link_editor.active);
+    assert!(app.link_editor.active);
 }
 
 // open_link_editor populates results excluding self
