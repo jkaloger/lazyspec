@@ -44,11 +44,6 @@ pub enum AppEvent {
         source_hash: u64,
         entry: crate::tui::content::diagram::DiagramCacheEntry,
     },
-    ProbeResult {
-        picker: ratatui_image::picker::Picker,
-        protocol: crate::tui::infra::terminal_caps::TerminalImageProtocol,
-        tool_availability: crate::tui::content::diagram::ToolAvailability,
-    },
     CreateStarted,
     CreateProgress {
         message: String,

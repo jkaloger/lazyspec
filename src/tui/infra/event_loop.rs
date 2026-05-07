@@ -150,17 +150,6 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
         AppEvent::DiagramRendered { source_hash, entry } => {
             app.diagram_cache.insert(source_hash, entry);
         }
-        AppEvent::ProbeResult {
-            picker,
-            protocol,
-            tool_availability,
-        } => {
-            app.picker = picker;
-            app.terminal_image_protocol = protocol;
-            app.tool_availability = tool_availability;
-            app.diagram_cache = content::diagram::DiagramCache::new();
-            app.image_states.clear();
-        }
         AppEvent::CacheRefresh => {
             let root = app.store.root().to_path_buf();
             if let Ok(refreshed) = Store::load(&root, config) {
@@ -238,10 +227,17 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
 }
 
 pub fn run(store: Store, config: &Config) -> Result<()> {
+    // Probe terminal capabilities BEFORE entering raw mode and spawning the input thread.
+    // `Picker::from_query_stdio` reads stdin directly to capture terminal capability responses;
+    // running it concurrently with the crossterm input thread races for stdin and silently
+    // consumes user keystrokes (the parser eats bytes looking for the DSR Status terminator).
+    let picker = terminal_caps::create_picker();
+    let protocol = terminal_caps::TerminalImageProtocol::from(picker.protocol_type());
+    let tool_availability = content::diagram::ToolAvailability::detect();
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
-    let picker = ratatui_image::picker::Picker::halfblocks();
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -251,23 +247,12 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         picker,
         Box::new(crate::engine::fs::RealFileSystem),
     );
+    app.terminal_image_protocol = protocol;
+    app.tool_availability = tool_availability;
     app.refresh_validation(config);
 
     let (tx, rx) = crossbeam_channel::unbounded();
     app.event_tx = tx.clone();
-
-    // Spawn background probe for terminal image protocol and diagram tool availability
-    let probe_tx = tx.clone();
-    std::thread::spawn(move || {
-        let picker = terminal_caps::create_picker();
-        let protocol = terminal_caps::TerminalImageProtocol::from(picker.protocol_type());
-        let tool_availability = content::diagram::ToolAvailability::detect();
-        let _ = probe_tx.send(AppEvent::ProbeResult {
-            picker,
-            protocol,
-            tool_availability,
-        });
-    });
 
     let has_gh_types = config
         .documents
