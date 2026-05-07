@@ -26,6 +26,7 @@ mod tests {
     use super::*;
     use pulldown_cmark::Alignment;
     use ratatui::style::Modifier;
+    use ratatui::text::Line;
 
     #[test]
     fn test_extract_plain_markdown() {
@@ -59,6 +60,78 @@ mod tests {
         assert_eq!(table.rows.len(), 2);
         assert_eq!(table.rows[0], vec!["Alice", "30"]);
         assert_eq!(table.rows[1], vec!["Bob", "25"]);
+    }
+
+    #[test]
+    fn table_extractor_soft_break_renders_as_space() {
+        // Plain single-line table cell — pulldown-cmark emits a single
+        // Text event, no SoftBreak inside cells. Asserts that ordinary
+        // cells contain no '\n' so the HardBreak split doesn't accidentally
+        // inject newlines.
+        let input = "| col |\n|---|\n| plain text here |\n";
+        let segments = extract_gfm_segments(input);
+
+        let table = segments
+            .iter()
+            .find_map(|s| match s {
+                GfmSegment::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("should contain a Table segment");
+
+        let cell = &table.rows[0][0];
+        assert!(
+            !cell.contains('\n'),
+            "plain cell should not contain '\\n', got {:?}",
+            cell
+        );
+        assert_eq!(cell, "plain text here");
+    }
+
+    #[test]
+    fn table_extractor_br_tag_emits_newline() {
+        let input = "| col |\n|---|\n| first<br>second |";
+        let segments = extract_gfm_segments(input);
+
+        let table = segments
+            .iter()
+            .find_map(|s| match s {
+                GfmSegment::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("should contain a Table segment");
+
+        let cell = &table.rows[0][0];
+        assert!(
+            cell.contains('\n'),
+            "cell should contain '\\n' between 'first' and 'second', got {:?}",
+            cell
+        );
+        assert_eq!(cell, "first\nsecond");
+    }
+
+    #[test]
+    fn table_extractor_br_tag_case_insensitive() {
+        let variants = ["<BR>", "<br/>", "<br />"];
+        for variant in variants {
+            let input = format!("| col |\n|---|\n| first{variant}second |");
+            let segments = extract_gfm_segments(&input);
+
+            let table = segments
+                .iter()
+                .find_map(|s| match s {
+                    GfmSegment::Table(t) => Some(t),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("should contain a Table segment for variant {variant}"));
+
+            let cell = &table.rows[0][0];
+            assert_eq!(
+                cell, "first\nsecond",
+                "variant {variant} should produce '\\n' in cell, got {:?}",
+                cell
+            );
+        }
     }
 
     #[test]
@@ -449,6 +522,187 @@ More text at the end.
             "expected blank line between paragraphs, got {:?}",
             line_texts
         );
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn table_cell_hard_break_splits_lines() {
+        let table = GfmTable {
+            headers: vec!["h".into()],
+            alignments: vec![Alignment::None],
+            rows: vec![vec!["line1\nline2".into()]],
+        };
+
+        let lines = render_table(&table, 80);
+        assert_eq!(
+            lines.len(),
+            4,
+            "expected header + sep + 2 row visual lines, got {}",
+            lines.len()
+        );
+
+        let row_line_1 = line_text(&lines[2]);
+        let row_line_2 = line_text(&lines[3]);
+        assert!(
+            row_line_1.contains("line1"),
+            "row visual line 1 should contain 'line1', got {:?}",
+            row_line_1
+        );
+        assert!(
+            row_line_2.contains("line2"),
+            "row visual line 2 should contain 'line2', got {:?}",
+            row_line_2
+        );
+    }
+
+    #[test]
+    fn table_cell_soft_wrap_word_boundary() {
+        let table = GfmTable {
+            headers: vec!["h".into()],
+            alignments: vec![Alignment::None],
+            rows: vec![vec!["the quick brown fox".into()]],
+        };
+
+        let max_width: u16 = 10;
+        let lines = render_table(&table, max_width);
+
+        for (i, line) in lines.iter().enumerate().skip(2) {
+            let text_len = line_text(line).chars().count();
+            assert!(
+                text_len <= max_width as usize,
+                "row visual line {i} width {text_len} exceeded max_width {max_width}: {:?}",
+                line_text(line)
+            );
+        }
+
+        assert!(
+            lines.len() > 3,
+            "expected wrapping to produce multiple row visual lines, got {} total lines",
+            lines.len()
+        );
+    }
+
+    #[test]
+    fn table_row_height_max_lines() {
+        let table = GfmTable {
+            headers: vec!["a".into(), "b".into()],
+            alignments: vec![Alignment::None, Alignment::None],
+            rows: vec![vec!["a\nb\nc".into(), "x".into()]],
+        };
+
+        let lines = render_table(&table, 80);
+        assert_eq!(
+            lines.len(),
+            5,
+            "expected header + sep + 3 row visual lines, got {}",
+            lines.len()
+        );
+
+        let row_line_1 = line_text(&lines[2]);
+        let row_line_2 = line_text(&lines[3]);
+        let row_line_3 = line_text(&lines[4]);
+
+        assert!(row_line_1.contains('a'), "row line 1: {:?}", row_line_1);
+        assert!(row_line_1.contains('x'), "row line 1: {:?}", row_line_1);
+        assert!(row_line_2.contains('b'), "row line 2: {:?}", row_line_2);
+        assert!(row_line_3.contains('c'), "row line 3: {:?}", row_line_3);
+
+        // Cell B is blank on visual lines 2 + 3; assert no stray 'x' in those lines.
+        let count_x_line_2 = row_line_2.matches('x').count();
+        let count_x_line_3 = row_line_3.matches('x').count();
+        assert_eq!(
+            count_x_line_2, 0,
+            "cell B should be blank on row visual line 2, got {:?}",
+            row_line_2
+        );
+        assert_eq!(
+            count_x_line_3, 0,
+            "cell B should be blank on row visual line 3, got {:?}",
+            row_line_3
+        );
+    }
+
+    #[test]
+    fn table_single_line_unchanged() {
+        let table = GfmTable {
+            headers: vec!["A".into(), "B".into()],
+            alignments: vec![Alignment::None, Alignment::None],
+            rows: vec![
+                vec!["a1".into(), "b1".into()],
+                vec!["a2".into(), "b2".into()],
+            ],
+        };
+
+        let lines = render_table(&table, 80);
+        assert_eq!(
+            lines.len(),
+            4,
+            "expected header + sep + 2 single-line rows = 4 lines, got {}",
+            lines.len()
+        );
+    }
+
+    #[test]
+    fn table_combined_hard_soft() {
+        let table = GfmTable {
+            headers: vec!["h".into()],
+            alignments: vec![Alignment::None],
+            rows: vec![vec!["short\nthis is a long segment that wraps".into()]],
+        };
+
+        let max_width: u16 = 15;
+        let lines = render_table(&table, max_width);
+
+        // Expected: header + sep + 1 (short) + ≥2 (wrapped long segment) = ≥4 row visual lines total
+        let row_visual_lines = lines.len() - 2;
+        assert!(
+            row_visual_lines >= 3,
+            "expected ≥3 row visual lines (1 short + ≥2 wrapped), got {row_visual_lines}: {:?}",
+            lines.iter().map(line_text).collect::<Vec<_>>()
+        );
+
+        let first_row_line = line_text(&lines[2]);
+        assert!(
+            first_row_line.contains("short"),
+            "first row visual line should contain 'short', got {:?}",
+            first_row_line
+        );
+    }
+
+    #[test]
+    fn table_alignment_preserved_multiline() {
+        let table = GfmTable {
+            headers: vec!["A".into(), "B".into()],
+            alignments: vec![Alignment::None, Alignment::None],
+            rows: vec![vec!["one\ntwo\nthree".into(), "x\ny".into()]],
+        };
+
+        let lines = render_table(&table, 80);
+        // Skip header (0) and separator (1); collect row visual lines.
+        let row_lines: Vec<String> = lines.iter().skip(2).map(line_text).collect();
+        assert!(
+            row_lines.len() >= 3,
+            "expected ≥3 row visual lines, got {}",
+            row_lines.len()
+        );
+
+        let pipe_offsets: Vec<Option<usize>> =
+            row_lines.iter().map(|t| t.find('│')).collect();
+        let first = pipe_offsets[0].expect("first row visual line should have '│'");
+        for (i, off) in pipe_offsets.iter().enumerate() {
+            assert_eq!(
+                off,
+                &Some(first),
+                "row visual line {i} '│' offset {:?} differs from first ({first})",
+                off
+            );
+        }
     }
 
     #[test]

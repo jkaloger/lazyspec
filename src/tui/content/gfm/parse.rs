@@ -73,7 +73,15 @@ impl GfmExtractor for TableExtractor {
                 self.cell_text.clear();
             }
             Event::Text(t) | Event::Code(t) => self.cell_text.push_str(t),
-            Event::SoftBreak | Event::HardBreak => self.cell_text.push(' '),
+            Event::SoftBreak => self.cell_text.push(' '),
+            Event::HardBreak => self.cell_text.push('\n'),
+            Event::InlineHtml(t)
+                if t.eq_ignore_ascii_case("<br>")
+                    || t.eq_ignore_ascii_case("<br/>")
+                    || t.eq_ignore_ascii_case("<br />") =>
+            {
+                self.cell_text.push('\n')
+            }
             Event::End(TagEnd::Table) => {
                 let seg = GfmSegment::Table(GfmTable {
                     headers: self.headers.clone(),

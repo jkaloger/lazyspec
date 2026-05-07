@@ -1,11 +1,12 @@
 ---
 title: "TUI Multi-Line Display"
 type: rfc
-status: draft
+status: accepted
 author: "jkaloger"
 date: 2026-04-30
 tags: ["tui", "display", "ux"]
 ---
+
 
 ## Problem
 

@@ -1,13 +1,14 @@
 ---
 title: GFM table multi-line cells
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-05-07
 tags: []
 related:
 - implements: RFC-040
 ---
+
 
 
 ## Context

@@ -45,7 +45,8 @@ pub fn render_table(table: &GfmTable, max_width: u16) -> Vec<Line<'static>> {
     for row in &table.rows {
         for (i, cell) in row.iter().enumerate() {
             if i < col_widths.len() {
-                col_widths[i] = col_widths[i].max(cell.len());
+                let longest_segment = cell.split('\n').map(str::len).max().unwrap_or(0);
+                col_widths[i] = col_widths[i].max(longest_segment);
             }
         }
     }
@@ -101,24 +102,68 @@ pub fn render_table(table: &GfmTable, max_width: u16) -> Vec<Line<'static>> {
     lines.push(Line::from(sep_spans));
 
     for row in &table.rows {
-        let row_spans: Vec<Span<'static>> = row
+        let cell_lines: Vec<Vec<String>> = row
             .iter()
             .enumerate()
-            .flat_map(|(i, cell)| {
-                let alignment = alignments.get(i).unwrap_or(&Alignment::None);
+            .map(|(i, cell)| {
                 let width = col_widths.get(i).copied().unwrap_or(cell.len());
-                let text = align_text(cell, width, alignment);
-                let mut spans = vec![Span::raw(text)];
-                if i < col_count - 1 {
-                    spans.push(Span::raw(" │ ".to_string()));
-                }
-                spans
+                wrap_cell(cell, width)
             })
             .collect();
-        lines.push(Line::from(row_spans));
+
+        let row_height = cell_lines.iter().map(|c| c.len()).max().unwrap_or(1).max(1);
+
+        for vis in 0..row_height {
+            let row_spans: Vec<Span<'static>> = (0..col_count)
+                .flat_map(|i| {
+                    let alignment = alignments.get(i).unwrap_or(&Alignment::None);
+                    let width = col_widths.get(i).copied().unwrap_or(0);
+                    let text_ref: &str = cell_lines
+                        .get(i)
+                        .and_then(|cl| cl.get(vis))
+                        .map(String::as_str)
+                        .unwrap_or("");
+                    let text = align_text(text_ref, width, alignment);
+                    let mut spans = vec![Span::raw(text)];
+                    if i < col_count - 1 {
+                        spans.push(Span::raw(" │ ".to_string()));
+                    }
+                    spans
+                })
+                .collect();
+            lines.push(Line::from(row_spans));
+        }
     }
 
     lines
+}
+
+fn wrap_cell(cell: &str, width: usize) -> Vec<String> {
+    if cell.is_empty() {
+        return vec![String::new()];
+    }
+    if width == 0 {
+        return cell.split('\n').map(String::from).collect();
+    }
+    let mut out: Vec<String> = Vec::new();
+    for segment in cell.split('\n') {
+        if segment.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let wrapped = textwrap::wrap(segment, width);
+        if wrapped.is_empty() {
+            out.push(String::new());
+        } else {
+            for piece in wrapped {
+                out.push(piece.into_owned());
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
 }
 
 pub fn render_admonition(kind: &str, body: &str) -> Vec<Line<'static>> {
