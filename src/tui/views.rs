@@ -368,9 +368,9 @@ mod tests {
         // Tags whose combined width exceeds the 24-col cell. First two
         // pack with room for the indicator; the remainder shows as `+N`.
         let tags = vec![
-            "alpha".to_string(),    // [alpha] = 7
-            "bravo".to_string(),    // [bravo] = 7 (+1 sep = 8)
-            "charlie".to_string(),  // [charlie] = 9 (+1 sep = 10) — drops
+            "alpha".to_string(),   // [alpha] = 7
+            "bravo".to_string(),   // [bravo] = 7 (+1 sep = 8)
+            "charlie".to_string(), // [charlie] = 9 (+1 sep = 10) — drops
             "delta".to_string(),
             "echo".to_string(),
         ];

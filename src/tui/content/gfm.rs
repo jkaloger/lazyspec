@@ -477,7 +477,9 @@ More text at the end.
             line_texts
         );
         assert!(
-            !line_texts.iter().any(|t| t.contains("fn a()") && t.contains("fn b()")),
+            !line_texts
+                .iter()
+                .any(|t| t.contains("fn a()") && t.contains("fn b()")),
             "code block lines should be separate, got {:?}",
             line_texts
         );
@@ -692,8 +694,7 @@ More text at the end.
             row_lines.len()
         );
 
-        let pipe_offsets: Vec<Option<usize>> =
-            row_lines.iter().map(|t| t.find('│')).collect();
+        let pipe_offsets: Vec<Option<usize>> = row_lines.iter().map(|t| t.find('│')).collect();
         let first = pipe_offsets[0].expect("first row visual line should have '│'");
         for (i, off) in pipe_offsets.iter().enumerate() {
             assert_eq!(

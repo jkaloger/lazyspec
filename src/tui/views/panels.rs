@@ -1883,7 +1883,10 @@ mod tests {
             "blocked-on-upstream".to_string(),
         ];
         let (taken, dropped) = pack_tags_to_width(&tags, 24);
-        assert!(dropped > 0, "expected width overflow to drop at least one tag");
+        assert!(
+            dropped > 0,
+            "expected width overflow to drop at least one tag"
+        );
         assert_eq!(taken + dropped, tags.len());
     }
 
@@ -1900,7 +1903,11 @@ mod tests {
         let (taken, dropped) = pack_tags_to_width(&tags, 24);
         // Without reservation 3 tags fit (23 ≤ 24); with reservation for
         // " +1" (3 cols) the third must drop so total ≤ 21.
-        assert!(taken < 3, "should reserve indicator space, got taken={}", taken);
+        assert!(
+            taken < 3,
+            "should reserve indicator space, got taken={}",
+            taken
+        );
         assert!(dropped >= 2);
     }
 
@@ -1909,7 +1916,11 @@ mod tests {
         // Many tags in narrow column should drive row line count up.
         let tags: Vec<String> = (0..10).map(|i| format!("tag-{}", i)).collect();
         let lines = row_content_lines("t", &tags, &[], widths_for_test(80, 12, 20));
-        assert!(lines > 1, "expected multi-line from tag wrap, got {}", lines);
+        assert!(
+            lines > 1,
+            "expected multi-line from tag wrap, got {}",
+            lines
+        );
     }
 
     #[test]
