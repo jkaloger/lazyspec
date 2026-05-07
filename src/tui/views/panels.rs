@@ -261,6 +261,115 @@ fn provenance_cell_text(provenance: &[String], max_cols: usize) -> String {
     truncate_with_ellipsis(&provenance.join(", "), max_cols)
 }
 
+/// Column widths used by `row_content_lines` and `doc_row_for_node` for
+/// soft-wrap measurement. Indices align with cells produced by
+/// `doc_row_cells` (title at 1, tags at 3, provenance at 4).
+#[derive(Debug, Clone, Copy)]
+struct DocCellWidths {
+    title: u16,
+    tags: u16,
+    provenance: u16,
+}
+
+impl DocCellWidths {
+    /// Resolve cell widths from the available table area width.
+    /// Mirrors `doc_table_widths` ordering: indicator(2), gutter(1),
+    /// tree(4), id(18), title(Fill), status(12), tags(24), provenance(Min 20).
+    fn from_area_width(area_width: u16) -> Self {
+        // Mirror the layout ratatui's Table will compute for these
+        // constraints so wrap measurements match the real cell rects.
+        // `column_spacing` defaults to 1 between adjacent cells.
+        let inner_width = area_width.saturating_sub(2);
+        let rects = Layout::default()
+            .direction(Direction::Horizontal)
+            .spacing(1)
+            .constraints(doc_table_widths())
+            .split(Rect::new(0, 0, inner_width, 1));
+        DocCellWidths {
+            title: rects[3].width.max(1),
+            tags: rects[5].width.max(1),
+            provenance: rects[6].width.max(1),
+        }
+    }
+}
+
+fn wrap_segments(text: &str, width: u16) -> usize {
+    if text.is_empty() {
+        return 1;
+    }
+    let w = width.max(1) as usize;
+    text.split('\n')
+        .map(|seg| {
+            if seg.is_empty() {
+                1
+            } else {
+                textwrap::wrap(seg, w).len().max(1)
+            }
+        })
+        .sum()
+}
+
+/// Greedy word-wrap the full tag list into styled spans, one Line per
+/// row of the cell. Each tag is `[name]` separated by a space; tags
+/// never split across lines.
+fn tag_wrapped_lines(tags: &[String], width: u16, dim: bool) -> Vec<Line<'static>> {
+    if tags.is_empty() {
+        return vec![Line::from("")];
+    }
+    let dim_color = Color::DarkGray;
+    let w = width.max(1) as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut current: Vec<Span<'static>> = Vec::new();
+    let mut cur_width = 0usize;
+    for tag in tags {
+        let token = format!("[{}]", tag);
+        let tlen = token.chars().count();
+        let needed = if current.is_empty() { tlen } else { tlen + 1 };
+        if cur_width + needed > w && !current.is_empty() {
+            lines.push(Line::from(std::mem::take(&mut current)));
+            cur_width = 0;
+        }
+        if !current.is_empty() {
+            current.push(Span::raw(" "));
+            cur_width += 1;
+        }
+        let tc = if dim { dim_color } else { tag_color(tag) };
+        current.push(Span::styled(token, Style::default().fg(tc)));
+        cur_width += tlen;
+    }
+    if !current.is_empty() {
+        lines.push(Line::from(current));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+    lines
+}
+
+/// Compute the natural visual line count for a row's content given the
+/// resolved cell widths. Returns the maximum across the title, tags, and
+/// provenance cells.
+fn row_content_lines(
+    title: &str,
+    tags: &[String],
+    provenance: &[String],
+    widths: DocCellWidths,
+) -> usize {
+    let title_lines = wrap_segments(title, widths.title);
+    let tags_lines = tag_wrapped_lines(tags, widths.tags, false).len();
+    let prov_text = if provenance.is_empty() {
+        String::new()
+    } else {
+        provenance.join(", ")
+    };
+    let prov_lines = if prov_text.is_empty() {
+        1
+    } else {
+        wrap_segments(&prov_text, widths.provenance)
+    };
+    title_lines.max(tags_lines).max(prov_lines)
+}
+
 /// Returns `true` when `elapsed_secs` exceeds twice the given `cache_ttl`.
 pub(crate) fn is_cache_stale(elapsed_secs: u64, cache_ttl: u64) -> bool {
     elapsed_secs >= 2 * cache_ttl
@@ -367,12 +476,76 @@ fn doc_row_cells(
     vec![id_cell, title_cell, status_cell, tags_cell, provenance_cell]
 }
 
+fn wrap_to_lines(text: &str, width: u16, style: Style) -> Vec<Line<'static>> {
+    let w = width.max(1) as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for segment in text.split('\n') {
+        if segment.is_empty() {
+            lines.push(Line::from(""));
+            continue;
+        }
+        for piece in textwrap::wrap(segment, w) {
+            lines.push(Line::from(Span::styled(piece.into_owned(), style)));
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+    lines
+}
+
+#[allow(clippy::too_many_arguments)]
+fn doc_row_cells_expanded(
+    id: &str,
+    title: &str,
+    status: &Status,
+    tags: &[String],
+    provenance: &[String],
+    is_virtual: bool,
+    dim: bool,
+    is_gh: bool,
+    is_stale: bool,
+    widths: DocCellWidths,
+) -> Vec<Cell<'static>> {
+    // Reuse the single-line cell builder, then replace title and provenance
+    // cells with wrapped multi-line versions.
+    let mut cells = doc_row_cells(
+        id, title, status, tags, provenance, is_virtual, dim, is_gh, is_stale,
+    );
+
+    let dim_style = Style::default().fg(Color::DarkGray);
+    let normal_style = Style::default();
+    let title_style = if dim { dim_style } else { normal_style };
+    let prov_style = if dim { dim_style } else { normal_style };
+
+    let title_text = if is_virtual {
+        format!("{} (virtual)", title)
+    } else {
+        title.to_string()
+    };
+    let title_lines = wrap_to_lines(&title_text, widths.title, title_style);
+    cells[1] = Cell::from(title_lines);
+
+    if !tags.is_empty() {
+        cells[3] = Cell::from(tag_wrapped_lines(tags, widths.tags, dim));
+    }
+
+    if !provenance.is_empty() {
+        let prov_text = provenance.join(", ");
+        let prov_lines = wrap_to_lines(&prov_text, widths.provenance, prov_style);
+        cells[4] = Cell::from(prov_lines);
+    }
+
+    cells
+}
+
 fn doc_row_for_node(
     app: &App,
     node: &DocListNode,
     index: usize,
     dim: bool,
     config: &Config,
+    area_width: u16,
 ) -> Row<'static> {
     let tree_text = if node.depth > 0 {
         let leading = "   ".repeat(node.depth - 1);
@@ -422,25 +595,52 @@ fn doc_row_for_node(
 
     let (is_gh, is_stale) = check_doc_stale(&node.path, node.doc_type.as_str(), config);
 
+    let widths = DocCellWidths::from_area_width(area_width);
+    let content_lines = row_content_lines(&node.title, &tags, &provenance, widths);
+    let expanded = app.wrap_mode && index == app.selected_doc;
+
     let mut cells = vec![gutter_cell, tree_cell];
-    cells.extend(doc_row_cells(
-        &display_id,
-        &node.title,
-        &node.status,
-        &tags,
-        &provenance,
-        node.is_virtual,
-        dim,
-        is_gh,
-        is_stale,
-    ));
+    if expanded {
+        cells.extend(doc_row_cells_expanded(
+            &display_id,
+            &node.title,
+            &node.status,
+            &tags,
+            &provenance,
+            node.is_virtual,
+            dim,
+            is_gh,
+            is_stale,
+            widths,
+        ));
+    } else {
+        cells.extend(doc_row_cells(
+            &display_id,
+            &node.title,
+            &node.status,
+            &tags,
+            &provenance,
+            node.is_virtual,
+            dim,
+            is_gh,
+            is_stale,
+        ));
+    }
 
     let style = if dim {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default()
     };
-    Row::new(cells).style(style)
+
+    let row = Row::new(cells).style(style);
+    if expanded {
+        let max = config.ui.multiline.max_expanded_height.max(1) as u16;
+        let height = (content_lines as u16).min(max).max(1);
+        row.height(height)
+    } else {
+        row
+    }
 }
 
 pub fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
@@ -481,11 +681,12 @@ pub fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect, config: &Config) 
     let relations_focused = app.preview_tab == PreviewTab::Relations;
     let dim = relations_focused;
 
+    let area_width = area.width;
     let rows: Vec<Row> = app
         .doc_tree
         .iter()
         .enumerate()
-        .map(|(i, node)| doc_row_for_node(app, node, i, dim, config))
+        .map(|(i, node)| doc_row_for_node(app, node, i, dim, config, area_width))
         .collect();
 
     let widths = doc_table_widths();
@@ -1523,6 +1724,138 @@ mod tests {
         let text = line_text(prov_line);
         assert!(text.contains('X'), "should contain X, got: {}", text);
         assert!(text.contains('Y'), "should contain Y, got: {}", text);
+    }
+
+    fn widths_for_test(title: u16, tags: u16, provenance: u16) -> DocCellWidths {
+        DocCellWidths {
+            title,
+            tags,
+            provenance,
+        }
+    }
+
+    #[test]
+    fn row_content_lines_single_line_inputs_returns_one() {
+        let lines = row_content_lines("short", &[], &[], widths_for_test(40, 24, 20));
+        assert_eq!(lines, 1);
+    }
+
+    #[test]
+    fn row_content_lines_counts_explicit_newlines_in_title() {
+        let title = "line1\nline2\nline3";
+        let lines = row_content_lines(title, &[], &[], widths_for_test(80, 24, 20));
+        assert_eq!(lines, 3);
+    }
+
+    #[test]
+    fn row_content_lines_soft_wraps_long_title() {
+        // 30-char title soft-wrapped into width 10 should produce >1 lines.
+        let title = "alpha beta gamma delta epsilon zeta";
+        let lines = row_content_lines(title, &[], &[], widths_for_test(10, 24, 20));
+        assert!(lines > 1, "expected wrap, got {}", lines);
+    }
+
+    #[test]
+    fn row_content_lines_takes_max_across_cells() {
+        // Title fits on 1 line; provenance wraps to multiple.
+        let provenance: Vec<String> = (0..5).map(|i| format!("contributor-{}", i)).collect();
+        let lines = row_content_lines("t", &[], &provenance, widths_for_test(80, 24, 10));
+        assert!(lines > 1);
+    }
+
+    #[test]
+    fn doc_cell_widths_resolves_title_from_area() {
+        // Widths come from ratatui's Layout for the doc-table constraints.
+        // Title (Fill) and provenance (Min 20) flex; tags is fixed at 24.
+        let widths = DocCellWidths::from_area_width(200);
+        assert!(widths.title > 0);
+        assert!(widths.title < 200);
+        assert_eq!(widths.tags, 24);
+        assert!(widths.provenance >= 20);
+    }
+
+    #[test]
+    fn doc_cell_widths_title_scales_with_area() {
+        let small = DocCellWidths::from_area_width(80);
+        let large = DocCellWidths::from_area_width(200);
+        assert!(large.title > small.title);
+    }
+
+    #[test]
+    fn doc_cell_widths_clamps_to_min_one_when_area_tiny() {
+        let widths = DocCellWidths::from_area_width(10);
+        assert_eq!(widths.title, 1);
+    }
+
+    #[test]
+    fn expanded_height_is_clamped_by_config_max() {
+        // Sanity: simulate the row-height clamp logic used in doc_row_for_node.
+        let cfg = crate::engine::config::MultiLineConfig {
+            max_expanded_height: 3,
+        };
+        let content_lines: usize = 10;
+        let max = cfg.max_expanded_height.max(1) as u16;
+        let height = (content_lines as u16).min(max).max(1);
+        assert_eq!(height, 3);
+    }
+
+    #[test]
+    fn tag_wrapped_lines_single_line_when_fits() {
+        let tags = vec!["a".to_string(), "b".to_string()];
+        let lines = tag_wrapped_lines(&tags, 24, false);
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn tag_wrapped_lines_multi_line_when_overflow() {
+        let tags: Vec<String> = (0..6).map(|i| format!("tag-{}", i)).collect();
+        let lines = tag_wrapped_lines(&tags, 12, false);
+        assert!(lines.len() > 1, "expected wrap, got {}", lines.len());
+    }
+
+    #[test]
+    fn tag_wrapped_lines_empty_returns_one_blank_line() {
+        let lines = tag_wrapped_lines(&[], 24, false);
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn row_content_lines_includes_all_tags_not_just_first_three() {
+        // Many tags in narrow column should drive row line count up.
+        let tags: Vec<String> = (0..10).map(|i| format!("tag-{}", i)).collect();
+        let lines = row_content_lines("t", &tags, &[], widths_for_test(80, 12, 20));
+        assert!(lines > 1, "expected multi-line from tag wrap, got {}", lines);
+    }
+
+    #[test]
+    fn expanded_row_cells_render_full_tag_list() {
+        let tags: Vec<String> = (0..6).map(|i| format!("tag-{}", i)).collect();
+        let cells = doc_row_cells_expanded(
+            "RFC-001",
+            "Title",
+            &Status::Draft,
+            &tags,
+            &[],
+            false,
+            false,
+            false,
+            false,
+            widths_for_test(80, 12, 20),
+        );
+        let dbg = format!("{:?}", cells[3]);
+        for tag in &tags {
+            assert!(
+                dbg.contains(tag),
+                "expanded tags cell should contain {}, got: {}",
+                tag,
+                dbg
+            );
+        }
+        assert!(
+            !dbg.contains(" +"),
+            "expanded tags cell should not show '+N' counter, got: {}",
+            dbg
+        );
     }
 
     #[test]

@@ -574,6 +574,9 @@ impl App {
                     self.editor_request = Some(root.join(&doc.path));
                 }
             }
+            (KeyCode::Char('x'), _) => {
+                self.wrap_mode = !self.wrap_mode;
+            }
             (KeyCode::Enter, _) => {
                 if self.preview_tab == PreviewTab::Relations {
                     self.navigate_to_relation();
