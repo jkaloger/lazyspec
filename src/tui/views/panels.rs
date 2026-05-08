@@ -2055,7 +2055,11 @@ mod tests {
         assert_eq!(widths[4], 0, "status dropped");
         assert_eq!(widths[5], 0, "tags dropped");
         assert_eq!(widths[6], 0, "provenance dropped");
-        assert!(widths[3] > 0, "title gets remaining budget, got {}", widths[3]);
+        assert!(
+            widths[3] > 0,
+            "title gets remaining budget, got {}",
+            widths[3]
+        );
     }
 
     #[test]
