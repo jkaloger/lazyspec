@@ -27,6 +27,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+// Discard any pending crossterm events buffered in stdin. Called after a child
+// process (editor, agent) exits to drop bytes that may have arrived during the
+// subprocess but were not consumed by it. Caller must hold the stdin lock so the
+// input thread does not race the reads.
+fn drain_stdin() {
+    while let Ok(true) = crossterm::event::poll(Duration::from_millis(0)) {
+        let _ = crossterm::event::read();
+    }
+}
+
 fn run_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) -> Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     disable_raw_mode()?;
@@ -313,27 +323,26 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         }
     }
 
-    // Dedicated terminal input thread: sends key events through the unified channel
-    let input_paused = Arc::new(AtomicBool::new(false));
+    // Dedicated terminal input thread: sends key events through the unified channel.
+    // The mutex enforces single-reader ownership of stdin: the main thread acquires it
+    // before disabling raw mode for an external editor / subprocess, guaranteeing that
+    // no concurrent crossterm poll consumes bytes meant for the child process.
+    let stdin_lock = Arc::new(Mutex::new(()));
     let term_tx = tx.clone();
-    let paused = input_paused.clone();
-    std::thread::spawn(move || {
-        loop {
-            if paused.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(50));
-                continue;
-            }
-            // Poll with short timeout so we re-check paused frequently
-            if let Ok(true) = crossterm::event::poll(Duration::from_millis(50)) {
-                if let Ok(Event::Key(key)) = crossterm::event::read() {
-                    if key.kind == KeyEventKind::Press {
-                        perf_log::log(&format!("input_thread: read key {:?}", key.code));
-                        let _ = term_tx.send(AppEvent::Terminal(key));
-                        perf_log::log("input_thread: sent to channel");
-                    }
+    let thread_stdin_lock = stdin_lock.clone();
+    std::thread::spawn(move || loop {
+        let _guard = thread_stdin_lock.lock().unwrap();
+        if let Ok(true) = crossterm::event::poll(Duration::from_millis(50)) {
+            if let Ok(Event::Key(key)) = crossterm::event::read() {
+                if key.kind == KeyEventKind::Press {
+                    perf_log::log(&format!("input_thread: read key {:?}", key.code));
+                    let _ = term_tx.send(AppEvent::Terminal(key));
+                    perf_log::log("input_thread: sent to channel");
                 }
             }
         }
+        drop(_guard);
+        std::thread::yield_now();
     });
 
     let mut loop_count: u64 = 0;
@@ -449,11 +458,12 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         perf_log::log_duration("loop_total", loop_start);
 
         if let Some(path) = app.editor_request.take() {
-            input_paused.store(true, Ordering::Relaxed);
+            let _stdin_guard = stdin_lock.lock().unwrap();
             while rx.try_recv().is_ok() {}
             run_editor(&mut terminal, &path)?;
+            drain_stdin();
             while rx.try_recv().is_ok() {}
-            input_paused.store(false, Ordering::Relaxed);
+            drop(_stdin_guard);
             let root = app.store.root().to_path_buf();
             if let Ok(relative) = path.strip_prefix(&root) {
                 let _ = app.store.reload_file(&root, relative, &*app.fs);
@@ -493,7 +503,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
 
         #[cfg(feature = "agent")]
         if let Some(session_id) = app.resume_request.take() {
-            input_paused.store(true, Ordering::Relaxed);
+            let _stdin_guard = stdin_lock.lock().unwrap();
             while rx.try_recv().is_ok() {}
 
             execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -505,8 +515,9 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             execute!(terminal.backend_mut(), EnterAlternateScreen)?;
             terminal.clear()?;
 
+            drain_stdin();
             while rx.try_recv().is_ok() {}
-            input_paused.store(false, Ordering::Relaxed);
+            drop(_stdin_guard);
             let root = app.store.root().to_path_buf();
             app.store = Store::load(&root, config)?;
             app.refresh_validation(config);

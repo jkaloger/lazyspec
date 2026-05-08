@@ -227,9 +227,23 @@ where
     let mut value: serde_yaml::Value = serde_yaml::from_str(&yaml)?;
     mutate(&mut value)?;
     let new_yaml = serde_yaml::to_string(&value)?;
-    let output = format!("---\n{}---\n{}", new_yaml, body);
+    let output = compose_frontmatter(&new_yaml, &body);
     fs.write(path, &output)?;
     Ok(())
+}
+
+/// Reconstruct a markdown document from a YAML frontmatter block and body.
+///
+/// Inverse of [`split_frontmatter`]: composing the parts that `split_frontmatter`
+/// returned reproduces the original document. The body is preserved byte-for-byte
+/// (including any leading newline that follows the closing `---` delimiter), so
+/// repeated split/compose cycles do not accumulate blank lines.
+pub fn compose_frontmatter(yaml: &str, body: &str) -> String {
+    if yaml.ends_with('\n') {
+        format!("---\n{}---{}", yaml, body)
+    } else {
+        format!("---\n{}\n---{}", yaml, body)
+    }
 }
 
 pub fn split_frontmatter(content: &str) -> Result<(String, String)> {
@@ -437,6 +451,79 @@ Body.
 "#;
         let meta = DocMeta::parse(content).unwrap();
         assert!(meta.provenance.is_empty());
+    }
+
+    #[test]
+    fn split_compose_roundtrip_preserves_content() {
+        let cases = [
+            "---\ntitle: foo\n---\nbody\n",
+            "---\ntitle: foo\n---\n\nbody with blank line\n",
+            "---\ntitle: foo\n---\n",
+            "---\ntitle: foo\n---",
+            "---\ntitle: foo\n---\nbody without trailing newline",
+        ];
+        for original in cases {
+            let (yaml, body) = split_frontmatter(original).unwrap();
+            let yaml_with_newline = format!("{}\n", yaml);
+            let recomposed = compose_frontmatter(&yaml_with_newline, &body);
+            assert_eq!(recomposed, original, "roundtrip failed for: {:?}", original);
+        }
+    }
+
+    #[test]
+    fn rewrite_frontmatter_is_idempotent() {
+        use crate::engine::fs::FileSystem;
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+
+        struct InMemFs(RefCell<HashMap<PathBuf, String>>);
+        impl FileSystem for InMemFs {
+            fn read_to_string(&self, p: &Path) -> Result<String> {
+                self.0
+                    .borrow()
+                    .get(p)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("not found: {}", p.display()))
+            }
+            fn write(&self, p: &Path, c: &str) -> Result<()> {
+                self.0.borrow_mut().insert(p.to_path_buf(), c.to_string());
+                Ok(())
+            }
+            fn rename(&self, _: &Path, _: &Path) -> Result<()> {
+                Ok(())
+            }
+            fn read_dir(&self, _: &Path) -> Result<Vec<PathBuf>> {
+                Ok(vec![])
+            }
+            fn exists(&self, p: &Path) -> bool {
+                self.0.borrow().contains_key(p)
+            }
+            fn create_dir_all(&self, _: &Path) -> Result<()> {
+                Ok(())
+            }
+            fn is_dir(&self, _: &Path) -> bool {
+                false
+            }
+        }
+
+        let initial = "---\ntitle: foo\n---\nbody\n";
+        let path = PathBuf::from("doc.md");
+        let mut map = HashMap::new();
+        map.insert(path.clone(), initial.to_string());
+        let fs = InMemFs(RefCell::new(map));
+
+        rewrite_frontmatter(&path, &fs, |_| Ok(())).unwrap();
+        let after_first = fs.read_to_string(&path).unwrap();
+
+        for _ in 0..5 {
+            rewrite_frontmatter(&path, &fs, |_| Ok(())).unwrap();
+        }
+        let after_many = fs.read_to_string(&path).unwrap();
+
+        assert_eq!(
+            after_first, after_many,
+            "no-op rewrite must not accumulate newlines across runs"
+        );
     }
 
     #[test]

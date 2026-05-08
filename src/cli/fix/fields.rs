@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::engine::config::Config;
-use crate::engine::document::split_frontmatter;
+use crate::engine::document::{compose_frontmatter, split_frontmatter};
 use crate::engine::fs::FileSystem;
 use crate::engine::store::Store;
 
@@ -73,7 +73,7 @@ fn fix_file(
 
     let written = if !dry_run && !fields_added.is_empty() {
         let new_yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(mapping))?;
-        let output = format!("---\n{}---\n{}", new_yaml, body);
+        let output = compose_frontmatter(&new_yaml, &body);
         fs.write(&full_path, &output)?;
         true
     } else {

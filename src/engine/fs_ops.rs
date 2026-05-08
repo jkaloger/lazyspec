@@ -5,7 +5,7 @@ use anyhow::{anyhow, bail, Result};
 use chrono::Local;
 
 use crate::engine::config::{Config, NumberingStrategy, ReservedFormat};
-use crate::engine::document::split_frontmatter;
+use crate::engine::document::{compose_frontmatter, split_frontmatter};
 use crate::engine::reservation;
 use crate::engine::store::Store;
 use crate::engine::template;
@@ -293,7 +293,7 @@ pub fn update_document(
     }
 
     let new_yaml = lines.join("\n");
-    let new_content = format!("---\n{}\n---\n{}", new_yaml, body);
+    let new_content = compose_frontmatter(&new_yaml, &body);
     fs::write(&full_path, new_content)?;
     Ok(())
 }
