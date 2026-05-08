@@ -1,13 +1,14 @@
 ---
 title: Title prioritised in TUI tables at narrow widths
 type: iteration
-status: draft
+status: accepted
 author: agent
 date: 2026-05-08
 tags: []
 related:
 - implements: STORY-047
 ---
+
 
 ## Context
 
@@ -85,7 +86,7 @@ AC-3 (selected-row highlight) and AC-2 (Filters mode parity) are reachable throu
 - **AC-2** Given a narrow terminal (~70 columns) when the document list renders then provenance and tags are hidden (width 0), status remains at 12, and title receives at least `TITLE_MIN_COLS` (20).
 - **AC-3** Given a very narrow terminal (~50 columns) when the document list renders then status, tags, and provenance are hidden, and title takes the remaining budget.
 - **AC-4** Given any terminal width when soft-wrap measurement runs then `DocCellWidths::from_area_width(w).title` equals the title cell width that ratatui resolves from `doc_table_widths(w)`.
-- **AC-5** Given any terminal width when the document list renders then gutter (1), tree (4), and ID (18) columns retain their fixed widths.
+- **AC-5** Given a terminal width >= 51 columns when the document list renders then gutter (1), tree (4), and ID (18) columns retain their fixed widths. Below the physical floor (`gutter + tree + id + title-min + 6 spacings = 49` plus 2 borders), ratatui proportionally shrinks fixed-length columns; this is graceful degradation outside the supported range.
 
 ## Notes
 
