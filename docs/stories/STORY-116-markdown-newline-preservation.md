@@ -1,13 +1,14 @@
 ---
 title: Markdown newline preservation
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-04-30
 tags: []
 related:
 - implements: RFC-040
 ---
+
 
 
 ## Context

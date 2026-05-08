@@ -6,3 +6,4 @@
 .lazyspec/issue-map.json
 result
 .direnv
+.local

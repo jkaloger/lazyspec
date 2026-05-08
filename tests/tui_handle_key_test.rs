@@ -154,6 +154,66 @@ fn test_handle_key_tab_toggles_preview() {
     assert_eq!(app.preview_tab, PreviewTab::Relations);
 }
 
+#[test]
+fn test_handle_key_x_toggles_wrap_mode() {
+    let (fixture, mut app) = setup_app_with_docs();
+    assert!(!app.wrap_mode);
+
+    app.handle_key(
+        KeyCode::Char('x'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
+    assert!(app.wrap_mode);
+
+    app.handle_key(
+        KeyCode::Char('x'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
+    assert!(!app.wrap_mode);
+}
+
+#[test]
+fn test_handle_key_e_does_not_toggle_wrap_mode() {
+    let (fixture, mut app) = setup_app_with_docs();
+    assert!(!app.wrap_mode);
+
+    app.handle_key(
+        KeyCode::Char('e'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
+
+    assert!(app.editor_request.is_some());
+    assert!(!app.wrap_mode);
+}
+
+#[test]
+fn test_handle_key_x_toggles_wrap_mode_without_selection() {
+    let fixture = TestFixture::new();
+    let store = fixture.store();
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
+    assert!(app.selected_doc_meta().is_none());
+
+    app.handle_key(
+        KeyCode::Char('x'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
+
+    assert!(app.wrap_mode);
+}
+
 // --- Search mode ---
 
 #[test]

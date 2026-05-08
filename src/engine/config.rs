@@ -189,12 +189,32 @@ impl Default for StatusBarConfig {
     }
 }
 
+fn default_multiline_max_expanded_height() -> usize {
+    5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiLineConfig {
+    #[serde(default = "default_multiline_max_expanded_height")]
+    pub max_expanded_height: usize,
+}
+
+impl Default for MultiLineConfig {
+    fn default() -> Self {
+        Self {
+            max_expanded_height: default_multiline_max_expanded_height(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UiConfig {
     #[serde(default)]
     pub ascii_diagrams: bool,
     #[serde(default)]
     pub statusbar: StatusBarConfig,
+    #[serde(default)]
+    pub multiline: MultiLineConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -970,6 +990,35 @@ store = "git-ref"
 "#;
         let config = Config::parse(toml_str).unwrap();
         assert_eq!(config.documents.types[0].store, StoreBackend::GitRef);
+    }
+
+    #[test]
+    fn test_multiline_config_defaults() {
+        let cfg = MultiLineConfig::default();
+        assert_eq!(cfg.max_expanded_height, 5);
+    }
+
+    #[test]
+    fn test_multiline_config_parses_max_expanded_height() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[tui.multiline]
+max_expanded_height = 3
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert_eq!(config.ui.multiline.max_expanded_height, 3);
+    }
+
+    #[test]
+    fn test_multiline_config_defaults_when_section_absent() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert_eq!(config.ui.multiline.max_expanded_height, 5);
     }
 
     #[test]

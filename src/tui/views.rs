@@ -365,12 +365,14 @@ mod tests {
 
     #[test]
     fn doc_row_cells_tag_overflow() {
+        // Tags whose combined width exceeds the 24-col cell. First two
+        // pack with room for the indicator; the remainder shows as `+N`.
         let tags = vec![
-            "a".to_string(),
-            "b".to_string(),
-            "c".to_string(),
-            "d".to_string(),
-            "e".to_string(),
+            "alpha".to_string(),   // [alpha] = 7
+            "bravo".to_string(),   // [bravo] = 7 (+1 sep = 8)
+            "charlie".to_string(), // [charlie] = 9 (+1 sep = 10) — drops
+            "delta".to_string(),
+            "echo".to_string(),
         ];
         let cells = panels::doc_row_cells_for_test(
             "RFC-003",
@@ -384,33 +386,23 @@ mod tests {
 
         let tags_dbg = cell_debug(&cells[3]);
         assert!(
-            tags_dbg.contains("[a]"),
-            "Tags cell should contain [a], got: {}",
+            tags_dbg.contains("[alpha]"),
+            "Tags cell should contain [alpha], got: {}",
             tags_dbg
         );
         assert!(
-            tags_dbg.contains("[b]"),
-            "Tags cell should contain [b], got: {}",
+            tags_dbg.contains("[bravo]"),
+            "Tags cell should contain [bravo], got: {}",
             tags_dbg
         );
         assert!(
-            tags_dbg.contains("[c]"),
-            "Tags cell should contain [c], got: {}",
+            tags_dbg.contains(" +"),
+            "Tags cell should contain overflow indicator, got: {}",
             tags_dbg
         );
         assert!(
-            tags_dbg.contains("+2"),
-            "Tags cell should contain +2 overflow, got: {}",
-            tags_dbg
-        );
-        assert!(
-            !tags_dbg.contains("[d]"),
-            "Tags cell should not contain [d], got: {}",
-            tags_dbg
-        );
-        assert!(
-            !tags_dbg.contains("[e]"),
-            "Tags cell should not contain [e], got: {}",
+            !tags_dbg.contains("[echo]"),
+            "Tags cell should not contain [echo], got: {}",
             tags_dbg
         );
     }

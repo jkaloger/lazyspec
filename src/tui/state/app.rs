@@ -224,6 +224,7 @@ pub struct App {
     pub type_icons: HashMap<String, String>,
     pub type_plurals: HashMap<String, String>,
     pub expanded_parents: HashSet<PathBuf>,
+    pub wrap_mode: bool,
     pub doc_tree: Vec<DocListNode>,
     pub show_warnings: bool,
     pub warnings_selected: usize,
@@ -349,6 +350,7 @@ impl App {
             type_icons,
             type_plurals,
             expanded_parents: HashSet::new(),
+            wrap_mode: false,
             doc_tree: Vec::new(),
             show_warnings: false,
             warnings_selected: 0,
@@ -1572,6 +1574,7 @@ mod tests {
             type_icons: HashMap::new(),
             type_plurals: HashMap::new(),
             expanded_parents: HashSet::new(),
+            wrap_mode: false,
             doc_tree: (0..doc_count).map(make_dummy_node).collect(),
             show_warnings: false,
             warnings_selected: 0,
@@ -2029,5 +2032,19 @@ mod tests {
     fn last_sync_initially_none() {
         let app = make_test_app(0);
         assert!(app.last_sync.is_none());
+    }
+
+    #[test]
+    fn wrap_mode_defaults_to_off() {
+        let app = make_test_app(0);
+        assert!(!app.wrap_mode);
+    }
+
+    #[test]
+    fn wrap_mode_survives_doc_tree_rebuild() {
+        let mut app = make_test_app(3);
+        app.wrap_mode = true;
+        app.build_doc_tree();
+        assert!(app.wrap_mode);
     }
 }

@@ -16,7 +16,7 @@ pub fn draw_help_overlay(f: &mut Frame) {
     let area = f.area();
 
     let popup_width = 50.min(area.width.saturating_sub(4));
-    let popup_height = 26.min(area.height.saturating_sub(4));
+    let popup_height = 27.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(popup_width)) / 2;
     let y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -33,6 +33,7 @@ pub fn draw_help_overlay(f: &mut Frame) {
         Line::from(""),
         Line::from("  h/l       Switch type"),
         Line::from("  Space     Expand/collapse tree node"),
+        Line::from("  x         Toggle wrap mode (selected row wraps content)"),
         Line::from("  j/k       Navigate up/down"),
         Line::from("  Enter     Open document fullscreen"),
         Line::from("  Esc       Back / close"),

@@ -482,6 +482,12 @@ impl App {
             KeyCode::Char('s') => {
                 self.open_status_picker();
             }
+            KeyCode::Char('r') => {
+                self.open_link_editor();
+            }
+            KeyCode::Char('p') => {
+                self.open_provenance_editor();
+            }
             _ => {}
         }
     }
@@ -574,6 +580,9 @@ impl App {
                     self.editor_request = Some(root.join(&doc.path));
                 }
             }
+            (KeyCode::Char('x'), _) => {
+                self.wrap_mode = !self.wrap_mode;
+            }
             (KeyCode::Enter, _) => {
                 if self.preview_tab == PreviewTab::Relations {
                     self.navigate_to_relation();
@@ -635,7 +644,7 @@ impl App {
             (KeyCode::Char('w'), _) => self.open_warnings(),
             (KeyCode::Char('s'), _) => self.open_status_picker(),
             (KeyCode::Char('p'), _) => self.open_provenance_editor(),
-            (KeyCode::Char('r'), _) if self.preview_tab == PreviewTab::Relations => {
+            (KeyCode::Char('r'), _) => {
                 self.open_link_editor();
             }
             #[cfg(feature = "agent")]
