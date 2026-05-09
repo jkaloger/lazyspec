@@ -213,15 +213,49 @@ fn display_name(path: &std::path::Path) -> &str {
     }
 }
 
-fn doc_table_widths() -> [Constraint; 7] {
+const GUTTER_COLS: u16 = 1;
+const TREE_COLS: u16 = 4;
+const ID_COLS: u16 = 18;
+const TITLE_MIN_COLS: u16 = 20;
+const STATUS_COLS: u16 = 12;
+const TAGS_COLS: u16 = 24;
+const PROV_MIN_COLS: u16 = 20;
+
+fn doc_table_widths(area_width: u16) -> [Constraint; 7] {
+    let inner = area_width.saturating_sub(2);
+    let essentials = GUTTER_COLS + TREE_COLS + ID_COLS + 6;
+    let mut remaining = inner
+        .saturating_sub(essentials)
+        .saturating_sub(TITLE_MIN_COLS);
+    let status = if remaining >= STATUS_COLS {
+        remaining -= STATUS_COLS;
+        STATUS_COLS
+    } else {
+        0
+    };
+    let tags = if remaining >= TAGS_COLS {
+        remaining -= TAGS_COLS;
+        TAGS_COLS
+    } else {
+        0
+    };
+    let prov_min = if remaining >= PROV_MIN_COLS {
+        PROV_MIN_COLS
+    } else {
+        0
+    };
     [
-        Constraint::Length(1),  // gutter
-        Constraint::Length(4),  // tree
-        Constraint::Length(18), // ID
-        Constraint::Fill(1),    // title
-        Constraint::Length(12), // status
-        Constraint::Length(24), // tags
-        Constraint::Min(20),    // provenance
+        Constraint::Length(GUTTER_COLS),
+        Constraint::Length(TREE_COLS),
+        Constraint::Length(ID_COLS),
+        Constraint::Min(TITLE_MIN_COLS),
+        Constraint::Length(status),
+        Constraint::Length(tags),
+        if prov_min > 0 {
+            Constraint::Min(prov_min)
+        } else {
+            Constraint::Length(0)
+        },
     ]
 }
 
@@ -273,8 +307,10 @@ struct DocCellWidths {
 
 impl DocCellWidths {
     /// Resolve cell widths from the available table area width.
-    /// Mirrors `doc_table_widths` ordering: indicator(2), gutter(1),
-    /// tree(4), id(18), title(Fill), status(12), tags(24), provenance(Min 20).
+    /// Mirrors `doc_table_widths(area_width)` ordering: gutter(1), tree(4),
+    /// id(18), title(Min 20), status, tags, provenance. Optional columns
+    /// (status, tags, provenance) collapse to width 0 at narrow widths so
+    /// soft-wrap measurement stays aligned with the responsive layout.
     fn from_area_width(area_width: u16) -> Self {
         // Mirror the layout ratatui's Table will compute for these
         // constraints so wrap measurements match the real cell rects.
@@ -283,7 +319,7 @@ impl DocCellWidths {
         let rects = Layout::default()
             .direction(Direction::Horizontal)
             .spacing(1)
-            .constraints(doc_table_widths())
+            .constraints(doc_table_widths(area_width))
             .split(Rect::new(0, 0, inner_width, 1));
         DocCellWidths {
             title: rects[3].width.max(1),
@@ -726,7 +762,7 @@ pub fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect, config: &Config) 
         .map(|(i, node)| doc_row_for_node(app, node, i, dim, config, area_width))
         .collect();
 
-    let widths = doc_table_widths();
+    let widths = doc_table_widths(area.width);
 
     let border_style = if relations_focused {
         Style::default().fg(Color::DarkGray)
@@ -1308,7 +1344,7 @@ pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect, config: &Co
         })
         .collect();
 
-    let widths = doc_table_widths();
+    let widths = doc_table_widths(right[0].width);
 
     let border_style = if relations_focused {
         Style::default().fg(Color::DarkGray)
@@ -1821,7 +1857,9 @@ mod tests {
     #[test]
     fn doc_cell_widths_clamps_to_min_one_when_area_tiny() {
         let widths = DocCellWidths::from_area_width(10);
-        assert_eq!(widths.title, 1);
+        assert!(widths.title >= 1);
+        assert!(widths.tags >= 1);
+        assert!(widths.provenance >= 1);
     }
 
     #[test]
@@ -1963,6 +2001,93 @@ mod tests {
                 !line_text(line).contains("Provenance:"),
                 "no line should mention Provenance when empty"
             );
+        }
+    }
+
+    fn resolve_doc_widths(width: u16) -> Vec<u16> {
+        let inner = width.saturating_sub(2);
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .spacing(1)
+            .constraints(doc_table_widths(width))
+            .split(Rect::new(0, 0, inner, 1))
+            .iter()
+            .map(|r| r.width)
+            .collect()
+    }
+
+    #[test]
+    fn doc_table_widths_wide_shows_all_columns() {
+        let widths = resolve_doc_widths(200);
+        assert!(widths[3] >= 20, "title >= 20, got {}", widths[3]);
+        assert_eq!(widths[4], 12, "status == 12");
+        assert_eq!(widths[5], 24, "tags == 24");
+        assert!(widths[6] >= 20, "provenance >= 20, got {}", widths[6]);
+    }
+
+    #[test]
+    fn doc_table_widths_medium_drops_provenance() {
+        // width=90: inner=88. After essentials+title (49) + status (12) + tags (24) = 85,
+        // leaving 3 cols — below PROV_MIN_COLS so provenance collapses to 0.
+        let widths = resolve_doc_widths(90);
+        assert_eq!(widths[6], 0, "provenance dropped");
+        assert_eq!(widths[5], 24, "tags retained");
+        assert_eq!(widths[4], 12, "status retained");
+        assert!(widths[3] >= 20, "title >= 20, got {}", widths[3]);
+    }
+
+    #[test]
+    fn doc_table_widths_narrow_drops_tags_and_provenance() {
+        // width=70: inner=68. After essentials+title (49) + status (12) = 61,
+        // leaving 7 cols — below TAGS_COLS, so tags and provenance collapse.
+        let widths = resolve_doc_widths(70);
+        assert_eq!(widths[5], 0, "tags dropped");
+        assert_eq!(widths[6], 0, "provenance dropped");
+        assert_eq!(widths[4], 12, "status retained");
+        assert!(widths[3] >= 20, "title >= 20, got {}", widths[3]);
+    }
+
+    #[test]
+    fn doc_table_widths_very_narrow_drops_status() {
+        // width=50: inner=48, after essentials (29) = 19 — below TITLE_MIN_COLS,
+        // so title takes remaining and status/tags/provenance collapse.
+        let widths = resolve_doc_widths(50);
+        assert_eq!(widths[4], 0, "status dropped");
+        assert_eq!(widths[5], 0, "tags dropped");
+        assert_eq!(widths[6], 0, "provenance dropped");
+        assert!(
+            widths[3] > 0,
+            "title gets remaining budget, got {}",
+            widths[3]
+        );
+    }
+
+    #[test]
+    fn doc_cell_widths_match_constraint_split() {
+        // `from_area_width` clamps tags/provenance to .max(1) so wrap-math
+        // never divides by zero; mirror that here when comparing.
+        let resolved = resolve_doc_widths(80);
+        let cells = DocCellWidths::from_area_width(80);
+        assert_eq!(cells.title, resolved[3].max(1), "title agrees with split");
+        assert_eq!(cells.tags, resolved[5].max(1), "tags agrees with split");
+        assert_eq!(
+            cells.provenance,
+            resolved[6].max(1),
+            "provenance agrees with split"
+        );
+    }
+
+    #[test]
+    fn doc_table_widths_preserves_id_and_tree_at_all_widths() {
+        // Lower bound 60: at narrower widths the inner area cannot fit
+        // gutter+tree+id+title-min plus 6 column spacings (1+4+18+20+6=49,
+        // needs inner >= 49 i.e. width >= 51), so ratatui shrinks the Length
+        // constraints. Below that floor AC-5 is physically unsatisfiable.
+        for width in [60u16, 80, 120, 200] {
+            let widths = resolve_doc_widths(width);
+            assert_eq!(widths[0], 1, "gutter == 1 at width {}", width);
+            assert_eq!(widths[1], 4, "tree == 4 at width {}", width);
+            assert_eq!(widths[2], 18, "ID == 18 at width {}", width);
         }
     }
 }

@@ -5,7 +5,7 @@ use chrono::Local;
 
 use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{Config, TypeDef};
-use crate::engine::document::{split_frontmatter, DocMeta, DocType, Status};
+use crate::engine::document::{compose_frontmatter, split_frontmatter, DocMeta, DocType, Status};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::store_dispatch::{find_cache_file, write_cache_file, CreatedDoc, DocumentStore};
 
@@ -188,7 +188,7 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
         } else {
             format!("\n{}\n", body_trimmed)
         };
-        let updated_content = format!("---\n{}\n---\n{}", updated_yaml, body_section);
+        let updated_content = compose_frontmatter(&updated_yaml, &body_section);
 
         let refname = Self::refname(&type_def.name, doc_id);
         let new_sha = self.git.create_commit(
@@ -257,7 +257,7 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
         } else {
             format!("\n{}\n", body_trimmed)
         };
-        let updated_content = format!("---\n{}---\n{}", new_yaml, body_section);
+        let updated_content = compose_frontmatter(&new_yaml, &body_section);
 
         let refname = Self::refname(&type_def.name, doc_id);
         let new_sha = self.git.create_commit(

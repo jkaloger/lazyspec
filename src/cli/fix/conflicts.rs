@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::engine::config::{Config, NumberingStrategy};
-use crate::engine::document::split_frontmatter;
+use crate::engine::document::{compose_frontmatter, split_frontmatter};
 use crate::engine::fs::FileSystem;
 use crate::engine::store::{extract_id_from_name, Store};
 use crate::engine::template::{next_number, next_sqids_id};
@@ -172,6 +172,6 @@ fn update_title_in_file(path: &Path, old_id: &str, new_id: &str, fs: &dyn FileSy
     }
 
     let new_yaml = yaml_str.replace(old_id, new_id);
-    let output = format!("---\n{}\n---\n{}", new_yaml, body);
+    let output = compose_frontmatter(&new_yaml, &body);
     let _ = fs.write(path, &output);
 }

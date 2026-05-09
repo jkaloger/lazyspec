@@ -6,7 +6,7 @@ use chrono::Local;
 use serde::Serialize;
 
 use crate::engine::config::{Config, StoreBackend, TypeDef};
-use crate::engine::document::{DocMeta, DocType, Status};
+use crate::engine::document::{compose_frontmatter, DocMeta, DocType, Status};
 use crate::engine::gh::{self, GhIssueReader, GhIssueWriter};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::git_ref_store::GitRefStore;
@@ -456,7 +456,7 @@ pub fn write_cache_file(
     } else {
         format!("\n{}\n", body)
     };
-    let cache_content = format!("---\n{}---\n{}", yaml, body_section);
+    let cache_content = compose_frontmatter(&yaml, &body_section);
     std::fs::write(&cache_path, &cache_content)?;
     Ok(())
 }

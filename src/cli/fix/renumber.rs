@@ -5,7 +5,7 @@ use regex::Regex;
 
 use crate::cli::RenumberFormat;
 use crate::engine::config::{Config, SqidsConfig};
-use crate::engine::document::split_frontmatter;
+use crate::engine::document::{compose_frontmatter, split_frontmatter};
 use crate::engine::fs::FileSystem;
 use crate::engine::refs::REF_PATTERN;
 use crate::engine::store::Store;
@@ -408,7 +408,7 @@ fn update_title_in_file(path: &Path, old_id: &str, new_id: &str, fs: &dyn FileSy
     }
 
     let new_yaml = yaml_str.replace(old_id, new_id);
-    let output = format!("---\n{}\n---\n{}", new_yaml, body);
+    let output = compose_frontmatter(&new_yaml, &body);
     let _ = fs.write(path, &output);
 }
 
@@ -498,7 +498,7 @@ pub fn cascade_references(
                 Ok(y) => y,
                 Err(_) => continue,
             };
-            let output = format!("---\n{}---\n{}", new_yaml, final_body);
+            let output = compose_frontmatter(&new_yaml, final_body);
             let _ = fs.write(&full_path, &output);
         }
 
