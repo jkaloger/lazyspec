@@ -6,8 +6,9 @@ author: agent
 date: 2026-03-27
 tags: []
 related:
-- implements: docs/stories/STORY-094-singleton-and-parent-type-constraints.md
+- implements: docs/stories/STORY-118-singleton-and-parent-type-constraints.md
 ---
+
 
 
 
