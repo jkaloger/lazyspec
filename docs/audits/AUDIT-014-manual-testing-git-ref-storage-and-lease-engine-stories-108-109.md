@@ -1,7 +1,7 @@
 ---
 title: 'Manual testing: git-ref storage and lease engine (Stories 108/109)'
 type: audit
-status: draft
+status: superseded
 author: jack
 date: 2026-04-02
 tags: []
@@ -10,6 +10,7 @@ related:
 - related-to: STORY-109
 - related-to: RFC-035
 ---
+
 
 ## Scope
 

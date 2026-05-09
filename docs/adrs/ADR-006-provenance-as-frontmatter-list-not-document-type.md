@@ -1,13 +1,14 @@
 ---
 title: Provenance as frontmatter list of free-form strings
 type: adr
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-04-29
 tags: []
 related:
 - related-to: RFC-039
 ---
+
 
 ## Context
 

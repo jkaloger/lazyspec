@@ -1,12 +1,13 @@
 ---
 title: "Fix CLI help and skill guidance for github-issues stored documents"
 type: iteration
-status: draft
+status: accepted
 author: "agent"
 date: 2026-04-09
 tags: []
 related: []
 ---
+
 
 ## Context
 

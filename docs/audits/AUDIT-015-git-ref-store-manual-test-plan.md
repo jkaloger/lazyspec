@@ -1,7 +1,7 @@
 ---
 title: git-ref-store-manual-test-plan
 type: audit
-status: draft
+status: complete
 author: jkaloger
 date: 2026-04-06
 tags: []
@@ -9,7 +9,10 @@ related:
 - related-to: STORY-108
 - related-to: STORY-109
 - related-to: RFC-035
+- supersedes: AUDIT-014
 ---
+
+
 
 
 

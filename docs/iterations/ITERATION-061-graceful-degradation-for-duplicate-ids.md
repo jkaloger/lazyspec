@@ -1,13 +1,14 @@
 ---
 title: Graceful degradation for duplicate IDs
 type: iteration
-status: draft
+status: accepted
 author: agent
 date: 2026-03-13
 tags: []
 related:
 - implements: STORY-061
 ---
+
 
 
 

@@ -1,7 +1,7 @@
 ---
 title: Spec Document Type and Migration
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-24
 tags:
@@ -9,8 +9,11 @@ tags:
 - specs
 - migration
 related:
-- implements: RFC-038
+- implements: RFC-034
 ---
+
+
+
 
 
 

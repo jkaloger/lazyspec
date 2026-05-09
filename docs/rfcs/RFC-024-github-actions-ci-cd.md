@@ -1,7 +1,7 @@
 ---
 title: GitHub Actions CI/CD
 type: rfc
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-15
 tags:
@@ -13,6 +13,7 @@ tags:
 related:
 - related to: RFC-009
 ---
+
 
 
 ## Problem

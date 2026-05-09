@@ -10,8 +10,10 @@ tags:
 - blob-pinning
 - semantic-hashing
 related:
-- implements: RFC-038
+- implements: RFC-034
 ---
+
+
 
 
 

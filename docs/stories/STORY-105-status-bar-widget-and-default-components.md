@@ -1,13 +1,14 @@
 ---
 title: Status bar widget and default components
 type: story
-status: complete
+status: accepted
 author: agent
 date: 2026-03-30
 tags: []
 related:
 - implements: RFC-022
 ---
+
 
 
 

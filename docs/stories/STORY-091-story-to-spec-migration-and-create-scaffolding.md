@@ -1,13 +1,16 @@
 ---
 title: Spec Create Scaffolding and Story Linking
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-24
 tags: []
 related:
-- implements: RFC-038
+- implements: RFC-034
 ---
+
+
+
 
 
 

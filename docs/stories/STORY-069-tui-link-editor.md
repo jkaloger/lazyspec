@@ -1,13 +1,14 @@
 ---
 title: TUI Link Editor
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-20
 tags: []
 related:
 - implements: RFC-028
 ---
+
 
 
 

@@ -1,7 +1,7 @@
 ---
 title: Git Ref Task Coordination
 type: rfc
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-26
 tags:
@@ -12,6 +12,7 @@ tags:
 related:
 - related-to: RFC-030
 ---
+
 
 
 

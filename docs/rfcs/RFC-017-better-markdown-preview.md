@@ -1,7 +1,7 @@
 ---
 title: Better markdown preview
 type: rfc
-status: draft
+status: accepted
 author: "@jkaloger"
 date: 2026-03-08
 tags:
@@ -9,6 +9,7 @@ tags:
   - markdown
   - d2
 ---
+
 
 ## Problem
 

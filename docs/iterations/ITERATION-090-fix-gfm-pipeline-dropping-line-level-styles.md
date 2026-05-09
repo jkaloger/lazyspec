@@ -1,13 +1,14 @@
 ---
 title: Fix GFM pipeline dropping line-level styles
 type: iteration
-status: draft
+status: accepted
 author: agent
 date: 2026-03-19
 tags: []
 related:
 - implements: STORY-067
 ---
+
 
 
 ## Context

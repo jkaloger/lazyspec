@@ -1,7 +1,7 @@
 ---
 title: GitHub Issues Document Store
 type: rfc
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-27
 tags:
@@ -12,6 +12,7 @@ tags:
 related:
 - related-to: RFC-035
 ---
+
 
 
 

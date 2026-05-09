@@ -1,7 +1,7 @@
 ---
 title: Agent Orchestration Daemon
 type: rfc
-status: draft
+status: superseded
 author: jkaloger
 date: 2026-03-27
 tags:
@@ -13,6 +13,7 @@ related:
 - supersedes: RFC-016
 - related-to: RFC-035
 ---
+
 
 
 
