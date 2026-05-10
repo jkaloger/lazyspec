@@ -202,7 +202,7 @@ impl GitRefOps for GitCli {
 
     fn fetch_refs(&self, root: &Path, remote: &str, pattern: &str) -> Result<()> {
         let refspec = format!("+{}:{}", pattern, pattern);
-        let output = self.run_git(root, &["fetch", remote, &refspec])?;
+        let output = self.run_git(root, &["fetch", "--prune", remote, &refspec])?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("git fetch failed: {}", stderr.trim());
