@@ -69,7 +69,9 @@ impl<R: GitRefOps> LeaseEngine<R> {
     ) -> Result<Lease> {
         let refname = lease_ref(type_name, id);
 
-        fetch_ref_optional(&self.git, root, &self.config.remote, &refname)?;
+        // Glob fetch so --prune removes all stale local lease refs for this type.
+        let lease_glob = format!("refs/lazyspec/leases/{}/*", type_name);
+        fetch_ref_optional(&self.git, root, &self.config.remote, &lease_glob)?;
         let existing = self.git.resolve_ref(root, &refname)?;
         if existing.is_some() {
             bail!("lease held");

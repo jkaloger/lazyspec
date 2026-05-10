@@ -206,7 +206,19 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
         }
 
         if let Some(coord) = &self.config.coordination {
-            self.git.push_ref(&self.root, &coord.remote, &refname)?;
+            if let Err(push_err) = self.git.push_ref(&self.root, &coord.remote, &refname) {
+                if let Err(rollback_err) = self
+                    .git
+                    .update_ref(&self.root, &refname, &old_sha, &new_sha)
+                {
+                    bail!(
+                        "push failed: {}; rollback failed: {}; local state wedged, recover with `lazyspec fetch`",
+                        push_err,
+                        rollback_err
+                    );
+                }
+                bail!("push failed for {}: {}", doc_id, push_err);
+            }
         }
 
         std::fs::write(&cache_path, &updated_content)?;
@@ -275,7 +287,19 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
         }
 
         if let Some(coord) = &self.config.coordination {
-            self.git.push_ref(&self.root, &coord.remote, &refname)?;
+            if let Err(push_err) = self.git.push_ref(&self.root, &coord.remote, &refname) {
+                if let Err(rollback_err) = self
+                    .git
+                    .update_ref(&self.root, &refname, &old_sha, &new_sha)
+                {
+                    bail!(
+                        "push failed: {}; rollback failed: {}; local state wedged, recover with `lazyspec fetch`",
+                        push_err,
+                        rollback_err
+                    );
+                }
+                bail!("push failed for {}: {}", doc_id, push_err);
+            }
         }
 
         std::fs::write(&cache_path, &updated_content)?;
@@ -928,6 +952,223 @@ mod tests {
 
         let lock = CacheLock::load(tmp.path()).unwrap();
         assert_eq!(lock.get("iteration/ITERATION-042"), Some("newsha"));
+    }
+
+    #[test]
+    fn test_git_ref_store_update_rollback_on_push_failure() {
+        let tmp = TempDir::new().unwrap();
+        let td = test_type_def();
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache_content = "---\ntitle: Title\ntype: iteration\nstatus: draft\nauthor: alice\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\nbody\n";
+        let cache_path = cache_dir.join("ITERATION-042.md");
+        std::fs::write(&cache_path, cache_content).unwrap();
+
+        let mut lock = CacheLock::default();
+        lock.set("iteration/ITERATION-042", "oldsha");
+        lock.save(tmp.path()).unwrap();
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha".to_string()))
+            .with_update_ref_result(Ok(()))
+            .with_update_ref_result(Ok(()))
+            .with_push_result(Err(anyhow::anyhow!("non-fast-forward")));
+
+        let mut store = GitRefStore {
+            git: mock,
+            root: tmp.path().to_path_buf(),
+            config: test_config_with_coordination(),
+            reserved_number: None,
+        };
+        let result = store.update(&td, "ITERATION-042", &[("status", "accepted")]);
+
+        assert!(result.is_err(), "update should fail when push is rejected");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("non-fast-forward"),
+            "error should mention push failure, got: {}",
+            err_msg
+        );
+
+        let calls = store.git.calls.borrow();
+        let update_ref_calls: Vec<&String> = calls
+            .iter()
+            .filter(|c| c.starts_with("update_ref:"))
+            .collect();
+        assert_eq!(
+            update_ref_calls.len(),
+            2,
+            "should have two update_ref calls (forward + rollback), got: {:?}",
+            *calls
+        );
+        assert_eq!(
+            update_ref_calls[0], "update_ref:refs/lazyspec/iteration/ITERATION-042:newsha:oldsha",
+            "first update_ref is forward CAS"
+        );
+        assert_eq!(
+            update_ref_calls[1], "update_ref:refs/lazyspec/iteration/ITERATION-042:oldsha:newsha",
+            "second update_ref is rollback (reverse CAS)"
+        );
+        drop(calls);
+
+        let unchanged = std::fs::read_to_string(&cache_path).unwrap();
+        assert!(
+            unchanged.contains("status: draft"),
+            "cache file should be unchanged on push failure, got: {}",
+            unchanged
+        );
+
+        let lock = CacheLock::load(tmp.path()).unwrap();
+        assert_eq!(
+            lock.get("iteration/ITERATION-042"),
+            Some("oldsha"),
+            "cache.lock should be unchanged on push failure"
+        );
+    }
+
+    #[test]
+    fn test_git_ref_store_set_provenance_rollback_on_push_failure() {
+        let tmp = TempDir::new().unwrap();
+        let td = test_type_def();
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache_content = "---\ntitle: Title\ntype: iteration\nstatus: draft\nauthor: alice\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\nbody\n";
+        let cache_path = cache_dir.join("ITERATION-042.md");
+        std::fs::write(&cache_path, cache_content).unwrap();
+
+        let mut lock = CacheLock::default();
+        lock.set("iteration/ITERATION-042", "oldsha");
+        lock.save(tmp.path()).unwrap();
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha".to_string()))
+            .with_update_ref_result(Ok(()))
+            .with_update_ref_result(Ok(()))
+            .with_push_result(Err(anyhow::anyhow!("non-fast-forward")));
+
+        let mut store = GitRefStore {
+            git: mock,
+            root: tmp.path().to_path_buf(),
+            config: test_config_with_coordination(),
+            reserved_number: None,
+        };
+        let result = store.set_provenance(&td, "ITERATION-042", &["A".to_string()]);
+
+        assert!(
+            result.is_err(),
+            "set_provenance should fail when push is rejected"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("non-fast-forward"),
+            "error should mention push failure, got: {}",
+            err_msg
+        );
+
+        let calls = store.git.calls.borrow();
+        let update_ref_calls: Vec<&String> = calls
+            .iter()
+            .filter(|c| c.starts_with("update_ref:"))
+            .collect();
+        assert_eq!(
+            update_ref_calls.len(),
+            2,
+            "should have two update_ref calls (forward + rollback), got: {:?}",
+            *calls
+        );
+        assert_eq!(
+            update_ref_calls[0], "update_ref:refs/lazyspec/iteration/ITERATION-042:newsha:oldsha",
+            "first update_ref is forward CAS"
+        );
+        assert_eq!(
+            update_ref_calls[1], "update_ref:refs/lazyspec/iteration/ITERATION-042:oldsha:newsha",
+            "second update_ref is rollback (reverse CAS)"
+        );
+        drop(calls);
+
+        let unchanged = std::fs::read_to_string(&cache_path).unwrap();
+        assert!(
+            !unchanged.contains("provenance"),
+            "cache file should be unchanged on push failure, got: {}",
+            unchanged
+        );
+
+        let lock = CacheLock::load(tmp.path()).unwrap();
+        assert_eq!(
+            lock.get("iteration/ITERATION-042"),
+            Some("oldsha"),
+            "cache.lock should be unchanged on push failure"
+        );
+    }
+
+    #[test]
+    fn delete_preserves_local_state_when_remote_delete_fails() {
+        let tmp = TempDir::new().unwrap();
+        let td = test_type_def();
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache_content = "---\ntitle: T\ntype: iteration\nstatus: draft\nauthor: a\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n";
+        let cache_path = cache_dir.join("ITERATION-042.md");
+        std::fs::write(&cache_path, cache_content).unwrap();
+
+        let mut lock = CacheLock::default();
+        lock.set("iteration/ITERATION-042", "somesha");
+        lock.save(tmp.path()).unwrap();
+
+        let mock =
+            MockGitRefClient::new().with_delete_remote_result(Err(anyhow::anyhow!("network down")));
+
+        let mut store = GitRefStore {
+            git: mock,
+            root: tmp.path().to_path_buf(),
+            config: test_config_with_coordination(),
+            reserved_number: None,
+        };
+        let result = store.delete(&td, "ITERATION-042");
+
+        assert!(
+            result.is_err(),
+            "delete should fail when remote delete fails"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("network down"),
+            "error should mention remote failure, got: {}",
+            err_msg
+        );
+
+        assert!(
+            cache_path.exists(),
+            "cache file should still exist after remote delete failure"
+        );
+        let unchanged = std::fs::read_to_string(&cache_path).unwrap();
+        assert_eq!(
+            unchanged, cache_content,
+            "cache file content should be unchanged"
+        );
+
+        let lock = CacheLock::load(tmp.path()).unwrap();
+        assert_eq!(
+            lock.get("iteration/ITERATION-042"),
+            Some("somesha"),
+            "lock entry should still be present with original SHA"
+        );
+
+        let calls = store.git.calls.borrow();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c == "delete_remote_ref:origin:refs/lazyspec/iteration/ITERATION-042"),
+            "should have attempted remote delete, got: {:?}",
+            *calls
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c == "delete_ref:refs/lazyspec/iteration/ITERATION-042"),
+            "should NOT call local delete_ref when remote delete failed, got: {:?}",
+            *calls
+        );
     }
 
     #[test]
