@@ -207,8 +207,9 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
 
         if let Some(coord) = &self.config.coordination {
             if let Err(push_err) = self.git.push_ref(&self.root, &coord.remote, &refname) {
-                if let Err(rollback_err) =
-                    self.git.update_ref(&self.root, &refname, &old_sha, &new_sha)
+                if let Err(rollback_err) = self
+                    .git
+                    .update_ref(&self.root, &refname, &old_sha, &new_sha)
                 {
                     bail!(
                         "push failed: {}; rollback failed: {}; local state wedged, recover with `lazyspec fetch`",
@@ -287,8 +288,9 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
 
         if let Some(coord) = &self.config.coordination {
             if let Err(push_err) = self.git.push_ref(&self.root, &coord.remote, &refname) {
-                if let Err(rollback_err) =
-                    self.git.update_ref(&self.root, &refname, &old_sha, &new_sha)
+                if let Err(rollback_err) = self
+                    .git
+                    .update_ref(&self.root, &refname, &old_sha, &new_sha)
                 {
                     bail!(
                         "push failed: {}; rollback failed: {}; local state wedged, recover with `lazyspec fetch`",
@@ -1000,13 +1002,11 @@ mod tests {
             *calls
         );
         assert_eq!(
-            update_ref_calls[0],
-            "update_ref:refs/lazyspec/iteration/ITERATION-042:newsha:oldsha",
+            update_ref_calls[0], "update_ref:refs/lazyspec/iteration/ITERATION-042:newsha:oldsha",
             "first update_ref is forward CAS"
         );
         assert_eq!(
-            update_ref_calls[1],
-            "update_ref:refs/lazyspec/iteration/ITERATION-042:oldsha:newsha",
+            update_ref_calls[1], "update_ref:refs/lazyspec/iteration/ITERATION-042:oldsha:newsha",
             "second update_ref is rollback (reverse CAS)"
         );
         drop(calls);
@@ -1077,13 +1077,11 @@ mod tests {
             *calls
         );
         assert_eq!(
-            update_ref_calls[0],
-            "update_ref:refs/lazyspec/iteration/ITERATION-042:newsha:oldsha",
+            update_ref_calls[0], "update_ref:refs/lazyspec/iteration/ITERATION-042:newsha:oldsha",
             "first update_ref is forward CAS"
         );
         assert_eq!(
-            update_ref_calls[1],
-            "update_ref:refs/lazyspec/iteration/ITERATION-042:oldsha:newsha",
+            update_ref_calls[1], "update_ref:refs/lazyspec/iteration/ITERATION-042:oldsha:newsha",
             "second update_ref is rollback (reverse CAS)"
         );
         drop(calls);
@@ -1117,8 +1115,8 @@ mod tests {
         lock.set("iteration/ITERATION-042", "somesha");
         lock.save(tmp.path()).unwrap();
 
-        let mock = MockGitRefClient::new()
-            .with_delete_remote_result(Err(anyhow::anyhow!("network down")));
+        let mock =
+            MockGitRefClient::new().with_delete_remote_result(Err(anyhow::anyhow!("network down")));
 
         let mut store = GitRefStore {
             git: mock,

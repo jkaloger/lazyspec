@@ -2,9 +2,7 @@ mod common;
 
 use anyhow::Result;
 use chrono::Utc;
-use lazyspec::engine::config::{
-    Config, CoordinationConfig, StoreBackend, TypeDef,
-};
+use lazyspec::engine::config::{Config, CoordinationConfig, StoreBackend, TypeDef};
 use lazyspec::engine::gh::{GhIssue, GhIssueReader};
 use lazyspec::engine::git_ref::{GitCli, GitRefOps};
 use lazyspec::engine::git_ref_store::GitRefStore;
@@ -121,7 +119,10 @@ fn fetch_prunes_deleted_remote_doc_refs() {
         git.resolve_ref(clone_b.path(), refname).unwrap().is_some(),
         "B should have local ref after first fetch"
     );
-    assert!(cache_file.exists(), "B should have cache file after first fetch");
+    assert!(
+        cache_file.exists(),
+        "B should have cache file after first fetch"
+    );
 
     // Clone A deletes ITERATION-001 (removes remote ref).
     store_a
@@ -221,8 +222,7 @@ fn update_rolls_back_on_push_rejection_then_recovers_after_fetch() {
         "B's first update should fail (non-fast-forward push)"
     );
 
-    let lock_b_after_fail =
-        lazyspec::engine::cache_lock::CacheLock::load(clone_b.path()).unwrap();
+    let lock_b_after_fail = lazyspec::engine::cache_lock::CacheLock::load(clone_b.path()).unwrap();
     let lock_sha_after_fail = lock_b_after_fail
         .get("iteration/ITERATION-001")
         .expect("lock entry should still exist");
@@ -252,8 +252,7 @@ fn update_rolls_back_on_push_rejection_then_recovers_after_fetch() {
         Some(accepted_sha.clone()),
         "B's local ref should now be at A's accepted SHA"
     );
-    let lock_b_after_fetch =
-        lazyspec::engine::cache_lock::CacheLock::load(clone_b.path()).unwrap();
+    let lock_b_after_fetch = lazyspec::engine::cache_lock::CacheLock::load(clone_b.path()).unwrap();
     assert_eq!(
         lock_b_after_fetch.get("iteration/ITERATION-001"),
         Some(accepted_sha.as_str()),
@@ -292,7 +291,9 @@ fn update_rolls_back_on_push_rejection_then_recovers_after_fetch() {
         .output()
         .expect("git rev-parse parent");
     assert!(parent_out.status.success());
-    let b_parent = String::from_utf8_lossy(&parent_out.stdout).trim().to_string();
+    let b_parent = String::from_utf8_lossy(&parent_out.stdout)
+        .trim()
+        .to_string();
     assert_eq!(
         b_parent, accepted_sha,
         "B's final commit should be parented on A's accepted commit"
@@ -342,7 +343,9 @@ fn fetch_prunes_deleted_remote_lease_refs_so_claim_succeeds() {
     git.fetch_refs(clone_b.path(), "origin", "refs/lazyspec/leases/*")
         .expect("B fetches leases");
     assert!(
-        git.resolve_ref(clone_b.path(), lease_ref).unwrap().is_some(),
+        git.resolve_ref(clone_b.path(), lease_ref)
+            .unwrap()
+            .is_some(),
         "B should have lease ref locally after fetch"
     );
 
