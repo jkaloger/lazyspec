@@ -1,7 +1,7 @@
 ---
 title: Heartbeat --min-interval throttle
 type: iteration
-status: draft
+status: accepted
 author: agent
 date: 2026-05-11
 tags:
