@@ -395,8 +395,7 @@ fn push_ref_with_lease_fails_when_remote_changed() {
 
     // Push with lease using the stale expected old SHA -- should fail because
     // remote is at interloper_sha, not sha
-    let result =
-        git.push_ref_with_lease(fixture.root(), "origin", refname, &new_sha, Some(&sha));
+    let result = git.push_ref_with_lease(fixture.root(), "origin", refname, &new_sha, Some(&sha));
     assert!(
         result.is_err(),
         "push_ref_with_lease should fail when remote ref was changed by another agent"

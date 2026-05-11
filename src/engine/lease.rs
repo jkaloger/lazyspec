@@ -409,9 +409,7 @@ mod tests {
             .with_fetch_result(Ok(()))
             .with_resolve_result(Ok(None))
             .with_create_commit_result(Ok("sha1".to_string()))
-            .with_push_with_lease_result(Err(anyhow::anyhow!(
-                "stale info: ref exists on remote"
-            )));
+            .with_push_with_lease_result(Err(anyhow::anyhow!("stale info: ref exists on remote")));
 
         let engine = LeaseEngine::new(mock, test_config());
         let err = engine

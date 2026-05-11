@@ -664,8 +664,14 @@ mod tests {
     #[test]
     fn mock_push_ref_with_lease_records_call_with_expected_old() {
         let mock = MockGitRefClient::new().with_push_with_lease_result(Ok(()));
-        mock.push_ref_with_lease(&dummy_root(), "origin", "refs/test", "newsha", Some("abc123"))
-            .unwrap();
+        mock.push_ref_with_lease(
+            &dummy_root(),
+            "origin",
+            "refs/test",
+            "newsha",
+            Some("abc123"),
+        )
+        .unwrap();
         assert_eq!(
             mock.calls.borrow()[0],
             "push_ref_with_lease:origin:refs/test:new_sha=newsha:expected_old=Some(\"abc123\")"
