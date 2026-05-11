@@ -36,6 +36,7 @@ pub trait GitRefOps {
         root: &Path,
         remote: &str,
         refname: &str,
+        new_sha: &str,
         expected_old: Option<&str>,
     ) -> Result<()>;
     fn read_commit_timestamp(&self, root: &Path, sha: &str) -> Result<DateTime<Utc>>;
@@ -252,13 +253,17 @@ impl GitRefOps for GitCli {
         root: &Path,
         remote: &str,
         refname: &str,
+        new_sha: &str,
         expected_old: Option<&str>,
     ) -> Result<()> {
         let lease_arg = match expected_old {
             Some(sha) => format!("--force-with-lease={}:{}", refname, sha),
             None => format!("--force-with-lease={}", refname),
         };
-        let output = self.run_git(root, &["push", &lease_arg, remote, refname])?;
+        // Push by SHA so dangling commit objects without a local ref can be pushed.
+        // Local ref advances only after this returns Ok (see LeaseEngine::acquire/heartbeat).
+        let refspec = format!("{}:{}", new_sha, refname);
+        let output = self.run_git(root, &["push", &lease_arg, remote, &refspec])?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("git push --force-with-lease failed: {}", stderr.trim());
@@ -509,11 +514,12 @@ pub mod test_support {
             _root: &Path,
             remote: &str,
             refname: &str,
+            new_sha: &str,
             expected_old: Option<&str>,
         ) -> Result<()> {
             self.calls.borrow_mut().push(format!(
-                "push_ref_with_lease:{}:{}:expected_old={:?}",
-                remote, refname, expected_old
+                "push_ref_with_lease:{}:{}:new_sha={}:expected_old={:?}",
+                remote, refname, new_sha, expected_old
             ));
             Self::pop_or_default(&self.push_with_lease_results)
         }
@@ -658,22 +664,22 @@ mod tests {
     #[test]
     fn mock_push_ref_with_lease_records_call_with_expected_old() {
         let mock = MockGitRefClient::new().with_push_with_lease_result(Ok(()));
-        mock.push_ref_with_lease(&dummy_root(), "origin", "refs/test", Some("abc123"))
+        mock.push_ref_with_lease(&dummy_root(), "origin", "refs/test", "newsha", Some("abc123"))
             .unwrap();
         assert_eq!(
             mock.calls.borrow()[0],
-            "push_ref_with_lease:origin:refs/test:expected_old=Some(\"abc123\")"
+            "push_ref_with_lease:origin:refs/test:new_sha=newsha:expected_old=Some(\"abc123\")"
         );
     }
 
     #[test]
     fn mock_push_ref_with_lease_records_call_with_none() {
         let mock = MockGitRefClient::new().with_push_with_lease_result(Ok(()));
-        mock.push_ref_with_lease(&dummy_root(), "origin", "refs/test", None)
+        mock.push_ref_with_lease(&dummy_root(), "origin", "refs/test", "newsha", None)
             .unwrap();
         assert_eq!(
             mock.calls.borrow()[0],
-            "push_ref_with_lease:origin:refs/test:expected_old=None"
+            "push_ref_with_lease:origin:refs/test:new_sha=newsha:expected_old=None"
         );
     }
 
@@ -681,7 +687,8 @@ mod tests {
     fn mock_push_ref_with_lease_returns_configured_error() {
         let mock = MockGitRefClient::new()
             .with_push_with_lease_result(Err(anyhow::anyhow!("lease mismatch")));
-        let result = mock.push_ref_with_lease(&dummy_root(), "origin", "refs/test", Some("old"));
+        let result =
+            mock.push_ref_with_lease(&dummy_root(), "origin", "refs/test", "newsha", Some("old"));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("lease mismatch"));
     }

@@ -99,6 +99,7 @@ impl<R: GitRefOps> LeaseEngine<R> {
             root,
             &self.config.remote,
             &refname,
+            &new_sha,
             Some(ZERO_SHA),
         )?;
         self.git.update_ref(root, &refname, &new_sha, ZERO_SHA)?;
@@ -192,6 +193,7 @@ impl<R: GitRefOps> LeaseEngine<R> {
             root,
             &self.config.remote,
             &refname,
+            &new_sha,
             Some(&old_sha),
         )?;
         self.git.update_ref(root, &refname, &new_sha, &old_sha)?;
@@ -244,7 +246,7 @@ impl<R: GitRefOps> LeaseEngine<R> {
             self.git
                 .create_commit(root, &refname, &[("lease.json", &json)], Some(&sha))?;
         self.git
-            .push_ref_with_lease(root, &self.config.remote, &refname, Some(&sha))?;
+            .push_ref_with_lease(root, &self.config.remote, &refname, &new_sha, Some(&sha))?;
         self.git.update_ref(root, &refname, &new_sha, &sha)?;
         Ok(new_lease)
     }
@@ -361,7 +363,7 @@ mod tests {
         assert_eq!(
             calls[3],
             format!(
-                "push_ref_with_lease:origin:refs/lazyspec/leases/story/STORY-001:expected_old=Some(\"{}\")",
+                "push_ref_with_lease:origin:refs/lazyspec/leases/story/STORY-001:new_sha=sha1:expected_old=Some(\"{}\")",
                 ZERO_SHA
             )
         );
@@ -604,7 +606,7 @@ mod tests {
             .expect("expected push_ref_with_lease call");
         assert_eq!(
             push_call,
-            "push_ref_with_lease:origin:refs/lazyspec/leases/story/STORY-001:expected_old=Some(\"old-sha\")"
+            "push_ref_with_lease:origin:refs/lazyspec/leases/story/STORY-001:new_sha=new-sha:expected_old=Some(\"old-sha\")"
         );
     }
 
@@ -880,7 +882,7 @@ mod tests {
             .expect("expected push_ref_with_lease call");
         assert_eq!(
             push_lease_call,
-            "push_ref_with_lease:origin:refs/lazyspec/leases/story/STORY-001:expected_old=Some(\"old-sha\")"
+            "push_ref_with_lease:origin:refs/lazyspec/leases/story/STORY-001:new_sha=new-sha:expected_old=Some(\"old-sha\")"
         );
 
         let update_call = calls

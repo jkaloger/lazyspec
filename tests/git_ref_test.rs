@@ -196,7 +196,7 @@ fn delete_remote_ref_removes_from_remote() {
         .unwrap();
     git.push_ref(fixture.root(), "origin", refname).unwrap();
 
-    git.delete_remote_ref(fixture.root(), "origin", refname)
+    git.delete_remote_ref(fixture.root(), "origin", refname, None)
         .unwrap();
 
     // Verify ref is gone from remote via ls-remote on the bare repo
@@ -276,7 +276,7 @@ fn push_ref_with_lease_succeeds_when_remote_matches() {
         .unwrap();
 
     // Push with lease using the correct expected old SHA
-    git.push_ref_with_lease(fixture.root(), "origin", refname, Some(&sha))
+    git.push_ref_with_lease(fixture.root(), "origin", refname, &new_sha, Some(&sha))
         .unwrap();
 
     // Verify remote has the new SHA by fetching
@@ -284,6 +284,80 @@ fn push_ref_with_lease_succeeds_when_remote_matches() {
     git.fetch_refs(fixture.root(), "origin", refname).unwrap();
     let fetched = git.resolve_ref(fixture.root(), refname).unwrap();
     assert_eq!(fetched, Some(new_sha));
+}
+
+#[test]
+fn push_ref_with_lease_pushes_dangling_commit_without_local_ref() {
+    // Regression: LeaseEngine::acquire and ::heartbeat mint a dangling commit
+    // (no local ref) and push it. Earlier impl pushed by refname, which failed
+    // with "src refspec ... does not match any" for acquire and silently no-op'd
+    // for heartbeat (local ref still at old sha). Push must use <sha>:<refname>.
+    let (fixture, _bare) = TestFixture::with_git_remote();
+    let git = GitCli;
+    let refname = "refs/lazyspec/leases/iteration/ITERATION-REG";
+
+    let new_sha = git
+        .create_commit(fixture.root(), refname, &[("lease.json", "{}")], None)
+        .unwrap();
+
+    // Local ref must NOT exist at this point -- this is the precondition of acquire.
+    assert_eq!(
+        git.resolve_ref(fixture.root(), refname).unwrap(),
+        None,
+        "test precondition: local ref must be absent"
+    );
+
+    let zero = "0000000000000000000000000000000000000000";
+    git.push_ref_with_lease(fixture.root(), "origin", refname, &new_sha, Some(zero))
+        .unwrap();
+
+    // Verify the dangling commit landed on the remote.
+    git.fetch_refs(fixture.root(), "origin", refname).unwrap();
+    assert_eq!(
+        git.resolve_ref(fixture.root(), refname).unwrap(),
+        Some(new_sha)
+    );
+}
+
+#[test]
+fn push_ref_with_lease_pushes_new_sha_not_local_ref() {
+    // Regression for heartbeat: local ref still points at old sha when push fires.
+    // Earlier impl pushed by refname (i.e. old sha), so remote stayed stale even
+    // though local later advanced via update_ref. Push must carry new_sha.
+    let (fixture, _bare) = TestFixture::with_git_remote();
+    let git = GitCli;
+    let refname = "refs/lazyspec/leases/iteration/ITERATION-HB";
+
+    let old_sha = git
+        .create_ref_commit(fixture.root(), refname, &[("lease.json", "{\"v\":1}")])
+        .unwrap();
+    git.push_ref(fixture.root(), "origin", refname).unwrap();
+
+    // Mint a dangling new commit. Local ref still at old_sha.
+    let new_sha = git
+        .create_commit(
+            fixture.root(),
+            refname,
+            &[("lease.json", "{\"v\":2}")],
+            Some(&old_sha),
+        )
+        .unwrap();
+    assert_eq!(
+        git.resolve_ref(fixture.root(), refname).unwrap(),
+        Some(old_sha.clone()),
+        "test precondition: local ref must still be at old_sha"
+    );
+
+    git.push_ref_with_lease(fixture.root(), "origin", refname, &new_sha, Some(&old_sha))
+        .unwrap();
+
+    // Remote must now hold new_sha (not old_sha).
+    git.delete_ref(fixture.root(), refname).unwrap();
+    git.fetch_refs(fixture.root(), "origin", refname).unwrap();
+    assert_eq!(
+        git.resolve_ref(fixture.root(), refname).unwrap(),
+        Some(new_sha)
+    );
 }
 
 #[test]
@@ -321,7 +395,8 @@ fn push_ref_with_lease_fails_when_remote_changed() {
 
     // Push with lease using the stale expected old SHA -- should fail because
     // remote is at interloper_sha, not sha
-    let result = git.push_ref_with_lease(fixture.root(), "origin", refname, Some(&sha));
+    let result =
+        git.push_ref_with_lease(fixture.root(), "origin", refname, &new_sha, Some(&sha));
     assert!(
         result.is_err(),
         "push_ref_with_lease should fail when remote ref was changed by another agent"
@@ -382,6 +457,7 @@ fn heartbeat_succeeds_and_extends_expiry() {
         lease_duration: "60m".to_string(),
         grace_period: "2m".to_string(),
         max_push_retries: 5,
+        max_clock_skew: "5m".to_string(),
     };
 
     let engine = LeaseEngine::new(git, config.clone());
