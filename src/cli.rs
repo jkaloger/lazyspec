@@ -327,6 +327,9 @@ pub enum Commands {
         /// Agent identity (defaults to auto-resolved agent ID)
         #[arg(long)]
         agent_id: Option<String>,
+        /// Skip heartbeat if last run within duration (e.g. 15m). State in .lazyspec/state/
+        #[arg(long)]
+        min_interval: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,

@@ -443,6 +443,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Heartbeat {
             doc_id,
             agent_id,
+            min_interval,
             json,
         }) => {
             if let Err(e) = lazyspec::cli::lease::run_heartbeat(
@@ -450,6 +451,7 @@ fn main() -> anyhow::Result<()> {
                 &config,
                 &doc_id,
                 agent_id.as_deref(),
+                min_interval.as_deref(),
                 json,
             ) {
                 if json {

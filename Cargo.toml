@@ -30,6 +30,7 @@ sqids = "0.4"
 pulldown-cmark = "0.13"
 indicatif = "0.17"
 textwrap = "0.16"
+tempfile = "3"
 
 [features]
 default = []
@@ -37,4 +38,3 @@ agent = []
 metrics = []
 
 [dev-dependencies]
-tempfile = "3"
