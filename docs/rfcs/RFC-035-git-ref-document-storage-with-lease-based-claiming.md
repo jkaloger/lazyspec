@@ -275,14 +275,43 @@ Claude Code hooks automate the coordination lifecycle:
 // .claude/settings.json
 {
   "hooks": {
-    "session-start": "lazyspec claim $ASSIGNED_TASK --agent-id $CLAUDE_SESSION_ID",
-    "post-tool-use": "lazyspec heartbeat $ASSIGNED_TASK --agent-id $CLAUDE_SESSION_ID",
-    "session-end": "lazyspec release $ASSIGNED_TASK --agent-id $CLAUDE_SESSION_ID"
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ASSIGNED_TASK\" ] && lazyspec claim \"$ASSIGNED_TASK\" --agent-id \"$CLAUDE_SESSION_ID\" --json || true"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ASSIGNED_TASK\" ] && lazyspec heartbeat \"$ASSIGNED_TASK\" --agent-id \"$CLAUDE_SESSION_ID\" --min-interval 15m --json || true"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ASSIGNED_TASK\" ] && lazyspec release \"$ASSIGNED_TASK\" --agent-id \"$CLAUDE_SESSION_ID\" --json || true"
+          }
+        ]
+      }
+    ]
   }
 }
 ```
 
-The orchestrator sets `$ASSIGNED_TASK` when spawning the agent. The hooks handle claim, heartbeat, and release without the agent needing to know about coordination.
+The orchestrator sets `$ASSIGNED_TASK` when spawning the agent. The hooks handle claim, heartbeat, and release without the agent needing to know about coordination. The `[ -n "$ASSIGNED_TASK" ]` guard makes the snippet a no-op when the env var is unset (safe to install unconditionally); `|| true` swallows non-zero exits so a session never fails to end on a coordination error. `--min-interval 15m` matches the default `lease_duration / 4` (lease default 60m) -- tune if `lease_duration` changes.
+
+See README § Claude Code Hooks and [`hooks/claude-code-settings.json`](../../hooks/claude-code-settings.json) for the canonical snippet.
 
 ### Git Ref Operations Trait
 

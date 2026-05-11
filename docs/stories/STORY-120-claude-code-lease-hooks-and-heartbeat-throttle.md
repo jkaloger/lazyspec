@@ -1,7 +1,7 @@
 ---
 title: "Claude Code lease hooks and heartbeat throttle"
 type: story
-status: draft
+status: accepted
 author: "jkaloger"
 date: 2026-05-11
 tags:
@@ -11,6 +11,7 @@ tags:
 related:
 - implements: docs/rfcs/RFC-035-git-ref-document-storage-with-lease-based-claiming.md
 ---
+
 
 ## Context
 
