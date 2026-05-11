@@ -24,7 +24,13 @@ pub trait GitRefOps {
     fn delete_ref(&self, root: &Path, refname: &str) -> Result<()>;
     fn fetch_refs(&self, root: &Path, remote: &str, pattern: &str) -> Result<()>;
     fn push_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()>;
-    fn delete_remote_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()>;
+    fn delete_remote_ref(
+        &self,
+        root: &Path,
+        remote: &str,
+        refname: &str,
+        expected_old: Option<&str>,
+    ) -> Result<()>;
     fn push_ref_with_lease(
         &self,
         root: &Path,
@@ -219,9 +225,21 @@ impl GitRefOps for GitCli {
         Ok(())
     }
 
-    fn delete_remote_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()> {
+    fn delete_remote_ref(
+        &self,
+        root: &Path,
+        remote: &str,
+        refname: &str,
+        expected_old: Option<&str>,
+    ) -> Result<()> {
         let delete_spec = format!(":{}", refname);
-        let output = self.run_git(root, &["push", remote, &delete_spec])?;
+        let output = match expected_old {
+            Some(sha) => {
+                let lease_arg = format!("--force-with-lease={}:{}", refname, sha);
+                self.run_git(root, &["push", &lease_arg, remote, &delete_spec])?
+            }
+            None => self.run_git(root, &["push", remote, &delete_spec])?,
+        };
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("git push --delete failed: {}", stderr.trim());
@@ -472,10 +490,17 @@ pub mod test_support {
             Self::pop_or_default(&self.push_results)
         }
 
-        fn delete_remote_ref(&self, _root: &Path, remote: &str, refname: &str) -> Result<()> {
-            self.calls
-                .borrow_mut()
-                .push(format!("delete_remote_ref:{}:{}", remote, refname));
+        fn delete_remote_ref(
+            &self,
+            _root: &Path,
+            remote: &str,
+            refname: &str,
+            expected_old: Option<&str>,
+        ) -> Result<()> {
+            self.calls.borrow_mut().push(format!(
+                "delete_remote_ref:{}:{}:expected_old={:?}",
+                remote, refname, expected_old
+            ));
             Self::pop_or_default(&self.delete_remote_results)
         }
 

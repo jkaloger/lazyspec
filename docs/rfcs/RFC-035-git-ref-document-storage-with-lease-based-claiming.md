@@ -317,11 +317,11 @@ The existing reservation module can be migrated to use `GitRefOps` in a follow-u
 
 The distributed lease protocol relies on the following safety properties:
 
-- **Linearization points**: All document writes use CAS (`git update-ref <ref> <new> <old>`) as their linearization point. Lease operations use `push --force-with-lease` for atomic ref swaps. These ensure that concurrent operations are serialized at the git ref level.
-- **Fetch-before-check**: The lease gate fetches from remote before checking lease state, adding one remote round-trip per gated write. This ensures the lease check operates on the latest remote state rather than potentially stale local refs.
-- **Clock skew tolerance**: The `grace_period` (default 2 minutes) absorbs NTP drift between agents. Force-acquire uses commit timestamps (server-side, written at push time) as the expiry reference rather than relying on the acquiring agent's local clock.
-- **Network partition behavior**: During a partition, local ref commits succeed but push fails. The lease gate falls back to local refs with a warning, allowing the agent to continue working locally. Coordination resumes when connectivity is restored and the next push succeeds.
-- **Initial ref creation**: Uses CAS with all-zeros SHA (`0000000000000000000000000000000000000000`) as the expected old value, preventing a TOCTOU race where two agents both see "ref does not exist" and both attempt to create it. Only one push succeeds; the other gets a ref-update rejection.
+- **Linearization point at the remote**: Every lease mutation (`acquire`, `heartbeat`, `release`, `force_acquire`) writes to the remote ref with explicit CAS via `git push --force-with-lease=ref:<expected_old>` before the local ref advances. The local `git update-ref <ref> <new> <old>` is a follow-up cache update, not the linearization point. Operations push first, then update local on success; local never advances past what the remote accepted.
+- **Fetch-before-check (glob, with prune)**: `acquire`, `heartbeat`, `release`, `force_acquire` all fetch `refs/lazyspec/leases/{type}/*` with `--prune` before reading local state. Single-ref fetches leave stale local refs surviving when their remote counterparts have been deleted; glob fetch with prune clears them. The fetch is best-effort: a missing remote ref is benign (treated as "no lease"), other errors propagate.
+- **Clock skew tolerance**: The `grace_period` (default 2m) absorbs NTP drift between honest agents. Force-acquire computes expiry from the commit's committer timestamp; that timestamp is client-written and baked into the commit SHA, so it cannot be rewritten server-side. To bound adversarial or pathological skew, `force_acquire` also rejects leases whose commit timestamp is more than `max_clock_skew` (default 5m) ahead of the caller's local clock. Operationally, agents must be reasonably NTP-synchronized: split-brain is reachable iff `|Δ_clocks| > duration + grace_period`.
+- **Network partition behavior**: Lease mutations require the remote (fetch failures and push failures both abort the operation). The implementation does not silently fall back to local-only writes — a heartbeat under partition returns `Err` rather than advancing local state; an acquire under partition fails before producing any commit. The read-only `query()` is the one exception: a failed fetch is logged and the cached local view is returned. The agent layer is expected to handle these errors (retry with backoff, surface to the daemon, etc.) rather than the engine guessing a partition-tolerance policy.
+- **Initial ref creation**: `acquire` pushes with `--force-with-lease=ref:0000000000000000000000000000000000000000`, requiring the remote ref to be absent. Two agents racing both see "ref does not exist" locally; only one push lands first and creates the ref, the other's CAS expectation (`expected_old = zero`) no longer matches and the push is rejected with a clear stale-info error.
 
 ### Fetch Refspecs
 
@@ -348,6 +348,7 @@ Shallow clones are detected and warned against (`git rev-parse --is-shallow-repo
     lease_duration: String,   // default "60m"
     grace_period: String,     // default "2m"
     max_push_retries: u8,     // default 5
+    max_clock_skew: String,   // default "5m" - bound on committer-date trust during force_acquire
 }
 
 ```toml
@@ -380,6 +381,7 @@ remote = "origin"
 lease_duration = "60m"
 grace_period = "2m"
 max_push_retries = 5
+max_clock_skew = "5m"
 ```
 
 ### Graceful Degradation

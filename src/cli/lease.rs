@@ -297,6 +297,7 @@ mod tests {
                 lease_duration: "60m".to_string(),
                 grace_period: "2m".to_string(),
                 max_push_retries: 5,
+                max_clock_skew: "5m".to_string(),
             }),
         }
     }

@@ -315,7 +315,7 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
         let refname = Self::refname(&type_def.name, doc_id);
         if let Some(coord) = &self.config.coordination {
             self.git
-                .delete_remote_ref(&self.root, &coord.remote, &refname)?;
+                .delete_remote_ref(&self.root, &coord.remote, &refname, None)?;
         }
         self.git.delete_ref(&self.root, &refname)?;
 
@@ -716,6 +716,7 @@ mod tests {
             lease_duration: "60m".to_string(),
             grace_period: "2m".to_string(),
             max_push_retries: 5,
+            max_clock_skew: "5m".to_string(),
         });
         config
     }
@@ -837,7 +838,7 @@ mod tests {
         assert!(
             calls
                 .iter()
-                .any(|c| c == "delete_remote_ref:origin:refs/lazyspec/iteration/ITERATION-042"),
+                .any(|c| c == "delete_remote_ref:origin:refs/lazyspec/iteration/ITERATION-042:expected_old=None"),
             "should delete remote ref, got: {:?}",
             *calls
         );
@@ -1158,7 +1159,7 @@ mod tests {
         assert!(
             calls
                 .iter()
-                .any(|c| c == "delete_remote_ref:origin:refs/lazyspec/iteration/ITERATION-042"),
+                .any(|c| c == "delete_remote_ref:origin:refs/lazyspec/iteration/ITERATION-042:expected_old=None"),
             "should have attempted remote delete, got: {:?}",
             *calls
         );
