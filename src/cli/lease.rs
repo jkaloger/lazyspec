@@ -239,6 +239,7 @@ fn write_heartbeat_state(state_path: &Path, now: DateTime<Utc>) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_heartbeat_with<R: GitRefOps>(
     root: &Path,
     config: &Config,
