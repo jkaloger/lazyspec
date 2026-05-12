@@ -1,7 +1,7 @@
 ---
 title: Agent Orchestration Daemon (revised)
 type: rfc
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-05-09
 tags: []
