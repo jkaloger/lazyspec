@@ -91,6 +91,10 @@ fn default_coordination_max_push_retries() -> u8 {
     5
 }
 
+fn default_coordination_max_clock_skew() -> String {
+    "5m".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CoordinationConfig {
     #[serde(default = "default_coordination_remote")]
@@ -101,6 +105,8 @@ pub struct CoordinationConfig {
     pub grace_period: String,
     #[serde(default = "default_coordination_max_push_retries")]
     pub max_push_retries: u8,
+    #[serde(default = "default_coordination_max_clock_skew")]
+    pub max_clock_skew: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

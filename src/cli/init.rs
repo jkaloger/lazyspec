@@ -66,10 +66,14 @@ fn ensure_github_labels(config: &Config, root: &Path) {
     }
 }
 
-const GITIGNORE_ENTRIES: &[&str] = &[".lazyspec/cache/", ".lazyspec/issue-map.json"];
+const GITIGNORE_ENTRIES: &[&str] = &[
+    ".lazyspec/cache/",
+    ".lazyspec/issue-map.json",
+    ".lazyspec/state/",
+];
 
 fn ensure_gitignore(config: &Config, root: &Path) -> Result<()> {
-    if !config.documents.has_github_issues_types() {
+    if !config.documents.has_github_issues_types() && config.coordination.is_none() {
         return Ok(());
     }
 
@@ -179,7 +183,7 @@ by agent skills. For example, a dictum about testing philosophy would have
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::{StoreBackend, TypeDef};
+    use crate::engine::config::{CoordinationConfig, StoreBackend, TypeDef};
 
     fn gh_issues_config() -> Config {
         let mut config = Config::default();
@@ -187,6 +191,30 @@ mod tests {
             TypeDef::test_fixture("rfc", StoreBackend::Filesystem),
             TypeDef::test_fixture("story", StoreBackend::GithubIssues),
         ];
+        config
+    }
+
+    fn coordination_config() -> CoordinationConfig {
+        CoordinationConfig {
+            remote: "origin".to_string(),
+            lease_duration: "60m".to_string(),
+            grace_period: "2m".to_string(),
+            max_push_retries: 5,
+            max_clock_skew: "5m".to_string(),
+        }
+    }
+
+    fn coordination_only_config() -> Config {
+        let mut config = Config::default();
+        // default types are all Filesystem; ensure no github-issues types are present.
+        config.documents.types = vec![TypeDef::test_fixture("rfc", StoreBackend::Filesystem)];
+        config.coordination = Some(coordination_config());
+        config
+    }
+
+    fn gh_issues_and_coordination_config() -> Config {
+        let mut config = gh_issues_config();
+        config.coordination = Some(coordination_config());
         config
     }
 
@@ -260,5 +288,35 @@ mod tests {
         ensure_gitignore(&config, dir.path()).unwrap();
 
         assert!(!dir.path().join(".gitignore").exists());
+    }
+
+    #[test]
+    fn gitignore_includes_state_when_coordination_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = coordination_only_config();
+
+        ensure_gitignore(&config, dir.path()).unwrap();
+
+        let contents = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(
+            contents.contains(".lazyspec/state/"),
+            "expected .lazyspec/state/ in gitignore, got:\n{}",
+            contents
+        );
+    }
+
+    #[test]
+    fn gitignore_includes_state_when_github_issues_and_coordination() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = gh_issues_and_coordination_config();
+
+        ensure_gitignore(&config, dir.path()).unwrap();
+
+        let contents = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(
+            contents.contains(".lazyspec/state/"),
+            "expected .lazyspec/state/ in gitignore, got:\n{}",
+            contents
+        );
     }
 }

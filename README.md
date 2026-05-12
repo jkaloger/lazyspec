@@ -80,17 +80,16 @@ Add the appropriate line to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.) t
 
 Lazyspec includes a set of agent skills that enforce its workflow:
 
-| Skill              | Purpose                                                              |
-| ------------------ | -------------------------------------------------------------------- |
-| `plan-work`        | Detect existing artifacts and determine the right entry point       |
+| Skill              | Purpose                                                                |
+| ------------------ | ---------------------------------------------------------------------- |
+| `plan-work`        | Detect existing artifacts and determine the right entry point          |
 | `write-rfc`        | Propose a design with intent, interface sketches, and identify stories |
-| `create-story`     | Create stories with acceptance criteria linked to an RFC             |
-| `resolve-context`  | Gather full document chain (RFC -> Story -> Iteration) before work  |
-| `create-iteration` | Plan an iteration with task breakdown and test plan                 |
-| `build`            | Implement tasks from an iteration with subagent dispatch             |
-| `review-iteration` | Two-stage review -- AC compliance first, then code quality           |
-| `create-audit`     | Criteria-based review (health check, security, accessibility, etc.)  |
-
+| `create-story`     | Create stories with acceptance criteria linked to an RFC               |
+| `resolve-context`  | Gather full document chain (RFC -> Story -> Iteration) before work     |
+| `create-iteration` | Plan an iteration with task breakdown and test plan                    |
+| `build`            | Implement tasks from an iteration with subagent dispatch               |
+| `review-iteration` | Two-stage review -- AC compliance first, then code quality             |
+| `create-audit`     | Criteria-based review (health check, security, accessibility, etc.)    |
 
 ## Usage
 
@@ -170,6 +169,61 @@ All three subcommands accept `--json`. Shapes:
 - `list` (no id): `{ "documents": [{ "id": "...", "path": "...", "provenance": [...] }, ...] }`
 
 `add` rejects empty citations. `remove` is exact-match and errors when the citation is absent.
+
+## Coordination
+
+### Claude Code Hooks
+
+Lazyspec ships hook snippets that claim, heartbeat, and release a lease on `$ASSIGNED_TASK` across a Claude Code session. The orchestrator (daemon, manual `export`, etc.) sets the env var; hooks no-op silently when it is unset, so the snippet is safe to install unconditionally.
+
+Drop into `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ASSIGNED_TASK\" ] && lazyspec claim \"$ASSIGNED_TASK\" --agent-id \"$CLAUDE_SESSION_ID\" --json || true"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ASSIGNED_TASK\" ] && lazyspec heartbeat \"$ASSIGNED_TASK\" --agent-id \"$CLAUDE_SESSION_ID\" --min-interval 15m --json || true"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ASSIGNED_TASK\" ] && lazyspec release \"$ASSIGNED_TASK\" --agent-id \"$CLAUDE_SESSION_ID\" --json || true"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The standalone file lives at [`hooks/claude-code-settings.json`](hooks/claude-code-settings.json).
+
+**`$ASSIGNED_TASK` contract.** Orchestrator sets it to a doc id (e.g. `ITERATION-170`). If unset, the `[ -n "$ASSIGNED_TASK" ]` guard short-circuits and no `lazyspec` invocation happens.
+
+**Throttle.** `--min-interval 15m` matches the default `lease_duration / 4` (lease defaults to 60m). If you tune `lease_duration` in `.lazyspec.toml`, tune this to roughly a quarter of it.
+
+**Error tolerance.** `|| true` swallows non-zero exits from `lazyspec` (e.g. lease already released, network blip), so a session never fails to end because of a coordination error.
+
+See [RFC-035](docs/rfcs/RFC-035-git-ref-document-storage-with-lease-based-claiming.md) for the design rationale.
 
 </details>
 
@@ -281,10 +335,10 @@ severity = "error"
 
 Document numbers are assigned automatically during `create`. Three strategies are available per type:
 
-| Strategy      | Behaviour |
-|---------------|-----------|
-| `incremental` | Next sequential integer from existing files (default) |
-| `sqids`       | Short hash-like IDs derived from a timestamp, configured via `[numbering.sqids]` |
+| Strategy      | Behaviour                                                                                 |
+| ------------- | ----------------------------------------------------------------------------------------- |
+| `incremental` | Next sequential integer from existing files (default)                                     |
+| `sqids`       | Short hash-like IDs derived from a timestamp, configured via `[numbering.sqids]`          |
 | `reserved`    | Reserves numbers on a git remote before creating files, preventing distributed collisions |
 
 Reserved numbering uses git custom refs (`refs/reservations/*`) to coordinate across branches. It wraps either incremental or sqids formatting with an atomic push-based lock, so two people never get the same number.

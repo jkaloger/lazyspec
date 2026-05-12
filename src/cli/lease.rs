@@ -3,9 +3,10 @@ use crate::engine::config::Config;
 use crate::engine::git_ref::{GitCli, GitRefOps};
 use crate::engine::lease::{fetch_ref_optional, Lease, LeaseEngine};
 use anyhow::{bail, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 fn extract_doc_id(input: &str, config: &Config) -> Option<String> {
     for t in &config.documents.types {
@@ -205,15 +206,96 @@ pub fn run_heartbeat(
     config: &Config,
     doc_id: &str,
     agent_id: Option<&str>,
+    min_interval: Option<&str>,
     json: bool,
 ) -> Result<()> {
     let engine = require_coordination(config)?;
+    run_heartbeat_with(
+        root,
+        config,
+        &engine,
+        doc_id,
+        agent_id,
+        min_interval,
+        Utc::now(),
+        json,
+    )
+}
+
+fn heartbeat_state_path(root: &Path, type_name: &str, doc_id: &str) -> PathBuf {
+    root.join(".lazyspec/state")
+        .join(format!("heartbeat-{}-{}", type_name, doc_id))
+}
+
+fn write_heartbeat_state(state_path: &Path, now: DateTime<Utc>) -> Result<()> {
+    let dir = state_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("state path has no parent"))?;
+    std::fs::create_dir_all(dir)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(now.to_rfc3339().as_bytes())?;
+    tmp.persist(state_path)
+        .map_err(|e| anyhow::anyhow!("persist failed: {}", e))?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_heartbeat_with<R: GitRefOps>(
+    root: &Path,
+    config: &Config,
+    engine: &LeaseEngine<R>,
+    doc_id: &str,
+    agent_id: Option<&str>,
+    min_interval: Option<&str>,
+    now: DateTime<Utc>,
+    json: bool,
+) -> Result<()> {
     let type_name = resolve_doc_type(config, doc_id)?;
     let agent = match agent_id {
         Some(id) => id.to_string(),
         None => resolve_agent_id(root)?,
     };
-    let lease = engine.heartbeat(root, type_name, doc_id, &agent, Utc::now())?;
+
+    if let Some(s) = min_interval {
+        let interval = crate::engine::lease::parse_duration(s)?;
+        let state_path = heartbeat_state_path(root, type_name, doc_id);
+        match std::fs::read_to_string(&state_path) {
+            Ok(raw) => {
+                let last = DateTime::parse_from_rfc3339(raw.trim())?.with_timezone(&Utc);
+                if now - last < interval {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "skipped": true,
+                                "reason": "throttled",
+                                "last": last.to_rfc3339(),
+                            })
+                        );
+                    } else {
+                        println!(
+                            "Heartbeat {} skipped (throttled, last {})",
+                            doc_id,
+                            last.to_rfc3339()
+                        );
+                    }
+                    return Ok(());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    let lease = engine.heartbeat(root, type_name, doc_id, &agent, now)?;
+
+    if min_interval.is_some() {
+        let state_path = heartbeat_state_path(root, type_name, doc_id);
+        if let Err(e) = write_heartbeat_state(&state_path, now) {
+            eprintln!("warning: failed to write heartbeat state file: {}", e);
+        }
+    }
+
     if json {
         println!("{}", serde_json::to_string_pretty(&lease)?);
     } else {
@@ -297,6 +379,7 @@ mod tests {
                 lease_duration: "60m".to_string(),
                 grace_period: "2m".to_string(),
                 max_push_retries: 5,
+                max_clock_skew: "5m".to_string(),
             }),
         }
     }
@@ -514,5 +597,241 @@ mod tests {
         let calls = mock.calls.borrow();
         assert!(calls[0].starts_with("fetch_refs:"));
         assert!(calls[1].starts_with("list_refs:"));
+    }
+
+    // --- heartbeat throttle tests ---
+    //
+    // Note: AC4 specifies a JSON shape `{"skipped":true,"reason":"throttled","last":"<rfc3339>"}`
+    // for the throttled-skip case. Stdout capture isn't available without a new dev-dep
+    // (`gag`/`assert_cmd` are not in Cargo.toml). The throttle path is covered behaviourally
+    // by `heartbeat_skips_when_last_run_within_interval` (engine never called, state file
+    // untouched). JSON-shape coverage is deferred to an integration test.
+
+    use chrono::TimeZone;
+
+    fn engine_for(config: &Config, mock: MockGitRefClient) -> LeaseEngine<MockGitRefClient> {
+        LeaseEngine::new(mock, config.coordination.clone().unwrap())
+    }
+
+    fn fixed_now() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 5, 11, 12, 0, 0).unwrap()
+    }
+
+    fn succeeding_mock() -> MockGitRefClient {
+        MockGitRefClient::new()
+            .with_fetch_result(Ok(()))
+            .with_resolve_result(Ok(Some("sha-old".to_string())))
+            .with_read_blob_result(Ok(make_lease_json("agent-a")))
+            .with_create_commit_result(Ok("sha-new".to_string()))
+            .with_push_with_lease_result(Ok(()))
+            .with_update_ref_result(Ok(()))
+    }
+
+    #[test]
+    fn heartbeat_without_min_interval_runs_unconditionally() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_coordination();
+        let engine = engine_for(&config, succeeding_mock());
+        let now = fixed_now();
+
+        let result = run_heartbeat_with(
+            dir.path(),
+            &config,
+            &engine,
+            "RFC-001",
+            Some("agent-a"),
+            None,
+            now,
+            true,
+        );
+
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+        assert!(
+            !engine.git.calls.borrow().is_empty(),
+            "engine should be called when min_interval is None"
+        );
+        assert!(
+            !dir.path().join(".lazyspec/state").exists(),
+            "no state I/O when min_interval is None"
+        );
+    }
+
+    #[test]
+    fn heartbeat_skips_when_last_run_within_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_coordination();
+        let now = fixed_now();
+        let last = now - Duration::minutes(5);
+
+        let state_dir = dir.path().join(".lazyspec/state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let state_path = state_dir.join("heartbeat-rfc-RFC-001");
+        std::fs::write(&state_path, last.to_rfc3339()).unwrap();
+
+        // Mock has no results queued; if engine is called, pop_or_default will return defaults
+        // (e.g. resolve -> Ok(None)) which would make heartbeat fail with "no lease found".
+        // So either path -- success or err -- shows engine ran. We assert mock.calls is empty.
+        let engine = engine_for(&config, MockGitRefClient::new());
+
+        let result = run_heartbeat_with(
+            dir.path(),
+            &config,
+            &engine,
+            "RFC-001",
+            Some("agent-a"),
+            Some("15m"),
+            now,
+            true,
+        );
+
+        assert!(result.is_ok(), "throttled skip should be Ok");
+        assert!(
+            engine.git.calls.borrow().is_empty(),
+            "engine must not be called on throttle: {:?}",
+            engine.git.calls.borrow()
+        );
+        let written = std::fs::read_to_string(&state_path).unwrap();
+        assert_eq!(
+            written,
+            last.to_rfc3339(),
+            "state file should be unchanged on skip"
+        );
+    }
+
+    #[test]
+    fn heartbeat_runs_when_state_file_older_than_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_coordination();
+        let now = fixed_now();
+        let last = now - Duration::minutes(30);
+
+        let state_dir = dir.path().join(".lazyspec/state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let state_path = state_dir.join("heartbeat-rfc-RFC-001");
+        std::fs::write(&state_path, last.to_rfc3339()).unwrap();
+
+        let engine = engine_for(&config, succeeding_mock());
+
+        let result = run_heartbeat_with(
+            dir.path(),
+            &config,
+            &engine,
+            "RFC-001",
+            Some("agent-a"),
+            Some("15m"),
+            now,
+            true,
+        );
+
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+        assert!(
+            !engine.git.calls.borrow().is_empty(),
+            "engine should have been called when state is stale"
+        );
+        let written = std::fs::read_to_string(&state_path).unwrap();
+        assert_eq!(
+            written,
+            now.to_rfc3339(),
+            "state file should be updated to `now` after a successful heartbeat"
+        );
+    }
+
+    #[test]
+    fn heartbeat_runs_when_state_file_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_coordination();
+        let now = fixed_now();
+
+        let engine = engine_for(&config, succeeding_mock());
+
+        let result = run_heartbeat_with(
+            dir.path(),
+            &config,
+            &engine,
+            "RFC-001",
+            Some("agent-a"),
+            Some("15m"),
+            now,
+            true,
+        );
+
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+        assert!(
+            !engine.git.calls.borrow().is_empty(),
+            "engine should be called when state file is absent"
+        );
+        let state_path = dir.path().join(".lazyspec/state/heartbeat-rfc-RFC-001");
+        assert!(state_path.exists(), "state file should be written");
+        let written = std::fs::read_to_string(&state_path).unwrap();
+        assert_eq!(written, now.to_rfc3339());
+    }
+
+    #[test]
+    fn heartbeat_state_file_written_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_coordination();
+        let now = fixed_now();
+        let engine = engine_for(&config, succeeding_mock());
+
+        run_heartbeat_with(
+            dir.path(),
+            &config,
+            &engine,
+            "RFC-001",
+            Some("agent-a"),
+            Some("15m"),
+            now,
+            true,
+        )
+        .unwrap();
+
+        let state_dir = dir.path().join(".lazyspec/state");
+        let entries: Vec<_> = std::fs::read_dir(&state_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "expected exactly one file in state dir, found {:?}",
+            entries
+        );
+        assert_eq!(entries[0], "heartbeat-rfc-RFC-001");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn heartbeat_state_write_failure_does_not_fail_command() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_coordination();
+        let now = fixed_now();
+
+        let state_dir = dir.path().join(".lazyspec/state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let engine = engine_for(&config, succeeding_mock());
+
+        let result = run_heartbeat_with(
+            dir.path(),
+            &config,
+            &engine,
+            "RFC-001",
+            Some("agent-a"),
+            Some("15m"),
+            now,
+            true,
+        );
+
+        // Restore perms so TempDir cleanup succeeds.
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            result.is_ok(),
+            "state write failure should not fail command, got {:?}",
+            result.err()
+        );
     }
 }
