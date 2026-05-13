@@ -125,6 +125,7 @@ All document management is available as subcommands. Most accept `--json` for ma
 | `delete <path>`                      | Delete a document                                                     |
 | `link <from> <rel> <to>`             | Add a typed relationship (implements, supersedes, blocks, related-to) |
 | `unlink <from> <rel> <to>`           | Remove a relationship between documents                               |
+| `assign <id> [--user X]`             | Append a user to a document's `assignees` frontmatter list            |
 | `search <query> [--doc-type X]`      | Full-text search across all documents                                 |
 | `context <id>`                       | Show the full document chain (RFC -> Story -> Iteration)              |
 | `status`                             | Show full project status with all documents and validation            |
@@ -138,6 +139,7 @@ All document management is available as subcommands. Most accept `--json` for ma
 | `provenance list [id]`               | List citations for a document, or for all documents grouped by id     |
 | `reservations list`                  | Show all reservation refs on the remote                               |
 | `reservations prune [--dry-run]`     | Remove refs for documents that already exist locally                  |
+| `daemon`                             | Run the orchestration daemon in the foreground                        |
 
 #### `show` Flags
 
@@ -169,6 +171,18 @@ All three subcommands accept `--json`. Shapes:
 - `list` (no id): `{ "documents": [{ "id": "...", "path": "...", "provenance": [...] }, ...] }`
 
 `add` rejects empty citations. `remove` is exact-match and errors when the citation is absent.
+
+#### `assign`
+
+Append a user login to a document's `assignees` frontmatter list. When `--user` is omitted, the first entry of `[orchestration] agent_users` is used; with neither flag nor default the command errors.
+
+```sh
+lazyspec assign STORY-126 --user claude-bot
+# Assigned claude-bot to STORY-126 (assignees: ["claude-bot"])
+
+lazyspec assign STORY-126 --json
+# {"id":"STORY-126","assignee_added":"claude-bot","assignees":["claude-bot"]}
+```
 
 ## Coordination
 
@@ -226,6 +240,64 @@ The standalone file lives at [`hooks/claude-code-settings.json`](hooks/claude-co
 See [RFC-035](docs/rfcs/RFC-035-git-ref-document-storage-with-lease-based-claiming.md) for the design rationale.
 
 </details>
+
+## Daemon Deployment
+
+The orchestration daemon runs in the foreground and binds a unix socket at `.lazyspec/daemon.sock`. For production use, supervise it with a process manager -- systemd on Linux, launchd on macOS -- rather than backgrounding it manually.
+
+### systemd
+
+```ini
+[Unit]
+Description=lazyspec orchestration daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/lazyspec daemon
+WorkingDirectory=/srv/lazyspec/your-repo
+Restart=on-failure
+User=lazyspec
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Replace `WorkingDirectory` with the absolute path to your repo. Install at `/etc/systemd/system/lazyspec.service`, then enable and start it with `systemctl enable --now lazyspec`.
+
+### launchd
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>au.com.inlight.lazyspec</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/lazyspec</string>
+        <string>daemon</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/you/your-repo</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/lazyspec.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/lazyspec.err.log</string>
+</dict>
+</plist>
+```
+
+Install at `~/Library/LaunchAgents/au.com.inlight.lazyspec.plist` and load with `launchctl load ~/Library/LaunchAgents/au.com.inlight.lazyspec.plist`.
+
+### Stopping
+
+There is no `lazyspec daemon stop` subcommand. Stop the daemon through its supervisor: `systemctl stop lazyspec`, `launchctl unload ~/Library/LaunchAgents/au.com.inlight.lazyspec.plist`, or `kill <pid>`. Both SIGTERM and SIGINT trigger graceful shutdown.
 
 <details>
 <summary><h3><code>@ref</code> Syntax</h3></summary>
@@ -356,6 +428,19 @@ max_retries = 5          # push retry attempts before failing
 ```
 
 If the remote is unreachable, `create` fails rather than silently falling back. Use `lazyspec reservations prune` to clean up refs for documents that have been created.
+
+### Orchestration
+
+The `[orchestration]` section configures defaults for agent-driven workflows -- which user logins count as agents, and what document type is the unit of claimable work.
+
+```toml
+[orchestration]
+agent_users = ["claude-bot"]
+claim_type = "story"  # default
+```
+
+- `agent_users` -- logins eligible to be picked up by the daemon. The first entry is the default for `lazyspec assign` when `--user` is omitted.
+- `claim_type` -- document type the daemon claims as a unit of work. Defaults to `story`.
 
 ### Templates
 

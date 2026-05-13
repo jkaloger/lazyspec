@@ -314,8 +314,11 @@ fn parse_issue(issue: &GhIssue, type_name: &str, known_types: &[String]) -> (Doc
         .map(|a| format!("@{}", a.login))
         .unwrap_or_else(|| "unknown".to_string());
 
+    let assignees: Vec<String> = issue.assignees.iter().map(|a| a.login.clone()).collect();
+
     if let Ok((mut meta, body)) = issue_body::deserialize(&issue.body, &ctx) {
         meta.author = author;
+        meta.assignees = assignees;
         return (meta, body);
     }
 
@@ -343,6 +346,7 @@ fn parse_issue(issue: &GhIssue, type_name: &str, known_types: &[String]) -> (Doc
         validate_ignore: false,
         virtual_doc: false,
         id: String::new(),
+        assignees,
     };
 
     (meta, issue.body.clone())
@@ -433,6 +437,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            assignees: vec![],
         }
     }
 
@@ -481,6 +486,10 @@ mod tests {
 
         fn issue_view(&self, _repo: &str, _number: u64) -> Result<GhIssue> {
             unimplemented!()
+        }
+
+        fn user_exists(&self, _login: &str) -> Result<bool> {
+            Ok(true)
         }
     }
 

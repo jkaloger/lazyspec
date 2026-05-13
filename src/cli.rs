@@ -1,7 +1,9 @@
+pub mod assign;
 pub mod completions;
 pub mod context;
 pub mod convention;
 pub mod create;
+pub mod daemon;
 pub mod delete;
 pub mod fetch;
 pub mod fix;
@@ -319,6 +321,32 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Add an assignee to a document's frontmatter
+    ///
+    /// Appends `--user <login>` to the document's `assignees` list and persists
+    /// the change. When `--user` is omitted, falls back to the first entry of
+    /// `[orchestration] agent_users` in `.lazyspec.toml`; errors if neither is
+    /// available.
+    ///
+    /// On success in `--json` mode, prints
+    /// `{ "id": "...", "assignee_added": "...", "assignees": [...] }`.
+    Assign {
+        /// Document path or shorthand ID (e.g. STORY-126)
+        #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
+        doc_id: String,
+        /// User login to add (defaults to first of [orchestration] agent_users)
+        #[arg(long)]
+        user: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run the orchestration daemon in the foreground.
+    ///
+    /// Blocks until interrupted (SIGTERM/SIGINT). The daemon binds a unix socket at
+    /// `.lazyspec/daemon.sock` and releases this host's RFC-035 leases on shutdown.
+    /// Run under your process supervisor of choice (systemd, launchd, foreman, etc.).
+    Daemon,
     /// Extend the expiry of a held lease
     Heartbeat {
         /// Document ID (e.g. STORY-108, RFC-035)

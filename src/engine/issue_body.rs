@@ -93,6 +93,7 @@ pub fn deserialize(issue_body: &str, ctx: &IssueContext) -> Result<(DocMeta, Str
         validate_ignore: false,
         virtual_doc: false,
         id: String::new(),
+        assignees: vec![],
     };
 
     Ok((meta, body))
@@ -203,6 +204,7 @@ mod tests {
             validate_ignore: false,
             virtual_doc: false,
             id: "RFC-042".to_string(),
+            assignees: vec![],
         }
     }
 

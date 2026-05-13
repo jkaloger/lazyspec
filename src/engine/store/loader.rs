@@ -155,6 +155,7 @@ fn load_subdirectory(
         validate_ignore: false,
         virtual_doc: true,
         id: extract_id(&parent_relative),
+        assignees: vec![],
     };
     docs.insert(parent_relative.clone(), virtual_meta);
 

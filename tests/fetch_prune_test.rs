@@ -26,6 +26,9 @@ impl GhIssueReader for NoopGh {
     fn issue_view(&self, _repo: &str, _number: u64) -> Result<GhIssue> {
         unreachable!("not used in this test")
     }
+    fn user_exists(&self, _login: &str) -> Result<bool> {
+        Ok(true)
+    }
 }
 
 fn config_with_git_ref_iteration() -> Config {

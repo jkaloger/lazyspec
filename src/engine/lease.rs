@@ -15,6 +15,13 @@ pub struct Lease {
     pub expires: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleasedLease {
+    pub type_name: String,
+    pub id: String,
+    pub agent: String,
+}
+
 pub fn parse_duration(s: &str) -> Result<Duration> {
     if s.is_empty() {
         bail!("empty duration string");
@@ -249,6 +256,70 @@ impl<R: GitRefOps> LeaseEngine<R> {
             .push_ref_with_lease(root, &self.config.remote, &refname, &new_sha, Some(&sha))?;
         self.git.update_ref(root, &refname, &new_sha, &sha)?;
         Ok(new_lease)
+    }
+
+    pub fn release_by_host_prefix(
+        &self,
+        root: &Path,
+        type_names: &[&str],
+        host_prefix: &str,
+    ) -> Result<Vec<ReleasedLease>> {
+        let mut released = Vec::new();
+        let needle = format!("{}:", host_prefix);
+        for type_name in type_names {
+            let pattern = format!("refs/lazyspec/leases/{}/", type_name);
+            let ref_prefix = pattern.clone();
+            let refs = match self.git.list_refs(root, &pattern) {
+                Ok(refs) => refs,
+                Err(e) => {
+                    eprintln!(
+                        "warning: failed to list lease refs for type '{}': {}",
+                        type_name, e
+                    );
+                    continue;
+                }
+            };
+            for (refname, sha) in refs {
+                let blob = match self.git.read_ref_blob(root, &sha, "lease.json") {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("warning: failed to read lease blob {}: {}", refname, e);
+                        continue;
+                    }
+                };
+                let lease: Lease = match serde_json::from_str(&blob) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        eprintln!("warning: failed to parse lease blob {}: {}", refname, e);
+                        continue;
+                    }
+                };
+                if !lease.agent.starts_with(&needle) {
+                    continue;
+                }
+                let id = match refname.strip_prefix(&ref_prefix) {
+                    Some(id) => id.to_string(),
+                    None => {
+                        eprintln!("warning: lease ref {} did not match prefix", refname);
+                        continue;
+                    }
+                };
+                match self.release(root, type_name, &id, &lease.agent) {
+                    Ok(()) => released.push(ReleasedLease {
+                        type_name: (*type_name).to_string(),
+                        id,
+                        agent: lease.agent,
+                    }),
+                    Err(e) => {
+                        eprintln!(
+                            "warning: failed to release lease {}/{}: {}",
+                            type_name, id, e
+                        );
+                    }
+                }
+            }
+        }
+        Ok(released)
     }
 
     pub fn query(&self, root: &Path) -> Result<Vec<(String, Lease)>> {
@@ -1093,6 +1164,173 @@ mod tests {
             "expected skew error, got: {}",
             err
         );
+    }
+
+    // --- release_by_host_prefix tests ---
+
+    fn lease_ref_pair(type_name: &str, id: &str, sha: &str) -> (String, String) {
+        (
+            format!("refs/lazyspec/leases/{}/{}", type_name, id),
+            sha.to_string(),
+        )
+    }
+
+    #[test]
+    fn release_by_host_prefix_releases_only_matching_leases() {
+        let now = fixed_now();
+        let lease_a1 = make_lease_json("host-A:sess-1", now, now + Duration::minutes(60));
+        let lease_a2 = make_lease_json("host-A:sess-2", now, now + Duration::minutes(60));
+        let lease_b1 = make_lease_json("host-B:sess-1", now, now + Duration::minutes(60));
+
+        // read_blob queue order is interleaved because release() also reads the blob.
+        // Order of pops: prefilter-STORY-001, release-STORY-001, prefilter-STORY-002,
+        // release-STORY-002, prefilter-STORY-003.
+        let mock = MockGitRefClient::new()
+            .with_list_result(Ok(vec![
+                lease_ref_pair("story", "STORY-001", "sha1"),
+                lease_ref_pair("story", "STORY-002", "sha2"),
+                lease_ref_pair("story", "STORY-003", "sha3"),
+            ]))
+            .with_read_blob_result(Ok(lease_a1.clone()))
+            .with_read_blob_result(Ok(lease_a1))
+            .with_read_blob_result(Ok(lease_a2.clone()))
+            .with_read_blob_result(Ok(lease_a2))
+            .with_read_blob_result(Ok(lease_b1))
+            // fetch + resolve for each release: STORY-001 then STORY-002
+            .with_fetch_result(Ok(()))
+            .with_fetch_result(Ok(()))
+            .with_resolve_result(Ok(Some("sha1".to_string())))
+            .with_resolve_result(Ok(Some("sha2".to_string())))
+            .with_delete_remote_result(Ok(()))
+            .with_delete_remote_result(Ok(()))
+            .with_delete_ref_result(Ok(()))
+            .with_delete_ref_result(Ok(()));
+
+        let engine = LeaseEngine::new(mock, test_config());
+        let released = engine
+            .release_by_host_prefix(&dummy_root(), &["story"], "host-A")
+            .unwrap();
+
+        assert_eq!(released.len(), 2);
+        let ids: Vec<&str> = released.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"STORY-001"));
+        assert!(ids.contains(&"STORY-002"));
+        assert!(!ids.contains(&"STORY-003"));
+
+        let calls = engine.git.calls.borrow();
+        let delete_remote_calls: Vec<&String> = calls
+            .iter()
+            .filter(|c| c.starts_with("delete_remote_ref:"))
+            .collect();
+        assert_eq!(delete_remote_calls.len(), 2);
+        assert!(delete_remote_calls
+            .iter()
+            .any(|c| c.contains("STORY-001")));
+        assert!(delete_remote_calls
+            .iter()
+            .any(|c| c.contains("STORY-002")));
+        assert!(!delete_remote_calls
+            .iter()
+            .any(|c| c.contains("STORY-003")));
+    }
+
+    #[test]
+    fn release_by_host_prefix_empty_when_no_matches() {
+        let now = fixed_now();
+        let lease_b = make_lease_json("host-B:sess-1", now, now + Duration::minutes(60));
+        let mock = MockGitRefClient::new()
+            .with_list_result(Ok(vec![lease_ref_pair("story", "STORY-001", "sha1")]))
+            .with_read_blob_result(Ok(lease_b));
+
+        let engine = LeaseEngine::new(mock, test_config());
+        let released = engine
+            .release_by_host_prefix(&dummy_root(), &["story"], "host-A")
+            .unwrap();
+
+        assert!(released.is_empty());
+        let calls = engine.git.calls.borrow();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("delete_remote_ref:")),
+            "no delete_remote_ref should be called when no agent matches"
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("delete_ref:")),
+            "no delete_ref should be called when no agent matches"
+        );
+    }
+
+    #[test]
+    fn release_by_host_prefix_handles_no_leases() {
+        let mock = MockGitRefClient::new().with_list_result(Ok(vec![]));
+        let engine = LeaseEngine::new(mock, test_config());
+        let released = engine
+            .release_by_host_prefix(&dummy_root(), &["story"], "host-A")
+            .unwrap();
+        assert!(released.is_empty());
+    }
+
+    #[test]
+    fn release_by_host_prefix_continues_after_per_lease_error() {
+        let now = fixed_now();
+        let lease_a1 = make_lease_json("host-A:sess-1", now, now + Duration::minutes(60));
+        let lease_a3 = make_lease_json("host-A:sess-3", now, now + Duration::minutes(60));
+
+        // read_blob queue order:
+        // STORY-001 prefilter → release internal
+        // STORY-002 prefilter (this is the one that errors)
+        // STORY-003 prefilter → release internal
+        let mock = MockGitRefClient::new()
+            .with_list_result(Ok(vec![
+                lease_ref_pair("story", "STORY-001", "sha1"),
+                lease_ref_pair("story", "STORY-002", "sha2"),
+                lease_ref_pair("story", "STORY-003", "sha3"),
+            ]))
+            .with_read_blob_result(Ok(lease_a1.clone()))
+            .with_read_blob_result(Ok(lease_a1))
+            .with_read_blob_result(Err(anyhow::anyhow!("blob read failed")))
+            .with_read_blob_result(Ok(lease_a3.clone()))
+            .with_read_blob_result(Ok(lease_a3))
+            // release for STORY-001 then STORY-003
+            .with_fetch_result(Ok(()))
+            .with_fetch_result(Ok(()))
+            .with_resolve_result(Ok(Some("sha1".to_string())))
+            .with_resolve_result(Ok(Some("sha3".to_string())))
+            .with_delete_remote_result(Ok(()))
+            .with_delete_remote_result(Ok(()))
+            .with_delete_ref_result(Ok(()))
+            .with_delete_ref_result(Ok(()));
+
+        let engine = LeaseEngine::new(mock, test_config());
+        let released = engine
+            .release_by_host_prefix(&dummy_root(), &["story"], "host-A")
+            .unwrap();
+
+        assert_eq!(released.len(), 2);
+        let ids: Vec<&str> = released.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"STORY-001"));
+        assert!(ids.contains(&"STORY-003"));
+        assert!(!ids.contains(&"STORY-002"));
+    }
+
+    #[test]
+    fn release_by_host_prefix_distinguishes_prefix_boundary() {
+        let now = fixed_now();
+        let lease_lookalike =
+            make_lease_json("host-A-foo:sess-1", now, now + Duration::minutes(60));
+        let mock = MockGitRefClient::new()
+            .with_list_result(Ok(vec![lease_ref_pair("story", "STORY-001", "sha1")]))
+            .with_read_blob_result(Ok(lease_lookalike));
+
+        let engine = LeaseEngine::new(mock, test_config());
+        let released = engine
+            .release_by_host_prefix(&dummy_root(), &["story"], "host-A")
+            .unwrap();
+        assert!(
+            released.is_empty(),
+            "host-A prefix without ':' boundary must not match host-A-foo"
+        );
+        let calls = engine.git.calls.borrow();
+        assert!(!calls.iter().any(|c| c.starts_with("delete_remote_ref:")));
     }
 
     #[test]

@@ -37,6 +37,8 @@ pub struct GhIssue {
     pub created_at: String,
     #[serde(default)]
     pub author: Option<GhAuthor>,
+    #[serde(default)]
+    pub assignees: Vec<GhAuthor>,
 }
 
 // --- Error types ---
@@ -122,6 +124,8 @@ pub trait GhIssueReader {
     ) -> Result<Vec<GhIssue>>;
 
     fn issue_view(&self, repo: &str, number: u64) -> Result<GhIssue>;
+
+    fn user_exists(&self, login: &str) -> Result<bool>;
 }
 
 pub trait GhIssueWriter {
@@ -150,6 +154,14 @@ pub trait GhIssueWriter {
     fn label_create(&self, repo: &str, name: &str, description: &str, color: &str) -> Result<()>;
 
     fn label_ensure(&self, repo: &str, name: &str, description: &str, color: &str) -> Result<()>;
+
+    fn issue_assignees(
+        &self,
+        repo: &str,
+        number: u64,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()>;
 }
 
 pub trait GhAuth {
@@ -206,7 +218,7 @@ impl GhIssueReader for GhCli {
     ) -> Result<Vec<GhIssue>> {
         let label_filter = labels.join(",");
         let fields = if json_fields.is_empty() {
-            "number,url,title,body,labels,state,updatedAt,createdAt,author".to_string()
+            "number,url,title,body,labels,state,updatedAt,createdAt,author,assignees".to_string()
         } else {
             json_fields.join(",")
         };
@@ -239,11 +251,28 @@ impl GhIssueReader for GhCli {
             "--repo",
             repo,
             "--json",
-            "number,url,title,body,labels,state,updatedAt,createdAt,author",
+            "number,url,title,body,labels,state,updatedAt,createdAt,author,assignees",
         ];
 
         let stdout = self.run_gh_checked(&args)?;
         parse_issue_json(&stdout)
+    }
+
+    fn user_exists(&self, login: &str) -> Result<bool> {
+        let path = format!("users/{}", login);
+        let output = self.run_gh(&["api", &path])?;
+
+        if output.status.success() {
+            return Ok(true);
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let lower = stderr.to_lowercase();
+        if lower.contains("http 404") || lower.contains("not found") {
+            return Ok(false);
+        }
+
+        bail!(classify_gh_error(stderr.trim()));
     }
 }
 
@@ -341,6 +370,33 @@ impl GhIssueWriter for GhCli {
             color,
             "--force",
         ])?;
+        Ok(())
+    }
+
+    fn issue_assignees(
+        &self,
+        repo: &str,
+        number: u64,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        if add.is_empty() && remove.is_empty() {
+            return Ok(());
+        }
+
+        let num_str = number.to_string();
+        let mut args = vec!["issue", "edit", &num_str, "--repo", repo];
+
+        for login in add {
+            args.push("--add-assignee");
+            args.push(login);
+        }
+        for login in remove {
+            args.push("--remove-assignee");
+            args.push(login);
+        }
+
+        self.run_gh_checked(&args)?;
         Ok(())
     }
 }
@@ -465,6 +521,7 @@ fn extract_after(text: &str, needle: &str) -> Option<String> {
 pub mod test_support {
     use super::*;
     use std::cell::{Cell, RefCell};
+    use std::collections::HashSet;
 
     pub struct MockGhClient {
         pub auth: AuthStatus,
@@ -479,6 +536,8 @@ pub mod test_support {
         pub last_edit_labels_remove: RefCell<Vec<String>>,
         pub last_create_body: RefCell<Option<String>>,
         pub next_issue_number: Cell<u64>,
+        pub known_users: RefCell<Option<HashSet<String>>>,
+        pub assignees_calls: RefCell<Vec<(String, u64, Vec<String>, Vec<String>)>>,
     }
 
     impl Default for MockGhClient {
@@ -505,6 +564,8 @@ pub mod test_support {
                 last_edit_labels_remove: RefCell::new(vec![]),
                 last_create_body: RefCell::new(None),
                 next_issue_number: Cell::new(1),
+                known_users: RefCell::new(None),
+                assignees_calls: RefCell::new(vec![]),
             }
         }
 
@@ -531,6 +592,38 @@ pub mod test_support {
         pub fn with_label_create_fail(mut self) -> Self {
             self.label_create_fail = true;
             self
+        }
+
+        pub fn with_known_users<I, S>(self, users: I) -> Self
+        where
+            I: IntoIterator<Item = S>,
+            S: Into<String>,
+        {
+            let set: HashSet<String> = users.into_iter().map(Into::into).collect();
+            *self.known_users.borrow_mut() = Some(set);
+            self
+        }
+
+        pub fn assignees_calls(&self) -> Vec<(String, u64, Vec<String>, Vec<String>)> {
+            self.assignees_calls.borrow().clone()
+        }
+
+        pub fn last_assignees_call(&self) -> Option<(String, u64, Vec<String>, Vec<String>)> {
+            self.assignees_calls.borrow().last().cloned()
+        }
+
+        pub fn last_assignees_add(&self) -> Option<Vec<String>> {
+            self.assignees_calls
+                .borrow()
+                .last()
+                .map(|(_, _, add, _)| add.clone())
+        }
+
+        pub fn last_assignees_remove(&self) -> Option<Vec<String>> {
+            self.assignees_calls
+                .borrow()
+                .last()
+                .map(|(_, _, _, remove)| remove.clone())
         }
     }
 
@@ -559,7 +652,15 @@ pub mod test_support {
                 updated_at: String::new(),
                 created_at: String::new(),
                 author: None,
+                assignees: vec![],
             })
+        }
+
+        fn user_exists(&self, login: &str) -> Result<bool> {
+            match self.known_users.borrow().as_ref() {
+                Some(set) => Ok(set.contains(login)),
+                None => Ok(true),
+            }
         }
     }
 
@@ -593,6 +694,7 @@ pub mod test_support {
                 updated_at: "2026-03-27T00:00:00Z".to_string(),
                 created_at: String::new(),
                 author: None,
+                assignees: vec![],
             })
         }
 
@@ -641,6 +743,22 @@ pub mod test_support {
             _description: &str,
             _color: &str,
         ) -> Result<()> {
+            Ok(())
+        }
+
+        fn issue_assignees(
+            &self,
+            repo: &str,
+            number: u64,
+            add: &[String],
+            remove: &[String],
+        ) -> Result<()> {
+            self.assignees_calls.borrow_mut().push((
+                repo.to_string(),
+                number,
+                add.to_vec(),
+                remove.to_vec(),
+            ));
             Ok(())
         }
     }
@@ -793,6 +911,7 @@ mod tests {
                 updated_at: String::new(),
                 created_at: String::new(),
                 author: None,
+                assignees: vec![],
             },
             GhIssue {
                 number: 2,
@@ -804,6 +923,7 @@ mod tests {
                 updated_at: String::new(),
                 created_at: String::new(),
                 author: None,
+                assignees: vec![],
             },
         ]);
         let issues = client.issue_list("owner/repo", &[], &[], None).unwrap();
@@ -945,6 +1065,72 @@ mod tests {
             }
             other => panic!("expected ApiError with status 0, got {:?}", other),
         }
+    }
+
+    // --- Task 4: assignees + user_exists ---
+
+    #[test]
+    fn mock_user_exists_returns_true_by_default() {
+        let client = MockGhClient::new();
+        assert_eq!(client.user_exists("anyone").unwrap(), true);
+    }
+
+    #[test]
+    fn mock_user_exists_honors_known_set() {
+        let client = MockGhClient::new().with_known_users(["alice", "bob"]);
+        assert_eq!(client.user_exists("alice").unwrap(), true);
+        assert_eq!(client.user_exists("bob").unwrap(), true);
+        assert_eq!(client.user_exists("ghost").unwrap(), false);
+    }
+
+    #[test]
+    fn mock_issue_assignees_records_call() {
+        let client = MockGhClient::new();
+        client
+            .issue_assignees(
+                "acme/repo",
+                7,
+                &["alice".to_string()],
+                &["bob".to_string()],
+            )
+            .unwrap();
+
+        let last = client.last_assignees_call().expect("call recorded");
+        assert_eq!(last.0, "acme/repo");
+        assert_eq!(last.1, 7);
+        assert_eq!(last.2, vec!["alice".to_string()]);
+        assert_eq!(last.3, vec!["bob".to_string()]);
+        assert_eq!(client.last_assignees_add().unwrap(), vec!["alice"]);
+        assert_eq!(client.last_assignees_remove().unwrap(), vec!["bob"]);
+    }
+
+    #[test]
+    fn ghissue_deserializes_assignees_from_json() {
+        let json = r#"{
+            "number": 1,
+            "title": "Has assignees",
+            "assignees": [{"login": "alice"}, {"login": "bob"}]
+        }"#;
+
+        let issue = parse_issue_json(json).unwrap();
+        assert_eq!(
+            issue.assignees,
+            vec![
+                GhAuthor {
+                    login: "alice".to_string()
+                },
+                GhAuthor {
+                    login: "bob".to_string()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn ghissue_deserializes_assignees_defaults_empty_when_absent() {
+        let json = r#"{"number": 2, "title": "No assignees"}"#;
+        let issue = parse_issue_json(json).unwrap();
+        assert!(issue.assignees.is_empty());
     }
 
     #[test]

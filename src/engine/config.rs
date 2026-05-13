@@ -95,6 +95,22 @@ fn default_coordination_max_clock_skew() -> String {
     "5m".to_string()
 }
 
+fn default_claim_type() -> String {
+    "story".to_string()
+}
+
+fn default_agent_users() -> Vec<String> {
+    Vec::new()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OrchestrationConfig {
+    #[serde(default = "default_agent_users")]
+    pub agent_users: Vec<String>,
+    #[serde(default = "default_claim_type")]
+    pub claim_type: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CoordinationConfig {
     #[serde(default = "default_coordination_remote")]
@@ -239,6 +255,8 @@ pub struct Config {
     pub certification: CertificationConfig,
     #[serde(skip)]
     pub coordination: Option<CoordinationConfig>,
+    #[serde(skip)]
+    pub orchestration: Option<OrchestrationConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,6 +345,8 @@ struct RawConfig {
     github: Option<GithubConfig>,
     #[serde(default)]
     coordination: Option<CoordinationConfig>,
+    #[serde(default)]
+    orchestration: Option<OrchestrationConfig>,
 }
 
 fn build_type_def(name: &str, dir: &str, prefix: &str, icon: &str) -> TypeDef {
@@ -457,6 +477,7 @@ impl Default for Config {
             ref_count_ceiling: 15,
             certification: CertificationConfig::default(),
             coordination: None,
+            orchestration: None,
         }
     }
 }
@@ -574,6 +595,7 @@ impl Config {
             ref_count_ceiling,
             certification: raw.certification.unwrap_or_default(),
             coordination: raw.coordination,
+            orchestration: raw.orchestration,
         })
     }
 
@@ -959,6 +981,61 @@ pattern = "{type}-{n:03}-{title}.md"
 "#;
         let config = Config::parse(toml_str).unwrap();
         assert!(config.coordination.is_none());
+    }
+
+    #[test]
+    fn orchestration_defaults_when_section_absent() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert!(config.orchestration.is_none());
+    }
+
+    #[test]
+    fn orchestration_defaults_when_empty_section() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[orchestration]
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let orch = config.orchestration.unwrap();
+        assert!(orch.agent_users.is_empty());
+        assert_eq!(orch.claim_type, "story");
+    }
+
+    #[test]
+    fn orchestration_uses_explicit_values() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[orchestration]
+agent_users = ["claude-bot", "other-bot"]
+claim_type = "iteration"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let orch = config.orchestration.unwrap();
+        assert_eq!(orch.agent_users, vec!["claude-bot", "other-bot"]);
+        assert_eq!(orch.claim_type, "iteration");
+    }
+
+    #[test]
+    fn orchestration_partial_section_falls_back_to_default_claim_type() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[orchestration]
+agent_users = ["claude-bot"]
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let orch = config.orchestration.unwrap();
+        assert_eq!(orch.agent_users, vec!["claude-bot"]);
+        assert_eq!(orch.claim_type, "story");
     }
 
     #[test]

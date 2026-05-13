@@ -198,6 +198,7 @@ pub struct DocMeta {
     pub validate_ignore: bool,
     pub virtual_doc: bool,
     pub id: String,
+    pub assignees: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -216,6 +217,8 @@ struct RawFrontmatter {
     related: Vec<serde_yaml::Value>,
     #[serde(default, rename = "validate-ignore")]
     validate_ignore: bool,
+    #[serde(default)]
+    assignees: Vec<String>,
 }
 
 pub fn rewrite_frontmatter<F>(path: &Path, fs: &dyn FileSystem, mutate: F) -> Result<()>
@@ -320,6 +323,7 @@ impl DocMeta {
             validate_ignore: raw.validate_ignore,
             virtual_doc: false,
             id: String::new(),
+            assignees: raw.assignees,
         })
     }
 
@@ -356,6 +360,7 @@ mod tests {
             validate_ignore: false,
             virtual_doc: false,
             id: String::new(),
+            assignees: vec![],
         }
     }
 
@@ -523,6 +528,76 @@ Body.
         assert_eq!(
             after_first, after_many,
             "no-op rewrite must not accumulate newlines across runs"
+        );
+    }
+
+    #[test]
+    fn docmeta_parses_assignees_from_frontmatter() {
+        let content = r#"---
+title: "Doc"
+type: rfc
+status: draft
+author: a
+date: 2026-01-01
+tags: []
+assignees:
+  - alice
+  - claude-bot
+---
+
+Body.
+"#;
+        let meta = DocMeta::parse(content).unwrap();
+        assert_eq!(
+            meta.assignees,
+            vec!["alice".to_string(), "claude-bot".to_string()]
+        );
+    }
+
+    #[test]
+    fn docmeta_defaults_assignees_to_empty_when_absent() {
+        let content = r#"---
+title: "Doc"
+type: rfc
+status: draft
+author: a
+date: 2026-01-01
+tags: []
+---
+
+Body.
+"#;
+        let meta = DocMeta::parse(content).unwrap();
+        assert!(meta.assignees.is_empty());
+    }
+
+    #[test]
+    fn docmeta_assignees_preserves_order_and_values() {
+        let content = r#"---
+title: "Doc"
+type: rfc
+status: draft
+author: a
+date: 2026-01-01
+tags: []
+assignees:
+  - "user@example.com"
+  - "claude-bot"
+  - "Some Free-Form Name"
+  - "x"
+---
+
+Body.
+"#;
+        let meta = DocMeta::parse(content).unwrap();
+        assert_eq!(
+            meta.assignees,
+            vec![
+                "user@example.com".to_string(),
+                "claude-bot".to_string(),
+                "Some Free-Form Name".to_string(),
+                "x".to_string(),
+            ]
         );
     }
 

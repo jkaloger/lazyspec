@@ -67,6 +67,88 @@ impl<R: GitRefOps> GitRefStore<R> {
         Ok(max + 1)
     }
 
+    fn set_list_field(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        field: &str,
+        values: &[String],
+    ) -> Result<()> {
+        let doc_key = Self::doc_key(&type_def.name, doc_id);
+        let lock = CacheLock::load(&self.root)?;
+        let old_sha = lock
+            .get(&doc_key)
+            .ok_or_else(|| anyhow::anyhow!("{} not found in cache.lock", doc_id))?
+            .to_string();
+
+        let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
+        let cache_path = find_cache_file(&cache_dir, doc_id)
+            .ok_or_else(|| anyhow::anyhow!("cache file not found for {}", doc_id))?;
+        let content = std::fs::read_to_string(&cache_path)?;
+
+        let (yaml, existing_body) = split_frontmatter(&content)?;
+        let mut value: serde_yaml::Value = serde_yaml::from_str(&yaml)?;
+        let entries: Vec<serde_yaml::Value> = values
+            .iter()
+            .map(|s| serde_yaml::Value::String(s.clone()))
+            .collect();
+        let map = value
+            .as_mapping_mut()
+            .ok_or_else(|| anyhow::anyhow!("frontmatter root must be a mapping"))?;
+        map.insert(
+            serde_yaml::Value::String(field.to_string()),
+            serde_yaml::Value::Sequence(entries),
+        );
+        let new_yaml = serde_yaml::to_string(&value)?;
+
+        let body_trimmed = existing_body.trim_start_matches('\n');
+        let body_section = if body_trimmed.is_empty() {
+            String::new()
+        } else {
+            format!("\n{}\n", body_trimmed)
+        };
+        let updated_content = compose_frontmatter(&new_yaml, &body_section);
+
+        let refname = Self::refname(&type_def.name, doc_id);
+        let new_sha = self.git.create_commit(
+            &self.root,
+            &refname,
+            &[("doc.md", &updated_content)],
+            Some(&old_sha),
+        )?;
+
+        if let Err(e) = self
+            .git
+            .update_ref(&self.root, &refname, &new_sha, &old_sha)
+        {
+            bail!("conflict updating {}: {}", doc_id, e);
+        }
+
+        if let Some(coord) = &self.config.coordination {
+            if let Err(push_err) = self.git.push_ref(&self.root, &coord.remote, &refname) {
+                if let Err(rollback_err) = self
+                    .git
+                    .update_ref(&self.root, &refname, &old_sha, &new_sha)
+                {
+                    bail!(
+                        "push failed: {}; rollback failed: {}; local state wedged, recover with `lazyspec fetch`",
+                        push_err,
+                        rollback_err
+                    );
+                }
+                bail!("push failed for {}: {}", doc_id, push_err);
+            }
+        }
+
+        std::fs::write(&cache_path, &updated_content)?;
+
+        let mut lock = CacheLock::load(&self.root)?;
+        lock.set(&doc_key, &new_sha);
+        lock.save(&self.root)?;
+
+        Ok(())
+    }
+
     fn build_markdown(
         type_def: &TypeDef,
         title: &str,
@@ -128,6 +210,7 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
             validate_ignore: false,
             virtual_doc: false,
             id: id.clone(),
+            assignees: vec![],
         };
 
         write_cache_file(&self.root, type_def, &meta, body)?;
@@ -236,79 +319,16 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
         doc_id: &str,
         provenance: &[String],
     ) -> Result<()> {
-        let doc_key = Self::doc_key(&type_def.name, doc_id);
-        let lock = CacheLock::load(&self.root)?;
-        let old_sha = lock
-            .get(&doc_key)
-            .ok_or_else(|| anyhow::anyhow!("{} not found in cache.lock", doc_id))?
-            .to_string();
+        self.set_list_field(type_def, doc_id, "provenance", provenance)
+    }
 
-        let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
-        let cache_path = find_cache_file(&cache_dir, doc_id)
-            .ok_or_else(|| anyhow::anyhow!("cache file not found for {}", doc_id))?;
-        let content = std::fs::read_to_string(&cache_path)?;
-
-        let (yaml, existing_body) = split_frontmatter(&content)?;
-        let mut value: serde_yaml::Value = serde_yaml::from_str(&yaml)?;
-        let entries: Vec<serde_yaml::Value> = provenance
-            .iter()
-            .map(|s| serde_yaml::Value::String(s.clone()))
-            .collect();
-        let map = value
-            .as_mapping_mut()
-            .ok_or_else(|| anyhow::anyhow!("frontmatter root must be a mapping"))?;
-        map.insert(
-            serde_yaml::Value::String("provenance".to_string()),
-            serde_yaml::Value::Sequence(entries),
-        );
-        let new_yaml = serde_yaml::to_string(&value)?;
-
-        let body_trimmed = existing_body.trim_start_matches('\n');
-        let body_section = if body_trimmed.is_empty() {
-            String::new()
-        } else {
-            format!("\n{}\n", body_trimmed)
-        };
-        let updated_content = compose_frontmatter(&new_yaml, &body_section);
-
-        let refname = Self::refname(&type_def.name, doc_id);
-        let new_sha = self.git.create_commit(
-            &self.root,
-            &refname,
-            &[("doc.md", &updated_content)],
-            Some(&old_sha),
-        )?;
-
-        if let Err(e) = self
-            .git
-            .update_ref(&self.root, &refname, &new_sha, &old_sha)
-        {
-            bail!("conflict updating {}: {}", doc_id, e);
-        }
-
-        if let Some(coord) = &self.config.coordination {
-            if let Err(push_err) = self.git.push_ref(&self.root, &coord.remote, &refname) {
-                if let Err(rollback_err) = self
-                    .git
-                    .update_ref(&self.root, &refname, &old_sha, &new_sha)
-                {
-                    bail!(
-                        "push failed: {}; rollback failed: {}; local state wedged, recover with `lazyspec fetch`",
-                        push_err,
-                        rollback_err
-                    );
-                }
-                bail!("push failed for {}: {}", doc_id, push_err);
-            }
-        }
-
-        std::fs::write(&cache_path, &updated_content)?;
-
-        let mut lock = CacheLock::load(&self.root)?;
-        lock.set(&doc_key, &new_sha);
-        lock.save(&self.root)?;
-
-        Ok(())
+    fn set_assignees(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        assignees: &[String],
+    ) -> Result<()> {
+        self.set_list_field(type_def, doc_id, "assignees", assignees)
     }
 
     fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()> {
@@ -384,6 +404,7 @@ mod tests {
             ref_count_ceiling: 0,
             certification: Default::default(),
             coordination: None,
+            orchestration: None,
         }
     }
 
@@ -1169,6 +1190,117 @@ mod tests {
                 .any(|c| c == "delete_ref:refs/lazyspec/iteration/ITERATION-042"),
             "should NOT call local delete_ref when remote delete failed, got: {:?}",
             *calls
+        );
+    }
+
+    #[test]
+    fn git_ref_round_trips_assignees() {
+        use chrono::NaiveDate;
+
+        let tmp = TempDir::new().unwrap();
+        let td = test_type_def();
+
+        let meta = DocMeta {
+            path: PathBuf::new(),
+            title: "Iteration".to_string(),
+            doc_type: DocType::new("iteration"),
+            status: Status::Draft,
+            author: "alice".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 5, 12).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            id: "ITERATION-001".to_string(),
+            assignees: vec!["bob".to_string()],
+        };
+
+        write_cache_file(tmp.path(), &td, &meta, "body").unwrap();
+
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        let cache_path = find_cache_file(&cache_dir, "ITERATION-001").unwrap();
+        let content = std::fs::read_to_string(&cache_path).unwrap();
+        let loaded = DocMeta::parse(&content).unwrap();
+
+        assert_eq!(
+            loaded.assignees,
+            vec!["bob".to_string()],
+            "git-ref cache round-trip must preserve assignees"
+        );
+    }
+
+    #[test]
+    fn git_ref_accepts_free_form_assignee_strings() {
+        use chrono::NaiveDate;
+
+        let tmp = TempDir::new().unwrap();
+        let td = test_type_def();
+
+        let meta = DocMeta {
+            path: PathBuf::new(),
+            title: "Iteration".to_string(),
+            doc_type: DocType::new("iteration"),
+            status: Status::Draft,
+            author: "alice".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 5, 12).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            id: "ITERATION-002".to_string(),
+            assignees: vec![
+                "alice".to_string(),
+                "claude-bot".to_string(),
+                "not-a-real-github-user".to_string(),
+                "user@example.com".to_string(),
+            ],
+        };
+
+        write_cache_file(tmp.path(), &td, &meta, "body").unwrap();
+
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        let cache_path = find_cache_file(&cache_dir, "ITERATION-002").unwrap();
+        let content = std::fs::read_to_string(&cache_path).unwrap();
+        let loaded = DocMeta::parse(&content).unwrap();
+
+        assert_eq!(
+            loaded.assignees,
+            vec![
+                "alice".to_string(),
+                "claude-bot".to_string(),
+                "not-a-real-github-user".to_string(),
+                "user@example.com".to_string(),
+            ],
+            "git-ref store must preserve free-form assignee strings verbatim and in order"
+        );
+    }
+
+    #[test]
+    fn git_ref_create_does_not_strip_assignees_from_existing_cache() {
+        // The manual DocMeta construction inside `create` is a placeholder for fresh docs
+        // (which have no assignees yet). This test verifies that the placeholder path
+        // writes assignees: [] correctly and does not crash, exercising the field through
+        // write_cache_file.
+        let tmp = TempDir::new().unwrap();
+        let mock = MockGitRefClient::new()
+            .with_list_result(Ok(vec![]))
+            .with_create_ref_commit_result(Ok("abc123sha".to_string()));
+
+        let mut store = make_store(&tmp, mock);
+        let td = test_type_def();
+        let result = store.create(&td, "Fresh Doc", "alice", "body").unwrap();
+
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        let cache_path = find_cache_file(&cache_dir, &result.id).unwrap();
+        let content = std::fs::read_to_string(&cache_path).unwrap();
+        let loaded = DocMeta::parse(&content).unwrap();
+
+        assert!(
+            loaded.assignees.is_empty(),
+            "fresh git-ref doc must have empty assignees, got: {:?}",
+            loaded.assignees
         );
     }
 

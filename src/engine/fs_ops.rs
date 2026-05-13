@@ -297,3 +297,157 @@ pub fn update_document(
     fs::write(&full_path, new_content)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::document::DocMeta;
+    use tempfile::TempDir;
+
+    fn write_doc(dir: &Path, name: &str, content: &str) -> PathBuf {
+        let p = dir.join(name);
+        fs::write(&p, content).unwrap();
+        p
+    }
+
+    #[test]
+    fn fs_ops_round_trips_assignees_exact_order() {
+        let tmp = TempDir::new().unwrap();
+        let content = r#"---
+title: "Doc"
+type: rfc
+status: draft
+author: alice
+date: 2026-05-12
+tags: []
+assignees:
+  - alice
+  - claude-bot
+related: []
+---
+
+Body.
+"#;
+        let path = write_doc(tmp.path(), "RFC-001.md", content);
+        let raw = fs::read_to_string(&path).unwrap();
+        let meta = DocMeta::parse(&raw).unwrap();
+        assert_eq!(
+            meta.assignees,
+            vec!["alice".to_string(), "claude-bot".to_string()],
+            "assignees must round-trip in exact order"
+        );
+    }
+
+    #[test]
+    fn fs_ops_accepts_free_form_assignee_strings() {
+        let tmp = TempDir::new().unwrap();
+        let content = r#"---
+title: "Doc"
+type: rfc
+status: draft
+author: alice
+date: 2026-05-12
+tags: []
+assignees:
+  - "not-a-real-github-user"
+  - "user@example.com"
+  - "Some Free Form"
+related: []
+---
+
+Body.
+"#;
+        let path = write_doc(tmp.path(), "RFC-002.md", content);
+        let raw = fs::read_to_string(&path).unwrap();
+        let meta = DocMeta::parse(&raw).unwrap();
+        assert_eq!(
+            meta.assignees,
+            vec![
+                "not-a-real-github-user".to_string(),
+                "user@example.com".to_string(),
+                "Some Free Form".to_string(),
+            ],
+            "free-form assignee strings must pass through verbatim"
+        );
+    }
+
+    #[test]
+    fn fs_ops_update_document_preserves_assignees_when_updating_other_fields() {
+        use crate::engine::config::{
+            Config, Directories, DocumentConfig, FilesystemConfig, Naming, NumberingStrategy,
+            StoreBackend, Templates, TypeDef, UiConfig,
+        };
+
+        let tmp = TempDir::new().unwrap();
+        let rfcs_dir = tmp.path().join("docs/rfcs");
+        fs::create_dir_all(&rfcs_dir).unwrap();
+        let content = r#"---
+title: "Doc"
+type: rfc
+status: draft
+author: alice
+date: 2026-05-12
+tags: []
+assignees:
+  - alice
+  - claude-bot
+related: []
+---
+
+Body.
+"#;
+        write_doc(&rfcs_dir, "RFC-001.md", content);
+
+        let config = Config {
+            documents: DocumentConfig {
+                types: vec![TypeDef {
+                    name: "rfc".to_string(),
+                    plural: "rfcs".to_string(),
+                    dir: "docs/rfcs".to_string(),
+                    prefix: "RFC".to_string(),
+                    icon: None,
+                    numbering: NumberingStrategy::Incremental,
+                    subdirectory: false,
+                    store: StoreBackend::Filesystem,
+                    singleton: false,
+                    parent_type: None,
+                }],
+                naming: Naming {
+                    pattern: "{type}-{n:03}-{title}.md".to_string(),
+                },
+                sqids: None,
+                reserved: None,
+                github: None,
+            },
+            filesystem: FilesystemConfig {
+                directories: Directories {
+                    rfcs: "docs/rfcs".to_string(),
+                    adrs: "docs/adrs".to_string(),
+                    stories: "docs/stories".to_string(),
+                    iterations: "docs/iterations".to_string(),
+                },
+                templates: Templates {
+                    dir: ".lazyspec/templates".to_string(),
+                },
+            },
+            ui: UiConfig::default(),
+            rules: vec![],
+            ref_count_ceiling: 0,
+            certification: Default::default(),
+            coordination: None,
+            orchestration: None,
+        };
+
+        let store = Store::load(tmp.path(), &config).unwrap();
+        update_document(tmp.path(), &store, "RFC-001", &[("status", "accepted")]).unwrap();
+
+        let updated = fs::read_to_string(rfcs_dir.join("RFC-001.md")).unwrap();
+        let meta = DocMeta::parse(&updated).unwrap();
+        assert_eq!(
+            meta.assignees,
+            vec!["alice".to_string(), "claude-bot".to_string()],
+            "update_document must not strip assignees"
+        );
+        assert_eq!(meta.status.to_string(), "accepted");
+    }
+}

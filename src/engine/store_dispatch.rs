@@ -26,6 +26,7 @@ struct CacheFrontmatter {
     date: String,
     tags: Vec<String>,
     provenance: Vec<String>,
+    assignees: Vec<String>,
     related: Vec<BTreeMap<String, String>>,
 }
 
@@ -53,6 +54,13 @@ pub trait DocumentStore {
         type_def: &TypeDef,
         doc_id: &str,
         provenance: &[String],
+    ) -> Result<()>;
+
+    fn set_assignees(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        assignees: &[String],
     ) -> Result<()>;
 }
 
@@ -138,6 +146,40 @@ impl DocumentStore for FilesystemStore {
             },
         )
     }
+
+    fn set_assignees(
+        &mut self,
+        _type_def: &TypeDef,
+        doc_id: &str,
+        assignees: &[String],
+    ) -> Result<()> {
+        let store = Store::load(&self.root, &self.config)?;
+        let doc = store
+            .get(std::path::Path::new(doc_id))
+            .or_else(|| store.resolve_shorthand(doc_id).ok())
+            .ok_or_else(|| anyhow::anyhow!("could not resolve document: {}", doc_id))?;
+        let full_path = self.root.join(&doc.path);
+
+        let entries: Vec<serde_yaml::Value> = assignees
+            .iter()
+            .map(|s| serde_yaml::Value::String(s.clone()))
+            .collect();
+
+        crate::engine::document::rewrite_frontmatter(
+            &full_path,
+            &crate::engine::fs::RealFileSystem,
+            |val| {
+                let map = val
+                    .as_mapping_mut()
+                    .ok_or_else(|| anyhow::anyhow!("frontmatter root must be a mapping"))?;
+                map.insert(
+                    serde_yaml::Value::String("assignees".to_string()),
+                    serde_yaml::Value::Sequence(entries.clone()),
+                );
+                Ok(())
+            },
+        )
+    }
 }
 
 pub struct GithubIssuesStore<G: GhIssueReader + GhIssueWriter> {
@@ -164,11 +206,28 @@ impl<G: GhIssueReader + GhIssueWriter> GithubIssuesStore<G> {
         let meta = DocMeta::parse(&content)?;
         let body = DocMeta::extract_body(&content)?;
 
-        let (issue_number, _remote_issue) = self.check_lock(doc_id)?;
+        // Validate all assignees BEFORE any mutating call so we never leave
+        // a half-applied state on GitHub.
+        for login in &meta.assignees {
+            if !self.client.user_exists(login)? {
+                bail!("assignee {} is not a GitHub user", login);
+            }
+        }
+
+        let (issue_number, remote_issue) = self.check_lock(doc_id)?;
 
         let new_body = issue_body::serialize(&meta, &body);
         self.client
             .issue_edit(&self.repo, issue_number, None, Some(&new_body), &[], &[])?;
+
+        let remote_logins: Vec<String> = remote_issue
+            .assignees
+            .iter()
+            .map(|a| a.login.clone())
+            .collect();
+        let (add, remove) = assignees_diff(&meta.assignees, &remote_logins);
+        self.client
+            .issue_assignees(&self.repo, issue_number, &add, &remove)?;
 
         self.issue_map.insert(doc_id, issue_number, "");
         self.issue_map.save(&self.root)?;
@@ -239,6 +298,7 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
             validate_ignore: false,
             virtual_doc: false,
             id: String::new(),
+            assignees: vec![],
         };
 
         let issue_body = issue_body::serialize(&placeholder_meta, body);
@@ -306,6 +366,12 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
             default_type: type_def.name.clone(),
         };
         let (mut meta, mut body) = issue_body::deserialize(&remote_issue.body, &ctx)?;
+        // Stamp remote assignees onto meta so the cache reflects GH state.
+        meta.assignees = remote_issue
+            .assignees
+            .iter()
+            .map(|a| a.login.clone())
+            .collect();
 
         let mut new_status: Option<Status> = None;
         for &(key, value) in updates {
@@ -322,9 +388,25 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
             }
         }
 
+        // Validate assignees BEFORE any mutating call.
+        for login in &meta.assignees {
+            if !self.client.user_exists(login)? {
+                bail!("assignee {} is not a GitHub user", login);
+            }
+        }
+
         let new_body = issue_body::serialize(&meta, &body);
         self.client
             .issue_edit(&self.repo, issue_number, None, Some(&new_body), &[], &[])?;
+
+        let remote_logins: Vec<String> = remote_issue
+            .assignees
+            .iter()
+            .map(|a| a.login.clone())
+            .collect();
+        let (add, remove) = assignees_diff(&meta.assignees, &remote_logins);
+        self.client
+            .issue_assignees(&self.repo, issue_number, &add, &remove)?;
 
         if let Some(status) = new_status {
             let should_be_open = matches!(
@@ -395,6 +477,27 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
         Ok(())
     }
 
+    fn set_assignees(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        assignees: &[String],
+    ) -> Result<()> {
+        // Read cache meta + body, replace assignees, write cache, then push_cache
+        // (which validates the assignees against GitHub and reconciles via issue_assignees).
+        let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
+        let cache_path = find_cache_file(&cache_dir, doc_id)
+            .ok_or_else(|| anyhow::anyhow!("cache file not found for {}", doc_id))?;
+        let content = std::fs::read_to_string(&cache_path)?;
+        let mut meta = DocMeta::parse(&content)?;
+        let body = DocMeta::extract_body(&content)?;
+        meta.id = doc_id.to_string();
+        meta.assignees = assignees.to_vec();
+
+        write_cache_file(&self.root, type_def, &meta, &body)?;
+        self.push_cache(type_def, doc_id)
+    }
+
     fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()> {
         let (issue_number, remote_issue) = self.check_lock(doc_id)?;
 
@@ -439,6 +542,7 @@ pub fn write_cache_file(
         date: meta.date.to_string(),
         tags: meta.tags.clone(),
         provenance: meta.provenance.clone(),
+        assignees: meta.assignees.clone(),
         related: meta
             .related
             .iter()
@@ -459,6 +563,24 @@ pub fn write_cache_file(
     let cache_content = compose_frontmatter(&yaml, &body_section);
     std::fs::write(&cache_path, &cache_content)?;
     Ok(())
+}
+
+/// Compute the (add, remove) diff between local and remote assignee lists.
+///
+/// `add` contains logins present locally but missing on remote.
+/// `remove` contains logins present on remote but absent locally.
+fn assignees_diff(local: &[String], remote: &[String]) -> (Vec<String>, Vec<String>) {
+    let add: Vec<String> = local
+        .iter()
+        .filter(|l| !remote.iter().any(|r| r == *l))
+        .cloned()
+        .collect();
+    let remove: Vec<String> = remote
+        .iter()
+        .filter(|r| !local.iter().any(|l| l == *r))
+        .cloned()
+        .collect();
+    (add, remove)
 }
 
 pub(crate) fn find_cache_file(cache_dir: &std::path::Path, doc_id: &str) -> Option<PathBuf> {
@@ -772,6 +894,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -821,6 +944,7 @@ mod tests {
             updated_at: "2026-03-27T10:45:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -864,6 +988,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -904,6 +1029,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -963,6 +1089,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1002,6 +1129,7 @@ mod tests {
             updated_at: "2026-03-27T10:45:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1054,6 +1182,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1145,6 +1274,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1210,6 +1340,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1258,6 +1389,7 @@ mod tests {
             updated_at: "2026-03-27T10:45:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1439,6 +1571,7 @@ mod tests {
             validate_ignore: false,
             virtual_doc: false,
             id: "RFC-099".to_string(),
+            assignees: vec![],
         };
 
         write_cache_file(&root, &td, &meta, "body").unwrap();
@@ -1502,6 +1635,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1560,6 +1694,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1619,6 +1754,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1671,6 +1807,7 @@ mod tests {
             validate_ignore: false,
             virtual_doc: false,
             id: "RFC-099".to_string(),
+            assignees: vec![],
         };
 
         write_cache_file(&root, &td, &meta, "body").unwrap();
@@ -1701,6 +1838,7 @@ mod tests {
             ref_count_ceiling: 0,
             certification: Default::default(),
             coordination: None,
+            orchestration: None,
         };
 
         let store = Store::load(&root, &config).unwrap();
@@ -1709,6 +1847,284 @@ mod tests {
             loaded.provenance,
             vec!["Workshop 2026-04-12".to_string(), "Jane Doe".to_string()]
         );
+    }
+
+    #[test]
+    fn cache_frontmatter_round_trips_assignees() {
+        use crate::engine::config::{
+            Config, Directories, DocumentConfig, FilesystemConfig, Naming, Templates, UiConfig,
+        };
+        use chrono::NaiveDate;
+
+        let root = tmp_root("cache_assignees_roundtrip");
+        let td = test_type_def(StoreBackend::GithubIssues);
+
+        let meta = DocMeta {
+            path: PathBuf::new(),
+            title: "Title".to_string(),
+            doc_type: DocType::new("rfc"),
+            status: Status::Draft,
+            author: "alice".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 3, 28).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            id: "RFC-099".to_string(),
+            assignees: vec!["alice".to_string(), "claude-bot".to_string()],
+        };
+
+        write_cache_file(&root, &td, &meta, "body").unwrap();
+
+        let config = Config {
+            documents: DocumentConfig {
+                types: vec![td.clone()],
+                naming: Naming {
+                    pattern: "{type}-{n:03}-{title}.md".to_string(),
+                },
+                sqids: None,
+                reserved: None,
+                github: None,
+            },
+            filesystem: FilesystemConfig {
+                directories: Directories {
+                    rfcs: "docs/rfcs".to_string(),
+                    adrs: "docs/adrs".to_string(),
+                    stories: "docs/stories".to_string(),
+                    iterations: "docs/iterations".to_string(),
+                },
+                templates: Templates {
+                    dir: ".lazyspec/templates".to_string(),
+                },
+            },
+            ui: UiConfig::default(),
+            rules: vec![],
+            ref_count_ceiling: 0,
+            certification: Default::default(),
+            coordination: None,
+            orchestration: None,
+        };
+
+        let store = Store::load(&root, &config).unwrap();
+        let loaded = store.resolve_shorthand("RFC-099").unwrap();
+        assert_eq!(
+            loaded.assignees,
+            vec!["alice".to_string(), "claude-bot".to_string()]
+        );
+    }
+
+    fn cache_with_assignees(assignees: &[&str]) -> String {
+        let lines: Vec<String> = assignees.iter().map(|a| format!("- {}", a)).collect();
+        format!(
+            "---\ntitle: My RFC\ntype: rfc\nstatus: draft\nauthor: agent-7\ndate: 2026-03-27\ntags: []\nassignees:\n{}\nrelated: []\n---\nSome body.\n",
+            lines.join("\n")
+        )
+    }
+
+    fn view_issue_with_assignees(assignees: Vec<&str>) -> GhIssue {
+        let body = make_issue_body("agent-7", "2026-03-27", None, "Some body.");
+        GhIssue {
+            number: 42,
+            url: String::new(),
+            title: "My RFC".to_string(),
+            body,
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+            assignees: assignees
+                .into_iter()
+                .map(|login| crate::engine::gh::GhAuthor {
+                    login: login.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    fn setup_push_gh_store(
+        name: &str,
+        client: MockGhClient,
+        local_assignees: &[&str],
+    ) -> (PathBuf, GithubIssuesStore<MockGhClient>) {
+        let root = tmp_root(name);
+        let cache_dir = root.join(".lazyspec/cache/rfc");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(
+            cache_dir.join("RFC-001.md"),
+            cache_with_assignees(local_assignees),
+        )
+        .unwrap();
+
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+
+        let store = GithubIssuesStore {
+            client,
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(&root),
+        };
+
+        (root, store)
+    }
+
+    #[test]
+    fn gh_push_assignees_calls_issue_assignees() {
+        let view = view_issue_with_assignees(vec![]);
+        let client = MockGhClient::new().with_view_issue(view);
+        let (_root, mut store) =
+            setup_push_gh_store("gh_push_assignees_add", client, &["claude-bot"]);
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        store.push_cache(&td, "RFC-001").unwrap();
+
+        let last = store
+            .client
+            .last_assignees_call()
+            .expect("issue_assignees should have been called");
+        assert_eq!(last.0, "owner/repo");
+        assert_eq!(last.1, 42);
+        assert_eq!(last.2, vec!["claude-bot".to_string()]);
+        assert!(last.3.is_empty());
+    }
+
+    #[test]
+    fn gh_push_assignees_diffs_against_remote_only_added() {
+        let view = view_issue_with_assignees(vec!["alice"]);
+        let client = MockGhClient::new().with_view_issue(view);
+        let (_root, mut store) =
+            setup_push_gh_store("gh_push_assignees_only_added", client, &["alice", "bob"]);
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        store.push_cache(&td, "RFC-001").unwrap();
+
+        let last = store.client.last_assignees_call().unwrap();
+        assert_eq!(last.2, vec!["bob".to_string()]);
+        assert!(last.3.is_empty());
+    }
+
+    #[test]
+    fn gh_push_assignees_diffs_against_remote_only_removed() {
+        let view = view_issue_with_assignees(vec!["alice"]);
+        let client = MockGhClient::new().with_view_issue(view);
+        let (_root, mut store) =
+            setup_push_gh_store("gh_push_assignees_only_removed", client, &[]);
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        store.push_cache(&td, "RFC-001").unwrap();
+
+        let last = store.client.last_assignees_call().unwrap();
+        assert!(last.2.is_empty());
+        assert_eq!(last.3, vec!["alice".to_string()]);
+    }
+
+    #[test]
+    fn gh_push_unknown_assignee_errors_before_mutation() {
+        let view = view_issue_with_assignees(vec![]);
+        let client = MockGhClient::new()
+            .with_view_issue(view)
+            .with_known_users(["alice"]);
+        let (root, mut store) =
+            setup_push_gh_store("gh_push_unknown_assignee", client, &["ghost"]);
+
+        let cache_path = root.join(".lazyspec/cache/rfc/RFC-001.md");
+        let before = std::fs::read_to_string(&cache_path).unwrap();
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        let err = store.push_cache(&td, "RFC-001").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ghost"),
+            "error should mention unknown login, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("not a GitHub user"),
+            "error should say 'not a GitHub user', got: {}",
+            msg
+        );
+
+        assert!(
+            store.client.last_assignees_call().is_none(),
+            "issue_assignees must NOT be called when validation fails"
+        );
+        assert!(
+            store.client.last_edit_body.borrow().is_none(),
+            "issue_edit must NOT be called when validation fails"
+        );
+
+        let after = std::fs::read_to_string(&cache_path).unwrap();
+        assert_eq!(before, after, "cache file must be unchanged on disk");
+    }
+
+    #[test]
+    fn gh_load_populates_meta_assignees_from_remote() {
+        use crate::engine::config::{
+            Config, Directories, DocumentConfig, FilesystemConfig, Naming, Templates, UiConfig,
+        };
+
+        let root = tmp_root("gh_load_assignees");
+        let td = test_type_def(StoreBackend::GithubIssues);
+
+        let mut remote = view_issue_with_assignees(vec!["alice"]);
+        remote.number = 7;
+        let client = MockGhClient::new().with_list_result(vec![remote]);
+
+        let cache = IssueCache::new(&root);
+        let mut map = IssueMap::load(&root).unwrap();
+        cache
+            .fetch_all(&root, &td, &client, "owner/repo", &mut map, &["rfc".to_string()])
+            .unwrap();
+
+        let config = Config {
+            documents: DocumentConfig {
+                types: vec![td.clone()],
+                naming: Naming {
+                    pattern: "{type}-{n:03}-{title}.md".to_string(),
+                },
+                sqids: None,
+                reserved: None,
+                github: None,
+            },
+            filesystem: FilesystemConfig {
+                directories: Directories {
+                    rfcs: "docs/rfcs".to_string(),
+                    adrs: "docs/adrs".to_string(),
+                    stories: "docs/stories".to_string(),
+                    iterations: "docs/iterations".to_string(),
+                },
+                templates: Templates {
+                    dir: ".lazyspec/templates".to_string(),
+                },
+            },
+            ui: UiConfig::default(),
+            rules: vec![],
+            ref_count_ceiling: 0,
+            certification: Default::default(),
+            coordination: None,
+            orchestration: None,
+        };
+
+        let store = Store::load(&root, &config).unwrap();
+        let loaded = store.resolve_shorthand("RFC-7").unwrap();
+        assert_eq!(loaded.assignees, vec!["alice".to_string()]);
+    }
+
+    #[test]
+    fn assignees_diff_basic() {
+        let (add, remove) = assignees_diff(
+            &["alice".into(), "bob".into()],
+            &["bob".into(), "carol".into()],
+        );
+        assert_eq!(add, vec!["alice".to_string()]);
+        assert_eq!(remove, vec!["carol".to_string()]);
     }
 
     #[test]

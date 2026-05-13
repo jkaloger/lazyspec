@@ -31,6 +31,7 @@ pulldown-cmark = "0.13"
 indicatif = "0.17"
 textwrap = "0.16"
 tempfile = "3"
+signal-hook = "0.3"
 
 [features]
 default = []
