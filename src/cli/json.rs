@@ -11,6 +11,7 @@ pub fn doc_to_json(doc: &DocMeta) -> Value {
         "author": doc.author,
         "date": doc.date.to_string(),
         "tags": doc.tags,
+        "assignees": doc.assignees,
         "provenance": doc.provenance,
         "related": doc.related.iter().map(|r| {
             serde_json::json!({
