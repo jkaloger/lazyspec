@@ -96,6 +96,7 @@ mod tests {
                 branch_template: "agents/{{ story_id }}".to_string(),
                 workspace_root: std::path::PathBuf::from(".lazyspec/work"),
                 base_branch: "origin/main".to_string(),
+                runtime: Default::default(),
             }),
             ..Config::default()
         }

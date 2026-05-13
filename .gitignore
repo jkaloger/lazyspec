@@ -7,3 +7,4 @@
 result
 .direnv
 .local
+.lazyspec/daemon-host-id

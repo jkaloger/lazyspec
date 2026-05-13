@@ -33,6 +33,7 @@ textwrap = "0.16"
 tempfile = "3"
 signal-hook = "0.3"
 minijinja = { version = "2", default-features = false, features = ["builtins", "serde"] }
+libc = "0.2"
 
 [features]
 default = []

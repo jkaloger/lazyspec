@@ -437,10 +437,18 @@ The `[orchestration]` section configures defaults for agent-driven workflows -- 
 [orchestration]
 agent_users = ["claude-bot"]
 claim_type = "story"  # default
+
+[orchestration.runtime]
+claude_binary = "claude"      # default
+allowed_tools = ""             # default (comma-separated list passed to claude --allowedTools)
+turn_timeout_ms = 600000       # default (per-turn timeout)
 ```
 
 - `agent_users` -- logins eligible to be picked up by the daemon. The first entry is the default for `lazyspec assign` when `--user` is omitted.
 - `claim_type` -- document type the daemon claims as a unit of work. Defaults to `story`.
+- `runtime.claude_binary` -- path to the `claude` CLI the daemon invokes. Defaults to `claude` (looked up on `PATH`).
+- `runtime.allowed_tools` -- comma-separated tool allowlist forwarded to `claude --allowedTools`. Empty string (default) means no restriction.
+- `runtime.turn_timeout_ms` -- max wall-clock per agent turn, in milliseconds. Defaults to `600000` (10 minutes).
 
 ### Templates
 

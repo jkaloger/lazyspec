@@ -116,6 +116,38 @@ fn default_base_branch() -> String {
     "origin/main".to_string()
 }
 
+fn default_claude_binary() -> String {
+    "claude".to_string()
+}
+
+fn default_allowed_tools() -> String {
+    String::new()
+}
+
+fn default_turn_timeout_ms() -> u64 {
+    600_000
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeConfig {
+    #[serde(default = "default_claude_binary")]
+    pub claude_binary: String,
+    #[serde(default = "default_allowed_tools")]
+    pub allowed_tools: String,
+    #[serde(default = "default_turn_timeout_ms")]
+    pub turn_timeout_ms: u64,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            claude_binary: default_claude_binary(),
+            allowed_tools: default_allowed_tools(),
+            turn_timeout_ms: default_turn_timeout_ms(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OrchestrationConfig {
     #[serde(default = "default_agent_users")]
@@ -128,6 +160,8 @@ pub struct OrchestrationConfig {
     pub workspace_root: PathBuf,
     #[serde(default = "default_base_branch")]
     pub base_branch: String,
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1064,6 +1098,55 @@ agent_users = ["claude-bot"]
         let orch = config.orchestration.unwrap();
         assert_eq!(orch.agent_users, vec!["claude-bot"]);
         assert_eq!(orch.claim_type, "story");
+    }
+
+    #[test]
+    fn runtime_defaults_when_section_absent() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[orchestration]
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let orch = config.orchestration.unwrap();
+        assert_eq!(orch.runtime.claude_binary, "claude");
+        assert_eq!(orch.runtime.allowed_tools, "");
+        assert_eq!(orch.runtime.turn_timeout_ms, 600_000);
+    }
+
+    #[test]
+    fn runtime_uses_explicit_values() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[orchestration.runtime]
+claude_binary = "/usr/local/bin/claude"
+allowed_tools = "Read,Edit,Bash"
+turn_timeout_ms = 120000
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let orch = config.orchestration.unwrap();
+        assert_eq!(orch.runtime.claude_binary, "/usr/local/bin/claude");
+        assert_eq!(orch.runtime.allowed_tools, "Read,Edit,Bash");
+        assert_eq!(orch.runtime.turn_timeout_ms, 120_000);
+    }
+
+    #[test]
+    fn runtime_partial_section_falls_back_to_defaults() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[orchestration.runtime]
+claude_binary = "/opt/claude"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let orch = config.orchestration.unwrap();
+        assert_eq!(orch.runtime.claude_binary, "/opt/claude");
+        assert_eq!(orch.runtime.allowed_tools, "");
+        assert_eq!(orch.runtime.turn_timeout_ms, 600_000);
     }
 
     #[test]
