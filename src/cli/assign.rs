@@ -93,6 +93,9 @@ mod tests {
             orchestration: Some(OrchestrationConfig {
                 agent_users: agents.into_iter().map(String::from).collect(),
                 claim_type: "story".to_string(),
+                branch_template: "agents/{{ story_id }}".to_string(),
+                workspace_root: std::path::PathBuf::from(".lazyspec/work"),
+                base_branch: "origin/main".to_string(),
             }),
             ..Config::default()
         }

@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -103,12 +104,30 @@ fn default_agent_users() -> Vec<String> {
     Vec::new()
 }
 
+fn default_branch_template() -> String {
+    "agents/{{ story_id }}".to_string()
+}
+
+fn default_workspace_root() -> PathBuf {
+    PathBuf::from(".lazyspec/work")
+}
+
+fn default_base_branch() -> String {
+    "origin/main".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OrchestrationConfig {
     #[serde(default = "default_agent_users")]
     pub agent_users: Vec<String>,
     #[serde(default = "default_claim_type")]
     pub claim_type: String,
+    #[serde(default = "default_branch_template")]
+    pub branch_template: String,
+    #[serde(default = "default_workspace_root")]
+    pub workspace_root: PathBuf,
+    #[serde(default = "default_base_branch")]
+    pub base_branch: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1005,6 +1024,9 @@ pattern = "{type}-{n:03}-{title}.md"
         let orch = config.orchestration.unwrap();
         assert!(orch.agent_users.is_empty());
         assert_eq!(orch.claim_type, "story");
+        assert_eq!(orch.branch_template, "agents/{{ story_id }}");
+        assert_eq!(orch.workspace_root, PathBuf::from(".lazyspec/work"));
+        assert_eq!(orch.base_branch, "origin/main");
     }
 
     #[test]
@@ -1016,11 +1038,17 @@ pattern = "{type}-{n:03}-{title}.md"
 [orchestration]
 agent_users = ["claude-bot", "other-bot"]
 claim_type = "iteration"
+branch_template = "bots/{{ iteration_id }}"
+workspace_root = "/tmp/lazyspec-work"
+base_branch = "origin/develop"
 "#;
         let config = Config::parse(toml_str).unwrap();
         let orch = config.orchestration.unwrap();
         assert_eq!(orch.agent_users, vec!["claude-bot", "other-bot"]);
         assert_eq!(orch.claim_type, "iteration");
+        assert_eq!(orch.branch_template, "bots/{{ iteration_id }}");
+        assert_eq!(orch.workspace_root, PathBuf::from("/tmp/lazyspec-work"));
+        assert_eq!(orch.base_branch, "origin/develop");
     }
 
     #[test]

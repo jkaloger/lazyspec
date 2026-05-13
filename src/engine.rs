@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod assignees;
+pub mod branch_template;
 pub mod cache;
 pub mod cache_lock;
 pub mod certification;
@@ -27,3 +28,4 @@ pub mod store_dispatch;
 pub mod symbols;
 pub mod template;
 pub mod validation;
+pub mod workspace;
