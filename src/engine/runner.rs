@@ -68,9 +68,7 @@ mod tests {
 
         let events = vec![
             AgentEvent::SessionStarted,
-            AgentEvent::Text {
-                delta: "hi".into(),
-            },
+            AgentEvent::Text { delta: "hi".into() },
             AgentEvent::ToolCall {
                 name: "Read".into(),
                 summary: "/etc/hosts".into(),

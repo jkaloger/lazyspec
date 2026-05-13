@@ -2014,8 +2014,7 @@ mod tests {
     fn gh_push_assignees_diffs_against_remote_only_removed() {
         let view = view_issue_with_assignees(vec!["alice"]);
         let client = MockGhClient::new().with_view_issue(view);
-        let (_root, mut store) =
-            setup_push_gh_store("gh_push_assignees_only_removed", client, &[]);
+        let (_root, mut store) = setup_push_gh_store("gh_push_assignees_only_removed", client, &[]);
 
         let td = test_type_def(StoreBackend::GithubIssues);
         store.push_cache(&td, "RFC-001").unwrap();
@@ -2031,8 +2030,7 @@ mod tests {
         let client = MockGhClient::new()
             .with_view_issue(view)
             .with_known_users(["alice"]);
-        let (root, mut store) =
-            setup_push_gh_store("gh_push_unknown_assignee", client, &["ghost"]);
+        let (root, mut store) = setup_push_gh_store("gh_push_unknown_assignee", client, &["ghost"]);
 
         let cache_path = root.join(".lazyspec/cache/rfc/RFC-001.md");
         let before = std::fs::read_to_string(&cache_path).unwrap();
@@ -2080,7 +2078,14 @@ mod tests {
         let cache = IssueCache::new(&root);
         let mut map = IssueMap::load(&root).unwrap();
         cache
-            .fetch_all(&root, &td, &client, "owner/repo", &mut map, &["rfc".to_string()])
+            .fetch_all(
+                &root,
+                &td,
+                &client,
+                "owner/repo",
+                &mut map,
+                &["rfc".to_string()],
+            )
             .unwrap();
 
         let config = Config {

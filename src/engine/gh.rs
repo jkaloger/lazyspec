@@ -1087,12 +1087,7 @@ mod tests {
     fn mock_issue_assignees_records_call() {
         let client = MockGhClient::new();
         client
-            .issue_assignees(
-                "acme/repo",
-                7,
-                &["alice".to_string()],
-                &["bob".to_string()],
-            )
+            .issue_assignees("acme/repo", 7, &["alice".to_string()], &["bob".to_string()])
             .unwrap();
 
         let last = client.last_assignees_call().expect("call recorded");

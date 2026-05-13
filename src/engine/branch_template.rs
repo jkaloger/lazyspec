@@ -60,8 +60,8 @@ mod tests {
 
     #[test]
     fn renders_happy_path() {
-        let out = render_branch_name("agents/{{ story_id }}/{{ iteration_slug }}", &fixture())
-            .unwrap();
+        let out =
+            render_branch_name("agents/{{ story_id }}/{{ iteration_slug }}", &fixture()).unwrap();
         assert_eq!(out, "agents/STORY-127/workspace");
     }
 

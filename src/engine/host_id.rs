@@ -57,13 +57,8 @@ fn write_atomically(path: &Path, content: &str) -> Result<()> {
     let tmp = parent.join(format!(".daemon-host-id.tmp.{}", std::process::id()));
     fs::write(&tmp, content)
         .with_context(|| format!("failed to write temp host id file: {}", tmp.display()))?;
-    fs::rename(&tmp, path).with_context(|| {
-        format!(
-            "failed to rename {} to {}",
-            tmp.display(),
-            path.display()
-        )
-    })?;
+    fs::rename(&tmp, path)
+        .with_context(|| format!("failed to rename {} to {}", tmp.display(), path.display()))?;
     Ok(())
 }
 

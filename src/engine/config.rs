@@ -128,6 +128,26 @@ fn default_turn_timeout_ms() -> u64 {
     600_000
 }
 
+fn default_poll_interval_ms() -> u64 {
+    30_000
+}
+
+fn default_max_concurrent_agents() -> usize {
+    4
+}
+
+fn default_active_statuses() -> Vec<String> {
+    vec!["todo".to_string(), "in-progress".to_string()]
+}
+
+fn default_heartbeat_interval_ms() -> u64 {
+    300_000
+}
+
+fn default_metadata_push_interval_ms() -> u64 {
+    30_000
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeConfig {
     #[serde(default = "default_claude_binary")]
@@ -184,6 +204,16 @@ pub struct OrchestrationConfig {
     pub runtime: RuntimeConfig,
     #[serde(default)]
     pub hooks: OrchestrationHooks,
+    #[serde(default = "default_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+    #[serde(default = "default_max_concurrent_agents")]
+    pub max_concurrent_agents: usize,
+    #[serde(default = "default_active_statuses")]
+    pub active_statuses: Vec<String>,
+    #[serde(default = "default_heartbeat_interval_ms")]
+    pub heartbeat_interval_ms: u64,
+    #[serde(default = "default_metadata_push_interval_ms")]
+    pub metadata_push_interval_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1083,6 +1113,33 @@ pattern = "{type}-{n:03}-{title}.md"
         assert_eq!(orch.branch_template, "agents/{{ story_id }}");
         assert_eq!(orch.workspace_root, PathBuf::from(".lazyspec/work"));
         assert_eq!(orch.base_branch, "origin/main");
+        assert_eq!(orch.poll_interval_ms, 30_000);
+        assert_eq!(orch.max_concurrent_agents, 4);
+        assert_eq!(orch.active_statuses, vec!["todo", "in-progress"]);
+        assert_eq!(orch.heartbeat_interval_ms, 300_000);
+        assert_eq!(orch.metadata_push_interval_ms, 30_000);
+    }
+
+    #[test]
+    fn orchestration_tick_loop_explicit_values_roundtrip() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[orchestration]
+poll_interval_ms = 5000
+max_concurrent_agents = 8
+active_statuses = ["todo", "review"]
+heartbeat_interval_ms = 60000
+metadata_push_interval_ms = 10000
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let orch = config.orchestration.unwrap();
+        assert_eq!(orch.poll_interval_ms, 5_000);
+        assert_eq!(orch.max_concurrent_agents, 8);
+        assert_eq!(orch.active_statuses, vec!["todo", "review"]);
+        assert_eq!(orch.heartbeat_interval_ms, 60_000);
+        assert_eq!(orch.metadata_push_interval_ms, 10_000);
     }
 
     #[test]

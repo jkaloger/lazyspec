@@ -2,6 +2,10 @@ use anyhow::{bail, Result};
 use std::path::Path;
 use std::process::Command;
 
+pub fn lease_agent_id(host: &str, session_id: &str) -> String {
+    format!("{host}:{session_id}")
+}
+
 pub fn resolve_agent_id(root: &Path) -> Result<String> {
     resolve_agent_id_with_env(
         root,
@@ -98,6 +102,11 @@ mod tests {
 
         let result = resolve_agent_id_with_env(root, None, None).unwrap();
         assert_eq!(result, "TestUser");
+    }
+
+    #[test]
+    fn lease_agent_id_formats_host_and_session() {
+        assert_eq!(lease_agent_id("hostA", "sess-1"), "hostA:sess-1");
     }
 
     #[test]

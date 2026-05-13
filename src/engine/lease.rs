@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::Path;
 
 use super::config::CoordinationConfig;
@@ -62,6 +63,22 @@ pub fn fetch_ref_optional(
     Ok(())
 }
 
+/// Enumerate local lease refs for a doc type and extract the doc ids. No
+/// network I/O — callers that need a fresh view must fetch beforehand (the
+/// tick loop gates fetches on `metadata_push_interval_ms`).
+pub fn local_lease_ids<R: GitRefOps>(
+    git: &R,
+    root: &Path,
+    type_name: &str,
+) -> Result<HashSet<String>> {
+    let prefix = format!("refs/lazyspec/leases/{}/", type_name);
+    let refs = git.list_refs(root, &lease_glob(type_name))?;
+    Ok(refs
+        .into_iter()
+        .filter_map(|(refname, _sha)| refname.strip_prefix(&prefix).map(|s| s.to_string()))
+        .collect())
+}
+
 pub struct LeaseEngine<R: GitRefOps> {
     pub git: R,
     pub config: CoordinationConfig,
@@ -83,6 +100,9 @@ impl<R: GitRefOps> LeaseEngine<R> {
         let refname = lease_ref(type_name, id);
 
         // Glob fetch so --prune removes stale local lease refs whose remote counterparts are gone.
+        // Safety-net fetch per RFC-041 §Claim authority: tick-loop eligibility uses local-only
+        // reads gated on metadata_push_interval_ms (AC7); this acquire-time fetch covers the
+        // stale-local-view edge case. AC7 governs eligibility, not acquire.
         fetch_ref_optional(&self.git, root, &self.config.remote, &lease_glob(type_name))?;
         let existing = self.git.resolve_ref(root, &refname)?;
         if existing.is_some() {
@@ -1223,15 +1243,9 @@ mod tests {
             .filter(|c| c.starts_with("delete_remote_ref:"))
             .collect();
         assert_eq!(delete_remote_calls.len(), 2);
-        assert!(delete_remote_calls
-            .iter()
-            .any(|c| c.contains("STORY-001")));
-        assert!(delete_remote_calls
-            .iter()
-            .any(|c| c.contains("STORY-002")));
-        assert!(!delete_remote_calls
-            .iter()
-            .any(|c| c.contains("STORY-003")));
+        assert!(delete_remote_calls.iter().any(|c| c.contains("STORY-001")));
+        assert!(delete_remote_calls.iter().any(|c| c.contains("STORY-002")));
+        assert!(!delete_remote_calls.iter().any(|c| c.contains("STORY-003")));
     }
 
     #[test]
@@ -1331,6 +1345,66 @@ mod tests {
         );
         let calls = engine.git.calls.borrow();
         assert!(!calls.iter().any(|c| c.starts_with("delete_remote_ref:")));
+    }
+
+    // --- local_lease_ids tests ---
+
+    #[test]
+    fn local_lease_ids_strips_prefix_and_returns_ids() {
+        let refs = vec![
+            (
+                "refs/lazyspec/leases/story/STORY-1".to_string(),
+                "sha1".to_string(),
+            ),
+            (
+                "refs/lazyspec/leases/story/STORY-2".to_string(),
+                "sha2".to_string(),
+            ),
+        ];
+        let mock = MockGitRefClient::new().with_list_result(Ok(refs));
+        let ids = local_lease_ids(&mock, &dummy_root(), "story").unwrap();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains("STORY-1"));
+        assert!(ids.contains("STORY-2"));
+    }
+
+    #[test]
+    fn local_lease_ids_ignores_non_matching_refnames() {
+        let refs = vec![
+            (
+                "refs/lazyspec/leases/story/STORY-1".to_string(),
+                "sha1".to_string(),
+            ),
+            ("refs/heads/main".to_string(), "sha2".to_string()),
+        ];
+        let mock = MockGitRefClient::new().with_list_result(Ok(refs));
+        let ids = local_lease_ids(&mock, &dummy_root(), "story").unwrap();
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains("STORY-1"));
+    }
+
+    #[test]
+    fn local_lease_ids_passes_glob_pattern() {
+        let mock = MockGitRefClient::new().with_list_result(Ok(vec![]));
+        local_lease_ids(&mock, &dummy_root(), "iteration").unwrap();
+        let calls = mock.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], "list_refs:refs/lazyspec/leases/iteration/*");
+    }
+
+    #[test]
+    fn local_lease_ids_returns_empty_on_no_refs() {
+        let mock = MockGitRefClient::new().with_list_result(Ok(vec![]));
+        let ids = local_lease_ids(&mock, &dummy_root(), "story").unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn local_lease_ids_propagates_list_refs_error() {
+        let mock = MockGitRefClient::new()
+            .with_list_result(Err(anyhow::anyhow!("git for-each-ref failed: boom")));
+        let err = local_lease_ids(&mock, &dummy_root(), "story").unwrap_err();
+        assert!(err.to_string().contains("boom"));
     }
 
     #[test]

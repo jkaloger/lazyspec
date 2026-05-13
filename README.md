@@ -436,7 +436,12 @@ The `[orchestration]` section configures defaults for agent-driven workflows -- 
 ```toml
 [orchestration]
 agent_users = ["claude-bot"]
-claim_type = "story"  # default
+claim_type = "story"           # default
+poll_interval_ms = 30000        # default (tick cadence)
+max_concurrent_agents = 4       # default (concurrent agent cap)
+active_statuses = ["todo", "in-progress"]  # default (eligible doc statuses)
+heartbeat_interval_ms = 300000  # default (5 minutes; daemon-side lease heartbeat)
+metadata_push_interval_ms = 30000  # default (batched lease fetch window)
 
 [orchestration.runtime]
 claude_binary = "claude"      # default
@@ -459,6 +464,11 @@ script = "scripts/before-remove.sh"
 
 - `agent_users` -- logins eligible to be picked up by the daemon. The first entry is the default for `lazyspec assign` when `--user` is omitted.
 - `claim_type` -- document type the daemon claims as a unit of work. Defaults to `story`.
+- `poll_interval_ms` -- tick-loop polling cadence in milliseconds. Defaults to `30000` (30 seconds).
+- `max_concurrent_agents` -- maximum number of agents the daemon will run in parallel. Defaults to `4`.
+- `active_statuses` -- document statuses eligible for dispatch. Defaults to `["todo", "in-progress"]`.
+- `heartbeat_interval_ms` -- daemon-side lease heartbeat cadence in milliseconds. Defaults to `300000` (5 minutes).
+- `metadata_push_interval_ms` -- window in milliseconds for batched `git fetch refs/lazyspec/leases/*`; lease freshness rides this cadence rather than per-tick. Defaults to `30000` (30 seconds).
 - `runtime.claude_binary` -- path to the `claude` CLI the daemon invokes. Defaults to `claude` (looked up on `PATH`).
 - `runtime.allowed_tools` -- comma-separated tool allowlist forwarded to `claude --allowedTools`. Empty string (default) means no restriction.
 - `runtime.turn_timeout_ms` -- max wall-clock per agent turn, in milliseconds. Defaults to `600000` (10 minutes).

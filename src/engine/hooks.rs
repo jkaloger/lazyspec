@@ -247,7 +247,10 @@ mod tests {
     fn run_cwd_is_workspace() {
         let ws = TempDir::new().unwrap();
         let runner = BashHookRunner;
-        assert_eq!(runner.run(&spec("pwd > out"), &env_for(&ws)), HookOutcome::Ok);
+        assert_eq!(
+            runner.run(&spec("pwd > out"), &env_for(&ws)),
+            HookOutcome::Ok
+        );
 
         let pwd = fs::read_to_string(ws.path().join("out")).unwrap();
         let canon_ws = fs::canonicalize(ws.path()).unwrap();
@@ -396,7 +399,10 @@ mod tests {
         let ws = TempDir::new().unwrap();
         let runner = BashHookRunner;
         assert_eq!(
-            runner.run(&timed_spec("exit 0", Duration::from_secs(10)), &env_for(&ws)),
+            runner.run(
+                &timed_spec("exit 0", Duration::from_secs(10)),
+                &env_for(&ws)
+            ),
             HookOutcome::Ok
         );
     }
@@ -406,7 +412,10 @@ mod tests {
         let ws = TempDir::new().unwrap();
         let runner = BashHookRunner;
         assert_eq!(
-            runner.run(&timed_spec("exit 7", Duration::from_secs(10)), &env_for(&ws)),
+            runner.run(
+                &timed_spec("exit 7", Duration::from_secs(10)),
+                &env_for(&ws)
+            ),
             HookOutcome::NonZero(7)
         );
     }

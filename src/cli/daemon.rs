@@ -19,7 +19,7 @@ use crate::engine::daemon::Daemon;
 /// `Daemon::run` until a signal arrives. The first signal triggers shutdown;
 /// subsequent signals are drained (idempotent).
 pub fn run(root: &Path, config: &Config) -> Result<()> {
-    let daemon = Daemon::new(root, config)?;
+    let mut daemon = Daemon::new(root, config)?;
 
     let (shutdown_tx, shutdown_rx) = bounded::<()>(1);
 

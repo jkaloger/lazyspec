@@ -145,9 +145,15 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                AgentEvent::Text { delta: "one".into() },
-                AgentEvent::Text { delta: "two".into() },
-                AgentEvent::Text { delta: "three".into() },
+                AgentEvent::Text {
+                    delta: "one".into()
+                },
+                AgentEvent::Text {
+                    delta: "two".into()
+                },
+                AgentEvent::Text {
+                    delta: "three".into()
+                },
             ]
         );
     }

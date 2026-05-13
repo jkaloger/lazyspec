@@ -98,6 +98,11 @@ mod tests {
                 base_branch: "origin/main".to_string(),
                 runtime: Default::default(),
                 hooks: Default::default(),
+                poll_interval_ms: 30_000,
+                max_concurrent_agents: 4,
+                active_statuses: vec!["todo".to_string(), "in-progress".to_string()],
+                heartbeat_interval_ms: 300_000,
+                metadata_push_interval_ms: 30_000,
             }),
             ..Config::default()
         }
