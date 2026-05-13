@@ -148,6 +148,26 @@ impl Default for RuntimeConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct HookConfig {
+    #[serde(default)]
+    pub script: Option<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct OrchestrationHooks {
+    #[serde(default)]
+    pub after_create: Option<HookConfig>,
+    #[serde(default)]
+    pub before_run: Option<HookConfig>,
+    #[serde(default)]
+    pub after_run: Option<HookConfig>,
+    #[serde(default)]
+    pub before_remove: Option<HookConfig>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OrchestrationConfig {
     #[serde(default = "default_agent_users")]
@@ -162,6 +182,8 @@ pub struct OrchestrationConfig {
     pub base_branch: String,
     #[serde(default)]
     pub runtime: RuntimeConfig,
+    #[serde(default)]
+    pub hooks: OrchestrationHooks,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1131,6 +1153,107 @@ turn_timeout_ms = 120000
         assert_eq!(orch.runtime.claude_binary, "/usr/local/bin/claude");
         assert_eq!(orch.runtime.allowed_tools, "Read,Edit,Bash");
         assert_eq!(orch.runtime.turn_timeout_ms, 120_000);
+    }
+
+    #[test]
+    fn hooks_default_when_section_absent() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[orchestration]
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let orch = config.orchestration.unwrap();
+        assert!(orch.hooks.after_create.is_none());
+        assert!(orch.hooks.before_run.is_none());
+        assert!(orch.hooks.after_run.is_none());
+        assert!(orch.hooks.before_remove.is_none());
+    }
+
+    #[test]
+    fn hooks_partial_section_loads_one_hook() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[orchestration.hooks.after_create]
+script = "scripts/after-create.sh"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let hooks = config.orchestration.unwrap().hooks;
+        let after = hooks.after_create.unwrap();
+        assert_eq!(after.script.as_deref(), Some("scripts/after-create.sh"));
+        assert!(after.timeout_ms.is_none());
+        assert!(hooks.before_run.is_none());
+        assert!(hooks.after_run.is_none());
+        assert!(hooks.before_remove.is_none());
+    }
+
+    #[test]
+    fn hooks_all_four_points_load() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[orchestration.hooks.after_create]
+script = "ac.sh"
+
+[orchestration.hooks.before_run]
+script = "br.sh"
+
+[orchestration.hooks.after_run]
+script = "ar.sh"
+
+[orchestration.hooks.before_remove]
+script = "brm.sh"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let hooks = config.orchestration.unwrap().hooks;
+        assert_eq!(hooks.after_create.unwrap().script.as_deref(), Some("ac.sh"));
+        assert_eq!(hooks.before_run.unwrap().script.as_deref(), Some("br.sh"));
+        assert_eq!(hooks.after_run.unwrap().script.as_deref(), Some("ar.sh"));
+        assert_eq!(
+            hooks.before_remove.unwrap().script.as_deref(),
+            Some("brm.sh")
+        );
+    }
+
+    #[test]
+    fn hooks_timeout_ms_loads() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[orchestration.hooks.after_create]
+script = "ac.sh"
+timeout_ms = 1000
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let after = config.orchestration.unwrap().hooks.after_create.unwrap();
+        assert_eq!(after.timeout_ms, Some(1000));
+    }
+
+    #[test]
+    fn hooks_toml_roundtrip() {
+        let hooks = OrchestrationHooks {
+            after_create: Some(HookConfig {
+                script: Some("ac.sh".to_string()),
+                timeout_ms: Some(5000),
+            }),
+            before_run: Some(HookConfig {
+                script: Some("br.sh".to_string()),
+                timeout_ms: None,
+            }),
+            after_run: None,
+            before_remove: Some(HookConfig {
+                script: None,
+                timeout_ms: Some(2000),
+            }),
+        };
+        let serialized = toml::to_string(&hooks).unwrap();
+        let parsed: OrchestrationHooks = toml::from_str(&serialized).unwrap();
+        assert_eq!(parsed, hooks);
     }
 
     #[test]

@@ -97,6 +97,7 @@ mod tests {
                 workspace_root: std::path::PathBuf::from(".lazyspec/work"),
                 base_branch: "origin/main".to_string(),
                 runtime: Default::default(),
+                hooks: Default::default(),
             }),
             ..Config::default()
         }

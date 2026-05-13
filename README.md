@@ -442,6 +442,19 @@ claim_type = "story"  # default
 claude_binary = "claude"      # default
 allowed_tools = ""             # default (comma-separated list passed to claude --allowedTools)
 turn_timeout_ms = 600000       # default (per-turn timeout)
+
+[orchestration.hooks.after_create]
+script = "scripts/after-create.sh"
+timeout_ms = 60000             # default
+
+[orchestration.hooks.before_run]
+script = "scripts/before-run.sh"
+
+[orchestration.hooks.after_run]
+script = "scripts/after-run.sh"
+
+[orchestration.hooks.before_remove]
+script = "scripts/before-remove.sh"
 ```
 
 - `agent_users` -- logins eligible to be picked up by the daemon. The first entry is the default for `lazyspec assign` when `--user` is omitted.
@@ -449,6 +462,8 @@ turn_timeout_ms = 600000       # default (per-turn timeout)
 - `runtime.claude_binary` -- path to the `claude` CLI the daemon invokes. Defaults to `claude` (looked up on `PATH`).
 - `runtime.allowed_tools` -- comma-separated tool allowlist forwarded to `claude --allowedTools`. Empty string (default) means no restriction.
 - `runtime.turn_timeout_ms` -- max wall-clock per agent turn, in milliseconds. Defaults to `600000` (10 minutes).
+- `hooks.<point>.script` -- shell script invoked at the lifecycle point. Each `<point>` (`after_create`, `before_run`, `after_run`, `before_remove`) is an optional sub-table; omit a sub-table to skip that hook.
+- `hooks.<point>.timeout_ms` -- per-hook timeout in milliseconds. Defaults to `60000` (60 seconds). `before_*` hooks are fatal (non-zero exit aborts the lifecycle step); `after_*` hooks are non-fatal (failures are logged but the daemon proceeds).
 
 ### Templates
 

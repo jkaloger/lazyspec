@@ -15,6 +15,7 @@ pub mod git_ref_store;
 pub mod git_status;
 pub mod github;
 pub mod hashing;
+pub mod hooks;
 pub mod host_id;
 pub mod issue_body;
 pub mod issue_cache;

@@ -1,7 +1,7 @@
 ---
 title: 'Agent runtime: ClaudeP runner, worktree, hooks'
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-05-12
 tags: []

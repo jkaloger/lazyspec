@@ -1,7 +1,7 @@
 ---
 title: Lifecycle hook runner
 type: iteration
-status: draft
+status: accepted
 author: agent
 date: 2026-05-13
 tags: []
