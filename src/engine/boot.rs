@@ -219,6 +219,12 @@ mod tests {
     }
 
     impl AgentMetadataWriter for RecordingAgentMetadata {
+        fn write(
+            &self,
+            _metadata: &crate::engine::agent_metadata::AgentMetadata,
+        ) -> Result<String> {
+            Ok(String::new())
+        }
         fn mark_crashed(&self, session_id: &str) -> Result<()> {
             self.crashed.lock().unwrap().push(session_id.to_string());
             Ok(())

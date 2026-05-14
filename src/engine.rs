@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod agent_metadata;
+pub use agent_metadata::read_agent_metadata;
 pub mod assignees;
 pub mod boot;
 pub mod branch_template;
