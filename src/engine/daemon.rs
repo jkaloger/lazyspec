@@ -193,6 +193,7 @@ impl Daemon {
                     lease_ops,
                     SystemClock,
                     GitWorktreeProvisioner,
+                    GitRefAgentMetadata::new(root.to_path_buf(), GitCli),
                     Box::new(EprintlnEventSink),
                 );
 

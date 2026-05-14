@@ -17,6 +17,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError};
 use uuid::Uuid;
 
 use super::agent::lease_agent_id;
+use super::agent_metadata::GitRefAgentMetadata;
 use super::branch_template::{render_branch_name, BranchVars};
 use super::config::Config;
 use super::dispatcher::{Candidate, Dispatcher};
@@ -282,6 +283,7 @@ pub struct TickLoop<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: Work
     pub clock: C,
     pub workspace_provisioner: W,
     pub event_sink: Box<dyn AgentEventSink>,
+    pub metadata: GitRefAgentMetadata<G>,
     pub running: HashMap<String, RunningAgent>,
     pub last_metadata_push: Option<Instant>,
     pub retry_queue: Vec<PendingRetry>,
@@ -312,6 +314,7 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
         lease_ops: L,
         clock: C,
         workspace_provisioner: W,
+        metadata: GitRefAgentMetadata<G>,
     ) -> Self {
         Self::with_event_sink(
             root,
@@ -322,6 +325,7 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             lease_ops,
             clock,
             workspace_provisioner,
+            metadata,
             Box::new(NullEventSink),
         )
     }
@@ -336,6 +340,7 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
         lease_ops: L,
         clock: C,
         workspace_provisioner: W,
+        metadata: GitRefAgentMetadata<G>,
         event_sink: Box<dyn AgentEventSink>,
     ) -> Self {
         Self {
@@ -348,6 +353,7 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             clock,
             workspace_provisioner,
             event_sink,
+            metadata,
             running: HashMap::new(),
             last_metadata_push: None,
             retry_queue: Vec::new(),
@@ -428,6 +434,19 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                 if let Err(e) = fetch_ref_optional(&self.git, &self.root, &coord_remote, &glob) {
                     eprintln!("tick: fetch leases {} failed: {}", glob, e);
                 }
+            }
+            // AC4/AC7 (STORY-124): push per-session metadata refs after the
+            // lease-fetch batch so push failures cannot short-circuit fetch.
+            // Errors are swallowed inside `metadata.push`; tick continues.
+            for ra in self.running.values() {
+                let _ = self.metadata.push(&ra.session_id, &coord_remote);
+            }
+            // AC5 (STORY-124): pull peer clones' metadata into local refs so
+            // `read_agent_metadata` sees cross-machine sessions. Push before
+            // fetch so this clone's authoritative state goes out first; fetch
+            // errors are swallowed (mirrors lease-fetch handling above).
+            if let Err(e) = self.metadata.fetch_all(&coord_remote) {
+                eprintln!("tick: metadata fetch failed: {}", e);
             }
             self.last_metadata_push = Some(now_instant);
         }
@@ -1336,6 +1355,8 @@ body\n",
         FakeClock,
         Arc<FakeProvisioner>,
     > {
+        let metadata =
+            GitRefAgentMetadata::new(td.path().to_path_buf(), MockGitRefClient::new());
         TickLoop::new(
             td.path().to_path_buf(),
             cfg,
@@ -1345,6 +1366,7 @@ body\n",
             lease,
             clock,
             provisioner,
+            metadata,
         )
     }
 
@@ -1484,6 +1506,7 @@ body\n",
             recording_lease,
             FakeClock::new(),
             Arc::new(FakeProvisioner::default()),
+            GitRefAgentMetadata::new(td.path().to_path_buf(), MockGitRefClient::new()),
         );
         t.run_once().unwrap();
 
@@ -1793,6 +1816,7 @@ body\n",
             Arc::clone(&lease),
             FakeClock::new(),
             Arc::new(FakeProvisioner::default()),
+            GitRefAgentMetadata::new(td.path().to_path_buf(), CountingGit::new()),
         );
         for _ in 0..5 {
             t.run_once().unwrap();
@@ -1828,6 +1852,7 @@ body\n",
             Arc::clone(&lease),
             FakeClock::new(),
             Arc::new(FakeProvisioner::default()),
+            GitRefAgentMetadata::new(td.path().to_path_buf(), CountingGit::new()),
         );
         t.run_once().unwrap();
         let n_types = t.config.documents.types.len();
@@ -1866,6 +1891,7 @@ body\n",
             Arc::clone(&lease),
             FakeClock::new(),
             Arc::new(FakeProvisioner::default()),
+            GitRefAgentMetadata::new(td.path().to_path_buf(), CountingGit::new()),
         );
         t.run_once().unwrap();
         let patterns = t.git.fetch_patterns();
@@ -1897,6 +1923,7 @@ body\n",
             Arc::clone(&lease),
             FakeClock::new(),
             Arc::new(FakeProvisioner::default()),
+            GitRefAgentMetadata::new(td.path().to_path_buf(), CountingGit::new()),
         );
         t.run_once().unwrap();
         let after_first = t.git.fetch_count();
@@ -1906,6 +1933,408 @@ body\n",
         assert_eq!(t.git.fetch_count(), after_first);
         // But list_refs ran again on tick 2 (eligibility path).
         assert!(t.git.lists.borrow().len() > lists_after_first);
+    }
+
+    // ===========================================================
+    // STORY-124 AC4/AC7 — agent metadata push gated by interval
+    // ===========================================================
+
+    #[derive(Clone, Debug)]
+    #[allow(dead_code)]
+    struct RecordedPush {
+        remote: String,
+        refname: String,
+        new_sha: String,
+        expected_old: Option<String>,
+    }
+
+    /// Shareable git fake that records `resolve_ref` and `push_ref_with_lease`.
+    /// `Arc<Self>` is what TickLoop's `G` and the metadata writer's `G` both
+    /// hold, so a single instance observes calls from both sites.
+    struct RecordingPushGit {
+        resolve_value: Mutex<Option<String>>,
+        push_calls: Mutex<Vec<RecordedPush>>,
+        fetch_patterns: Mutex<Vec<(String, String)>>,
+        // Queue of results for push_ref_with_lease; defaults to Ok(()) when empty.
+        push_results: Mutex<Vec<Result<()>>>,
+    }
+
+    impl RecordingPushGit {
+        fn new(sha: Option<&str>) -> Self {
+            Self {
+                resolve_value: Mutex::new(sha.map(|s| s.to_string())),
+                push_calls: Mutex::new(Vec::new()),
+                fetch_patterns: Mutex::new(Vec::new()),
+                push_results: Mutex::new(Vec::new()),
+            }
+        }
+        fn push_calls(&self) -> Vec<RecordedPush> {
+            self.push_calls.lock().unwrap().clone()
+        }
+        fn fetch_patterns(&self) -> Vec<(String, String)> {
+            self.fetch_patterns.lock().unwrap().clone()
+        }
+        fn queue_push_result(&self, r: Result<()>) {
+            self.push_results.lock().unwrap().push(r);
+        }
+        fn set_resolve_value(&self, sha: Option<&str>) {
+            *self.resolve_value.lock().unwrap() = sha.map(|s| s.to_string());
+        }
+    }
+
+    impl GitRefOps for Arc<RecordingPushGit> {
+        fn resolve_ref(&self, _r: &std::path::Path, _n: &str) -> Result<Option<String>> {
+            Ok(self.resolve_value.lock().unwrap().clone())
+        }
+        fn list_refs(&self, _r: &std::path::Path, _p: &str) -> Result<Vec<(String, String)>> {
+            Ok(vec![])
+        }
+        fn read_ref_blob(&self, _r: &std::path::Path, _s: &str, _p: &str) -> Result<String> {
+            Ok(String::new())
+        }
+        fn create_commit(
+            &self,
+            _r: &std::path::Path,
+            _n: &str,
+            _f: &[(&str, &str)],
+            _p: Option<&str>,
+        ) -> Result<String> {
+            Ok("sha".into())
+        }
+        fn create_ref_commit(
+            &self,
+            _r: &std::path::Path,
+            _n: &str,
+            _f: &[(&str, &str)],
+        ) -> Result<String> {
+            Ok("sha".into())
+        }
+        fn update_ref(&self, _r: &std::path::Path, _n: &str, _ns: &str, _os: &str) -> Result<()> {
+            Ok(())
+        }
+        fn delete_ref(&self, _r: &std::path::Path, _n: &str) -> Result<()> {
+            Ok(())
+        }
+        fn fetch_refs(&self, _r: &std::path::Path, rem: &str, p: &str) -> Result<()> {
+            self.fetch_patterns
+                .lock()
+                .unwrap()
+                .push((rem.to_string(), p.to_string()));
+            Ok(())
+        }
+        fn push_ref(&self, _r: &std::path::Path, _rem: &str, _n: &str) -> Result<()> {
+            Ok(())
+        }
+        fn delete_remote_ref(
+            &self,
+            _r: &std::path::Path,
+            _rem: &str,
+            _n: &str,
+            _eo: Option<&str>,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn push_ref_with_lease(
+            &self,
+            _r: &std::path::Path,
+            remote: &str,
+            refname: &str,
+            new_sha: &str,
+            expected_old: Option<&str>,
+        ) -> Result<()> {
+            self.push_calls.lock().unwrap().push(RecordedPush {
+                remote: remote.to_string(),
+                refname: refname.to_string(),
+                new_sha: new_sha.to_string(),
+                expected_old: expected_old.map(|s| s.to_string()),
+            });
+            let mut q = self.push_results.lock().unwrap();
+            if q.is_empty() {
+                Ok(())
+            } else {
+                q.remove(0)
+            }
+        }
+        fn read_commit_timestamp(&self, _r: &std::path::Path, _s: &str) -> Result<DateTime<Utc>> {
+            Ok(Utc::now())
+        }
+    }
+
+    /// Helper for STORY-124 AC4/AC7 tests: builds a TickLoop wired with a
+    /// shared `RecordingPushGit` and seeds one running session.
+    fn build_push_test_loop(
+        td: &TempDir,
+        cfg: Config,
+        git: Arc<RecordingPushGit>,
+        session_id: &str,
+    ) -> TickLoop<
+        Arc<FakeRunner>,
+        Arc<RecordingPushGit>,
+        Arc<FakeLeaseOps>,
+        FakeClock,
+        Arc<FakeProvisioner>,
+    > {
+        let runner = Arc::new(FakeRunner::new());
+        let lease = Arc::new(FakeLeaseOps::new());
+        let metadata = GitRefAgentMetadata::new(td.path().to_path_buf(), Arc::clone(&git));
+        let mut t = TickLoop::new(
+            td.path().to_path_buf(),
+            cfg,
+            "host-test".to_string(),
+            runner,
+            Arc::clone(&git),
+            lease,
+            FakeClock::new(),
+            Arc::new(FakeProvisioner::default()),
+            metadata,
+        );
+        let (cn_tx, _cn_rx) = unbounded::<()>();
+        let now = t.clock.now_instant();
+        t.running.insert(
+            "STORY-1".to_string(),
+            RunningAgent {
+                session_id: session_id.to_string(),
+                doc_id: "STORY-1".to_string(),
+                doc_type: "story".to_string(),
+                agent_ident: format!("host-test:{}", session_id),
+                workspace: PathBuf::from("/tmp/fake-ws/STORY-1"),
+                branch: "agents/STORY-1".to_string(),
+                cancel: cn_tx,
+                pid: 42,
+                last_heartbeat: now,
+                observation: Arc::new(Mutex::new(AgentObservation::new(now))),
+                reader_handle: Some(std::thread::spawn(|| {})),
+            },
+        );
+        // Keep the cn_rx alive via leak — test only cares about push behaviour
+        // and we don't want the cancel channel to drop and trip downstream
+        // assertions.
+        std::mem::forget(_cn_rx);
+        t
+    }
+
+    fn session_push_count(git: &RecordingPushGit, session_id: &str) -> usize {
+        let session_ref = format!("refs/lazyspec/agents/{}", session_id);
+        git.push_calls()
+            .iter()
+            .filter(|p| p.refname == session_ref)
+            .count()
+    }
+
+    #[test]
+    fn metadata_push_respects_interval_cadence() {
+        // AC4: cadence honours `metadata_push_interval_ms`. Push fires when the
+        // configured window has elapsed and not before.
+        let td = TempDir::new().unwrap();
+        let mut orch = base_orch(vec!["draft"]);
+        orch.poll_interval_ms = 100;
+        orch.metadata_push_interval_ms = 1_000;
+        let cfg1 = cfg(orch);
+        let git = Arc::new(RecordingPushGit::new(Some("head-sha-1")));
+        let session_id = "sess-cad";
+        let mut t = build_push_test_loop(&td, cfg1, Arc::clone(&git), session_id);
+
+        // t=0: first tick, push_due=true (no prior push).
+        t.run_once().unwrap();
+        assert_eq!(session_push_count(&git, session_id), 1);
+
+        // +500ms: still within the 1000ms window.
+        t.clock.advance(Duration::from_millis(500));
+        t.run_once().unwrap();
+        assert_eq!(session_push_count(&git, session_id), 1);
+
+        // +500ms more (=1000ms total): window elapsed.
+        t.clock.advance(Duration::from_millis(500));
+        t.run_once().unwrap();
+        assert_eq!(session_push_count(&git, session_id), 2);
+
+        // Verify a *different* configured interval produces a different
+        // cadence. Build a fresh loop with 200ms interval; advance 200ms;
+        // expect exactly one push beyond the t=0 push.
+        let td2 = TempDir::new().unwrap();
+        let mut orch2 = base_orch(vec!["draft"]);
+        orch2.poll_interval_ms = 50;
+        orch2.metadata_push_interval_ms = 200;
+        let cfg2 = cfg(orch2);
+        let git2 = Arc::new(RecordingPushGit::new(Some("head-sha-2")));
+        let mut t2 = build_push_test_loop(&td2, cfg2, Arc::clone(&git2), session_id);
+        t2.run_once().unwrap();
+        assert_eq!(session_push_count(&git2, session_id), 1);
+        t2.clock.advance(Duration::from_millis(200));
+        t2.run_once().unwrap();
+        assert_eq!(session_push_count(&git2, session_id), 2);
+    }
+
+    #[test]
+    fn metadata_push_unreachable_does_not_block_tick() {
+        // AC7: remote unreachable does not propagate; tick keeps ticking,
+        // push retries on the next interval. Local ref state is untouched by
+        // push failures.
+        let td = TempDir::new().unwrap();
+        let mut orch = base_orch(vec!["draft"]);
+        orch.poll_interval_ms = 100;
+        orch.metadata_push_interval_ms = 1_000;
+        let cfg = cfg(orch);
+        let git = Arc::new(RecordingPushGit::new(Some("head-sha-unreach")));
+        let session_id = "sess-unr";
+        // Three pushes, all unreachable.
+        git.queue_push_result(Err(anyhow::anyhow!("connection refused")));
+        git.queue_push_result(Err(anyhow::anyhow!("connection refused")));
+        git.queue_push_result(Err(anyhow::anyhow!("connection refused")));
+
+        let mut t = build_push_test_loop(&td, cfg, Arc::clone(&git), session_id);
+
+        // Tick 1: t=0, push_due=true.
+        t.run_once().unwrap();
+        // Tick 2: advance past the window.
+        t.clock.advance(Duration::from_millis(1_000));
+        t.run_once().unwrap();
+        // Tick 3: advance past the window again.
+        t.clock.advance(Duration::from_millis(1_000));
+        t.run_once().unwrap();
+
+        assert_eq!(
+            session_push_count(&git, session_id),
+            3,
+            "expected three push attempts despite all failing"
+        );
+        // Local head sha untouched by push failures (no write() called, push
+        // doesn't mutate resolve_value).
+        assert_eq!(
+            git.resolve_value.lock().unwrap().clone(),
+            Some("head-sha-unreach".to_string())
+        );
+    }
+
+    #[test]
+    fn metadata_push_drains_accumulated_commits_once_remote_reachable() {
+        // AC7: while the remote is unreachable, local writes accumulate. Once
+        // the remote returns, a single push covers all accumulated commits via
+        // the chain-head sha (parents are transitively included). expected_old
+        // does NOT advance on failed pushes, so the final successful push uses
+        // the same expected_old as the first failing push (ZERO_SHA here).
+        let td = TempDir::new().unwrap();
+        let mut orch = base_orch(vec!["draft"]);
+        orch.poll_interval_ms = 100;
+        orch.metadata_push_interval_ms = 1_000;
+        let cfg = cfg(orch);
+        let git = Arc::new(RecordingPushGit::new(Some("head-1")));
+        let session_id = "sess-drain";
+        // First two pushes fail (remote unreachable), third succeeds.
+        git.queue_push_result(Err(anyhow::anyhow!("connection refused")));
+        git.queue_push_result(Err(anyhow::anyhow!("connection refused")));
+        git.queue_push_result(Ok(()));
+
+        let mut t = build_push_test_loop(&td, cfg, Arc::clone(&git), session_id);
+
+        // Simulate three accumulated local writes by advancing the head sha
+        // between ticks. (The real write() path produces a chain; the fake
+        // only needs to report a head — push reads it via resolve_ref.)
+        git.set_resolve_value(Some("head-1"));
+        t.run_once().unwrap();
+
+        git.set_resolve_value(Some("head-2"));
+        t.clock.advance(Duration::from_millis(1_000));
+        t.run_once().unwrap();
+
+        git.set_resolve_value(Some("head-3"));
+        t.clock.advance(Duration::from_millis(1_000));
+        t.run_once().unwrap();
+
+        let session_ref = format!("refs/lazyspec/agents/{}", session_id);
+        let pushes: Vec<RecordedPush> = git
+            .push_calls()
+            .into_iter()
+            .filter(|p| p.refname == session_ref)
+            .collect();
+        assert_eq!(pushes.len(), 3, "expected three push attempts");
+
+        // Third (successful) push carries the latest chain head — covers all
+        // accumulated prior writes via parent chain.
+        assert_eq!(pushes[2].new_sha, "head-3");
+
+        // expected_old did NOT advance on the prior failures: same value
+        // (ZERO_SHA, since no prior push succeeded) as the first failing push.
+        assert_eq!(pushes[0].expected_old, pushes[2].expected_old);
+        assert_eq!(
+            pushes[0].expected_old.as_deref(),
+            Some("0000000000000000000000000000000000000000")
+        );
+    }
+
+    #[test]
+    fn push_due_pushes_metadata_ref_for_each_running_session() {
+        let td = TempDir::new().unwrap();
+        let mut orch = base_orch(vec!["draft"]);
+        orch.poll_interval_ms = 1_000;
+        orch.metadata_push_interval_ms = 10_000;
+        let cfg = cfg(orch);
+        let runner = Arc::new(FakeRunner::new());
+        let lease = Arc::new(FakeLeaseOps::new());
+        let git = Arc::new(RecordingPushGit::new(Some("head-sha-1")));
+        let metadata =
+            GitRefAgentMetadata::new(td.path().to_path_buf(), Arc::clone(&git));
+        let mut t = TickLoop::new(
+            td.path().to_path_buf(),
+            cfg,
+            "host-test".to_string(),
+            Arc::clone(&runner),
+            Arc::clone(&git),
+            Arc::clone(&lease),
+            FakeClock::new(),
+            Arc::new(FakeProvisioner::default()),
+            metadata,
+        );
+
+        // Seed one running agent with a known session_id.
+        let session_id = "sess-abc";
+        let (cn_tx, _cn_rx) = unbounded::<()>();
+        t.running.insert(
+            "STORY-1".to_string(),
+            RunningAgent {
+                session_id: session_id.to_string(),
+                doc_id: "STORY-1".to_string(),
+                doc_type: "story".to_string(),
+                agent_ident: "host-test:sess-abc".to_string(),
+                workspace: PathBuf::from("/tmp/fake-ws/STORY-1"),
+                branch: "agents/STORY-1".to_string(),
+                cancel: cn_tx,
+                pid: 42,
+                last_heartbeat: t.clock.now_instant(),
+                observation: Arc::new(Mutex::new(AgentObservation::new(t.clock.now_instant()))),
+                reader_handle: Some(std::thread::spawn(|| {})),
+            },
+        );
+
+        // First tick: push_due is true (no prior push). Should push once for
+        // the running session's metadata ref.
+        t.run_once().unwrap();
+
+        let pushes = git.push_calls();
+        let session_ref = format!("refs/lazyspec/agents/{}", session_id);
+        let session_pushes: Vec<_> = pushes
+            .iter()
+            .filter(|p| p.refname == session_ref)
+            .collect();
+        assert_eq!(
+            session_pushes.len(),
+            1,
+            "expected exactly one push to {}, got pushes={:?}",
+            session_ref,
+            pushes
+        );
+        assert_eq!(session_pushes[0].remote, "origin");
+        assert_eq!(session_pushes[0].new_sha, "head-sha-1");
+
+        // AC5: same gate also fetched peer agent metadata.
+        let fetches = git.fetch_patterns();
+        assert!(
+            fetches
+                .iter()
+                .any(|(rem, pat)| rem == "origin" && pat == "refs/lazyspec/agents/*"),
+            "expected fetch_refs on refs/lazyspec/agents/*, got fetches={:?}",
+            fetches
+        );
     }
 
     // ===========================================================
@@ -2586,6 +3015,8 @@ body\n",
         FakeClock,
         Arc<FakeProvisioner>,
     > {
+        let metadata =
+            GitRefAgentMetadata::new(td.path().to_path_buf(), MockGitRefClient::new());
         TickLoop::with_event_sink(
             td.path().to_path_buf(),
             cfg,
@@ -2595,6 +3026,7 @@ body\n",
             lease,
             clock,
             provisioner,
+            metadata,
             Box::new(sink),
         )
     }
