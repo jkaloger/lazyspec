@@ -103,6 +103,12 @@ mod tests {
                 active_statuses: vec!["todo".to_string(), "in-progress".to_string()],
                 heartbeat_interval_ms: 300_000,
                 metadata_push_interval_ms: 30_000,
+                stall_timeout_ms: 300_000,
+                max_turns: 20,
+                max_failure_attempts: 5,
+                max_retry_backoff_ms: 300_000,
+                handoff_states: vec!["in-review".to_string()],
+                continuation_delay_ms: 1_000,
             }),
             ..Config::default()
         }

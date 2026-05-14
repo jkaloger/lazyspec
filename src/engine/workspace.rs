@@ -49,6 +49,21 @@ pub fn provision_workspace(
     })
 }
 
+pub fn remove(repo_root: &Path, workspace_path: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["worktree", "remove", "--force"])
+        .arg(workspace_path)
+        .output()
+        .context("failed to spawn git worktree remove")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git worktree remove failed: {}", stderr.trim());
+    }
+    Ok(())
+}
+
 fn local_branch_exists(repo_root: &Path, branch: &str) -> Result<bool> {
     let refname = format!("refs/heads/{}", branch);
     let output = Command::new("git")
@@ -177,6 +192,32 @@ mod tests {
         assert!(
             ws.path.join("extra.txt").exists(),
             "extra commit content present"
+        );
+    }
+
+    #[test]
+    fn remove_workspace_unregisters_worktree() {
+        let (td, repo) = setup_repo();
+        let workspace_root = td.path().join("workspaces");
+        fs::create_dir(&workspace_root).unwrap();
+        let ws = provision_workspace(
+            &repo,
+            &workspace_root,
+            "main",
+            "agents/STORY-127",
+            "claim-1",
+        )
+        .unwrap();
+        assert!(ws.path.exists());
+
+        remove(&repo, &ws.path).unwrap();
+        assert!(!ws.path.exists(), "worktree dir should be gone");
+        let list = run_git(&repo, &["worktree", "list", "--porcelain"]);
+        let list_str = String::from_utf8_lossy(&list.stdout);
+        assert!(
+            !list_str.contains(&ws.path.to_string_lossy().to_string()),
+            "worktree should be unregistered: {}",
+            list_str
         );
     }
 

@@ -32,9 +32,21 @@ pub(crate) fn parse_record(line: &str) -> Option<AgentEvent> {
 
 fn parse_assistant_text(v: &Value) -> Option<AgentEvent> {
     let content = v.get("message")?.get("content")?.as_array()?;
-    // emit first text block; caller invokes parse_record per line so
-    // multiple text blocks in one record collapse here. for v1 the
-    // claude CLI emits one text block per assistant record so this matches.
+    // v1 precedence: if record contains a tool_use block, emit ToolCallStarted
+    // for the first one; otherwise emit Text for the first text block. Records
+    // mixing both collapse to the tool_use signal since stall detection
+    // depends on observing tool starts; downstream consumers tolerate missing
+    // text deltas in mixed records (next assistant record continues stream).
+    for block in content {
+        if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+            let name = block
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            return Some(AgentEvent::ToolCallStarted { name });
+        }
+    }
     for block in content {
         if block.get("type").and_then(Value::as_str) == Some("text") {
             let delta = block.get("text")?.as_str()?.to_string();
@@ -155,6 +167,28 @@ mod tests {
                     delta: "three".into()
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn parses_tool_use_as_tool_call_started() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"/etc/hosts"}}]}}"#;
+        assert_eq!(
+            parse_record(line),
+            Some(AgentEvent::ToolCallStarted {
+                name: "Read".into()
+            })
+        );
+    }
+
+    #[test]
+    fn tool_use_takes_precedence_when_record_has_both() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]}}"#;
+        assert_eq!(
+            parse_record(line),
+            Some(AgentEvent::ToolCallStarted {
+                name: "Bash".into()
+            })
         );
     }
 

@@ -440,11 +440,7 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Some(Commands::Assign {
-            doc_id,
-            user,
-            json,
-        }) => {
+        Some(Commands::Assign { doc_id, user, json }) => {
             if let Err(e) = lazyspec::cli::assign::run(&cwd, &doc_id, user.as_deref(), json) {
                 if json {
                     println!("{}", serde_json::json!({"error": e.to_string()}));

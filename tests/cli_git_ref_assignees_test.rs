@@ -87,8 +87,7 @@ fn wipe_cache(root: &Path, doc_id: &str) {
     if cache_path.exists() {
         std::fs::remove_file(&cache_path).expect("remove cache file");
     }
-    let mut lock =
-        lazyspec::engine::cache_lock::CacheLock::load(root).expect("load cache.lock");
+    let mut lock = lazyspec::engine::cache_lock::CacheLock::load(root).expect("load cache.lock");
     lock.remove(&format!("story/{}", doc_id));
     lock.save(root).expect("save cache.lock");
 }
@@ -129,10 +128,7 @@ fn git_ref_round_trip_assignees() {
     // Blow away the cache file + cache.lock entry, forcing fetch to
     // re-materialise from the ref's `doc.md` blob.
     wipe_cache(fixture.root(), "STORY-001");
-    assert!(
-        !cache_path.exists(),
-        "cache file should be gone after wipe"
-    );
+    assert!(!cache_path.exists(), "cache file should be gone after wipe");
 
     // Fetch reads remote refs, writes cache files from the ref blobs.
     run_fetch(fixture.root(), &config).expect("fetch re-materialise");

@@ -299,6 +299,17 @@ Install at `~/Library/LaunchAgents/au.com.inlight.lazyspec.plist` and load with 
 
 There is no `lazyspec daemon stop` subcommand. Stop the daemon through its supervisor: `systemctl stop lazyspec`, `launchctl unload ~/Library/LaunchAgents/au.com.inlight.lazyspec.plist`, or `kill <pid>`. Both SIGTERM and SIGINT trigger graceful shutdown.
 
+### Startup sequence
+
+`lazyspec daemon` runs these steps in order on every start:
+
+1. **Bind socket.** Single-instance gate. If another daemon already listens, exit.
+2. **Boot orphan recovery.** Scan local lease refs for leases owned by this host (agent prefix `{host_id}:`). If any are found, the daemon **blocks for `coordination.grace_period`** to give a still-running peer process time to renew; then admin-releases each orphan lease and marks the corresponding `refs/lazyspec/agents/{session_id}` as `crashed`. Worktrees are left in place so an operator can resume or discard them. With the RFC-035 default `grace_period = "1h"`, a crash recovery can stall startup for an hour -- tune `grace_period` in `.lazyspec.toml` if that's not acceptable.
+3. **Preflight checks.** Three gates: (a) the prompt template `.lazyspec/prompts/builder.md` is readable, (b) the prompt template renders against a dummy context under minijinja strict-undefined mode, (c) `orchestration.agent_users` is non-empty. Failure does **not** stop the daemon; it logs the failed checks and gates new dispatches. In-flight agents are not affected.
+4. **Accept thread + tick thread.** The tick loop is started with the initial preflight report and a notify-driven watcher on `.lazyspec.toml` + `.lazyspec/prompts/builder.md`.
+
+Edit either watched file at runtime and the daemon re-runs preflight before the next dispatch. If preflight now fails, the daemon stops issuing new dispatches but does not yank in-flight agents -- hot-reload applies to future ticks only.
+
 <details>
 <summary><h3><code>@ref</code> Syntax</h3></summary>
 
@@ -440,13 +451,19 @@ claim_type = "story"           # default
 poll_interval_ms = 30000        # default (tick cadence)
 max_concurrent_agents = 4       # default (concurrent agent cap)
 active_statuses = ["todo", "in-progress"]  # default (eligible doc statuses)
+handoff_states = ["in-review"]  # default (statuses that release without removing the worktree)
 heartbeat_interval_ms = 300000  # default (5 minutes; daemon-side lease heartbeat)
 metadata_push_interval_ms = 30000  # default (batched lease fetch window)
+stall_timeout_ms = 300000       # default (5 minutes; tool_use suspends this timer)
+max_turns = 20                  # default (continuation cap on clean exits)
+max_failure_attempts = 5        # default (failure cap; stall/turn/abnormal/hook share counter)
+max_retry_backoff_ms = 300000   # default (5 minutes; ceiling on exponential failure backoff)
+continuation_delay_ms = 1000    # default (delay before re-invoking claude on clean exit)
 
 [orchestration.runtime]
 claude_binary = "claude"      # default
 allowed_tools = ""             # default (comma-separated list passed to claude --allowedTools)
-turn_timeout_ms = 600000       # default (per-turn timeout)
+turn_timeout_ms = 600000       # default (per-turn hard wall; NOT suspended by tool_use)
 
 [orchestration.hooks.after_create]
 script = "scripts/after-create.sh"
@@ -467,11 +484,17 @@ script = "scripts/before-remove.sh"
 - `poll_interval_ms` -- tick-loop polling cadence in milliseconds. Defaults to `30000` (30 seconds).
 - `max_concurrent_agents` -- maximum number of agents the daemon will run in parallel. Defaults to `4`.
 - `active_statuses` -- document statuses eligible for dispatch. Defaults to `["todo", "in-progress"]`.
+- `handoff_states` -- statuses that, when observed, kill the agent and release the lease but leave the worktree in place for operator follow-up. Defaults to `["in-review"]`. Anything outside `active_statuses` and `handoff_states` is treated as terminal: the worktree is removed.
 - `heartbeat_interval_ms` -- daemon-side lease heartbeat cadence in milliseconds. Defaults to `300000` (5 minutes).
 - `metadata_push_interval_ms` -- window in milliseconds for batched `git fetch refs/lazyspec/leases/*`; lease freshness rides this cadence rather than per-tick. Defaults to `30000` (30 seconds).
+- `stall_timeout_ms` -- max idle time between agent stream-json events before the daemon kills the agent for retry. Suspended while a `tool_use` is in flight. Defaults to `300000` (5 minutes).
+- `max_turns` -- continuation cap. After each clean exit (`code == 0`) with the doc still in an active status, the daemon re-invokes claude in the same workspace. Once `attempt > max_turns`, the daemon emits a `failed` event with reason `max_turns`, releases the lease, and stops. Defaults to `20`.
+- `max_failure_attempts` -- failure cap. Stalls, turn timeouts, abnormal exits, and hook failures share one `failure_attempt` counter; once `failure_attempt > max_failure_attempts`, the daemon emits a `failed` event with reason `max_failure_attempts`, releases the lease, and stops. Defaults to `5`.
+- `max_retry_backoff_ms` -- ceiling on exponential failure backoff. Retry delay is `min(10000 * 2^(n-1), max_retry_backoff_ms)`. Defaults to `300000` (5 minutes).
+- `continuation_delay_ms` -- delay before re-invoking claude after a clean exit, in milliseconds. Defaults to `1000` (1 second).
 - `runtime.claude_binary` -- path to the `claude` CLI the daemon invokes. Defaults to `claude` (looked up on `PATH`).
 - `runtime.allowed_tools` -- comma-separated tool allowlist forwarded to `claude --allowedTools`. Empty string (default) means no restriction.
-- `runtime.turn_timeout_ms` -- max wall-clock per agent turn, in milliseconds. Defaults to `600000` (10 minutes).
+- `runtime.turn_timeout_ms` -- hard wall on a single agent turn, in milliseconds. NOT suspended by `tool_use`. Defaults to `600000` (10 minutes).
 - `hooks.<point>.script` -- shell script invoked at the lifecycle point. Each `<point>` (`after_create`, `before_run`, `after_run`, `before_remove`) is an optional sub-table; omit a sub-table to skip that hook.
 - `hooks.<point>.timeout_ms` -- per-hook timeout in milliseconds. Defaults to `60000` (60 seconds). `before_*` hooks are fatal (non-zero exit aborts the lifecycle step); `after_*` hooks are non-fatal (failures are logged but the daemon proceeds).
 

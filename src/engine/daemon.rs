@@ -21,12 +21,20 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use crossbeam_channel::{bounded, Receiver};
 
+use super::agent_metadata::GitRefAgentMetadata;
+use super::boot::boot_orphan_recovery;
 use super::config::Config;
 use super::git_ref::GitCli;
 use super::host_id;
 use super::lease::LeaseEngine;
+use super::preflight::{
+    run_preflight, NotifyPreflightWatcher, PreflightChecks, PreflightReport, PreflightWatcher,
+    DEFAULT_CONFIG_PATH, DEFAULT_PROMPT_PATH,
+};
 use super::runner::ClaudeP;
-use super::tick::{EngineLeaseOps, GitWorktreeProvisioner, SystemClock, TickLoop, TickRunner};
+use super::tick::{
+    EngineLeaseOps, EprintlnEventSink, GitWorktreeProvisioner, SystemClock, TickLoop, TickRunner,
+};
 
 const SOCKET_REL_PATH: &str = ".lazyspec/daemon.sock";
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -65,6 +73,64 @@ impl LeaseReleaser for RealLeaseReleaser {
     }
 }
 
+/// Boot-time orphan lease recovery, run once at daemon start before any
+/// dispatch. Trait seam matches RFC-041's conservative gate so tests can
+/// inject a no-op without spinning up a real lease engine.
+pub trait BootRecovery: Send + Sync {
+    fn recover(&self) -> Result<()>;
+}
+
+/// Production [`BootRecovery`] backed by `boot::boot_orphan_recovery` with a
+/// real lease engine, system clock, and git-ref agent-metadata writer.
+pub struct RealBootRecovery {
+    root: PathBuf,
+    host_id: String,
+    lease_engine: LeaseEngine<GitCli>,
+    config: Config,
+    metadata: GitRefAgentMetadata<GitCli>,
+}
+
+impl RealBootRecovery {
+    pub fn new(
+        root: PathBuf,
+        host_id: String,
+        lease_engine: LeaseEngine<GitCli>,
+        config: Config,
+        metadata: GitRefAgentMetadata<GitCli>,
+    ) -> Self {
+        Self {
+            root,
+            host_id,
+            lease_engine,
+            config,
+            metadata,
+        }
+    }
+}
+
+impl BootRecovery for RealBootRecovery {
+    fn recover(&self) -> Result<()> {
+        boot_orphan_recovery(
+            &self.root,
+            &self.host_id,
+            &self.lease_engine,
+            &self.config,
+            &SystemClock,
+            &self.metadata,
+        )
+    }
+}
+
+/// No-op [`BootRecovery`]. Used by tests + by `Daemon::with_lease_releaser`
+/// / `with_tick_runner` constructors that don't need real boot recovery.
+pub struct NoopBootRecovery;
+
+impl BootRecovery for NoopBootRecovery {
+    fn recover(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
 /// Per-workspace daemon. Holds its socket path, host identity, a lease
 /// releaser used to clean up on graceful shutdown, and an optional
 /// orchestrator tick runner that runs on its own thread.
@@ -74,6 +140,7 @@ pub struct Daemon {
     pub host_id: String,
     pub lease_releaser: Box<dyn LeaseReleaser>,
     pub tick_runner: Option<Box<dyn TickRunner>>,
+    pub boot_recovery: Box<dyn BootRecovery>,
 }
 
 impl Daemon {
@@ -97,6 +164,14 @@ impl Daemon {
         let engine = LeaseEngine::new(GitCli, coordination.clone());
         let releaser = RealLeaseReleaser::new(engine, root.to_path_buf(), type_names);
 
+        let boot_recovery: Box<dyn BootRecovery> = Box::new(RealBootRecovery::new(
+            root.to_path_buf(),
+            host_id.clone(),
+            LeaseEngine::new(GitCli, coordination.clone()),
+            config.clone(),
+            GitRefAgentMetadata::new(root.to_path_buf(), GitCli),
+        ));
+
         let tick_runner: Option<Box<dyn TickRunner>> =
             if let Some(orch) = config.orchestration.as_ref() {
                 let runner = ClaudeP {
@@ -109,7 +184,7 @@ impl Daemon {
                     engine: lease_engine,
                     root: root.to_path_buf(),
                 };
-                let tl = TickLoop::new(
+                let tl = TickLoop::with_event_sink(
                     root.to_path_buf(),
                     config.clone(),
                     host_id.clone(),
@@ -118,7 +193,52 @@ impl Daemon {
                     lease_ops,
                     SystemClock,
                     GitWorktreeProvisioner,
+                    Box::new(EprintlnEventSink),
                 );
+
+                // Initial preflight: log on failure but daemon continues.
+                let initial_report = match run_preflight(&PreflightChecks { root, config }) {
+                    Ok(r) => {
+                        if !r.is_ok() {
+                            eprintln!(
+                                "daemon: preflight checks failed at startup: {:?}; \
+                                 dispatch will be gated until config is fixed",
+                                r
+                            );
+                        }
+                        r
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "daemon: preflight run errored at startup: {}; \
+                             treating as all-failing report",
+                            e
+                        );
+                        PreflightReport {
+                            workflow_readable: false,
+                            prompt_renders: false,
+                            agent_users_non_empty: false,
+                        }
+                    }
+                };
+
+                // Construct watcher. Failure is non-fatal: log + fall back to None.
+                let config_path = root.join(DEFAULT_CONFIG_PATH);
+                let prompt_path = root.join(DEFAULT_PROMPT_PATH);
+                let watcher: Option<Box<dyn PreflightWatcher>> =
+                    match NotifyPreflightWatcher::start(config_path, prompt_path) {
+                        Ok(w) => Some(Box::new(w)),
+                        Err(e) => {
+                            eprintln!(
+                                "daemon: failed to start preflight watcher: {}; \
+                                 hot-reload disabled, daemon continues",
+                                e
+                            );
+                            None
+                        }
+                    };
+
+                let tl = tl.with_preflight(initial_report, watcher);
                 Some(Box::new(tl))
             } else {
                 None
@@ -130,6 +250,7 @@ impl Daemon {
             host_id,
             lease_releaser: Box::new(releaser),
             tick_runner,
+            boot_recovery,
         })
     }
 
@@ -146,6 +267,7 @@ impl Daemon {
             host_id,
             lease_releaser,
             tick_runner: None,
+            boot_recovery: Box::new(NoopBootRecovery),
         }
     }
 
@@ -165,7 +287,16 @@ impl Daemon {
             host_id,
             lease_releaser,
             tick_runner,
+            boot_recovery: Box::new(NoopBootRecovery),
         }
+    }
+
+    /// Test-only setter that swaps the [`BootRecovery`] impl. Lets tests
+    /// inject a recording fake to assert the daemon called `recover()` before
+    /// spawning the tick thread.
+    pub fn with_boot_recovery(mut self, boot_recovery: Box<dyn BootRecovery>) -> Self {
+        self.boot_recovery = boot_recovery;
+        self
     }
 
     /// Run the daemon in the foreground. Blocks until `shutdown_rx` receives a
@@ -179,6 +310,16 @@ impl Daemon {
         listener
             .set_nonblocking(true)
             .context("failed to set listener non-blocking")?;
+
+        // RFC-041 conservative gate: scan + grace_period sleep + admin-release
+        // for any orphan leases held by this host before we spawn dispatch.
+        // Synchronous on purpose — daemon is unresponsive during the grace
+        // window. Errors are logged but do NOT stop the daemon.
+        eprintln!("daemon: starting boot orphan recovery");
+        if let Err(e) = self.boot_recovery.recover() {
+            eprintln!("warning: boot orphan recovery failed: {e}; daemon continuing");
+        }
+        eprintln!("daemon: boot orphan recovery complete");
 
         let running = Arc::new(AtomicBool::new(true));
         let accept_running = Arc::clone(&running);
@@ -673,5 +814,192 @@ mod tests {
             seq
         );
         assert_eq!(seq, vec!["release".to_string()]);
+    }
+
+    // -------- BootRecovery wiring (Task 5 / ITERATION-178) --------
+
+    /// [`BootRecovery`] fake that records when `recover()` runs into a shared
+    /// order log so we can assert ordering against tick startup and lease
+    /// release.
+    struct RecordingBootRecovery {
+        order: Arc<Mutex<Vec<String>>>,
+        called: Arc<AtomicBool>,
+    }
+
+    impl BootRecovery for RecordingBootRecovery {
+        fn recover(&self) -> Result<()> {
+            self.called.store(true, Ordering::SeqCst);
+            self.order.lock().unwrap().push("boot:recover".to_string());
+            Ok(())
+        }
+    }
+
+    /// [`BootRecovery`] fake whose `recover()` always errors.
+    struct FailingBootRecovery {
+        called: Arc<AtomicBool>,
+    }
+
+    impl BootRecovery for FailingBootRecovery {
+        fn recover(&self) -> Result<()> {
+            self.called.store(true, Ordering::SeqCst);
+            Err(anyhow!("boot recovery exploded"))
+        }
+    }
+
+    #[test]
+    fn daemon_calls_boot_recovery_on_run() {
+        let td = TempDir::new().unwrap();
+        fs::create_dir_all(td.path().join(".lazyspec")).unwrap();
+        let sock_path = td.path().join(SOCKET_REL_PATH);
+        let order = Arc::new(Mutex::new(Vec::<String>::new()));
+        let called = Arc::new(AtomicBool::new(false));
+
+        let boot = Box::new(RecordingBootRecovery {
+            order: Arc::clone(&order),
+            called: Arc::clone(&called),
+        });
+        let releaser = Box::new(OrderingReleaser {
+            order: Arc::clone(&order),
+        });
+
+        let mut daemon = Daemon::with_lease_releaser(
+            td.path().to_path_buf(),
+            sock_path.clone(),
+            "host-test:boot".to_string(),
+            releaser,
+        )
+        .with_boot_recovery(boot);
+
+        let (tx, rx) = crossbeam_channel::bounded::<()>(1);
+        let handle = thread::spawn(move || daemon.run(rx));
+        assert!(wait_for_socket(&sock_path, Duration::from_secs(1)));
+        tx.send(()).unwrap();
+        handle.join().unwrap().unwrap();
+
+        assert!(called.load(Ordering::SeqCst), "boot recovery must run");
+        let seq = order.lock().unwrap().clone();
+        let boot_idx = seq
+            .iter()
+            .position(|s| s == "boot:recover")
+            .expect("boot recover not recorded");
+        let release_idx = seq
+            .iter()
+            .position(|s| s == "release")
+            .expect("release not recorded");
+        assert!(
+            boot_idx < release_idx,
+            "boot recovery must run before lease release; got {:?}",
+            seq
+        );
+    }
+
+    #[test]
+    fn daemon_runs_boot_recovery_before_tick_thread() {
+        let td = TempDir::new().unwrap();
+        fs::create_dir_all(td.path().join(".lazyspec")).unwrap();
+        let sock_path = td.path().join(SOCKET_REL_PATH);
+        let order = Arc::new(Mutex::new(Vec::<String>::new()));
+        let called = Arc::new(AtomicBool::new(false));
+
+        let boot = Box::new(RecordingBootRecovery {
+            order: Arc::clone(&order),
+            called: Arc::clone(&called),
+        });
+        let tick = Box::new(RecordingTickRunner {
+            order: Arc::clone(&order),
+            started: Arc::new(AtomicBool::new(false)),
+            shutdown_received: Arc::new(AtomicBool::new(false)),
+        });
+        let releaser = Box::new(OrderingReleaser {
+            order: Arc::clone(&order),
+        });
+
+        let mut daemon = Daemon::with_tick_runner(
+            td.path().to_path_buf(),
+            sock_path.clone(),
+            "host-test:bootbefore".to_string(),
+            releaser,
+            Some(tick),
+        )
+        .with_boot_recovery(boot);
+
+        let (tx, rx) = crossbeam_channel::bounded::<()>(1);
+        let handle = thread::spawn(move || daemon.run(rx));
+        assert!(wait_for_socket(&sock_path, Duration::from_secs(1)));
+
+        // Wait for tick to register itself before shutting down so the order
+        // log has both entries.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if order.lock().unwrap().iter().any(|s| s == "tick:started") {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        tx.send(()).unwrap();
+        handle.join().unwrap().unwrap();
+
+        let seq = order.lock().unwrap().clone();
+        let boot_idx = seq
+            .iter()
+            .position(|s| s == "boot:recover")
+            .expect("boot recover not recorded");
+        let tick_idx = seq
+            .iter()
+            .position(|s| s == "tick:started")
+            .expect("tick start not recorded");
+        assert!(
+            boot_idx < tick_idx,
+            "boot recovery must run before tick thread; got {:?}",
+            seq
+        );
+    }
+
+    #[test]
+    fn daemon_continues_when_boot_recovery_errs() {
+        let td = TempDir::new().unwrap();
+        fs::create_dir_all(td.path().join(".lazyspec")).unwrap();
+        let sock_path = td.path().join(SOCKET_REL_PATH);
+        let called = Arc::new(AtomicBool::new(false));
+
+        let releaser = Arc::new(RecordingReleaser::new());
+        let boot = Box::new(FailingBootRecovery {
+            called: Arc::clone(&called),
+        });
+
+        let mut daemon = Daemon::with_lease_releaser(
+            td.path().to_path_buf(),
+            sock_path.clone(),
+            "host-test:bootfail".to_string(),
+            Box::new(Arc::clone(&releaser)),
+        )
+        .with_boot_recovery(boot);
+
+        let (tx, rx) = crossbeam_channel::bounded::<()>(1);
+        let handle = thread::spawn(move || daemon.run(rx));
+        assert!(
+            wait_for_socket(&sock_path, Duration::from_secs(1)),
+            "daemon must still bind after boot recovery error"
+        );
+        tx.send(()).unwrap();
+        let result = handle.join().expect("daemon thread panicked");
+        assert!(
+            result.is_ok(),
+            "daemon must complete cleanly despite boot recovery error: {:?}",
+            result
+        );
+        assert!(
+            called.load(Ordering::SeqCst),
+            "boot recovery must be invoked"
+        );
+        // Lease release still happens on shutdown.
+        assert_eq!(releaser.calls().len(), 1);
+    }
+
+    #[test]
+    fn noop_boot_recovery_does_nothing() {
+        let boot = NoopBootRecovery;
+        boot.recover().unwrap();
     }
 }

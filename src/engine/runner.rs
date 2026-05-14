@@ -34,6 +34,9 @@ pub enum AgentEvent {
     Text {
         delta: String,
     },
+    ToolCallStarted {
+        name: String,
+    },
     ToolCall {
         name: String,
         summary: String,
@@ -69,6 +72,9 @@ mod tests {
         let events = vec![
             AgentEvent::SessionStarted,
             AgentEvent::Text { delta: "hi".into() },
+            AgentEvent::ToolCallStarted {
+                name: "Read".into(),
+            },
             AgentEvent::ToolCall {
                 name: "Read".into(),
                 summary: "/etc/hosts".into(),
@@ -86,6 +92,7 @@ mod tests {
             match ev {
                 AgentEvent::SessionStarted => {}
                 AgentEvent::Text { .. } => {}
+                AgentEvent::ToolCallStarted { .. } => {}
                 AgentEvent::ToolCall { .. } => {}
                 AgentEvent::TurnCompleted { .. } => {}
                 AgentEvent::SubprocessExited { .. } => {}

@@ -148,6 +148,30 @@ fn default_metadata_push_interval_ms() -> u64 {
     30_000
 }
 
+fn default_stall_timeout_ms() -> u64 {
+    300_000
+}
+
+fn default_max_turns() -> u32 {
+    20
+}
+
+fn default_max_failure_attempts() -> u32 {
+    5
+}
+
+fn default_max_retry_backoff_ms() -> u64 {
+    300_000
+}
+
+fn default_handoff_states() -> Vec<String> {
+    vec!["in-review".to_string()]
+}
+
+fn default_continuation_delay_ms() -> u64 {
+    1_000
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeConfig {
     #[serde(default = "default_claude_binary")]
@@ -214,6 +238,18 @@ pub struct OrchestrationConfig {
     pub heartbeat_interval_ms: u64,
     #[serde(default = "default_metadata_push_interval_ms")]
     pub metadata_push_interval_ms: u64,
+    #[serde(default = "default_stall_timeout_ms")]
+    pub stall_timeout_ms: u64,
+    #[serde(default = "default_max_turns")]
+    pub max_turns: u32,
+    #[serde(default = "default_max_failure_attempts")]
+    pub max_failure_attempts: u32,
+    #[serde(default = "default_max_retry_backoff_ms")]
+    pub max_retry_backoff_ms: u64,
+    #[serde(default = "default_handoff_states")]
+    pub handoff_states: Vec<String>,
+    #[serde(default = "default_continuation_delay_ms")]
+    pub continuation_delay_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1118,6 +1154,36 @@ pattern = "{type}-{n:03}-{title}.md"
         assert_eq!(orch.active_statuses, vec!["todo", "in-progress"]);
         assert_eq!(orch.heartbeat_interval_ms, 300_000);
         assert_eq!(orch.metadata_push_interval_ms, 30_000);
+        assert_eq!(orch.stall_timeout_ms, 300_000);
+        assert_eq!(orch.max_turns, 20);
+        assert_eq!(orch.max_failure_attempts, 5);
+        assert_eq!(orch.max_retry_backoff_ms, 300_000);
+        assert_eq!(orch.handoff_states, vec!["in-review"]);
+        assert_eq!(orch.continuation_delay_ms, 1_000);
+    }
+
+    #[test]
+    fn orchestration_reconcile_retry_explicit_values_roundtrip() {
+        let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[orchestration]
+stall_timeout_ms = 60000
+max_turns = 50
+max_failure_attempts = 3
+max_retry_backoff_ms = 120000
+handoff_states = ["in-review", "needs-human"]
+continuation_delay_ms = 500
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let orch = config.orchestration.unwrap();
+        assert_eq!(orch.stall_timeout_ms, 60_000);
+        assert_eq!(orch.max_turns, 50);
+        assert_eq!(orch.max_failure_attempts, 3);
+        assert_eq!(orch.max_retry_backoff_ms, 120_000);
+        assert_eq!(orch.handoff_states, vec!["in-review", "needs-human"]);
+        assert_eq!(orch.continuation_delay_ms, 500);
     }
 
     #[test]

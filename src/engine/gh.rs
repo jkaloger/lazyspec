@@ -537,6 +537,7 @@ pub mod test_support {
         pub last_create_body: RefCell<Option<String>>,
         pub next_issue_number: Cell<u64>,
         pub known_users: RefCell<Option<HashSet<String>>>,
+        #[allow(clippy::type_complexity)]
         pub assignees_calls: RefCell<Vec<(String, u64, Vec<String>, Vec<String>)>>,
     }
 
@@ -1072,15 +1073,15 @@ mod tests {
     #[test]
     fn mock_user_exists_returns_true_by_default() {
         let client = MockGhClient::new();
-        assert_eq!(client.user_exists("anyone").unwrap(), true);
+        assert!(client.user_exists("anyone").unwrap());
     }
 
     #[test]
     fn mock_user_exists_honors_known_set() {
         let client = MockGhClient::new().with_known_users(["alice", "bob"]);
-        assert_eq!(client.user_exists("alice").unwrap(), true);
-        assert_eq!(client.user_exists("bob").unwrap(), true);
-        assert_eq!(client.user_exists("ghost").unwrap(), false);
+        assert!(client.user_exists("alice").unwrap());
+        assert!(client.user_exists("bob").unwrap());
+        assert!(!client.user_exists("ghost").unwrap());
     }
 
     #[test]

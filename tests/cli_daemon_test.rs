@@ -46,7 +46,6 @@ impl DaemonHandle {
         }
         None
     }
-
 }
 
 impl Drop for DaemonHandle {
