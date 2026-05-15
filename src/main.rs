@@ -2,7 +2,7 @@ use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 use lazyspec::cli::provenance::ProvenanceCommand;
 use lazyspec::cli::reservations::ReservationsCommand;
-use lazyspec::cli::{Cli, Commands};
+use lazyspec::cli::{Cli, Commands, DaemonCmd};
 use lazyspec::engine::config::{Config, StoreBackend};
 use lazyspec::engine::fs::RealFileSystem;
 use lazyspec::engine::gh::GhCli;
@@ -450,9 +450,30 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Some(Commands::Daemon) => {
-            lazyspec::cli::daemon::run(&cwd, &config)?;
-        }
+        Some(Commands::Daemon { cmd }) => match cmd {
+            None => lazyspec::cli::daemon::run(&cwd, &config)?,
+            Some(DaemonCmd::Status { json }) => {
+                match lazyspec::cli::daemon::status::run(&cwd, json) {
+                    Ok(()) => {}
+                    Err(lazyspec::cli::daemon::status::DaemonStatusError::NotRunning) => {
+                        if json {
+                            println!("{}", serde_json::json!({"error": "daemon not running"}));
+                        } else {
+                            eprintln!("daemon not running");
+                        }
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        if json {
+                            println!("{}", serde_json::json!({"error": e.to_string()}));
+                            std::process::exit(1);
+                        } else {
+                            return Err(anyhow::anyhow!(e));
+                        }
+                    }
+                }
+            }
+        },
         Some(Commands::Heartbeat {
             doc_id,
             agent_id,

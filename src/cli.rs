@@ -341,12 +341,18 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Run the orchestration daemon in the foreground.
+    /// Run the orchestration daemon in the foreground, or query a running daemon.
     ///
-    /// Blocks until interrupted (SIGTERM/SIGINT). The daemon binds a unix socket at
-    /// `.lazyspec/daemon.sock` and releases this host's RFC-035 leases on shutdown.
-    /// Run under your process supervisor of choice (systemd, launchd, foreman, etc.).
-    Daemon,
+    /// Without a subcommand, blocks until interrupted (SIGTERM/SIGINT). The daemon
+    /// binds a unix socket at `.lazyspec/daemon.sock` and releases this host's
+    /// RFC-035 leases on shutdown. Run under your process supervisor of choice.
+    ///
+    /// Subcommands:
+    ///   status — query a running daemon for a snapshot of active agents.
+    Daemon {
+        #[command(subcommand)]
+        cmd: Option<DaemonCmd>,
+    },
     /// Extend the expiry of a held lease
     Heartbeat {
         /// Document ID (e.g. STORY-108, RFC-035)
@@ -358,6 +364,19 @@ pub enum Commands {
         /// Skip heartbeat if last run within duration (e.g. 15m). State in .lazyspec/state/
         #[arg(long)]
         min_interval: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DaemonCmd {
+    /// Query a running daemon for a snapshot of active agents.
+    ///
+    /// Connects to the daemon's unix socket. Exits non-zero with
+    /// "daemon not running" if no daemon is reachable.
+    Status {
         /// Output as JSON
         #[arg(long)]
         json: bool,

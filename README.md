@@ -140,6 +140,7 @@ All document management is available as subcommands. Most accept `--json` for ma
 | `reservations list`                  | Show all reservation refs on the remote                               |
 | `reservations prune [--dry-run]`     | Remove refs for documents that already exist locally                  |
 | `daemon`                             | Run the orchestration daemon in the foreground                        |
+| `daemon status [--json]`             | Query a running daemon for a snapshot of active agents                |
 
 #### `show` Flags
 
@@ -298,6 +299,15 @@ Install at `~/Library/LaunchAgents/au.com.inlight.lazyspec.plist` and load with 
 ### Stopping
 
 There is no `lazyspec daemon stop` subcommand. Stop the daemon through its supervisor: `systemctl stop lazyspec`, `launchctl unload ~/Library/LaunchAgents/au.com.inlight.lazyspec.plist`, or `kill <pid>`. Both SIGTERM and SIGINT trigger graceful shutdown.
+
+### Querying status
+
+```bash
+lazyspec daemon status            # human-readable table
+lazyspec daemon status --json     # JSON array of agent snapshots
+```
+
+Connects to `.lazyspec/daemon.sock` and prints a snapshot of currently active agents. Does not spawn a daemon: if the socket is missing or unreachable, the command prints `daemon not running` to stderr and exits with status 1 (or stdout `{"error":"daemon not running"}` with `--json`).
 
 ### Startup sequence
 

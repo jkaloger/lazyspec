@@ -1,5 +1,6 @@
 use crate::cli::resolve::resolve_shorthand_or_path;
 use crate::engine::config::Config;
+use crate::engine::ipc::DAEMON_SOCKET_REL_PATH;
 use crate::engine::store::Store;
 use anyhow::{bail, Result};
 use serde::Serialize;
@@ -72,13 +73,11 @@ pub fn run(root: &Path, doc_id: &str, user: Option<&str>, json: bool) -> Result<
     Ok(())
 }
 
-pub const DAEMON_SOCKET: &str = ".lazyspec/daemon.sock";
-
 fn send_kick(root: &Path) {
     use crate::engine::ipc::framing::write_msg;
     use crate::engine::ipc::protocol::ClientMessage;
     use std::os::unix::net::UnixStream;
-    let path = root.join(DAEMON_SOCKET);
+    let path = root.join(DAEMON_SOCKET_REL_PATH);
     if let Ok(mut stream) = UnixStream::connect(&path) {
         let _ = write_msg(&mut stream, &ClientMessage::Kick);
     }
@@ -157,7 +156,7 @@ mod tests {
 
         let td = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(td.path().join(".lazyspec")).unwrap();
-        let sock_path = td.path().join(DAEMON_SOCKET);
+        let sock_path = td.path().join(DAEMON_SOCKET_REL_PATH);
         let listener = UnixListener::bind(&sock_path).unwrap();
 
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
@@ -189,7 +188,7 @@ mod tests {
     fn send_kick_no_op_when_socket_path_is_not_a_socket() {
         let td = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(td.path().join(".lazyspec")).unwrap();
-        std::fs::write(td.path().join(DAEMON_SOCKET), b"not a socket").unwrap();
+        std::fs::write(td.path().join(DAEMON_SOCKET_REL_PATH), b"not a socket").unwrap();
         // UnixStream::connect should error; send_kick must swallow.
         send_kick(td.path());
     }
