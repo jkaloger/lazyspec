@@ -1,7 +1,7 @@
 ---
 title: TUI agents view
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-05-12
 tags: []

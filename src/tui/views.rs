@@ -6,7 +6,7 @@ mod panels;
 pub mod status_bar;
 
 pub use colors::{status_color, tag_color};
-pub use layout::{calculate_image_height, wrapped_line_count, wrapped_lines_total};
+pub use layout::{calculate_image_height, format_elapsed, wrapped_line_count, wrapped_lines_total};
 
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
@@ -23,7 +23,7 @@ use crate::tui::state::{App, ViewMode};
 use status_bar::draw_status_bar;
 
 #[cfg(feature = "agent")]
-use overlays::draw_agent_dialog;
+use overlays::{draw_agent_dialog, draw_kickoff_picker};
 use overlays::{
     draw_create_form, draw_delete_confirm, draw_gh_conflict, draw_help_overlay, draw_link_editor,
     draw_provenance_editor, draw_search_overlay, draw_status_picker, draw_warnings_panel,
@@ -227,6 +227,11 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
     #[cfg(feature = "agent")]
     if app.agent_dialog.active {
         draw_agent_dialog(f, app);
+    }
+
+    #[cfg(feature = "agent")]
+    if app.kickoff_picker.active {
+        draw_kickoff_picker(f, app);
     }
 
     if app.gh_conflict_message.is_some() {
@@ -553,5 +558,119 @@ mod tests {
         let (text, color) = sync_indicator_text(125, 120);
         assert_eq!(text, "synced 2m ago");
         assert_eq!(color, Color::Yellow);
+    }
+
+    use super::format_elapsed;
+    use std::time::Duration;
+
+    #[test]
+    fn format_elapsed_seconds() {
+        assert_eq!(format_elapsed(Duration::from_secs(5)), "5s");
+    }
+
+    #[test]
+    fn format_elapsed_minutes_seconds() {
+        assert_eq!(format_elapsed(Duration::from_secs(125)), "2m05s");
+    }
+
+    #[test]
+    fn format_elapsed_hours_minutes() {
+        assert_eq!(format_elapsed(Duration::from_secs(3900)), "1h05m");
+    }
+
+    #[test]
+    fn format_elapsed_days() {
+        assert_eq!(format_elapsed(Duration::from_secs(90_000)), "1d");
+    }
+
+    #[test]
+    fn format_elapsed_zero() {
+        assert_eq!(format_elapsed(Duration::from_secs(0)), "0s");
+    }
+
+    #[cfg(feature = "agent")]
+    mod agent_row {
+        use super::cell_debug;
+        use super::super::panels;
+        use crate::engine::agent_metadata::AgentStatus;
+        use std::time::Duration;
+
+        #[test]
+        fn agent_row_cells_contain_status_icon_for_running() {
+            let cells = panels::agent_row_cells_for_test(
+                Some(AgentStatus::Running),
+                "sess-1",
+                "STORY-1",
+                Duration::from_secs(0),
+                0,
+                0,
+            );
+            let dbg = cell_debug(&cells[0]);
+            assert!(
+                dbg.contains("●"),
+                "running status cell should contain ● icon, got: {}",
+                dbg
+            );
+        }
+
+        #[test]
+        fn agent_row_cells_show_short_session_id() {
+            let cells = panels::agent_row_cells_for_test(
+                Some(AgentStatus::Running),
+                "abcdef12-9999-9999",
+                "STORY-1",
+                Duration::from_secs(0),
+                0,
+                0,
+            );
+            let dbg = cell_debug(&cells[1]);
+            assert!(
+                dbg.contains("abcdef12"),
+                "session cell should contain short session id, got: {}",
+                dbg
+            );
+        }
+
+        #[test]
+        fn agent_row_cells_show_doc_id_and_tokens() {
+            let cells = panels::agent_row_cells_for_test(
+                Some(AgentStatus::Running),
+                "sess-1",
+                "STORY-1",
+                Duration::from_secs(0),
+                100,
+                200,
+            );
+            let doc_dbg = cell_debug(&cells[2]);
+            assert!(
+                doc_dbg.contains("STORY-1"),
+                "doc cell should contain doc id, got: {}",
+                doc_dbg
+            );
+            let tokens_dbg = cell_debug(&cells[4]);
+            assert!(
+                tokens_dbg.contains("100/200"),
+                "tokens cell should contain 100/200, got: {}",
+                tokens_dbg
+            );
+        }
+
+        #[test]
+        fn agent_row_cells_handle_absent_status() {
+            let cells = panels::agent_row_cells_for_test(
+                None,
+                "sess-1",
+                "STORY-1",
+                Duration::from_secs(0),
+                0,
+                0,
+            );
+            let dbg = cell_debug(&cells[0]);
+            assert!(
+                dbg.contains("○"),
+                "absent status should render ○ idle icon, got: {}",
+                dbg
+            );
+        }
     }
 }

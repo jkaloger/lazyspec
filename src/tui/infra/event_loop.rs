@@ -233,6 +233,14 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
         }
         #[cfg(feature = "agent")]
         AppEvent::AgentFinished => {}
+        #[cfg(feature = "agent")]
+        AppEvent::AgentsDaemonMessage(msg) => {
+            app.agents_view.apply(msg);
+        }
+        #[cfg(feature = "agent")]
+        AppEvent::AgentsConnectionChanged(state) => {
+            app.agents_view.set_connection(state);
+        }
     }
 }
 
@@ -321,6 +329,34 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         if full.exists() {
             _watcher.watch(&full, RecursiveMode::NonRecursive)?;
         }
+    }
+
+    #[cfg(feature = "agent")]
+    {
+        let socket_path = root.join(".lazyspec").join("daemon.sock");
+        let (msg_rx, state_rx) =
+            crate::engine::ipc::default_subscriber(socket_path).events_with_state();
+        let bridge_tx = tx.clone();
+        std::thread::spawn(move || loop {
+            crossbeam_channel::select! {
+                recv(msg_rx) -> got => match got {
+                    Ok(msg) => {
+                        if bridge_tx.send(AppEvent::AgentsDaemonMessage(msg)).is_err() {
+                            return;
+                        }
+                    }
+                    Err(_) => return,
+                },
+                recv(state_rx) -> got => match got {
+                    Ok(state) => {
+                        if bridge_tx.send(AppEvent::AgentsConnectionChanged(state)).is_err() {
+                            return;
+                        }
+                    }
+                    Err(_) => return,
+                },
+            }
+        });
     }
 
     // Dedicated terminal input thread: sends key events through the unified channel.
@@ -498,28 +534,6 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                     });
                 }
             }
-            app.refresh_validation(config);
-        }
-
-        #[cfg(feature = "agent")]
-        if let Some(session_id) = app.resume_request.take() {
-            let _stdin_guard = stdin_lock.lock().unwrap();
-            while rx.try_recv().is_ok() {}
-
-            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-            disable_raw_mode()?;
-            let _ = Command::new("claude")
-                .args(["--resume", &session_id])
-                .status();
-            enable_raw_mode()?;
-            execute!(terminal.backend_mut(), EnterAlternateScreen)?;
-            terminal.clear()?;
-
-            drain_stdin();
-            while rx.try_recv().is_ok() {}
-            drop(_stdin_guard);
-            let root = app.store.root().to_path_buf();
-            app.store = Store::load(&root, config)?;
             app.refresh_validation(config);
         }
 

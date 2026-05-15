@@ -84,6 +84,22 @@ fn is_transient(e: &io::Error) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionState {
+    Connected,
+    Reconnecting,
+}
+
+pub fn default_subscriber(
+    socket_path: PathBuf,
+) -> ReconnectingSubscriber<SocketConnector, ThreadSleeper> {
+    ReconnectingSubscriber::new(
+        SocketConnector::new(socket_path),
+        ThreadSleeper,
+        BackoffSchedule::new(250, 5000),
+    )
+}
+
 pub struct ReconnectingSubscriber<C: Connector, S: Sleeper> {
     connector: C,
     sleeper: S,
@@ -108,10 +124,26 @@ impl<C: Connector, S: Sleeper> ReconnectingSubscriber<C, S> {
         } = self;
 
         std::thread::spawn(move || {
-            run_loop(connector, sleeper, &mut backoff, tx);
+            run_loop(connector, sleeper, &mut backoff, tx, None);
         });
 
         rx
+    }
+
+    pub fn events_with_state(self) -> (Receiver<DaemonMessage>, Receiver<ConnectionState>) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (state_tx, state_rx) = crossbeam_channel::unbounded();
+        let ReconnectingSubscriber {
+            connector,
+            sleeper,
+            mut backoff,
+        } = self;
+
+        std::thread::spawn(move || {
+            run_loop(connector, sleeper, &mut backoff, tx, Some(state_tx));
+        });
+
+        (rx, state_rx)
     }
 }
 
@@ -120,11 +152,19 @@ fn run_loop<C: Connector, S: Sleeper>(
     sleeper: S,
     backoff: &mut BackoffSchedule,
     tx: Sender<DaemonMessage>,
+    state_tx: Option<Sender<ConnectionState>>,
 ) {
+    let emit_state = |s: ConnectionState| {
+        if let Some(tx) = state_tx.as_ref() {
+            let _ = tx.send(s);
+        }
+    };
+
     loop {
         let stream = match connector.connect() {
             Ok(s) => s,
             Err(e) if is_transient(&e) => {
+                emit_state(ConnectionState::Reconnecting);
                 sleeper.sleep(backoff.next());
                 continue;
             }
@@ -137,9 +177,12 @@ fn run_loop<C: Connector, S: Sleeper>(
         };
 
         if framing::write_msg(&mut writer, &ClientMessage::Subscribe).is_err() {
+            emit_state(ConnectionState::Reconnecting);
             sleeper.sleep(backoff.next());
             continue;
         }
+
+        emit_state(ConnectionState::Connected);
 
         loop {
             match framing::read_msg::<_, DaemonMessage>(&mut reader) {
@@ -149,6 +192,7 @@ fn run_loop<C: Connector, S: Sleeper>(
                     }
                 }
                 Ok(None) => {
+                    emit_state(ConnectionState::Reconnecting);
                     sleeper.sleep(backoff.next());
                     break;
                 }
@@ -158,6 +202,7 @@ fn run_loop<C: Connector, S: Sleeper>(
                         .map(is_transient)
                         .unwrap_or(false);
                     if transient {
+                        emit_state(ConnectionState::Reconnecting);
                         sleeper.sleep(backoff.next());
                         break;
                     } else {
@@ -537,5 +582,166 @@ mod tests {
 
         *feeder_stop.lock().unwrap() = true;
         feeder.join().ok();
+    }
+
+    #[test]
+    fn state_channel_emits_connected_then_reconnecting_on_eof() {
+        // First connection: one event then EOF -> Connected then Reconnecting.
+        // Second connect attempt exhausts script with PermissionDenied -> terminates.
+        let incoming = Arc::new(Mutex::new(encode_event("a1", "hi")));
+        let outgoing = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let eof = Arc::new(Mutex::new(true));
+
+        let connector = ScriptedConnector {
+            script: Arc::new(Mutex::new(vec![Outcome::Stream {
+                incoming: Arc::clone(&incoming),
+                outgoing: Arc::clone(&outgoing),
+                eof_signal: Arc::clone(&eof),
+            }])),
+            attempts: Arc::new(Mutex::new(0)),
+            on_exhaust: ErrorKind::PermissionDenied,
+        };
+        let sleeper = RecordingSleeper {
+            sleeps: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        let sub = ReconnectingSubscriber::new(connector, sleeper, BackoffSchedule::new(10, 50));
+        let (rx, state_rx) = sub.events_with_state();
+
+        let _ = rx.recv_timeout(Duration::from_secs(2)).expect("event");
+
+        let first = state_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first state");
+        assert_eq!(first, ConnectionState::Connected);
+
+        let second = state_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second state");
+        assert_eq!(second, ConnectionState::Reconnecting);
+    }
+
+    #[test]
+    fn subscriber_resumes_streaming_after_transient_drop() {
+        // First stream: emits "first" then EOF -> Reconnecting -> backoff
+        // Second stream: emits "second" then EOF
+        // Third connect attempt exhausts -> PermissionDenied -> permanent exit.
+        let in1 = Arc::new(Mutex::new(encode_event("a1", "first")));
+        let out1 = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let eof1 = Arc::new(Mutex::new(true));
+
+        let in2 = Arc::new(Mutex::new(encode_event("a2", "second")));
+        let out2 = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let eof2 = Arc::new(Mutex::new(true));
+
+        let connector = ScriptedConnector {
+            script: Arc::new(Mutex::new(vec![
+                Outcome::Stream {
+                    incoming: Arc::clone(&in1),
+                    outgoing: Arc::clone(&out1),
+                    eof_signal: Arc::clone(&eof1),
+                },
+                Outcome::Stream {
+                    incoming: Arc::clone(&in2),
+                    outgoing: Arc::clone(&out2),
+                    eof_signal: Arc::clone(&eof2),
+                },
+            ])),
+            attempts: Arc::new(Mutex::new(0)),
+            on_exhaust: ErrorKind::PermissionDenied,
+        };
+        let sleeps = Arc::new(Mutex::new(Vec::new()));
+        let sleeper = RecordingSleeper {
+            sleeps: Arc::clone(&sleeps),
+        };
+
+        let sub = ReconnectingSubscriber::new(connector, sleeper, BackoffSchedule::new(10, 50));
+        let (rx, state_rx) = sub.events_with_state();
+
+        let first = rx.recv_timeout(Duration::from_secs(2)).expect("first event");
+        match first {
+            DaemonMessage::AgentEvent { event, .. } => match event {
+                AgentEvent::Text { delta } => assert_eq!(delta, "first"),
+                other => panic!("unexpected event: {other:?}"),
+            },
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        let second = rx.recv_timeout(Duration::from_secs(2)).expect("second event");
+        match second {
+            DaemonMessage::AgentEvent { event, .. } => match event {
+                AgentEvent::Text { delta } => assert_eq!(delta, "second"),
+                other => panic!("unexpected event: {other:?}"),
+            },
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        // Event channel closes cleanly after permanent error.
+        let closed = rx.recv_timeout(Duration::from_secs(2));
+        assert!(closed.is_err(), "event channel should close cleanly");
+
+        // Collect state transitions. The thread has exited (event channel
+        // closed) so the state sender is dropped; draining yields all states.
+        let mut states = Vec::new();
+        while let Ok(s) = state_rx.recv_timeout(Duration::from_millis(200)) {
+            states.push(s);
+        }
+        assert_eq!(
+            states,
+            vec![
+                ConnectionState::Connected,
+                ConnectionState::Reconnecting,
+                ConnectionState::Connected,
+                ConnectionState::Reconnecting,
+            ],
+            "expected Connected -> Reconnecting -> Connected -> Reconnecting"
+        );
+    }
+
+    #[test]
+    fn state_channel_drop_does_not_break_event_stream() {
+        let in1 = Arc::new(Mutex::new(encode_event("a1", "first")));
+        let out1 = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let eof1 = Arc::new(Mutex::new(true));
+
+        let in2 = Arc::new(Mutex::new(encode_event("a2", "second")));
+        let out2 = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let eof2 = Arc::new(Mutex::new(true));
+
+        let connector = ScriptedConnector {
+            script: Arc::new(Mutex::new(vec![
+                Outcome::Stream {
+                    incoming: Arc::clone(&in1),
+                    outgoing: Arc::clone(&out1),
+                    eof_signal: Arc::clone(&eof1),
+                },
+                Outcome::Stream {
+                    incoming: Arc::clone(&in2),
+                    outgoing: Arc::clone(&out2),
+                    eof_signal: Arc::clone(&eof2),
+                },
+            ])),
+            attempts: Arc::new(Mutex::new(0)),
+            on_exhaust: ErrorKind::PermissionDenied,
+        };
+        let sleeper = RecordingSleeper {
+            sleeps: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        let sub = ReconnectingSubscriber::new(connector, sleeper, BackoffSchedule::new(10, 50));
+        let (rx, state_rx) = sub.events_with_state();
+
+        drop(state_rx);
+
+        let first = rx.recv_timeout(Duration::from_secs(2)).expect("first");
+        let second = rx.recv_timeout(Duration::from_secs(2)).expect("second");
+        match first {
+            DaemonMessage::AgentEvent { agent_id, .. } => assert_eq!(agent_id, "a1"),
+            other => panic!("unexpected: {other:?}"),
+        }
+        match second {
+            DaemonMessage::AgentEvent { agent_id, .. } => assert_eq!(agent_id, "a2"),
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }

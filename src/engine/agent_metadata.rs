@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use super::git_ref::GitRefOps;
 use super::lease::fetch_ref_optional;
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     Running,
@@ -66,8 +66,46 @@ impl<G: GitRefOps> GitRefAgentMetadata<G> {
     }
 }
 
+pub(crate) const AGENT_REF_PREFIX: &str = "refs/lazyspec/agents/";
+
 fn agent_ref(session_id: &str) -> String {
-    format!("refs/lazyspec/agents/{}", session_id)
+    format!("{AGENT_REF_PREFIX}{session_id}")
+}
+
+/// List every session id with a metadata ref under `refs/lazyspec/agents/*`.
+///
+/// Used by the TUI offline fallback (RFC-041 graceful degradation): when the
+/// daemon is unreachable, the agents view enumerates historical sessions from
+/// git refs directly.
+pub fn list_agent_sessions<G: GitRefOps>(git: &G, root: &Path) -> Result<Vec<String>> {
+    let pattern = format!("{AGENT_REF_PREFIX}*");
+    let refs = git.list_refs(root, &pattern)?;
+    let mut ids: Vec<String> = refs
+        .into_iter()
+        .filter_map(|(refname, _sha)| {
+            refname
+                .strip_prefix(AGENT_REF_PREFIX)
+                .map(|s| s.to_string())
+        })
+        .collect();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
+/// Load metadata for every session enumerated from `refs/lazyspec/agents/*`.
+/// Sessions whose ref exists but resolves to `None` are silently skipped.
+pub fn load_all_agent_metadata<G: GitRefOps>(
+    git: &G,
+    root: &Path,
+) -> Result<Vec<AgentMetadata>> {
+    let mut out = Vec::new();
+    for session_id in list_agent_sessions(git, root)? {
+        if let Some(meta) = read_agent_metadata(git, root, &session_id)? {
+            out.push(meta);
+        }
+    }
+    Ok(out)
 }
 
 impl<G: GitRefOps> GitRefAgentMetadata<G> {
@@ -853,6 +891,152 @@ mod tests {
             .unwrap()
             .expect("reader B should see metadata after fetch");
         assert_eq!(got, metadata);
+    }
+
+    /// Fake tailored to `list_agent_sessions` / `load_all_agent_metadata`.
+    /// Maps refname -> (sha, blob JSON). list_refs filters by prefix.
+    #[derive(Default)]
+    struct ListFake {
+        entries: Mutex<HashMap<String, (String, String)>>,
+    }
+
+    impl ListFake {
+        fn add(&self, refname: &str, sha: &str, blob: &str) {
+            self.entries
+                .lock()
+                .unwrap()
+                .insert(refname.to_string(), (sha.to_string(), blob.to_string()));
+        }
+    }
+
+    impl GitRefOps for ListFake {
+        fn resolve_ref(&self, _root: &Path, refname: &str) -> Result<Option<String>> {
+            Ok(self
+                .entries
+                .lock()
+                .unwrap()
+                .get(refname)
+                .map(|(sha, _)| sha.clone()))
+        }
+        fn list_refs(&self, _root: &Path, pattern: &str) -> Result<Vec<(String, String)>> {
+            let prefix = pattern.trim_end_matches('*');
+            Ok(self
+                .entries
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(refname, _)| refname.starts_with(prefix))
+                .map(|(refname, (sha, _))| (refname.clone(), sha.clone()))
+                .collect())
+        }
+        fn read_ref_blob(&self, _root: &Path, sha: &str, _path: &str) -> Result<String> {
+            self.entries
+                .lock()
+                .unwrap()
+                .values()
+                .find(|(s, _)| s == sha)
+                .map(|(_, blob)| blob.clone())
+                .ok_or_else(|| anyhow::anyhow!("no blob for sha {}", sha))
+        }
+        fn create_commit(
+            &self,
+            _root: &Path,
+            _refname: &str,
+            _files: &[(&str, &str)],
+            _parent: Option<&str>,
+        ) -> Result<String> {
+            bail!("unused")
+        }
+        fn create_ref_commit(
+            &self,
+            _root: &Path,
+            _refname: &str,
+            _files: &[(&str, &str)],
+        ) -> Result<String> {
+            bail!("unused")
+        }
+        fn update_ref(
+            &self,
+            _root: &Path,
+            _refname: &str,
+            _new_sha: &str,
+            _old_sha: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn delete_ref(&self, _root: &Path, _refname: &str) -> Result<()> {
+            Ok(())
+        }
+        fn fetch_refs(&self, _root: &Path, _remote: &str, _pattern: &str) -> Result<()> {
+            Ok(())
+        }
+        fn push_ref(&self, _root: &Path, _remote: &str, _refname: &str) -> Result<()> {
+            Ok(())
+        }
+        fn delete_remote_ref(
+            &self,
+            _root: &Path,
+            _remote: &str,
+            _refname: &str,
+            _expected_old: Option<&str>,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn push_ref_with_lease(
+            &self,
+            _root: &Path,
+            _remote: &str,
+            _refname: &str,
+            _new_sha: &str,
+            _expected_old: Option<&str>,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn read_commit_timestamp(&self, _root: &Path, _sha: &str) -> Result<DateTime<Utc>> {
+            bail!("unused")
+        }
+    }
+
+    #[test]
+    fn list_agent_sessions_extracts_ids_from_refs() {
+        let fake = ListFake::default();
+        fake.add("refs/lazyspec/agents/sess-a", "sha1", "");
+        fake.add("refs/lazyspec/agents/sess-b", "sha2", "");
+
+        let ids = list_agent_sessions(&fake, &dummy_root()).unwrap();
+        assert_eq!(ids, vec!["sess-a".to_string(), "sess-b".to_string()]);
+    }
+
+    #[test]
+    fn list_agent_sessions_handles_empty() {
+        let fake = ListFake::default();
+        let ids = list_agent_sessions(&fake, &dummy_root()).unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn load_all_agent_metadata_reads_each_session() {
+        let fake = ListFake::default();
+        let mut a = sample_metadata(AgentStatus::Running);
+        a.session_id = "sess-a".to_string();
+        let mut b = sample_metadata(AgentStatus::Crashed);
+        b.session_id = "sess-b".to_string();
+        fake.add(
+            "refs/lazyspec/agents/sess-a",
+            "sha-a",
+            &serde_json::to_string(&a).unwrap(),
+        );
+        fake.add(
+            "refs/lazyspec/agents/sess-b",
+            "sha-b",
+            &serde_json::to_string(&b).unwrap(),
+        );
+
+        let got = load_all_agent_metadata(&fake, &dummy_root()).unwrap();
+        assert_eq!(got.len(), 2);
+        let ids: Vec<&str> = got.iter().map(|m| m.session_id.as_str()).collect();
+        assert!(ids.contains(&"sess-a"));
+        assert!(ids.contains(&"sess-b"));
     }
 
     #[test]

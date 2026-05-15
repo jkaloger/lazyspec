@@ -15,15 +15,7 @@ use super::colors::status_color;
 pub fn draw_help_overlay(f: &mut Frame) {
     let area = f.area();
 
-    let popup_width = 50.min(area.width.saturating_sub(4));
-    let popup_height = 27.min(area.height.saturating_sub(4));
-    let x = (area.width.saturating_sub(popup_width)) / 2;
-    let y = (area.height.saturating_sub(popup_height)) / 2;
-    let popup_area = Rect::new(x, y, popup_width, popup_height);
-
-    f.render_widget(Clear, popup_area);
-
-    let help_text = vec![
+    let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
             "Keybindings",
             Style::default()
@@ -55,19 +47,45 @@ pub fn draw_help_overlay(f: &mut Frame) {
         Line::from(""),
         Line::from("  r         Add relation"),
         Line::from("  p         Add provenance entry"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Fullscreen",
+    ];
+
+    #[cfg(feature = "agent")]
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Agents view",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from("  j/k       Scroll"),
-        Line::from("  Esc/q     Back to dashboard"),
-    ];
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from("  j/k       Select agent"));
+        lines.push(Line::from("  C-d/C-u   Half-page jump"));
+        lines.push(Line::from("  e         Open agent's document"));
+        lines.push(Line::from("  n         New agent (kickoff picker)"));
+    }
 
-    let paragraph = Paragraph::new(help_text).block(
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Fullscreen",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from("  j/k       Scroll"));
+    lines.push(Line::from("  Esc/q     Back to dashboard"));
+
+    let popup_width = 50.min(area.width.saturating_sub(4));
+    let desired_height = lines.len() as u16 + 4;
+    let popup_height = desired_height.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let paragraph = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -707,4 +725,89 @@ fn display_name(path: &std::path::Path) -> &str {
         Some(name) => name,
         None => "?",
     }
+}
+
+#[cfg(feature = "agent")]
+pub fn draw_kickoff_picker(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let picker = &app.kickoff_picker;
+
+    let popup_width = ((area.width as u32 * 60) / 100) as u16;
+    let popup_height = ((area.height as u32 * 50) / 100) as u16;
+    let popup_width = popup_width.max(40).min(area.width.saturating_sub(4));
+    let popup_height = popup_height.max(10).min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    if picker.eligible.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  No eligible documents.",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  Configure [orchestration].agent_users and",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  ensure stories exist in active statuses.",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("  Filter: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(format!("{}_", picker.query)),
+        ]));
+        lines.push(Line::from(""));
+
+        let filtered = picker.filtered_indices();
+        let max_results = (popup_height as usize).saturating_sub(6);
+        for (row, idx) in filtered.iter().take(max_results).enumerate() {
+            let Some(c) = picker.eligible.get(*idx) else {
+                continue;
+            };
+            let label = format!("{}  {}", c.doc_id, c.title);
+            let prefix = if row == picker.selected { "> " } else { "  " };
+            let style = if row == picker.selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{}{}", prefix, label),
+                style,
+            )));
+        }
+
+        if filtered.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  (no matches)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  enter", Style::default().fg(Color::DarkGray)),
+        Span::raw(" assign + kick  "),
+        Span::styled("esc", Style::default().fg(Color::DarkGray)),
+        Span::raw(" cancel"),
+    ]));
+
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" Kickoff Agent "),
+    );
+    f.render_widget(paragraph, popup_area);
 }

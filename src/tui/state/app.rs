@@ -1,9 +1,13 @@
 #[cfg(feature = "agent")]
 use super::forms::AgentDialog;
+#[cfg(feature = "agent")]
+use super::forms::{KickoffFeedback, KickoffPicker};
 use super::forms::{
     CreateForm, DeleteConfirm, LinkEditor, ProvenanceEditor, StatusPicker, REL_TYPES,
 };
 use super::graph::traverse_dependency_chain;
+#[cfg(feature = "agent")]
+use crate::tui::state::agents::AgentsViewState;
 
 use crate::engine::cache::DiskCache;
 use crate::engine::config::{Config, NumberingStrategy, StoreBackend};
@@ -13,7 +17,7 @@ use crate::engine::git_status::{query_git_branch, GitStatusCache};
 use crate::engine::reservation::ReservationProgress;
 use crate::engine::store::{Filter, Store};
 #[cfg(feature = "agent")]
-use crate::tui::agent::{load_all_records, AgentSpawner};
+use crate::tui::agent::AgentSpawner;
 use crate::tui::views::status_bar::StatusBarComponents;
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
@@ -55,6 +59,10 @@ pub enum AppEvent {
     GhPushResult(Result<(), String>),
     #[cfg(feature = "agent")]
     AgentFinished,
+    #[cfg(feature = "agent")]
+    AgentsDaemonMessage(crate::engine::ipc::protocol::DaemonMessage),
+    #[cfg(feature = "agent")]
+    AgentsConnectionChanged(crate::engine::ipc::ConnectionState),
 }
 
 fn update_tags(root: &Path, relative: &Path, tags: &[String], fs: &dyn FileSystem) -> Result<()> {
@@ -213,6 +221,10 @@ pub struct App {
     pub agent_dialog: AgentDialog,
     #[cfg(feature = "agent")]
     pub agent_spawner: AgentSpawner,
+    #[cfg(feature = "agent")]
+    pub agents_view: AgentsViewState,
+    #[cfg(feature = "agent")]
+    pub kickoff_picker: KickoffPicker,
     pub view_mode: ViewMode,
     pub graph_nodes: Vec<GraphNode>,
     pub graph_selected: usize,
@@ -236,10 +248,6 @@ pub struct App {
     pub doc_list_offset: usize,
     pub doc_list_height: usize,
     pub fullscreen_height: usize,
-    #[cfg(feature = "agent")]
-    pub agent_selected_index: usize,
-    #[cfg(feature = "agent")]
-    pub resume_request: Option<String>,
     pub expanded_body_cache: HashMap<PathBuf, String>,
     pub expansion_in_flight: Option<PathBuf>,
     pub event_tx: crossbeam_channel::Sender<AppEvent>,
@@ -339,6 +347,10 @@ impl App {
             agent_dialog: AgentDialog::new(),
             #[cfg(feature = "agent")]
             agent_spawner: AgentSpawner::new(),
+            #[cfg(feature = "agent")]
+            agents_view: AgentsViewState::new(),
+            #[cfg(feature = "agent")]
+            kickoff_picker: KickoffPicker::default(),
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
@@ -362,10 +374,6 @@ impl App {
             doc_list_offset: 0,
             doc_list_height: 0,
             fullscreen_height: 0,
-            #[cfg(feature = "agent")]
-            agent_selected_index: 0,
-            #[cfg(feature = "agent")]
-            resume_request: None,
             expanded_body_cache: HashMap::new(),
             expansion_in_flight: None,
             event_tx,
@@ -424,11 +432,24 @@ impl App {
             self.selected_doc = 0;
         }
         #[cfg(feature = "agent")]
-        if self.view_mode == ViewMode::Agents {
-            if let Ok(records) = load_all_records(None) {
-                self.agent_spawner.records = records;
-            }
-            self.agent_selected_index = 0;
+        if self.view_mode == ViewMode::Agents
+            && self.agents_view.connection != crate::engine::ipc::ConnectionState::Connected
+        {
+            let root = self.store.root().to_path_buf();
+            self.refresh_agents_offline(&root);
+        }
+    }
+
+    /// Populate `agents_view` from `refs/lazyspec/agents/*` for RFC-041 offline
+    /// fallback (STORY-122 AC6). Best-effort: if git enumeration fails, leave
+    /// view state untouched -- the status bar already surfaces the daemon
+    /// connection state separately.
+    #[cfg(feature = "agent")]
+    pub fn refresh_agents_offline(&mut self, root: &Path) {
+        use crate::engine::agent_metadata::load_all_agent_metadata;
+        use crate::engine::git_ref::GitCli;
+        if let Ok(sessions) = load_all_agent_metadata(&GitCli, root) {
+            self.agents_view.load_offline(sessions);
         }
     }
 
@@ -1476,6 +1497,68 @@ impl App {
         }
     }
 
+    #[cfg(feature = "agent")]
+    pub fn open_kickoff_picker(&mut self, config: &Config) {
+        let Some(orch) = config.orchestration.as_ref() else {
+            return;
+        };
+        if orch.agent_users.is_empty() {
+            return;
+        }
+        let docs = self.store.all_docs();
+        self.kickoff_picker.eligible =
+            crate::tui::state::agents::build_kickoff_candidates(&docs, orch);
+        self.kickoff_picker.query.clear();
+        self.kickoff_picker.selected = 0;
+        self.kickoff_picker.feedback = None;
+        self.kickoff_picker.active = true;
+    }
+
+    #[cfg(feature = "agent")]
+    pub fn close_kickoff_picker(&mut self) {
+        self.kickoff_picker.active = false;
+    }
+
+    #[cfg(feature = "agent")]
+    pub fn submit_kickoff(&mut self, root: &Path, config: &Config) {
+        let Some(orch) = config.orchestration.as_ref() else {
+            return;
+        };
+        let agent_user = match orch.agent_users.first() {
+            Some(u) => u.clone(),
+            None => return,
+        };
+        let Some(candidate) = self.kickoff_picker.selected_candidate().cloned() else {
+            return;
+        };
+
+        let mut new_list = candidate.current_assignees.clone();
+        if !new_list.iter().any(|u| u == &agent_user) {
+            new_list.push(agent_user);
+        }
+
+        let res = crate::engine::assignees::set_assignees(
+            root,
+            config,
+            &candidate.type_name,
+            &candidate.doc_id,
+            &new_list,
+        );
+
+        let feedback = match res {
+            Err(e) => KickoffFeedback::Failed(e.to_string()),
+            Ok(()) => {
+                let socket_path = root.join(crate::engine::ipc::DAEMON_SOCKET_REL_PATH);
+                match crate::engine::ipc::send_kick(socket_path) {
+                    Ok(()) => KickoffFeedback::AssignedAndKicked(candidate.doc_id.clone()),
+                    Err(_) => KickoffFeedback::AssignedOnly(candidate.doc_id.clone()),
+                }
+            }
+        };
+        self.kickoff_picker.feedback = Some(feedback);
+        self.kickoff_picker.active = false;
+    }
+
     fn parse_relations(&self) -> Result<Vec<(String, std::path::PathBuf)>> {
         let related_str = self.create_form.related.trim().to_string();
         if related_str.is_empty() {
@@ -1506,12 +1589,14 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::engine::store::Store;
     use crossterm::event::{KeyCode, KeyModifiers};
+    #[cfg(feature = "agent")]
+    use tempfile::TempDir;
 
-    fn make_dummy_node(index: usize) -> DocListNode {
+    pub(crate) fn make_dummy_node(index: usize) -> DocListNode {
         DocListNode {
             path: PathBuf::from(format!("docs/rfcs/RFC-{:03}.md", index)),
             id: format!("RFC-{:03}", index),
@@ -1525,7 +1610,7 @@ mod tests {
         }
     }
 
-    fn make_test_app(doc_count: usize) -> App {
+    pub(crate) fn make_test_app(doc_count: usize) -> App {
         let store = Store {
             root: PathBuf::from("."),
             docs: HashMap::new(),
@@ -1563,6 +1648,10 @@ mod tests {
             agent_dialog: AgentDialog::new(),
             #[cfg(feature = "agent")]
             agent_spawner: AgentSpawner::new(),
+            #[cfg(feature = "agent")]
+            agents_view: AgentsViewState::new(),
+            #[cfg(feature = "agent")]
+            kickoff_picker: KickoffPicker::default(),
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
@@ -1586,10 +1675,6 @@ mod tests {
             doc_list_offset: 0,
             doc_list_height: 0,
             fullscreen_height: 0,
-            #[cfg(feature = "agent")]
-            agent_selected_index: 0,
-            #[cfg(feature = "agent")]
-            resume_request: None,
             expanded_body_cache: HashMap::new(),
             expansion_in_flight: None,
             event_tx: tx,
@@ -2049,5 +2134,158 @@ mod tests {
         app.wrap_mode = true;
         app.build_doc_tree();
         assert!(app.wrap_mode);
+    }
+
+    #[cfg(feature = "agent")]
+    #[test]
+    fn app_forwards_agents_daemon_message_to_view_state() {
+        use crate::engine::ipc::protocol::DaemonMessage;
+        use crate::engine::runner::AgentEvent;
+
+        let mut app = make_test_app(0);
+        let msg = DaemonMessage::AgentEvent {
+            agent_id: "a1".into(),
+            session_id: "s1".into(),
+            event: AgentEvent::Text {
+                delta: "hello".into(),
+            },
+        };
+        app.agents_view.apply(msg);
+        assert_eq!(
+            app.agents_view.output.get("s1").map(String::as_str),
+            Some("hello"),
+        );
+    }
+
+    #[cfg(feature = "agent")]
+    #[test]
+    fn app_forwards_connection_change_to_view_state() {
+        use crate::engine::ipc::ConnectionState;
+
+        let mut app = make_test_app(0);
+        assert_eq!(app.agents_view.connection, ConnectionState::Reconnecting);
+        app.agents_view.set_connection(ConnectionState::Connected);
+        assert_eq!(app.agents_view.connection, ConnectionState::Connected);
+    }
+
+    #[cfg(feature = "agent")]
+    mod kickoff_submit {
+        use super::*;
+        use crate::engine::document::DocMeta;
+        use crate::tui::state::forms::{KickoffCandidate, KickoffFeedback};
+        use std::fs;
+
+        const STORY_TEMPLATE: &str = r#"---
+title: "Test Story"
+type: story
+status: in-progress
+author: tester
+date: 2026-01-01
+tags: []
+assignees: __ASSIGNEES__
+---
+
+Body.
+"#;
+
+        fn setup_temp_project(initial_assignees: &str) -> (TempDir, Config) {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+
+            fs::create_dir_all(root.join("docs/stories")).unwrap();
+            let content = STORY_TEMPLATE.replace("__ASSIGNEES__", initial_assignees);
+            fs::write(root.join("docs/stories/STORY-001-test.md"), content).unwrap();
+
+            let toml = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[orchestration]
+agent_users = ["claude-bot"]
+claim_type = "story"
+active_statuses = ["todo", "in-progress"]
+"#;
+            let config = Config::parse(toml).unwrap();
+            (tmp, config)
+        }
+
+        fn make_app_with_root(root: &std::path::Path, config: &Config) -> App {
+            let mut app = make_test_app(0);
+            // Reload store from the temp dir so set_assignees can find the doc.
+            app.store = Store::load(root, config).unwrap();
+            app
+        }
+
+        fn populate_picker_with_story_001(app: &mut App, current_assignees: Vec<String>) {
+            app.kickoff_picker.eligible = vec![KickoffCandidate {
+                doc_id: "STORY-001".to_string(),
+                title: "Test Story".to_string(),
+                type_name: "story".to_string(),
+                current_assignees,
+            }];
+            app.kickoff_picker.selected = 0;
+            app.kickoff_picker.active = true;
+        }
+
+        fn read_assignees(path: &std::path::Path) -> Vec<String> {
+            let content = fs::read_to_string(path).unwrap();
+            let meta = DocMeta::parse(&content).unwrap();
+            meta.assignees
+        }
+
+        #[test]
+        fn submit_kickoff_writes_assignees_filesystem_doc() {
+            let (tmp, config) = setup_temp_project("[]");
+            let root = tmp.path();
+            let mut app = make_app_with_root(root, &config);
+            populate_picker_with_story_001(&mut app, vec![]);
+
+            app.submit_kickoff(root, &config);
+
+            let assignees = read_assignees(&root.join("docs/stories/STORY-001-test.md"));
+            assert_eq!(assignees, vec!["claude-bot".to_string()]);
+
+            // Daemon not running -> AssignedOnly.
+            match app.kickoff_picker.feedback {
+                Some(KickoffFeedback::AssignedOnly(ref id)) => assert_eq!(id, "STORY-001"),
+                ref other => panic!("expected AssignedOnly, got {other:?}"),
+            }
+            assert!(!app.kickoff_picker.active);
+        }
+
+        #[test]
+        fn submit_kickoff_appends_to_existing_assignees() {
+            let (tmp, config) = setup_temp_project("[\"someone-else\"]");
+            let root = tmp.path();
+            let mut app = make_app_with_root(root, &config);
+            populate_picker_with_story_001(&mut app, vec!["someone-else".to_string()]);
+
+            app.submit_kickoff(root, &config);
+
+            let assignees = read_assignees(&root.join("docs/stories/STORY-001-test.md"));
+            assert_eq!(
+                assignees,
+                vec!["someone-else".to_string(), "claude-bot".to_string()]
+            );
+        }
+
+        #[test]
+        fn submit_kickoff_skips_when_already_assigned() {
+            let (tmp, config) = setup_temp_project("[\"claude-bot\"]");
+            let root = tmp.path();
+            let mut app = make_app_with_root(root, &config);
+            populate_picker_with_story_001(&mut app, vec!["claude-bot".to_string()]);
+
+            app.submit_kickoff(root, &config);
+
+            let assignees = read_assignees(&root.join("docs/stories/STORY-001-test.md"));
+            assert_eq!(assignees, vec!["claude-bot".to_string()]);
+        }
     }
 }

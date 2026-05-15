@@ -216,3 +216,133 @@ impl AgentDialog {
         }
     }
 }
+
+#[cfg(feature = "agent")]
+#[derive(Debug, Clone)]
+pub struct KickoffCandidate {
+    pub doc_id: String,
+    pub title: String,
+    pub type_name: String,
+    pub current_assignees: Vec<String>,
+}
+
+#[cfg(feature = "agent")]
+#[derive(Debug, Clone)]
+pub enum KickoffFeedback {
+    AssignedAndKicked(String),
+    AssignedOnly(String),
+    Failed(String),
+}
+
+#[cfg(feature = "agent")]
+#[derive(Debug, Clone, Default)]
+pub struct KickoffPicker {
+    pub active: bool,
+    pub query: String,
+    pub eligible: Vec<KickoffCandidate>,
+    pub selected: usize,
+    pub feedback: Option<KickoffFeedback>,
+}
+
+#[cfg(feature = "agent")]
+impl KickoffPicker {
+    pub fn filtered_indices(&self) -> Vec<usize> {
+        if self.query.is_empty() {
+            return (0..self.eligible.len()).collect();
+        }
+        let q = self.query.to_lowercase();
+        self.eligible
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.doc_id.to_lowercase().contains(&q) || c.title.to_lowercase().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    pub fn selected_candidate(&self) -> Option<&KickoffCandidate> {
+        let filtered = self.filtered_indices();
+        let idx = filtered.get(self.selected)?;
+        self.eligible.get(*idx)
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "agent")]
+mod kickoff_picker_tests {
+    use super::*;
+
+    fn candidate(id: &str, title: &str) -> KickoffCandidate {
+        KickoffCandidate {
+            doc_id: id.to_string(),
+            title: title.to_string(),
+            type_name: "story".to_string(),
+            current_assignees: vec![],
+        }
+    }
+
+    #[test]
+    fn filtered_indices_returns_all_when_query_empty() {
+        let picker = KickoffPicker {
+            eligible: vec![
+                candidate("STORY-1", "Foo"),
+                candidate("STORY-2", "Bar"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(picker.filtered_indices(), vec![0, 1]);
+    }
+
+    #[test]
+    fn filtered_indices_matches_doc_id_substring() {
+        let picker = KickoffPicker {
+            eligible: vec![
+                candidate("STORY-1", "Foo"),
+                candidate("STORY-2", "Bar"),
+            ],
+            query: "story-2".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(picker.filtered_indices(), vec![1]);
+    }
+
+    #[test]
+    fn filtered_indices_matches_title_case_insensitive() {
+        let picker = KickoffPicker {
+            eligible: vec![
+                candidate("STORY-1", "Apples"),
+                candidate("STORY-2", "Oranges"),
+            ],
+            query: "APP".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(picker.filtered_indices(), vec![0]);
+    }
+
+    #[test]
+    fn selected_candidate_indexes_through_filter() {
+        let picker = KickoffPicker {
+            eligible: vec![
+                candidate("STORY-1", "Foo"),
+                candidate("STORY-2", "Bar"),
+                candidate("STORY-3", "Baz"),
+            ],
+            query: "ba".to_string(),
+            selected: 1,
+            ..Default::default()
+        };
+        let c = picker.selected_candidate().expect("present");
+        assert_eq!(c.doc_id, "STORY-3");
+    }
+
+    #[test]
+    fn selected_candidate_none_when_out_of_range() {
+        let picker = KickoffPicker {
+            eligible: vec![candidate("STORY-1", "Foo")],
+            selected: 5,
+            ..Default::default()
+        };
+        assert!(picker.selected_candidate().is_none());
+    }
+}

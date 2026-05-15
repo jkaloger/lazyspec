@@ -2,9 +2,6 @@ use crate::engine::config::Config;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::path::Path;
 
-#[cfg(feature = "agent")]
-use crate::tui::agent::AgentStatus;
-
 use crate::tui::state::forms::REL_TYPES;
 use crate::tui::state::{App, FilterField, PreviewTab, ViewMode};
 
@@ -47,6 +44,10 @@ impl App {
         #[cfg(feature = "agent")]
         if self.agent_dialog.active {
             return self.handle_agent_dialog_key(code, config);
+        }
+        #[cfg(feature = "agent")]
+        if self.kickoff_picker.active {
+            return self.handle_kickoff_picker_key(code, root, config);
         }
         if self.search_mode {
             return self.handle_search_key(code, modifiers);
@@ -343,19 +344,26 @@ impl App {
     }
 
     #[cfg(feature = "agent")]
-    fn handle_agents_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        let record_count = self.agent_spawner.records.len();
-
+    fn handle_agents_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        root: &Path,
+        config: &Config,
+    ) {
         if modifiers.contains(KeyModifiers::CONTROL) {
             match code {
                 KeyCode::Char('d') => {
-                    let jump = self.doc_list_height / 2;
-                    self.agent_selected_index =
-                        (self.agent_selected_index + jump).min(record_count.saturating_sub(1));
+                    let jump = (self.doc_list_height / 2).max(1);
+                    for _ in 0..jump {
+                        self.agents_view.select_next();
+                    }
                 }
                 KeyCode::Char('u') => {
-                    let jump = self.doc_list_height / 2;
-                    self.agent_selected_index = self.agent_selected_index.saturating_sub(jump);
+                    let jump = (self.doc_list_height / 2).max(1);
+                    for _ in 0..jump {
+                        self.agents_view.select_prev();
+                    }
                 }
                 _ => {}
             }
@@ -363,32 +371,56 @@ impl App {
         }
 
         match code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.agent_selected_index =
-                    (self.agent_selected_index + 1).min(record_count.saturating_sub(1));
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.agent_selected_index = self.agent_selected_index.saturating_sub(1);
-            }
+            KeyCode::Char('j') | KeyCode::Down => self.agents_view.select_next(),
+            KeyCode::Char('k') | KeyCode::Up => self.agents_view.select_prev(),
             KeyCode::Char('e') => {
-                if record_count > 0 {
-                    let doc_path = &self.agent_spawner.records[self.agent_selected_index].doc_path;
-                    self.editor_request = Some(self.store.root.join(doc_path));
-                }
-            }
-            KeyCode::Char('r') => {
-                if record_count > 0 {
-                    let record = &self.agent_spawner.records[self.agent_selected_index];
-                    if record.status != AgentStatus::Running {
-                        self.resume_request = Some(record.session_id.clone());
+                if let Some(sid) = self.agents_view.selected_session() {
+                    if let Some(snap) = self.agents_view.snapshots.get(sid) {
+                        let doc_id = snap.doc_id.clone();
+                        if let Some(doc) = self
+                            .store
+                            .all_docs()
+                            .into_iter()
+                            .find(|d| d.id == doc_id)
+                        {
+                            self.editor_request = Some(self.store.root.join(&doc.path));
+                        }
                     }
                 }
             }
-            KeyCode::Char('q') => {
-                self.should_quit = true;
+            KeyCode::Char('n') => self.open_kickoff_picker(config),
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('`') => self.cycle_mode(),
+            _ => {}
+        }
+        let _ = root;
+    }
+
+    #[cfg(feature = "agent")]
+    fn handle_kickoff_picker_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
+        match code {
+            KeyCode::Esc => self.close_kickoff_picker(),
+            KeyCode::Enter => self.submit_kickoff(root, config),
+            KeyCode::Backspace => {
+                self.kickoff_picker.query.pop();
+                self.kickoff_picker.selected = 0;
             }
-            KeyCode::Char('`') => {
-                self.cycle_mode();
+            KeyCode::Down | KeyCode::Char('j') => {
+                let max = self
+                    .kickoff_picker
+                    .filtered_indices()
+                    .len()
+                    .saturating_sub(1);
+                if self.kickoff_picker.selected < max {
+                    self.kickoff_picker.selected += 1;
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.kickoff_picker.selected = self.kickoff_picker.selected.saturating_sub(1);
+            }
+            KeyCode::Char(c) => {
+                self.kickoff_picker.query.push(c);
+                self.kickoff_picker.selected = 0;
             }
             _ => {}
         }
@@ -551,7 +583,7 @@ impl App {
             ViewMode::Filters => return self.handle_filters_key(code, modifiers, root),
             ViewMode::Graph => return self.handle_graph_key(code, modifiers, root),
             #[cfg(feature = "agent")]
-            ViewMode::Agents => return self.handle_agents_key(code, modifiers),
+            ViewMode::Agents => return self.handle_agents_key(code, modifiers, root, config),
             _ => {}
         }
 

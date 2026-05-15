@@ -7,6 +7,12 @@ use ratatui::{
 };
 
 use crate::engine::config::StatusBarConfig;
+#[cfg(feature = "agent")]
+use crate::engine::agent_metadata::AgentStatus;
+#[cfg(feature = "agent")]
+use crate::engine::ipc::ConnectionState;
+#[cfg(feature = "agent")]
+use crate::tui::state::agents::DataSource;
 use crate::tui::state::{App, ViewMode};
 
 pub type StatusComponent = fn(&App) -> Option<Span<'static>>;
@@ -151,6 +157,12 @@ fn lookup_component(name: &str) -> Option<StatusComponent> {
         "help_hint" => Some(help_hint_component),
         "search" => Some(search_component),
         "git_branch" => Some(git_branch_component),
+        #[cfg(feature = "agent")]
+        "agents_connection" => Some(agents_connection_component),
+        #[cfg(feature = "agent")]
+        "agents_counts" => Some(agents_counts_component),
+        #[cfg(feature = "agent")]
+        "agents_tokens" => Some(agents_tokens_component),
         _ => None,
     }
 }
@@ -200,7 +212,16 @@ impl Default for StatusBarComponents {
     fn default() -> Self {
         Self {
             left: vec![mode_component, type_filter_component, doc_count_component],
-            center: vec![warnings_component, errors_component],
+            center: vec![
+                warnings_component,
+                errors_component,
+                #[cfg(feature = "agent")]
+                agents_connection_component,
+                #[cfg(feature = "agent")]
+                agents_counts_component,
+                #[cfg(feature = "agent")]
+                agents_tokens_component,
+            ],
             right: vec![
                 git_branch_component,
                 search_component,
@@ -296,6 +317,75 @@ pub fn type_filter_component(app: &App) -> Option<Span<'static>> {
         return None;
     }
     Some(Span::raw(app.current_type().to_string()))
+}
+
+#[cfg(feature = "agent")]
+pub fn agents_connection_component(app: &App) -> Option<Span<'static>> {
+    if app.view_mode != ViewMode::Agents {
+        return None;
+    }
+    let (text, color) = if app.agents_view.source == DataSource::Offline {
+        (" offline (history) ", Color::Red)
+    } else if app.agents_view.connection == ConnectionState::Connected {
+        (" daemon: connected ", Color::Green)
+    } else {
+        (" daemon: reconnecting ", Color::Yellow)
+    };
+    Some(Span::styled(text, Style::default().fg(color)))
+}
+
+#[cfg(feature = "agent")]
+pub fn agents_counts_component(app: &App) -> Option<Span<'static>> {
+    if app.view_mode != ViewMode::Agents {
+        return None;
+    }
+    let counts = app.agents_view.counts_by_status();
+    if counts.is_empty() && app.agents_view.snapshots.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for status in [AgentStatus::Running, AgentStatus::Crashed] {
+        if let Some(&n) = counts.get(&status) {
+            if n > 0 {
+                let label = match status {
+                    AgentStatus::Running => "running",
+                    AgentStatus::Crashed => "crashed",
+                };
+                parts.push(format!("{n} {label}"));
+            }
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(Span::raw(format!(" {} ", parts.join(", "))))
+}
+
+#[cfg(feature = "agent")]
+pub fn agents_tokens_component(app: &App) -> Option<Span<'static>> {
+    if app.view_mode != ViewMode::Agents {
+        return None;
+    }
+    let (tin, tout) = app.agents_view.aggregate_tokens();
+    if tin == 0 && tout == 0 && app.agents_view.snapshots.is_empty() {
+        return None;
+    }
+    Some(Span::raw(format!(
+        " in: {} / out: {} ",
+        humanize_count(tin),
+        humanize_count(tout)
+    )))
+}
+
+#[cfg(feature = "agent")]
+fn humanize_count(n: u64) -> String {
+    if n < 1_000 {
+        format!("{n}")
+    } else if n < 1_000_000 {
+        format!("{:.1}k", (n as f64) / 1_000.0)
+    } else {
+        format!("{:.1}m", (n as f64) / 1_000_000.0)
+    }
 }
 
 #[cfg(test)]
@@ -449,5 +539,112 @@ mod tests {
 
         let line = bar.render(40);
         assert!(line.spans.is_empty(), "empty bar should have no spans");
+    }
+}
+
+#[cfg(all(test, feature = "agent"))]
+mod agent_tests {
+    use super::*;
+    use crate::engine::agent_metadata::AgentStatus;
+    use crate::engine::ipc::ConnectionState;
+    use crate::engine::ipc::protocol::AgentSnapshot;
+    use crate::tui::state::App;
+    use crate::tui::state::ViewMode;
+    use crate::tui::state::agents::DataSource;
+    use crate::tui::state::app::tests::make_test_app;
+
+    fn snap(session: &str, tin: u64, tout: u64) -> AgentSnapshot {
+        AgentSnapshot {
+            agent_id: format!("a-{session}"),
+            session_id: session.into(),
+            doc_id: "STORY-1".into(),
+            elapsed_ms: 0,
+            tokens_in: tin,
+            tokens_out: tout,
+        }
+    }
+
+    fn agents_app() -> App {
+        let mut app = make_test_app(0);
+        app.view_mode = ViewMode::Agents;
+        app
+    }
+
+    fn content(span: Option<Span<'static>>) -> String {
+        span.expect("span present").content.into_owned()
+    }
+
+    #[test]
+    fn agents_connection_component_none_when_not_agents_view() {
+        let mut app = make_test_app(0);
+        app.view_mode = ViewMode::Types;
+        assert!(agents_connection_component(&app).is_none());
+    }
+
+    #[test]
+    fn agents_connection_component_connected_in_view() {
+        let mut app = agents_app();
+        app.agents_view.source = DataSource::Live;
+        app.agents_view.connection = ConnectionState::Connected;
+        let s = content(agents_connection_component(&app));
+        assert!(s.contains("connected"), "got: {s}");
+    }
+
+    #[test]
+    fn agents_connection_component_reconnecting_in_view() {
+        let mut app = agents_app();
+        app.agents_view.source = DataSource::Live;
+        app.agents_view.connection = ConnectionState::Reconnecting;
+        let s = content(agents_connection_component(&app));
+        assert!(s.contains("reconnecting"), "got: {s}");
+    }
+
+    #[test]
+    fn agents_connection_component_offline_overrides() {
+        let mut app = agents_app();
+        app.agents_view.source = DataSource::Offline;
+        app.agents_view.connection = ConnectionState::Connected;
+        let s = content(agents_connection_component(&app));
+        assert!(s.contains("offline"), "got: {s}");
+    }
+
+    #[test]
+    fn agents_counts_component_renders_running_and_crashed() {
+        let mut app = agents_app();
+        app.agents_view
+            .statuses
+            .insert("s1".into(), AgentStatus::Running);
+        app.agents_view
+            .statuses
+            .insert("s2".into(), AgentStatus::Running);
+        app.agents_view
+            .statuses
+            .insert("s3".into(), AgentStatus::Crashed);
+        let s = content(agents_counts_component(&app));
+        assert!(s.contains("2 running"), "got: {s}");
+        assert!(s.contains("1 crashed"), "got: {s}");
+    }
+
+    #[test]
+    fn agents_counts_component_none_when_empty() {
+        let app = agents_app();
+        assert!(agents_counts_component(&app).is_none());
+    }
+
+    #[test]
+    fn agents_tokens_component_humanizes() {
+        let mut app = agents_app();
+        app.agents_view
+            .snapshots
+            .insert("s1".into(), snap("s1", 1500, 25));
+        let s = content(agents_tokens_component(&app));
+        assert!(s.contains("1.5k"), "got: {s}");
+        assert!(s.contains("25"), "got: {s}");
+    }
+
+    #[test]
+    fn agents_tokens_component_none_when_zero_and_empty() {
+        let app = agents_app();
+        assert!(agents_tokens_component(&app).is_none());
     }
 }

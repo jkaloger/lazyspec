@@ -16,7 +16,7 @@ use crate::engine::config::{Config, StoreBackend};
 use crate::engine::document::{DocMeta, RelationType, Status};
 use crate::engine::git_status::GitFileStatus;
 #[cfg(feature = "agent")]
-use crate::tui::agent::AgentStatus;
+use crate::engine::agent_metadata::AgentStatus;
 use crate::tui::state::{App, DocListNode, FilterField, PreviewTab};
 
 use super::colors::{status_color, tag_color};
@@ -1424,6 +1424,43 @@ pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect, config: &Co
 }
 
 #[cfg(feature = "agent")]
+fn agent_status_icon(status: Option<&AgentStatus>) -> (&'static str, Color) {
+    match status {
+        Some(AgentStatus::Running) => ("●", Color::Yellow),
+        Some(AgentStatus::Crashed) => ("!", Color::Red),
+        None => ("○", Color::DarkGray),
+    }
+}
+
+#[cfg(feature = "agent")]
+fn short_session(session_id: &str) -> &str {
+    session_id.split('-').next().unwrap_or(session_id)
+}
+
+#[cfg(feature = "agent")]
+fn agent_row_cells(
+    status: Option<&AgentStatus>,
+    session_id: &str,
+    doc_id: &str,
+    elapsed: std::time::Duration,
+    tokens_in: u64,
+    tokens_out: u64,
+) -> Vec<Cell<'static>> {
+    let (icon, color) = agent_status_icon(status);
+    let short = short_session(session_id);
+    vec![
+        Cell::from(Span::styled(
+            format!(" {} ", icon),
+            Style::default().fg(color),
+        )),
+        Cell::from(Span::raw(format!("{:<10.10}", short))),
+        Cell::from(Span::raw(truncate_with_ellipsis(doc_id, 12))),
+        Cell::from(Span::raw(super::layout::format_elapsed(elapsed))),
+        Cell::from(Span::raw(format!("{}/{}", tokens_in, tokens_out))),
+    ]
+}
+
+#[cfg(feature = "agent")]
 pub fn draw_agents_screen(f: &mut Frame, app: &App, area: Rect) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -1433,66 +1470,57 @@ pub fn draw_agents_screen(f: &mut Frame, app: &App, area: Rect) {
     let main_area = layout[0];
     let footer_area = layout[1];
 
-    let block = Block::default()
+    let main = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(main_area);
+
+    let left_area = main[0];
+    let right_area = main[1];
+
+    let left_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Cyan))
         .title(" Agents ");
 
-    if app.agent_spawner.records.is_empty() {
-        let paragraph = Paragraph::new(
-            "No agents have been invoked yet. Press `a` on a document to start one.",
-        )
-        .style(Style::default().fg(Color::DarkGray))
-        .alignment(ratatui::layout::Alignment::Center)
-        .block(block);
-        f.render_widget(paragraph, main_area);
+    if app.agents_view.snapshots.is_empty() {
+        let paragraph = Paragraph::new("No agents yet. Press n to start one.")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(ratatui::layout::Alignment::Center)
+            .block(left_block);
+        f.render_widget(paragraph, left_area);
     } else {
         let rows: Vec<Row> = app
-            .agent_spawner
-            .records
-            .iter()
-            .map(|record| {
-                let (icon, color) = match record.status {
-                    AgentStatus::Running => ("●", Color::Yellow),
-                    AgentStatus::Complete => ("✔", Color::Green),
-                    AgentStatus::Failed => ("✘", Color::Red),
-                };
-                Row::new(vec![
-                    Cell::from(Span::styled(
-                        format!("  {}", icon),
-                        Style::default().fg(color),
-                    )),
-                    Cell::from(Span::raw(format!(
-                        "{:<14}",
-                        record
-                            .session_id
-                            .split('-')
-                            .next()
-                            .unwrap_or(&record.session_id)
-                    ))),
-                    Cell::from(Span::raw(&*record.doc_title)),
-                    Cell::from(Span::raw(&*record.action)),
-                    Cell::from(Span::styled(
-                        &*record.started_at,
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                ])
+            .agents_view
+            .snapshots
+            .values()
+            .map(|snap| {
+                let status = app.agents_view.statuses.get(&snap.session_id);
+                let cells = agent_row_cells(
+                    status,
+                    &snap.session_id,
+                    &snap.doc_id,
+                    std::time::Duration::from_millis(snap.elapsed_ms),
+                    snap.tokens_in,
+                    snap.tokens_out,
+                );
+                Row::new(cells)
             })
             .collect();
 
         let widths = [
-            Constraint::Length(4),
-            Constraint::Length(14),
-            Constraint::Fill(1),
-            Constraint::Length(18),
-            Constraint::Min(20),
+            Constraint::Length(3),
+            Constraint::Length(10),
+            Constraint::Length(12),
+            Constraint::Length(9),
+            Constraint::Length(16),
         ];
 
         let table = Table::new(rows, widths)
-            .block(block)
+            .block(left_block)
             .header(
-                Row::new(vec!["  ", "Session", "Document", "Action", "Started"]).style(
+                Row::new(vec!["  ", "Session", "Document", "Elapsed", "Tokens (in/out)"]).style(
                     Style::default()
                         .fg(Color::DarkGray)
                         .add_modifier(Modifier::BOLD),
@@ -1500,15 +1528,65 @@ pub fn draw_agents_screen(f: &mut Frame, app: &App, area: Rect) {
             )
             .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
-        let mut state = TableState::default().with_selected(Some(app.agent_selected_index));
-        f.render_stateful_widget(table, main_area, &mut state);
+        let mut state = TableState::default().with_selected(Some(app.agents_view.selected));
+        f.render_stateful_widget(table, left_area, &mut state);
+    }
+
+    let selected_session = app.agents_view.selected_session();
+    let right_title = match selected_session {
+        Some(sid) => format!(" Output -- {} ", short_session(sid)),
+        None => " Output ".to_string(),
+    };
+    let right_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(right_title);
+
+    match selected_session {
+        None => {
+            let paragraph = Paragraph::new("No agent selected.")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(right_block);
+            f.render_widget(paragraph, right_area);
+        }
+        Some(sid) => {
+            let buf = app.agents_view.output.get(sid);
+            match buf {
+                None => {
+                    let paragraph = Paragraph::new("No output yet...")
+                        .style(Style::default().fg(Color::DarkGray))
+                        .alignment(ratatui::layout::Alignment::Center)
+                        .block(right_block);
+                    f.render_widget(paragraph, right_area);
+                }
+                Some(text) if text.is_empty() => {
+                    let paragraph = Paragraph::new("No output yet...")
+                        .style(Style::default().fg(Color::DarkGray))
+                        .alignment(ratatui::layout::Alignment::Center)
+                        .block(right_block);
+                    f.render_widget(paragraph, right_area);
+                }
+                Some(text) => {
+                    let lines_in_buffer = text.lines().count() as u16;
+                    let visible_lines = right_area.height.saturating_sub(2);
+                    let scroll_offset = lines_in_buffer.saturating_sub(visible_lines);
+                    let paragraph = Paragraph::new(text.as_str())
+                        .block(right_block)
+                        .wrap(Wrap { trim: false })
+                        .scroll((scroll_offset, 0));
+                    f.render_widget(paragraph, right_area);
+                }
+            }
+        }
     }
 
     let footer = Line::from(vec![
-        Span::styled("e", Style::default().fg(Color::Cyan)),
-        Span::raw(": open document  "),
-        Span::styled("r", Style::default().fg(Color::Cyan)),
-        Span::raw(": resume session  "),
+        Span::styled("j/k", Style::default().fg(Color::Cyan)),
+        Span::raw(": select  "),
+        Span::styled("n", Style::default().fg(Color::Cyan)),
+        Span::raw(": new agent  "),
         Span::styled("`", Style::default().fg(Color::Cyan)),
         Span::raw(": switch view"),
     ]);
@@ -1516,6 +1594,25 @@ pub fn draw_agents_screen(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
         footer_area,
     );
+}
+
+#[cfg(all(test, feature = "agent"))]
+pub(super) fn agent_row_cells_for_test(
+    status: Option<AgentStatus>,
+    session_id: &str,
+    doc_id: &str,
+    elapsed: std::time::Duration,
+    tokens_in: u64,
+    tokens_out: u64,
+) -> Vec<Cell<'static>> {
+    agent_row_cells(
+        status.as_ref(),
+        session_id,
+        doc_id,
+        elapsed,
+        tokens_in,
+        tokens_out,
+    )
 }
 
 #[cfg(feature = "metrics")]

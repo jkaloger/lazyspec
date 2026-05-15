@@ -2,7 +2,8 @@ mod expansion;
 pub mod forms;
 mod graph;
 
-mod app;
+pub mod agents;
+pub(crate) mod app;
 
 pub use app::{
     resolve_editor, resolve_editor_from, App, AppEvent, CreateResult, DocListNode, FilterField,

@@ -1,5 +1,27 @@
 use ratatui::text::Line;
+use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
+
+/// Format a `Duration` as a compact human-readable string suitable for table
+/// cells: `Ns` under a minute, `MmSSs` under an hour, `HhMMm` under a day,
+/// `Dd` beyond. Uses saturating arithmetic; never panics.
+pub fn format_elapsed(d: Duration) -> String {
+    let total = d.as_secs();
+    if total < 60 {
+        format!("{}s", total)
+    } else if total < 3_600 {
+        let m = total / 60;
+        let s = total % 60;
+        format!("{}m{:02}s", m, s)
+    } else if total < 86_400 {
+        let h = total / 3_600;
+        let m = (total % 3_600) / 60;
+        format!("{}h{:02}m", h, m)
+    } else {
+        let days = total / 86_400;
+        format!("{}d", days)
+    }
+}
 
 pub fn wrapped_line_count(line: &Line, content_width: usize) -> usize {
     if content_width == 0 {

@@ -110,6 +110,20 @@ lazyspec
 
 Running `lazyspec` with no subcommand opens the interactive dashboard. It provides fuzzy search, markdown preview, document creation, and live file watching -- documents update automatically when changed on disk.
 
+#### Agents view
+
+Cycle to the agents view with `` ` `` from any other view. It lists live agent sessions managed by the orchestration daemon (see [Coordination](#coordination)) in a two-panel layout: agent list on the left, live output stream for the selected agent on the right. The status bar surfaces daemon connection state, counts by status, and aggregate token usage. When the daemon is offline, the view falls back to read-only session history from `refs/lazyspec/agents/*` and shows an `offline (history)` indicator.
+
+Press `n` to assign an unassigned eligible document to the configured agent user and send a `Kick` over the IPC socket so the daemon picks it up immediately.
+
+| Binding       | Action                                 |
+| ------------- | -------------------------------------- |
+| `j` / `k`     | Select next / previous agent           |
+| `C-d` / `C-u` | Half-page jump                         |
+| `e`           | Open the agent's document in `$EDITOR` |
+| `n`           | Open the manual-kickoff picker         |
+| `Esc`         | Close the picker                       |
+
 <details>
 <summary><h3>CLI</h3></summary>
 
