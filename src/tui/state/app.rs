@@ -2209,7 +2209,7 @@ prefix = "STORY"
 [orchestration]
 agent_users = ["claude-bot"]
 claim_type = "story"
-active_statuses = ["todo", "in-progress"]
+active_statuses = ["accepted", "in-progress"]
 "#;
             let config = Config::parse(toml).unwrap();
             (tmp, config)

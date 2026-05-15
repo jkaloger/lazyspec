@@ -550,7 +550,7 @@ pattern = "{type}-{n:03}-{title}.md"
 [orchestration]
 agent_users = ["claude-bot"]
 claim_type = "story"
-active_statuses = ["todo", "in-progress"]
+active_statuses = ["accepted", "in-progress"]
 "#;
             Config::parse(toml).unwrap().orchestration.unwrap()
         }
@@ -571,9 +571,6 @@ active_statuses = ["todo", "in-progress"]
             let s1 = doc("STORY-1", "story", Status::InProgress, vec![]);
             let s2 = doc("STORY-2", "story", Status::Complete, vec![]);
             let s3 = doc("STORY-3", "story", Status::Draft, vec![]);
-            // "todo" is in active_statuses; Status::Draft serializes as "draft"
-            // so it must NOT match. We need a story with status that maps to a
-            // string in the active_statuses list. InProgress -> "in-progress".
             let docs = vec![&s1, &s2, &s3];
             let cands = build_kickoff_candidates(&docs, &orchestration());
             assert_eq!(cands.len(), 1);

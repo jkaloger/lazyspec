@@ -137,7 +137,7 @@ fn default_max_concurrent_agents() -> usize {
 }
 
 fn default_active_statuses() -> Vec<String> {
-    vec!["todo".to_string(), "in-progress".to_string()]
+    vec!["accepted".to_string(), "in-progress".to_string()]
 }
 
 fn default_heartbeat_interval_ms() -> u64 {
@@ -165,7 +165,7 @@ fn default_max_retry_backoff_ms() -> u64 {
 }
 
 fn default_handoff_states() -> Vec<String> {
-    vec!["in-review".to_string()]
+    vec!["review".to_string()]
 }
 
 fn default_continuation_delay_ms() -> u64 {
@@ -1151,14 +1151,14 @@ pattern = "{type}-{n:03}-{title}.md"
         assert_eq!(orch.base_branch, "origin/main");
         assert_eq!(orch.poll_interval_ms, 30_000);
         assert_eq!(orch.max_concurrent_agents, 4);
-        assert_eq!(orch.active_statuses, vec!["todo", "in-progress"]);
+        assert_eq!(orch.active_statuses, vec!["accepted", "in-progress"]);
         assert_eq!(orch.heartbeat_interval_ms, 300_000);
         assert_eq!(orch.metadata_push_interval_ms, 30_000);
         assert_eq!(orch.stall_timeout_ms, 300_000);
         assert_eq!(orch.max_turns, 20);
         assert_eq!(orch.max_failure_attempts, 5);
         assert_eq!(orch.max_retry_backoff_ms, 300_000);
-        assert_eq!(orch.handoff_states, vec!["in-review"]);
+        assert_eq!(orch.handoff_states, vec!["review"]);
         assert_eq!(orch.continuation_delay_ms, 1_000);
     }
 
