@@ -21,6 +21,7 @@ pub mod github;
 pub mod hashing;
 pub mod hooks;
 pub mod host_id;
+pub mod ipc;
 pub mod issue_body;
 pub mod issue_cache;
 pub mod issue_map;

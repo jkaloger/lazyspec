@@ -54,6 +54,11 @@ pub trait Clock: Send + Sync {
     fn now_instant(&self) -> Instant;
     fn now_utc(&self) -> DateTime<Utc>;
     fn sleep(&self, dur: Duration);
+    /// Sleep up to `dur`, returning `true` if interrupted by a send on `wake`.
+    /// Default impl uses `recv_timeout`; test fakes may override to instrument.
+    fn sleep_interruptible(&self, dur: Duration, wake: &Receiver<()>) -> bool {
+        matches!(wake.recv_timeout(dur), Ok(()))
+    }
 }
 
 pub struct SystemClock;
@@ -163,9 +168,12 @@ pub struct AgentObservation {
     pub last_event_at: Instant,
     pub tool_use_in_flight: bool,
     pub turn_started_at: Instant,
+    pub session_started_at: Instant,
     pub attempt: u32,
     pub failure_attempt: u32,
     pub exit: Option<Option<i32>>,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
 }
 
 impl AgentObservation {
@@ -174,9 +182,12 @@ impl AgentObservation {
             last_event_at: now,
             tool_use_in_flight: false,
             turn_started_at: now,
+            session_started_at: now,
             attempt: 1,
             failure_attempt: 0,
             exit: None,
+            tokens_in: 0,
+            tokens_out: 0,
         }
     }
 }
@@ -250,7 +261,28 @@ impl AgentEventSink for EprintlnEventSink {
 /// `last_event_at` / `turn_started_at` — reconcile reads via the abstract
 /// `Clock`, so determinism lives at the comparison site, not here.
 pub fn run_event_reader(events: Receiver<AgentEvent>, observation: Arc<Mutex<AgentObservation>>) {
+    run_event_reader_with_publish(events, observation, None, String::new(), String::new());
+}
+
+/// Drain `events` into `observation`, optionally publishing each event onto a
+/// [`Broadcaster`] for IPC subscribers. The `run_event_reader` wrapper omits
+/// the broadcaster; daemon-orchestrated spawns plumb one through so the IPC
+/// layer can fan out per-agent events.
+pub fn run_event_reader_with_publish(
+    events: Receiver<AgentEvent>,
+    observation: Arc<Mutex<AgentObservation>>,
+    broadcaster: Option<crate::engine::ipc::broadcaster::Broadcaster>,
+    agent_id: String,
+    session_id: String,
+) {
     while let Ok(ev) = events.recv() {
+        if let Some(bc) = broadcaster.as_ref() {
+            bc.publish(crate::engine::ipc::protocol::DaemonMessage::AgentEvent {
+                agent_id: agent_id.clone(),
+                session_id: session_id.clone(),
+                event: ev.clone(),
+            });
+        }
         let mut obs = observation.lock().unwrap();
         obs.last_event_at = Instant::now();
         match ev {
@@ -260,9 +292,14 @@ pub fn run_event_reader(events: Receiver<AgentEvent>, observation: Arc<Mutex<Age
             AgentEvent::ToolCall { .. } => {
                 obs.tool_use_in_flight = false;
             }
-            AgentEvent::TurnCompleted { .. } => {
+            AgentEvent::TurnCompleted {
+                input_tokens,
+                output_tokens,
+            } => {
                 obs.turn_started_at = obs.last_event_at;
                 obs.tool_use_in_flight = false;
+                obs.tokens_in = obs.tokens_in.saturating_add(input_tokens);
+                obs.tokens_out = obs.tokens_out.saturating_add(output_tokens);
             }
             AgentEvent::SubprocessExited { code } => {
                 obs.exit = Some(code);
@@ -284,7 +321,7 @@ pub struct TickLoop<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: Work
     pub workspace_provisioner: W,
     pub event_sink: Box<dyn AgentEventSink>,
     pub metadata: GitRefAgentMetadata<G>,
-    pub running: HashMap<String, RunningAgent>,
+    pub running: Arc<Mutex<HashMap<String, RunningAgent>>>,
     pub last_metadata_push: Option<Instant>,
     pub retry_queue: Vec<PendingRetry>,
     /// Latest preflight result. Dispatch is gated on `is_ok()`.
@@ -295,6 +332,24 @@ pub struct TickLoop<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: Work
     /// Set when the watcher observes an event; cleared after `run_preflight`
     /// re-runs at the top of the next tick.
     pub preflight_dirty: bool,
+    /// IPC kick channel. When `Some`, `run_once` uses `sleep_interruptible` so
+    /// a kick from the IPC layer shortcuts the poll wait. `None` in tests that
+    /// don't wire IPC — those keep the existing blocking `sleep` path.
+    pub wake_rx: Option<Receiver<()>>,
+    /// Shared cancel index for IPC `cancel`. Populated on every spawn with both
+    /// agent_ident and session_id keys mapping to the same `cancel` sender;
+    /// removed on every agent exit, kill, or shutdown drain. Tests default to a
+    /// fresh local map so existing scaffolding doesn't need IPC wiring; the
+    /// daemon swaps in `DaemonState.cancel_map` via `with_cancel_map`.
+    ///
+    /// Lock-order rule: NEVER hold `running` and `cancel_map` locks at the same
+    /// time. Always release the `running` guard before locking `cancel_map`.
+    pub cancel_map: Arc<Mutex<HashMap<String, crossbeam_channel::Sender<()>>>>,
+    /// IPC broadcaster wired in by `Daemon::run`. When `Some`, every event the
+    /// per-agent reader thread receives is also published to subscribers so the
+    /// TUI / CLI clients can stream live agent output. `None` in tests that
+    /// don't exercise IPC.
+    pub broadcaster: Option<crate::engine::ipc::broadcaster::Broadcaster>,
 }
 
 fn lease_glob(type_name: &str) -> String {
@@ -354,12 +409,15 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             workspace_provisioner,
             event_sink,
             metadata,
-            running: HashMap::new(),
+            running: Arc::new(Mutex::new(HashMap::new())),
             last_metadata_push: None,
             retry_queue: Vec::new(),
             preflight: PreflightReport::all_ok(),
             preflight_watcher: None,
             preflight_dirty: false,
+            wake_rx: None,
+            cancel_map: Arc::new(Mutex::new(HashMap::new())),
+            broadcaster: None,
         }
     }
 
@@ -374,6 +432,37 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
         self.preflight = preflight;
         self.preflight_watcher = watcher;
         self.preflight_dirty = false;
+        self
+    }
+
+    /// Wire the IPC kick receiver. Once set, `run_once` interrupts the poll
+    /// sleep on any send. Daemon::run calls this with the rx half from
+    /// `wake_channel()`; the tx half lives on `DaemonState`.
+    pub fn with_wake(mut self, rx: Receiver<()>) -> Self {
+        self.wake_rx = Some(rx);
+        self
+    }
+
+    /// Swap in the shared `cancel_map` from `DaemonState` so IPC `cancel`
+    /// handlers can resolve agent_id or session_id to the live spawn's cancel
+    /// sender. Daemon::run calls this once at startup; tests that don't wire
+    /// IPC keep the default (fresh local) map.
+    pub fn with_cancel_map(
+        mut self,
+        map: Arc<Mutex<HashMap<String, crossbeam_channel::Sender<()>>>>,
+    ) -> Self {
+        self.cancel_map = map;
+        self
+    }
+
+    /// Wire the IPC broadcaster so per-agent events flow to subscribed clients.
+    /// `Daemon::run` calls this with the broadcaster shared by `DaemonState`;
+    /// tests that don't exercise IPC leave it `None`.
+    pub fn with_broadcaster(
+        mut self,
+        broadcaster: crate::engine::ipc::broadcaster::Broadcaster,
+    ) -> Self {
+        self.broadcaster = Some(broadcaster);
         self
     }
 
@@ -438,8 +527,12 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             // AC4/AC7 (STORY-124): push per-session metadata refs after the
             // lease-fetch batch so push failures cannot short-circuit fetch.
             // Errors are swallowed inside `metadata.push`; tick continues.
-            for ra in self.running.values() {
-                let _ = self.metadata.push(&ra.session_id, &coord_remote);
+            let session_ids: Vec<String> = {
+                let guard = self.running.lock().unwrap();
+                guard.values().map(|ra| ra.session_id.clone()).collect()
+            };
+            for session_id in &session_ids {
+                let _ = self.metadata.push(session_id, &coord_remote);
             }
             // AC5 (STORY-124): pull peer clones' metadata into local refs so
             // `read_agent_metadata` sees cross-machine sessions. Push before
@@ -469,56 +562,78 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
         // mutates `self.running`, so we can't act while iterating.
         let stall_timeout = Duration::from_millis(orch.stall_timeout_ms);
         let turn_timeout = Duration::from_millis(orch.runtime.turn_timeout_ms);
-        let kills: Vec<(String, RetryReason)> = self
-            .running
-            .iter()
-            .filter_map(|(doc_id, ra)| {
-                let obs = ra.observation.lock().unwrap();
-                let turn_elapsed = now_instant.duration_since(obs.turn_started_at);
-                if turn_elapsed >= turn_timeout {
-                    return Some((doc_id.clone(), RetryReason::TurnTimeout));
-                }
-                if obs.tool_use_in_flight {
-                    return None;
-                }
-                let idle = now_instant.duration_since(obs.last_event_at);
-                if idle >= stall_timeout {
-                    Some((doc_id.clone(), RetryReason::Stall))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let kills: Vec<(String, RetryReason)> = {
+            let guard = self.running.lock().unwrap();
+            guard
+                .iter()
+                .filter_map(|(doc_id, ra)| {
+                    let obs = ra.observation.lock().unwrap();
+                    let turn_elapsed = now_instant.duration_since(obs.turn_started_at);
+                    if turn_elapsed >= turn_timeout {
+                        return Some((doc_id.clone(), RetryReason::TurnTimeout));
+                    }
+                    if obs.tool_use_in_flight {
+                        return None;
+                    }
+                    let idle = now_instant.duration_since(obs.last_event_at);
+                    if idle >= stall_timeout {
+                        Some((doc_id.clone(), RetryReason::Stall))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
         for (doc_id, reason) in kills {
             self.kill_agent_for_retry(&doc_id, reason, now_instant);
         }
 
         // AC5: heartbeat sweep.
         let hb_interval = Duration::from_millis(orch.heartbeat_interval_ms);
+        let due: Vec<(String, String, String, String)> = {
+            let guard = self.running.lock().unwrap();
+            guard
+                .iter()
+                .filter(|(_, ra)| now_instant.duration_since(ra.last_heartbeat) >= hb_interval)
+                .map(|(doc_id, ra)| {
+                    (
+                        doc_id.clone(),
+                        ra.doc_type.clone(),
+                        ra.doc_id.clone(),
+                        ra.agent_ident.clone(),
+                    )
+                })
+                .collect()
+        };
         let mut dead_after_hb: Vec<String> = Vec::new();
-        for (doc_id, ra) in self.running.iter_mut() {
-            if now_instant.duration_since(ra.last_heartbeat) >= hb_interval {
-                match self.lease_ops.heartbeat(
-                    &ra.doc_type,
-                    &ra.doc_id,
-                    &ra.agent_ident,
-                    self.clock.now_utc(),
-                ) {
-                    Ok(()) => {
+        for (doc_id, doc_type, ra_doc_id, agent_ident) in due {
+            match self.lease_ops.heartbeat(
+                &doc_type,
+                &ra_doc_id,
+                &agent_ident,
+                self.clock.now_utc(),
+            ) {
+                Ok(()) => {
+                    let mut guard = self.running.lock().unwrap();
+                    if let Some(ra) = guard.get_mut(&doc_id) {
                         ra.last_heartbeat = now_instant;
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "tick: heartbeat {}/{} failed: {}; dropping agent",
-                            ra.doc_type, ra.doc_id, e
-                        );
-                        dead_after_hb.push(doc_id.clone());
-                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "tick: heartbeat {}/{} failed: {}; dropping agent",
+                        doc_type, ra_doc_id, e
+                    );
+                    dead_after_hb.push(doc_id);
                 }
             }
         }
         for doc_id in dead_after_hb {
-            if let Some(ra) = self.running.remove(&doc_id) {
+            let removed = {
+                let mut guard = self.running.lock().unwrap();
+                guard.remove(&doc_id)
+            };
+            if let Some(ra) = removed {
                 let _ = self
                     .lease_ops
                     .release(&ra.doc_type, &ra.doc_id, &ra.agent_ident);
@@ -540,7 +655,10 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             // AC2: build local active_lease_ids from local refs (no fetch).
             let active_lease_ids = self.local_active_lease_ids(&orch.claim_type);
 
-            let running_ids: HashSet<String> = self.running.keys().cloned().collect();
+            let (running_ids, running_len): (HashSet<String>, usize) = {
+                let guard = self.running.lock().unwrap();
+                (guard.keys().cloned().collect(), guard.len())
+            };
 
             let dispatcher = Dispatcher {
                 orchestration: &orch,
@@ -548,7 +666,7 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                 running_ids: &running_ids,
             };
             let eligible = dispatcher.eligible(&candidates);
-            let slots = dispatcher.slots_available(self.running.len());
+            let slots = dispatcher.slots_available(running_len);
             eligible.into_iter().take(slots).collect()
         } else {
             Vec::new()
@@ -636,11 +754,23 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             } = handle;
             let observation = Arc::new(Mutex::new(AgentObservation::new(now_instant)));
             let reader_obs = Arc::clone(&observation);
+            let reader_broadcaster = self.broadcaster.clone();
+            let reader_agent_id = agent_ident.clone();
+            let reader_session_id = session_id.clone();
             let reader_handle = std::thread::spawn(move || {
-                run_event_reader(events, reader_obs);
+                run_event_reader_with_publish(
+                    events,
+                    reader_obs,
+                    reader_broadcaster,
+                    reader_agent_id,
+                    reader_session_id,
+                );
             });
 
-            self.running.insert(
+            let cancel_for_map = cancel.clone();
+            let agent_ident_for_map = agent_ident.clone();
+            let session_id_for_map = session_id.clone();
+            self.running.lock().unwrap().insert(
                 cand.doc_id.clone(),
                 RunningAgent {
                     session_id,
@@ -656,11 +786,20 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                     reader_handle: Some(reader_handle),
                 },
             );
+            let mut map = self.cancel_map.lock().unwrap();
+            map.insert(agent_ident_for_map, cancel_for_map.clone());
+            map.insert(session_id_for_map, cancel_for_map);
         }
 
-        // AC1: pace ticks.
-        self.clock
-            .sleep(Duration::from_millis(orch.poll_interval_ms));
+        // AC1: pace ticks. AC6 (RFC-041): if IPC kick channel is wired, an
+        // incoming kick collapses the wait so the next tick fires immediately.
+        let pace = Duration::from_millis(orch.poll_interval_ms);
+        match self.wake_rx.as_ref() {
+            Some(rx) => {
+                self.clock.sleep_interruptible(pace, rx);
+            }
+            None => self.clock.sleep(pace),
+        }
         Ok(())
     }
 
@@ -676,7 +815,17 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
         }
         // On shutdown: cancel + release every running agent. Join the reader
         // thread so the channel drains and no orphan threads outlive the loop.
-        let agents: Vec<(String, RunningAgent)> = self.running.drain().collect();
+        let agents: Vec<(String, RunningAgent)> = {
+            let mut guard = self.running.lock().unwrap();
+            guard.drain().collect()
+        };
+        {
+            let mut map = self.cancel_map.lock().unwrap();
+            for (_, ra) in &agents {
+                map.remove(&ra.agent_ident);
+                map.remove(&ra.session_id);
+            }
+        }
         for (_, mut ra) in agents {
             let _ = ra.cancel.send(());
             if let Some(rh) = ra.reader_handle.take() {
@@ -690,9 +839,14 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
     }
 
     fn kill_agent_for_retry(&mut self, doc_id: &str, kind: RetryReason, now: Instant) {
-        let Some(mut ra) = self.running.remove(doc_id) else {
+        let Some(mut ra) = self.running.lock().unwrap().remove(doc_id) else {
             return;
         };
+        {
+            let mut map = self.cancel_map.lock().unwrap();
+            map.remove(&ra.agent_ident);
+            map.remove(&ra.session_id);
+        }
         let _ = ra.cancel.send(());
         if let Some(rh) = ra.reader_handle.take() {
             let _ = rh.join();
@@ -783,19 +937,22 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             .map(|m| (m.id.clone(), m.status.to_string()))
             .collect();
 
-        let actions: Vec<(String, bool)> = self
-            .running
-            .keys()
-            .filter_map(|doc_id| match status_by_id.get(doc_id) {
+        let running_keys: Vec<String> = {
+            let guard = self.running.lock().unwrap();
+            guard.keys().cloned().collect()
+        };
+        let actions: Vec<(String, bool)> = running_keys
+            .into_iter()
+            .filter_map(|doc_id| match status_by_id.get(&doc_id) {
                 // Missing from store: leave alone. Daemon does not infer
                 // intent from absence — could be a transient load error or a
                 // shorthand id mismatch. Status reconcile only fires when we
                 // can observe a definite non-active status.
                 None => None,
                 Some(s) if active_statuses.iter().any(|a| a == s) => None,
-                Some(s) if handoff_states.iter().any(|h| h == s) => Some((doc_id.clone(), false)),
+                Some(s) if handoff_states.iter().any(|h| h == s) => Some((doc_id, false)),
                 // Definite non-active, non-handoff status: terminal.
-                Some(_) => Some((doc_id.clone(), true)),
+                Some(_) => Some((doc_id, true)),
             })
             .collect();
 
@@ -807,9 +964,14 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
     /// Terminal kill — cancel + join + release, optionally remove workspace.
     /// Sibling to `kill_agent_for_retry`; this path does NOT enqueue a retry.
     fn kill_agent_terminal(&mut self, doc_id: &str, remove_workspace: bool) {
-        let Some(mut ra) = self.running.remove(doc_id) else {
+        let Some(mut ra) = self.running.lock().unwrap().remove(doc_id) else {
             return;
         };
+        {
+            let mut map = self.cancel_map.lock().unwrap();
+            map.remove(&ra.agent_ident);
+            map.remove(&ra.session_id);
+        }
         let _ = ra.cancel.send(());
         if let Some(rh) = ra.reader_handle.take() {
             let _ = rh.join();
@@ -887,10 +1049,22 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             obs.failure_attempt = retry.failure_attempt;
             let observation = Arc::new(Mutex::new(obs));
             let reader_obs = Arc::clone(&observation);
+            let reader_broadcaster = self.broadcaster.clone();
+            let reader_agent_id = retry.agent_ident.clone();
+            let reader_session_id = retry.session_id.clone();
             let reader_handle = std::thread::spawn(move || {
-                run_event_reader(events, reader_obs);
+                run_event_reader_with_publish(
+                    events,
+                    reader_obs,
+                    reader_broadcaster,
+                    reader_agent_id,
+                    reader_session_id,
+                );
             });
-            self.running.insert(
+            let cancel_for_map = cancel.clone();
+            let agent_ident_for_map = retry.agent_ident.clone();
+            let session_id_for_map = retry.session_id.clone();
+            self.running.lock().unwrap().insert(
                 retry.doc_id.clone(),
                 RunningAgent {
                     session_id: retry.session_id,
@@ -906,6 +1080,9 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                     reader_handle: Some(reader_handle),
                 },
             );
+            let mut map = self.cancel_map.lock().unwrap();
+            map.insert(agent_ident_for_map, cancel_for_map.clone());
+            map.insert(session_id_for_map, cancel_for_map);
         }
         self.retry_queue = remaining;
     }
@@ -916,14 +1093,16 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
     /// doc that already transitioned to terminal/handoff in the same tick is
     /// culled by the terminal kill path and never reaches classification.
     fn reap_exited(&mut self, _claim_type: &str, now: Instant) {
-        let exited: Vec<(String, Option<i32>)> = self
-            .running
-            .iter()
-            .filter_map(|(doc_id, ra)| {
-                let obs = ra.observation.lock().unwrap();
-                obs.exit.map(|code| (doc_id.clone(), code))
-            })
-            .collect();
+        let exited: Vec<(String, Option<i32>)> = {
+            let guard = self.running.lock().unwrap();
+            guard
+                .iter()
+                .filter_map(|(doc_id, ra)| {
+                    let obs = ra.observation.lock().unwrap();
+                    obs.exit.map(|code| (doc_id.clone(), code))
+                })
+                .collect()
+        };
         for (doc_id, code) in exited {
             let kind = match code {
                 Some(0) => RetryReason::CleanExit,
@@ -969,6 +1148,43 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                 HashSet::new()
             }
         }
+    }
+
+    /// Hand out a `SnapshotProvider` view onto the tick loop's running map.
+    /// Task 9 wires this into `DaemonState` so the IPC handler thread can
+    /// answer `Status` requests without touching the tick thread.
+    pub fn snapshot_provider(&self) -> Arc<TickSnapshotProvider> {
+        Arc::new(TickSnapshotProvider {
+            running: Arc::clone(&self.running),
+        })
+    }
+}
+
+pub struct TickSnapshotProvider {
+    pub running: Arc<Mutex<HashMap<String, RunningAgent>>>,
+}
+
+impl crate::engine::ipc::state::SnapshotProvider for TickSnapshotProvider {
+    fn snapshot(&self) -> Vec<crate::engine::ipc::protocol::AgentSnapshot> {
+        let now = Instant::now();
+        let guard = self.running.lock().unwrap();
+        guard
+            .values()
+            .map(|ra| {
+                let obs = ra.observation.lock().unwrap();
+                let elapsed_ms = now
+                    .saturating_duration_since(obs.session_started_at)
+                    .as_millis() as u64;
+                crate::engine::ipc::protocol::AgentSnapshot {
+                    agent_id: ra.agent_ident.clone(),
+                    session_id: ra.session_id.clone(),
+                    doc_id: ra.doc_id.clone(),
+                    elapsed_ms,
+                    tokens_in: obs.tokens_in,
+                    tokens_out: obs.tokens_out,
+                }
+            })
+            .collect()
     }
 }
 
@@ -1355,8 +1571,7 @@ body\n",
         FakeClock,
         Arc<FakeProvisioner>,
     > {
-        let metadata =
-            GitRefAgentMetadata::new(td.path().to_path_buf(), MockGitRefClient::new());
+        let metadata = GitRefAgentMetadata::new(td.path().to_path_buf(), MockGitRefClient::new());
         TickLoop::new(
             td.path().to_path_buf(),
             cfg,
@@ -1421,6 +1636,39 @@ body\n",
         let durs = t.clock.sleep_durations();
         assert_eq!(durs.len(), 2);
         assert!(durs.iter().all(|d| *d == Duration::from_millis(30_000)));
+    }
+
+    #[test]
+    fn kick_wake_interrupts_poll_sleep() {
+        let td = TempDir::new().unwrap();
+        let mut orch = base_orch(vec!["draft"]);
+        orch.poll_interval_ms = 5_000;
+        let cfg = cfg(orch);
+        let clock = FakeClock::new();
+        let runner = Arc::new(FakeRunner::new());
+        let lease = Arc::new(FakeLeaseOps::new());
+        let (wake_tx, wake_rx) = crate::engine::ipc::state::wake_channel();
+        let mut t = build_loop(
+            &td,
+            cfg,
+            Arc::clone(&runner),
+            MockGitRefClient::new(),
+            Arc::clone(&lease),
+            clock,
+        )
+        .with_wake(wake_rx);
+
+        wake_tx.send(()).unwrap();
+        let start = Instant::now();
+        t.run_once().unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(t.clock.sleep_durations().is_empty());
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "run_once should return early on kick, took {:?}",
+            elapsed
+        );
     }
 
     // ===========================================================
@@ -1560,7 +1808,7 @@ body\n",
         // Dummy reader thread — finishes immediately, gives us a real
         // JoinHandle without spawning a reader against a live channel.
         let reader_handle = std::thread::spawn(|| {});
-        t.running.insert(
+        t.running.lock().unwrap().insert(
             doc_id.to_string(),
             RunningAgent {
                 session_id: "sess".to_string(),
@@ -2077,7 +2325,7 @@ body\n",
         let runner = Arc::new(FakeRunner::new());
         let lease = Arc::new(FakeLeaseOps::new());
         let metadata = GitRefAgentMetadata::new(td.path().to_path_buf(), Arc::clone(&git));
-        let mut t = TickLoop::new(
+        let t = TickLoop::new(
             td.path().to_path_buf(),
             cfg,
             "host-test".to_string(),
@@ -2090,7 +2338,7 @@ body\n",
         );
         let (cn_tx, _cn_rx) = unbounded::<()>();
         let now = t.clock.now_instant();
-        t.running.insert(
+        t.running.lock().unwrap().insert(
             "STORY-1".to_string(),
             RunningAgent {
                 session_id: session_id.to_string(),
@@ -2272,8 +2520,7 @@ body\n",
         let runner = Arc::new(FakeRunner::new());
         let lease = Arc::new(FakeLeaseOps::new());
         let git = Arc::new(RecordingPushGit::new(Some("head-sha-1")));
-        let metadata =
-            GitRefAgentMetadata::new(td.path().to_path_buf(), Arc::clone(&git));
+        let metadata = GitRefAgentMetadata::new(td.path().to_path_buf(), Arc::clone(&git));
         let mut t = TickLoop::new(
             td.path().to_path_buf(),
             cfg,
@@ -2289,7 +2536,7 @@ body\n",
         // Seed one running agent with a known session_id.
         let session_id = "sess-abc";
         let (cn_tx, _cn_rx) = unbounded::<()>();
-        t.running.insert(
+        t.running.lock().unwrap().insert(
             "STORY-1".to_string(),
             RunningAgent {
                 session_id: session_id.to_string(),
@@ -2312,10 +2559,7 @@ body\n",
 
         let pushes = git.push_calls();
         let session_ref = format!("refs/lazyspec/agents/{}", session_id);
-        let session_pushes: Vec<_> = pushes
-            .iter()
-            .filter(|p| p.refname == session_ref)
-            .collect();
+        let session_pushes: Vec<_> = pushes.iter().filter(|p| p.refname == session_ref).collect();
         assert_eq!(
             session_pushes.len(),
             1,
@@ -2486,7 +2730,7 @@ body\n",
         t.clock.advance(Duration::from_millis(15_000));
         t.run_once().unwrap();
 
-        assert!(!t.running.contains_key("STORY-S1"));
+        assert!(!t.running.lock().unwrap().contains_key("STORY-S1"));
         assert_eq!(t.retry_queue.len(), 1);
         assert_eq!(t.retry_queue[0].kind, RetryReason::Stall);
         assert_eq!(t.retry_queue[0].doc_id, "STORY-S1");
@@ -2530,7 +2774,7 @@ body\n",
         t.run_once().unwrap();
 
         assert!(
-            t.running.contains_key("STORY-S2"),
+            t.running.lock().unwrap().contains_key("STORY-S2"),
             "tool_use_in_flight suspends stall kill"
         );
         assert!(t.retry_queue.is_empty());
@@ -2572,7 +2816,7 @@ body\n",
         t.clock.advance(Duration::from_millis(15_000));
         t.run_once().unwrap();
 
-        assert!(!t.running.contains_key("STORY-S3"));
+        assert!(!t.running.lock().unwrap().contains_key("STORY-S3"));
         assert_eq!(t.retry_queue.len(), 1);
         assert_eq!(t.retry_queue[0].kind, RetryReason::Stall);
     }
@@ -2613,7 +2857,7 @@ body\n",
         t.clock.advance(Duration::from_millis(65_000));
         t.run_once().unwrap();
 
-        assert!(!t.running.contains_key("STORY-T1"));
+        assert!(!t.running.lock().unwrap().contains_key("STORY-T1"));
         assert_eq!(t.retry_queue.len(), 1);
         assert_eq!(t.retry_queue[0].kind, RetryReason::TurnTimeout);
         assert_eq!(t.retry_queue[0].doc_id, "STORY-T1");
@@ -2699,7 +2943,7 @@ body\n",
         t.clock.advance(Duration::from_millis(30_000));
         t.run_once().unwrap();
 
-        assert!(t.running.contains_key("STORY-T3"));
+        assert!(t.running.lock().unwrap().contains_key("STORY-T3"));
         assert!(t.retry_queue.is_empty());
     }
 
@@ -2736,7 +2980,7 @@ body\n",
         t.clock.advance(Duration::from_millis(25_000));
         t.run_once().unwrap();
 
-        assert!(!t.running.contains_key("STORY-T4"));
+        assert!(!t.running.lock().unwrap().contains_key("STORY-T4"));
         assert_eq!(t.retry_queue.len(), 1);
         assert_eq!(
             t.retry_queue[0].kind,
@@ -2818,7 +3062,7 @@ body\n",
 
         t.run_once().unwrap();
 
-        assert!(!t.running.contains_key("STORY-000"));
+        assert!(!t.running.lock().unwrap().contains_key("STORY-000"));
         assert!(cn_rx.try_recv().is_ok(), "cancel signal should be sent");
         let releases: Vec<_> = lease
             .calls()
@@ -2889,7 +3133,7 @@ body\n",
 
         t.run_once().unwrap();
 
-        assert!(!t.running.contains_key("STORY-000"));
+        assert!(!t.running.lock().unwrap().contains_key("STORY-000"));
         assert!(cn_rx.try_recv().is_ok(), "cancel signal should be sent");
         let releases: Vec<_> = lease
             .calls()
@@ -2932,7 +3176,7 @@ body\n",
 
         t.run_once().unwrap();
 
-        assert!(t.running.contains_key("STORY-000"));
+        assert!(t.running.lock().unwrap().contains_key("STORY-000"));
         assert!(provisioner.remove_calls().is_empty());
     }
 
@@ -3015,8 +3259,7 @@ body\n",
         FakeClock,
         Arc<FakeProvisioner>,
     > {
-        let metadata =
-            GitRefAgentMetadata::new(td.path().to_path_buf(), MockGitRefClient::new());
+        let metadata = GitRefAgentMetadata::new(td.path().to_path_buf(), MockGitRefClient::new());
         TickLoop::with_event_sink(
             td.path().to_path_buf(),
             cfg,
@@ -3063,7 +3306,7 @@ body\n",
 
         t.run_once().unwrap();
 
-        assert!(!t.running.contains_key("STORY-CE1"));
+        assert!(!t.running.lock().unwrap().contains_key("STORY-CE1"));
         assert_eq!(t.retry_queue.len(), 1);
         let retry = &t.retry_queue[0];
         assert_eq!(retry.kind, RetryReason::CleanExit);
@@ -3155,7 +3398,7 @@ body\n",
         t.run_once().unwrap();
 
         assert!(t.retry_queue.is_empty(), "cap must NOT enqueue retry");
-        assert!(!t.running.contains_key("STORY-CECAP"));
+        assert!(!t.running.lock().unwrap().contains_key("STORY-CECAP"));
         let calls = sink.snapshot();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "STORY-CECAP");
@@ -3688,9 +3931,9 @@ body\n",
         t.run_once().unwrap();
 
         assert_eq!(runner.spawn_count(), 1);
-        assert!(t.running.contains_key("STORY-DR1"));
         assert!(t.retry_queue.is_empty());
-        let ra = t.running.get("STORY-DR1").unwrap();
+        let running_guard = t.running.lock().unwrap();
+        let ra = running_guard.get("STORY-DR1").unwrap();
         let g = ra.observation.lock().unwrap();
         assert_eq!(g.attempt, 3, "carried attempt");
         assert_eq!(g.failure_attempt, 1, "carried failure_attempt");
@@ -3718,7 +3961,7 @@ body\n",
 
         assert_eq!(runner.spawn_count(), 0);
         assert_eq!(t.retry_queue.len(), 1, "entry retained for later tick");
-        assert!(!t.running.contains_key("STORY-DR2"));
+        assert!(!t.running.lock().unwrap().contains_key("STORY-DR2"));
     }
 
     #[test]
@@ -3751,7 +3994,7 @@ body\n",
 
         assert_eq!(runner.spawn_count(), 0);
         assert!(t.retry_queue.is_empty(), "abandoned on CAS failure");
-        assert!(!t.running.contains_key("STORY-DRC"));
+        assert!(!t.running.lock().unwrap().contains_key("STORY-DRC"));
         let calls = sink.snapshot();
         let has_lease_cas = calls
             .iter()
@@ -3968,9 +4211,287 @@ body\n",
         t.run_once().unwrap();
 
         assert!(
-            t.running.contains_key("STORY-IF1"),
+            t.running.lock().unwrap().contains_key("STORY-IF1"),
             "in-flight agent must NOT be yanked on preflight failure"
         );
         assert_eq!(runner.spawn_count(), 0, "no new dispatches");
+    }
+
+    // ===========================================================
+    // RFC-041 / STORY-186 — TickSnapshotProvider
+    // ===========================================================
+
+    use crate::engine::ipc::state::SnapshotProvider as _;
+
+    fn make_running_agent(doc_id: &str, agent_ident: &str, obs: AgentObservation) -> RunningAgent {
+        let (cn_tx, cn_rx) = unbounded::<()>();
+        std::mem::forget(cn_rx);
+        RunningAgent {
+            session_id: format!("sess-{doc_id}"),
+            doc_id: doc_id.to_string(),
+            doc_type: "story".to_string(),
+            agent_ident: agent_ident.to_string(),
+            workspace: PathBuf::from(format!("/tmp/fake-ws/{doc_id}")),
+            branch: format!("agents/{doc_id}"),
+            cancel: cn_tx,
+            pid: 1,
+            last_heartbeat: obs.session_started_at,
+            observation: Arc::new(Mutex::new(obs)),
+            reader_handle: Some(std::thread::spawn(|| {})),
+        }
+    }
+
+    #[test]
+    fn tick_snapshot_provider_empty_returns_empty_vec() {
+        let running: Arc<Mutex<HashMap<String, RunningAgent>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let provider = TickSnapshotProvider {
+            running: Arc::clone(&running),
+        };
+        assert!(provider.snapshot().is_empty());
+    }
+
+    #[test]
+    fn tick_snapshot_provider_returns_one_for_one_agent() {
+        let running: Arc<Mutex<HashMap<String, RunningAgent>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let obs = AgentObservation::new(Instant::now());
+        running.lock().unwrap().insert(
+            "STORY-A".to_string(),
+            make_running_agent("STORY-A", "host-test:sess-A", obs),
+        );
+
+        let provider = TickSnapshotProvider {
+            running: Arc::clone(&running),
+        };
+        let got = provider.snapshot();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].agent_id, "host-test:sess-A");
+        assert_eq!(got[0].doc_id, "STORY-A");
+        assert_eq!(got[0].session_id, "sess-STORY-A");
+        assert_eq!(got[0].tokens_in, 0);
+        assert_eq!(got[0].tokens_out, 0);
+    }
+
+    #[test]
+    fn tick_snapshot_provider_returns_n_for_n_agents() {
+        let running: Arc<Mutex<HashMap<String, RunningAgent>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let now = Instant::now();
+        for doc in &["STORY-1", "STORY-2", "STORY-3"] {
+            let obs = AgentObservation::new(now);
+            running.lock().unwrap().insert(
+                doc.to_string(),
+                make_running_agent(doc, &format!("host-test:{doc}"), obs),
+            );
+        }
+
+        let provider = TickSnapshotProvider {
+            running: Arc::clone(&running),
+        };
+        let got = provider.snapshot();
+        assert_eq!(got.len(), 3);
+        let mut ids: Vec<String> = got.iter().map(|s| s.doc_id.clone()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["STORY-1", "STORY-2", "STORY-3"]);
+    }
+
+    #[test]
+    fn tick_snapshot_elapsed_ms_reflects_session_age() {
+        let running: Arc<Mutex<HashMap<String, RunningAgent>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let mut obs = AgentObservation::new(Instant::now());
+        obs.session_started_at = Instant::now() - Duration::from_millis(100);
+        running.lock().unwrap().insert(
+            "STORY-E".to_string(),
+            make_running_agent("STORY-E", "host-test:sess-E", obs),
+        );
+
+        let provider = TickSnapshotProvider {
+            running: Arc::clone(&running),
+        };
+        let got = provider.snapshot();
+        assert_eq!(got.len(), 1);
+        assert!(
+            got[0].elapsed_ms >= 100,
+            "expected elapsed_ms >= 100, got {}",
+            got[0].elapsed_ms
+        );
+    }
+
+    // ===========================================================
+    // RFC-041 / STORY-186 — cancel_map population (Task 7)
+    // ===========================================================
+
+    #[test]
+    fn cancel_map_populated_on_spawn() {
+        let td = TempDir::new().unwrap();
+        let cfg = cfg(base_orch(vec!["draft"]));
+        make_stories_status(&td, 1, "draft");
+        let runner = Arc::new(FakeRunner::new());
+        let lease = Arc::new(FakeLeaseOps::new());
+        let shared_map: Arc<Mutex<HashMap<String, crossbeam_channel::Sender<()>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let mut t = build_loop(
+            &td,
+            cfg,
+            Arc::clone(&runner),
+            MockGitRefClient::new(),
+            Arc::clone(&lease),
+            FakeClock::new(),
+        )
+        .with_cancel_map(Arc::clone(&shared_map));
+
+        t.run_once().unwrap();
+
+        assert_eq!(runner.spawn_count(), 1);
+        let (agent_ident, session_id) = {
+            let guard = t.running.lock().unwrap();
+            let ra = guard.values().next().expect("one running agent");
+            (ra.agent_ident.clone(), ra.session_id.clone())
+        };
+
+        let map = shared_map.lock().unwrap();
+        assert_eq!(map.len(), 2, "both keys inserted, got {:?}", map.keys());
+        let by_agent = map.get(&agent_ident).expect("agent_ident key present");
+        let by_session = map.get(&session_id).expect("session_id key present");
+
+        // Both keys must point at the SAME live cancel sender. Send via one
+        // and the receiver inside FakeRunner should see it.
+        let cancel_rxs = runner.cancel_receivers.lock().unwrap();
+        let cn_rx = cancel_rxs.first().expect("one cancel receiver");
+        by_agent.send(()).expect("send via agent_ident key");
+        cn_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("agent_ident send delivered");
+        by_session.send(()).expect("send via session_id key");
+        cn_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("session_id send delivered");
+    }
+
+    #[test]
+    fn cancel_map_cleaned_on_kill_for_retry() {
+        let td = TempDir::new().unwrap();
+        let mut orch = base_orch(vec!["draft"]);
+        orch.stall_timeout_ms = 10_000;
+        let cfg = cfg(orch);
+        let runner = Arc::new(FakeRunner::new());
+        let lease = Arc::new(FakeLeaseOps::new());
+        let shared_map: Arc<Mutex<HashMap<String, crossbeam_channel::Sender<()>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let mut t = build_loop(
+            &td,
+            cfg,
+            Arc::clone(&runner),
+            MockGitRefClient::new(),
+            Arc::clone(&lease),
+            FakeClock::new(),
+        )
+        .with_cancel_map(Arc::clone(&shared_map));
+
+        let now = t.clock.now_instant();
+        let obs = Arc::new(Mutex::new(AgentObservation::new(now)));
+        let _cn_rx = insert_fake_running_with_obs(
+            &mut t,
+            "STORY-K1",
+            "host-test:sess-k1",
+            now,
+            Arc::clone(&obs),
+        );
+        // Mirror the dispatch-path population so kill cleanup has something to
+        // remove. (insert_fake_running_with_obs only touches `running`.)
+        {
+            let guard = t.running.lock().unwrap();
+            let ra = guard.get("STORY-K1").unwrap();
+            let cancel = ra.cancel.clone();
+            let agent_ident = ra.agent_ident.clone();
+            let session_id = ra.session_id.clone();
+            drop(guard);
+            let mut m = shared_map.lock().unwrap();
+            m.insert(agent_ident, cancel.clone());
+            m.insert(session_id, cancel);
+        }
+        assert_eq!(shared_map.lock().unwrap().len(), 2);
+
+        t.clock.advance(Duration::from_millis(15_000));
+        t.run_once().unwrap();
+
+        assert!(!t.running.lock().unwrap().contains_key("STORY-K1"));
+        assert!(
+            shared_map.lock().unwrap().is_empty(),
+            "cancel_map should be cleared on kill_for_retry, got {:?}",
+            shared_map.lock().unwrap().keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn cancel_map_cleaned_on_shutdown_drain() {
+        let td = TempDir::new().unwrap();
+        let cfg = cfg(base_orch(vec!["draft"]));
+        let runner = Arc::new(FakeRunner::new());
+        let lease = Arc::new(FakeLeaseOps::new());
+        let shared_map: Arc<Mutex<HashMap<String, crossbeam_channel::Sender<()>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let mut t = build_loop(
+            &td,
+            cfg,
+            Arc::clone(&runner),
+            MockGitRefClient::new(),
+            Arc::clone(&lease),
+            FakeClock::new(),
+        )
+        .with_cancel_map(Arc::clone(&shared_map));
+
+        let now = t.clock.now_instant();
+        let obs = Arc::new(Mutex::new(AgentObservation::new(now)));
+        let _cn_rx = insert_fake_running_with_obs(
+            &mut t,
+            "STORY-D1",
+            "host-test:sess-d1",
+            now,
+            Arc::clone(&obs),
+        );
+        {
+            let guard = t.running.lock().unwrap();
+            let ra = guard.get("STORY-D1").unwrap();
+            let cancel = ra.cancel.clone();
+            let agent_ident = ra.agent_ident.clone();
+            let session_id = ra.session_id.clone();
+            drop(guard);
+            let mut m = shared_map.lock().unwrap();
+            m.insert(agent_ident, cancel.clone());
+            m.insert(session_id, cancel);
+        }
+        assert_eq!(shared_map.lock().unwrap().len(), 2);
+
+        let (sd_tx, sd_rx) = unbounded::<()>();
+        sd_tx.send(()).unwrap();
+        t.run_until(sd_rx).unwrap();
+
+        assert!(
+            shared_map.lock().unwrap().is_empty(),
+            "cancel_map should be cleared on shutdown drain"
+        );
+    }
+
+    #[test]
+    fn tick_snapshot_reports_accumulated_tokens() {
+        let running: Arc<Mutex<HashMap<String, RunningAgent>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let mut obs = AgentObservation::new(Instant::now());
+        obs.tokens_in = 123;
+        obs.tokens_out = 456;
+        running.lock().unwrap().insert(
+            "STORY-T".to_string(),
+            make_running_agent("STORY-T", "host-test:sess-T", obs),
+        );
+
+        let provider = TickSnapshotProvider {
+            running: Arc::clone(&running),
+        };
+        let got = provider.snapshot();
+        assert_eq!(got[0].tokens_in, 123);
+        assert_eq!(got[0].tokens_out, 456);
     }
 }

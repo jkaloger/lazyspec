@@ -155,11 +155,11 @@ fn assign_kicks_listening_socket() {
     let bytes = rx
         .recv_timeout(Duration::from_secs(2))
         .expect("expected kick bytes on socket within 2s");
-    assert!(
-        bytes.starts_with(b"kick\n"),
-        "expected kick payload, got: {:?}",
-        bytes
-    );
+    let s = std::str::from_utf8(&bytes).expect("kick payload must be utf-8");
+    assert!(s.ends_with('\n'), "wire form must be newline-framed");
+    let payload: serde_json::Value =
+        serde_json::from_str(s.trim_end()).expect("kick payload must be JSON");
+    assert_eq!(payload["type"], "kick", "expected kick payload, got: {s:?}");
 
     handle.join().expect("listener thread joined");
 }

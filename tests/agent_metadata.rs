@@ -65,7 +65,12 @@ fn write_twice_produces_two_commit_chain() -> Result<()> {
     assert_ne!(sha1, sha2);
 
     let commits = rev_list(fixture.root(), "refs/lazyspec/agents/sess-1")?;
-    assert_eq!(commits.len(), 2, "expected 2-commit chain, got {:?}", commits);
+    assert_eq!(
+        commits.len(),
+        2,
+        "expected 2-commit chain, got {:?}",
+        commits
+    );
     assert_eq!(commits[0], sha2, "head should be latest write");
     assert_eq!(commits[1], sha1, "parent should be first write");
     Ok(())

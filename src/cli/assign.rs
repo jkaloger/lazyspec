@@ -75,11 +75,12 @@ pub fn run(root: &Path, doc_id: &str, user: Option<&str>, json: bool) -> Result<
 pub const DAEMON_SOCKET: &str = ".lazyspec/daemon.sock";
 
 fn send_kick(root: &Path) {
-    use std::io::Write;
+    use crate::engine::ipc::framing::write_msg;
+    use crate::engine::ipc::protocol::ClientMessage;
     use std::os::unix::net::UnixStream;
     let path = root.join(DAEMON_SOCKET);
     if let Ok(mut stream) = UnixStream::connect(&path) {
-        let _ = stream.write_all(b"kick\n");
+        let _ = write_msg(&mut stream, &ClientMessage::Kick);
     }
 }
 
@@ -170,7 +171,10 @@ mod tests {
         send_kick(td.path());
 
         let bytes = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert_eq!(bytes, b"kick\n");
+        let s = std::str::from_utf8(&bytes).unwrap();
+        assert!(s.ends_with('\n'), "wire form must be newline-framed");
+        let payload: serde_json::Value = serde_json::from_str(s.trim_end()).unwrap();
+        assert_eq!(payload["type"], "kick");
         handle.join().unwrap();
     }
 

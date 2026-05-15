@@ -21,11 +21,17 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use crossbeam_channel::{bounded, Receiver};
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use super::agent_metadata::GitRefAgentMetadata;
 use super::boot::boot_orphan_recovery;
 use super::config::Config;
 use super::git_ref::GitCli;
 use super::host_id;
+use super::ipc::broadcaster::Broadcaster;
+use super::ipc::handler::handle_connection;
+use super::ipc::state::{wake_channel, DaemonState, StaticSnapshotProvider};
 use super::lease::LeaseEngine;
 use super::preflight::{
     run_preflight, NotifyPreflightWatcher, PreflightChecks, PreflightReport, PreflightWatcher,
@@ -38,6 +44,20 @@ use super::tick::{
 
 const SOCKET_REL_PATH: &str = ".lazyspec/daemon.sock";
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Default empty [`DaemonState`] used by test ctors and by `Daemon::run` after
+/// it moves the live state into an `Arc`. Has no tick-side wiring: empty
+/// cancel map, empty snapshot provider, fresh broadcaster, lone wake sender
+/// whose receiver is dropped on the floor.
+fn default_state() -> DaemonState {
+    let (wake_tx, _wake_rx) = wake_channel();
+    DaemonState {
+        cancel_map: Arc::new(Mutex::new(HashMap::new())),
+        snapshot_provider: Arc::new(StaticSnapshotProvider(vec![])),
+        broadcaster: Broadcaster::new(),
+        wake: wake_tx,
+    }
+}
 
 /// Releases leases owned by a given host prefix. Trait seam for testability;
 /// the production impl wraps [`LeaseEngine::release_by_host_prefix`].
@@ -141,6 +161,11 @@ pub struct Daemon {
     pub lease_releaser: Box<dyn LeaseReleaser>,
     pub tick_runner: Option<Box<dyn TickRunner>>,
     pub boot_recovery: Box<dyn BootRecovery>,
+    /// Cross-wired state shared between the IPC handler and (when wired) the
+    /// tick loop. Built by `Daemon::new` when orchestration is enabled; test
+    /// ctors default to an empty state. Consumed once by `run` to spawn the
+    /// accept loop.
+    pub state: DaemonState,
 }
 
 impl Daemon {
@@ -172,6 +197,14 @@ impl Daemon {
             GitRefAgentMetadata::new(root.to_path_buf(), GitCli),
         ));
 
+        let broadcaster = Broadcaster::new();
+        let cancel_map: Arc<Mutex<HashMap<String, crossbeam_channel::Sender<()>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let (wake_tx, wake_rx) = wake_channel();
+
+        let mut snapshot_provider: Arc<dyn super::ipc::state::SnapshotProvider> =
+            Arc::new(StaticSnapshotProvider(vec![]));
+
         let tick_runner: Option<Box<dyn TickRunner>> =
             if let Some(orch) = config.orchestration.as_ref() {
                 let runner = ClaudeP {
@@ -196,6 +229,7 @@ impl Daemon {
                     GitRefAgentMetadata::new(root.to_path_buf(), GitCli),
                     Box::new(EprintlnEventSink),
                 );
+                snapshot_provider = tl.snapshot_provider();
 
                 // Initial preflight: log on failure but daemon continues.
                 let initial_report = match run_preflight(&PreflightChecks { root, config }) {
@@ -239,11 +273,26 @@ impl Daemon {
                         }
                     };
 
-                let tl = tl.with_preflight(initial_report, watcher);
+                let tl = tl
+                    .with_preflight(initial_report, watcher)
+                    .with_wake(wake_rx)
+                    .with_cancel_map(Arc::clone(&cancel_map))
+                    .with_broadcaster(broadcaster.clone());
                 Some(Box::new(tl))
             } else {
+                // Drop the wake_rx; only the orchestrated path owns the tick
+                // side of the kick channel. `_wake_rx` keeps the Sender alive
+                // on `state` so `Kick` succeeds even when there's no tick.
+                drop(wake_rx);
                 None
             };
+
+        let state = DaemonState {
+            cancel_map,
+            snapshot_provider,
+            broadcaster,
+            wake: wake_tx,
+        };
 
         Ok(Self {
             root: root.to_path_buf(),
@@ -252,6 +301,7 @@ impl Daemon {
             lease_releaser: Box::new(releaser),
             tick_runner,
             boot_recovery,
+            state,
         })
     }
 
@@ -269,6 +319,7 @@ impl Daemon {
             lease_releaser,
             tick_runner: None,
             boot_recovery: Box::new(NoopBootRecovery),
+            state: default_state(),
         }
     }
 
@@ -289,6 +340,7 @@ impl Daemon {
             lease_releaser,
             tick_runner,
             boot_recovery: Box::new(NoopBootRecovery),
+            state: default_state(),
         }
     }
 
@@ -322,9 +374,13 @@ impl Daemon {
         }
         eprintln!("daemon: boot orphan recovery complete");
 
+        let state = Arc::new(std::mem::replace(&mut self.state, default_state()));
+
         let running = Arc::new(AtomicBool::new(true));
         let accept_running = Arc::clone(&running);
-        let accept_handle = thread::spawn(move || accept_loop(listener, accept_running));
+        let accept_state = Arc::clone(&state);
+        let accept_handle =
+            thread::spawn(move || accept_loop(listener, accept_running, accept_state));
 
         // Spawn tick thread if orchestration is wired in.
         let (tick_tx, tick_handle) = match self.tick_runner.take() {
@@ -421,12 +477,16 @@ fn bind_listener(sock_path: &Path) -> Result<UnixListener> {
         .with_context(|| format!("failed to bind unix socket at {}", sock_path.display()))
 }
 
-fn accept_loop(listener: UnixListener, running: Arc<AtomicBool>) {
+fn accept_loop(listener: UnixListener, running: Arc<AtomicBool>, state: Arc<DaemonState>) {
     while running.load(Ordering::SeqCst) {
         match listener.accept() {
-            Ok((_stream, _addr)) => {
-                // v1: no protocol yet. Drop the stream; future slices will
-                // route the connection to a handler.
+            Ok((stream, _addr)) => {
+                // Listener is non-blocking so we can poll for shutdown.
+                // Accepted streams inherit that flag on some platforms
+                // (notably macOS); reset to blocking for the handler.
+                let _ = stream.set_nonblocking(false);
+                let st = Arc::clone(&state);
+                thread::spawn(move || handle_connection(stream, st));
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(ACCEPT_POLL_INTERVAL);

@@ -316,14 +316,17 @@ mod tests {
             let mut n = self.next_sha.lock().unwrap();
             *n += 1;
             let new_sha = format!("sha-{}", *n);
-            self.create_commit_calls.lock().unwrap().push(CreateCommitCall {
-                refname: refname.to_string(),
-                files: files
-                    .iter()
-                    .map(|(p, c)| (p.to_string(), c.to_string()))
-                    .collect(),
-                parent: parent.map(|s| s.to_string()),
-            });
+            self.create_commit_calls
+                .lock()
+                .unwrap()
+                .push(CreateCommitCall {
+                    refname: refname.to_string(),
+                    files: files
+                        .iter()
+                        .map(|(p, c)| (p.to_string(), c.to_string()))
+                        .collect(),
+                    parent: parent.map(|s| s.to_string()),
+                });
             // Update the seeded blob so subsequent reads see what we just wrote.
             if let Some((_, content)) = files.iter().find(|(p, _)| *p == "metadata.json") {
                 *self.blob.lock().unwrap() = Some(content.to_string());
@@ -432,14 +435,18 @@ mod tests {
     #[test]
     fn null_metadata_write_returns_empty_sha() {
         let writer = NullAgentMetadata;
-        let sha = writer.write(&sample_metadata(AgentStatus::Running)).unwrap();
+        let sha = writer
+            .write(&sample_metadata(AgentStatus::Running))
+            .unwrap();
         assert!(sha.is_empty());
     }
 
     #[test]
     fn write_first_commit_uses_none_parent_and_zero_sha_cas() {
         let writer = GitRefAgentMetadata::new(dummy_root(), ChainFake::default());
-        let new_sha = writer.write(&sample_metadata(AgentStatus::Running)).unwrap();
+        let new_sha = writer
+            .write(&sample_metadata(AgentStatus::Running))
+            .unwrap();
 
         let commits = writer.git.create_commit_calls.lock().unwrap();
         assert_eq!(commits.len(), 1);
@@ -457,8 +464,12 @@ mod tests {
     #[test]
     fn write_appends_chain() {
         let writer = GitRefAgentMetadata::new(dummy_root(), ChainFake::default());
-        let first_sha = writer.write(&sample_metadata(AgentStatus::Running)).unwrap();
-        let second_sha = writer.write(&sample_metadata(AgentStatus::Crashed)).unwrap();
+        let first_sha = writer
+            .write(&sample_metadata(AgentStatus::Running))
+            .unwrap();
+        let second_sha = writer
+            .write(&sample_metadata(AgentStatus::Crashed))
+            .unwrap();
         assert_ne!(first_sha, second_sha);
 
         let commits = writer.git.create_commit_calls.lock().unwrap();
@@ -568,7 +579,9 @@ mod tests {
     #[test]
     fn first_push_after_write_uses_zero_sha_expected_old() {
         let writer = GitRefAgentMetadata::new(dummy_root(), ChainFake::default());
-        let new_sha = writer.write(&sample_metadata(AgentStatus::Running)).unwrap();
+        let new_sha = writer
+            .write(&sample_metadata(AgentStatus::Running))
+            .unwrap();
         writer.push("sess-1", "origin").unwrap();
 
         let pushes = writer.git.push_lease_calls.lock().unwrap();
@@ -582,10 +595,14 @@ mod tests {
     #[test]
     fn second_push_uses_prior_pushed_sha_as_expected_old() {
         let writer = GitRefAgentMetadata::new(dummy_root(), ChainFake::default());
-        let first_sha = writer.write(&sample_metadata(AgentStatus::Running)).unwrap();
+        let first_sha = writer
+            .write(&sample_metadata(AgentStatus::Running))
+            .unwrap();
         writer.push("sess-1", "origin").unwrap();
 
-        let second_sha = writer.write(&sample_metadata(AgentStatus::Crashed)).unwrap();
+        let second_sha = writer
+            .write(&sample_metadata(AgentStatus::Crashed))
+            .unwrap();
         writer.push("sess-1", "origin").unwrap();
 
         let pushes = writer.git.push_lease_calls.lock().unwrap();
@@ -599,16 +616,22 @@ mod tests {
     #[test]
     fn push_failure_is_swallowed_and_does_not_advance_expected_old() {
         let writer = GitRefAgentMetadata::new(dummy_root(), ChainFake::default());
-        let first_sha = writer.write(&sample_metadata(AgentStatus::Running)).unwrap();
+        let first_sha = writer
+            .write(&sample_metadata(AgentStatus::Running))
+            .unwrap();
 
-        writer.git.queue_push_result(Err(anyhow::anyhow!("network down")));
+        writer
+            .git
+            .queue_push_result(Err(anyhow::anyhow!("network down")));
         // Must not propagate the error to the caller.
         writer.push("sess-1", "origin").unwrap();
 
         // Subsequent successful push (after another write) still targets ZERO_SHA
         // because the prior attempt failed and didn't advance last_pushed; the
         // new chain head transitively covers the unsuccessful prior head.
-        let second_sha = writer.write(&sample_metadata(AgentStatus::Crashed)).unwrap();
+        let second_sha = writer
+            .write(&sample_metadata(AgentStatus::Crashed))
+            .unwrap();
         writer.push("sess-1", "origin").unwrap();
 
         let pushes = writer.git.push_lease_calls.lock().unwrap();
@@ -815,8 +838,8 @@ mod tests {
         writer_a.push(&metadata.session_id, "origin").unwrap();
 
         // Before fetch, B sees nothing.
-        let before = read_agent_metadata(&reader_b_git, &dummy_root(), &metadata.session_id)
-            .unwrap();
+        let before =
+            read_agent_metadata(&reader_b_git, &dummy_root(), &metadata.session_id).unwrap();
         assert!(
             before.is_none(),
             "reader B should not see metadata before fetch"

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
+use serde::{Deserialize, Serialize};
 
 mod claudep;
 mod stream;
@@ -22,13 +23,15 @@ pub struct AgentHandle {
     pub cancel: Sender<()>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolStatus {
     Ok,
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "event_type", rename_all = "snake_case")]
 pub enum AgentEvent {
     SessionStarted,
     Text {
