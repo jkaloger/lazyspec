@@ -1,10 +1,19 @@
 use anyhow::{bail, Context, Result};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[derive(Debug)]
 pub struct Workspace {
     pub path: PathBuf,
     pub branch: String,
+}
+
+#[derive(Debug)]
+struct WorktreeEntry {
+    path: PathBuf,
+    /// `Some(name)` for a checked-out branch, `None` for detached HEAD.
+    branch: Option<String>,
 }
 
 pub fn provision_workspace(
@@ -15,6 +24,16 @@ pub fn provision_workspace(
     claim_id: &str,
 ) -> Result<Workspace> {
     let worktree_path = workspace_root.join(claim_id);
+
+    match precheck_existing_worktree(repo_root, &worktree_path, branch)? {
+        PrecheckOutcome::Reuse => {
+            return Ok(Workspace {
+                path: worktree_path,
+                branch: branch.to_string(),
+            });
+        }
+        PrecheckOutcome::Proceed => {}
+    }
 
     let ref_exists = local_branch_exists(repo_root, branch)?;
 
@@ -62,6 +81,129 @@ pub fn remove(repo_root: &Path, workspace_path: &Path) -> Result<()> {
         bail!("git worktree remove failed: {}", stderr.trim());
     }
     Ok(())
+}
+
+enum PrecheckOutcome {
+    /// Matching registered worktree on the requested branch: reuse as-is.
+    Reuse,
+    /// No conflict: caller should continue with `git worktree add`.
+    Proceed,
+}
+
+fn precheck_existing_worktree(
+    repo_root: &Path,
+    worktree_path: &Path,
+    requested_branch: &str,
+) -> Result<PrecheckOutcome> {
+    let entries = list_worktrees(repo_root)?;
+    let target = canonicalize_for_compare(worktree_path);
+
+    let registered = entries
+        .iter()
+        .find(|e| canonicalize_for_compare(&e.path) == target);
+
+    match registered {
+        Some(entry) => match &entry.branch {
+            Some(name) if name == requested_branch => Ok(PrecheckOutcome::Reuse),
+            Some(name) => bail!(
+                "worktree at {} is registered on branch {} but {} was requested; \
+                 resolve by removing the existing worktree or re-running with the matching branch",
+                worktree_path.display(),
+                name,
+                requested_branch,
+            ),
+            None => bail!(
+                "worktree at {} is registered with detached HEAD but branch {} was requested; \
+                 resolve by removing the existing worktree or re-running with the matching branch",
+                worktree_path.display(),
+                requested_branch,
+            ),
+        },
+        None => {
+            if worktree_path.exists() {
+                bail!(
+                    "path {} exists on disk but is not a registered git worktree; \
+                     remove the directory or run `git worktree prune` before retrying",
+                    worktree_path.display(),
+                );
+            }
+            Ok(PrecheckOutcome::Proceed)
+        }
+    }
+}
+
+fn list_worktrees(repo_root: &Path) -> Result<Vec<WorktreeEntry>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .context("failed to spawn git worktree list")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git worktree list failed: {}", stderr.trim());
+    }
+    Ok(parse_worktree_porcelain(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+fn parse_worktree_porcelain(input: &str) -> Vec<WorktreeEntry> {
+    let mut entries = Vec::new();
+    let mut current_path: Option<PathBuf> = None;
+    let mut current_branch: Option<String> = None;
+    let mut detached = false;
+
+    let flush = |entries: &mut Vec<WorktreeEntry>,
+                 path: &mut Option<PathBuf>,
+                 branch: &mut Option<String>,
+                 detached: &mut bool| {
+        if let Some(p) = path.take() {
+            let b = if *detached { None } else { branch.take() };
+            entries.push(WorktreeEntry { path: p, branch: b });
+        }
+        *branch = None;
+        *detached = false;
+    };
+
+    for line in input.lines() {
+        if line.is_empty() {
+            flush(
+                &mut entries,
+                &mut current_path,
+                &mut current_branch,
+                &mut detached,
+            );
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            // New record; flush any in-progress entry that had no trailing blank.
+            flush(
+                &mut entries,
+                &mut current_path,
+                &mut current_branch,
+                &mut detached,
+            );
+            current_path = Some(PathBuf::from(rest));
+        } else if let Some(rest) = line.strip_prefix("branch ") {
+            current_branch = Some(rest.strip_prefix("refs/heads/").unwrap_or(rest).to_string());
+        } else if line == "detached" {
+            detached = true;
+        }
+    }
+    flush(
+        &mut entries,
+        &mut current_path,
+        &mut current_branch,
+        &mut detached,
+    );
+    entries
+}
+
+/// Canonicalize for path equality (resolves macOS `/var` → `/private/var`).
+/// Falls back to the original path if canonicalization fails (e.g. path missing).
+fn canonicalize_for_compare(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn local_branch_exists(repo_root: &Path, branch: &str) -> Result<bool> {
@@ -218,6 +360,125 @@ mod tests {
             !list_str.contains(&ws.path.to_string_lossy().to_string()),
             "worktree should be unregistered: {}",
             list_str
+        );
+    }
+
+    #[test]
+    fn provision_workspace_reentry_with_matching_worktree_is_idempotent() {
+        // AC1: re-provision w/ existing registered worktree on matching branch
+        // returns Workspace without invoking `git worktree add` again.
+        let (td, repo) = setup_repo();
+        let workspace_root = td.path().join("workspaces");
+        fs::create_dir(&workspace_root).unwrap();
+
+        let first = provision_workspace(
+            &repo,
+            &workspace_root,
+            "main",
+            "agents/STORY-127",
+            "claim-1",
+        )
+        .unwrap();
+        let first_head = head_sha(&first.path);
+
+        let second = provision_workspace(
+            &repo,
+            &workspace_root,
+            "main",
+            "agents/STORY-127",
+            "claim-1",
+        )
+        .expect("re-provision should be idempotent");
+
+        assert_eq!(second.path, first.path);
+        assert_eq!(second.branch, first.branch);
+        assert_eq!(
+            head_sha(&second.path),
+            first_head,
+            "worktree HEAD unchanged"
+        );
+
+        let list = run_git(&repo, &["worktree", "list", "--porcelain"]);
+        let list_str = String::from_utf8_lossy(&list.stdout);
+        let count = list_str
+            .lines()
+            .filter(|l| l.starts_with("worktree "))
+            .count();
+        assert_eq!(count, 2, "main repo + one claim worktree: {}", list_str);
+    }
+
+    #[test]
+    fn provision_workspace_orphan_dir_errors_with_guidance() {
+        // AC2: directory exists at worktree path but is not registered.
+        let (td, repo) = setup_repo();
+        let workspace_root = td.path().join("workspaces");
+        fs::create_dir(&workspace_root).unwrap();
+        let orphan = workspace_root.join("claim-1");
+        fs::create_dir_all(&orphan).unwrap();
+        fs::write(orphan.join("stale.txt"), "leftover\n").unwrap();
+
+        let err = provision_workspace(
+            &repo,
+            &workspace_root,
+            "main",
+            "agents/STORY-127",
+            "claim-1",
+        )
+        .expect_err("orphan dir should error");
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&orphan.to_string_lossy().to_string()),
+            "error should name path: {msg}"
+        );
+        let lower = msg.to_lowercase();
+        assert!(
+            lower.contains("prune") || lower.contains("remove"),
+            "error should mention prune or remove: {msg}"
+        );
+    }
+
+    #[test]
+    fn provision_workspace_branch_mismatch_errors_naming_both_branches() {
+        // AC3: registered worktree on a different branch than requested.
+        let (td, repo) = setup_repo();
+        let workspace_root = td.path().join("workspaces");
+        fs::create_dir(&workspace_root).unwrap();
+        let worktree_path = workspace_root.join("claim-1");
+
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "agents/OTHER",
+                worktree_path.to_str().unwrap(),
+                "main",
+            ],
+        );
+
+        let err = provision_workspace(
+            &repo,
+            &workspace_root,
+            "main",
+            "agents/STORY-127",
+            "claim-1",
+        )
+        .expect_err("branch mismatch should error");
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&worktree_path.to_string_lossy().to_string()),
+            "error should name path: {msg}"
+        );
+        assert!(
+            msg.contains("agents/OTHER"),
+            "error should name registered branch: {msg}"
+        );
+        assert!(
+            msg.contains("agents/STORY-127"),
+            "error should name requested branch: {msg}"
         );
     }
 
