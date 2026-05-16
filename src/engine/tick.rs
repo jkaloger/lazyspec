@@ -852,6 +852,12 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             map.insert(session_id_for_map, cancel_for_map);
         }
 
+        if let Some(bc) = self.broadcaster.as_ref() {
+            bc.publish(crate::engine::ipc::protocol::DaemonMessage::DaemonStatus {
+                agents: snapshot_running(&self.running),
+            });
+        }
+
         // AC1: pace ticks. AC6 (RFC-041): if IPC kick channel is wired, an
         // incoming kick collapses the wait so the next tick fires immediately.
         let pace = Duration::from_millis(orch.poll_interval_ms);
@@ -1242,26 +1248,35 @@ pub struct TickSnapshotProvider {
 
 impl crate::engine::ipc::state::SnapshotProvider for TickSnapshotProvider {
     fn snapshot(&self) -> Vec<crate::engine::ipc::protocol::AgentSnapshot> {
-        let now = Instant::now();
-        let guard = self.running.lock().unwrap();
-        guard
-            .values()
-            .map(|ra| {
-                let obs = ra.observation.lock().unwrap();
-                let elapsed_ms = now
-                    .saturating_duration_since(obs.session_started_at)
-                    .as_millis() as u64;
-                crate::engine::ipc::protocol::AgentSnapshot {
-                    agent_id: ra.agent_ident.clone(),
-                    session_id: ra.session_id.clone(),
-                    doc_id: ra.doc_id.clone(),
-                    elapsed_ms,
-                    tokens_in: obs.tokens_in,
-                    tokens_out: obs.tokens_out,
-                }
-            })
-            .collect()
+        snapshot_running(&self.running)
     }
+}
+
+/// Build an `AgentSnapshot` vector from the live `running` map. Shared between
+/// the IPC `SnapshotProvider` impl (answers `Status` requests) and the tick
+/// loop's end-of-tick `DaemonStatus` broadcast, so both surface the same view.
+pub fn snapshot_running(
+    running: &Mutex<HashMap<String, RunningAgent>>,
+) -> Vec<crate::engine::ipc::protocol::AgentSnapshot> {
+    let now = Instant::now();
+    let guard = running.lock().unwrap();
+    guard
+        .values()
+        .map(|ra| {
+            let obs = ra.observation.lock().unwrap();
+            let elapsed_ms = now
+                .saturating_duration_since(obs.session_started_at)
+                .as_millis() as u64;
+            crate::engine::ipc::protocol::AgentSnapshot {
+                agent_id: ra.agent_ident.clone(),
+                session_id: ra.session_id.clone(),
+                doc_id: ra.doc_id.clone(),
+                elapsed_ms,
+                tokens_in: obs.tokens_in,
+                tokens_out: obs.tokens_out,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

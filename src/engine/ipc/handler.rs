@@ -106,7 +106,10 @@ fn dispatch(
     match msg {
         ClientMessage::Subscribe => {
             *sub_rx = Some(state.broadcaster.subscribe());
-            true
+            let seed = DaemonMessage::DaemonStatus {
+                agents: state.snapshot_provider.snapshot(),
+            };
+            write_msg(writer, &seed).is_ok()
         }
         ClientMessage::Unsubscribe => {
             *sub_rx = None;
