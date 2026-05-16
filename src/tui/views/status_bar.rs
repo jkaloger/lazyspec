@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::Rect,
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
@@ -127,17 +127,44 @@ impl StatusBar {
     }
 }
 
+/// Height required to render the status bar, including a toast strip above it
+/// when `app.toast` is set. Used by the top-level layout to reserve vertical
+/// space.
+pub fn status_bar_height(app: &App) -> u16 {
+    if app.toast.is_some() {
+        2
+    } else {
+        1
+    }
+}
+
 pub fn draw_status_bar(f: &mut Frame, app: &App, area: Rect, components: &StatusBarComponents) {
+    let (toast_area, status_area) = if app.toast.is_some() && area.height >= 2 {
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+        (Some(split[0]), split[1])
+    } else {
+        (None, area)
+    };
+
+    if let (Some(toast_area), Some(toast)) = (toast_area, app.toast.as_ref()) {
+        let toast_para = Paragraph::new(Line::from(Span::raw(toast.message.clone())))
+            .style(Style::default().fg(Color::Red).bg(Color::DarkGray));
+        f.render_widget(toast_para, toast_area);
+    }
+
     let bar = StatusBar {
         left: components.left.iter().map(|c| c(app)).collect(),
         center: components.center.iter().map(|c| c(app)).collect(),
         right: components.right.iter().map(|c| c(app)).collect(),
     };
 
-    let line = bar.render(area.width);
+    let line = bar.render(status_area.width);
     let paragraph =
         Paragraph::new(line).style(Style::default().bg(Color::DarkGray).fg(Color::White));
-    f.render_widget(paragraph, area);
+    f.render_widget(paragraph, status_area);
 }
 
 pub struct StatusBarComponents {

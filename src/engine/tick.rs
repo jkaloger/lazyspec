@@ -350,6 +350,12 @@ pub struct TickLoop<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: Work
     /// TUI / CLI clients can stream live agent output. `None` in tests that
     /// don't exercise IPC.
     pub broadcaster: Option<crate::engine::ipc::broadcaster::Broadcaster>,
+    /// Monotonic tick counter for observability. Incremented at the top of
+    /// every `run_once`; first tick is 1.
+    pub tick_id: u64,
+    /// Daemon-relative clock origin. Initialized lazily on the first `run_once`
+    /// call so the t=ms timestamp does not include `Daemon::new` setup time.
+    pub started_at: Option<Instant>,
 }
 
 fn lease_glob(type_name: &str) -> String {
@@ -418,6 +424,8 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             wake_rx: None,
             cancel_map: Arc::new(Mutex::new(HashMap::new())),
             broadcaster: None,
+            tick_id: 0,
+            started_at: None,
         }
     }
 
@@ -466,6 +474,34 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
         self
     }
 
+    /// Emit a `daemon: tick=<n> t=<ms> <event> <kv>` line on stderr. Used by
+    /// `run_once` for tick-lifecycle observability per ITERATION-185 AC3. Takes
+    /// `&self` — `started_at` is initialized explicitly in `run_once`, not here.
+    fn log(&self, event: &str, kv: &str) {
+        let now = self.clock.now_instant();
+        let t = match self.started_at {
+            Some(start) => now.saturating_duration_since(start).as_millis(),
+            None => 0,
+        };
+        eprintln!("daemon: tick={} t={}ms {} {}", self.tick_id, t, event, kv);
+    }
+
+    /// Log a pre-spawn dispatch failure and, if the IPC broadcaster is wired,
+    /// publish a `DaemonMessage::Error` so subscribers (TUI, CLI clients) see
+    /// the failure instead of silent "nothing happened". `stage` identifies
+    /// which step of the dispatch pipeline failed.
+    fn publish_dispatch_error(&self, doc_id: &str, stage: &str, err: &dyn std::fmt::Display) {
+        self.log(
+            "dispatch_failed",
+            &format!("doc={} stage={} err={}", doc_id, stage, err),
+        );
+        if let Some(bc) = self.broadcaster.as_ref() {
+            bc.publish(crate::engine::ipc::protocol::DaemonMessage::Error {
+                message: format!("{doc_id}: {stage}: {err}"),
+            });
+        }
+    }
+
     pub fn run_once(&mut self) -> Result<()> {
         let orch = self
             .config
@@ -482,6 +518,11 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             .clone();
 
         let now_instant = self.clock.now_instant();
+        if self.started_at.is_none() {
+            self.started_at = Some(now_instant);
+        }
+        self.tick_id = self.tick_id.saturating_add(1);
+        self.log("tick_start", "");
 
         // AC16: drain the preflight watcher channel. Any event flips the dirty
         // flag; the actual `run_preflight` re-run is below so a dirty flag set
@@ -500,9 +541,9 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                     self.preflight = report;
                 }
                 Err(e) => {
-                    eprintln!(
-                        "tick: preflight re-run failed: {}; keeping previous report",
-                        e
+                    self.log(
+                        "preflight_rerun_failed",
+                        &format!("err={} note=keeping_previous_report", e),
                     );
                 }
             }
@@ -521,7 +562,7 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             for type_def in &self.config.documents.types {
                 let glob = lease_glob(&type_def.name);
                 if let Err(e) = fetch_ref_optional(&self.git, &self.root, &coord_remote, &glob) {
-                    eprintln!("tick: fetch leases {} failed: {}", glob, e);
+                    self.log("lease_fetch_failed", &format!("glob={} err={}", glob, e));
                 }
             }
             // AC4/AC7 (STORY-124): push per-session metadata refs after the
@@ -539,7 +580,7 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             // fetch so this clone's authoritative state goes out first; fetch
             // errors are swallowed (mirrors lease-fetch handling above).
             if let Err(e) = self.metadata.fetch_all(&coord_remote) {
-                eprintln!("tick: metadata fetch failed: {}", e);
+                self.log("metadata_fetch_failed", &format!("err={}", e));
             }
             self.last_metadata_push = Some(now_instant);
         }
@@ -620,9 +661,12 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "tick: heartbeat {}/{} failed: {}; dropping agent",
-                        doc_type, ra_doc_id, e
+                    self.log(
+                        "heartbeat_failed",
+                        &format!(
+                            "doc_type={} doc={} err={} note=dropping_agent",
+                            doc_type, ra_doc_id, e
+                        ),
                     );
                     dead_after_hb.push(doc_id);
                 }
@@ -666,9 +710,16 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                 running_ids: &running_ids,
             };
             let eligible = dispatcher.eligible(&candidates);
+            let eligible_len = eligible.len();
             let slots = dispatcher.slots_available(running_len);
-            eligible.into_iter().take(slots).collect()
+            let selected: Vec<Candidate> = eligible.into_iter().take(slots).collect();
+            self.log(
+                "candidates_loaded",
+                &format!("count={} selected={}", eligible_len, selected.len()),
+            );
+            selected
         } else {
+            self.log("candidates_loaded", "count=0 selected=0 note=preflight_fail");
             Vec::new()
         };
 
@@ -681,12 +732,13 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                 self.lease_ops
                     .acquire(&cand.doc_type, &cand.doc_id, &agent_ident, now_utc)
             {
-                eprintln!(
-                    "tick: lease acquire {}/{} failed: {}; skipping",
-                    cand.doc_type, cand.doc_id, e
-                );
+                self.publish_dispatch_error(&cand.doc_id, "lease_acquire", &e);
                 continue;
             }
+            self.log(
+                "dispatch_stage_ok",
+                &format!("doc={} stage=lease_acquire", cand.doc_id),
+            );
 
             let branch = match render_branch_name(
                 &orch.branch_template,
@@ -700,13 +752,17 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             ) {
                 Ok(b) => b,
                 Err(e) => {
-                    eprintln!("tick: branch render failed for {}: {}", cand.doc_id, e);
+                    self.publish_dispatch_error(&cand.doc_id, "branch_render", &e);
                     let _ = self
                         .lease_ops
                         .release(&cand.doc_type, &cand.doc_id, &agent_ident);
                     continue;
                 }
             };
+            self.log(
+                "dispatch_stage_ok",
+                &format!("doc={} stage=branch_render", cand.doc_id),
+            );
 
             let workspace = match self.workspace_provisioner.provision(
                 &self.root,
@@ -717,16 +773,17 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             ) {
                 Ok(ws) => ws,
                 Err(e) => {
-                    eprintln!(
-                        "tick: workspace provision failed for {}: {}",
-                        cand.doc_id, e
-                    );
+                    self.publish_dispatch_error(&cand.doc_id, "workspace_provision", &e);
                     let _ = self
                         .lease_ops
                         .release(&cand.doc_type, &cand.doc_id, &agent_ident);
                     continue;
                 }
             };
+            self.log(
+                "dispatch_stage_ok",
+                &format!("doc={} stage=workspace_provision", cand.doc_id),
+            );
 
             let workspace_path = workspace.path.clone();
             let workspace_branch = workspace.branch.clone();
@@ -739,13 +796,17 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             let handle = match self.runner.spawn(ctx) {
                 Ok(h) => h,
                 Err(e) => {
-                    eprintln!("tick: spawn {} failed: {}", cand.doc_id, e);
+                    self.publish_dispatch_error(&cand.doc_id, "spawn", &e);
                     let _ = self
                         .lease_ops
                         .release(&cand.doc_type, &cand.doc_id, &agent_ident);
                     continue;
                 }
             };
+            self.log(
+                "dispatch_stage_ok",
+                &format!("doc={} stage=spawn", cand.doc_id),
+            );
 
             let AgentHandle {
                 pid,
@@ -794,12 +855,15 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
         // AC1: pace ticks. AC6 (RFC-041): if IPC kick channel is wired, an
         // incoming kick collapses the wait so the next tick fires immediately.
         let pace = Duration::from_millis(orch.poll_interval_ms);
-        match self.wake_rx.as_ref() {
-            Some(rx) => {
-                self.clock.sleep_interruptible(pace, rx);
+        self.log("sleep_start", &format!("pace_ms={}", orch.poll_interval_ms));
+        let interrupted = match self.wake_rx.as_ref() {
+            Some(rx) => self.clock.sleep_interruptible(pace, rx),
+            None => {
+                self.clock.sleep(pace);
+                false
             }
-            None => self.clock.sleep(pace),
-        }
+        };
+        self.log("sleep_wake", &format!("interrupted={}", interrupted));
         Ok(())
     }
 
@@ -810,7 +874,7 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                 Err(RecvTimeoutError::Timeout) => {}
             }
             if let Err(e) = self.run_once() {
-                eprintln!("tick: run_once error: {}", e);
+                self.log("run_once_error", &format!("err={}", e));
             }
         }
         // On shutdown: cancel + release every running agent. Join the reader
@@ -927,7 +991,10 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
         let store = match Store::load(&self.root, &self.config) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("tick: reconcile store load failed: {}; skipping", e);
+                self.log(
+                    "reconcile_store_load_failed",
+                    &format!("err={} note=skipping", e),
+                );
                 return;
             }
         };
@@ -981,11 +1048,14 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             .release(&ra.doc_type, &ra.doc_id, &ra.agent_ident);
         if remove_workspace {
             if let Err(e) = self.workspace_provisioner.remove(&self.root, &ra.workspace) {
-                eprintln!(
-                    "tick: workspace remove for {} at {} failed: {}",
-                    ra.doc_id,
-                    ra.workspace.display(),
-                    e
+                self.log(
+                    "workspace_remove_failed",
+                    &format!(
+                        "doc={} path={} err={}",
+                        ra.doc_id,
+                        ra.workspace.display(),
+                        e
+                    ),
                 );
             }
         }
@@ -1010,9 +1080,12 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                 self.lease_ops
                     .acquire(&retry.doc_type, &retry.doc_id, &retry.agent_ident, now_utc)
             {
-                eprintln!(
-                    "tick: retry lease re-acquire {}/{} failed: {}; abandoning",
-                    retry.doc_type, retry.doc_id, e
+                self.log(
+                    "retry_lease_reacquire_failed",
+                    &format!(
+                        "doc_type={} doc={} err={} note=abandoning",
+                        retry.doc_type, retry.doc_id, e
+                    ),
                 );
                 self.event_sink
                     .emit_failed(&retry.doc_id, &retry.agent_ident, "lease_cas_failed");
@@ -1027,7 +1100,10 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             let handle = match self.runner.spawn(ctx) {
                 Ok(h) => h,
                 Err(e) => {
-                    eprintln!("tick: retry spawn {} failed: {}", retry.doc_id, e);
+                    self.log(
+                        "retry_spawn_failed",
+                        &format!("doc={} err={}", retry.doc_id, e),
+                    );
                     let _ =
                         self.lease_ops
                             .release(&retry.doc_type, &retry.doc_id, &retry.agent_ident);
@@ -1144,7 +1220,7 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
         match local_lease_ids(&self.git, &self.root, claim_type) {
             Ok(ids) => ids,
             Err(e) => {
-                eprintln!("tick: list_refs leases failed: {}", e);
+                self.log("list_refs_leases_failed", &format!("err={}", e));
                 HashSet::new()
             }
         }
@@ -1338,6 +1414,9 @@ mod tests {
         // Per-spawn channels we keep alive (so try_recv returns Empty, not Disconnected).
         event_senders: Mutex<Vec<Sender<AgentEvent>>>,
         cancel_receivers: Mutex<Vec<Receiver<()>>>,
+        /// Optional canned error; when set, `spawn` returns this error instead
+        /// of a fresh handle. Used by dispatch-failure tests.
+        spawn_error: Mutex<Option<String>>,
     }
 
     impl FakeRunner {
@@ -1347,15 +1426,22 @@ mod tests {
                 next_pid: AtomicUsize::new(1),
                 event_senders: Mutex::new(Vec::new()),
                 cancel_receivers: Mutex::new(Vec::new()),
+                spawn_error: Mutex::new(None),
             }
         }
         fn spawn_count(&self) -> usize {
             self.calls.lock().unwrap().len()
         }
+        fn fail_spawn(&self, msg: &str) {
+            *self.spawn_error.lock().unwrap() = Some(msg.to_string());
+        }
     }
 
     impl AgentRunner for Arc<FakeRunner> {
         fn spawn(&self, ctx: AgentContext) -> Result<AgentHandle> {
+            if let Some(msg) = self.spawn_error.lock().unwrap().as_ref() {
+                return Err(anyhow::anyhow!(msg.clone()));
+            }
             self.calls.lock().unwrap().push(ctx);
             let (ev_tx, ev_rx) = unbounded::<AgentEvent>();
             let (cn_tx, cn_rx) = unbounded::<()>();
@@ -1499,11 +1585,17 @@ body\n",
     #[derive(Default)]
     struct FakeProvisioner {
         remove_calls: Mutex<Vec<PathBuf>>,
+        /// Optional canned error message; when set, `provision` returns this
+        /// error instead of a fresh workspace. Used by dispatch-failure tests.
+        provision_error: Mutex<Option<String>>,
     }
 
     impl FakeProvisioner {
         fn remove_calls(&self) -> Vec<PathBuf> {
             self.remove_calls.lock().unwrap().clone()
+        }
+        fn fail_provision(&self, msg: &str) {
+            *self.provision_error.lock().unwrap() = Some(msg.to_string());
         }
     }
 
@@ -1516,6 +1608,9 @@ body\n",
             branch: &str,
             claim: &str,
         ) -> Result<Workspace> {
+            if let Some(msg) = self.provision_error.lock().unwrap().as_ref() {
+                return Err(anyhow::anyhow!(msg.clone()));
+            }
             Ok(Workspace {
                 path: PathBuf::from(format!("/tmp/fake-ws/{}", claim)),
                 branch: branch.to_string(),
@@ -4493,5 +4588,178 @@ body\n",
         let got = provider.snapshot();
         assert_eq!(got[0].tokens_in, 123);
         assert_eq!(got[0].tokens_out, 456);
+    }
+
+    // ===========================================================
+    // ITERATION-185 AC1 — pre-spawn dispatch failure error events
+    // ===========================================================
+
+    fn recv_error_message(
+        rx: &Receiver<crate::engine::ipc::protocol::DaemonMessage>,
+    ) -> String {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(crate::engine::ipc::protocol::DaemonMessage::Error { message }) => message,
+            Ok(other) => panic!("expected Error message, got {:?}", other),
+            Err(e) => panic!("expected Error message, got {:?}", e),
+        }
+    }
+
+    #[test]
+    fn provision_failure_publishes_error_event() {
+        let td = TempDir::new().unwrap();
+        let cfg = cfg(base_orch(vec!["draft"]));
+        make_stories_status(&td, 1, "draft");
+        let runner = Arc::new(FakeRunner::new());
+        let lease = Arc::new(FakeLeaseOps::new());
+        let provisioner = Arc::new(FakeProvisioner::default());
+        provisioner.fail_provision("worktree add boom");
+
+        let bc = crate::engine::ipc::broadcaster::Broadcaster::new();
+        let rx = bc.subscribe();
+
+        let mut t = build_loop_with_provisioner(
+            &td,
+            cfg,
+            Arc::clone(&runner),
+            MockGitRefClient::new(),
+            Arc::clone(&lease),
+            FakeClock::new(),
+            Arc::clone(&provisioner),
+        )
+        .with_broadcaster(bc);
+
+        t.run_once().unwrap();
+
+        let msg = recv_error_message(&rx);
+        assert!(msg.contains("STORY-000"), "msg should mention doc_id: {msg}");
+        assert!(
+            msg.contains("workspace_provision"),
+            "msg should mention stage: {msg}"
+        );
+        assert!(
+            msg.contains("worktree add boom"),
+            "msg should mention underlying err: {msg}"
+        );
+        // No spawn since provision failed.
+        assert_eq!(runner.spawn_count(), 0);
+        // Lease was acquired and released.
+        let calls = lease.calls();
+        assert!(calls.iter().any(|c| matches!(c, LeaseCall::Acquire { .. })));
+        assert!(calls.iter().any(|c| matches!(c, LeaseCall::Release { .. })));
+    }
+
+    #[test]
+    fn spawn_failure_publishes_error_event() {
+        let td = TempDir::new().unwrap();
+        let cfg = cfg(base_orch(vec!["draft"]));
+        make_stories_status(&td, 1, "draft");
+        let runner = Arc::new(FakeRunner::new());
+        runner.fail_spawn("exec bang");
+        let lease = Arc::new(FakeLeaseOps::new());
+
+        let bc = crate::engine::ipc::broadcaster::Broadcaster::new();
+        let rx = bc.subscribe();
+
+        let mut t = build_loop(
+            &td,
+            cfg,
+            Arc::clone(&runner),
+            MockGitRefClient::new(),
+            Arc::clone(&lease),
+            FakeClock::new(),
+        )
+        .with_broadcaster(bc);
+
+        t.run_once().unwrap();
+
+        let msg = recv_error_message(&rx);
+        assert!(msg.contains("STORY-000"), "msg should mention doc_id: {msg}");
+        assert!(msg.contains("spawn"), "msg should mention stage: {msg}");
+        assert!(
+            msg.contains("exec bang"),
+            "msg should mention underlying err: {msg}"
+        );
+        let calls = lease.calls();
+        assert!(calls.iter().any(|c| matches!(c, LeaseCall::Acquire { .. })));
+        assert!(calls.iter().any(|c| matches!(c, LeaseCall::Release { .. })));
+    }
+
+    #[test]
+    fn branch_render_failure_publishes_error_event() {
+        let td = TempDir::new().unwrap();
+        let mut orch = base_orch(vec!["draft"]);
+        // unknown var forces render_branch_name to error.
+        orch.branch_template = "agents/{{ missing }}".to_string();
+        let cfg = cfg(orch);
+        make_stories_status(&td, 1, "draft");
+        let runner = Arc::new(FakeRunner::new());
+        let lease = Arc::new(FakeLeaseOps::new());
+
+        let bc = crate::engine::ipc::broadcaster::Broadcaster::new();
+        let rx = bc.subscribe();
+
+        let mut t = build_loop(
+            &td,
+            cfg,
+            Arc::clone(&runner),
+            MockGitRefClient::new(),
+            Arc::clone(&lease),
+            FakeClock::new(),
+        )
+        .with_broadcaster(bc);
+
+        t.run_once().unwrap();
+
+        let msg = recv_error_message(&rx);
+        assert!(msg.contains("STORY-000"), "msg should mention doc_id: {msg}");
+        assert!(
+            msg.contains("branch_render"),
+            "msg should mention stage: {msg}"
+        );
+        assert_eq!(runner.spawn_count(), 0);
+        let calls = lease.calls();
+        assert!(calls.iter().any(|c| matches!(c, LeaseCall::Acquire { .. })));
+        assert!(calls.iter().any(|c| matches!(c, LeaseCall::Release { .. })));
+    }
+
+    #[test]
+    fn lease_acquire_failure_publishes_error_event() {
+        let td = TempDir::new().unwrap();
+        let cfg = cfg(base_orch(vec!["draft"]));
+        make_stories_status(&td, 1, "draft");
+        let runner = Arc::new(FakeRunner::new());
+        let lease = Arc::new(FakeLeaseOps::new());
+        lease
+            .acquire_results
+            .lock()
+            .unwrap()
+            .push(Err(anyhow::anyhow!("CAS rejected")));
+
+        let bc = crate::engine::ipc::broadcaster::Broadcaster::new();
+        let rx = bc.subscribe();
+
+        let mut t = build_loop(
+            &td,
+            cfg,
+            Arc::clone(&runner),
+            MockGitRefClient::new(),
+            Arc::clone(&lease),
+            FakeClock::new(),
+        )
+        .with_broadcaster(bc);
+
+        t.run_once().unwrap();
+
+        let msg = recv_error_message(&rx);
+        assert!(msg.contains("STORY-000"), "msg should mention doc_id: {msg}");
+        assert!(
+            msg.contains("lease_acquire"),
+            "msg should mention stage: {msg}"
+        );
+        assert!(
+            msg.contains("CAS rejected"),
+            "msg should mention underlying err: {msg}"
+        );
+        assert_eq!(runner.spawn_count(), 0);
     }
 }

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::thread;
 
 use anyhow::Result;
-use crossbeam_channel::{bounded, select, Receiver};
+use crossbeam_channel::{bounded, select, Receiver, TrySendError};
 
 use crate::engine::ipc::framing::{read_msg, write_msg};
 use crate::engine::ipc::protocol::{ClientMessage, DaemonMessage};
@@ -141,7 +141,14 @@ fn dispatch(
             write_msg(writer, &resp).is_ok()
         }
         ClientMessage::Kick => {
-            let _ = state.wake.try_send(());
+            eprintln!("daemon: ipc kick received");
+            match state.wake.try_send(()) {
+                Ok(()) => {}
+                Err(TrySendError::Full(())) => {
+                    eprintln!("daemon: ipc kick dropped (channel full)");
+                }
+                Err(TrySendError::Disconnected(())) => {}
+            }
             true
         }
     }

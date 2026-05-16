@@ -24,7 +24,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+pub struct Toast {
+    pub message: String,
+    pub expires_at: Instant,
+}
 
 pub struct SearchEntry {
     pub path: PathBuf,
@@ -275,6 +280,7 @@ pub struct App {
     pub gh_issue_map_stale: bool,
     pub status_bar_enabled: bool,
     pub status_bar_components: StatusBarComponents,
+    pub toast: Option<Toast>,
 }
 
 impl App {
@@ -402,11 +408,27 @@ impl App {
             gh_issue_map_stale: false,
             status_bar_enabled: config.ui.statusbar.enabled,
             status_bar_components,
+            toast: None,
         };
         app.status_bar_warnings = status_bar_warnings;
         app.rebuild_search_index();
         app.build_doc_tree();
         app
+    }
+
+    pub fn set_toast(&mut self, message: String) {
+        self.toast = Some(Toast {
+            message,
+            expires_at: Instant::now() + Duration::from_secs(5),
+        });
+    }
+
+    pub fn tick_toast(&mut self, now: Instant) {
+        if let Some(toast) = &self.toast {
+            if now >= toast.expires_at {
+                self.toast = None;
+            }
+        }
     }
 
     pub fn refresh_validation(&mut self, config: &Config) {
@@ -1699,8 +1721,35 @@ pub(crate) mod tests {
             gh_issue_map_stale: false,
             status_bar_enabled: true,
             status_bar_components: StatusBarComponents::default(),
+            toast: None,
         };
         app
+    }
+
+    #[test]
+    fn set_toast_records_message_with_future_expiry() {
+        let mut app = make_test_app(0);
+        let before = Instant::now();
+        app.set_toast("oops".into());
+        let toast = app.toast.as_ref().expect("toast should be set");
+        assert_eq!(toast.message, "oops");
+        assert!(toast.expires_at > before);
+    }
+
+    #[test]
+    fn tick_toast_clears_when_now_past_expiry() {
+        let mut app = make_test_app(0);
+        app.set_toast("boom".into());
+        app.tick_toast(Instant::now() + std::time::Duration::from_secs(6));
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn tick_toast_keeps_unexpired() {
+        let mut app = make_test_app(0);
+        app.set_toast("still here".into());
+        app.tick_toast(Instant::now());
+        assert!(app.toast.is_some());
     }
 
     #[test]

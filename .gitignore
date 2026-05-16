@@ -8,3 +8,4 @@ result
 .direnv
 .local
 .lazyspec/daemon-host-id
+.lazyspec/work

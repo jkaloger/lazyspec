@@ -20,7 +20,7 @@ use std::sync::atomic::Ordering;
 
 use crate::engine::config::{Config, StoreBackend};
 use crate::tui::state::{App, ViewMode};
-use status_bar::draw_status_bar;
+use status_bar::{draw_status_bar, status_bar_height};
 
 #[cfg(feature = "agent")]
 use overlays::{draw_agent_dialog, draw_kickoff_picker};
@@ -73,7 +73,7 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
         if app.status_bar_enabled {
             let areas = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(0), Constraint::Length(1)])
+                .constraints([Constraint::Min(0), Constraint::Length(status_bar_height(app))])
                 .split(f.area());
             draw_create_form(f, app);
             draw_status_bar(f, app, areas[1], &app.status_bar_components);
@@ -92,7 +92,7 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
         if app.status_bar_enabled {
             let areas = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(0), Constraint::Length(1)])
+                .constraints([Constraint::Min(0), Constraint::Length(status_bar_height(app))])
                 .split(f.area());
             draw_search_overlay(f, app);
             draw_status_bar(f, app, areas[1], &app.status_bar_components);
@@ -114,7 +114,7 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
             .constraints([
                 Constraint::Length(1),
                 Constraint::Min(0),
-                Constraint::Length(1),
+                Constraint::Length(status_bar_height(app)),
             ])
             .split(f.area())
     } else {

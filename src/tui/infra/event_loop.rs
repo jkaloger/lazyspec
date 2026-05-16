@@ -121,6 +121,7 @@ fn try_push_git_ref_edit(root: &Path, relative: &Path, config: &Config) -> Resul
 fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config) {
     match event {
         AppEvent::Terminal(key) => {
+            app.toast = None;
             app.handle_key(key.code, key.modifiers, root, config);
         }
         AppEvent::FileChange(event) => match event.kind {
@@ -235,6 +236,9 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
         AppEvent::AgentFinished => {}
         #[cfg(feature = "agent")]
         AppEvent::AgentsDaemonMessage(msg) => {
+            if let crate::engine::ipc::protocol::DaemonMessage::Error { message } = &msg {
+                app.set_toast(message.clone());
+            }
             app.agents_view.apply(msg);
         }
         #[cfg(feature = "agent")]
@@ -384,6 +388,8 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     let mut loop_count: u64 = 0;
     loop {
         let loop_start = Instant::now();
+
+        app.tick_toast(Instant::now());
 
         let t = Instant::now();
         terminal.draw(|f| views::draw(f, &mut app, config))?;
