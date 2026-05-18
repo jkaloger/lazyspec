@@ -6,9 +6,9 @@ use ratatui::{
     Frame,
 };
 
-use crate::engine::config::StatusBarConfig;
 #[cfg(feature = "agent")]
 use crate::engine::agent_metadata::AgentStatus;
+use crate::engine::config::StatusBarConfig;
 #[cfg(feature = "agent")]
 use crate::engine::ipc::ConnectionState;
 #[cfg(feature = "agent")]
@@ -573,12 +573,12 @@ mod tests {
 mod agent_tests {
     use super::*;
     use crate::engine::agent_metadata::AgentStatus;
-    use crate::engine::ipc::ConnectionState;
     use crate::engine::ipc::protocol::AgentSnapshot;
-    use crate::tui::state::App;
-    use crate::tui::state::ViewMode;
+    use crate::engine::ipc::ConnectionState;
     use crate::tui::state::agents::DataSource;
     use crate::tui::state::app::tests::make_test_app;
+    use crate::tui::state::App;
+    use crate::tui::state::ViewMode;
 
     fn snap(session: &str, tin: u64, tout: u64) -> AgentSnapshot {
         AgentSnapshot {

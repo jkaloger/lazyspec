@@ -1,12 +1,12 @@
 use anyhow::Result;
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use minijinja::{context, Environment, UndefinedBehavior};
 use notify::{recommended_watcher, EventHandler, RecommendedWatcher, RecursiveMode, Watcher};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use super::config::Config;
+use super::prompt::{render_prompt, DocSummary};
 
 /// Default workflow/prompt path for the v1 single-role builder.
 /// Multi-role (`.lazyspec/workflows/<role>.md`) is a future evolution.
@@ -161,26 +161,14 @@ pub fn run_preflight(checks: &PreflightChecks) -> Result<PreflightReport> {
 }
 
 fn prompt_renders_ok(template: &str) -> bool {
-    let mut env = Environment::new();
-    env.set_undefined_behavior(UndefinedBehavior::Strict);
-    if env.add_template("preflight", template).is_err() {
-        return false;
-    }
-    let Ok(tmpl) = env.get_template("preflight") else {
-        return false;
+    let stub_doc = DocSummary {
+        id: "DUMMY".to_string(),
+        title: "x".to_string(),
+        body: String::new(),
+        status: "draft".to_string(),
+        assignees: vec![],
     };
-    tmpl.render(context! {
-        doc => context! {
-            id => "DUMMY",
-            title => "x",
-            body => "",
-            status => "draft",
-            assignees => Vec::<String>::new(),
-        },
-        attempt => Option::<()>::None,
-        prior_iterations => Vec::<()>::new(),
-    })
-    .is_ok()
+    render_prompt(template, &stub_doc, None, &[]).is_ok()
 }
 
 #[cfg(test)]

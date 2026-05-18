@@ -17,13 +17,15 @@ use crossbeam_channel::{Receiver, RecvTimeoutError};
 use uuid::Uuid;
 
 use super::agent::lease_agent_id;
-use super::agent_metadata::GitRefAgentMetadata;
+use super::agent_metadata::{read_agent_metadata, AgentMetadata, AgentStatus, GitRefAgentMetadata};
 use super::branch_template::{render_branch_name, BranchVars};
 use super::config::Config;
 use super::dispatcher::{Candidate, Dispatcher};
+use super::document::DocMeta;
 use super::git_ref::GitRefOps;
 use super::lease::{fetch_ref_optional, local_lease_ids, LeaseEngine};
 use super::preflight::{run_preflight, PreflightChecks, PreflightReport, PreflightWatcher};
+use super::prompt::{iterations_implementing, prior_iterations, DocSummary, PromptRenderer};
 use super::runner::{AgentContext, AgentEvent, AgentHandle, AgentRunner};
 use super::store::Store;
 use super::workspace::{provision_workspace, remove as remove_workspace, Workspace};
@@ -356,6 +358,10 @@ pub struct TickLoop<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: Work
     /// Daemon-relative clock origin. Initialized lazily on the first `run_once`
     /// call so the t=ms timestamp does not include `Daemon::new` setup time.
     pub started_at: Option<Instant>,
+    /// Prompt renderer used at fresh and retry dispatch. `None` means dispatch
+    /// passes an empty prompt string (existing test default — production wires
+    /// `MinijinjaPromptRenderer` via `with_prompt_renderer` in `Daemon::run`).
+    pub prompt_renderer: Option<Arc<dyn PromptRenderer>>,
 }
 
 fn lease_glob(type_name: &str) -> String {
@@ -426,7 +432,16 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             broadcaster: None,
             tick_id: 0,
             started_at: None,
+            prompt_renderer: None,
         }
+    }
+
+    /// Wire a `PromptRenderer` so fresh + retry dispatch builds the agent's
+    /// initial prompt from a template. When unset, dispatch falls back to an
+    /// empty prompt (existing test default).
+    pub fn with_prompt_renderer(mut self, renderer: Arc<dyn PromptRenderer>) -> Self {
+        self.prompt_renderer = Some(renderer);
+        self
     }
 
     /// Inject the initial preflight report + an optional watcher. Daemon
@@ -719,7 +734,10 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             );
             selected
         } else {
-            self.log("candidates_loaded", "count=0 selected=0 note=preflight_fail");
+            self.log(
+                "candidates_loaded",
+                "count=0 selected=0 note=preflight_fail",
+            );
             Vec::new()
         };
 
@@ -785,6 +803,47 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                 &format!("doc={} stage=workspace_provision", cand.doc_id),
             );
 
+            // AC1/AC2/AC4: render the initial prompt. attempt=None on fresh
+            // dispatch. prior_iterations=&[] because snapshot==current at
+            // session start by definition. AC5: capture snapshot for retry.
+            let snapshot = self.iteration_snapshot_for(&cand.doc_id);
+            let prompt = match self.prompt_renderer.as_ref() {
+                Some(renderer) => {
+                    let summary = match self.load_doc_summary(&cand.doc_id) {
+                        Ok(Some(s)) => s,
+                        Ok(None) => {
+                            self.publish_dispatch_error(
+                                &cand.doc_id,
+                                "prompt_render",
+                                &format!("doc {} missing from store", cand.doc_id),
+                            );
+                            let _ =
+                                self.lease_ops
+                                    .release(&cand.doc_type, &cand.doc_id, &agent_ident);
+                            continue;
+                        }
+                        Err(e) => {
+                            self.publish_dispatch_error(&cand.doc_id, "prompt_render", &e);
+                            let _ =
+                                self.lease_ops
+                                    .release(&cand.doc_type, &cand.doc_id, &agent_ident);
+                            continue;
+                        }
+                    };
+                    match renderer.render(&summary, None, &[]) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            self.publish_dispatch_error(&cand.doc_id, "prompt_render", &e);
+                            let _ =
+                                self.lease_ops
+                                    .release(&cand.doc_type, &cand.doc_id, &agent_ident);
+                            continue;
+                        }
+                    }
+                }
+                None => String::new(),
+            };
+
             let workspace_path = workspace.path.clone();
             let workspace_branch = workspace.branch.clone();
             let ctx = AgentContext {
@@ -792,6 +851,7 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                 doc_id: cand.doc_id.clone(),
                 agent_id: agent_ident.clone(),
                 branch: workspace.branch,
+                prompt,
             };
             let handle = match self.runner.spawn(ctx) {
                 Ok(h) => h,
@@ -807,6 +867,31 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                 "dispatch_stage_ok",
                 &format!("doc={} stage=spawn", cand.doc_id),
             );
+
+            // AC6: write initial AgentMetadata so the retry path can recover
+            // the session-start snapshot after a daemon restart. Best effort:
+            // metadata is observability, not the authoritative spawn record.
+            let now_utc_meta = self.clock.now_utc();
+            let metadata = AgentMetadata {
+                session_id: session_id.clone(),
+                agent_id: agent_ident.clone(),
+                doc_id: cand.doc_id.clone(),
+                doc_type: cand.doc_type.clone(),
+                status: AgentStatus::Running,
+                started_at: now_utc_meta,
+                last_event_at: now_utc_meta,
+                tokens_in: 0,
+                tokens_out: 0,
+                turn_count: 0,
+                error: None,
+                session_start_iteration_ids: snapshot,
+            };
+            if let Err(e) = self.metadata.write(&metadata) {
+                self.log(
+                    "metadata_write_failed",
+                    &format!("doc={} err={}", cand.doc_id, e),
+                );
+            }
 
             let AgentHandle {
                 pid,
@@ -1097,11 +1182,97 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                     .emit_failed(&retry.doc_id, &retry.agent_ident, "lease_cas_failed");
                 continue;
             }
+            // AC4/AC5: retry prompt rendering. attempt=Some(retry.attempt).
+            // prior_iterations = current_snapshot \ session_start_snapshot
+            // (from the prior metadata record, surviving daemon restart per
+            // AC6). Snapshot lookup is best-effort: a missing/unreadable
+            // record collapses prior to empty (degraded but safe — every
+            // iteration in current is treated as "added during this session").
+            let prompt = match self.prompt_renderer.as_ref() {
+                Some(renderer) => {
+                    let snapshot =
+                        match read_agent_metadata(&self.git, &self.root, &retry.session_id) {
+                            Ok(Some(m)) => m.session_start_iteration_ids,
+                            Ok(None) => Vec::new(),
+                            Err(e) => {
+                                self.log(
+                                    "retry_metadata_read_failed",
+                                    &format!(
+                                        "doc={} session={} err={} note=empty_snapshot",
+                                        retry.doc_id, retry.session_id, e
+                                    ),
+                                );
+                                Vec::new()
+                            }
+                        };
+                    let current = self.iteration_snapshot_for(&retry.doc_id);
+                    let prior = prior_iterations(&current, &snapshot);
+                    let summary = match self.load_doc_summary(&retry.doc_id) {
+                        Ok(Some(s)) => s,
+                        Ok(None) => {
+                            self.log(
+                                "retry_doc_missing",
+                                &format!("doc={} note=abandoning", retry.doc_id),
+                            );
+                            let _ = self.lease_ops.release(
+                                &retry.doc_type,
+                                &retry.doc_id,
+                                &retry.agent_ident,
+                            );
+                            self.event_sink.emit_failed(
+                                &retry.doc_id,
+                                &retry.agent_ident,
+                                "doc_missing",
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            self.log(
+                                "retry_doc_load_failed",
+                                &format!("doc={} err={} note=abandoning", retry.doc_id, e),
+                            );
+                            let _ = self.lease_ops.release(
+                                &retry.doc_type,
+                                &retry.doc_id,
+                                &retry.agent_ident,
+                            );
+                            self.event_sink.emit_failed(
+                                &retry.doc_id,
+                                &retry.agent_ident,
+                                "doc_load_failed",
+                            );
+                            continue;
+                        }
+                    };
+                    match renderer.render(&summary, Some(retry.attempt), &prior) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            self.log(
+                                "retry_prompt_render_failed",
+                                &format!("doc={} err={} note=abandoning", retry.doc_id, e),
+                            );
+                            let _ = self.lease_ops.release(
+                                &retry.doc_type,
+                                &retry.doc_id,
+                                &retry.agent_ident,
+                            );
+                            self.event_sink.emit_failed(
+                                &retry.doc_id,
+                                &retry.agent_ident,
+                                "prompt_render_failed",
+                            );
+                            continue;
+                        }
+                    }
+                }
+                None => String::new(),
+            };
             let ctx = AgentContext {
                 workspace: retry.workspace.clone(),
                 doc_id: retry.doc_id.clone(),
                 agent_id: retry.agent_ident.clone(),
                 branch: retry.branch.clone(),
+                prompt,
             };
             let handle = match self.runner.spawn(ctx) {
                 Ok(h) => h,
@@ -1191,6 +1362,49 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                 _ => RetryReason::AbnormalExit,
             };
             self.kill_agent_for_retry(&doc_id, kind, now);
+        }
+    }
+
+    /// Load a `DocSummary` for `doc_id` by re-reading the store. Returns
+    /// `Ok(None)` if the doc id is not in the store. The body is read from disk
+    /// (DocMeta's parser strips the frontmatter but does not retain the body).
+    fn load_doc_summary(&self, doc_id: &str) -> Result<Option<DocSummary>> {
+        let store = Store::load(&self.root, &self.config)?;
+        let Some(meta) = store
+            .all_docs()
+            .into_iter()
+            .find(|m| m.id == doc_id)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let full_path = store.root().join(&meta.path);
+        let body = match std::fs::read_to_string(&full_path) {
+            Ok(c) => DocMeta::extract_body(&c).unwrap_or_default(),
+            Err(_) => String::new(),
+        };
+        Ok(Some(DocSummary {
+            id: meta.id.clone(),
+            title: meta.title.clone(),
+            body,
+            status: meta.status.to_string(),
+            assignees: meta.assignees.clone(),
+        }))
+    }
+
+    /// Compute the current snapshot of iteration ids implementing `doc_id`.
+    /// Returns an empty vector on store-load failure (logged); empty snapshot
+    /// is a safe degradation — prior_iterations falls back to all-current.
+    fn iteration_snapshot_for(&self, doc_id: &str) -> Vec<String> {
+        match Store::load(&self.root, &self.config) {
+            Ok(s) => iterations_implementing(&s, doc_id),
+            Err(e) => {
+                self.log(
+                    "snapshot_load_failed",
+                    &format!("doc={} err={} note=empty_snapshot", doc_id, e),
+                );
+                Vec::new()
+            }
         }
     }
 
@@ -4609,9 +4823,7 @@ body\n",
     // ITERATION-185 AC1 — pre-spawn dispatch failure error events
     // ===========================================================
 
-    fn recv_error_message(
-        rx: &Receiver<crate::engine::ipc::protocol::DaemonMessage>,
-    ) -> String {
+    fn recv_error_message(rx: &Receiver<crate::engine::ipc::protocol::DaemonMessage>) -> String {
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(crate::engine::ipc::protocol::DaemonMessage::Error { message }) => message,
             Ok(other) => panic!("expected Error message, got {:?}", other),
@@ -4646,7 +4858,10 @@ body\n",
         t.run_once().unwrap();
 
         let msg = recv_error_message(&rx);
-        assert!(msg.contains("STORY-000"), "msg should mention doc_id: {msg}");
+        assert!(
+            msg.contains("STORY-000"),
+            "msg should mention doc_id: {msg}"
+        );
         assert!(
             msg.contains("workspace_provision"),
             "msg should mention stage: {msg}"
@@ -4688,7 +4903,10 @@ body\n",
         t.run_once().unwrap();
 
         let msg = recv_error_message(&rx);
-        assert!(msg.contains("STORY-000"), "msg should mention doc_id: {msg}");
+        assert!(
+            msg.contains("STORY-000"),
+            "msg should mention doc_id: {msg}"
+        );
         assert!(msg.contains("spawn"), "msg should mention stage: {msg}");
         assert!(
             msg.contains("exec bang"),
@@ -4726,7 +4944,10 @@ body\n",
         t.run_once().unwrap();
 
         let msg = recv_error_message(&rx);
-        assert!(msg.contains("STORY-000"), "msg should mention doc_id: {msg}");
+        assert!(
+            msg.contains("STORY-000"),
+            "msg should mention doc_id: {msg}"
+        );
         assert!(
             msg.contains("branch_render"),
             "msg should mention stage: {msg}"
@@ -4766,7 +4987,10 @@ body\n",
         t.run_once().unwrap();
 
         let msg = recv_error_message(&rx);
-        assert!(msg.contains("STORY-000"), "msg should mention doc_id: {msg}");
+        assert!(
+            msg.contains("STORY-000"),
+            "msg should mention doc_id: {msg}"
+        );
         assert!(
             msg.contains("lease_acquire"),
             "msg should mention stage: {msg}"
@@ -4776,5 +5000,490 @@ body\n",
             "msg should mention underlying err: {msg}"
         );
         assert_eq!(runner.spawn_count(), 0);
+    }
+
+    // ===========================================================
+    // ITERATION-186 AC4/AC5/AC6/AC7/AC8 — PromptRenderer wiring
+    // ===========================================================
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct RecordedRender {
+        doc_id: String,
+        attempt: Option<u32>,
+        prior_iterations: Vec<String>,
+    }
+
+    #[derive(Default)]
+    struct RecordingPromptRenderer {
+        calls: Mutex<Vec<RecordedRender>>,
+    }
+
+    impl RecordingPromptRenderer {
+        fn calls(&self) -> Vec<RecordedRender> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl PromptRenderer for RecordingPromptRenderer {
+        fn render(
+            &self,
+            doc: &DocSummary,
+            attempt: Option<u32>,
+            prior_iterations: &[String],
+        ) -> anyhow::Result<String> {
+            self.calls.lock().unwrap().push(RecordedRender {
+                doc_id: doc.id.clone(),
+                attempt,
+                prior_iterations: prior_iterations.to_vec(),
+            });
+            Ok(format!(
+                "RENDERED:{}:{:?}:{:?}",
+                doc.id, attempt, prior_iterations
+            ))
+        }
+    }
+
+    fn write_story_doc(td: &TempDir, id: &str, status: &str) {
+        let dir = td.path().join("docs/stories");
+        std::fs::create_dir_all(&dir).unwrap();
+        let content = format!(
+            "---\n\
+title: \"{id}\"\n\
+type: story\n\
+status: {status}\n\
+author: test\n\
+date: 2026-01-01\n\
+tags: []\n\
+assignees: [\"claude-bot\"]\n\
+---\n\
+body\n",
+        );
+        std::fs::write(dir.join(format!("{id}.md")), content).unwrap();
+    }
+
+    fn write_iteration_doc(td: &TempDir, id: &str, implements: &str) {
+        let dir = td.path().join("docs/iterations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let content = format!(
+            "---\n\
+title: \"{id}\"\n\
+type: iteration\n\
+status: draft\n\
+author: test\n\
+date: 2026-01-01\n\
+tags: []\n\
+related:\n\
+- implements: {implements}\n\
+---\n\
+body\n",
+        );
+        std::fs::write(dir.join(format!("{id}.md")), content).unwrap();
+    }
+
+    type RendererTestRig = (
+        TickLoop<
+            Arc<FakeRunner>,
+            MockGitRefClient,
+            Arc<FakeLeaseOps>,
+            FakeClock,
+            Arc<FakeProvisioner>,
+        >,
+        Arc<RecordingPromptRenderer>,
+        Arc<FakeRunner>,
+        Arc<FakeLeaseOps>,
+    );
+
+    fn build_loop_with_renderer(td: &TempDir, cfg: Config) -> RendererTestRig {
+        let runner = Arc::new(FakeRunner::new());
+        let lease = Arc::new(FakeLeaseOps::new());
+        let recorder = Arc::new(RecordingPromptRenderer::default());
+        let t = build_loop(
+            td,
+            cfg,
+            Arc::clone(&runner),
+            MockGitRefClient::new(),
+            Arc::clone(&lease),
+            FakeClock::new(),
+        )
+        .with_prompt_renderer(Arc::clone(&recorder) as Arc<dyn PromptRenderer>);
+        (t, recorder, runner, lease)
+    }
+
+    // ---- AC4: fresh dispatch passes attempt=None + empty prior_iterations
+
+    #[test]
+    fn fresh_dispatch_renders_with_attempt_none() {
+        let td = TempDir::new().unwrap();
+        write_story_doc(&td, "STORY-FRESH1", "draft");
+        let (mut t, recorder, _runner, _lease) =
+            build_loop_with_renderer(&td, cfg(base_orch(vec!["draft"])));
+
+        t.run_once().unwrap();
+
+        let calls = recorder.calls();
+        assert_eq!(calls.len(), 1, "expected exactly one render call");
+        assert_eq!(calls[0].doc_id, "STORY-FRESH1");
+        assert_eq!(
+            calls[0].attempt, None,
+            "fresh dispatch must pass attempt=None"
+        );
+    }
+
+    #[test]
+    fn fresh_dispatch_renders_with_empty_prior_iterations() {
+        let td = TempDir::new().unwrap();
+        write_story_doc(&td, "STORY-FRESH2", "draft");
+        // Seed iterations implementing the story — at the moment of fresh
+        // dispatch the snapshot equals current, so prior_iterations is empty
+        // regardless of how many iterations already exist.
+        write_iteration_doc(&td, "ITERATION-001", "STORY-FRESH2");
+        write_iteration_doc(&td, "ITERATION-002", "STORY-FRESH2");
+        let (mut t, recorder, _runner, _lease) =
+            build_loop_with_renderer(&td, cfg(base_orch(vec!["draft"])));
+
+        t.run_once().unwrap();
+
+        let calls = recorder.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].prior_iterations.is_empty(),
+            "fresh dispatch must pass empty prior_iterations; got {:?}",
+            calls[0].prior_iterations
+        );
+    }
+
+    // ---- AC4/AC5/AC6: retry path
+
+    /// Seed `MockGitRefClient` so the retry path's `read_agent_metadata`
+    /// resolves the stub session ref to a sha and reads back a JSON payload
+    /// carrying the given session_start_iteration_ids.
+    fn seed_metadata_read(
+        git: &MockGitRefClient,
+        session_id: &str,
+        doc_id: &str,
+        snapshot: Vec<String>,
+    ) {
+        let now = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let md = AgentMetadata {
+            agent_id: format!("host-test:{session_id}"),
+            session_id: session_id.to_string(),
+            doc_id: doc_id.to_string(),
+            doc_type: "story".to_string(),
+            status: AgentStatus::Running,
+            started_at: now,
+            last_event_at: now,
+            tokens_in: 0,
+            tokens_out: 0,
+            turn_count: 0,
+            error: None,
+            session_start_iteration_ids: snapshot,
+        };
+        let json = serde_json::to_string(&md).unwrap();
+        git.resolve_results
+            .borrow_mut()
+            .push(Ok(Some("sha-md".to_string())));
+        git.read_blob_results.borrow_mut().push(Ok(json));
+    }
+
+    fn enqueue_retry_with_session(
+        t: &mut TickLoop<
+            Arc<FakeRunner>,
+            MockGitRefClient,
+            Arc<FakeLeaseOps>,
+            FakeClock,
+            Arc<FakeProvisioner>,
+        >,
+        doc_id: &str,
+        session_id: &str,
+        ready_at: Instant,
+        attempt: u32,
+        failure_attempt: u32,
+    ) {
+        t.retry_queue.push(PendingRetry {
+            doc_id: doc_id.to_string(),
+            doc_type: "story".to_string(),
+            workspace: PathBuf::from(format!("/tmp/fake-ws/{doc_id}")),
+            branch: format!("agents/{doc_id}"),
+            agent_ident: format!("host-test:{session_id}"),
+            session_id: session_id.to_string(),
+            attempt,
+            failure_attempt,
+            ready_at,
+            kind: RetryReason::CleanExit,
+        });
+    }
+
+    #[test]
+    fn retry_dispatch_renders_with_attempt_some_carried_from_pending() {
+        let td = TempDir::new().unwrap();
+        // Use non-active status so the same doc doesn't ALSO get picked up by
+        // the fresh-dispatch path after the retry adds it to `running`. (Even
+        // with active status the running filter would block re-dispatch, but
+        // non-active keeps the assertion focused.)
+        write_story_doc(&td, "STORY-RT1", "complete");
+        let (mut t, recorder, _runner, _lease) =
+            build_loop_with_renderer(&td, cfg(base_orch(vec!["draft"])));
+
+        // Seed metadata read so the retry's snapshot lookup succeeds (empty
+        // snapshot is fine here — we only assert on `attempt`).
+        seed_metadata_read(&t.git, "sess-rt1", "STORY-RT1", Vec::new());
+
+        let now = t.clock.now_instant();
+        enqueue_retry_with_session(&mut t, "STORY-RT1", "sess-rt1", now, 3, 0);
+
+        t.run_once().unwrap();
+
+        let calls = recorder.calls();
+        assert_eq!(calls.len(), 1, "expected exactly one retry render call");
+        assert_eq!(calls[0].doc_id, "STORY-RT1");
+        assert_eq!(
+            calls[0].attempt,
+            Some(3),
+            "retry render must carry PendingRetry.attempt"
+        );
+    }
+
+    #[test]
+    fn retry_reloads_snapshot_from_metadata_and_passes_prior_iterations() {
+        let td = TempDir::new().unwrap();
+        write_story_doc(&td, "STORY-RT2", "complete");
+        write_iteration_doc(&td, "ITER-A", "STORY-RT2");
+        write_iteration_doc(&td, "ITER-B", "STORY-RT2");
+        let (mut t, recorder, _runner, _lease) =
+            build_loop_with_renderer(&td, cfg(base_orch(vec!["draft"])));
+
+        // session_start snapshot was [ITER-A]; current is [ITER-A, ITER-B];
+        // prior must therefore be [ITER-B].
+        seed_metadata_read(&t.git, "sess-rt2", "STORY-RT2", vec!["ITER-A".to_string()]);
+
+        let now = t.clock.now_instant();
+        enqueue_retry_with_session(&mut t, "STORY-RT2", "sess-rt2", now, 1, 0);
+
+        t.run_once().unwrap();
+
+        let calls = recorder.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].prior_iterations,
+            vec!["ITER-B".to_string()],
+            "prior must be current minus session-start snapshot"
+        );
+    }
+
+    #[test]
+    fn retry_with_empty_snapshot_metadata_includes_all_current_iterations() {
+        let td = TempDir::new().unwrap();
+        write_story_doc(&td, "STORY-RT3", "complete");
+        write_iteration_doc(&td, "ITER-A", "STORY-RT3");
+        write_iteration_doc(&td, "ITER-B", "STORY-RT3");
+        let (mut t, recorder, _runner, _lease) =
+            build_loop_with_renderer(&td, cfg(base_orch(vec!["draft"])));
+
+        // Empty snapshot → every current iteration is "new".
+        seed_metadata_read(&t.git, "sess-rt3", "STORY-RT3", Vec::new());
+
+        let now = t.clock.now_instant();
+        enqueue_retry_with_session(&mut t, "STORY-RT3", "sess-rt3", now, 2, 0);
+
+        t.run_once().unwrap();
+
+        let calls = recorder.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].prior_iterations,
+            vec!["ITER-A".to_string(), "ITER-B".to_string()],
+            "empty snapshot must yield all current iterations, sorted"
+        );
+    }
+
+    // ---- AC7: preflight failure gates dispatch — renderer never invoked
+
+    #[test]
+    fn dispatch_skipped_when_preflight_fails() {
+        let td = TempDir::new().unwrap();
+        write_story_doc(&td, "STORY-PF1", "draft");
+        let (mut t, recorder, runner, lease) =
+            build_loop_with_renderer(&td, cfg(base_orch(vec!["draft"])));
+        let failing = PreflightReport {
+            workflow_readable: false,
+            prompt_renders: false,
+            agent_users_non_empty: false,
+        };
+        t = t.with_preflight(failing, None);
+
+        t.run_once().unwrap();
+
+        assert!(
+            recorder.calls().is_empty(),
+            "preflight=fail must skip prompt rendering: {:?}",
+            recorder.calls()
+        );
+        assert_eq!(
+            runner.spawn_count(),
+            0,
+            "preflight=fail must skip spawn entirely"
+        );
+        let acquired = lease
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, LeaseCall::Acquire { .. }))
+            .count();
+        assert_eq!(acquired, 0, "preflight=fail must skip lease acquire");
+    }
+
+    // ---- AC8: in-flight session survives a preflight-fail tick
+
+    #[test]
+    fn in_flight_session_not_killed_on_template_change() {
+        let td = TempDir::new().unwrap();
+        write_story_doc(&td, "STORY-IFR", "draft");
+        let (mut t, recorder, runner, _lease) =
+            build_loop_with_renderer(&td, cfg(base_orch(vec!["draft"])));
+
+        // Tick 1: fresh dispatch goes through the renderer.
+        t.run_once().unwrap();
+        assert_eq!(runner.spawn_count(), 1, "fresh dispatch spawned");
+        assert_eq!(
+            recorder.calls().len(),
+            1,
+            "tick 1 rendered the fresh dispatch"
+        );
+        assert!(
+            t.running.lock().unwrap().contains_key("STORY-IFR"),
+            "agent inserted into running map after fresh dispatch"
+        );
+
+        // Simulate template invalidation: flip preflight to fail and mark
+        // dirty so the next tick re-runs preflight. The re-run reads disk
+        // (no prompt template at .lazyspec/prompts/builder.md), so the
+        // refreshed report will fail on `prompt_renders`.
+        t.preflight = PreflightReport {
+            workflow_readable: false,
+            prompt_renders: false,
+            agent_users_non_empty: true,
+        };
+        t.preflight_dirty = true;
+
+        // Tick 2: preflight gates fresh dispatch but must leave the in-flight
+        // agent untouched.
+        t.run_once().unwrap();
+
+        assert!(
+            t.running.lock().unwrap().contains_key("STORY-IFR"),
+            "in-flight session must survive a preflight-fail tick"
+        );
+        assert_eq!(runner.spawn_count(), 1, "no NEW dispatch on the gated tick");
+        assert_eq!(
+            recorder.calls().len(),
+            1,
+            "renderer NOT re-invoked on the gated tick"
+        );
+    }
+
+    // ---- AC5/AC6: AgentMetadata first-write persists session-start snapshot
+    //
+    // The retry path's prior_iterations computation depends on
+    // `session_start_iteration_ids` having been written at fresh-dispatch time
+    // (and surviving a daemon restart). These tests enforce that invariant at
+    // the tick layer so a future refactor can't silently drop the write.
+
+    #[test]
+    fn fresh_dispatch_writes_initial_metadata_with_snapshot() {
+        let td = TempDir::new().unwrap();
+        write_story_doc(&td, "STORY-MD1", "draft");
+        // Seed two iterations implementing the candidate — the snapshot
+        // written into AgentMetadata must contain both ids, sorted.
+        write_iteration_doc(&td, "ITER-A", "STORY-MD1");
+        write_iteration_doc(&td, "ITER-B", "STORY-MD1");
+        let (mut t, _recorder, _runner, _lease) =
+            build_loop_with_renderer(&td, cfg(base_orch(vec!["draft"])));
+
+        t.run_once().unwrap();
+
+        // Inspect the metadata writer's git mock. `GitRefAgentMetadata::write`
+        // calls `create_commit` on `refs/lazyspec/agents/<session_id>` with a
+        // single `metadata.json` file; assert the blob deserialises to an
+        // AgentMetadata carrying the expected snapshot.
+        let calls = t.metadata.git.calls.borrow().clone();
+        let commit_call = calls
+            .iter()
+            .find(|c| c.starts_with("create_commit:refs/lazyspec/agents/"))
+            .expect("fresh dispatch must create_commit on agent metadata ref");
+        assert!(
+            commit_call.contains("parent=None"),
+            "first metadata write must be an orphan commit (no parent); got {commit_call}"
+        );
+
+        let files_log = t.metadata.git.create_commit_files.borrow();
+        assert_eq!(files_log.len(), 1, "expected exactly one create_commit");
+        let files = &files_log[0];
+        let (path, content) = files
+            .iter()
+            .find(|(p, _)| p == "metadata.json")
+            .expect("create_commit must include metadata.json");
+        assert_eq!(path, "metadata.json");
+        let written: AgentMetadata =
+            serde_json::from_str(content).expect("written blob must deserialise as AgentMetadata");
+        assert_eq!(written.doc_id, "STORY-MD1");
+        assert_eq!(written.doc_type, "story");
+        assert_eq!(
+            written.session_start_iteration_ids,
+            vec!["ITER-A".to_string(), "ITER-B".to_string()],
+            "session_start_iteration_ids must equal the sorted current snapshot"
+        );
+    }
+
+    // Idempotency note (option b chosen):
+    //
+    // Fresh dispatch generates `session_id` via `Uuid::new_v4()` at the top of
+    // its dispatch arm, so the metadata ref `refs/lazyspec/agents/<uuid>`
+    // cannot collide with any pre-existing ref in production. Asserting "no
+    // overwrite when a metadata ref already exists for this session_id"
+    // therefore can't be expressed without scaffolding to swap the uuid
+    // generator. The safety mechanism is the v4 uniqueness — documented here
+    // so a future refactor switching to deterministic session ids (e.g.
+    // per-doc) notices it must reintroduce a CAS / read-before-write guard
+    // before reaching `metadata.write`.
+
+    #[test]
+    fn retry_does_not_overwrite_session_start_snapshot() {
+        let td = TempDir::new().unwrap();
+        // Non-active status so fresh dispatch doesn't fire on the same tick.
+        write_story_doc(&td, "STORY-MD3", "complete");
+        write_iteration_doc(&td, "ITER-A", "STORY-MD3");
+        let (mut t, _recorder, _runner, _lease) =
+            build_loop_with_renderer(&td, cfg(base_orch(vec!["draft"])));
+
+        // Pre-seed: pretend the prior session already wrote
+        // session_start_iteration_ids = [ITER-A]. The retry path reads this
+        // (via `read_agent_metadata`) to compute prior_iterations; it must NOT
+        // write back a new metadata blob.
+        seed_metadata_read(&t.git, "sess-md3", "STORY-MD3", vec!["ITER-A".to_string()]);
+
+        let now = t.clock.now_instant();
+        enqueue_retry_with_session(&mut t, "STORY-MD3", "sess-md3", now, 1, 0);
+
+        t.run_once().unwrap();
+
+        // The retry render must have happened (sanity: it depends on the
+        // seeded metadata read), but no metadata write should have been
+        // recorded against the metadata writer's mock.
+        let writes: Vec<String> = t
+            .metadata
+            .git
+            .calls
+            .borrow()
+            .iter()
+            .filter(|c| c.starts_with("create_commit:refs/lazyspec/agents/"))
+            .cloned()
+            .collect();
+        assert!(
+            writes.is_empty(),
+            "retry must not rewrite agent metadata (would clobber session-start snapshot); got {writes:?}"
+        );
+        assert!(
+            t.metadata.git.create_commit_files.borrow().is_empty(),
+            "no metadata.json blob should be written on retry"
+        );
     }
 }

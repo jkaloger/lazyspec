@@ -28,6 +28,7 @@ fn ctx() -> AgentContext {
         doc_id: "STORY-127".into(),
         agent_id: "claude-bot".into(),
         branch: "feat/x".into(),
+        prompt: "test prompt".into(),
     }
 }
 

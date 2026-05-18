@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::engine::agent_metadata::{AgentMetadata, AgentStatus};
-use crate::engine::ipc::ConnectionState;
 use crate::engine::ipc::protocol::{AgentSnapshot, DaemonMessage};
+use crate::engine::ipc::ConnectionState;
 use crate::engine::runner::AgentEvent;
 
 const OUTPUT_BUFFER_CAP: usize = 65_536;
@@ -55,17 +55,17 @@ impl AgentsViewState {
                     input_tokens,
                     output_tokens,
                 } => {
-                    let snap = self
-                        .snapshots
-                        .entry(session_id.clone())
-                        .or_insert_with(|| AgentSnapshot {
-                            agent_id: String::new(),
-                            session_id: session_id.clone(),
-                            doc_id: String::new(),
-                            elapsed_ms: 0,
-                            tokens_in: 0,
-                            tokens_out: 0,
-                        });
+                    let snap =
+                        self.snapshots
+                            .entry(session_id.clone())
+                            .or_insert_with(|| AgentSnapshot {
+                                agent_id: String::new(),
+                                session_id: session_id.clone(),
+                                doc_id: String::new(),
+                                elapsed_ms: 0,
+                                tokens_in: 0,
+                                tokens_out: 0,
+                            });
                     snap.tokens_in = input_tokens;
                     snap.tokens_out = output_tokens;
                 }
@@ -123,16 +123,13 @@ impl AgentsViewState {
     }
 
     pub fn selected_session(&self) -> Option<&str> {
-        self.snapshots
-            .keys()
-            .nth(self.selected)
-            .map(String::as_str)
+        self.snapshots.keys().nth(self.selected).map(String::as_str)
     }
 
     pub fn aggregate_tokens(&self) -> (u64, u64) {
-        self.snapshots
-            .values()
-            .fold((0u64, 0u64), |(ti, to), s| (ti + s.tokens_in, to + s.tokens_out))
+        self.snapshots.values().fold((0u64, 0u64), |(ti, to), s| {
+            (ti + s.tokens_in, to + s.tokens_out)
+        })
     }
 
     pub fn counts_by_status(&self) -> HashMap<AgentStatus, u32> {
@@ -310,7 +307,10 @@ mod tests {
         let mut s = AgentsViewState::new();
         s.apply(text_event("s1", "history"));
         s.apply(DaemonMessage::DaemonStatus {
-            agents: vec![snapshot("s1", "STORY-1", 0, 0), snapshot("s2", "STORY-2", 0, 0)],
+            agents: vec![
+                snapshot("s1", "STORY-1", 0, 0),
+                snapshot("s2", "STORY-2", 0, 0),
+            ],
         });
         assert_eq!(s.output.get("s1").map(String::as_str), Some("history"));
         assert!(s.snapshots.contains_key("s1"));
@@ -333,7 +333,10 @@ mod tests {
             status: AgentStatus::Crashed,
         });
         s.apply(DaemonMessage::DaemonStatus {
-            agents: vec![snapshot("s1", "STORY-1", 0, 0), snapshot("s2", "STORY-2", 0, 0)],
+            agents: vec![
+                snapshot("s1", "STORY-1", 0, 0),
+                snapshot("s2", "STORY-2", 0, 0),
+            ],
         });
 
         s.apply(DaemonMessage::DaemonStatus {

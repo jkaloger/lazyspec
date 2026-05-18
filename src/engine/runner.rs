@@ -15,6 +15,7 @@ pub struct AgentContext {
     pub doc_id: String,
     pub agent_id: String,
     pub branch: String,
+    pub prompt: String,
 }
 
 pub struct AgentHandle {
@@ -69,6 +70,7 @@ mod tests {
             doc_id: "STORY-127".into(),
             agent_id: "claude-bot".into(),
             branch: "feat/x".into(),
+            prompt: "test prompt".into(),
         };
         assert_eq!(ctx.doc_id, "STORY-127");
 

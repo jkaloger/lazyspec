@@ -37,6 +37,7 @@ use super::preflight::{
     run_preflight, NotifyPreflightWatcher, PreflightChecks, PreflightReport, PreflightWatcher,
     DEFAULT_CONFIG_PATH, DEFAULT_PROMPT_PATH,
 };
+use super::prompt::{MinijinjaPromptRenderer, PromptRenderer};
 use super::runner::ClaudeP;
 use super::tick::{
     EngineLeaseOps, EprintlnEventSink, GitWorktreeProvisioner, SystemClock, TickLoop, TickRunner,
@@ -273,11 +274,15 @@ impl Daemon {
                         }
                     };
 
+                let prompt_renderer: Arc<dyn PromptRenderer> = Arc::new(MinijinjaPromptRenderer {
+                    prompt_path: root.join(DEFAULT_PROMPT_PATH),
+                });
                 let tl = tl
                     .with_preflight(initial_report, watcher)
                     .with_wake(wake_rx)
                     .with_cancel_map(Arc::clone(&cancel_map))
-                    .with_broadcaster(broadcaster.clone());
+                    .with_broadcaster(broadcaster.clone())
+                    .with_prompt_renderer(prompt_renderer);
                 Some(Box::new(tl))
             } else {
                 // Drop the wake_rx; only the orchestrated path owns the tick

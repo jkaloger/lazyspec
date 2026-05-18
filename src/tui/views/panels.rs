@@ -12,11 +12,11 @@ use unicode_width::UnicodeWidthChar;
 
 use std::path::PathBuf;
 
+#[cfg(feature = "agent")]
+use crate::engine::agent_metadata::AgentStatus;
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::document::{DocMeta, RelationType, Status};
 use crate::engine::git_status::GitFileStatus;
-#[cfg(feature = "agent")]
-use crate::engine::agent_metadata::AgentStatus;
 use crate::tui::state::{App, DocListNode, FilterField, PreviewTab};
 
 use super::colors::{status_color, tag_color};
@@ -1520,7 +1520,14 @@ pub fn draw_agents_screen(f: &mut Frame, app: &App, area: Rect) {
         let table = Table::new(rows, widths)
             .block(left_block)
             .header(
-                Row::new(vec!["  ", "Session", "Document", "Elapsed", "Tokens (in/out)"]).style(
+                Row::new(vec![
+                    "  ",
+                    "Session",
+                    "Document",
+                    "Elapsed",
+                    "Tokens (in/out)",
+                ])
+                .style(
                     Style::default()
                         .fg(Color::DarkGray)
                         .add_modifier(Modifier::BOLD),

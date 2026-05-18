@@ -334,6 +334,18 @@ Connects to `.lazyspec/daemon.sock` and prints a snapshot of currently active ag
 
 Edit either watched file at runtime and the daemon re-runs preflight before the next dispatch. If preflight now fails, the daemon stops issuing new dispatches but does not yank in-flight agents -- hot-reload applies to future ticks only.
 
+### Prompt rendering
+
+Builder prompts live at `.lazyspec/prompts/builder.md`. The template is rendered with minijinja in strict-undefined mode -- any unknown variable reference fails preflight at startup (or on hot-reload) rather than at dispatch.
+
+The renderer re-reads the template from disk on every turn, so edits to `builder.md` take effect on the next agent invocation without restarting the daemon. In-flight sessions continue against whatever is on disk at the time of their next turn.
+
+Render variables:
+
+- `doc` -- the document being engaged: `id`, `title`, `body`, `status`, `assignees`.
+- `attempt` -- `none` on the first turn of a session, integer on continuation turns.
+- `prior_iterations` -- iteration ids created against this document during the current session, computed as the diff of current iterations against the session-start snapshot. The snapshot is persisted on the agent metadata ref so the value remains correct across daemon restarts.
+
 <details>
 <summary><h3><code>@ref</code> Syntax</h3></summary>
 

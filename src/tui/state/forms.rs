@@ -285,10 +285,7 @@ mod kickoff_picker_tests {
     #[test]
     fn filtered_indices_returns_all_when_query_empty() {
         let picker = KickoffPicker {
-            eligible: vec![
-                candidate("STORY-1", "Foo"),
-                candidate("STORY-2", "Bar"),
-            ],
+            eligible: vec![candidate("STORY-1", "Foo"), candidate("STORY-2", "Bar")],
             ..Default::default()
         };
         assert_eq!(picker.filtered_indices(), vec![0, 1]);
@@ -297,10 +294,7 @@ mod kickoff_picker_tests {
     #[test]
     fn filtered_indices_matches_doc_id_substring() {
         let picker = KickoffPicker {
-            eligible: vec![
-                candidate("STORY-1", "Foo"),
-                candidate("STORY-2", "Bar"),
-            ],
+            eligible: vec![candidate("STORY-1", "Foo"), candidate("STORY-2", "Bar")],
             query: "story-2".to_string(),
             ..Default::default()
         };

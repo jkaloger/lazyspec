@@ -377,11 +377,8 @@ impl App {
                 if let Some(sid) = self.agents_view.selected_session() {
                     if let Some(snap) = self.agents_view.snapshots.get(sid) {
                         let doc_id = snap.doc_id.clone();
-                        if let Some(doc) = self
-                            .store
-                            .all_docs()
-                            .into_iter()
-                            .find(|d| d.id == doc_id)
+                        if let Some(doc) =
+                            self.store.all_docs().into_iter().find(|d| d.id == doc_id)
                         {
                             self.editor_request = Some(self.store.root.join(&doc.path));
                         }

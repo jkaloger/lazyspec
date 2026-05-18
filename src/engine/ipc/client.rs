@@ -439,8 +439,12 @@ mod tests {
         let sub = ReconnectingSubscriber::new(connector, sleeper, BackoffSchedule::new(10, 50));
         let rx = sub.events();
 
-        let first = rx.recv_timeout(Duration::from_secs(2)).expect("first event");
-        let second = rx.recv_timeout(Duration::from_secs(2)).expect("second event");
+        let first = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first event");
+        let second = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second event");
 
         match first {
             DaemonMessage::AgentEvent { agent_id, .. } => assert_eq!(agent_id, "a1"),
@@ -658,7 +662,9 @@ mod tests {
         let sub = ReconnectingSubscriber::new(connector, sleeper, BackoffSchedule::new(10, 50));
         let (rx, state_rx) = sub.events_with_state();
 
-        let first = rx.recv_timeout(Duration::from_secs(2)).expect("first event");
+        let first = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first event");
         match first {
             DaemonMessage::AgentEvent { event, .. } => match event {
                 AgentEvent::Text { delta } => assert_eq!(delta, "first"),
@@ -667,7 +673,9 @@ mod tests {
             other => panic!("unexpected message: {other:?}"),
         }
 
-        let second = rx.recv_timeout(Duration::from_secs(2)).expect("second event");
+        let second = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second event");
         match second {
             DaemonMessage::AgentEvent { event, .. } => match event {
                 AgentEvent::Text { delta } => assert_eq!(delta, "second"),

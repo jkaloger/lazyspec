@@ -7,7 +7,7 @@ pub mod state;
 
 use std::path::PathBuf;
 
-pub use client::{ConnectionState, ReconnectingSubscriber, default_subscriber};
+pub use client::{default_subscriber, ConnectionState, ReconnectingSubscriber};
 
 /// Relative path (from workspace root) to the daemon IPC socket.
 ///

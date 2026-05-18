@@ -73,7 +73,10 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
         if app.status_bar_enabled {
             let areas = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(0), Constraint::Length(status_bar_height(app))])
+                .constraints([
+                    Constraint::Min(0),
+                    Constraint::Length(status_bar_height(app)),
+                ])
                 .split(f.area());
             draw_create_form(f, app);
             draw_status_bar(f, app, areas[1], &app.status_bar_components);
@@ -92,7 +95,10 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
         if app.status_bar_enabled {
             let areas = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(0), Constraint::Length(status_bar_height(app))])
+                .constraints([
+                    Constraint::Min(0),
+                    Constraint::Length(status_bar_height(app)),
+                ])
                 .split(f.area());
             draw_search_overlay(f, app);
             draw_status_bar(f, app, areas[1], &app.status_bar_components);
@@ -590,8 +596,8 @@ mod tests {
 
     #[cfg(feature = "agent")]
     mod agent_row {
-        use super::cell_debug;
         use super::super::panels;
+        use super::cell_debug;
         use crate::engine::agent_metadata::AgentStatus;
         use std::time::Duration;
 

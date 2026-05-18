@@ -317,6 +317,11 @@ pub mod test_support {
         pub push_with_lease_results: RefCell<Vec<Result<()>>>,
         pub read_commit_timestamp_results: RefCell<Vec<Result<DateTime<Utc>>>>,
         pub calls: RefCell<Vec<String>>,
+        /// Captured `(path, content)` pairs for each `create_commit` call, in
+        /// call order. Lets tests inspect the actual blob payload — used by the
+        /// AgentMetadata write-invariant tests in tick.rs to verify the
+        /// session-start snapshot is persisted on fresh dispatch (T8 / AC5,6).
+        pub create_commit_files: RefCell<Vec<Vec<(String, String)>>>,
     }
 
     impl Default for MockGitRefClient {
@@ -341,6 +346,7 @@ pub mod test_support {
                 push_with_lease_results: RefCell::new(vec![]),
                 read_commit_timestamp_results: RefCell::new(vec![]),
                 calls: RefCell::new(vec![]),
+                create_commit_files: RefCell::new(vec![]),
             }
         }
 
@@ -440,12 +446,18 @@ pub mod test_support {
             &self,
             _root: &Path,
             refname: &str,
-            _files: &[(&str, &str)],
+            files: &[(&str, &str)],
             parent: Option<&str>,
         ) -> Result<String> {
             self.calls
                 .borrow_mut()
                 .push(format!("create_commit:{}:parent={:?}", refname, parent));
+            self.create_commit_files.borrow_mut().push(
+                files
+                    .iter()
+                    .map(|(p, c)| (p.to_string(), c.to_string()))
+                    .collect(),
+            );
             Self::pop_or_default(&self.create_commit_results)
         }
 

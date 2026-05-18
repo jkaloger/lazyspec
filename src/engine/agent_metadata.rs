@@ -95,10 +95,7 @@ pub fn list_agent_sessions<G: GitRefOps>(git: &G, root: &Path) -> Result<Vec<Str
 
 /// Load metadata for every session enumerated from `refs/lazyspec/agents/*`.
 /// Sessions whose ref exists but resolves to `None` are silently skipped.
-pub fn load_all_agent_metadata<G: GitRefOps>(
-    git: &G,
-    root: &Path,
-) -> Result<Vec<AgentMetadata>> {
+pub fn load_all_agent_metadata<G: GitRefOps>(git: &G, root: &Path) -> Result<Vec<AgentMetadata>> {
     let mut out = Vec::new();
     for session_id in list_agent_sessions(git, root)? {
         if let Some(meta) = read_agent_metadata(git, root, &session_id)? {
@@ -158,10 +155,13 @@ impl<G: GitRefOps> GitRefAgentMetadata<G> {
     pub fn fetch_all(&self, remote: &str) -> Result<()> {
         fetch_ref_optional(&self.git, &self.root, remote, "refs/lazyspec/agents/*")
     }
-}
 
-impl<G: GitRefOps + Send + Sync> AgentMetadataWriter for GitRefAgentMetadata<G> {
-    fn write(&self, metadata: &AgentMetadata) -> Result<String> {
+    /// Inherent equivalent of `AgentMetadataWriter::write` that does not
+    /// require `G: Send + Sync`. The trait impl below delegates here; callers
+    /// that hold a concrete `GitRefAgentMetadata<G>` (e.g. the tick loop) can
+    /// invoke this directly so test git mocks built on `RefCell` (not `Sync`)
+    /// remain usable through the same code path.
+    pub fn write(&self, metadata: &AgentMetadata) -> Result<String> {
         let refname = agent_ref(&metadata.session_id);
         let prev_sha = self.git.resolve_ref(&self.root, &refname)?;
         let json = serde_json::to_string_pretty(metadata)?;
@@ -178,6 +178,12 @@ impl<G: GitRefOps + Send + Sync> AgentMetadataWriter for GitRefAgentMetadata<G> 
         self.git
             .update_ref(&self.root, &refname, &new_sha, expected_old)?;
         Ok(new_sha)
+    }
+}
+
+impl<G: GitRefOps + Send + Sync> AgentMetadataWriter for GitRefAgentMetadata<G> {
+    fn write(&self, metadata: &AgentMetadata) -> Result<String> {
+        GitRefAgentMetadata::write(self, metadata)
     }
 
     fn mark_crashed(&self, session_id: &str) -> Result<()> {

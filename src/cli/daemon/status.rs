@@ -116,7 +116,13 @@ fn render<W: Write>(
         return Ok(());
     }
 
-    let headers = ["AGENT_ID", "DOC_ID", "ELAPSED_MS", "TOKENS_IN", "TOKENS_OUT"];
+    let headers = [
+        "AGENT_ID",
+        "DOC_ID",
+        "ELAPSED_MS",
+        "TOKENS_IN",
+        "TOKENS_OUT",
+    ];
     let mut widths = headers.map(|h| h.len());
 
     for a in agents {

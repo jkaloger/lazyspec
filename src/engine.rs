@@ -27,6 +27,7 @@ pub mod issue_cache;
 pub mod issue_map;
 pub mod lease;
 pub mod preflight;
+pub mod prompt;
 pub mod provenance;
 pub mod refs;
 pub mod reservation;
