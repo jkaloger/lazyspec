@@ -15,17 +15,26 @@ pub struct ClaudeP {
     pub turn_timeout_ms: u64,
 }
 
-impl AgentRunner for ClaudeP {
-    fn spawn(&self, ctx: AgentContext) -> Result<AgentHandle> {
-        let mut child = Command::new(&self.binary)
-            .arg("-p")
+impl ClaudeP {
+    fn build_command(&self, ctx: &AgentContext) -> Command {
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("-p")
             .arg("--output-format")
             .arg("stream-json")
             .arg("--allowedTools")
             .arg(&self.allowed_tools)
+            .current_dir(&ctx.workspace)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        cmd
+    }
+}
+
+impl AgentRunner for ClaudeP {
+    fn spawn(&self, ctx: AgentContext) -> Result<AgentHandle> {
+        let mut child = self
+            .build_command(&ctx)
             .spawn()
             .with_context(|| format!("spawn {}", self.binary))?;
 
@@ -104,6 +113,27 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         write_prompt(&mut buf, "").unwrap();
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn build_command_sets_current_dir_to_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runner = ClaudeP {
+            binary: "sh".into(),
+            allowed_tools: "Read".into(),
+            turn_timeout_ms: 0,
+        };
+        let ctx = AgentContext {
+            workspace: tmp.path().to_path_buf(),
+            doc_id: "STORY-1".into(),
+            agent_id: "claude-bot".into(),
+            branch: "feat/x".into(),
+            prompt: "noop".into(),
+        };
+
+        let cmd = runner.build_command(&ctx);
+
+        assert_eq!(cmd.get_current_dir(), Some(tmp.path()));
     }
 
     #[test]

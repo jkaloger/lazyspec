@@ -197,6 +197,10 @@ Continuation (clean exit, status still active): 1-second delay, fresh `claude -p
 
 Failure (abnormal exit, stall, hook failure): exponential backoff `delay = min(10000 * 2^(n-1), max_retry_backoff_ms)`, default cap 5 minutes. Cap: `max_failure_attempts = 5`. After cap, the daemon releases the lease and emits a `failed` agent event; status mutation is the workflow's responsibility, not the daemon's.
 
+#### Known limitation: open-loop continuation
+
+CleanExit continuation re-spawns `claude -p` against the same document until `max_turns` is reached or an external status change (frontmatter mutation, manual cancel) breaks the loop. The daemon does not inspect descendant documents created during a session, so an agent that produces a new doc (for example, an iteration spawned from a story) cannot pause for human or operator review of that descendant; the continuation loop proceeds on the parent regardless. Future work: a descendant-doc approval gate, or a per-type continue policy that lets workflows opt into review checkpoints between turns.
+
 ### IPC and CLI surface
 
 Unix socket at `.lazyspec/daemon.sock`. Newline-delimited JSON, one message per line. Unix-only in v1; Windows named-pipe support is deferred.

@@ -1,15 +1,15 @@
 ---
-title: "Claude Code lease hooks and heartbeat throttle"
+title: Claude Code lease hooks and heartbeat throttle
 type: story
 status: accepted
-author: "jkaloger"
+author: jkaloger
 date: 2026-05-11
 tags:
 - hooks
 - leasing
 - claude-code
 related:
-- implements: docs/rfcs/RFC-035-git-ref-document-storage-with-lease-based-claiming.md
+- implements: RFC-035
 ---
 
 
