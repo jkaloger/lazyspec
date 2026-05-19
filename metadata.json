@@ -1,0 +1,14 @@
+{
+  "agent_id": "Mac.localdomain-7a012141-faa2-4db7-8b8b-57ed28eb6af8:2a532f49-5b21-452d-b405-92b45a12e5d0",
+  "session_id": "2a532f49-5b21-452d-b405-92b45a12e5d0",
+  "doc_id": "STORY-050",
+  "doc_type": "story",
+  "status": "running",
+  "started_at": "2026-05-19T00:42:44.787200Z",
+  "last_event_at": "2026-05-19T00:42:44.787200Z",
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "turn_count": 0,
+  "error": null,
+  "session_start_iteration_ids": []
+}
