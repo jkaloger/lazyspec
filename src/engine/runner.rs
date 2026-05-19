@@ -50,6 +50,10 @@ pub enum AgentEvent {
         input_tokens: u64,
         output_tokens: u64,
     },
+    TokenUsage {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
     SubprocessExited {
         code: Option<i32>,
     },
@@ -89,6 +93,10 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 2,
             },
+            AgentEvent::TokenUsage {
+                input_tokens: 3,
+                output_tokens: 4,
+            },
             AgentEvent::SubprocessExited { code: Some(0) },
             AgentEvent::SubprocessExited { code: None },
         ];
@@ -100,6 +108,7 @@ mod tests {
                 AgentEvent::ToolCallStarted { .. } => {}
                 AgentEvent::ToolCall { .. } => {}
                 AgentEvent::TurnCompleted { .. } => {}
+                AgentEvent::TokenUsage { .. } => {}
                 AgentEvent::SubprocessExited { .. } => {}
             }
         }

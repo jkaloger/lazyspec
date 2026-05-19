@@ -10,24 +10,47 @@ use super::{AgentEvent, ToolStatus};
 // - tool result: `{"type":"user","message":{"content":[{"type":"tool_result",...}]}}`
 //   v1 does not pair tool_use w/ tool_result; name falls back to tool_use_id when absent.
 // - turn complete: `{"type":"result","usage":{"input_tokens":N,"output_tokens":M}}`.
-// - unknown / missing type: None. forward-compat per RFC.
+// - unknown / missing type: empty Vec. forward-compat per RFC.
 
 const SUMMARY_MAX: usize = 200;
 
-pub(crate) fn parse_record(line: &str) -> Option<AgentEvent> {
-    let v: Value = serde_json::from_str(line).ok()?;
-    let ty = v.get("type")?.as_str()?;
+pub(crate) fn parse_record(line: &str) -> Vec<AgentEvent> {
+    let Ok(v) = serde_json::from_str::<Value>(line) else {
+        return Vec::new();
+    };
+    let Some(ty) = v.get("type").and_then(Value::as_str) else {
+        return Vec::new();
+    };
 
     match ty {
-        "session_start" => Some(AgentEvent::SessionStarted),
+        "session_start" => vec![AgentEvent::SessionStarted],
         "system" if v.get("subtype").and_then(Value::as_str) == Some("init") => {
-            Some(AgentEvent::SessionStarted)
+            vec![AgentEvent::SessionStarted]
         }
-        "assistant" => parse_assistant_text(&v),
-        "user" => parse_tool_result(&v),
-        "result" => parse_result(&v),
-        _ => None,
+        "assistant" => {
+            let mut out = Vec::new();
+            if let Some(primary) = parse_assistant_text(&v) {
+                out.push(primary);
+            }
+            if let Some(usage) = parse_assistant_usage(&v) {
+                out.push(usage);
+            }
+            out
+        }
+        "user" => parse_tool_result(&v).into_iter().collect(),
+        "result" => parse_result(&v).into_iter().collect(),
+        _ => Vec::new(),
     }
+}
+
+fn parse_assistant_usage(v: &Value) -> Option<AgentEvent> {
+    let usage = v.get("message")?.get("usage")?;
+    let input_tokens = usage.get("input_tokens")?.as_u64()?;
+    let output_tokens = usage.get("output_tokens")?.as_u64()?;
+    Some(AgentEvent::TokenUsage {
+        input_tokens,
+        output_tokens,
+    })
 }
 
 fn parse_assistant_text(v: &Value) -> Option<AgentEvent> {
@@ -126,13 +149,13 @@ mod tests {
     #[test]
     fn parses_session_start_explicit() {
         let line = r#"{"type":"session_start","session_id":"abc"}"#;
-        assert_eq!(parse_record(line), Some(AgentEvent::SessionStarted));
+        assert_eq!(parse_record(line), vec![AgentEvent::SessionStarted]);
     }
 
     #[test]
     fn parses_system_init_as_session_start() {
         let line = r#"{"type":"system","subtype":"init","session_id":"abc"}"#;
-        assert_eq!(parse_record(line), Some(AgentEvent::SessionStarted));
+        assert_eq!(parse_record(line), vec![AgentEvent::SessionStarted]);
     }
 
     #[test]
@@ -140,9 +163,9 @@ mod tests {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}"#;
         assert_eq!(
             parse_record(line),
-            Some(AgentEvent::Text {
+            vec![AgentEvent::Text {
                 delta: "hello".into()
-            })
+            }]
         );
     }
 
@@ -153,7 +176,7 @@ mod tests {
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"two"}]}}"#,
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"three"}]}}"#,
         ];
-        let events: Vec<_> = lines.iter().filter_map(|l| parse_record(l)).collect();
+        let events: Vec<_> = lines.iter().flat_map(|l| parse_record(l)).collect();
         assert_eq!(
             events,
             vec![
@@ -175,9 +198,9 @@ mod tests {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"/etc/hosts"}}]}}"#;
         assert_eq!(
             parse_record(line),
-            Some(AgentEvent::ToolCallStarted {
+            vec![AgentEvent::ToolCallStarted {
                 name: "Read".into()
-            })
+            }]
         );
     }
 
@@ -186,9 +209,9 @@ mod tests {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]}}"#;
         assert_eq!(
             parse_record(line),
-            Some(AgentEvent::ToolCallStarted {
+            vec![AgentEvent::ToolCallStarted {
                 name: "Bash".into()
-            })
+            }]
         );
     }
 
@@ -197,11 +220,11 @@ mod tests {
         let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"file contents","is_error":false}]}}"#;
         assert_eq!(
             parse_record(line),
-            Some(AgentEvent::ToolCall {
+            vec![AgentEvent::ToolCall {
                 name: "toolu_1".into(),
                 summary: "file contents".into(),
                 status: ToolStatus::Ok,
-            })
+            }]
         );
     }
 
@@ -210,11 +233,11 @@ mod tests {
         let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"boom","is_error":true}]}}"#;
         assert_eq!(
             parse_record(line),
-            Some(AgentEvent::ToolCall {
+            vec![AgentEvent::ToolCall {
                 name: "toolu_2".into(),
                 summary: "boom".into(),
                 status: ToolStatus::Error,
-            })
+            }]
         );
     }
 
@@ -223,33 +246,88 @@ mod tests {
         let line = r#"{"type":"result","subtype":"success","usage":{"input_tokens":42,"output_tokens":17}}"#;
         assert_eq!(
             parse_record(line),
-            Some(AgentEvent::TurnCompleted {
+            vec![AgentEvent::TurnCompleted {
                 input_tokens: 42,
                 output_tokens: 17,
-            })
+            }]
         );
     }
 
     #[test]
     fn unknown_type_returns_none() {
         let line = r#"{"type":"future_thing","payload":{"x":1}}"#;
-        assert_eq!(parse_record(line), None);
+        assert!(parse_record(line).is_empty());
     }
 
     #[test]
     fn missing_type_returns_none() {
         let line = r#"{"payload":{"x":1}}"#;
-        assert_eq!(parse_record(line), None);
+        assert!(parse_record(line).is_empty());
     }
 
     #[test]
     fn malformed_json_returns_none() {
-        assert_eq!(parse_record("not json"), None);
+        assert!(parse_record("not json").is_empty());
     }
 
     #[test]
     fn result_without_usage_returns_none() {
         let line = r#"{"type":"result","subtype":"success"}"#;
-        assert_eq!(parse_record(line), None);
+        assert!(parse_record(line).is_empty());
+    }
+
+    #[test]
+    fn assistant_with_usage_emits_text_and_token_usage() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}],"usage":{"input_tokens":3,"output_tokens":5}}}"#;
+        assert_eq!(
+            parse_record(line),
+            vec![
+                AgentEvent::Text {
+                    delta: "hello".into()
+                },
+                AgentEvent::TokenUsage {
+                    input_tokens: 3,
+                    output_tokens: 5,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn assistant_with_usage_only_emits_token_usage() {
+        let line = r#"{"type":"assistant","message":{"content":[],"usage":{"input_tokens":9,"output_tokens":13}}}"#;
+        assert_eq!(
+            parse_record(line),
+            vec![AgentEvent::TokenUsage {
+                input_tokens: 9,
+                output_tokens: 13,
+            }]
+        );
+    }
+
+    #[test]
+    fn tool_use_with_usage_emits_tool_call_started_and_token_usage() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}],"usage":{"input_tokens":2,"output_tokens":4}}}"#;
+        assert_eq!(
+            parse_record(line),
+            vec![
+                AgentEvent::ToolCallStarted {
+                    name: "Bash".into()
+                },
+                AgentEvent::TokenUsage {
+                    input_tokens: 2,
+                    output_tokens: 4,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn assistant_missing_usage_emits_primary_only() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#;
+        assert_eq!(
+            parse_record(line),
+            vec![AgentEvent::Text { delta: "hi".into() }]
+        );
     }
 }

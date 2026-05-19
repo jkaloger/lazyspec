@@ -307,7 +307,9 @@ pub fn run_event_reader_with_publish(
                 obs.exit = Some(code);
                 break;
             }
-            AgentEvent::SessionStarted | AgentEvent::Text { .. } => {}
+            AgentEvent::SessionStarted
+            | AgentEvent::Text { .. }
+            | AgentEvent::TokenUsage { .. } => {}
         }
     }
 }
@@ -517,6 +519,18 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
         }
     }
 
+    /// Publish a `DaemonStatus` snapshot to subscribers. Called on every
+    /// lifecycle transition of `self.running` (spawn insert, retry kill,
+    /// shutdown drain) AND at end-of-tick, so subscribers see additions and
+    /// removals immediately rather than waiting `poll_interval_ms`.
+    fn broadcast_status(&self) {
+        if let Some(bc) = self.broadcaster.as_ref() {
+            bc.publish(crate::engine::ipc::protocol::DaemonMessage::DaemonStatus {
+                agents: snapshot_running(&self.running),
+            });
+        }
+    }
+
     pub fn run_once(&mut self) -> Result<()> {
         let orch = self
             .config
@@ -696,6 +710,9 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                 let _ = self
                     .lease_ops
                     .release(&ra.doc_type, &ra.doc_id, &ra.agent_ident);
+                // ITER-187 AC2: heartbeat failure dropped the agent —
+                // broadcast immediately so subscribers see it gone.
+                self.broadcast_status();
             }
         }
 
@@ -932,16 +949,17 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                     reader_handle: Some(reader_handle),
                 },
             );
-            let mut map = self.cancel_map.lock().unwrap();
-            map.insert(agent_ident_for_map, cancel_for_map.clone());
-            map.insert(session_id_for_map, cancel_for_map);
+            {
+                let mut map = self.cancel_map.lock().unwrap();
+                map.insert(agent_ident_for_map, cancel_for_map.clone());
+                map.insert(session_id_for_map, cancel_for_map);
+            }
+            // ITER-187 AC1: broadcast on spawn insert so TUI sees the new
+            // agent same-tick rather than waiting for the end-of-tick batch.
+            self.broadcast_status();
         }
 
-        if let Some(bc) = self.broadcaster.as_ref() {
-            bc.publish(crate::engine::ipc::protocol::DaemonMessage::DaemonStatus {
-                agents: snapshot_running(&self.running),
-            });
-        }
+        self.broadcast_status();
 
         // AC1: pace ticks. AC6 (RFC-041): if IPC kick channel is wired, an
         // incoming kick collapses the wait so the next tick fires immediately.
@@ -990,6 +1008,9 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                 .lease_ops
                 .release(&ra.doc_type, &ra.doc_id, &ra.agent_ident);
         }
+        // ITER-187 AC2: emit a final `DaemonStatus` reflecting the empty
+        // running map so subscribers see all agents go away on shutdown.
+        self.broadcast_status();
         Ok(())
     }
 
@@ -1009,6 +1030,9 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
         let _ = self
             .lease_ops
             .release(&ra.doc_type, &ra.doc_id, &ra.agent_ident);
+        // ITER-187 AC2: agent is gone from `running` — broadcast immediately
+        // so subscribers see the removal without waiting for end-of-tick.
+        self.broadcast_status();
 
         let orch = match self.config.orchestration.as_ref() {
             Some(o) => o,
@@ -1137,6 +1161,9 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
         let _ = self
             .lease_ops
             .release(&ra.doc_type, &ra.doc_id, &ra.agent_ident);
+        // ITER-187 AC2: broadcast removal immediately on terminal kill so the
+        // TUI does not show a stale agent until end-of-tick.
+        self.broadcast_status();
         if remove_workspace {
             if let Err(e) = self.workspace_provisioner.remove(&self.root, &ra.workspace) {
                 self.log(
@@ -1333,9 +1360,14 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                     reader_handle: Some(reader_handle),
                 },
             );
-            let mut map = self.cancel_map.lock().unwrap();
-            map.insert(agent_ident_for_map, cancel_for_map.clone());
-            map.insert(session_id_for_map, cancel_for_map);
+            {
+                let mut map = self.cancel_map.lock().unwrap();
+                map.insert(agent_ident_for_map, cancel_for_map.clone());
+                map.insert(session_id_for_map, cancel_for_map);
+            }
+            // ITER-187 AC1: retry respawn is a fresh insert into `running` —
+            // broadcast so the TUI sees the re-engaged agent immediately.
+            self.broadcast_status();
         }
         self.retry_queue = remaining;
     }
@@ -5484,6 +5516,184 @@ body\n",
         assert!(
             t.metadata.git.create_commit_files.borrow().is_empty(),
             "no metadata.json blob should be written on retry"
+        );
+    }
+
+    // ===========================================================
+    // ITERATION-187 AC1/AC2 — lifecycle broadcasts (spawn / kill /
+    // shutdown drain) fire immediately rather than only end-of-tick.
+    // ===========================================================
+
+    /// Drain every currently-available message from `rx`, collecting the
+    /// `DaemonStatus` payloads in order. Non-status messages are discarded —
+    /// these tests only care about the snapshot stream.
+    fn drain_daemon_status(
+        rx: &Receiver<crate::engine::ipc::protocol::DaemonMessage>,
+    ) -> Vec<Vec<crate::engine::ipc::protocol::AgentSnapshot>> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let crate::engine::ipc::protocol::DaemonMessage::DaemonStatus { agents } = msg {
+                out.push(agents);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn spawn_broadcasts_daemon_status_before_sleep() {
+        // AC1: when run_once spawns an agent, a DaemonStatus carrying that
+        // agent must reach subscribers before the tick goes to sleep. We
+        // assert this by counting DaemonStatus messages: pre-change the loop
+        // emits exactly one end-of-tick status; post-change there is a
+        // spawn-time status too, so we expect at least two AND at least one
+        // of them must contain the new agent. We also verify FakeClock did
+        // record a sleep (the tick reached the pace step), so the broadcasts
+        // observed in the receiver were necessarily published before sleep
+        // returned (publish is synchronous on the bounded subs vec).
+        let td = TempDir::new().unwrap();
+        let cfg = cfg(base_orch(vec!["draft"]));
+        make_stories_status(&td, 1, "draft");
+        let runner = Arc::new(FakeRunner::new());
+        let lease = Arc::new(FakeLeaseOps::new());
+
+        let bc = crate::engine::ipc::broadcaster::Broadcaster::new();
+        let rx = bc.subscribe();
+
+        let mut t = build_loop(
+            &td,
+            cfg,
+            Arc::clone(&runner),
+            MockGitRefClient::new(),
+            Arc::clone(&lease),
+            FakeClock::new(),
+        )
+        .with_broadcaster(bc);
+
+        t.run_once().unwrap();
+
+        // The tick actually slept — proves run_once ran to completion and
+        // broadcasts visible in `rx` were emitted before sleep returned.
+        assert!(
+            !t.clock.sleep_durations().is_empty(),
+            "tick should have reached the pace sleep"
+        );
+        assert_eq!(runner.spawn_count(), 1, "expected one spawn");
+
+        let statuses = drain_daemon_status(&rx);
+        assert!(
+            statuses.len() >= 2,
+            "expected at least two DaemonStatus (spawn + end-of-tick), got {}",
+            statuses.len()
+        );
+        assert!(
+            statuses
+                .iter()
+                .any(|s| s.iter().any(|a| a.doc_id == "STORY-000")),
+            "expected at least one DaemonStatus carrying STORY-000, got {statuses:?}"
+        );
+    }
+
+    #[test]
+    fn kill_agent_for_retry_broadcasts_removal() {
+        // AC2: removing an agent via the retry-kill path emits a DaemonStatus
+        // reflecting the absence immediately, not at end-of-tick.
+        let td = TempDir::new().unwrap();
+        let cfg = cfg(base_orch(vec!["draft"]));
+        let runner = Arc::new(FakeRunner::new());
+        let lease = Arc::new(FakeLeaseOps::new());
+
+        let bc = crate::engine::ipc::broadcaster::Broadcaster::new();
+        let rx = bc.subscribe();
+
+        let mut t = build_loop(
+            &td,
+            cfg,
+            Arc::clone(&runner),
+            MockGitRefClient::new(),
+            Arc::clone(&lease),
+            FakeClock::new(),
+        )
+        .with_broadcaster(bc);
+
+        let now = t.clock.now_instant();
+        let _cn_rx = insert_fake_running_with_obs(
+            &mut t,
+            "STORY-K1",
+            "host-test:sess-k1",
+            now,
+            Arc::new(Mutex::new(AgentObservation::new(now))),
+        );
+
+        t.kill_agent_for_retry("STORY-K1", RetryReason::Stall, now);
+
+        let statuses = drain_daemon_status(&rx);
+        assert!(
+            !statuses.is_empty(),
+            "kill must publish at least one DaemonStatus"
+        );
+        let last = statuses.last().unwrap();
+        assert!(
+            last.iter().all(|a| a.doc_id != "STORY-K1"),
+            "STORY-K1 must be absent from the last DaemonStatus, got {last:?}"
+        );
+        assert!(
+            last.is_empty(),
+            "running was just one agent; post-kill snapshot must be empty, got {last:?}"
+        );
+    }
+
+    #[test]
+    fn shutdown_drain_broadcasts_empty_status() {
+        // AC2: `run_until`'s shutdown drain releases all agents and must then
+        // publish a final empty DaemonStatus so subscribers see them gone.
+        let td = TempDir::new().unwrap();
+        let cfg = cfg(base_orch(vec!["draft"]));
+        let runner = Arc::new(FakeRunner::new());
+        let lease = Arc::new(FakeLeaseOps::new());
+
+        let bc = crate::engine::ipc::broadcaster::Broadcaster::new();
+        let rx = bc.subscribe();
+
+        let mut t = build_loop(
+            &td,
+            cfg,
+            Arc::clone(&runner),
+            MockGitRefClient::new(),
+            Arc::clone(&lease),
+            FakeClock::new(),
+        )
+        .with_broadcaster(bc);
+
+        let now = t.clock.now_instant();
+        let _cn_rx_a = insert_fake_running_with_obs(
+            &mut t,
+            "STORY-SD1",
+            "host-test:sess-sd1",
+            now,
+            Arc::new(Mutex::new(AgentObservation::new(now))),
+        );
+        let _cn_rx_b = insert_fake_running_with_obs(
+            &mut t,
+            "STORY-SD2",
+            "host-test:sess-sd2",
+            now,
+            Arc::new(Mutex::new(AgentObservation::new(now))),
+        );
+
+        // Pre-signal shutdown so run_until's main loop exits before the
+        // first run_once, then proceeds straight to the drain block.
+        let (sd_tx, sd_rx) = unbounded::<()>();
+        sd_tx.send(()).unwrap();
+
+        t.run_until(sd_rx).unwrap();
+
+        let statuses = drain_daemon_status(&rx);
+        let last = statuses
+            .last()
+            .expect("shutdown drain must publish at least one DaemonStatus");
+        assert!(
+            last.is_empty(),
+            "final DaemonStatus on shutdown drain must be empty, got {last:?}"
         );
     }
 }

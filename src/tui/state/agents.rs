@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::time::Instant;
 
 use crate::engine::agent_metadata::{AgentMetadata, AgentStatus};
 use crate::engine::ipc::protocol::{AgentSnapshot, DaemonMessage};
@@ -21,6 +22,7 @@ pub struct AgentsViewState {
     pub connection: ConnectionState,
     pub source: DataSource,
     pub selected: usize,
+    pub synced_at: HashMap<String, Instant>,
 }
 
 impl Default for AgentsViewState {
@@ -38,6 +40,7 @@ impl AgentsViewState {
             connection: ConnectionState::Reconnecting,
             source: DataSource::Live,
             selected: 0,
+            synced_at: HashMap::new(),
         }
     }
 
@@ -52,6 +55,10 @@ impl AgentsViewState {
                     trim_to_cap(buf, OUTPUT_BUFFER_CAP);
                 }
                 AgentEvent::TurnCompleted {
+                    input_tokens,
+                    output_tokens,
+                }
+                | AgentEvent::TokenUsage {
                     input_tokens,
                     output_tokens,
                 } => {
@@ -86,6 +93,11 @@ impl AgentsViewState {
                     .collect();
                 self.output.retain(|k, _| new_snapshots.contains_key(k));
                 self.statuses.retain(|k, _| new_snapshots.contains_key(k));
+                let now = Instant::now();
+                for k in new_snapshots.keys() {
+                    self.synced_at.insert(k.clone(), now);
+                }
+                self.synced_at.retain(|k, _| new_snapshots.contains_key(k));
                 self.snapshots = new_snapshots;
                 self.clamp_selected();
             }
@@ -118,12 +130,24 @@ impl AgentsViewState {
         if state == ConnectionState::Connected && was != ConnectionState::Connected {
             self.source = DataSource::Live;
             self.snapshots.clear();
+            self.synced_at.clear();
             self.clamp_selected();
         }
     }
 
     pub fn selected_session(&self) -> Option<&str> {
         self.snapshots.keys().nth(self.selected).map(String::as_str)
+    }
+
+    pub fn effective_elapsed_ms(&self, session_id: &str) -> Option<u64> {
+        let snap = self.snapshots.get(session_id)?;
+        let baseline = snap.elapsed_ms;
+        let delta = self
+            .synced_at
+            .get(session_id)
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        Some(baseline + delta)
     }
 
     pub fn aggregate_tokens(&self) -> (u64, u64) {
@@ -288,6 +312,43 @@ mod tests {
         let snap = s.snapshots.get("s1").expect("snapshot present");
         assert_eq!(snap.tokens_in, 42);
         assert_eq!(snap.tokens_out, 99);
+    }
+
+    #[test]
+    fn apply_token_usage_updates_existing_snapshot_tokens() {
+        let mut s = AgentsViewState::new();
+        s.apply(DaemonMessage::DaemonStatus {
+            agents: vec![snapshot("s1", "STORY-1", 0, 0)],
+        });
+        s.apply(DaemonMessage::AgentEvent {
+            agent_id: "a1".into(),
+            session_id: "s1".into(),
+            event: AgentEvent::TokenUsage {
+                input_tokens: 7,
+                output_tokens: 11,
+            },
+        });
+        let snap = s.snapshots.get("s1").expect("snapshot present");
+        assert_eq!(snap.tokens_in, 7);
+        assert_eq!(snap.tokens_out, 11);
+    }
+
+    #[test]
+    fn apply_token_usage_creates_stub_when_snapshot_absent() {
+        let mut s = AgentsViewState::new();
+        s.apply(DaemonMessage::AgentEvent {
+            agent_id: "a1".into(),
+            session_id: "s1".into(),
+            event: AgentEvent::TokenUsage {
+                input_tokens: 7,
+                output_tokens: 11,
+            },
+        });
+        let snap = s.snapshots.get("s1").expect("stub snapshot created");
+        assert_eq!(snap.tokens_in, 7);
+        assert_eq!(snap.tokens_out, 11);
+        assert_eq!(snap.doc_id, "");
+        assert_eq!(snap.agent_id, "");
     }
 
     #[test]
@@ -515,6 +576,111 @@ mod tests {
         s.selected = 0;
         s.select_prev();
         assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn apply_daemon_status_records_synced_at() {
+        let mut s = AgentsViewState::new();
+        s.apply(DaemonMessage::DaemonStatus {
+            agents: vec![snapshot("s1", "d", 0, 0), snapshot("s2", "d", 0, 0)],
+        });
+        assert_eq!(s.synced_at.len(), 2);
+        assert!(s.synced_at.contains_key("s1"));
+        assert!(s.synced_at.contains_key("s2"));
+    }
+
+    #[test]
+    fn apply_daemon_status_prunes_orphan_synced_at() {
+        let mut s = AgentsViewState::new();
+        s.apply(DaemonMessage::DaemonStatus {
+            agents: vec![snapshot("s1", "d", 0, 0), snapshot("s2", "d", 0, 0)],
+        });
+        s.apply(DaemonMessage::DaemonStatus {
+            agents: vec![snapshot("s1", "d", 0, 0)],
+        });
+        assert_eq!(s.synced_at.len(), 1);
+        assert!(s.synced_at.contains_key("s1"));
+        assert!(!s.synced_at.contains_key("s2"));
+    }
+
+    #[test]
+    fn effective_elapsed_ms_extrapolates_local_time() {
+        let mut s = AgentsViewState::new();
+        s.apply(DaemonMessage::DaemonStatus {
+            agents: vec![AgentSnapshot {
+                agent_id: "a".into(),
+                session_id: "s1".into(),
+                doc_id: "d".into(),
+                elapsed_ms: 100,
+                tokens_in: 0,
+                tokens_out: 0,
+            }],
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let got = s.effective_elapsed_ms("s1").expect("snapshot exists");
+        assert!(
+            got >= 150,
+            "effective_elapsed_ms should be >= 150 (100 baseline + 50 slept), got {got}"
+        );
+    }
+
+    #[test]
+    fn effective_elapsed_ms_returns_none_for_unknown_session() {
+        let s = AgentsViewState::new();
+        assert_eq!(s.effective_elapsed_ms("nope"), None);
+    }
+
+    #[test]
+    fn effective_elapsed_ms_returns_baseline_when_offline_loaded() {
+        let mut s = AgentsViewState::new();
+        let now = Utc::now();
+        s.load_offline(vec![AgentMetadata {
+            agent_id: "a1".into(),
+            session_id: "s1".into(),
+            doc_id: "STORY-1".into(),
+            doc_type: "story".into(),
+            status: AgentStatus::Running,
+            started_at: now,
+            last_event_at: now + Duration::milliseconds(100),
+            tokens_in: 0,
+            tokens_out: 0,
+            turn_count: 1,
+            error: None,
+            session_start_iteration_ids: vec![],
+        }]);
+        let got = s.effective_elapsed_ms("s1").expect("snapshot exists");
+        assert_eq!(got, 100);
+    }
+
+    #[test]
+    fn set_connection_connected_clears_synced_at() {
+        let mut s = AgentsViewState::new();
+        s.apply(DaemonMessage::DaemonStatus {
+            agents: vec![snapshot("s1", "d", 0, 0)],
+        });
+        assert!(!s.synced_at.is_empty());
+        s.set_connection(ConnectionState::Reconnecting);
+        s.set_connection(ConnectionState::Connected);
+        assert!(s.synced_at.is_empty());
+    }
+
+    #[test]
+    fn token_usage_does_not_reset_synced_at() {
+        let mut s = AgentsViewState::new();
+        s.apply(DaemonMessage::DaemonStatus {
+            agents: vec![snapshot("s1", "d", 0, 0)],
+        });
+        let before = *s.synced_at.get("s1").expect("synced_at recorded");
+        s.apply(DaemonMessage::AgentEvent {
+            agent_id: "a1".into(),
+            session_id: "s1".into(),
+            event: AgentEvent::TokenUsage {
+                input_tokens: 5,
+                output_tokens: 7,
+            },
+        });
+        let after = *s.synced_at.get("s1").expect("synced_at still present");
+        assert_eq!(before, after, "TokenUsage should not update synced_at");
     }
 
     #[cfg(feature = "agent")]

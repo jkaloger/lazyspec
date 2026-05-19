@@ -46,10 +46,10 @@ impl AgentRunner for ClaudeP {
         let reader_tx = events_tx.clone();
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
-            for line in reader.lines().map_while(Result::ok) {
-                if let Some(ev) = parse_record(&line) {
+            'lines: for line in reader.lines().map_while(Result::ok) {
+                for ev in parse_record(&line) {
                     if reader_tx.send(ev).is_err() {
-                        break;
+                        break 'lines;
                     }
                 }
             }

@@ -1497,11 +1497,15 @@ pub fn draw_agents_screen(f: &mut Frame, app: &App, area: Rect) {
             .values()
             .map(|snap| {
                 let status = app.agents_view.statuses.get(&snap.session_id);
+                let elapsed_ms = app
+                    .agents_view
+                    .effective_elapsed_ms(&snap.session_id)
+                    .unwrap_or(snap.elapsed_ms);
                 let cells = agent_row_cells(
                     status,
                     &snap.session_id,
                     &snap.doc_id,
-                    std::time::Duration::from_millis(snap.elapsed_ms),
+                    std::time::Duration::from_millis(elapsed_ms),
                     snap.tokens_in,
                     snap.tokens_out,
                 );
