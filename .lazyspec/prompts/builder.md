@@ -37,3 +37,18 @@ No iterations have been created during the current session yet.
 - Run `cargo run` for the dev build. Check `cargo clippy` before declaring a task done.
 - Prefer `--json` output when querying lazyspec for machine-readable state.
 - When updating CLI surfaces, update the README accordingly.
+
+## Termination
+
+You are running inside a daemon-managed continuation loop. The daemon respawns you 1s after every clean exit until the doc's status leaves the active set. This is the ONLY way the loop ends.
+
+When the work is complete (all acceptance criteria met, tests pass, `cargo clippy` clean, branch pushed):
+
+1. Edit the doc's frontmatter in this worktree: set `status: review`.
+2. Commit the status change on the agent branch (commit message: `chore: handoff {{ doc.id }} for review`).
+3. Push the branch.
+4. Exit.
+
+Do NOT flip the status while work is still in progress — the daemon will tear down your worktree and you will lose context. Only set `status: review` when you are genuinely done with this doc.
+
+If you hit a blocker you cannot resolve (missing context, ambiguous requirements, failing tests you don't understand), do NOT flip the status. Document the blocker in the doc body and exit — the daemon will respawn you, but a human reviewing TUI output will see the blocker note and intervene.

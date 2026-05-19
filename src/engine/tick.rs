@@ -1103,38 +1103,60 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
     /// removes it. No retry is enqueued either way — status reconcile is
     /// terminal.
     fn reconcile_doc_status(&mut self, active_statuses: &[String], handoff_states: &[String]) {
-        let store = match Store::load(&self.root, &self.config) {
-            Ok(s) => s,
+        // Read status per running agent from THAT agent's workspace, with a
+        // fallback to the main root if the workspace can't be loaded.
+        // Reading per-agent lets an agent signal "done" by flipping the
+        // status in its own checkout — without this, the daemon only sees
+        // post-merge state, so a builder has no path to terminate the
+        // continuation loop until a human merges.
+        let main_status_by_id: HashMap<String, String> = match Store::load(&self.root, &self.config)
+        {
+            Ok(s) => s
+                .all_docs()
+                .into_iter()
+                .map(|m| (m.id.clone(), m.status.to_string()))
+                .collect(),
             Err(e) => {
                 self.log(
                     "reconcile_store_load_failed",
-                    &format!("err={} note=skipping", e),
+                    &format!("err={} note=fallback only", e),
                 );
-                return;
+                HashMap::new()
             }
         };
-        let status_by_id: HashMap<String, String> = store
-            .all_docs()
-            .into_iter()
-            .map(|m| (m.id.clone(), m.status.to_string()))
-            .collect();
 
-        let running_keys: Vec<String> = {
+        let running: Vec<(String, PathBuf)> = {
             let guard = self.running.lock().unwrap();
-            guard.keys().cloned().collect()
+            guard
+                .values()
+                .map(|ra| (ra.doc_id.clone(), ra.workspace.clone()))
+                .collect()
         };
-        let actions: Vec<(String, bool)> = running_keys
+
+        let actions: Vec<(String, bool)> = running
             .into_iter()
-            .filter_map(|doc_id| match status_by_id.get(&doc_id) {
-                // Missing from store: leave alone. Daemon does not infer
-                // intent from absence — could be a transient load error or a
-                // shorthand id mismatch. Status reconcile only fires when we
-                // can observe a definite non-active status.
-                None => None,
-                Some(s) if active_statuses.iter().any(|a| a == s) => None,
-                Some(s) if handoff_states.iter().any(|h| h == s) => Some((doc_id, false)),
-                // Definite non-active, non-handoff status: terminal.
-                Some(_) => Some((doc_id, true)),
+            .filter_map(|(doc_id, workspace)| {
+                let status = Store::load(&workspace, &self.config)
+                    .ok()
+                    .and_then(|s| {
+                        s.all_docs()
+                            .into_iter()
+                            .find(|m| m.id == doc_id)
+                            .map(|m| m.status.to_string())
+                    })
+                    .or_else(|| main_status_by_id.get(&doc_id).cloned());
+
+                match status {
+                    // Missing from both stores: leave alone. Daemon does not
+                    // infer intent from absence — could be a transient load
+                    // error or a shorthand id mismatch. Status reconcile only
+                    // fires when we can observe a definite non-active status.
+                    None => None,
+                    Some(s) if active_statuses.iter().any(|a| a == &s) => None,
+                    Some(s) if handoff_states.iter().any(|h| h == &s) => Some((doc_id, false)),
+                    // Definite non-active, non-handoff status: terminal.
+                    Some(_) => Some((doc_id, true)),
+                }
             })
             .collect();
 
@@ -1822,7 +1844,11 @@ mod tests {
     /// doesn't have "todo", so tests use "draft" (a real Status value) and
     /// configure active_statuses to match the Display form.
     fn make_stories_status(td: &TempDir, n: usize, status: &str) {
-        let dir = td.path().join("docs/stories");
+        make_stories_status_at(td.path(), n, status);
+    }
+
+    fn make_stories_status_at(root: &std::path::Path, n: usize, status: &str) {
+        let dir = root.join("docs/stories");
         std::fs::create_dir_all(&dir).unwrap();
         for i in 0..n {
             let content = format!(
@@ -3534,6 +3560,72 @@ body\n",
 
         assert!(t.running.lock().unwrap().contains_key("STORY-000"));
         assert!(provisioner.remove_calls().is_empty());
+    }
+
+    #[test]
+    fn reconcile_reads_agent_workspace_for_handoff_status() {
+        // Agent has flipped its own doc to a handoff status in its worktree,
+        // but the main worktree still shows the active status (agent hasn't
+        // pushed/merged yet). The daemon must observe the agent's worktree
+        // view so the loop can terminate. Without this, a builder that
+        // completes work has no path to signal "done" that the daemon sees,
+        // and continuation respawns indefinitely.
+        let main_td = TempDir::new().unwrap();
+        let agent_ws = TempDir::new().unwrap();
+
+        let mut orch = base_orch(vec!["draft"]);
+        orch.handoff_states = vec!["review".to_string()];
+        let cfg = cfg(orch);
+        // Main worktree: doc still "draft" (active). Use a unique id ("S100")
+        // that the running agent does NOT match, just to populate the main
+        // store and exercise the fallback lookup path. The agent's own doc
+        // ("STORY-000") only exists in the agent workspace.
+        let main_dir = main_td.path().join("docs/stories");
+        std::fs::create_dir_all(&main_dir).unwrap();
+        std::fs::write(
+            main_dir.join("STORY-100-other.md"),
+            "---\ntitle: \"S100\"\ntype: story\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\nassignees: [\"claude-bot\"]\n---\nbody\n",
+        )
+        .unwrap();
+        // Agent workspace: STORY-000 with status flipped to "review".
+        make_stories_status_at(agent_ws.path(), 1, "review");
+
+        let runner = Arc::new(FakeRunner::new());
+        let lease = Arc::new(FakeLeaseOps::new());
+        let provisioner = Arc::new(FakeProvisioner::default());
+        let mut t = build_loop_with_provisioner(
+            &main_td,
+            cfg,
+            Arc::clone(&runner),
+            MockGitRefClient::new(),
+            Arc::clone(&lease),
+            FakeClock::new(),
+            Arc::clone(&provisioner),
+        );
+        let now = t.clock.now_instant();
+        let obs = Arc::new(Mutex::new(AgentObservation::new(now)));
+        let cn_rx = insert_fake_running_with_obs(&mut t, "STORY-000", "host-test:sess-1", now, obs);
+        // Repoint the running agent's workspace at the agent_ws temp dir so
+        // reconcile reads the agent's view of the doc, not the global default
+        // `/tmp/fake-ws/STORY-000`.
+        t.running
+            .lock()
+            .unwrap()
+            .get_mut("STORY-000")
+            .unwrap()
+            .workspace = agent_ws.path().to_path_buf();
+
+        t.run_once().unwrap();
+
+        assert!(
+            !t.running.lock().unwrap().contains_key("STORY-000"),
+            "handoff status in agent workspace must terminate the agent"
+        );
+        assert!(cn_rx.try_recv().is_ok(), "cancel signal should be sent");
+        assert!(
+            provisioner.remove_calls().is_empty(),
+            "handoff status must NOT remove workspace"
+        );
     }
 
     #[test]
