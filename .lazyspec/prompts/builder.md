@@ -33,7 +33,14 @@ No iterations have been created during the current session yet.
 
 ## Working agreement
 
-- Use the appropriate lazyspec skills (`/plan-work`, `/create-iteration`, `/build`, `/review-iteration`).
+- You are running non-interactively (`claude -p`). There is no human to answer questions. Do NOT call `AskUserQuestion` or wait for user alignment. Make reasonable assumptions and proceed.
+- Skip `/plan-work` — it is an interactive skill that blocks on user input. Dispatch directly based on iteration state:
+  - Run `lazyspec context {{ doc.id }} --json` to inspect existing iterations.
+  - If an in-progress iteration exists with an unfinished task breakdown, use `/build`.
+  - If an iteration exists without a task breakdown, use `/create-iteration` to add tasks, then `/build`.
+  - If no iteration exists for this story, use `/create-iteration` to plan one, then `/build`.
+  - When the iteration completes, use `/review-iteration`.
+- Any skill step that says "ask the user" or "get alignment" — proceed with your best judgement instead. Document non-obvious decisions in the iteration body.
 - Run `cargo run` for the dev build. Check `cargo clippy` before declaring a task done.
 - Prefer `--json` output when querying lazyspec for machine-readable state.
 - When updating CLI surfaces, update the README accordingly.
