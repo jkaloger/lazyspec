@@ -56,11 +56,7 @@ impl AgentsViewState {
                     append_output(&mut self.output, &doc_id, &delta);
                 }
                 AgentEvent::ToolCallStarted { name } => {
-                    append_output(
-                        &mut self.output,
-                        &doc_id,
-                        &format!("\n[tool] {name} …\n"),
-                    );
+                    append_output(&mut self.output, &doc_id, &format!("\n[tool] {name} …\n"));
                 }
                 AgentEvent::ToolCall {
                     name,
@@ -127,10 +123,8 @@ impl AgentsViewState {
                 // survives continuation respawns that mint fresh session_ids
                 // for the same doc. Retain only the doc_ids still present in
                 // any current snapshot.
-                let active_doc_ids: std::collections::HashSet<String> = new_snapshots
-                    .values()
-                    .map(|s| s.doc_id.clone())
-                    .collect();
+                let active_doc_ids: std::collections::HashSet<String> =
+                    new_snapshots.values().map(|s| s.doc_id.clone()).collect();
                 self.output
                     .retain(|doc_id, _| active_doc_ids.contains(doc_id));
                 self.statuses.retain(|k, _| new_snapshots.contains_key(k));
@@ -523,10 +517,7 @@ mod tests {
                 snapshot("s2", "STORY-2", 0, 0),
             ],
         });
-        assert_eq!(
-            s.output.get("STORY-1").map(String::as_str),
-            Some("history")
-        );
+        assert_eq!(s.output.get("STORY-1").map(String::as_str), Some("history"));
         assert!(s.snapshots.contains_key("s1"));
         assert!(s.snapshots.contains_key("s2"));
     }
