@@ -4,7 +4,7 @@ use std::time::Instant;
 use crate::engine::agent_metadata::{AgentMetadata, AgentStatus};
 use crate::engine::ipc::protocol::{AgentSnapshot, DaemonMessage};
 use crate::engine::ipc::ConnectionState;
-use crate::engine::runner::AgentEvent;
+use crate::engine::runner::{AgentEvent, ToolStatus};
 
 const OUTPUT_BUFFER_CAP: usize = 65_536;
 
@@ -47,12 +47,48 @@ impl AgentsViewState {
     pub fn apply(&mut self, msg: DaemonMessage) {
         match msg {
             DaemonMessage::AgentEvent {
-                session_id, event, ..
+                session_id,
+                doc_id,
+                event,
+                ..
             } => match event {
                 AgentEvent::Text { delta } => {
-                    let buf = self.output.entry(session_id).or_default();
-                    buf.push_str(&delta);
-                    trim_to_cap(buf, OUTPUT_BUFFER_CAP);
+                    append_output(&mut self.output, &doc_id, &delta);
+                }
+                AgentEvent::ToolCallStarted { name } => {
+                    append_output(
+                        &mut self.output,
+                        &doc_id,
+                        &format!("\n[tool] {name} …\n"),
+                    );
+                }
+                AgentEvent::ToolCall {
+                    name,
+                    summary,
+                    status,
+                } => {
+                    let marker = match status {
+                        ToolStatus::Ok => "ok",
+                        ToolStatus::Error => "err",
+                    };
+                    append_output(
+                        &mut self.output,
+                        &doc_id,
+                        &format!("[tool:{marker}] {name}: {summary}\n"),
+                    );
+                }
+                AgentEvent::SessionStarted => {
+                    append_output(&mut self.output, &doc_id, "\n--- session start ---\n");
+                }
+                AgentEvent::SubprocessExited { code } => {
+                    let label = code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "?".to_string());
+                    append_output(
+                        &mut self.output,
+                        &doc_id,
+                        &format!("\n--- exit {label} ---\n"),
+                    );
                 }
                 AgentEvent::TurnCompleted {
                     input_tokens,
@@ -76,10 +112,6 @@ impl AgentsViewState {
                     snap.tokens_in = input_tokens;
                     snap.tokens_out = output_tokens;
                 }
-                AgentEvent::SessionStarted
-                | AgentEvent::ToolCallStarted { .. }
-                | AgentEvent::ToolCall { .. }
-                | AgentEvent::SubprocessExited { .. } => {}
             },
             DaemonMessage::AgentStatus {
                 session_id, status, ..
@@ -91,7 +123,16 @@ impl AgentsViewState {
                     .into_iter()
                     .map(|a| (a.session_id.clone(), a))
                     .collect();
-                self.output.retain(|k, _| new_snapshots.contains_key(k));
+                // Output is keyed by doc_id (not session_id) so a transcript
+                // survives continuation respawns that mint fresh session_ids
+                // for the same doc. Retain only the doc_ids still present in
+                // any current snapshot.
+                let active_doc_ids: std::collections::HashSet<String> = new_snapshots
+                    .values()
+                    .map(|s| s.doc_id.clone())
+                    .collect();
+                self.output
+                    .retain(|doc_id, _| active_doc_ids.contains(doc_id));
                 self.statuses.retain(|k, _| new_snapshots.contains_key(k));
                 let now = Instant::now();
                 for k in new_snapshots.keys() {
@@ -216,6 +257,12 @@ pub fn build_kickoff_candidates(
         .collect()
 }
 
+fn append_output(output: &mut HashMap<String, String>, session_id: &str, chunk: &str) {
+    let buf = output.entry(session_id.to_string()).or_default();
+    buf.push_str(chunk);
+    trim_to_cap(buf, OUTPUT_BUFFER_CAP);
+}
+
 fn trim_to_cap(buf: &mut String, cap: usize) {
     if buf.len() <= cap {
         return;
@@ -238,9 +285,14 @@ mod tests {
     use chrono::{Duration, Utc};
 
     fn text_event(session: &str, delta: &str) -> DaemonMessage {
+        text_event_for(session, session, delta)
+    }
+
+    fn text_event_for(session: &str, doc_id: &str, delta: &str) -> DaemonMessage {
         DaemonMessage::AgentEvent {
             agent_id: "a1".into(),
             session_id: session.into(),
+            doc_id: doc_id.into(),
             event: AgentEvent::Text {
                 delta: delta.into(),
             },
@@ -276,6 +328,101 @@ mod tests {
     }
 
     #[test]
+    fn apply_tool_call_started_appends_marker() {
+        let mut s = AgentsViewState::new();
+        s.apply(text_event("s1", "thinking…"));
+        s.apply(DaemonMessage::AgentEvent {
+            agent_id: "a1".into(),
+            session_id: "s1".into(),
+            doc_id: "s1".into(),
+            event: AgentEvent::ToolCallStarted {
+                name: "Bash".into(),
+            },
+        });
+        let buf = s.output.get("s1").expect("buffer exists");
+        assert!(buf.contains("thinking…"), "prior text preserved");
+        assert!(buf.contains("[tool] Bash"), "tool start marker appended");
+    }
+
+    #[test]
+    fn apply_tool_call_appends_result_with_status() {
+        let mut s = AgentsViewState::new();
+        s.apply(DaemonMessage::AgentEvent {
+            agent_id: "a1".into(),
+            session_id: "s1".into(),
+            doc_id: "s1".into(),
+            event: AgentEvent::ToolCall {
+                name: "Bash".into(),
+                summary: "exit 0".into(),
+                status: ToolStatus::Ok,
+            },
+        });
+        s.apply(DaemonMessage::AgentEvent {
+            agent_id: "a1".into(),
+            session_id: "s1".into(),
+            doc_id: "s1".into(),
+            event: AgentEvent::ToolCall {
+                name: "Read".into(),
+                summary: "ENOENT".into(),
+                status: ToolStatus::Error,
+            },
+        });
+        let buf = s.output.get("s1").expect("buffer exists");
+        assert!(buf.contains("[tool:ok] Bash: exit 0"));
+        assert!(buf.contains("[tool:err] Read: ENOENT"));
+    }
+
+    #[test]
+    fn apply_session_started_and_exit_bracket_transcript() {
+        let mut s = AgentsViewState::new();
+        s.apply(DaemonMessage::AgentEvent {
+            agent_id: "a1".into(),
+            session_id: "s1".into(),
+            doc_id: "s1".into(),
+            event: AgentEvent::SessionStarted,
+        });
+        s.apply(text_event("s1", "hi"));
+        s.apply(DaemonMessage::AgentEvent {
+            agent_id: "a1".into(),
+            session_id: "s1".into(),
+            doc_id: "s1".into(),
+            event: AgentEvent::SubprocessExited { code: Some(0) },
+        });
+        let buf = s.output.get("s1").expect("buffer exists");
+        assert!(buf.contains("--- session start ---"));
+        assert!(buf.contains("hi"));
+        assert!(buf.contains("--- exit 0 ---"));
+    }
+
+    #[test]
+    fn output_buffer_survives_session_respawn_for_same_doc() {
+        // Daemon continuation respawns the agent with a fresh session_id but
+        // the same doc_id. The transcript must keep accumulating into the
+        // doc-keyed buffer instead of being dropped when the old session
+        // disappears from snapshots.
+        let mut s = AgentsViewState::new();
+
+        // Session 1 emits some output.
+        s.apply(text_event_for("sess-1", "STORY-99", "before-respawn\n"));
+        s.apply(DaemonMessage::DaemonStatus {
+            agents: vec![snapshot("sess-1", "STORY-99", 0, 0)],
+        });
+
+        // Daemon respawns: new session id, same doc id.
+        s.apply(DaemonMessage::DaemonStatus {
+            agents: vec![snapshot("sess-2", "STORY-99", 0, 0)],
+        });
+        s.apply(text_event_for("sess-2", "STORY-99", "after-respawn\n"));
+
+        let buf = s
+            .output
+            .get("STORY-99")
+            .expect("doc-keyed buffer should still exist after respawn");
+        assert!(buf.contains("before-respawn"));
+        assert!(buf.contains("after-respawn"));
+    }
+
+    #[test]
     fn output_buffer_caps_at_64kib() {
         let mut s = AgentsViewState::new();
         let big = "x".repeat(70_000);
@@ -304,6 +451,7 @@ mod tests {
         s.apply(DaemonMessage::AgentEvent {
             agent_id: "a1".into(),
             session_id: "s1".into(),
+            doc_id: "s1".into(),
             event: AgentEvent::TurnCompleted {
                 input_tokens: 42,
                 output_tokens: 99,
@@ -323,6 +471,7 @@ mod tests {
         s.apply(DaemonMessage::AgentEvent {
             agent_id: "a1".into(),
             session_id: "s1".into(),
+            doc_id: "s1".into(),
             event: AgentEvent::TokenUsage {
                 input_tokens: 7,
                 output_tokens: 11,
@@ -339,6 +488,7 @@ mod tests {
         s.apply(DaemonMessage::AgentEvent {
             agent_id: "a1".into(),
             session_id: "s1".into(),
+            doc_id: "s1".into(),
             event: AgentEvent::TokenUsage {
                 input_tokens: 7,
                 output_tokens: 11,
@@ -366,14 +516,17 @@ mod tests {
     #[test]
     fn apply_daemon_status_replaces_snapshots_preserving_output() {
         let mut s = AgentsViewState::new();
-        s.apply(text_event("s1", "history"));
+        s.apply(text_event_for("s1", "STORY-1", "history"));
         s.apply(DaemonMessage::DaemonStatus {
             agents: vec![
                 snapshot("s1", "STORY-1", 0, 0),
                 snapshot("s2", "STORY-2", 0, 0),
             ],
         });
-        assert_eq!(s.output.get("s1").map(String::as_str), Some("history"));
+        assert_eq!(
+            s.output.get("STORY-1").map(String::as_str),
+            Some("history")
+        );
         assert!(s.snapshots.contains_key("s1"));
         assert!(s.snapshots.contains_key("s2"));
     }
@@ -381,8 +534,8 @@ mod tests {
     #[test]
     fn apply_daemon_status_prunes_orphan_statuses_and_output() {
         let mut s = AgentsViewState::new();
-        s.apply(text_event("s1", "s1-buf"));
-        s.apply(text_event("s2", "s2-buf"));
+        s.apply(text_event_for("s1", "STORY-1", "s1-buf"));
+        s.apply(text_event_for("s2", "STORY-2", "s2-buf"));
         s.apply(DaemonMessage::AgentStatus {
             agent_id: "a1".into(),
             session_id: "s1".into(),
@@ -406,8 +559,8 @@ mod tests {
 
         assert!(s.statuses.contains_key("s1"));
         assert!(!s.statuses.contains_key("s2"));
-        assert_eq!(s.output.get("s1").map(String::as_str), Some("s1-buf"));
-        assert!(!s.output.contains_key("s2"));
+        assert_eq!(s.output.get("STORY-1").map(String::as_str), Some("s1-buf"));
+        assert!(!s.output.contains_key("STORY-2"));
         let counts = s.counts_by_status();
         assert_eq!(counts.get(&AgentStatus::Running).copied(), Some(1));
         assert_eq!(counts.get(&AgentStatus::Crashed).copied(), None);
@@ -471,6 +624,7 @@ mod tests {
         s.apply(DaemonMessage::AgentEvent {
             agent_id: "a1".into(),
             session_id: "sess-1".into(),
+            doc_id: "sess-1".into(),
             event: AgentEvent::Text {
                 delta: "before-".into(),
             },
@@ -479,6 +633,7 @@ mod tests {
         s.apply(DaemonMessage::AgentEvent {
             agent_id: "a1".into(),
             session_id: "sess-1".into(),
+            doc_id: "sess-1".into(),
             event: AgentEvent::Text {
                 delta: "after".into(),
             },
@@ -493,7 +648,7 @@ mod tests {
     #[test]
     fn set_connection_to_connected_clears_snapshots_keeps_output() {
         let mut s = AgentsViewState::new();
-        s.apply(text_event("s1", "buffered"));
+        s.apply(text_event_for("s1", "STORY-1", "buffered"));
         s.apply(DaemonMessage::DaemonStatus {
             agents: vec![snapshot("s1", "STORY-1", 1, 1)],
         });
@@ -503,7 +658,7 @@ mod tests {
 
         assert!(s.snapshots.is_empty(), "snapshots should be cleared");
         assert_eq!(
-            s.output.get("s1").map(String::as_str),
+            s.output.get("STORY-1").map(String::as_str),
             Some("buffered"),
             "output buffer should survive reconnect"
         );
@@ -674,6 +829,7 @@ mod tests {
         s.apply(DaemonMessage::AgentEvent {
             agent_id: "a1".into(),
             session_id: "s1".into(),
+            doc_id: "s1".into(),
             event: AgentEvent::TokenUsage {
                 input_tokens: 5,
                 output_tokens: 7,

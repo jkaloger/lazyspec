@@ -24,6 +24,7 @@ pub enum DaemonMessage {
     AgentEvent {
         agent_id: String,
         session_id: String,
+        doc_id: String,
         #[serde(flatten)]
         event: AgentEvent,
     },
@@ -83,12 +84,14 @@ mod tests {
         let event_msg = DaemonMessage::AgentEvent {
             agent_id: "a1".into(),
             session_id: "s1".into(),
+            doc_id: "STORY-1".into(),
             event: AgentEvent::Text { delta: "hi".into() },
         };
         let v: Value = serde_json::from_str(&serde_json::to_string(&event_msg).unwrap()).unwrap();
         assert_eq!(v["type"], "agent_event");
         assert_eq!(v["agent_id"], "a1");
         assert_eq!(v["session_id"], "s1");
+        assert_eq!(v["doc_id"], "STORY-1");
         assert_eq!(v["event_type"], "text");
         assert_eq!(v["delta"], "hi");
 
@@ -168,6 +171,7 @@ mod tests {
         let orig = DaemonMessage::AgentEvent {
             agent_id: "a1".into(),
             session_id: "s1".into(),
+            doc_id: "STORY-1".into(),
             event: AgentEvent::Text { delta: "hi".into() },
         };
         let s = serde_json::to_string(&orig).unwrap();
@@ -177,6 +181,7 @@ mod tests {
         let orig2 = DaemonMessage::AgentEvent {
             agent_id: "a1".into(),
             session_id: "s1".into(),
+            doc_id: "STORY-1".into(),
             event: AgentEvent::TurnCompleted {
                 input_tokens: 10,
                 output_tokens: 20,

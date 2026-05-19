@@ -2195,6 +2195,7 @@ pub(crate) mod tests {
         let msg = DaemonMessage::AgentEvent {
             agent_id: "a1".into(),
             session_id: "s1".into(),
+            doc_id: "s1".into(),
             event: AgentEvent::Text {
                 delta: "hello".into(),
             },

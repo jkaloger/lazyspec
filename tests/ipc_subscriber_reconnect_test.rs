@@ -123,6 +123,7 @@ fn sample_event(agent: &str, delta: &str) -> DaemonMessage {
     DaemonMessage::AgentEvent {
         agent_id: agent.into(),
         session_id: "s1".into(),
+        doc_id: "STORY-1".into(),
         event: AgentEvent::Text {
             delta: delta.into(),
         },

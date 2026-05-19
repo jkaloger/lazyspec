@@ -43,6 +43,7 @@ mod tests {
         DaemonMessage::AgentEvent {
             agent_id: "a1".into(),
             session_id: "s1".into(),
+            doc_id: "STORY-1".into(),
             event: AgentEvent::Text {
                 delta: delta.into(),
             },

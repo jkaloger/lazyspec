@@ -263,7 +263,14 @@ impl AgentEventSink for EprintlnEventSink {
 /// `last_event_at` / `turn_started_at` — reconcile reads via the abstract
 /// `Clock`, so determinism lives at the comparison site, not here.
 pub fn run_event_reader(events: Receiver<AgentEvent>, observation: Arc<Mutex<AgentObservation>>) {
-    run_event_reader_with_publish(events, observation, None, String::new(), String::new());
+    run_event_reader_with_publish(
+        events,
+        observation,
+        None,
+        String::new(),
+        String::new(),
+        String::new(),
+    );
 }
 
 /// Drain `events` into `observation`, optionally publishing each event onto a
@@ -276,12 +283,14 @@ pub fn run_event_reader_with_publish(
     broadcaster: Option<crate::engine::ipc::broadcaster::Broadcaster>,
     agent_id: String,
     session_id: String,
+    doc_id: String,
 ) {
     while let Ok(ev) = events.recv() {
         if let Some(bc) = broadcaster.as_ref() {
             bc.publish(crate::engine::ipc::protocol::DaemonMessage::AgentEvent {
                 agent_id: agent_id.clone(),
                 session_id: session_id.clone(),
+                doc_id: doc_id.clone(),
                 event: ev.clone(),
             });
         }
@@ -920,6 +929,7 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             let reader_broadcaster = self.broadcaster.clone();
             let reader_agent_id = agent_ident.clone();
             let reader_session_id = session_id.clone();
+            let reader_doc_id = cand.doc_id.clone();
             let reader_handle = std::thread::spawn(move || {
                 run_event_reader_with_publish(
                     events,
@@ -927,6 +937,7 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                     reader_broadcaster,
                     reader_agent_id,
                     reader_session_id,
+                    reader_doc_id,
                 );
             });
 
@@ -1354,6 +1365,7 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
             let reader_broadcaster = self.broadcaster.clone();
             let reader_agent_id = retry.agent_ident.clone();
             let reader_session_id = retry.session_id.clone();
+            let reader_doc_id = retry.doc_id.clone();
             let reader_handle = std::thread::spawn(move || {
                 run_event_reader_with_publish(
                     events,
@@ -1361,6 +1373,7 @@ impl<R: AgentRunner, G: GitRefOps, L: LeaseOps, C: Clock, W: WorkspaceProvisione
                     reader_broadcaster,
                     reader_agent_id,
                     reader_session_id,
+                    reader_doc_id,
                 );
             });
             let cancel_for_map = cancel.clone();

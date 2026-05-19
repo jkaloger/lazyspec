@@ -359,6 +359,7 @@ mod tests {
         let msg = DaemonMessage::AgentEvent {
             agent_id: agent_id.into(),
             session_id: "s1".into(),
+            doc_id: "STORY-1".into(),
             event: AgentEvent::Text {
                 delta: delta.into(),
             },

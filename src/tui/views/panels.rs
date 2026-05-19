@@ -1563,7 +1563,13 @@ pub fn draw_agents_screen(f: &mut Frame, app: &App, area: Rect) {
             f.render_widget(paragraph, right_area);
         }
         Some(sid) => {
-            let buf = app.agents_view.output.get(sid);
+            // Output is keyed by doc_id so a transcript spans continuation
+            // respawns (which mint a fresh session_id per attempt).
+            let buf = app
+                .agents_view
+                .snapshots
+                .get(sid)
+                .and_then(|snap| app.agents_view.output.get(&snap.doc_id));
             match buf {
                 None => {
                     let paragraph = Paragraph::new("No output yet...")
