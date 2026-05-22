@@ -1,0 +1,14 @@
+{
+  "agent_id": "Jacks-MacBook-Pro-2.local-7a012141-faa2-4db7-8b8b-57ed28eb6af8:988ad7f5-a80b-4614-a8c3-03570bc8511a",
+  "session_id": "988ad7f5-a80b-4614-a8c3-03570bc8511a",
+  "doc_id": "STORY-018",
+  "doc_type": "story",
+  "status": "running",
+  "started_at": "2026-05-22T00:44:32.246217Z",
+  "last_event_at": "2026-05-22T00:44:32.246217Z",
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "turn_count": 0,
+  "error": null,
+  "session_start_iteration_ids": []
+}
