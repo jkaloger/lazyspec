@@ -2,6 +2,11 @@
 name = "lazyspec"
 version = "0.8.0"
 edition = "2021"
+description = "A little TUI & CLI for project documentation."
+license = "MIT"
+repository = "https://github.com/jkaloger/lazyspec"
+homepage = "https://github.com/jkaloger/lazyspec"
+readme = "README.md"
 
 [dependencies]
 ratatui = "0.30"
