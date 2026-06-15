@@ -184,11 +184,17 @@ fn link_blocked_by_flips_and_stores_canonical_on_target() {
         fs::read_to_string(fixture.root().join("docs/adrs/ADR-001-adopt-auth.md")).unwrap();
 
     // ADR blocked-by RFC -> the canonical "blocks: ADR-001" lands on the RFC.
-    lazyspec::cli::link::link(fixture.root(), &store, "ADR-001", "blocked-by", "RFC-001", &fs)
-        .unwrap();
+    lazyspec::cli::link::link(
+        fixture.root(),
+        &store,
+        "ADR-001",
+        "blocked-by",
+        "RFC-001",
+        &fs,
+    )
+    .unwrap();
 
-    let rfc_content =
-        fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-auth.md")).unwrap();
+    let rfc_content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-auth.md")).unwrap();
     let rfc_meta = DocMeta::parse(&rfc_content).unwrap();
     assert_eq!(rfc_meta.related.len(), 1);
     assert_eq!(rfc_meta.related[0].rel_type, RelationType::Blocks);
@@ -211,8 +217,15 @@ fn link_implemented_by_flips_to_implements_on_target() {
     let fs = lazyspec::engine::fs::RealFileSystem;
 
     // RFC implemented-by ADR -> "implements: RFC-001" lands on the ADR.
-    lazyspec::cli::link::link(fixture.root(), &store, "RFC-001", "implemented-by", "ADR-001", &fs)
-        .unwrap();
+    lazyspec::cli::link::link(
+        fixture.root(),
+        &store,
+        "RFC-001",
+        "implemented-by",
+        "ADR-001",
+        &fs,
+    )
+    .unwrap();
 
     let adr_content =
         fs::read_to_string(fixture.root().join("docs/adrs/ADR-001-adopt-auth.md")).unwrap();
@@ -232,11 +245,17 @@ fn link_superseded_by_flips_to_supersedes_on_target() {
     let fs = lazyspec::engine::fs::RealFileSystem;
 
     // RFC-001 superseded-by RFC-002 -> "supersedes: RFC-001" lands on RFC-002.
-    lazyspec::cli::link::link(fixture.root(), &store, "RFC-001", "superseded-by", "RFC-002", &fs)
-        .unwrap();
+    lazyspec::cli::link::link(
+        fixture.root(),
+        &store,
+        "RFC-001",
+        "superseded-by",
+        "RFC-002",
+        &fs,
+    )
+    .unwrap();
 
-    let new_content =
-        fs::read_to_string(fixture.root().join("docs/rfcs/RFC-002-new.md")).unwrap();
+    let new_content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-002-new.md")).unwrap();
     let new_meta = DocMeta::parse(&new_content).unwrap();
     assert_eq!(new_meta.related.len(), 1);
     assert_eq!(new_meta.related[0].rel_type, RelationType::Supersedes);
@@ -251,18 +270,26 @@ fn unlink_blocked_by_removes_canonical_from_target() {
     let fs = lazyspec::engine::fs::RealFileSystem;
 
     // Seed RFC with "blocks: ADR-001".
-    lazyspec::cli::link::link(fixture.root(), &store, "RFC-001", "blocks", "ADR-001", &fs)
-        .unwrap();
+    lazyspec::cli::link::link(fixture.root(), &store, "RFC-001", "blocks", "ADR-001", &fs).unwrap();
 
     // Unlink via the inverse keyword from the ADR's perspective.
     let store = fixture.store();
-    lazyspec::cli::link::unlink(fixture.root(), &store, "ADR-001", "blocked-by", "RFC-001", &fs)
-        .unwrap();
+    lazyspec::cli::link::unlink(
+        fixture.root(),
+        &store,
+        "ADR-001",
+        "blocked-by",
+        "RFC-001",
+        &fs,
+    )
+    .unwrap();
 
-    let rfc_content =
-        fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-auth.md")).unwrap();
+    let rfc_content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-auth.md")).unwrap();
     let rfc_meta = DocMeta::parse(&rfc_content).unwrap();
-    assert!(rfc_meta.related.is_empty(), "entry should be removed from RFC");
+    assert!(
+        rfc_meta.related.is_empty(),
+        "entry should be removed from RFC"
+    );
 }
 
 #[test]
@@ -320,9 +347,15 @@ fn link_outcome_reflects_flip() {
     let store = fixture.store();
     let fs = lazyspec::engine::fs::RealFileSystem;
 
-    let outcome =
-        lazyspec::cli::link::link(fixture.root(), &store, "ADR-001", "blocked-by", "RFC-001", &fs)
-            .unwrap();
+    let outcome = lazyspec::cli::link::link(
+        fixture.root(),
+        &store,
+        "ADR-001",
+        "blocked-by",
+        "RFC-001",
+        &fs,
+    )
+    .unwrap();
 
     assert_eq!(
         outcome.source,

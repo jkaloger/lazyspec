@@ -57,7 +57,11 @@ fn link_inner<G: GhIssueReader + GhIssueWriter>(
     client_factory: impl FnOnce() -> G,
 ) -> Result<LinkOutcome> {
     let resolved = resolve_rel_keyword(rel_type)?;
-    let (from, to) = if resolved.flipped { (to, from) } else { (from, to) };
+    let (from, to) = if resolved.flipped {
+        (to, from)
+    } else {
+        (from, to)
+    };
     let rel_str = resolved.rel_type.to_string();
 
     let resolved_from = resolve_to_path(store, from)?;
@@ -109,7 +113,11 @@ pub fn unlink_with_config(
     config: Option<&Config>,
 ) -> Result<LinkOutcome> {
     let resolved = resolve_rel_keyword(rel_type)?;
-    let (from, to) = if resolved.flipped { (to, from) } else { (from, to) };
+    let (from, to) = if resolved.flipped {
+        (to, from)
+    } else {
+        (from, to)
+    };
     let rel_str = resolved.rel_type.to_string();
 
     let resolved_from = resolve_to_path(store, from)?;
