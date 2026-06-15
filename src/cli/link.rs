@@ -1,7 +1,7 @@
 use crate::cli::resolve::{resolve_to_id, resolve_to_path};
 use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{Config, StoreBackend};
-use crate::engine::document::rewrite_frontmatter;
+use crate::engine::document::{resolve_rel_keyword, rewrite_frontmatter, RelationType};
 use crate::engine::fs::FileSystem;
 use crate::engine::gh::{GhCli, GhIssueReader, GhIssueWriter};
 use crate::engine::git_ref::{GitCli, GitRefOps};
@@ -10,7 +10,17 @@ use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::GithubIssuesStore;
 use anyhow::{anyhow, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Describes the canonical relation that was actually written (or removed),
+/// reflecting any inverse-keyword flip. `source` is the document the relation
+/// landed on; `target` is the id stored in its frontmatter.
+#[derive(Debug)]
+pub struct LinkOutcome {
+    pub source: PathBuf,
+    pub rel_type: RelationType,
+    pub target: String,
+}
 
 pub fn link(
     root: &Path,
@@ -19,7 +29,7 @@ pub fn link(
     rel_type: &str,
     to: &str,
     fs: &dyn FileSystem,
-) -> Result<()> {
+) -> Result<LinkOutcome> {
     link_with_config(root, store, from, rel_type, to, fs, None)
 }
 
@@ -31,7 +41,7 @@ pub fn link_with_config(
     to: &str,
     fs: &dyn FileSystem,
     config: Option<&Config>,
-) -> Result<()> {
+) -> Result<LinkOutcome> {
     link_inner(root, store, from, rel_type, to, fs, config, GhCli::new)
 }
 
@@ -45,7 +55,11 @@ fn link_inner<G: GhIssueReader + GhIssueWriter>(
     fs: &dyn FileSystem,
     config: Option<&Config>,
     client_factory: impl FnOnce() -> G,
-) -> Result<()> {
+) -> Result<LinkOutcome> {
+    let resolved = resolve_rel_keyword(rel_type)?;
+    let (from, to) = if resolved.flipped { (to, from) } else { (from, to) };
+    let rel_str = resolved.rel_type.to_string();
+
     let resolved_from = resolve_to_path(store, from)?;
     let to_id = resolve_to_id(store, to)?;
     let full_path = root.join(&resolved_from);
@@ -55,7 +69,7 @@ fn link_inner<G: GhIssueReader + GhIssueWriter>(
         }
         let mut entry = serde_yaml::Mapping::new();
         entry.insert(
-            serde_yaml::Value::String(rel_type.to_string()),
+            serde_yaml::Value::String(rel_str.clone()),
             serde_yaml::Value::String(to_id.clone()),
         );
         doc["related"]
@@ -67,7 +81,11 @@ fn link_inner<G: GhIssueReader + GhIssueWriter>(
 
     push_if_github_backed(root, &resolved_from, config, client_factory)?;
     push_if_git_ref_backed(root, &resolved_from, config)?;
-    Ok(())
+    Ok(LinkOutcome {
+        source: resolved_from,
+        rel_type: resolved.rel_type,
+        target: to_id,
+    })
 }
 
 pub fn unlink(
@@ -77,7 +95,7 @@ pub fn unlink(
     rel_type: &str,
     to: &str,
     fs: &dyn FileSystem,
-) -> Result<()> {
+) -> Result<LinkOutcome> {
     unlink_with_config(root, store, from, rel_type, to, fs, None)
 }
 
@@ -89,7 +107,11 @@ pub fn unlink_with_config(
     to: &str,
     fs: &dyn FileSystem,
     config: Option<&Config>,
-) -> Result<()> {
+) -> Result<LinkOutcome> {
+    let resolved = resolve_rel_keyword(rel_type)?;
+    let (from, to) = if resolved.flipped { (to, from) } else { (from, to) };
+    let rel_str = resolved.rel_type.to_string();
+
     let resolved_from = resolve_to_path(store, from)?;
     let to_id = resolve_to_id(store, to)?;
     let full_path = root.join(&resolved_from);
@@ -97,7 +119,7 @@ pub fn unlink_with_config(
         if let Some(related) = doc.get_mut("related").and_then(|r| r.as_sequence_mut()) {
             related.retain(|entry| {
                 if let Some(map) = entry.as_mapping() {
-                    let key = serde_yaml::Value::String(rel_type.to_string());
+                    let key = serde_yaml::Value::String(rel_str.clone());
                     if let Some(val) = map.get(&key) {
                         return val.as_str() != Some(to_id.as_str());
                     }
@@ -110,7 +132,11 @@ pub fn unlink_with_config(
 
     push_if_github_backed(root, &resolved_from, config, GhCli::new)?;
     push_if_git_ref_backed(root, &resolved_from, config)?;
-    Ok(())
+    Ok(LinkOutcome {
+        source: resolved_from,
+        rel_type: resolved.rel_type,
+        target: to_id,
+    })
 }
 
 fn push_if_github_backed<G: GhIssueReader + GhIssueWriter>(

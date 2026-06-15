@@ -39,7 +39,49 @@ pub fn complete_rel_type(current: &OsStr) -> Vec<CompletionCandidate> {
     let current_str = current.to_str().unwrap_or("");
     RelationType::ALL_STRS
         .into_iter()
+        .chain(RelationType::INVERSE_STRS)
         .filter(|rt| rt.starts_with(current_str))
         .map(CompletionCandidate::new)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn values(current: &str) -> Vec<String> {
+        complete_rel_type(OsStr::new(current))
+            .into_iter()
+            .map(|c| c.get_value().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn empty_prefix_offers_all_canonical_and_inverse_keywords() {
+        let got = values("");
+        for expected in [
+            "implements",
+            "supersedes",
+            "blocks",
+            "related-to",
+            "implemented-by",
+            "superseded-by",
+            "blocked-by",
+        ] {
+            assert!(got.contains(&expected.to_string()), "missing {expected}");
+        }
+        assert_eq!(got.len(), 7);
+    }
+
+    #[test]
+    fn block_prefix_offers_canonical_and_inverse() {
+        let mut got = values("block");
+        got.sort();
+        assert_eq!(got, vec!["blocked-by", "blocks"]);
+    }
+
+    #[test]
+    fn inverse_only_prefix_offers_just_the_inverse() {
+        assert_eq!(values("implemented"), vec!["implemented-by"]);
+    }
 }

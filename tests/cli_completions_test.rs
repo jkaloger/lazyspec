@@ -94,7 +94,15 @@ fn rel_type_completer_returns_all_types() {
 
     assert_eq!(
         values,
-        vec!["implements", "supersedes", "blocks", "related-to"]
+        vec![
+            "implements",
+            "supersedes",
+            "blocks",
+            "related-to",
+            "implemented-by",
+            "superseded-by",
+            "blocked-by"
+        ]
     );
 }
 
@@ -106,7 +114,7 @@ fn rel_type_completer_filters_by_prefix() {
         .map(|c| c.get_value().to_string_lossy().into_owned())
         .collect();
 
-    assert_eq!(values, vec!["blocks"]);
+    assert_eq!(values, vec!["blocks", "blocked-by"]);
 }
 
 #[test]
