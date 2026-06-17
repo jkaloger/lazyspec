@@ -5,9 +5,13 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
+    git-hooks = {
+      url = "github:cachix/git-hooks.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, crane, flake-utils, ... }:
+  outputs = { self, nixpkgs, crane, flake-utils, git-hooks, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
@@ -24,6 +28,23 @@
         };
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+        pre-commit-check = git-hooks.lib.${system}.run {
+          src = ./.;
+          hooks = {
+            rustfmt.enable = true;
+            clippy = {
+              enable = true;
+              stages = [ "pre-push" ];
+              settings = {
+                denyWarnings = true;
+                allFeatures = false;
+                offline = true;
+                extraArgs = "--all-targets";
+              };
+            };
+          };
+        };
       in
       {
         packages.default = craneLib.buildPackage (commonArgs // {
@@ -32,6 +53,8 @@
         });
 
         checks = {
+          pre-commit = pre-commit-check;
+
           clippy = craneLib.cargoClippy (commonArgs // {
             inherit cargoArtifacts;
             cargoClippyExtraArgs = "--all-targets -- --deny warnings";
@@ -59,7 +82,8 @@
 
         devShells.default = craneLib.devShell {
           checks = self.checks.${system};
-          packages = [
+          shellHook = pre-commit-check.shellHook;
+          packages = pre-commit-check.enabledPackages ++ [
             pkgs.clippy
             pkgs.rustfmt
             pkgs.rust-analyzer
