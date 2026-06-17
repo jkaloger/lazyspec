@@ -42,4 +42,10 @@ default = []
 agent = []
 metrics = []
 
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"
+
 [dev-dependencies]
