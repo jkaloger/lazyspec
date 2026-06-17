@@ -129,6 +129,38 @@ impl RelationType {
     ];
 
     pub const ALL_STRS: [&str; 4] = ["implements", "supersedes", "blocks", "related-to"];
+
+    pub const INVERSE_STRS: [&str; 3] = ["implemented-by", "superseded-by", "blocked-by"];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRelKeyword {
+    pub rel_type: RelationType,
+    pub flipped: bool,
+}
+
+/// Resolves a link/unlink keyword to its canonical relation. Inverse keywords
+/// (e.g. `implemented-by`) map to the canonical relation with the direction
+/// flipped; `related-to` is symmetric and has no inverse keyword.
+pub fn resolve_rel_keyword(s: &str) -> Result<ResolvedRelKeyword> {
+    match s.to_lowercase().as_str() {
+        "implemented-by" => Ok(ResolvedRelKeyword {
+            rel_type: RelationType::Implements,
+            flipped: true,
+        }),
+        "superseded-by" => Ok(ResolvedRelKeyword {
+            rel_type: RelationType::Supersedes,
+            flipped: true,
+        }),
+        "blocked-by" => Ok(ResolvedRelKeyword {
+            rel_type: RelationType::Blocks,
+            flipped: true,
+        }),
+        _ => Ok(ResolvedRelKeyword {
+            rel_type: s.parse()?,
+            flipped: false,
+        }),
+    }
 }
 
 impl fmt::Display for RelationType {
@@ -548,5 +580,64 @@ Body.
             "expected error to mention empty, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn canonical_keywords_resolve_not_flipped() {
+        let cases = [
+            ("implements", RelationType::Implements),
+            ("supersedes", RelationType::Supersedes),
+            ("blocks", RelationType::Blocks),
+            ("related-to", RelationType::RelatedTo),
+        ];
+        for (kw, expected) in cases {
+            let resolved = resolve_rel_keyword(kw).unwrap();
+            assert_eq!(resolved.rel_type, expected, "keyword {kw}");
+            assert!(!resolved.flipped, "keyword {kw} should not be flipped");
+        }
+    }
+
+    #[test]
+    fn inverse_keywords_resolve_to_canonical_flipped() {
+        let cases = [
+            ("implemented-by", RelationType::Implements),
+            ("superseded-by", RelationType::Supersedes),
+            ("blocked-by", RelationType::Blocks),
+        ];
+        for (kw, expected) in cases {
+            let resolved = resolve_rel_keyword(kw).unwrap();
+            assert_eq!(resolved.rel_type, expected, "keyword {kw}");
+            assert!(resolved.flipped, "keyword {kw} should be flipped");
+        }
+    }
+
+    #[test]
+    fn related_to_resolves_not_flipped() {
+        let resolved = resolve_rel_keyword("related-to").unwrap();
+        assert_eq!(resolved.rel_type, RelationType::RelatedTo);
+        assert!(!resolved.flipped);
+    }
+
+    #[test]
+    fn related_to_exposes_no_inverse_keyword() {
+        assert!(!RelationType::INVERSE_STRS
+            .iter()
+            .any(|kw| kw.contains("related")));
+    }
+
+    #[test]
+    fn unknown_keyword_errors_naming_the_keyword() {
+        let err = resolve_rel_keyword("depends-on").unwrap_err();
+        assert!(
+            err.to_string().contains("depends-on"),
+            "expected error to name the keyword, got: {err}"
+        );
+    }
+
+    #[test]
+    fn keyword_resolution_is_case_insensitive() {
+        let resolved = resolve_rel_keyword("Blocked-By").unwrap();
+        assert_eq!(resolved.rel_type, RelationType::Blocks);
+        assert!(resolved.flipped);
     }
 }

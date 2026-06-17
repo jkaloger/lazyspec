@@ -57,10 +57,7 @@ pub enum RenumberFormat {
 }
 
 #[derive(Parser)]
-#[command(
-    name = "lazyspec",
-    about = "Manage project stories, RFCs, ADRs, and iterations"
-)]
+#[command(name = "lazyspec", about = "Manage project documentation")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -150,7 +147,7 @@ pub enum Commands {
         /// Source document path or shorthand ID (e.g. RFC-001)
         #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         from: String,
-        /// Relationship type (implements, supersedes, blocks, related-to)
+        /// Relationship type: canonical (implements, supersedes, blocks, related-to) or inverse alias (implemented-by, superseded-by, blocked-by)
         #[arg(add = ArgValueCompleter::new(completions::complete_rel_type))]
         rel_type: String,
         /// Target document path or shorthand ID (e.g. RFC-001)
@@ -162,7 +159,7 @@ pub enum Commands {
         /// Source document path or shorthand ID (e.g. RFC-001)
         #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         from: String,
-        /// Relationship type
+        /// Relationship type: canonical or inverse alias (mirrors `link`)
         #[arg(add = ArgValueCompleter::new(completions::complete_rel_type))]
         rel_type: String,
         /// Target document path or shorthand ID (e.g. RFC-001)

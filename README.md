@@ -123,8 +123,8 @@ All document management is available as subcommands. Most accept `--json` for ma
 | `show <id> [-e]`                     | Display a document by path or shorthand ID (e.g. `RFC-001`)           |
 | `update <path> --status X --title X` | Update document frontmatter                                           |
 | `delete <path>`                      | Delete a document                                                     |
-| `link <from> <rel> <to>`             | Add a typed relationship (implements, supersedes, blocks, related-to) |
-| `unlink <from> <rel> <to>`           | Remove a relationship between documents                               |
+| `link <from> <rel> <to>`             | Add a typed relationship (canonical or inverse keyword)               |
+| `unlink <from> <rel> <to>`           | Remove a relationship (canonical or inverse keyword)                  |
 | `search <query> [--doc-type X]`      | Full-text search across all documents                                 |
 | `context <id>`                       | Show the full document chain (RFC -> Story -> Iteration)              |
 | `status`                             | Show full project status with all documents and validation            |
@@ -138,6 +138,18 @@ All document management is available as subcommands. Most accept `--json` for ma
 | `provenance list [id]`               | List citations for a document, or for all documents grouped by id     |
 | `reservations list`                  | Show all reservation refs on the remote                               |
 | `reservations prune [--dry-run]`     | Remove refs for documents that already exist locally                  |
+
+#### Relationship Keywords
+
+`link` and `unlink` accept four canonical relationship types (`implements`, `supersedes`, `blocks`, `related-to`) and three inverse keywords (`implemented-by`, `superseded-by`, `blocked-by`). An inverse keyword is a write-time alias: it flips the direction and stores the canonical relation on the target document. Nothing new is persisted; the reverse direction is still computed by the link graph.
+
+```sh
+lazyspec link STORY-9 blocked-by RFC-2
+# writes `blocks: STORY-9` onto RFC-2, prints:
+# Linked docs/rfcs/RFC-002-....md --blocks--> STORY-9
+```
+
+`related-to` is symmetric and has no separate inverse keyword. Unknown keywords are rejected before anything is written.
 
 #### `show` Flags
 
