@@ -3,7 +3,7 @@ use super::forms::AgentDialog;
 use super::forms::{
     CreateForm, DeleteConfirm, LinkEditor, ProvenanceEditor, StatusPicker, REL_TYPES,
 };
-use super::graph::traverse_dependency_chain;
+use super::graph::flatten_forest;
 
 use crate::engine::cache::DiskCache;
 use crate::engine::config::{Config, NumberingStrategy, StoreBackend};
@@ -122,6 +122,20 @@ pub struct GraphNode {
     pub doc_type: DocType,
     pub status: Status,
     pub depth: usize,
+    /// A diamond/multi-parent re-encounter: drawn as a one-line back-reference
+    /// (Task 3 renders it without recursing). The full node was emitted earlier.
+    pub reference: bool,
+    /// Doc ids of this node's OWN depth-1 `related-to` neighbours, minus those on
+    /// its `implements` lineage (its transitive ancestors and descendants, already
+    /// drawn as tree edges through the node). Siblings/cousins reachable only
+    /// through a shared ancestor ARE included — they have no `implements` path to
+    /// the node, so the link is genuinely cross-cutting. Display-only (RFC-006
+    /// Graph mode Phase 1, rendered `┄▷ <id>` by the renderer), sorted for
+    /// determinism. This is the node's own depth-1 set, NOT the `context`
+    /// command's related set (which also surfaces the related-to links of the
+    /// node's ancestors). Back-reference nodes carry an empty set: the annotation
+    /// belongs on the full first-encounter node line.
+    pub related: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -616,33 +630,8 @@ impl App {
     }
 
     pub fn rebuild_graph(&mut self) {
-        let all_docs = self.store.all_docs();
-
-        let mut roots: Vec<&DocMeta> = all_docs
-            .iter()
-            .filter(|doc| {
-                !doc.related
-                    .iter()
-                    .any(|r| r.rel_type == RelationType::Implements)
-            })
-            .copied()
-            .collect();
-
-        roots.sort_by(|a, b| {
-            a.doc_type
-                .to_string()
-                .cmp(&b.doc_type.to_string())
-                .then(a.title.cmp(&b.title))
-        });
-
-        let mut nodes = Vec::new();
-        let mut visited = HashSet::new();
-
-        for root in &roots {
-            traverse_dependency_chain(&self.store, &root.path, 0, &mut nodes, &mut visited);
-        }
-
-        self.graph_nodes = nodes;
+        let forest = crate::engine::context::resolve_forest(&self.store);
+        self.graph_nodes = flatten_forest(&forest, &self.store);
         self.graph_selected = 0;
     }
 

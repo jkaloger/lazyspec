@@ -17,7 +17,7 @@ use crate::engine::document::{DocMeta, RelationType, Status};
 use crate::engine::git_status::GitFileStatus;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
-use crate::tui::state::{App, DocListNode, FilterField, PreviewTab};
+use crate::tui::state::{App, DocListNode, FilterField, GraphNode, PreviewTab};
 
 use super::colors::{status_color, tag_color};
 use super::layout::{calculate_image_height, wrapped_line_count, wrapped_lines_total};
@@ -1540,6 +1540,65 @@ pub fn draw_metrics_skeleton(f: &mut Frame, area: Rect) {
     f.render_widget(right, layout[1]);
 }
 
+/// Build the styled spans for one row of the dependency graph.
+///
+/// `type_icon`, `is_last`, and `id` are passed in so the helper has no
+/// dependency on `App` (DICTUM-003). `id` is the already-uppercased doc id,
+/// used only by the back-reference branch.
+pub(super) fn graph_node_spans(
+    node: &GraphNode,
+    type_icon: &str,
+    is_last: bool,
+    id: &str,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+
+    if node.depth > 0 {
+        let leading = "   ".repeat(node.depth - 1);
+        let connector = if is_last {
+            " └─▶ "
+        } else {
+            " ├─▶ "
+        };
+        spans.push(Span::styled(
+            format!("{}{}", leading, connector),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    if node.reference {
+        spans.push(Span::styled(
+            format!("\u{21B3} {} (see above)", id),
+            Style::default().fg(Color::DarkGray),
+        ));
+        return spans;
+    }
+
+    spans.push(Span::styled(
+        format!("{} ", type_icon),
+        Style::default().fg(Color::Gray),
+    ));
+
+    spans.push(Span::styled(
+        format!("{} ", node.title),
+        Style::default().fg(Color::White),
+    ));
+
+    spans.push(Span::styled(
+        format!("{}", node.status),
+        Style::default().fg(status_color(&node.status)),
+    ));
+
+    for related_id in &node.related {
+        spans.push(Span::styled(
+            format!(" \u{2504}\u{25B7} {}", related_id),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    spans
+}
+
 pub fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
     let layout = Layout::default()
         .direction(Direction::Horizontal)
@@ -1558,46 +1617,21 @@ pub fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, node)| {
-            let mut spans = Vec::new();
-
-            if node.depth > 0 {
-                let leading = "   ".repeat(node.depth - 1);
-                let is_last = match app.graph_nodes.get(i + 1) {
-                    Some(next) => next.depth <= node.depth,
-                    None => true,
-                };
-                let connector = if is_last {
-                    " └─▶ "
-                } else {
-                    " ├─▶ "
-                };
-                spans.push(Span::styled(
-                    format!("{}{}", leading, connector),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
-
+            let is_last = match app.graph_nodes.get(i + 1) {
+                Some(next) => next.depth <= node.depth,
+                None => true,
+            };
             let type_icon = app
                 .type_icons
                 .get(&node.doc_type.to_string())
                 .map(|s| s.as_str())
                 .unwrap_or("○");
-            spans.push(Span::styled(
-                format!("{} ", type_icon),
-                Style::default().fg(Color::Gray),
-            ));
-
-            spans.push(Span::styled(
-                format!("{} ", node.title),
-                Style::default().fg(Color::White),
-            ));
-
-            spans.push(Span::styled(
-                format!("{}", node.status),
-                Style::default().fg(status_color(&node.status)),
-            ));
-
-            ListItem::new(Line::from(spans))
+            let id = app
+                .store
+                .get(&node.path)
+                .map(|d| d.id.to_uppercase())
+                .unwrap_or_default();
+            ListItem::new(Line::from(graph_node_spans(node, type_icon, is_last, &id)))
         })
         .collect();
 
@@ -2089,5 +2123,116 @@ mod tests {
             assert_eq!(widths[1], 4, "tree == 4 at width {}", width);
             assert_eq!(widths[2], 18, "ID == 18 at width {}", width);
         }
+    }
+
+    fn graph_node_fixture(depth: usize, reference: bool, related: Vec<String>) -> GraphNode {
+        use crate::engine::document::DocType;
+        GraphNode {
+            path: PathBuf::from("docs/iterations/ITERATION-001.md"),
+            title: "Design".to_string(),
+            doc_type: DocType::new("iteration"),
+            status: Status::Draft,
+            depth,
+            reference,
+            related,
+        }
+    }
+
+    fn spans_text(spans: &[Span]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+    }
+
+    #[test]
+    fn graph_node_back_reference_renders_see_above_dimmed_no_icon() {
+        let node = graph_node_fixture(1, true, vec![]);
+        let spans = graph_node_spans(&node, "◆", true, "ITERATION-001");
+        let text = spans_text(&spans);
+
+        assert!(
+            text.contains("\u{21B3} ITERATION-001 (see above)"),
+            "back-ref should render the see-above line, got: {}",
+            text
+        );
+        assert!(
+            !text.contains('\u{25C6}'),
+            "back-ref must not include the type icon, got: {}",
+            text
+        );
+        assert!(
+            !text.contains("Design"),
+            "back-ref must not include the title, got: {}",
+            text
+        );
+        // Connector still present so the tree position reads correctly.
+        assert!(
+            text.contains("\u{2514}\u{2500}\u{25B6}"),
+            "back-ref keeps its depth-1 connector, got: {}",
+            text
+        );
+        // The see-above span is dimmed.
+        let ref_span = spans
+            .iter()
+            .find(|s| s.content.contains("see above"))
+            .expect("see-above span present");
+        assert_eq!(ref_span.style.fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn graph_node_full_node_appends_related_annotation() {
+        let node = graph_node_fixture(1, false, vec!["ADR-001".to_string()]);
+        let spans = graph_node_spans(&node, "◆", true, "ITERATION-001");
+        let text = spans_text(&spans);
+
+        assert!(
+            text.contains(" \u{2504}\u{25B7} ADR-001"),
+            "full node should append the related annotation, got: {}",
+            text
+        );
+        // Annotation follows the status, not before it.
+        let status_idx = text.find("draft").expect("status present");
+        let anno_idx = text.find("\u{2504}\u{25B7}").expect("annotation present");
+        assert!(
+            anno_idx > status_idx,
+            "annotation must come after status, got: {}",
+            text
+        );
+        let anno_span = spans
+            .iter()
+            .find(|s| s.content.contains("\u{2504}\u{25B7}"))
+            .expect("annotation span present");
+        assert_eq!(anno_span.style.fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn graph_node_multiple_related_annotations_each_appended() {
+        let node = graph_node_fixture(
+            1,
+            false,
+            vec!["ADR-001".to_string(), "STORY-005".to_string()],
+        );
+        let text = spans_text(&graph_node_spans(&node, "◆", true, "ITERATION-001"));
+        assert!(
+            text.contains(" \u{2504}\u{25B7} ADR-001 \u{2504}\u{25B7} STORY-005"),
+            "each related id gets its own annotation glyph, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn graph_node_full_node_no_related_is_backward_compatible() {
+        // Pre-Task-3 format: connector + icon + "title " + status, nothing else.
+        let node = graph_node_fixture(1, false, vec![]);
+        let text = spans_text(&graph_node_spans(&node, "◆", true, "ITERATION-001"));
+        assert_eq!(text, " \u{2514}\u{2500}\u{25B6} \u{25C6} Design draft");
+        assert!(!text.contains('\u{21B3}'), "no back-ref glyph");
+        assert!(!text.contains('\u{2504}'), "no annotation glyph");
+    }
+
+    #[test]
+    fn graph_node_root_full_node_has_no_connector() {
+        // depth 0 keeps the original no-indent shape.
+        let node = graph_node_fixture(0, false, vec![]);
+        let text = spans_text(&graph_node_spans(&node, "◆", true, "ITERATION-001"));
+        assert_eq!(text, "\u{25C6} Design draft");
     }
 }

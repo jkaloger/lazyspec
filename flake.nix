@@ -89,6 +89,7 @@
             pkgs.rust-analyzer
             pkgs.ast-grep
             pkgs.ripgrep
+            pkgs.llvmPackages.lld # provides ld64.lld for the dev/test linker (see .cargo/config.toml)
           ];
         };
       }

@@ -11,4 +11,3 @@ pub use app::{
 #[cfg(feature = "agent")]
 pub use forms::AgentDialog;
 pub use forms::{CreateForm, DeleteConfirm, FormField, LinkEditor, ProvenanceEditor, StatusPicker};
-pub use graph::traverse_dependency_chain;
