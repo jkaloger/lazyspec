@@ -57,10 +57,7 @@ pub enum RenumberFormat {
 }
 
 #[derive(Parser)]
-#[command(
-    name = "lazyspec",
-    about = "Manage project stories, RFCs, ADRs, and iterations"
-)]
+#[command(name = "lazyspec", about = "Manage project documentation")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,

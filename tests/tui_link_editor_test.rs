@@ -622,6 +622,30 @@ fn test_tab_cycles_rel_type() {
     );
     assert_eq!(app.link_editor.rel_type_index, 3); // related-to
 
+    app.handle_key(
+        KeyCode::Tab,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
+    assert_eq!(app.link_editor.rel_type_index, 4); // implemented-by
+
+    app.handle_key(
+        KeyCode::Tab,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
+    assert_eq!(app.link_editor.rel_type_index, 5); // superseded-by
+
+    app.handle_key(
+        KeyCode::Tab,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
+    assert_eq!(app.link_editor.rel_type_index, 6); // blocked-by
+
     // Wraps around
     app.handle_key(
         KeyCode::Tab,
@@ -630,6 +654,114 @@ fn test_tab_cycles_rel_type() {
         &fixture.config(),
     );
     assert_eq!(app.link_editor.rel_type_index, 0); // back to implements
+}
+
+// Inverse keyword is reachable in the cycler and writes the flipped relation
+// onto the target document, leaving the viewed doc's frontmatter untouched.
+#[test]
+fn test_inverse_keyword_writes_flipped_relation_to_target() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-source.md", "Source RFC", "draft");
+    fixture.write_rfc("RFC-002-target.md", "Target RFC", "draft");
+    let store = fixture.store();
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
+
+    app.selected_type = 0;
+    app.selected_doc = 0; // RFC-001 is the viewed (source) doc
+    app.preview_tab = PreviewTab::Relations;
+    app.open_link_editor();
+
+    // Canonical keywords occupy 0..=3, inverse keywords 4..=6; blocked-by is 6.
+    for _ in 0..6 {
+        app.handle_key(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+            fixture.root(),
+            &fixture.config(),
+        );
+    }
+    assert_eq!(app.link_editor.rel_type_index, 6);
+
+    app.handle_key(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
+    assert!(!app.link_editor.active);
+
+    // "blocked-by" flips direction: the canonical "blocks" lands on the target,
+    // pointing back at the source.
+    let store = fixture.store();
+    let target = store
+        .get(&std::path::PathBuf::from("docs/rfcs/RFC-002-target.md"))
+        .unwrap();
+    assert_eq!(
+        target.related[0].rel_type,
+        lazyspec::engine::document::RelationType::Blocks
+    );
+    assert_eq!(target.related[0].target, "RFC-001");
+
+    let source = store
+        .get(&std::path::PathBuf::from("docs/rfcs/RFC-001-source.md"))
+        .unwrap();
+    assert!(
+        source.related.is_empty(),
+        "inverse keyword must not write to the viewed doc's frontmatter"
+    );
+}
+
+// After adding an inverse link, the live store must reflect the new reverse
+// link on the viewed doc (the modified file is the target, so confirm_link
+// has to reload the file that actually changed).
+#[test]
+fn test_inverse_link_refreshes_live_store_reverse_links() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-source.md", "Source RFC", "draft");
+    fixture.write_rfc("RFC-002-target.md", "Target RFC", "draft");
+    let store = fixture.store();
+    let mut app = App::new(
+        store,
+        &fixture.config(),
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
+
+    app.selected_type = 0;
+    app.selected_doc = 0;
+    app.preview_tab = PreviewTab::Relations;
+    app.open_link_editor();
+
+    for _ in 0..6 {
+        app.handle_key(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+            fixture.root(),
+            &fixture.config(),
+        );
+    }
+
+    app.handle_key(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
+
+    let rev = app
+        .store
+        .reverse_links_for(&std::path::PathBuf::from("docs/rfcs/RFC-001-source.md"));
+    assert!(
+        rev.iter().any(|(rt, p)| *rt
+            == lazyspec::engine::document::RelationType::Blocks
+            && p == &std::path::PathBuf::from("docs/rfcs/RFC-002-target.md")),
+        "viewed doc should show it is blocked by the target after an inverse link, got {rev:?}"
+    );
 }
 
 // AC5: Enter with a selected doc writes the link and closes overlay
