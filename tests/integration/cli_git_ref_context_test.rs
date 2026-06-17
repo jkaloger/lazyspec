@@ -43,14 +43,18 @@ fn context_resolves_chain_across_fs_story_and_git_ref_iteration() {
     let resolved = lazyspec::cli::context::resolve_chain(&store, "ITERATION-001").unwrap();
 
     assert_eq!(
-        resolved.chain.len(),
+        resolved.nodes.len(),
         2,
         "chain should contain story + iteration; got: {:?}",
-        resolved.chain.iter().map(|d| &d.title).collect::<Vec<_>>()
+        resolved
+            .nodes
+            .iter()
+            .map(|n| &n.doc.title)
+            .collect::<Vec<_>>()
     );
-    assert_eq!(resolved.chain[0].title, "Feature Story");
-    assert_eq!(resolved.chain[1].title, "Impl Iteration");
-    assert_eq!(resolved.target_index, 1);
+    assert_eq!(resolved.nodes[0].doc.title, "Feature Story");
+    assert_eq!(resolved.nodes[1].doc.title, "Impl Iteration");
+    assert_eq!(resolved.target.title, "Impl Iteration");
 
     let json_output = lazyspec::cli::context::run_json(&store, "ITERATION-001").unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
@@ -66,8 +70,8 @@ fn context_reverse_links_show_git_ref_iteration_from_fs_story() {
 
     let resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001").unwrap();
 
-    assert_eq!(resolved.chain.len(), 1);
-    assert_eq!(resolved.chain[0].title, "Feature Story");
+    assert_eq!(resolved.nodes.len(), 1);
+    assert_eq!(resolved.nodes[0].doc.title, "Feature Story");
 
     let forward_titles: Vec<&str> = resolved.forward.iter().map(|d| d.title.as_str()).collect();
     assert!(
@@ -83,22 +87,19 @@ fn context_with_id_based_target() {
 
     let resolved = lazyspec::cli::context::resolve_chain(&store, "ITERATION-001").unwrap();
 
-    // The upward chain walk in resolve_chain does `store.get(&PathBuf::from(&rel.target))`
-    // which creates PathBuf("STORY-001") -- this won't match any key in the store
-    // (keys are full relative paths like "docs/stories/STORY-001-feature.md").
-    // So the chain should only contain the iteration itself (parent lookup fails silently).
-    //
-    // NOTE: This is a pre-existing bug in resolve_chain's upward traversal (lines 30-44
-    // of context.rs). It uses raw rel.target as a path key instead of resolving IDs.
-    // Forward/reverse links DO handle ID resolution (via build_links -> resolve_target),
-    // so the reverse direction works fine. Fixing this is out of scope for this iteration.
+    // The upward BFS does `store.get(&PathBuf::from(&rel.target))`, which creates
+    // PathBuf("STORY-001") -- this won't match any key in the store (keys are full
+    // relative paths like "docs/stories/STORY-001-feature.md"). BFS skips parents
+    // it cannot resolve, so the chain contains only the iteration itself. The
+    // ID-resolution limitation for the upward target is a separate concern; here we
+    // pin that an unresolvable `implements` parent is dropped.
     assert_eq!(
-        resolved.chain.len(),
+        resolved.nodes.len(),
         1,
-        "ID-based target breaks upward chain walk; chain should only contain the iteration itself; got: {:?}",
-        resolved.chain.iter().map(|d| &d.title).collect::<Vec<_>>()
+        "ID-based target leaves the parent unresolvable; chain should only contain the iteration itself; got: {:?}",
+        resolved.nodes.iter().map(|n| &n.doc.title).collect::<Vec<_>>()
     );
-    assert_eq!(resolved.chain[0].title, "Impl Iteration");
+    assert_eq!(resolved.nodes[0].doc.title, "Impl Iteration");
 
     // However, reverse links (story -> iteration) still work because build_links resolves IDs.
     let story_resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001").unwrap();

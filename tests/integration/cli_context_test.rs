@@ -23,11 +23,11 @@ fn context_walks_full_chain() {
     let store = fixture.store();
     let resolved = lazyspec::cli::context::resolve_chain(&store, "ITERATION-001").unwrap();
 
-    assert_eq!(resolved.chain.len(), 3);
-    assert_eq!(resolved.chain[0].title, "Auth Redesign");
-    assert_eq!(resolved.chain[1].title, "Auth Implementation");
-    assert_eq!(resolved.chain[2].title, "Auth Sprint 1");
-    assert_eq!(resolved.target_index, 2);
+    assert_eq!(resolved.nodes.len(), 3);
+    assert_eq!(resolved.nodes[0].doc.title, "Auth Redesign");
+    assert_eq!(resolved.nodes[1].doc.title, "Auth Implementation");
+    assert_eq!(resolved.nodes[2].doc.title, "Auth Sprint 1");
+    assert_eq!(resolved.target.title, "Auth Sprint 1");
 }
 
 #[test]
@@ -36,9 +36,9 @@ fn context_standalone_document() {
     let store = fixture.store();
     let resolved = lazyspec::cli::context::resolve_chain(&store, "RFC-001").unwrap();
 
-    assert_eq!(resolved.chain.len(), 1);
-    assert_eq!(resolved.chain[0].title, "Auth Redesign");
-    assert_eq!(resolved.target_index, 0);
+    assert_eq!(resolved.nodes.len(), 1);
+    assert_eq!(resolved.nodes[0].doc.title, "Auth Redesign");
+    assert_eq!(resolved.target.title, "Auth Redesign");
 }
 
 #[test]
@@ -122,7 +122,7 @@ fn forward_context_from_rfc() {
     let store = fixture.store();
     let resolved = lazyspec::cli::context::resolve_chain(&store, "RFC-001").unwrap();
 
-    assert_eq!(resolved.chain.len(), 1);
+    assert_eq!(resolved.nodes.len(), 1);
     assert_eq!(resolved.forward.len(), 2);
     let forward_titles: Vec<&str> = resolved.forward.iter().map(|d| d.title.as_str()).collect();
     assert!(forward_titles.contains(&"Impl A"));
@@ -155,9 +155,9 @@ fn forward_context_from_story() {
     let store = fixture.store();
     let resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001").unwrap();
 
-    assert_eq!(resolved.chain.len(), 2);
-    assert_eq!(resolved.chain[0].title, "Auth Redesign");
-    assert_eq!(resolved.chain[1].title, "Auth Implementation");
+    assert_eq!(resolved.nodes.len(), 2);
+    assert_eq!(resolved.nodes[0].doc.title, "Auth Redesign");
+    assert_eq!(resolved.nodes[1].doc.title, "Auth Implementation");
     assert_eq!(resolved.forward.len(), 2);
     let forward_titles: Vec<&str> = resolved.forward.iter().map(|d| d.title.as_str()).collect();
     assert!(forward_titles.contains(&"Sprint 1"));
@@ -255,5 +255,336 @@ fn no_forward_children_for_leaf() {
     assert!(
         resolved.forward.is_empty(),
         "leaf node should have no forward children"
+    );
+}
+
+fn node_titles<'a>(resolved: &'a lazyspec::cli::context::ResolvedContext<'a>) -> Vec<&'a str> {
+    resolved
+        .nodes
+        .iter()
+        .map(|n| n.doc.title.as_str())
+        .collect()
+}
+
+#[test]
+fn context_multi_parent_includes_all_ancestors() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-alpha.md",
+        "---\ntitle: \"RFC Alpha\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated: []\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-002-beta.md",
+        "---\ntitle: \"RFC Beta\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated: []\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/stories/STORY-001-fan.md",
+        "---\ntitle: \"Fan Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-alpha.md\n- implements: docs/rfcs/RFC-002-beta.md\n---\n\nbody\n",
+    );
+
+    let store = fixture.store();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001").unwrap();
+
+    let titles = node_titles(&resolved);
+    assert_eq!(resolved.nodes.len(), 3, "got: {:?}", titles);
+    assert!(titles.contains(&"RFC Alpha"));
+    assert!(titles.contains(&"RFC Beta"));
+    assert!(titles.contains(&"Fan Story"));
+    assert_eq!(resolved.target.title, "Fan Story");
+
+    // The story's node records both parent edges.
+    let story_node = resolved
+        .nodes
+        .iter()
+        .find(|n| n.doc.title == "Fan Story")
+        .unwrap();
+    assert_eq!(story_node.parents.len(), 2, "got: {:?}", story_node.parents);
+}
+
+#[test]
+fn context_diamond_ancestor_appears_once() {
+    // GRANDPARENT <- PARENT_A, PARENT_B; both <- TARGET (diamond).
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-root.md",
+        "---\ntitle: \"Root RFC\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated: []\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/stories/STORY-001-left.md",
+        "---\ntitle: \"Left Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-root.md\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/stories/STORY-002-right.md",
+        "---\ntitle: \"Right Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-root.md\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/iterations/ITERATION-001-bottom.md",
+        "---\ntitle: \"Bottom Iteration\"\ntype: iteration\nstatus: draft\nauthor: agent\ndate: 2026-03-03\ntags: []\nrelated:\n- implements: docs/stories/STORY-001-left.md\n- implements: docs/stories/STORY-002-right.md\n---\n\nbody\n",
+    );
+
+    let store = fixture.store();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "ITERATION-001").unwrap();
+
+    let titles = node_titles(&resolved);
+    assert_eq!(resolved.nodes.len(), 4, "got: {:?}", titles);
+    assert_eq!(
+        titles.iter().filter(|t| **t == "Root RFC").count(),
+        1,
+        "shared ancestor should appear exactly once; got: {:?}",
+        titles
+    );
+
+    // Both parents record an edge to the shared grandparent.
+    let root_path = std::path::PathBuf::from("docs/rfcs/RFC-001-root.md");
+    let left_node = resolved
+        .nodes
+        .iter()
+        .find(|n| n.doc.title == "Left Story")
+        .unwrap();
+    let right_node = resolved
+        .nodes
+        .iter()
+        .find(|n| n.doc.title == "Right Story")
+        .unwrap();
+    assert!(
+        left_node.parents.contains(&root_path),
+        "left story should record edge to grandparent; got: {:?}",
+        left_node.parents
+    );
+    assert!(
+        right_node.parents.contains(&root_path),
+        "right story should record edge to grandparent; got: {:?}",
+        right_node.parents
+    );
+
+    // Root-first topo order: grandparent precedes both parents, which precede target.
+    let pos = |title: &str| titles.iter().position(|t| *t == title).unwrap();
+    assert!(pos("Root RFC") < pos("Left Story"));
+    assert!(pos("Root RFC") < pos("Right Story"));
+    assert!(pos("Left Story") < pos("Bottom Iteration"));
+    assert!(pos("Right Story") < pos("Bottom Iteration"));
+}
+
+#[test]
+fn context_human_tree_for_multi_parent() {
+    // Diamond: Root RFC <- Left Story, Right Story; both <- Bottom Iteration.
+    // Distinct titles avoid substring collisions for .matches().count().
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-root.md",
+        "---\ntitle: \"Foundation Charter\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated: []\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/stories/STORY-001-left.md",
+        "---\ntitle: \"Western Wing\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-root.md\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/stories/STORY-002-right.md",
+        "---\ntitle: \"Eastern Wing\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-root.md\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/iterations/ITERATION-001-bottom.md",
+        "---\ntitle: \"Keystone Sprint\"\ntype: iteration\nstatus: draft\nauthor: agent\ndate: 2026-03-03\ntags: []\nrelated:\n- implements: docs/stories/STORY-001-left.md\n- implements: docs/stories/STORY-002-right.md\n---\n\nbody\n",
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::context::run_human(&store, "ITERATION-001").unwrap();
+
+    // All node titles present.
+    assert!(output.contains("Foundation Charter"), "got:\n{}", output);
+    assert!(output.contains("Western Wing"), "got:\n{}", output);
+    assert!(output.contains("Eastern Wing"), "got:\n{}", output);
+    assert!(output.contains("Keystone Sprint"), "got:\n{}", output);
+
+    // Exactly one 'you are here' marker, on the target (the iteration).
+    let marker = "\u{2190} you are here";
+    let marker_count = output.matches(marker).count();
+    assert_eq!(
+        marker_count, 1,
+        "expected exactly one marker, found {}; output:\n{}",
+        marker_count, output
+    );
+    let marker_line = output.lines().find(|l| l.contains(marker)).unwrap();
+    assert!(
+        marker_line.contains("Keystone Sprint"),
+        "marker should be on the target (iteration) line, got: {}",
+        marker_line
+    );
+
+    // Shared ancestor drawn exactly once (diamond-once).
+    assert_eq!(
+        output.matches("Foundation Charter").count(),
+        1,
+        "shared ancestor title should appear exactly once; output:\n{}",
+        output
+    );
+
+    // Tree shape: descendants are indented deeper than the root. The root
+    // card's title line has no leading whitespace; the target's does.
+    let indent_of = |needle: &str| -> usize {
+        let line = output
+            .lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("no line for {}; output:\n{}", needle, output));
+        line.len() - line.trim_start().len()
+    };
+    assert_eq!(
+        indent_of("Foundation Charter"),
+        0,
+        "root should be unindented; output:\n{}",
+        output
+    );
+    assert!(
+        indent_of("Keystone Sprint") > indent_of("Western Wing"),
+        "target should be indented deeper than its parent story; output:\n{}",
+        output
+    );
+    assert!(
+        indent_of("Western Wing") > indent_of("Foundation Charter"),
+        "story should be indented deeper than the root; output:\n{}",
+        output
+    );
+}
+
+#[test]
+fn context_json_forward_populated() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-auth.md",
+        "---\ntitle: \"Auth Redesign\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated: []\n---\n\nRFC body.\n",
+    );
+    fixture.write_story(
+        "STORY-001-impl-a.md",
+        "Impl A",
+        "draft",
+        Some("docs/rfcs/RFC-001-auth.md"),
+    );
+    fixture.write_story(
+        "STORY-002-impl-b.md",
+        "Impl B",
+        "draft",
+        Some("docs/rfcs/RFC-001-auth.md"),
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::context::run_json(&store, "RFC-001").unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    let forward = parsed["forward"].as_array().unwrap();
+    assert_eq!(forward.len(), 2, "forward should list both implementors");
+    let titles: Vec<&str> = forward.iter().filter_map(|f| f["title"].as_str()).collect();
+    assert!(titles.contains(&"Impl A"));
+    assert!(titles.contains(&"Impl B"));
+}
+
+#[test]
+fn context_json_forward_empty() {
+    let fixture = setup();
+    let store = fixture.store();
+    let output = lazyspec::cli::context::run_json(&store, "ITERATION-001").unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    let forward = parsed["forward"].as_array().unwrap();
+    assert!(
+        forward.is_empty(),
+        "leaf iteration should have an empty (present) forward array"
+    );
+}
+
+#[test]
+fn context_json_edges_reconstructable() {
+    // Diamond: root RFC <- two stories <- one iteration.
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-root.md",
+        "---\ntitle: \"Root RFC\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated: []\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/stories/STORY-001-left.md",
+        "---\ntitle: \"Left Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-root.md\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/stories/STORY-002-right.md",
+        "---\ntitle: \"Right Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-root.md\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/iterations/ITERATION-001-bottom.md",
+        "---\ntitle: \"Bottom Iteration\"\ntype: iteration\nstatus: draft\nauthor: agent\ndate: 2026-03-03\ntags: []\nrelated:\n- implements: docs/stories/STORY-001-left.md\n- implements: docs/stories/STORY-002-right.md\n---\n\nbody\n",
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::context::run_json(&store, "ITERATION-001").unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    let chain = parsed["chain"].as_array().unwrap();
+    assert_eq!(chain.len(), 4);
+
+    // Every chain element carries the implements_in_context edge field.
+    for elem in chain {
+        assert!(
+            elem["implements_in_context"].is_array(),
+            "each chain element must carry implements_in_context; got: {}",
+            elem
+        );
+    }
+
+    let edges_for = |title: &str| -> Vec<String> {
+        chain.iter().find(|e| e["title"] == title).unwrap()["implements_in_context"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p.as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // The iteration lists both story paths.
+    let bottom_edges = edges_for("Bottom Iteration");
+    assert_eq!(bottom_edges.len(), 2, "got: {:?}", bottom_edges);
+    assert!(bottom_edges.iter().any(|p| p.contains("STORY-001-left")));
+    assert!(bottom_edges.iter().any(|p| p.contains("STORY-002-right")));
+
+    // Each story lists the root RFC.
+    let left_edges = edges_for("Left Story");
+    assert_eq!(left_edges.len(), 1, "got: {:?}", left_edges);
+    assert!(left_edges[0].contains("RFC-001-root"));
+    let right_edges = edges_for("Right Story");
+    assert_eq!(right_edges.len(), 1, "got: {:?}", right_edges);
+    assert!(right_edges[0].contains("RFC-001-root"));
+
+    // Root has no in-graph parents.
+    assert!(edges_for("Root RFC").is_empty());
+
+    // target points at the requested doc's path.
+    let target = parsed["target"].as_str().unwrap();
+    assert!(
+        target.contains("ITERATION-001-bottom"),
+        "target should be the requested doc path; got: {}",
+        target
+    );
+}
+
+#[test]
+fn context_cycle_terminates() {
+    // A implements B, B implements A. resolve_chain must not hang and must
+    // contain each document exactly once (topological order is undefined).
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-a.md",
+        "---\ntitle: \"Doc A\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-002-b.md\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-002-b.md",
+        "---\ntitle: \"Doc B\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-a.md\n---\n\nbody\n",
+    );
+
+    let store = fixture.store();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "RFC-001").unwrap();
+
+    let mut titles = node_titles(&resolved);
+    titles.sort();
+    assert_eq!(
+        titles,
+        vec!["Doc A", "Doc B"],
+        "cycle should yield each node exactly once"
     );
 }
