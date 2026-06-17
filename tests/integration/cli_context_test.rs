@@ -588,3 +588,69 @@ fn context_cycle_terminates() {
         "cycle should yield each node exactly once"
     );
 }
+
+#[test]
+fn context_human_tree_renders_every_node_in_cyclic_multiparent() {
+    // A multi-parent graph that is also cyclic has no root (every node has an
+    // in-graph parent). The tree render must still draw every node exactly once
+    // rather than silently dropping the rootless component.
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-a.md",
+        "---\ntitle: \"Cycle Alpha\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-002-b.md\n- implements: docs/rfcs/RFC-003-c.md\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-002-b.md",
+        "---\ntitle: \"Cycle Beta\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-a.md\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-003-c.md",
+        "---\ntitle: \"Cycle Gamma\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-a.md\n---\n\nbody\n",
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::context::run_human(&store, "RFC-001").unwrap();
+
+    assert!(output.contains("Cycle Alpha"), "got: {}", output);
+    assert!(output.contains("Cycle Beta"), "got: {}", output);
+    assert!(output.contains("Cycle Gamma"), "got: {}", output);
+
+    let marker = "\u{2190} you are here";
+    assert_eq!(
+        output.matches(marker).count(),
+        1,
+        "target should carry exactly one marker; got: {}",
+        output
+    );
+}
+
+#[test]
+fn context_duplicate_implements_deduped() {
+    // A document that declares the same `implements` target twice must record
+    // that parent edge once, so it resolves as a normal single-parent chain.
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-root.md",
+        "---\ntitle: \"Root Spec\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated: []\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/stories/STORY-001-dup.md",
+        "---\ntitle: \"Dup Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-root.md\n- implements: docs/rfcs/RFC-001-root.md\n---\n\nbody\n",
+    );
+
+    let store = fixture.store();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001").unwrap();
+
+    assert_eq!(resolved.nodes.len(), 2, "got: {:?}", node_titles(&resolved));
+    let story_node = resolved
+        .nodes
+        .iter()
+        .find(|n| n.doc.title == "Dup Story")
+        .unwrap();
+    assert_eq!(
+        story_node.parents.len(),
+        1,
+        "duplicate implements edge should be deduped; got: {:?}",
+        story_node.parents
+    );
+}

@@ -32,7 +32,7 @@ The backward ancestor set is a list of `ContextNode` entries, each carrying its 
 
 @ref src/engine/store.rs#resolve_shorthand
 
-From the resolved document, the function performs a breadth-first traversal upward over *all* `implements` relations, not just a single parent. Each node's `related` entries are inspected for `Implements` relations, and every relation whose `target` path resolves through `Store::get` contributes a DAG edge to that parent; the parent is then enqueued for its own ancestor walk. This allows a document to implement multiple parents, so the lineage is a directed acyclic graph rather than a linear chain. Parents are followed only when `Store::get` resolves the relation target; unresolvable targets are skipped.
+From the resolved document, the function performs a breadth-first traversal upward over *all* `implements` relations, not just a single parent. Each node's `related` entries are inspected for `Implements` relations, and every relation whose `target` path resolves through `Store::get` contributes a DAG edge to that parent; the parent is then enqueued for its own ancestor walk. A parent listed more than once on a single node contributes a single edge. This allows a document to implement multiple parents, so the lineage is a directed acyclic graph rather than a linear chain. Parents are followed only when `Store::get` resolves the relation target; unresolvable targets are skipped.
 
 A `HashSet<PathBuf>` seen-set governs the traversal. It serves two purposes: it deduplicates shared ancestors so a diamond (two paths converging on the same ancestor) visits that ancestor only once, and it guards against cycles — a node that has already been seen is not re-enqueued, so cyclic `implements` input terminates instead of looping forever.
 
@@ -76,7 +76,7 @@ In the linear stack, `chain_connector` separates cards with a vertical pipe char
 
 @ref src/cli/context.rs#push_card_children
 
-In the DAG tree, the graph roots (nodes with no in-graph parents) are drawn first, and children descend along the `implements` edges with increasing indentation. Roots and each node's children are path-sorted for determinism. Each node is drawn exactly once: a node reachable by multiple paths (a diamond's shared node) is drawn in full on first encounter, and on every subsequent encounter it renders as a one-line shorthand reference (`↳ <ID> (see above)`) without recursing into its subtree. The `<- you are here` marker is never placed on a shorthand reference.
+In the DAG tree, the graph roots (nodes with no in-graph parents) are drawn first, and children descend along the `implements` edges with increasing indentation. Roots and each node's children are path-sorted for determinism. Each node is drawn exactly once: a node reachable by multiple paths (a diamond's shared node) is drawn in full on first encounter, and on every subsequent encounter it renders as a one-line shorthand reference (`↳ <ID> (see above)`) without recursing into its subtree. The `<- you are here` marker is never placed on a shorthand reference. Cyclic input can leave a strongly-connected component with no root; after the root traversal any still-undrawn node is drawn as a depth-0 subtree in node order, so every node appears even when no root reaches it.
 
 After the nodes, forward implementors are rendered in the same tree-connector style in both modes, preceded by a chain connector. If the forward list is empty, this section is omitted entirely.
 

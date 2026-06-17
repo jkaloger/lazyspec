@@ -50,7 +50,9 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str) -> Result<ResolvedContext<'
             let Some(parent) = store.get(&PathBuf::from(&rel.target)) else {
                 continue;
             };
-            parents.push(parent.path.clone());
+            if !parents.contains(&parent.path) {
+                parents.push(parent.path.clone());
+            }
             if seen.insert(parent.path.clone()) {
                 discovered.insert(parent.path.clone(), parent);
                 queue.push_back(parent);
@@ -330,6 +332,18 @@ fn render_tree(resolved: &ResolvedContext, store: &Store, output: &mut String) {
         render_tree_node(
             root, 0, resolved, store, &children, &by_path, &mut drawn, output,
         );
+    }
+
+    // Cyclic input can leave a strongly-connected component with no root, so
+    // the root traversal never reaches it. Draw any still-undrawn node as a
+    // depth-0 subtree (in topological/path order) so the render is complete;
+    // the drawn-set still guarantees each node is drawn exactly once.
+    for node in &resolved.nodes {
+        if !drawn.contains(&node.doc.path) {
+            render_tree_node(
+                node, 0, resolved, store, &children, &by_path, &mut drawn, output,
+            );
+        }
     }
 }
 
