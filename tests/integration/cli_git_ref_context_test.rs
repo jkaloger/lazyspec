@@ -91,21 +91,25 @@ fn context_with_id_based_target() {
 
     let resolved = lazyspec::cli::context::resolve_chain(&store, "ITERATION-001", 1).unwrap();
 
-    // The upward BFS does `store.get(&PathBuf::from(&rel.target))`, which creates
-    // PathBuf("STORY-001") -- this won't match any key in the store (keys are full
-    // relative paths like "docs/stories/STORY-001-feature.md"). BFS skips parents
-    // it cannot resolve, so the chain contains only the iteration itself. The
-    // ID-resolution limitation for the upward target is a separate concern; here we
-    // pin that an unresolvable `implements` parent is dropped.
+    // The upward walk resolves the `implements` target via
+    // `store.resolve_relation_target`, which looks the target up as a document id
+    // before falling back to a path. So an ID-based parent ("STORY-001") resolves
+    // to the FS story and joins the chain, matching the path-based target case.
     assert_eq!(
         resolved.nodes.len(),
-        1,
-        "ID-based target leaves the parent unresolvable; chain should only contain the iteration itself; got: {:?}",
-        resolved.nodes.iter().map(|n| &n.doc.title).collect::<Vec<_>>()
+        2,
+        "ID-based target resolves the parent; chain should contain story + iteration; got: {:?}",
+        resolved
+            .nodes
+            .iter()
+            .map(|n| &n.doc.title)
+            .collect::<Vec<_>>()
     );
-    assert_eq!(resolved.nodes[0].doc.title, "Impl Iteration");
+    assert_eq!(resolved.nodes[0].doc.title, "Feature Story");
+    assert_eq!(resolved.nodes[1].doc.title, "Impl Iteration");
+    assert_eq!(resolved.target.title, "Impl Iteration");
 
-    // However, reverse links (story -> iteration) still work because build_links resolves IDs.
+    // Reverse links (story -> iteration) also resolve ID-based targets via build_links.
     let story_resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001", 1).unwrap();
     let forward_titles: Vec<&str> = story_resolved
         .forward

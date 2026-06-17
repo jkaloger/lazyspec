@@ -52,6 +52,37 @@ fn context_depth_default_matches_today() {
 }
 
 #[test]
+fn context_resolves_implements_target_by_shorthand_id() {
+    // A story `implements` an RFC by shorthand id (`RFC-006`) rather than by
+    // path. The upward walk must still surface the RFC as an ancestor.
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-006-shorthand.md",
+        "---\ntitle: \"Shorthand RFC\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated: []\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/stories/STORY-001-shorthand.md",
+        "---\ntitle: \"Shorthand Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- implements: RFC-006\n---\n\nbody\n",
+    );
+
+    let store = fixture.store();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001", 1).unwrap();
+
+    let rfc_path = std::path::PathBuf::from("docs/rfcs/RFC-006-shorthand.md");
+    let node_paths: Vec<&std::path::Path> = resolved
+        .nodes
+        .iter()
+        .map(|n| n.doc.path.as_path())
+        .collect();
+    assert!(
+        node_paths.contains(&rfc_path.as_path()),
+        "RFC reached by shorthand id should appear in the chain; got: {:?}",
+        node_paths
+    );
+    assert_eq!(resolved.target.title, "Shorthand Story");
+}
+
+#[test]
 fn context_standalone_document() {
     let fixture = setup();
     let store = fixture.store();

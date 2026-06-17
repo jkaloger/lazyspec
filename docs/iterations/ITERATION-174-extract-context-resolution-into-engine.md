@@ -1,7 +1,7 @@
 ---
 title: Extract context resolution into engine
 type: iteration
-status: draft
+status: accepted
 author: agent
 date: 2026-06-18
 tags:
