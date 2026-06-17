@@ -12,14 +12,24 @@ pub struct ContextNode<'a> {
     pub parents: Vec<PathBuf>,
 }
 
+/// A document surfaced alongside the chain, tagged with how it was reached:
+/// the link type, the hop count from the chain (1 = directly adjacent), and the
+/// path of the chain/frontier doc it was reached through.
+pub struct RelatedRef<'a> {
+    pub doc: &'a DocMeta,
+    pub relation: RelationType,
+    pub distance: usize,
+    pub via: PathBuf,
+}
+
 pub struct ResolvedContext<'a> {
     pub target: &'a DocMeta,
     pub nodes: Vec<ContextNode<'a>>,
-    pub forward: Vec<&'a DocMeta>,
-    pub related: Vec<&'a DocMeta>,
+    pub forward: Vec<RelatedRef<'a>>,
+    pub related: Vec<RelatedRef<'a>>,
 }
 
-pub fn resolve_chain<'a>(store: &'a Store, id: &str) -> Result<ResolvedContext<'a>> {
+pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<ResolvedContext<'a>> {
     let doc = store
         .resolve_shorthand(id)
         .map_err(|e| match e {
@@ -63,51 +73,81 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str) -> Result<ResolvedContext<'
 
     let nodes = topo_order(&discovered, &node_parents);
 
-    // Forward context: find docs whose `implements` points at the target
-    let target_path = &doc.path;
-    let forward: Vec<&DocMeta> = store
+    // Forward context: docs whose `implements` points at the target. Each is
+    // one hop out, reached through the target it implements.
+    let target_path = doc.path.clone();
+    let forward: Vec<RelatedRef> = store
         .reverse_links
-        .get(target_path)
+        .get(&target_path)
         .map(|links| {
             links
                 .iter()
                 .filter(|(rel_type, _)| *rel_type == RelationType::Implements)
                 .filter_map(|(_, source_path)| store.get(source_path))
+                .map(|d| RelatedRef {
+                    doc: d,
+                    relation: RelationType::Implements,
+                    distance: 1,
+                    via: target_path.clone(),
+                })
                 .collect()
         })
         .unwrap_or_default();
 
-    // Related: collect RelatedTo links from all context documents, deduplicated
-    let chain_paths: HashSet<&PathBuf> = nodes.iter().map(|n| &n.doc.path).collect();
-    let mut related_seen = HashSet::new();
-    let mut related = Vec::new();
+    // Related: BFS over `related-to` links (both directions), bounded by
+    // `depth`. Hop 0's frontier is the chain/DAG nodes; each subsequent hop
+    // expands one ring of `related-to` neighbours. First discovery wins, so a
+    // doc's recorded `distance` is its shortest hop count. Frontiers and
+    // neighbours are processed in path order, so when a doc is reachable from
+    // two frontier docs at the same hop the lexicographically-smallest `via`
+    // wins (deterministic, test-stable).
+    let chain_paths: HashSet<PathBuf> = nodes.iter().map(|n| n.doc.path.clone()).collect();
+    let mut related_seen: HashSet<PathBuf> = HashSet::new();
+    let mut related: Vec<RelatedRef> = Vec::new();
 
-    for node in &nodes {
-        // Forward RelatedTo links from this doc
-        if let Some(fwd) = store.forward_links.get(&node.doc.path) {
-            for (rel_type, target) in fwd {
-                if *rel_type == RelationType::RelatedTo
-                    && !chain_paths.contains(target)
-                    && related_seen.insert(target.clone())
-                {
-                    if let Some(resolved) = store.get(target) {
-                        related.push(resolved);
+    let mut frontier: Vec<PathBuf> = chain_paths.iter().cloned().collect();
+    frontier.sort();
+
+    for hop in 1..=depth {
+        let mut next_frontier: Vec<PathBuf> = Vec::new();
+
+        for from in &frontier {
+            let mut neighbours: Vec<PathBuf> = Vec::new();
+            if let Some(fwd) = store.forward_links.get(from) {
+                for (rel_type, target) in fwd {
+                    if *rel_type == RelationType::RelatedTo {
+                        neighbours.push(target.clone());
                     }
+                }
+            }
+            if let Some(rev) = store.reverse_links.get(from) {
+                for (rel_type, source) in rev {
+                    if *rel_type == RelationType::RelatedTo {
+                        neighbours.push(source.clone());
+                    }
+                }
+            }
+            neighbours.sort();
+
+            for neighbour in neighbours {
+                if chain_paths.contains(&neighbour) || !related_seen.insert(neighbour.clone()) {
+                    continue;
+                }
+                if let Some(resolved) = store.get(&neighbour) {
+                    related.push(RelatedRef {
+                        doc: resolved,
+                        relation: RelationType::RelatedTo,
+                        distance: hop,
+                        via: from.clone(),
+                    });
+                    next_frontier.push(neighbour);
                 }
             }
         }
-        // Reverse RelatedTo links pointing at this doc
-        if let Some(rev) = store.reverse_links.get(&node.doc.path) {
-            for (rel_type, source) in rev {
-                if *rel_type == RelationType::RelatedTo
-                    && !chain_paths.contains(source)
-                    && related_seen.insert(source.clone())
-                {
-                    if let Some(resolved) = store.get(source) {
-                        related.push(resolved);
-                    }
-                }
-            }
+
+        frontier = next_frontier;
+        if frontier.is_empty() {
+            break;
         }
     }
 
@@ -195,8 +235,8 @@ fn topo_order<'a>(
         .collect()
 }
 
-pub fn run_json(store: &Store, id: &str) -> Result<String> {
-    let resolved = resolve_chain(store, id)?;
+pub fn run_json(store: &Store, id: &str, depth: usize) -> Result<String> {
+    let resolved = resolve_chain(store, id, depth)?;
     let chain: Vec<_> = resolved
         .nodes
         .iter()
@@ -214,16 +254,22 @@ pub fn run_json(store: &Store, id: &str) -> Result<String> {
             value
         })
         .collect();
-    let forward: Vec<_> = resolved
-        .forward
-        .iter()
-        .map(|d| doc_to_json_with_family(d, store))
-        .collect();
-    let related: Vec<_> = resolved
-        .related
-        .iter()
-        .map(|d| doc_to_json_with_family(d, store))
-        .collect();
+    let tag = |r: &RelatedRef| {
+        let mut value = doc_to_json_with_family(r.doc, store);
+        let obj = value.as_object_mut().unwrap();
+        obj.insert(
+            "relation".to_string(),
+            serde_json::Value::String(r.relation.to_string()),
+        );
+        obj.insert("distance".to_string(), serde_json::json!(r.distance));
+        obj.insert(
+            "via".to_string(),
+            serde_json::Value::String(r.via.to_string_lossy().to_string()),
+        );
+        value
+    };
+    let forward: Vec<_> = resolved.forward.iter().map(tag).collect();
+    let related: Vec<_> = resolved.related.iter().map(tag).collect();
     let output = serde_json::json!({
         "chain": chain,
         "forward": forward,
@@ -426,8 +472,8 @@ fn push_card_children(store: &Store, path: &Path, indent: &str, output: &mut Str
     }
 }
 
-pub fn run_human(store: &Store, id: &str) -> Result<String> {
-    let resolved = resolve_chain(store, id)?;
+pub fn run_human(store: &Store, id: &str, depth: usize) -> Result<String> {
+    let resolved = resolve_chain(store, id, depth)?;
     let mut output = String::new();
 
     let linear = resolved.nodes.iter().all(|n| n.parents.len() <= 1);
@@ -440,18 +486,18 @@ pub fn run_human(store: &Store, id: &str) -> Result<String> {
     if !resolved.forward.is_empty() {
         output.push_str(&chain_connector());
         output.push('\n');
-        for (j, child) in resolved.forward.iter().enumerate() {
+        for (j, f) in resolved.forward.iter().enumerate() {
             let connector = if j == resolved.forward.len() - 1 {
                 "\u{2514}\u{2500}"
             } else {
                 "\u{251c}\u{2500}"
             };
-            let shorthand = child.id.to_uppercase();
-            let title = &child.title;
+            let shorthand = f.doc.id.to_uppercase();
+            let title = &f.doc.title;
             let status_display = if colors_enabled() {
-                styled_status(&child.status)
+                styled_status(&f.doc.status)
             } else {
-                format!("{}", child.status)
+                format!("{}", f.doc.status)
             };
             output.push_str(&format!(
                 "  {} {} {} [{}]\n",
@@ -470,16 +516,25 @@ pub fn run_human(store: &Store, id: &str) -> Result<String> {
         } else {
             output.push_str("--- related ---\n");
         }
-        for rel_doc in &resolved.related {
-            let shorthand = rel_doc.id.to_uppercase();
+        for rel in &resolved.related {
+            let shorthand = rel.doc.id.to_uppercase();
             let status_display = if colors_enabled() {
-                styled_status(&rel_doc.status)
+                styled_status(&rel.doc.status)
             } else {
-                format!("{}", rel_doc.status)
+                format!("{}", rel.doc.status)
+            };
+            let suffix = if rel.distance > 1 {
+                let via = store
+                    .get(&rel.via)
+                    .map(|d| d.id.to_uppercase())
+                    .unwrap_or_else(|| rel.via.to_string_lossy().to_string());
+                format!(" (via {}, d{})", via, rel.distance)
+            } else {
+                String::new()
             };
             output.push_str(&format!(
-                "  {}  {} [{}]\n",
-                shorthand, rel_doc.title, status_display
+                "  {}  {} [{}]{}\n",
+                shorthand, rel.doc.title, status_display, suffix
             ));
         }
     }

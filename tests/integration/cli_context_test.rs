@@ -21,7 +21,7 @@ fn setup() -> TestFixture {
 fn context_walks_full_chain() {
     let fixture = setup();
     let store = fixture.store();
-    let resolved = lazyspec::cli::context::resolve_chain(&store, "ITERATION-001").unwrap();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "ITERATION-001", 1).unwrap();
 
     assert_eq!(resolved.nodes.len(), 3);
     assert_eq!(resolved.nodes[0].doc.title, "Auth Redesign");
@@ -31,10 +31,31 @@ fn context_walks_full_chain() {
 }
 
 #[test]
+fn context_depth_default_matches_today() {
+    // Depth 1 must reproduce the pre-iteration single-hop related set: the
+    // STORY chain (RFC<-STORY) relates (via the RFC) to the Token Strategy ADR,
+    // and every surfaced related doc is tagged distance == 1.
+    let fixture = setup_with_related();
+    let store = fixture.store();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001", 1).unwrap();
+
+    let titles: Vec<&str> = resolved
+        .related
+        .iter()
+        .map(|r| r.doc.title.as_str())
+        .collect();
+    assert_eq!(titles, vec!["Token Strategy"], "depth-1 related set");
+    assert!(
+        resolved.related.iter().all(|r| r.distance == 1),
+        "every depth-1 related doc is one hop out"
+    );
+}
+
+#[test]
 fn context_standalone_document() {
     let fixture = setup();
     let store = fixture.store();
-    let resolved = lazyspec::cli::context::resolve_chain(&store, "RFC-001").unwrap();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "RFC-001", 1).unwrap();
 
     assert_eq!(resolved.nodes.len(), 1);
     assert_eq!(resolved.nodes[0].doc.title, "Auth Redesign");
@@ -45,7 +66,7 @@ fn context_standalone_document() {
 fn context_json_output() {
     let fixture = setup();
     let store = fixture.store();
-    let output = lazyspec::cli::context::run_json(&store, "ITERATION-001").unwrap();
+    let output = lazyspec::cli::context::run_json(&store, "ITERATION-001", 1).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let chain = parsed["chain"].as_array().unwrap();
@@ -60,7 +81,7 @@ fn context_json_output() {
 fn context_human_output() {
     let fixture = setup();
     let store = fixture.store();
-    let output = lazyspec::cli::context::run_human(&store, "ITERATION-001").unwrap();
+    let output = lazyspec::cli::context::run_human(&store, "ITERATION-001", 1).unwrap();
 
     assert!(output.contains("Auth Redesign"));
     assert!(output.contains("Auth Implementation"));
@@ -74,7 +95,7 @@ fn context_human_output() {
 fn context_not_found() {
     let fixture = setup();
     let store = fixture.store();
-    let result = lazyspec::cli::context::resolve_chain(&store, "NONEXISTENT-999");
+    let result = lazyspec::cli::context::resolve_chain(&store, "NONEXISTENT-999", 1);
     assert!(result.is_err());
 }
 
@@ -120,11 +141,15 @@ fn forward_context_from_rfc() {
     );
 
     let store = fixture.store();
-    let resolved = lazyspec::cli::context::resolve_chain(&store, "RFC-001").unwrap();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "RFC-001", 1).unwrap();
 
     assert_eq!(resolved.nodes.len(), 1);
     assert_eq!(resolved.forward.len(), 2);
-    let forward_titles: Vec<&str> = resolved.forward.iter().map(|d| d.title.as_str()).collect();
+    let forward_titles: Vec<&str> = resolved
+        .forward
+        .iter()
+        .map(|f| f.doc.title.as_str())
+        .collect();
     assert!(forward_titles.contains(&"Impl A"));
     assert!(forward_titles.contains(&"Impl B"));
 }
@@ -153,13 +178,17 @@ fn forward_context_from_story() {
     );
 
     let store = fixture.store();
-    let resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001").unwrap();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001", 1).unwrap();
 
     assert_eq!(resolved.nodes.len(), 2);
     assert_eq!(resolved.nodes[0].doc.title, "Auth Redesign");
     assert_eq!(resolved.nodes[1].doc.title, "Auth Implementation");
     assert_eq!(resolved.forward.len(), 2);
-    let forward_titles: Vec<&str> = resolved.forward.iter().map(|d| d.title.as_str()).collect();
+    let forward_titles: Vec<&str> = resolved
+        .forward
+        .iter()
+        .map(|f| f.doc.title.as_str())
+        .collect();
     assert!(forward_titles.contains(&"Sprint 1"));
     assert!(forward_titles.contains(&"Sprint 2"));
 }
@@ -168,7 +197,7 @@ fn forward_context_from_story() {
 fn you_are_here_marker() {
     let fixture = setup();
     let store = fixture.store();
-    let output = lazyspec::cli::context::run_human(&store, "STORY-001").unwrap();
+    let output = lazyspec::cli::context::run_human(&store, "STORY-001", 1).unwrap();
 
     let marker = "\u{2190} you are here";
     let marker_count = output.matches(marker).count();
@@ -192,7 +221,7 @@ fn you_are_here_marker() {
 fn related_records_in_human_output() {
     let fixture = setup_with_related();
     let store = fixture.store();
-    let output = lazyspec::cli::context::run_human(&store, "STORY-001").unwrap();
+    let output = lazyspec::cli::context::run_human(&store, "STORY-001", 1).unwrap();
 
     assert!(
         output.contains("related"),
@@ -208,7 +237,7 @@ fn related_records_in_human_output() {
 fn related_records_omitted_when_none() {
     let fixture = setup();
     let store = fixture.store();
-    let output = lazyspec::cli::context::run_human(&store, "STORY-001").unwrap();
+    let output = lazyspec::cli::context::run_human(&store, "STORY-001", 1).unwrap();
 
     assert!(
         !output.contains("related"),
@@ -220,7 +249,7 @@ fn related_records_omitted_when_none() {
 fn json_related_field_present() {
     let fixture = setup_with_related();
     let store = fixture.store();
-    let output = lazyspec::cli::context::run_json(&store, "STORY-001").unwrap();
+    let output = lazyspec::cli::context::run_json(&store, "STORY-001", 1).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let related = parsed["related"].as_array().unwrap();
@@ -236,7 +265,7 @@ fn json_related_field_present() {
 fn json_related_empty() {
     let fixture = setup();
     let store = fixture.store();
-    let output = lazyspec::cli::context::run_json(&store, "STORY-001").unwrap();
+    let output = lazyspec::cli::context::run_json(&store, "STORY-001", 1).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let related = parsed["related"].as_array().unwrap();
@@ -250,7 +279,7 @@ fn json_related_empty() {
 fn no_forward_children_for_leaf() {
     let fixture = setup();
     let store = fixture.store();
-    let resolved = lazyspec::cli::context::resolve_chain(&store, "ITERATION-001").unwrap();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "ITERATION-001", 1).unwrap();
 
     assert!(
         resolved.forward.is_empty(),
@@ -283,7 +312,7 @@ fn context_multi_parent_includes_all_ancestors() {
     );
 
     let store = fixture.store();
-    let resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001").unwrap();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001", 1).unwrap();
 
     let titles = node_titles(&resolved);
     assert_eq!(resolved.nodes.len(), 3, "got: {:?}", titles);
@@ -323,7 +352,7 @@ fn context_diamond_ancestor_appears_once() {
     );
 
     let store = fixture.store();
-    let resolved = lazyspec::cli::context::resolve_chain(&store, "ITERATION-001").unwrap();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "ITERATION-001", 1).unwrap();
 
     let titles = node_titles(&resolved);
     assert_eq!(resolved.nodes.len(), 4, "got: {:?}", titles);
@@ -388,7 +417,7 @@ fn context_human_tree_for_multi_parent() {
     );
 
     let store = fixture.store();
-    let output = lazyspec::cli::context::run_human(&store, "ITERATION-001").unwrap();
+    let output = lazyspec::cli::context::run_human(&store, "ITERATION-001", 1).unwrap();
 
     // All node titles present.
     assert!(output.contains("Foundation Charter"), "got:\n{}", output);
@@ -467,7 +496,7 @@ fn context_json_forward_populated() {
     );
 
     let store = fixture.store();
-    let output = lazyspec::cli::context::run_json(&store, "RFC-001").unwrap();
+    let output = lazyspec::cli::context::run_json(&store, "RFC-001", 1).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let forward = parsed["forward"].as_array().unwrap();
@@ -481,7 +510,7 @@ fn context_json_forward_populated() {
 fn context_json_forward_empty() {
     let fixture = setup();
     let store = fixture.store();
-    let output = lazyspec::cli::context::run_json(&store, "ITERATION-001").unwrap();
+    let output = lazyspec::cli::context::run_json(&store, "ITERATION-001", 1).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let forward = parsed["forward"].as_array().unwrap();
@@ -513,7 +542,7 @@ fn context_json_edges_reconstructable() {
     );
 
     let store = fixture.store();
-    let output = lazyspec::cli::context::run_json(&store, "ITERATION-001").unwrap();
+    let output = lazyspec::cli::context::run_json(&store, "ITERATION-001", 1).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let chain = parsed["chain"].as_array().unwrap();
@@ -578,7 +607,7 @@ fn context_cycle_terminates() {
     );
 
     let store = fixture.store();
-    let resolved = lazyspec::cli::context::resolve_chain(&store, "RFC-001").unwrap();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "RFC-001", 1).unwrap();
 
     let mut titles = node_titles(&resolved);
     titles.sort();
@@ -609,7 +638,7 @@ fn context_human_tree_renders_every_node_in_cyclic_multiparent() {
     );
 
     let store = fixture.store();
-    let output = lazyspec::cli::context::run_human(&store, "RFC-001").unwrap();
+    let output = lazyspec::cli::context::run_human(&store, "RFC-001", 1).unwrap();
 
     assert!(output.contains("Cycle Alpha"), "got: {}", output);
     assert!(output.contains("Cycle Beta"), "got: {}", output);
@@ -639,7 +668,7 @@ fn context_duplicate_implements_deduped() {
     );
 
     let store = fixture.store();
-    let resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001").unwrap();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001", 1).unwrap();
 
     assert_eq!(resolved.nodes.len(), 2, "got: {:?}", node_titles(&resolved));
     let story_node = resolved
@@ -653,4 +682,232 @@ fn context_duplicate_implements_deduped() {
         "duplicate implements edge should be deduped; got: {:?}",
         story_node.parents
     );
+}
+
+#[test]
+fn context_depth_two_surfaces_adr_via_rfc() {
+    // STORY relates-to RFC (1 hop); ADR relates-to RFC (so RFC has a reverse
+    // link from the ADR). At depth 2 the ADR surfaces with distance 2, reached
+    // through the RFC path.
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/stories/STORY-001-hub.md",
+        "---\ntitle: \"Hub Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- related to: docs/rfcs/RFC-001-spec.md\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-spec.md",
+        "---\ntitle: \"Spec RFC\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated: []\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/adrs/ADR-001-choice.md",
+        "---\ntitle: \"Choice ADR\"\ntype: adr\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- related to: docs/rfcs/RFC-001-spec.md\n---\n\nbody\n",
+    );
+
+    let store = fixture.store();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001", 2).unwrap();
+
+    let adr = resolved
+        .related
+        .iter()
+        .find(|r| r.doc.title == "Choice ADR")
+        .expect("ADR should surface at depth 2");
+    assert_eq!(adr.distance, 2, "ADR is two hops from the chain");
+    assert_eq!(
+        adr.via,
+        std::path::PathBuf::from("docs/rfcs/RFC-001-spec.md"),
+        "ADR is reached through the RFC"
+    );
+
+    // The RFC itself is one hop out.
+    let rfc = resolved
+        .related
+        .iter()
+        .find(|r| r.doc.title == "Spec RFC")
+        .expect("RFC should surface at depth 1");
+    assert_eq!(rfc.distance, 1);
+}
+
+#[test]
+fn context_depth_bounds_traversal() {
+    // Chain (STORY) -A-> RFC -B-> ADR -C-> SPEC, all via related-to links.
+    // SPEC is three hops out: absent at depth 2, present at depth 3.
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/stories/STORY-001-hub.md",
+        "---\ntitle: \"Hub Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- related to: docs/rfcs/RFC-001-hop1.md\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-hop1.md",
+        "---\ntitle: \"Hop One\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- related to: docs/adrs/ADR-001-hop2.md\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/adrs/ADR-001-hop2.md",
+        "---\ntitle: \"Hop Two\"\ntype: adr\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- related to: docs/specs/SPEC-001-hop3.md\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/specs/SPEC-001-hop3.md",
+        "---\ntitle: \"Hop Three\"\ntype: spec\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated: []\n---\n\nbody\n",
+    );
+
+    let store = fixture.store();
+
+    let at_two = lazyspec::cli::context::resolve_chain(&store, "STORY-001", 2).unwrap();
+    let two_titles: Vec<&str> = at_two
+        .related
+        .iter()
+        .map(|r| r.doc.title.as_str())
+        .collect();
+    assert!(
+        two_titles.contains(&"Hop One") && two_titles.contains(&"Hop Two"),
+        "depth 2 reaches hops 1 and 2; got: {:?}",
+        two_titles
+    );
+    assert!(
+        !two_titles.contains(&"Hop Three"),
+        "nothing beyond depth 2 may appear; got: {:?}",
+        two_titles
+    );
+
+    let at_three = lazyspec::cli::context::resolve_chain(&store, "STORY-001", 3).unwrap();
+    let hop3 = at_three
+        .related
+        .iter()
+        .find(|r| r.doc.title == "Hop Three")
+        .expect("Hop Three should surface at depth 3");
+    assert_eq!(hop3.distance, 3);
+}
+
+#[test]
+fn context_json_related_tagged() {
+    // STORY relates-to RFC (1 hop). ADR relates-to RFC, so the ADR surfaces at
+    // distance 2 reached through the RFC. Each related entry must carry
+    // relation/distance/via.
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/stories/STORY-001-hub.md",
+        "---\ntitle: \"Hub Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- related to: docs/rfcs/RFC-001-spec.md\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-spec.md",
+        "---\ntitle: \"Spec RFC\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated: []\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/adrs/ADR-001-choice.md",
+        "---\ntitle: \"Choice ADR\"\ntype: adr\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- related to: docs/rfcs/RFC-001-spec.md\n---\n\nbody\n",
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::context::run_json(&store, "STORY-001", 2).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    let related = parsed["related"].as_array().unwrap();
+    assert!(!related.is_empty(), "related should be populated");
+
+    // Every related entry carries the three tag fields.
+    for entry in related {
+        assert!(
+            entry["relation"].is_string(),
+            "relation key present: {}",
+            entry
+        );
+        assert!(
+            entry["distance"].is_u64(),
+            "distance key present: {}",
+            entry
+        );
+        assert!(entry["via"].is_string(), "via key present: {}", entry);
+        assert_eq!(entry["relation"], "related-to");
+    }
+
+    let rfc = related
+        .iter()
+        .find(|e| e["title"] == "Spec RFC")
+        .expect("RFC at distance 1");
+    assert_eq!(rfc["distance"], 1);
+
+    let adr = related
+        .iter()
+        .find(|e| e["title"] == "Choice ADR")
+        .expect("ADR at distance 2");
+    assert_eq!(adr["distance"], 2);
+    assert_eq!(
+        adr["via"].as_str().unwrap(),
+        "docs/rfcs/RFC-001-spec.md",
+        "ADR reached through the RFC path"
+    );
+}
+
+#[test]
+fn context_json_forward_tagged() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-auth.md",
+        "---\ntitle: \"Auth Redesign\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated: []\n---\n\nRFC body.\n",
+    );
+    fixture.write_story(
+        "STORY-001-impl-a.md",
+        "Impl A",
+        "draft",
+        Some("docs/rfcs/RFC-001-auth.md"),
+    );
+    fixture.write_story(
+        "STORY-002-impl-b.md",
+        "Impl B",
+        "draft",
+        Some("docs/rfcs/RFC-001-auth.md"),
+    );
+
+    let store = fixture.store();
+    let output = lazyspec::cli::context::run_json(&store, "RFC-001", 1).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    let forward = parsed["forward"].as_array().unwrap();
+    assert_eq!(forward.len(), 2);
+    for entry in forward {
+        assert_eq!(entry["relation"], "implements", "got: {}", entry);
+        assert_eq!(entry["distance"], 1, "forward is one hop: {}", entry);
+        assert_eq!(
+            entry["via"].as_str().unwrap(),
+            "docs/rfcs/RFC-001-auth.md",
+            "forward reached through the target path: {}",
+            entry
+        );
+    }
+}
+
+#[test]
+fn context_related_shortest_distance() {
+    // The TARGET (a doc reachable both at 1 hop directly from the chain and at 2
+    // hops via a sibling) must be recorded once with distance 1.
+    //
+    // STORY -> NEAR (1 hop), STORY -> SIBLING (1 hop), SIBLING -> NEAR (so NEAR
+    // is also reachable in 2 hops). First discovery (distance 1) wins.
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/stories/STORY-001-hub.md",
+        "---\ntitle: \"Hub Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- related to: docs/rfcs/RFC-001-near.md\n- related to: docs/rfcs/RFC-002-sibling.md\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-near.md",
+        "---\ntitle: \"Near Doc\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated: []\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-002-sibling.md",
+        "---\ntitle: \"Sibling Doc\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- related to: docs/rfcs/RFC-001-near.md\n---\n\nbody\n",
+    );
+
+    let store = fixture.store();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001", 3).unwrap();
+
+    let near: Vec<&lazyspec::cli::context::RelatedRef> = resolved
+        .related
+        .iter()
+        .filter(|r| r.doc.title == "Near Doc")
+        .collect();
+    assert_eq!(
+        near.len(),
+        1,
+        "doc reachable at two distances is recorded once"
+    );
+    assert_eq!(near[0].distance, 1, "shortest hop wins");
 }

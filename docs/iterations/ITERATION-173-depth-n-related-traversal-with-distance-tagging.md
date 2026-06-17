@@ -1,7 +1,7 @@
 ---
 title: Depth-N related traversal with distance tagging
 type: iteration
-status: draft
+status: accepted
 author: agent
 date: 2026-06-17
 tags:

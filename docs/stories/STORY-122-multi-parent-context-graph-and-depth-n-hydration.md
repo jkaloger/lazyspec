@@ -1,7 +1,7 @@
 ---
 title: Multi-parent context graph and depth-N hydration
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-06-17
 tags:

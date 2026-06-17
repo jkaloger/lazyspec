@@ -256,14 +256,14 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Some(Commands::Context { id, json }) => {
+        Some(Commands::Context { id, depth, json }) => {
             refresh_github_cache(&cwd, &config);
             let store = Store::load(&cwd, &config)?;
             if json {
-                let output = lazyspec::cli::context::run_json(&store, &id)?;
+                let output = lazyspec::cli::context::run_json(&store, &id, depth)?;
                 println!("{}", output);
             } else {
-                let output = lazyspec::cli::context::run_human(&store, &id)?;
+                let output = lazyspec::cli::context::run_human(&store, &id, depth)?;
                 print!("{}", output);
             }
         }

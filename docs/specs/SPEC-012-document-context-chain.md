@@ -50,7 +50,11 @@ After building the backward node set, `resolve_chain` collects forward context: 
 
 ## Related Records
 
-Related records are gathered from every context document in `nodes`, not just the target. For each node, the function examines both `Store.forward_links` and `Store.reverse_links`, selecting entries with `RelationType::RelatedTo`. Documents already present among the context nodes are excluded. A `HashSet` tracks seen paths to prevent duplicates when multiple context documents link to the same related document. (Related collection is depth-1 from the context documents; deeper traversal is out of scope for this spec.)
+Related records are gathered by a breadth-first traversal over `related-to` links, bounded by the `--depth N` flag (default `1`). Frontier 0 is the set of context documents in `nodes`. Each hop examines the current frontier's `related-to` links in *both* directions — `Store.forward_links` and `Store.reverse_links`, selecting entries with `RelationType::RelatedTo` — and follows them to undiscovered documents. A document discovered at hop `h` is recorded with `distance = h` and `via = <path of the document it was reached through>`, and joins the next frontier. The traversal stops after `depth` hops, so nothing more than `depth` `related-to` links away from the chain appears.
+
+Documents already present among the context nodes are excluded from related records entirely; they are never recorded regardless of distance. Dedup is by path with first-discovery-wins semantics: a document reachable by several routes is recorded exactly once, at the *shortest* hop count, so its `distance` is always the minimum number of `related-to` links from the chain (a document reachable at both 1 and 2 hops is recorded once at distance 1). The traversal is deterministic: the frontier and each node's neighbours are path-sorted before expansion, so on a same-hop tie the lexicographically-smallest `via` wins.
+
+With the default `depth == 1` this reduces exactly to the prior behaviour — the direct `related-to` neighbours of the context documents, each at distance 1 — so the default is backward compatible. Every related entry carries three tags alongside its frontmatter: `relation` (always `"related-to"`), `distance` (the shortest hop count), and `via` (the path of the document it was reached through). See [JSON Output](#json-output) for the serialized shape.
 
 @ref src/engine/document.rs#RelationType
 
@@ -80,7 +84,7 @@ In the DAG tree, the graph roots (nodes with no in-graph parents) are drawn firs
 
 After the nodes, forward implementors are rendered in the same tree-connector style in both modes, preceded by a chain connector. If the forward list is empty, this section is omitted entirely.
 
-Related records appear after a blank line and a `"--- related ---"` separator (or its Unicode equivalent when colours are enabled). Each related document is printed as `SHORTHAND  Title [status]`. The section is omitted when there are no related records.
+Related records appear after a blank line and a `"--- related ---"` separator (or its Unicode equivalent when colours are enabled). Each related document is printed as `SHORTHAND  Title [status]`. Entries at distance 1 render exactly as before, unannotated. Entries discovered beyond depth 1 receive a trailing ` (via SHORTHAND, dN)`, where `SHORTHAND` is the uppercased shorthand ID of the `via` document (its raw path when the shorthand cannot be resolved) and `N` is the distance — for example `STORY-054  Forward and Backward Context with Related Records [accepted] (via SPEC-012, d2)`. The forward section is rendered unchanged and carries no distance annotation. The section is omitted when there are no related records.
 
 ## JSON Output
 
@@ -89,9 +93,31 @@ Related records appear after a blank line and a `"--- related ---"` separator (o
 `run_json` serializes the resolved context into a JSON object with four top-level keys: `chain`, `forward`, `related`, and `target`.
 
 - `chain` is an array of node objects in `nodes` (topological) order. Each is produced by `doc_to_json_with_family` — full frontmatter fields plus any children and parent information — with an added `implements_in_context` array carrying that node's in-graph `implements` edge targets as path strings. A root or ancestor with no in-graph parents carries an empty `[]`. This lets a consumer reconstruct the DAG directly from `chain` and its edges without re-walking the store.
-- `forward` is an array of direct forward implementors, each produced by `doc_to_json_with_family`. It is always present and is an empty array `[]` when nothing implements the target, giving a stable schema.
-- `related` is an array of the related documents, each produced by `doc_to_json_with_family`.
+- `forward` is an array of direct forward implementors. It is always present and is an empty array `[]` when nothing implements the target, giving a stable schema.
+- `related` is an array of the related documents discovered by the depth-bounded BFS.
 - `target` is the requested document's path as a string (a relative path such as `docs/...md`). Consumers locate the requested document within `chain` by matching `target` against each element's `path`, replacing the old positional `target_index`.
+
+Entries in `forward` and `related` share one schema: the full frontmatter object produced by `doc_to_json_with_family`, plus three tag keys describing how the document was reached:
+
+- `relation` — string, the link type: `"implements"` for `forward` entries, `"related-to"` for `related` entries.
+- `distance` — number, the hop count from the chain. For `forward` this is always `1`. For `related` it is the shortest number of `related-to` links from the chain (see [Related Records](#related-records)).
+- `via` — string, the path of the document the entry was reached through. For `related` this is the neighbouring document that linked to it. For `forward` it is the *target document's own path* — the document `context` was run on — since forward implementors are reached "through" the target they implement; this is expected, not a bug.
+
+A `related` entry therefore looks like:
+
+```json
+{
+  "title": "Forward and Backward Context with Related Records",
+  "type": "story",
+  "status": "accepted",
+  "path": "docs/stories/STORY-054-forward-and-backward-context-with-related-records.md",
+  "relation": "related-to",
+  "distance": 2,
+  "via": "docs/specs/SPEC-012-document-context-chain.md"
+}
+```
+
+and a `forward` entry carries the same three keys with `"relation": "implements"`, `"distance": 1`, and `via` set to the target's path. (Frontmatter fields above are abbreviated; the real object also carries `author`, `date`, `tags`, `related`, and family information.)
 
 @ref src/cli/json.rs#doc_to_json_with_family
 

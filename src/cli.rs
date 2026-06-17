@@ -189,6 +189,9 @@ pub enum Commands {
         /// Document path or shorthand ID (e.g. ITERATION-001)
         #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         id: String,
+        /// Maximum hops to follow `related-to` links when collecting related records
+        #[arg(long, default_value_t = 1)]
+        depth: usize,
         /// Output as JSON
         #[arg(long)]
         json: bool,
