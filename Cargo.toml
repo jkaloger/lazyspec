@@ -28,8 +28,8 @@ tree-sitter = "0.24"
 tree-sitter-typescript = "0.23"
 tree-sitter-rust = "0.23"
 crossbeam-channel = "0.5"
-ratatui-image = { version = "10", default-features = false, features = ["crossterm", "image-defaults"] }
-image = "0.25"
+ratatui-image = { version = "10", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 unicode-width = "0.2"
 sqids = "0.4"
 pulldown-cmark = "0.13"

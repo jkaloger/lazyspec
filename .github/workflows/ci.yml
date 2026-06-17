@@ -12,17 +12,16 @@ concurrency:
 
 jobs:
   ci:
-    name: CI
+    name: ${{ matrix.check }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [fmt, clippy, test]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
       - uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
         with:
           use-flakehub: false
-      - name: fmt
-        run: nix build .#checks.x86_64-linux.fmt
-      - name: clippy
-        run: nix build .#checks.x86_64-linux.clippy
-      - name: test
-        run: nix build .#checks.x86_64-linux.test
+      - run: nix build .#checks.x86_64-linux.${{ matrix.check }}
