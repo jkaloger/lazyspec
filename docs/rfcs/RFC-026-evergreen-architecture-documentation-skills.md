@@ -10,8 +10,8 @@ tags:
 - documentation
 - ai
 related:
-- related to: RFC-002
-- related to: RFC-019
+- related-to: RFC-002
+- related-to: RFC-019
 ---
 
 

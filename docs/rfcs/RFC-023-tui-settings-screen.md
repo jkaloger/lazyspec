@@ -9,8 +9,8 @@ tags:
 - config
 - settings
 related:
-- related to: RFC-013
-- related to: RFC-018
+- related-to: RFC-013
+- related-to: RFC-018
 ---
 
 

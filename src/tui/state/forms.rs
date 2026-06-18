@@ -1,4 +1,4 @@
-use crate::engine::document::{DocType, RelationType};
+use crate::engine::document::DocType;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -131,24 +131,6 @@ impl StatusPicker {
         }
     }
 }
-
-/// Keywords the link editor cycles through: the canonical relations followed by
-/// the inverse-direction aliases. Inverse keywords resolve to a flipped
-/// canonical relation in `link_with_config`.
-pub const REL_TYPES: [&str; RelationType::ALL_STRS.len() + RelationType::INVERSE_STRS.len()] = {
-    let mut all = [""; RelationType::ALL_STRS.len() + RelationType::INVERSE_STRS.len()];
-    let mut i = 0;
-    while i < RelationType::ALL_STRS.len() {
-        all[i] = RelationType::ALL_STRS[i];
-        i += 1;
-    }
-    let mut j = 0;
-    while j < RelationType::INVERSE_STRS.len() {
-        all[RelationType::ALL_STRS.len() + j] = RelationType::INVERSE_STRS[j];
-        j += 1;
-    }
-    all
-};
 
 pub struct LinkEditor {
     pub active: bool,

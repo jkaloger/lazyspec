@@ -24,7 +24,7 @@
 
 Lazyspec manages project documentation as version-controlled markdown files with YAML frontmatter. Documents live in your repo, so agents and humans read from the same source of truth.
 
-- Create, update, link, and validate documents. Typed relationships (`implements`, `supersedes`, `blocks`, `related-to`) keep the chain explicit.
+- Create, update, link, and validate documents. Config-driven relationships (the starter set is `implements`, `supersedes`, `blocks`, `related-to`) keep the chain explicit.
 - Catch broken links, orphaned documents, and incomplete frontmatter before they rot. `lazyspec validate` exits non-zero on errors, so it slots into CI.
 - Embed `@ref` directives in your specs to point at source code. Lazyspec expands them inline using `git show`, with symbol-level extraction for Rust and TypeScript.
 - Fuzzy search, markdown preview, live file watching, and document creation without leaving the terminal.
@@ -132,6 +132,7 @@ All document management is available as subcommands. Most accept `--json` for ma
 | `unignore <path>`                    | Remove validation skip from a document                                |
 | `validate [--warnings]`              | Check document integrity and link consistency                         |
 | `fix [paths] [--dry-run]`            | Fix documents with broken or incomplete frontmatter                   |
+| `fix --config [--dry-run]`           | Repair `.lazyspec.toml` (inject missing standard relationships/rules) |
 | `pin <id>`                           | Pin blob hashes onto `@ref` directives in a document                  |
 | `provenance add <id> <citation>`     | Append a citation to a document's provenance list                     |
 | `provenance remove <id> <citation>`  | Remove an exact-match citation from a document's provenance list      |
@@ -141,7 +142,7 @@ All document management is available as subcommands. Most accept `--json` for ma
 
 #### Relationship Keywords
 
-`link` and `unlink` accept four canonical relationship types (`implements`, `supersedes`, `blocks`, `related-to`) and three inverse keywords (`implemented-by`, `superseded-by`, `blocked-by`). An inverse keyword is a write-time alias: it flips the direction and stores the canonical relation on the target document. Nothing new is persisted; the reverse direction is still computed by the link graph.
+`link` and `unlink` resolve relationship names against the `[[relationships]]` block in your `.lazyspec.toml` (see [Configuration](#configuration)). The starter config declares the canonical set (`implements`, `supersedes`, `blocks`, `related-to`) and, for each directional relationship, an inverse keyword (`implemented-by`, `superseded-by`, `blocked-by`) -- but the vocabulary is yours to change. An inverse keyword is a write-time alias: it flips the direction and stores the canonical relation on the target document. Nothing new is persisted; the reverse direction is still computed by the link graph.
 
 ```sh
 lazyspec link STORY-9 blocked-by RFC-2
@@ -149,7 +150,7 @@ lazyspec link STORY-9 blocked-by RFC-2
 # Linked docs/rfcs/RFC-002-....md --blocks--> STORY-9
 ```
 
-`related-to` is symmetric and has no separate inverse keyword. Unknown keywords are rejected before anything is written.
+A relationship declared without an `inverse` is symmetric (like `related-to`) and has no separate inverse keyword. A keyword that matches no declared `name` or `inverse` is rejected before anything is written, and `validate` flags any document carrying a relationship name absent from `[[relationships]]`.
 
 #### `show` Flags
 
@@ -289,14 +290,28 @@ Unresolvable refs render as:
 <details>
 <summary><h2>Configuration</h2></summary>
 
-`lazyspec init` creates a `.lazyspec.toml` in your project root with four built-in document types:
+`lazyspec init` creates a `.lazyspec.toml` in your project root with a starter set
+of document types, relationships, and validation rules. The engine carries no
+built-in document types or relationship vocabulary: the `[[types]]`,
+`[[relationships]]`, and `[[rules]]` declared in `.lazyspec.toml` are the sole
+source of truth. A missing `.lazyspec.toml`, or a config with no `[[types]]`, is a
+hard error that points you at `lazyspec init`; a config missing the
+`[[relationships]]` block is a hard error that points you at `lazyspec fix --config`.
 
 ```toml
-[directories]
-rfcs = "docs/rfcs"
-adrs = "docs/adrs"
-stories = "docs/stories"
-iterations = "docs/iterations"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+icon = "●"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "related-to"
 
 [templates]
 dir = ".lazyspec/templates"
@@ -305,9 +320,31 @@ dir = ".lazyspec/templates"
 pattern = "{type}-{n:03}-{title}.md"
 ```
 
+### Migrating an Existing Config
+
+Projects created before relationships and rules became config-driven have a
+`.lazyspec.toml` with no `[[relationships]]` or `[[rules]]` blocks. Strict load
+now rejects such a config on every command, pointing you at the migration:
+
+```sh
+lazyspec fix --config            # inject the missing standard relationships/rules
+lazyspec fix --config --dry-run  # preview the additions without writing
+```
+
+`fix --config` reads the config leniently (the one place strict load is
+bypassed), then appends only the standard `[[relationships]]` / `[[rules]]` that
+are missing -- comparing by name, so user-added relationships and rules are kept
+and nothing is duplicated. It is append-only: every existing section (`[github]`,
+`[coordination]`, comments, ordering) is preserved byte-for-byte, and it is
+idempotent -- running it on an up-to-date config makes no change. The flag is
+config-only: no documents are touched (use plain `lazyspec fix` for frontmatter).
+
 ### Custom Types
 
-Instead of `[directories]`, you can define types explicitly with `[[types]]`. This lets you rename the defaults, add new types, or set custom prefixes and icons used in the TUI.
+Each document type is declared with a `[[types]]` block. This lets you rename the
+defaults, add new types, or set custom prefixes and icons used in the TUI.
+Directories derive entirely from each type's own `dir`; there is no separate
+`[directories]` table.
 
 ```toml
 [[types]]
@@ -323,6 +360,30 @@ plural = "specs"
 dir = "docs/specs"
 prefix = "SPEC"
 icon = "◆"
+```
+
+### Relationships
+
+The relationship vocabulary is config-driven, just like document types. Each
+`[[relationships]]` block declares a relationship `name` and an optional
+`inverse` keyword. A directional relationship declares its inverse (e.g.
+`implements` / `implemented-by`); a relationship with no `inverse` is symmetric
+(e.g. `related-to`). `link`/`unlink` resolve the keyword you type against this
+registry -- a canonical `name` links in the stated direction, while a declared
+`inverse` flips it and stores the canonical relation on the target. `validate`
+flags any document carrying a relationship name not declared here.
+
+```toml
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "tracks"
+inverse = "tracked-by"
+
+[[relationships]]
+name = "related-to"
 ```
 
 ### Validation Rules

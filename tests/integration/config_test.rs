@@ -1,15 +1,28 @@
 use lazyspec::engine::config::{
     Config, NumberingStrategy, ReservedFormat, Severity, ValidationRule,
 };
+use lazyspec::engine::fs::RealFileSystem;
+use tempfile::TempDir;
+
+/// Strict load now requires a `[[relationships]]` block; tests that build a
+/// `[[types]]`-only config append this so they exercise the section under test.
+const RELATIONSHIPS: &str = r#"
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "related-to"
+"#;
 
 #[test]
 fn parse_config_from_toml() {
     let toml_str = r#"
-[directories]
-rfcs = "docs/rfcs"
-adrs = "docs/adrs"
-stories = "docs/stories"
-iterations = "docs/iterations"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
 
 [templates]
 dir = ".lazyspec/templates"
@@ -18,50 +31,9 @@ dir = ".lazyspec/templates"
 pattern = "{type}-{n:03}-{title}.md"
 "#;
 
-    let config = Config::parse(toml_str).unwrap();
-    assert_eq!(config.filesystem.directories.rfcs, "docs/rfcs");
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+    assert_eq!(config.type_by_name("rfc").unwrap().dir, "docs/rfcs");
     assert_eq!(config.documents.naming.pattern, "{type}-{n:03}-{title}.md");
-}
-
-#[test]
-fn default_config() {
-    let config = Config::default();
-    assert_eq!(config.filesystem.directories.rfcs, "docs/rfcs");
-    assert_eq!(config.filesystem.directories.adrs, "docs/adrs");
-    assert_eq!(config.filesystem.directories.stories, "docs/stories");
-    assert_eq!(config.filesystem.directories.iterations, "docs/iterations");
-    assert_eq!(config.filesystem.templates.dir, ".lazyspec/templates");
-    assert_eq!(config.documents.naming.pattern, "{type}-{n:03}-{title}.md");
-}
-
-#[test]
-fn default_config_has_four_type_defs() {
-    let config = Config::default();
-    assert_eq!(config.documents.types.len(), 7);
-
-    let rfc = config.type_by_name("rfc").unwrap();
-    assert_eq!(rfc.plural, "rfcs");
-    assert_eq!(rfc.dir, "docs/rfcs");
-    assert_eq!(rfc.prefix, "RFC");
-    assert_eq!(rfc.icon, Some("●".to_string()));
-
-    let story = config.type_by_name("story").unwrap();
-    assert_eq!(story.plural, "stories");
-    assert_eq!(story.dir, "docs/stories");
-    assert_eq!(story.prefix, "STORY");
-    assert_eq!(story.icon, Some("▲".to_string()));
-
-    let iteration = config.type_by_name("iteration").unwrap();
-    assert_eq!(iteration.plural, "iterations");
-    assert_eq!(iteration.dir, "docs/iterations");
-    assert_eq!(iteration.prefix, "ITERATION");
-    assert_eq!(iteration.icon, Some("◆".to_string()));
-
-    let adr = config.type_by_name("adr").unwrap();
-    assert_eq!(adr.plural, "adrs");
-    assert_eq!(adr.dir, "docs/adrs");
-    assert_eq!(adr.prefix, "ADR");
-    assert_eq!(adr.icon, Some("■".to_string()));
 }
 
 #[test]
@@ -87,7 +59,7 @@ dir = ".lazyspec/templates"
 pattern = "{type}-{n:03}-{title}.md"
 "#;
 
-    let config = Config::parse(toml_str).unwrap();
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     assert_eq!(config.documents.types.len(), 2);
 
     let rfc = config.type_by_name("rfc").unwrap();
@@ -97,46 +69,6 @@ pattern = "{type}-{n:03}-{title}.md"
     assert_eq!(epic.plural, "epics");
     assert_eq!(epic.prefix, "EPIC");
     assert_eq!(epic.icon, None);
-}
-
-#[test]
-fn legacy_directories_populates_types() {
-    let toml_str = r#"
-[directories]
-rfcs = "custom/rfcs"
-adrs = "custom/adrs"
-stories = "custom/stories"
-iterations = "custom/iterations"
-
-[templates]
-dir = ".lazyspec/templates"
-
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-"#;
-
-    let config = Config::parse(toml_str).unwrap();
-    assert_eq!(config.documents.types.len(), 4);
-
-    let rfc = config.type_by_name("rfc").unwrap();
-    assert_eq!(rfc.dir, "custom/rfcs");
-    assert_eq!(config.filesystem.directories.rfcs, "custom/rfcs");
-}
-
-#[test]
-fn no_types_or_directories_uses_defaults() {
-    let toml_str = r#"
-[templates]
-dir = ".lazyspec/templates"
-
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-"#;
-
-    let config = Config::parse(toml_str).unwrap();
-    assert_eq!(config.documents.types.len(), 7);
-    assert_eq!(config.type_by_name("rfc").unwrap().dir, "docs/rfcs");
-    assert_eq!(config.filesystem.directories.rfcs, "docs/rfcs");
 }
 
 #[test]
@@ -154,7 +86,7 @@ plural = "rfcs"
 dir = "docs/rfcs"
 "#;
 
-    let result = Config::parse(toml_str);
+    let result = Config::parse(&format!("{toml_str}{RELATIONSHIPS}"));
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -164,43 +96,14 @@ dir = "docs/rfcs"
 }
 
 #[test]
-fn default_config_has_three_default_rules() {
-    let config = Config::default();
-    assert_eq!(config.rules.len(), 3);
-    assert_eq!(
-        config.rules[0],
-        ValidationRule::ParentChild {
-            name: "stories-need-rfcs".to_string(),
-            child: "story".to_string(),
-            parent: "rfc".to_string(),
-            link: "implements".to_string(),
-            severity: Severity::Warning,
-        }
-    );
-    assert_eq!(
-        config.rules[1],
-        ValidationRule::ParentChild {
-            name: "iterations-need-stories".to_string(),
-            child: "iteration".to_string(),
-            parent: "story".to_string(),
-            link: "implements".to_string(),
-            severity: Severity::Error,
-        }
-    );
-    assert_eq!(
-        config.rules[2],
-        ValidationRule::RelationExistence {
-            name: "adrs-need-relations".to_string(),
-            doc_type: "adr".to_string(),
-            require: "any-relation".to_string(),
-            severity: Severity::Error,
-        }
-    );
-}
-
-#[test]
-fn no_rules_section_uses_defaults() {
+fn no_rules_section_yields_empty_rules() {
     let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
 [templates]
 dir = ".lazyspec/templates"
 
@@ -208,13 +111,19 @@ dir = ".lazyspec/templates"
 pattern = "{type}-{n:03}-{title}.md"
 "#;
 
-    let config = Config::parse(toml_str).unwrap();
-    assert_eq!(config.rules.len(), 3);
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+    assert!(config.rules.is_empty());
 }
 
 #[test]
 fn parse_parent_child_rule() {
     let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
 [[rules]]
 shape = "parent-child"
 name = "epics-need-themes"
@@ -224,7 +133,7 @@ link = "belongs-to"
 severity = "warning"
 "#;
 
-    let config = Config::parse(toml_str).unwrap();
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     assert_eq!(config.rules.len(), 1);
     assert_eq!(
         config.rules[0],
@@ -241,6 +150,12 @@ severity = "warning"
 #[test]
 fn parse_relation_existence_rule() {
     let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
 [[rules]]
 shape = "relation-existence"
 name = "rfcs-need-relations"
@@ -249,7 +164,7 @@ require = "any-relation"
 severity = "error"
 "#;
 
-    let config = Config::parse(toml_str).unwrap();
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     assert_eq!(config.rules.len(), 1);
     assert_eq!(
         config.rules[0],
@@ -263,8 +178,14 @@ severity = "error"
 }
 
 #[test]
-fn custom_rules_fully_replace_defaults() {
+fn declared_rules_are_the_only_rules() {
     let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
 [[rules]]
 shape = "relation-existence"
 name = "only-this-rule"
@@ -273,7 +194,7 @@ require = "any-relation"
 severity = "warning"
 "#;
 
-    let config = Config::parse(toml_str).unwrap();
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     assert_eq!(config.rules.len(), 1);
     assert_eq!(
         config.rules[0],
@@ -298,7 +219,7 @@ link = "implements"
 severity = "fatal"
 "#;
 
-    let result = Config::parse(toml_str);
+    let result = Config::parse(&format!("{toml_str}{RELATIONSHIPS}"));
     assert!(
         result.is_err(),
         "Expected parse error for invalid severity 'fatal'"
@@ -308,20 +229,32 @@ severity = "fatal"
 #[test]
 fn parse_tui_ascii_diagrams_true() {
     let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
 [tui]
 ascii_diagrams = true
 "#;
-    let config = Config::parse(toml_str).unwrap();
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     assert!(config.ui.ascii_diagrams);
 }
 
 #[test]
 fn tui_defaults_to_ascii_diagrams_false() {
     let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
 [templates]
 dir = ".lazyspec/templates"
 "#;
-    let config = Config::parse(toml_str).unwrap();
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     assert!(!config.ui.ascii_diagrams);
 }
 
@@ -336,10 +269,16 @@ fn default_config_has_ascii_diagrams_false() {
 #[test]
 fn absent_numbering_defaults_to_incremental() {
     let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
 [templates]
 dir = ".lazyspec/templates"
 "#;
-    let config = Config::parse(toml_str).unwrap();
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     for t in &config.documents.types {
         assert_eq!(t.numbering, NumberingStrategy::Incremental);
     }
@@ -359,7 +298,7 @@ numbering = "sqids"
 salt = "my-secret-salt"
 min_length = 5
 "#;
-    let config = Config::parse(toml_str).unwrap();
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     let rfc = config.type_by_name("rfc").unwrap();
     assert_eq!(rfc.numbering, NumberingStrategy::Sqids);
     let sqids_cfg = config.documents.sqids.unwrap();
@@ -380,7 +319,7 @@ numbering = "sqids"
 [numbering.sqids]
 salt = "my-salt"
 "#;
-    let config = Config::parse(toml_str).unwrap();
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     let sqids_cfg = config.documents.sqids.unwrap();
     assert_eq!(sqids_cfg.min_length, 3);
 }
@@ -395,7 +334,7 @@ dir = "docs/rfcs"
 prefix = "RFC"
 numbering = "sqids"
 "#;
-    let result = Config::parse(toml_str);
+    let result = Config::parse(&format!("{toml_str}{RELATIONSHIPS}"));
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -417,7 +356,7 @@ numbering = "sqids"
 [numbering.sqids]
 salt = ""
 "#;
-    let result = Config::parse(toml_str);
+    let result = Config::parse(&format!("{toml_str}{RELATIONSHIPS}"));
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -440,7 +379,7 @@ numbering = "sqids"
 salt = "my-salt"
 min_length = 0
 "#;
-    let result = Config::parse(toml_str);
+    let result = Config::parse(&format!("{toml_str}{RELATIONSHIPS}"));
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -463,7 +402,7 @@ numbering = "sqids"
 salt = "my-salt"
 min_length = 11
 "#;
-    let result = Config::parse(toml_str);
+    let result = Config::parse(&format!("{toml_str}{RELATIONSHIPS}"));
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -489,7 +428,7 @@ remote = "upstream"
 format = "incremental"
 max_retries = 3
 "#;
-    let config = Config::parse(toml_str).unwrap();
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     let rfc = config.type_by_name("rfc").unwrap();
     assert_eq!(rfc.numbering, NumberingStrategy::Reserved);
     let reserved_cfg = config.documents.reserved.unwrap();
@@ -511,7 +450,7 @@ numbering = "reserved"
 [numbering.reserved]
 format = "incremental"
 "#;
-    let config = Config::parse(toml_str).unwrap();
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     let reserved_cfg = config.documents.reserved.unwrap();
     assert_eq!(reserved_cfg.remote, "origin");
     assert_eq!(reserved_cfg.max_retries, 5);
@@ -530,7 +469,7 @@ numbering = "reserved"
 [numbering.reserved]
 format = "sqids"
 "#;
-    let result = Config::parse(toml_str);
+    let result = Config::parse(&format!("{toml_str}{RELATIONSHIPS}"));
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -552,7 +491,7 @@ numbering = "reserved"
 [numbering.reserved]
 format = "incremental"
 "#;
-    let config = Config::parse(toml_str);
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}"));
     assert!(config.is_ok());
 }
 
@@ -570,7 +509,7 @@ numbering = "reserved"
 remote = ""
 format = "incremental"
 "#;
-    let result = Config::parse(toml_str);
+    let result = Config::parse(&format!("{toml_str}{RELATIONSHIPS}"));
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -582,10 +521,16 @@ format = "incremental"
 #[test]
 fn ref_count_ceiling_defaults_to_15() {
     let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
 [templates]
 dir = ".lazyspec/templates"
 "#;
-    let config = Config::parse(toml_str).unwrap();
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     assert_eq!(config.ref_count_ceiling, 15);
 }
 
@@ -594,10 +539,16 @@ fn ref_count_ceiling_configurable() {
     let toml_str = r#"
 ref_count_ceiling = 20
 
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
 [templates]
 dir = ".lazyspec/templates"
 "#;
-    let config = Config::parse(toml_str).unwrap();
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     assert_eq!(config.ref_count_ceiling, 20);
 }
 
@@ -617,7 +568,7 @@ dir = "docs/rfcs"
 prefix = "RFC"
 numbering = "reserved"
 "#;
-    let result = Config::parse(toml_str);
+    let result = Config::parse(&format!("{toml_str}{RELATIONSHIPS}"));
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -635,7 +586,7 @@ plural = "rfcs"
 dir = "docs/rfcs"
 prefix = "RFC"
 "#;
-    let config = Config::parse(toml_str).unwrap();
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     let rfc = config.type_by_name("rfc").unwrap();
     assert!(!rfc.singleton);
 }
@@ -650,7 +601,7 @@ dir = "docs/conventions"
 prefix = "CONV"
 singleton = true
 "#;
-    let config = Config::parse(toml_str).unwrap();
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     let conv = config.type_by_name("convention").unwrap();
     assert!(conv.singleton);
 }
@@ -664,40 +615,9 @@ plural = "rfcs"
 dir = "docs/rfcs"
 prefix = "RFC"
 "#;
-    let config = Config::parse(toml_str).unwrap();
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     let rfc = config.type_by_name("rfc").unwrap();
     assert!(rfc.parent_type.is_none());
-}
-
-#[test]
-fn default_config_has_convention_and_dictum_types() {
-    let config = Config::default();
-
-    let convention = config
-        .type_by_name("convention")
-        .expect("convention type should exist in defaults");
-    assert_eq!(convention.name, "convention");
-    assert_eq!(convention.plural, "convention");
-    assert_eq!(convention.dir, "docs/convention");
-    assert_eq!(convention.prefix, "CONVENTION");
-    assert_eq!(convention.icon, Some("\u{1F4DC}".to_string()));
-    assert!(convention.singleton);
-    assert!(convention.parent_type.is_none());
-    assert_eq!(convention.numbering, NumberingStrategy::Incremental);
-    assert!(convention.subdirectory);
-
-    let dictum = config
-        .type_by_name("dictum")
-        .expect("dictum type should exist in defaults");
-    assert_eq!(dictum.name, "dictum");
-    assert_eq!(dictum.plural, "dicta");
-    assert_eq!(dictum.dir, "docs/convention");
-    assert_eq!(dictum.prefix, "DICTUM");
-    assert_eq!(dictum.icon, Some("\u{2696}".to_string()));
-    assert!(!dictum.singleton);
-    assert_eq!(dictum.parent_type, Some("convention".to_string()));
-    assert_eq!(dictum.numbering, NumberingStrategy::Incremental);
-    assert!(!dictum.subdirectory);
 }
 
 #[test]
@@ -710,7 +630,133 @@ dir = "docs/conventions/dicta"
 prefix = "DICTUM"
 parent_type = "convention"
 "#;
-    let config = Config::parse(toml_str).unwrap();
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     let dictum = config.type_by_name("dictum").unwrap();
     assert_eq!(dictum.parent_type, Some("convention".to_string()));
+}
+
+// --- Strict config-driven type loading (STORY-125) ---
+
+// AC1: no .lazyspec.toml -> load errors pointing at `init`.
+#[test]
+fn load_without_config_file_errors_pointing_to_init() {
+    let tmp = TempDir::new().unwrap();
+    let fs = RealFileSystem;
+
+    let err = Config::load(tmp.path(), &fs).unwrap_err();
+    let msg = err.to_string();
+
+    assert!(
+        msg.contains("init"),
+        "error should point at init, got: {msg}"
+    );
+    assert!(
+        msg.contains(".lazyspec.toml"),
+        "error should name .lazyspec.toml, got: {msg}"
+    );
+}
+
+// AC2: file exists but no [[types]] -> hard error naming the missing types.
+#[test]
+fn parse_without_types_errors() {
+    let toml_str = r#"
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[templates]
+dir = ".lazyspec/templates"
+"#;
+
+    let err = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap_err();
+    let msg = err.to_string();
+
+    assert!(msg.contains("types"), "error should name types, got: {msg}");
+    assert!(
+        msg.contains("init"),
+        "error should suggest init, got: {msg}"
+    );
+}
+
+// AC4: directories derive entirely from declared types' dir, not named fields.
+#[test]
+fn directories_derive_from_declared_type_dirs() {
+    let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "specs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "epic"
+plural = "epics"
+dir = "planning/epics"
+prefix = "EPIC"
+"#;
+
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+    assert_eq!(config.type_by_name("rfc").unwrap().dir, "specs/rfcs");
+    assert_eq!(config.type_by_name("epic").unwrap().dir, "planning/epics");
+}
+
+// AC5: omitting a previously-built-in type leaves it absent; never injected.
+#[test]
+fn omitted_builtin_type_is_absent() {
+    let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+"#;
+
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+    assert!(config.type_by_name("spec").is_none());
+    assert_eq!(config.documents.types.len(), 2);
+}
+
+// AC6: explicit plural taken verbatim, no engine-side pluralization.
+#[test]
+fn explicit_plural_taken_verbatim() {
+    let toml_str = r#"
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[types]]
+name = "quux"
+plural = "quuxen"
+dir = "docs/quuxen"
+prefix = "QUUX"
+"#;
+
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+    assert_eq!(config.type_by_name("story").unwrap().plural, "stories");
+    assert_eq!(config.type_by_name("quux").unwrap().plural, "quuxen");
+}
+
+// AC6: plural is a required field; omitting it errors at parse.
+#[test]
+fn missing_plural_field_errors() {
+    let toml_str = r#"
+[[types]]
+name = "story"
+dir = "docs/stories"
+prefix = "STORY"
+"#;
+
+    let err = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("plural"),
+        "error should name the missing plural field, got: {msg}"
+    );
 }

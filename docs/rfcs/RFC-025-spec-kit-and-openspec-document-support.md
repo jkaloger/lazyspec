@@ -10,8 +10,8 @@ tags:
 - spec-kit
 - openspec
 related:
-- related to: RFC-013
-- related to: RFC-002
+- related-to: RFC-013
+- related-to: RFC-002
 ---
 
 

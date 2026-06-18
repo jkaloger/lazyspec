@@ -701,7 +701,7 @@ fn test_inverse_keyword_writes_flipped_relation_to_target() {
         .unwrap();
     assert_eq!(
         target.related[0].rel_type,
-        lazyspec::engine::document::RelationType::Blocks
+        lazyspec::engine::document::RelationType::new("blocks")
     );
     assert_eq!(target.related[0].target, "RFC-001");
 
@@ -756,7 +756,7 @@ fn test_inverse_link_refreshes_live_store_reverse_links() {
         .reverse_links_for(&std::path::PathBuf::from("docs/rfcs/RFC-001-source.md"));
     assert!(
         rev.iter().any(
-            |(rt, p)| *rt == lazyspec::engine::document::RelationType::Blocks
+            |(rt, p)| *rt == lazyspec::engine::document::RelationType::new("blocks")
                 && p == &std::path::PathBuf::from("docs/rfcs/RFC-002-target.md")
         ),
         "viewed doc should show it is blocked by the target after an inverse link, got {rev:?}"
@@ -807,7 +807,7 @@ fn test_enter_creates_link_and_closes() {
     );
     assert_eq!(
         source.related[0].rel_type,
-        lazyspec::engine::document::RelationType::Implements
+        lazyspec::engine::document::RelationType::new("implements")
     );
     assert_eq!(source.related[0].target, "RFC-002");
 }
@@ -885,6 +885,6 @@ fn test_enter_with_tab_writes_correct_rel_type() {
         .unwrap();
     assert_eq!(
         source.related[0].rel_type,
-        lazyspec::engine::document::RelationType::Blocks
+        lazyspec::engine::document::RelationType::new("blocks")
     );
 }

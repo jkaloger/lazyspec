@@ -5,7 +5,6 @@ use std::path::Path;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
 
-use crate::tui::state::forms::REL_TYPES;
 use crate::tui::state::{App, FilterField, PreviewTab, ViewMode};
 
 impl App {
@@ -111,8 +110,10 @@ impl App {
         match code {
             KeyCode::Esc => self.close_link_editor(),
             KeyCode::Tab => {
-                self.link_editor.rel_type_index =
-                    (self.link_editor.rel_type_index + 1) % REL_TYPES.len();
+                if !self.rel_types.is_empty() {
+                    self.link_editor.rel_type_index =
+                        (self.link_editor.rel_type_index + 1) % self.rel_types.len();
+                }
             }
             KeyCode::Enter => {
                 if !self.link_editor.results.is_empty() {

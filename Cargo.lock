@@ -1197,6 +1197,7 @@ dependencies = [
  "crossterm 0.28.1",
  "image",
  "indicatif",
+ "lazyspec",
  "notify",
  "pulldown-cmark",
  "ratatui",

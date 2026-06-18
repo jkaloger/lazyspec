@@ -61,6 +61,21 @@ fn main() -> anyhow::Result<()> {
     }
 
     let fs = RealFileSystem;
+
+    // `fix --config` migrates a legacy config that strict load would reject, so
+    // it must dispatch before `Config::load` via the lenient read (mirroring how
+    // Init/Completions are special-cased above).
+    if let Some(Commands::Fix {
+        config: true,
+        dry_run,
+        json,
+        ..
+    }) = &cli.command
+    {
+        let exit_code = lazyspec::cli::fix::run_config(&cwd, *dry_run, *json, &fs);
+        std::process::exit(exit_code);
+    }
+
     let config = Config::load(&cwd, &fs)?;
 
     match cli.command {
@@ -299,6 +314,7 @@ fn main() -> anyhow::Result<()> {
             json,
             renumber,
             doc_type,
+            config: _,
         }) => {
             let store = Store::load(&cwd, &config)?;
             let fs = lazyspec::engine::fs::RealFileSystem;

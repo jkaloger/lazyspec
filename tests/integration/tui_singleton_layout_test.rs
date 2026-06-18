@@ -19,6 +19,13 @@ name = "rfc"
 plural = "rfcs"
 dir = "docs/rfcs"
 prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "related-to"
 "#;
     Config::parse(toml_str).unwrap()
 }

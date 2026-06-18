@@ -149,9 +149,42 @@ pub struct TypeDef {
     pub parent_type: Option<String>,
 }
 
+/// One entry in the `[[relationships]]` block: a relationship name and its
+/// optional inverse keyword. A relationship with no `inverse` is symmetric
+/// (e.g. `related-to`); a directional one declares its inverse (e.g.
+/// `implements` / `implemented-by`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelationshipDef {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inverse: Option<String>,
+}
+
+/// The canonical starter relationship vocabulary, mirroring the closed enum that
+/// preceded the config registry. Used by `init`'s `starter_config`, the
+/// `to_toml` writer, and the test-only `Config::default()`. The load path
+/// carries none (ADR-011): a real config must declare `[[relationships]]`.
+pub fn starter_relationships() -> Vec<RelationshipDef> {
+    let directional = |name: &str, inverse: &str| RelationshipDef {
+        name: name.to_string(),
+        inverse: Some(inverse.to_string()),
+    };
+    vec![
+        directional("implements", "implemented-by"),
+        directional("supersedes", "superseded-by"),
+        directional("blocks", "blocked-by"),
+        RelationshipDef {
+            name: "related-to".to_string(),
+            inverse: None,
+        },
+    ]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentConfig {
-    #[serde(skip)]
+    // Serialized so `init` writes `[[types]]` into the config it scaffolds, but
+    // deserialized via `RawConfig` in `Config::parse`, not the derive.
+    #[serde(skip_deserializing)]
     pub types: Vec<TypeDef>,
     pub naming: Naming,
     #[serde(skip)]
@@ -164,7 +197,6 @@ pub struct DocumentConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilesystemConfig {
-    pub directories: Directories,
     pub templates: Templates,
 }
 
@@ -229,9 +261,15 @@ pub struct Config {
     pub documents: DocumentConfig,
     #[serde(flatten)]
     pub filesystem: FilesystemConfig,
+    // Serialized so `to_toml` writes `[[relationships]]` into the config it emits,
+    // but deserialized via `RawConfig` in `Config::parse`, not the derive.
+    #[serde(skip_deserializing)]
+    pub relationships: Vec<RelationshipDef>,
     #[serde(rename = "tui")]
     pub ui: UiConfig,
-    #[serde(skip)]
+    // Serialized so `to_toml` writes `[[rules]]` into the config it emits, but
+    // deserialized via `RawConfig` in `Config::parse`, not the derive.
+    #[serde(skip_deserializing)]
     pub rules: Vec<ValidationRule>,
     #[serde(skip)]
     pub ref_count_ceiling: usize,
@@ -239,14 +277,6 @@ pub struct Config {
     pub certification: CertificationConfig,
     #[serde(skip)]
     pub coordination: Option<CoordinationConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Directories {
-    pub rfcs: String,
-    pub adrs: String,
-    pub stories: String,
-    pub iterations: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,8 +344,8 @@ pub struct GithubConfig {
 #[derive(Deserialize)]
 struct RawConfig {
     types: Option<Vec<TypeDef>>,
+    relationships: Option<Vec<RelationshipDef>>,
     rules: Option<Vec<ValidationRule>>,
-    directories: Option<Directories>,
     templates: Option<Templates>,
     naming: Option<Naming>,
     tui: Option<UiConfig>,
@@ -329,14 +359,13 @@ struct RawConfig {
     coordination: Option<CoordinationConfig>,
 }
 
-fn build_type_def(name: &str, dir: &str, prefix: &str, icon: &str) -> TypeDef {
-    let plural = match name {
-        "story" => "stories".to_string(),
-        _ => format!("{}s", name),
-    };
-    TypeDef {
+/// The canonical starter document types. The engine carries no built-in types in
+/// its load path (see ADR-011); this is the set `init` writes into a fresh config
+/// and the set the `#[cfg(test)]` `Config::default()` fixture uses.
+pub fn starter_types() -> Vec<TypeDef> {
+    let simple = |name: &str, plural: &str, dir: &str, prefix: &str, icon: &str| TypeDef {
         name: name.to_string(),
-        plural,
+        plural: plural.to_string(),
         dir: dir.to_string(),
         prefix: prefix.to_string(),
         icon: Some(icon.to_string()),
@@ -345,16 +374,19 @@ fn build_type_def(name: &str, dir: &str, prefix: &str, icon: &str) -> TypeDef {
         store: StoreBackend::default(),
         singleton: false,
         parent_type: None,
-    }
-}
-
-fn default_types() -> Vec<TypeDef> {
+    };
     vec![
-        build_type_def("rfc", "docs/rfcs", "RFC", "●"),
-        build_type_def("story", "docs/stories", "STORY", "▲"),
-        build_type_def("iteration", "docs/iterations", "ITERATION", "◆"),
-        build_type_def("adr", "docs/adrs", "ADR", "■"),
-        build_type_def("spec", "docs/specs", "SPEC", "📋"),
+        simple("rfc", "rfcs", "docs/rfcs", "RFC", "●"),
+        simple("story", "stories", "docs/stories", "STORY", "▲"),
+        simple(
+            "iteration",
+            "iterations",
+            "docs/iterations",
+            "ITERATION",
+            "◆",
+        ),
+        simple("adr", "adrs", "docs/adrs", "ADR", "■"),
+        simple("spec", "specs", "docs/specs", "SPEC", "📋"),
         TypeDef {
             name: "convention".to_string(),
             plural: "convention".to_string(),
@@ -382,7 +414,9 @@ fn default_types() -> Vec<TypeDef> {
     ]
 }
 
-fn default_rules() -> Vec<ValidationRule> {
+/// The canonical starter validation rules. Not injected by the load path; only
+/// the config `init` writes and the test-only `Config::default()` use these.
+pub fn default_rules() -> Vec<ValidationRule> {
     vec![
         ValidationRule::ParentChild {
             name: "stories-need-rfcs".to_string(),
@@ -407,38 +441,12 @@ fn default_rules() -> Vec<ValidationRule> {
     ]
 }
 
-fn directories_from_types(types: &[TypeDef]) -> Directories {
-    let find = |name: &str| -> String {
-        types
-            .iter()
-            .find(|t| t.name == name)
-            .map(|t| t.dir.clone())
-            .unwrap_or_default()
-    };
-    Directories {
-        rfcs: find("rfc"),
-        adrs: find("adr"),
-        stories: find("story"),
-        iterations: find("iteration"),
-    }
-}
-
-fn types_from_directories(dirs: &Directories) -> Vec<TypeDef> {
-    vec![
-        build_type_def("rfc", &dirs.rfcs, "RFC", "●"),
-        build_type_def("story", &dirs.stories, "STORY", "▲"),
-        build_type_def("iteration", &dirs.iterations, "ITERATION", "◆"),
-        build_type_def("adr", &dirs.adrs, "ADR", "■"),
-    ]
-}
-
+#[cfg(any(test, feature = "test-support"))]
 impl Default for Config {
     fn default() -> Self {
-        let types = default_types();
-        let directories = directories_from_types(&types);
         Config {
             documents: DocumentConfig {
-                types,
+                types: starter_types(),
                 naming: Naming {
                     pattern: "{type}-{n:03}-{title}.md".to_string(),
                 },
@@ -447,11 +455,11 @@ impl Default for Config {
                 github: None,
             },
             filesystem: FilesystemConfig {
-                directories,
                 templates: Templates {
                     dir: ".lazyspec/templates".to_string(),
                 },
             },
+            relationships: starter_relationships(),
             ui: UiConfig::default(),
             rules: default_rules(),
             ref_count_ceiling: 15,
@@ -479,23 +487,36 @@ impl DocumentConfig {
 
 impl Config {
     pub fn parse(toml_str: &str) -> Result<Self> {
+        Self::parse_inner(toml_str, false)
+    }
+
+    /// Lenient parse used only by `fix --config`: tolerates a missing
+    /// `[[relationships]]` block (treating it as empty) so the migration can
+    /// read an upgraded legacy config that strict load would reject. All other
+    /// validation (types, numbering, github, etc.) is preserved.
+    pub fn parse_lenient(toml_str: &str) -> Result<Self> {
+        Self::parse_inner(toml_str, true)
+    }
+
+    fn parse_inner(toml_str: &str, lenient: bool) -> Result<Self> {
         let raw: RawConfig = toml::from_str(toml_str)?;
 
-        let types = if let Some(types) = raw.types {
-            types
-        } else if let Some(ref dirs) = raw.directories {
-            types_from_directories(dirs)
-        } else {
-            default_types()
+        let types = match raw.types {
+            Some(types) if !types.is_empty() => types,
+            _ => bail!(
+                ".lazyspec.toml is missing required [[types]]. Run `lazyspec init` to scaffold a config."
+            ),
         };
 
-        let directories = if let Some(dirs) = raw.directories {
-            dirs
-        } else {
-            directories_from_types(&types)
+        let relationships = match raw.relationships {
+            Some(relationships) => relationships,
+            None if lenient => Vec::new(),
+            None => bail!(
+                "[[relationships]] section is required; run `lazyspec fix --config` to add the standard set"
+            ),
         };
 
-        let rules = raw.rules.unwrap_or_else(default_rules);
+        let rules = raw.rules.unwrap_or_default();
 
         let any_sqids = types
             .iter()
@@ -564,11 +585,11 @@ impl Config {
                 github: raw.github,
             },
             filesystem: FilesystemConfig {
-                directories,
                 templates: raw.templates.unwrap_or(Templates {
                     dir: ".lazyspec/templates".to_string(),
                 }),
             },
+            relationships,
             ui: raw.tui.unwrap_or_default(),
             rules,
             ref_count_ceiling,
@@ -582,11 +603,33 @@ impl Config {
         fs: &dyn crate::engine::fs::FileSystem,
     ) -> Result<Self> {
         let path = project_root.join(".lazyspec.toml");
-        if fs.exists(&path) {
-            let content = fs.read_to_string(&path)?;
-            return Self::parse(&content);
+        if !fs.exists(&path) {
+            bail!(
+                "no .lazyspec.toml found in {}. Run `lazyspec init` to scaffold a config.",
+                project_root.display()
+            );
         }
-        Ok(Self::default())
+        let content = fs.read_to_string(&path)?;
+        Self::parse(&content)
+    }
+
+    /// Lenient counterpart of [`Config::load`], used only by `fix --config`.
+    /// Reads `.lazyspec.toml` without enforcing the strict `[[relationships]]`
+    /// requirement, so the migration can repair the very config strict load
+    /// would reject.
+    pub fn load_lenient(
+        project_root: &std::path::Path,
+        fs: &dyn crate::engine::fs::FileSystem,
+    ) -> Result<Self> {
+        let path = project_root.join(".lazyspec.toml");
+        if !fs.exists(&path) {
+            bail!(
+                "no .lazyspec.toml found in {}. Run `lazyspec init` to scaffold a config.",
+                project_root.display()
+            );
+        }
+        let content = fs.read_to_string(&path)?;
+        Self::parse_lenient(&content)
     }
 
     pub fn to_toml(&self) -> Result<String> {
@@ -595,6 +638,50 @@ impl Config {
 
     pub fn type_by_name(&self, name: &str) -> Option<&TypeDef> {
         self.documents.types.iter().find(|t| t.name == name)
+    }
+
+    /// The relationship declared under the canonical `name`, if any.
+    pub fn relationship_by_name(&self, name: &str) -> Option<&RelationshipDef> {
+        self.relationships.iter().find(|r| r.name == name)
+    }
+
+    /// The declared inverse keyword for a canonical relationship `name`, if it
+    /// is directional. Symmetric relationships return `None`.
+    pub fn inverse_of(&self, name: &str) -> Option<&str> {
+        self.relationship_by_name(name)
+            .and_then(|r| r.inverse.as_deref())
+    }
+
+    /// All link/unlink keywords the config declares: each relationship `name`
+    /// followed by each declared `inverse`. The source of truth for both shell
+    /// completion and the TUI link-editor cycler.
+    pub fn relationship_keywords(&self) -> Vec<String> {
+        let mut keywords: Vec<String> = self.relationships.iter().map(|r| r.name.clone()).collect();
+        keywords.extend(self.relationships.iter().filter_map(|r| r.inverse.clone()));
+        keywords
+    }
+
+    /// Resolve a link/unlink keyword against the registry. A keyword matching a
+    /// declared `name` resolves to `(name, false)` (not flipped); a keyword
+    /// matching some declared `inverse` resolves to that name `(name, true)`
+    /// (direction flipped). An unknown keyword is an error naming it. The
+    /// config registry is the sole source of relationship names and inverses.
+    pub fn resolve_relationship(&self, keyword: &str) -> Result<(String, bool)> {
+        let keyword = keyword.to_lowercase();
+        if let Some(rel) = self.relationship_by_name(&keyword) {
+            return Ok((rel.name.clone(), false));
+        }
+        if let Some(rel) = self
+            .relationships
+            .iter()
+            .find(|r| r.inverse.as_deref() == Some(keyword.as_str()))
+        {
+            return Ok((rel.name.clone(), true));
+        }
+        bail!(
+            "unknown relationship \"{}\" (not declared in [[relationships]])",
+            keyword
+        )
     }
 }
 
@@ -626,6 +713,35 @@ impl TypeDef {
 mod tests {
     use super::*;
 
+    /// A minimal valid `[[types]]` + `[[relationships]]` preamble. Strict load
+    /// requires at least one type and a `[[relationships]]` block, so tests that
+    /// only exercise other sections prepend this.
+    const TYPES: &str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "related-to"
+"#;
+
+    /// A standalone `[[relationships]]` block for tests that build their own
+    /// `[[types]]` inline (which would otherwise trip the strict-load error).
+    const RELATIONSHIPS: &str = r#"
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "related-to"
+"#;
+
     #[test]
     fn test_store_backend_display() {
         assert_eq!(StoreBackend::Filesystem.to_string(), "filesystem");
@@ -634,83 +750,79 @@ mod tests {
 
     #[test]
     fn test_certification_default_when_absent() {
-        let toml_str = r#"
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-"#;
-        let config = Config::parse(toml_str).unwrap();
+        let config = Config::parse(TYPES).unwrap();
         assert!(config.certification.normalize);
         assert!(config.certification.overrides.is_empty());
     }
 
     #[test]
     fn test_certification_explicit_true() {
-        let toml_str = r#"
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
 [certification]
 normalize = true
-"#;
-        let config = Config::parse(toml_str).unwrap();
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
         assert!(config.certification.normalize);
     }
 
     #[test]
     fn test_certification_explicit_false() {
-        let toml_str = r#"
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
 [certification]
 normalize = false
-"#;
-        let config = Config::parse(toml_str).unwrap();
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
         assert!(!config.certification.normalize);
     }
 
     #[test]
     fn test_certification_override_disables_normalize() {
-        let toml_str = r#"
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
 [certification]
 normalize = true
 
 [certification.overrides."docs/specs/SPEC-007"]
 normalize = false
-"#;
-        let config = Config::parse(toml_str).unwrap();
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
         assert!(!config.certification.should_normalize("docs/specs/SPEC-007"));
     }
 
     #[test]
     fn test_certification_override_does_not_affect_other_specs() {
-        let toml_str = r#"
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
 [certification]
 normalize = true
 
 [certification.overrides."docs/specs/SPEC-007"]
 normalize = false
-"#;
-        let config = Config::parse(toml_str).unwrap();
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
         assert!(config.certification.should_normalize("docs/specs/SPEC-008"));
     }
 
     #[test]
     fn test_should_normalize_falls_back_to_global() {
-        let toml_str = r#"
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
 [certification]
 normalize = false
-"#;
-        let config = Config::parse(toml_str).unwrap();
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
         assert!(!config.certification.should_normalize("docs/specs/SPEC-001"));
     }
 
@@ -723,7 +835,7 @@ plural = "rfcs"
 dir = "docs/rfcs"
 prefix = "RFC"
 "#;
-        let config = Config::parse(toml_str).unwrap();
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
         assert_eq!(config.documents.types[0].store, StoreBackend::Filesystem);
     }
 
@@ -740,7 +852,7 @@ dir = "docs/rfcs"
 prefix = "RFC"
 store = "github-issues"
 "#;
-        let config = Config::parse(toml_str).unwrap();
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
         assert_eq!(config.documents.types[0].store, StoreBackend::GithubIssues);
     }
 
@@ -754,7 +866,7 @@ dir = "docs/rfcs"
 prefix = "RFC"
 store = "filesystem"
 "#;
-        let config = Config::parse(toml_str).unwrap();
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
         assert_eq!(config.documents.types[0].store, StoreBackend::Filesystem);
     }
 
@@ -777,18 +889,21 @@ dir = "docs/stories"
 prefix = "STORY"
 store = "github-issues"
 "#;
-        let config = Config::parse(toml_str).unwrap();
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
         assert_eq!(config.documents.types[0].store, StoreBackend::Filesystem);
         assert_eq!(config.documents.types[1].store, StoreBackend::GithubIssues);
     }
 
     #[test]
     fn test_github_config_defaults() {
-        let toml_str = r#"
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
 [github]
 repo = "owner/repo"
-"#;
-        let config = Config::parse(toml_str).unwrap();
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
         let gh = config.documents.github.unwrap();
         assert_eq!(gh.repo.as_deref(), Some("owner/repo"));
         assert_eq!(gh.cache_ttl, 60);
@@ -796,12 +911,15 @@ repo = "owner/repo"
 
     #[test]
     fn test_github_config_custom_cache_ttl() {
-        let toml_str = r#"
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
 [github]
 repo = "owner/repo"
 cache_ttl = 120
-"#;
-        let config = Config::parse(toml_str).unwrap();
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
         let gh = config.documents.github.unwrap();
         assert_eq!(gh.cache_ttl, 120);
     }
@@ -816,7 +934,7 @@ dir = "docs/rfcs"
 prefix = "RFC"
 store = "filesystem"
 "#;
-        let config = Config::parse(toml_str).unwrap();
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
         assert!(config.documents.github.is_none());
     }
 
@@ -830,7 +948,7 @@ dir = "docs/rfcs"
 prefix = "RFC"
 store = "github-issues"
 "#;
-        let err = Config::parse(toml_str).unwrap_err();
+        let err = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap_err();
         assert!(
             err.to_string().contains("[github] section"),
             "unexpected error: {}",
@@ -864,7 +982,7 @@ dir = "docs/adrs"
 prefix = "ADR"
 store = "github-issues"
 "#;
-        let config = Config::parse(toml_str).unwrap();
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
         assert_eq!(config.documents.github_issues_types(), vec!["story", "adr"]);
     }
 
@@ -887,7 +1005,7 @@ dir = "docs/stories"
 prefix = "STORY"
 store = "github-issues"
 "#;
-        let config = Config::parse(toml_str).unwrap();
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
         assert!(config.documents.has_github_issues_types());
     }
 
@@ -917,17 +1035,17 @@ store = "github-issues"
 
     #[test]
     fn test_coordination_explicit_values() {
-        let toml_str = r#"
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
 [coordination]
 remote = "upstream"
 lease_duration = "30m"
 grace_period = "5m"
 max_push_retries = 10
-"#;
-        let config = Config::parse(toml_str).unwrap();
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
         let coord = config.coordination.unwrap();
         assert_eq!(coord.remote, "upstream");
         assert_eq!(coord.lease_duration, "30m");
@@ -937,13 +1055,13 @@ max_push_retries = 10
 
     #[test]
     fn test_coordination_defaults_when_empty_section() {
-        let toml_str = r#"
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
 [coordination]
-"#;
-        let config = Config::parse(toml_str).unwrap();
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
         let coord = config.coordination.unwrap();
         assert_eq!(coord.remote, "origin");
         assert_eq!(coord.lease_duration, "60m");
@@ -953,11 +1071,7 @@ pattern = "{type}-{n:03}-{title}.md"
 
     #[test]
     fn test_coordination_none_when_absent() {
-        let toml_str = r#"
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-"#;
-        let config = Config::parse(toml_str).unwrap();
+        let config = Config::parse(TYPES).unwrap();
         assert!(config.coordination.is_none());
     }
 
@@ -974,7 +1088,7 @@ dir = "docs/rfcs"
 prefix = "RFC"
 store = "github-issues"
 "#;
-        let config = Config::parse(toml_str).unwrap();
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
         let gh = config.documents.github.unwrap();
         assert!(gh.repo.is_none());
     }
@@ -994,7 +1108,7 @@ dir = "docs/rfcs"
 prefix = "RFC"
 store = "git-ref"
 "#;
-        let config = Config::parse(toml_str).unwrap();
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
         assert_eq!(config.documents.types[0].store, StoreBackend::GitRef);
     }
 
@@ -1006,24 +1120,20 @@ store = "git-ref"
 
     #[test]
     fn test_multiline_config_parses_max_expanded_height() {
-        let toml_str = r#"
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
 [tui.multiline]
 max_expanded_height = 3
-"#;
-        let config = Config::parse(toml_str).unwrap();
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
         assert_eq!(config.ui.multiline.max_expanded_height, 3);
     }
 
     #[test]
     fn test_multiline_config_defaults_when_section_absent() {
-        let toml_str = r#"
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-"#;
-        let config = Config::parse(toml_str).unwrap();
+        let config = Config::parse(TYPES).unwrap();
         assert_eq!(config.ui.multiline.max_expanded_height, 5);
     }
 
@@ -1053,9 +1163,78 @@ plural = "adrs"
 dir = "docs/adrs"
 prefix = "ADR"
 "#;
-        let config = Config::parse(toml_str).unwrap();
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
         assert_eq!(config.documents.types[0].store, StoreBackend::GitRef);
         assert_eq!(config.documents.types[1].store, StoreBackend::GithubIssues);
         assert_eq!(config.documents.types[2].store, StoreBackend::Filesystem);
+    }
+
+    // AC6: missing [[relationships]] block is a hard load error.
+    #[test]
+    fn parse_without_relationships_block_is_hard_error() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+"#;
+        let err = Config::parse(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("[[relationships]]"),
+            "error should name the missing section, got: {msg}"
+        );
+        assert!(
+            msg.contains("lazyspec fix"),
+            "error should point at the fix remedy, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_with_relationships_block_succeeds() {
+        let config = Config::parse(TYPES).unwrap();
+        assert!(config.relationship_by_name("implements").is_some());
+        assert!(config.relationship_by_name("related-to").is_some());
+    }
+
+    #[test]
+    fn resolve_relationship_canonical_inverse_symmetric_and_unknown() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "tracks"
+inverse = "tracked-by"
+
+[[relationships]]
+name = "related-to"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+
+        // Canonical name resolves, not flipped.
+        assert_eq!(
+            config.resolve_relationship("tracks").unwrap(),
+            ("tracks".to_string(), false)
+        );
+        // Inverse keyword resolves to the canonical name, flipped.
+        assert_eq!(
+            config.resolve_relationship("tracked-by").unwrap(),
+            ("tracks".to_string(), true)
+        );
+        // Symmetric relationship resolves, not flipped, and has no inverse.
+        assert_eq!(
+            config.resolve_relationship("related-to").unwrap(),
+            ("related-to".to_string(), false)
+        );
+        assert_eq!(config.inverse_of("related-to"), None);
+        assert_eq!(config.inverse_of("tracks"), Some("tracked-by"));
+        // Unknown keyword errors, naming it.
+        let err = config.resolve_relationship("frobs").unwrap_err();
+        assert!(err.to_string().contains("frobs"));
     }
 }

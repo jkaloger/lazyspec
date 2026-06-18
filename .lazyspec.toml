@@ -62,6 +62,21 @@ dir = "docs/audits"
 prefix = "AUDIT"
 icon = "🔍"
 
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "supersedes"
+inverse = "superseded-by"
+
+[[relationships]]
+name = "blocks"
+inverse = "blocked-by"
+
+[[relationships]]
+name = "related-to"
+
 [github]
 repo = 'jkaloger/lazyspec'
 
@@ -75,3 +90,26 @@ pattern = "{type}-{n:03}-{title}.md"
 left = ["mode", "git_branch"]
 right = ["version", "help_hint"]
 
+
+[[rules]]
+shape = "parent-child"
+name = "stories-need-rfcs"
+child = "story"
+parent = "rfc"
+link = "implements"
+severity = "warning"
+
+[[rules]]
+shape = "parent-child"
+name = "iterations-need-stories"
+child = "iteration"
+parent = "story"
+link = "implements"
+severity = "error"
+
+[[rules]]
+shape = "relation-existence"
+name = "adrs-need-relations"
+type = "adr"
+require = "any-relation"
+severity = "error"

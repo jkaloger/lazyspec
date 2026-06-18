@@ -9,7 +9,7 @@ tags:
 - validation
 - dx
 related:
-- related to: RFC-008
+- related-to: RFC-008
 ---
 
 

@@ -4,7 +4,6 @@ use std::path::Path;
 use clap_complete::engine::CompletionCandidate;
 
 use crate::engine::config::Config;
-use crate::engine::document::RelationType;
 use crate::engine::store::Store;
 
 pub fn complete_doc_id(current: &OsStr) -> Vec<CompletionCandidate> {
@@ -36,10 +35,23 @@ pub fn complete_doc_id_in(root: &Path, current: &OsStr) -> Vec<CompletionCandida
 }
 
 pub fn complete_rel_type(current: &OsStr) -> Vec<CompletionCandidate> {
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(_) => return vec![],
+    };
+    complete_rel_type_in(&cwd, current)
+}
+
+pub fn complete_rel_type_in(root: &Path, current: &OsStr) -> Vec<CompletionCandidate> {
     let current_str = current.to_str().unwrap_or("");
-    RelationType::ALL_STRS
+    let fs = crate::engine::fs::RealFileSystem;
+    let config = match Config::load(root, &fs) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    config
+        .relationship_keywords()
         .into_iter()
-        .chain(RelationType::INVERSE_STRS)
         .filter(|rt| rt.starts_with(current_str))
         .map(CompletionCandidate::new)
         .collect()
@@ -50,9 +62,11 @@ mod tests {
     use super::*;
 
     fn values(current: &str) -> Vec<String> {
-        complete_rel_type(OsStr::new(current))
+        let config = Config::default();
+        config
+            .relationship_keywords()
             .into_iter()
-            .map(|c| c.get_value().to_string_lossy().into_owned())
+            .filter(|rt| rt.starts_with(current))
             .collect()
     }
 

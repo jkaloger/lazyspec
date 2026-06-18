@@ -237,13 +237,14 @@ fn doc_to_json_link_command_produces_id_targets() {
 
     let store = fixture.store();
     let fs = lazyspec::engine::fs::RealFileSystem;
-    lazyspec::cli::link::link(
+    lazyspec::cli::link::link_with_config(
         fixture.root(),
         &store,
         "STORY-001",
         "implements",
         "RFC-001",
         &fs,
+        Some(&fixture.config()),
     )
     .unwrap();
 
@@ -256,4 +257,65 @@ fn doc_to_json_link_command_produces_id_targets() {
 
     assert_eq!(json["related"][0]["type"], "implements");
     assert_eq!(json["related"][0]["target"], "RFC-001");
+}
+
+// AC7: --json serializes a relationship under its configured name, end-to-end.
+#[test]
+fn json_output_serializes_relationship_by_configured_name() {
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    // A project declaring a custom `tracks` relationship.
+    let config = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "tracks"
+
+[[relationships]]
+name = "related-to"
+
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[templates]
+dir = ".lazyspec/templates"
+"#;
+    std::fs::write(root.join(".lazyspec.toml"), config).unwrap();
+    std::fs::create_dir_all(root.join("docs/rfcs")).unwrap();
+    std::fs::write(
+        root.join("docs/rfcs/RFC-001-a.md"),
+        "---\ntitle: \"A\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-01-01\ntags: []\nrelated:\n- tracks: RFC-002\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("docs/rfcs/RFC-002-b.md"),
+        "---\ntitle: \"B\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-01-01\ntags: []\n---\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lazyspec"))
+        .args(["show", "RFC-001", "--json"])
+        .current_dir(root)
+        .output()
+        .expect("failed to run lazyspec show");
+    assert!(
+        output.status.success(),
+        "show should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+    assert_eq!(
+        parsed["related"][0]["type"], "tracks",
+        "relationship should serialize under its configured name"
+    );
 }

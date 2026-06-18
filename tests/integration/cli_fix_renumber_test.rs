@@ -30,6 +30,13 @@ prefix = "ADR"
 [numbering.sqids]
 salt = "test-renumber-salt"
 min_length = 3
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "related-to"
 "#;
     lazyspec::engine::config::Config::parse(toml).unwrap()
 }

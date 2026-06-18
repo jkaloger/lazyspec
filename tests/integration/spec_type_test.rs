@@ -109,7 +109,7 @@ fn story_inherits_parent_spec_relations() {
     assert!(
         spec_links
             .iter()
-            .any(|(rel, target)| *rel == RelationType::Implements && *target == rfc_path),
+            .any(|(rel, target)| *rel == RelationType::new("implements") && *target == rfc_path),
         "spec should have the 'implements' link to the RFC, got: {:?}",
         spec_links
     );
@@ -119,7 +119,7 @@ fn story_inherits_parent_spec_relations() {
     assert!(
         rfc_links
             .iter()
-            .any(|(rel, src)| *rel == RelationType::Implements && *src == spec_file_path),
+            .any(|(rel, src)| *rel == RelationType::new("implements") && *src == spec_file_path),
         "RFC reverse links should include the spec, got: {:?}",
         rfc_links
     );

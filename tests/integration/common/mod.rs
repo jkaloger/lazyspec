@@ -19,6 +19,9 @@ impl TestFixture {
         std::fs::create_dir_all(root.join("docs/stories")).unwrap();
         std::fs::create_dir_all(root.join("docs/iterations")).unwrap();
         std::fs::create_dir_all(root.join("docs/specs")).unwrap();
+        // Strict load requires a config with [[types]]; mirror a real project.
+        let config = lazyspec::cli::init::starter_config();
+        std::fs::write(root.join(".lazyspec.toml"), config.to_toml().unwrap()).unwrap();
         Self { dir }
     }
 
@@ -108,7 +111,7 @@ impl TestFixture {
         related_to: Option<&str>,
     ) -> PathBuf {
         let related = match related_to {
-            Some(path) => format!("related:\n- related to: {}", path),
+            Some(path) => format!("related:\n- related-to: {}", path),
             None => String::new(),
         };
         let content = format!(

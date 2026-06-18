@@ -325,10 +325,24 @@ fn prune_json_output_is_structured() {
 
     // Write .lazyspec.toml with reserved numbering so the binary can load config
     let toml_content = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+numbering = "reserved"
+
 [numbering.reserved]
 remote = "origin"
 format = "incremental"
 max_retries = 5
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "related-to"
 "#;
     std::fs::write(fixture.root().join(".lazyspec.toml"), toml_content).unwrap();
 

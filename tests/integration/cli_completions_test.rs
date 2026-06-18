@@ -84,7 +84,9 @@ fn doc_id_completer_filters_by_prefix() {
 
 #[test]
 fn rel_type_completer_returns_all_types() {
-    let candidates = completions::complete_rel_type(OsStr::new(""));
+    // Keywords now come from the project's [[relationships]] registry on disk.
+    let fixture = TestFixture::new();
+    let candidates = completions::complete_rel_type_in(fixture.root(), OsStr::new(""));
     let values: Vec<String> = candidates
         .iter()
         .map(|c| c.get_value().to_string_lossy().into_owned())
@@ -106,7 +108,8 @@ fn rel_type_completer_returns_all_types() {
 
 #[test]
 fn rel_type_completer_filters_by_prefix() {
-    let candidates = completions::complete_rel_type(OsStr::new("b"));
+    let fixture = TestFixture::new();
+    let candidates = completions::complete_rel_type_in(fixture.root(), OsStr::new("b"));
     let values: Vec<String> = candidates
         .iter()
         .map(|c| c.get_value().to_string_lossy().into_owned())

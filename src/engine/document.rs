@@ -112,65 +112,43 @@ impl fmt::Display for Status {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RelationType {
-    Implements,
-    Supersedes,
-    Blocks,
-    RelatedTo,
-}
+/// A relationship name (e.g. `implements`, `related-to`). Mirrors [`DocType`]:
+/// an open string newtype validated against the config `[[relationships]]`
+/// registry rather than by the type system. `FromStr` is pure (any string is a
+/// valid value); `link`/`validate` reject names absent from the registry.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct RelationType(String);
 
 impl RelationType {
-    pub const ALL: [RelationType; 4] = [
-        RelationType::Implements,
-        RelationType::Supersedes,
-        RelationType::Blocks,
-        RelationType::RelatedTo,
-    ];
+    pub fn new(s: &str) -> Self {
+        RelationType(s.to_lowercase())
+    }
 
-    pub const ALL_STRS: [&str; 4] = ["implements", "supersedes", "blocks", "related-to"];
-
-    pub const INVERSE_STRS: [&str; 3] = ["implemented-by", "superseded-by", "blocked-by"];
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedRelKeyword {
-    pub rel_type: RelationType,
-    pub flipped: bool,
-}
-
-/// Resolves a link/unlink keyword to its canonical relation. Inverse keywords
-/// (e.g. `implemented-by`) map to the canonical relation with the direction
-/// flipped; `related-to` is symmetric and has no inverse keyword.
-pub fn resolve_rel_keyword(s: &str) -> Result<ResolvedRelKeyword> {
-    match s.to_lowercase().as_str() {
-        "implemented-by" => Ok(ResolvedRelKeyword {
-            rel_type: RelationType::Implements,
-            flipped: true,
-        }),
-        "superseded-by" => Ok(ResolvedRelKeyword {
-            rel_type: RelationType::Supersedes,
-            flipped: true,
-        }),
-        "blocked-by" => Ok(ResolvedRelKeyword {
-            rel_type: RelationType::Blocks,
-            flipped: true,
-        }),
-        _ => Ok(ResolvedRelKeyword {
-            rel_type: s.parse()?,
-            flipped: false,
-        }),
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
 impl fmt::Display for RelationType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RelationType::Implements => write!(f, "implements"),
-            RelationType::Supersedes => write!(f, "supersedes"),
-            RelationType::Blocks => write!(f, "blocks"),
-            RelationType::RelatedTo => write!(f, "related-to"),
-        }
+        write!(f, "{}", self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for RelationType {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(RelationType(s.to_lowercase()))
+    }
+}
+
+impl std::str::FromStr for RelationType {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(RelationType::new(s))
     }
 }
 
@@ -193,19 +171,6 @@ impl std::str::FromStr for Status {
             "rejected" => Ok(Status::Rejected),
             "superseded" => Ok(Status::Superseded),
             _ => Err(anyhow!("unknown status: {}", s)),
-        }
-    }
-}
-
-impl std::str::FromStr for RelationType {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "implements" => Ok(RelationType::Implements),
-            "supersedes" => Ok(RelationType::Supersedes),
-            "blocks" => Ok(RelationType::Blocks),
-            "related-to" | "related to" => Ok(RelationType::RelatedTo),
-            _ => Err(anyhow!("unknown relation type: {}", s)),
         }
     }
 }
@@ -583,61 +548,15 @@ Body.
     }
 
     #[test]
-    fn canonical_keywords_resolve_not_flipped() {
-        let cases = [
-            ("implements", RelationType::Implements),
-            ("supersedes", RelationType::Supersedes),
-            ("blocks", RelationType::Blocks),
-            ("related-to", RelationType::RelatedTo),
-        ];
-        for (kw, expected) in cases {
-            let resolved = resolve_rel_keyword(kw).unwrap();
-            assert_eq!(resolved.rel_type, expected, "keyword {kw}");
-            assert!(!resolved.flipped, "keyword {kw} should not be flipped");
-        }
+    fn relation_type_new_lowercases_and_displays_inner() {
+        assert_eq!(RelationType::new("Tracks").to_string(), "tracks");
+        assert_eq!(RelationType::new("RELATED-TO").as_str(), "related-to");
     }
 
     #[test]
-    fn inverse_keywords_resolve_to_canonical_flipped() {
-        let cases = [
-            ("implemented-by", RelationType::Implements),
-            ("superseded-by", RelationType::Supersedes),
-            ("blocked-by", RelationType::Blocks),
-        ];
-        for (kw, expected) in cases {
-            let resolved = resolve_rel_keyword(kw).unwrap();
-            assert_eq!(resolved.rel_type, expected, "keyword {kw}");
-            assert!(resolved.flipped, "keyword {kw} should be flipped");
-        }
-    }
-
-    #[test]
-    fn related_to_resolves_not_flipped() {
-        let resolved = resolve_rel_keyword("related-to").unwrap();
-        assert_eq!(resolved.rel_type, RelationType::RelatedTo);
-        assert!(!resolved.flipped);
-    }
-
-    #[test]
-    fn related_to_exposes_no_inverse_keyword() {
-        assert!(!RelationType::INVERSE_STRS
-            .iter()
-            .any(|kw| kw.contains("related")));
-    }
-
-    #[test]
-    fn unknown_keyword_errors_naming_the_keyword() {
-        let err = resolve_rel_keyword("depends-on").unwrap_err();
-        assert!(
-            err.to_string().contains("depends-on"),
-            "expected error to name the keyword, got: {err}"
-        );
-    }
-
-    #[test]
-    fn keyword_resolution_is_case_insensitive() {
-        let resolved = resolve_rel_keyword("Blocked-By").unwrap();
-        assert_eq!(resolved.rel_type, RelationType::Blocks);
-        assert!(resolved.flipped);
+    fn relation_type_fromstr_is_pure_and_never_errors() {
+        let rt: RelationType = "anything-goes".parse().unwrap();
+        assert_eq!(rt.to_string(), "anything-goes");
+        assert_eq!(rt, RelationType::new("anything-goes"));
     }
 }

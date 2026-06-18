@@ -1,5 +1,4 @@
 use crate::engine::context::ContextNode;
-use crate::engine::document::RelationType;
 use crate::engine::store::{extract_id_from_name, Store};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -20,7 +19,7 @@ use super::GraphNode;
 ///
 /// Each full node also carries its depth-1 `related-to` neighbours as a
 /// display-only annotation set (RFC-006 Graph mode Phase 1), sourced from the
-/// store's `forward_links`/`reverse_links` filtered to [`RelationType::RelatedTo`].
+/// store's `forward_links`/`reverse_links` filtered to the `related-to` relation.
 /// A neighbour that lies on the node's own `implements` lineage — a transitive
 /// ancestor (parent, grandparent, …) or a transitive descendant (child,
 /// grandchild, …) — is excluded, because such a link is already drawn as a tree
@@ -173,7 +172,7 @@ fn implements_lineage_of(
 fn related_annotations(path: &Path, lineage: &HashSet<PathBuf>, store: &Store) -> Vec<String> {
     let mut ids: BTreeSet<String> = BTreeSet::new();
     for (rel, neighbour) in store.related_to(path) {
-        if *rel != RelationType::RelatedTo || lineage.contains(neighbour) {
+        if rel.as_str() != "related-to" || lineage.contains(neighbour) {
             continue;
         }
         let id = match store.get(neighbour) {
