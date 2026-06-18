@@ -236,6 +236,10 @@ pub fn build_render_context(
 pub fn render(prompt: &AgentPrompt, ctx: &Value) -> Result<String> {
     let mut env = Environment::new();
     env.set_undefined_behavior(UndefinedBehavior::Strict);
+    // Capture template debug info unconditionally; otherwise the offending
+    // variable name only surfaces in debug builds (minijinja gates it on
+    // `debug_assertions`), so the error message differs under release.
+    env.set_debug(true);
     env.render_str(&prompt.body_template, ctx)
         .map_err(|e| anyhow::anyhow!("template render failed: {e:#}"))
 }
