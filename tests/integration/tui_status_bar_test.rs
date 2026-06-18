@@ -3,6 +3,23 @@ use lazyspec::engine::config::{Config, StatusBarConfig};
 use lazyspec::tui::state::{App, ViewMode};
 use lazyspec::tui::views::status_bar::*;
 
+/// Minimal valid `[[types]]` + `[[relationships]]` block; strict load requires
+/// at least one type and a relationships block.
+const TYPES: &str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "related-to"
+"#;
+
 fn make_app(fixture: &TestFixture) -> App {
     let store = fixture.store();
     App::new(
@@ -240,17 +257,17 @@ fn type_filter_component_returns_none_in_other_modes() {
 
 #[test]
 fn config_round_trip_through_toml() {
-    let toml_with_statusbar = r#"
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-
+    let toml_with_statusbar = format!(
+        "{TYPES}{}",
+        r#"
 [tui.statusbar]
 enabled = true
 left = ["mode", "doc_count"]
 center = ["warnings"]
 right = ["version"]
-"#;
-    let config = Config::parse(toml_with_statusbar).unwrap();
+"#
+    );
+    let config = Config::parse(&toml_with_statusbar).unwrap();
     assert!(config.ui.statusbar.enabled);
     assert_eq!(
         config.ui.statusbar.left,
@@ -263,11 +280,7 @@ right = ["version"]
     assert_eq!(config.ui.statusbar.right, Some(vec!["version".to_string()]));
 
     // Without [tui.statusbar] section, defaults apply
-    let toml_without = r#"
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-"#;
-    let config2 = Config::parse(toml_without).unwrap();
+    let config2 = Config::parse(TYPES).unwrap();
     assert!(config2.ui.statusbar.enabled);
     assert!(config2.ui.statusbar.left.is_none());
     assert!(config2.ui.statusbar.center.is_none());
@@ -276,27 +289,27 @@ pattern = "{type}-{n:03}-{title}.md"
 
 #[test]
 fn enabled_false_in_toml() {
-    let toml_str = r#"
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-
+    let toml_str = format!(
+        "{TYPES}{}",
+        r#"
 [tui.statusbar]
 enabled = false
-"#;
-    let config = Config::parse(toml_str).unwrap();
+"#
+    );
+    let config = Config::parse(&toml_str).unwrap();
     assert!(!config.ui.statusbar.enabled);
 }
 
 #[test]
 fn empty_zone_array_preserved() {
-    let toml_str = r#"
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-
+    let toml_str = format!(
+        "{TYPES}{}",
+        r#"
 [tui.statusbar]
 left = []
-"#;
-    let config = Config::parse(toml_str).unwrap();
+"#
+    );
+    let config = Config::parse(&toml_str).unwrap();
     assert_eq!(config.ui.statusbar.left, Some(vec![]));
     assert!(config.ui.statusbar.center.is_none());
     assert!(config.ui.statusbar.right.is_none());
@@ -304,14 +317,14 @@ left = []
 
 #[test]
 fn partial_zone_definition_leaves_others_as_none() {
-    let toml_str = r#"
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-
+    let toml_str = format!(
+        "{TYPES}{}",
+        r#"
 [tui.statusbar]
 right = ["help_hint"]
-"#;
-    let config = Config::parse(toml_str).unwrap();
+"#
+    );
+    let config = Config::parse(&toml_str).unwrap();
     assert!(config.ui.statusbar.left.is_none());
     assert!(config.ui.statusbar.center.is_none());
     assert_eq!(

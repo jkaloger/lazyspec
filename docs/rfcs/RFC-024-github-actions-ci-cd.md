@@ -11,7 +11,7 @@ tags:
 - nix
 - releases
 related:
-- related to: RFC-009
+- related-to: RFC-009
 ---
 
 

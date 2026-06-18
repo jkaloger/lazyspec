@@ -51,7 +51,7 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
     while let Some(current) = queue.pop_front() {
         let mut parents: Vec<PathBuf> = Vec::new();
         for rel in &current.related {
-            if rel.rel_type != RelationType::Implements {
+            if rel.rel_type.as_str() != "implements" {
                 continue;
             }
             let Some(parent) = store.resolve_relation_target(&rel.target) else {
@@ -79,11 +79,11 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
         .map(|links| {
             links
                 .iter()
-                .filter(|(rel_type, _)| *rel_type == RelationType::Implements)
+                .filter(|(rel_type, _)| rel_type.as_str() == "implements")
                 .filter_map(|(_, source_path)| store.get(source_path))
                 .map(|d| RelatedRef {
                     doc: d,
-                    relation: RelationType::Implements,
+                    relation: RelationType::new("implements"),
                     distance: 1,
                     via: target_path.clone(),
                 })
@@ -112,14 +112,14 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
             let mut neighbours: Vec<PathBuf> = Vec::new();
             if let Some(fwd) = store.forward_links.get(from) {
                 for (rel_type, target) in fwd {
-                    if *rel_type == RelationType::RelatedTo {
+                    if rel_type.as_str() == "related-to" {
                         neighbours.push(target.clone());
                     }
                 }
             }
             if let Some(rev) = store.reverse_links.get(from) {
                 for (rel_type, source) in rev {
-                    if *rel_type == RelationType::RelatedTo {
+                    if rel_type.as_str() == "related-to" {
                         neighbours.push(source.clone());
                     }
                 }
@@ -133,7 +133,7 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
                 if let Some(resolved) = store.get(&neighbour) {
                     related.push(RelatedRef {
                         doc: resolved,
-                        relation: RelationType::RelatedTo,
+                        relation: RelationType::new("related-to"),
                         distance: hop,
                         via: from.clone(),
                     });
@@ -177,7 +177,7 @@ pub fn resolve_forest(store: &Store) -> Vec<ContextNode<'_>> {
 
         let mut parents: Vec<PathBuf> = Vec::new();
         for rel in &doc.related {
-            if rel.rel_type != RelationType::Implements {
+            if rel.rel_type.as_str() != "implements" {
                 continue;
             }
             let Some(parent) = store.resolve_relation_target(&rel.target) else {

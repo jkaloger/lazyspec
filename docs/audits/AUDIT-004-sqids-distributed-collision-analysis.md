@@ -9,7 +9,7 @@ tags:
 - distributed
 - collision
 related:
-- related to: RFC-027
+- related-to: RFC-027
 ---
 
 

@@ -1,9 +1,39 @@
-use crate::engine::config::Config;
+use crate::engine::config::{
+    default_rules, starter_relationships, starter_types, CertificationConfig, Config,
+    DocumentConfig, FilesystemConfig, Naming, Templates, UiConfig,
+};
 use crate::engine::gh::{deterministic_color, type_label, GhCli, GhError, GhIssueWriter};
 use crate::engine::github::resolve_repo;
 use anyhow::{bail, Result};
 use std::fs;
 use std::path::Path;
+
+/// The starter config `init` writes into a fresh project. Per ADR-011 this is the
+/// sole home for default types and rules; the engine load path carries none.
+pub fn starter_config() -> Config {
+    Config {
+        documents: DocumentConfig {
+            types: starter_types(),
+            naming: Naming {
+                pattern: "{type}-{n:03}-{title}.md".to_string(),
+            },
+            sqids: None,
+            reserved: None,
+            github: None,
+        },
+        filesystem: FilesystemConfig {
+            templates: Templates {
+                dir: ".lazyspec/templates".to_string(),
+            },
+        },
+        relationships: starter_relationships(),
+        ui: UiConfig::default(),
+        rules: default_rules(),
+        ref_count_ceiling: 15,
+        certification: CertificationConfig::default(),
+        coordination: None,
+    }
+}
 
 pub fn run(root: &Path) -> Result<()> {
     let config_path = root.join(".lazyspec.toml");
@@ -11,7 +41,7 @@ pub fn run(root: &Path) -> Result<()> {
         bail!(".lazyspec.toml already exists");
     }
 
-    let config = Config::default();
+    let config = starter_config();
 
     for type_def in &config.documents.types {
         fs::create_dir_all(root.join(&type_def.dir))?;

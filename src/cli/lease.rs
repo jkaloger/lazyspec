@@ -311,8 +311,8 @@ pub fn run_heartbeat_with<R: GitRefOps>(
 mod tests {
     use super::*;
     use crate::engine::config::{
-        CertificationConfig, Config, CoordinationConfig, Directories, DocumentConfig,
-        FilesystemConfig, Naming, NumberingStrategy, StoreBackend, Templates, TypeDef, UiConfig,
+        CertificationConfig, Config, CoordinationConfig, DocumentConfig, FilesystemConfig, Naming,
+        NumberingStrategy, StoreBackend, Templates, TypeDef, UiConfig,
     };
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use crate::engine::lease::Lease;
@@ -360,16 +360,11 @@ mod tests {
                 github: None,
             },
             filesystem: FilesystemConfig {
-                directories: Directories {
-                    rfcs: "docs/rfcs".to_string(),
-                    adrs: "docs/adrs".to_string(),
-                    stories: "docs/stories".to_string(),
-                    iterations: "docs/iterations".to_string(),
-                },
                 templates: Templates {
                     dir: ".lazyspec/templates".to_string(),
                 },
             },
+            relationships: crate::engine::config::starter_relationships(),
             ui: UiConfig::default(),
             rules: vec![],
             ref_count_ceiling: 15,

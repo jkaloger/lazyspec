@@ -28,7 +28,7 @@ Some body content here.
     assert_eq!(meta.date, NaiveDate::from_ymd_opt(2026, 3, 4).unwrap());
     assert_eq!(meta.tags, vec!["architecture", "events"]);
     assert_eq!(meta.related.len(), 1);
-    assert_eq!(meta.related[0].rel_type, RelationType::Implements);
+    assert_eq!(meta.related[0].rel_type, RelationType::new("implements"));
     assert_eq!(meta.related[0].target, "rfcs/RFC-001-event-sourcing.md");
 }
 
@@ -118,32 +118,26 @@ Body.
 }
 
 #[test]
-fn relation_type_display() {
+fn relation_type_new_lowercases_and_displays_inner() {
     use lazyspec::engine::document::RelationType;
-    assert_eq!(format!("{}", RelationType::Implements), "implements");
-    assert_eq!(format!("{}", RelationType::Supersedes), "supersedes");
-    assert_eq!(format!("{}", RelationType::Blocks), "blocks");
-    assert_eq!(format!("{}", RelationType::RelatedTo), "related-to");
+    assert_eq!(format!("{}", RelationType::new("implements")), "implements");
+    assert_eq!(format!("{}", RelationType::new("TRACKS")), "tracks");
 }
 
 #[test]
-fn relation_type_fromstr_display_roundtrip() {
+fn relation_type_roundtrips_any_string_via_fromstr() {
     use lazyspec::engine::document::RelationType;
-    for canonical in RelationType::ALL_STRS {
-        let parsed: RelationType = canonical.parse().unwrap();
-        assert_eq!(parsed.to_string(), canonical);
+    for s in ["implements", "related-to", "tracks", "depends-on"] {
+        let parsed: RelationType = s.parse().unwrap();
+        assert_eq!(parsed.to_string(), s);
+        assert_eq!(parsed, RelationType::new(s));
     }
 }
 
 #[test]
-fn relation_type_fromstr_rejects_unknown() {
-    assert!("garbage".parse::<RelationType>().is_err());
-}
-
-#[test]
-fn relation_type_fromstr_accepts_space_variant() {
-    let rt: RelationType = "related to".parse().unwrap();
-    assert_eq!(rt, RelationType::RelatedTo);
+fn relation_type_fromstr_never_errors() {
+    // The newtype is open: any string parses (validation lives in link/validate).
+    assert!("anything-at-all".parse::<RelationType>().is_ok());
 }
 
 #[test]

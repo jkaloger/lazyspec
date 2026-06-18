@@ -1,3 +1,4 @@
+mod config;
 mod conflicts;
 mod fields;
 mod output;
@@ -13,9 +14,10 @@ use crate::engine::config::Config;
 use crate::engine::fs::FileSystem;
 use crate::engine::store::Store;
 
+use config::collect_config_fixes;
 use conflicts::collect_conflict_fixes;
 use fields::collect_field_fixes;
-use output::format_human;
+use output::{format_config_human, format_human};
 use relations::collect_relation_fixes;
 use renumber::collect_renumber_output;
 
@@ -66,6 +68,15 @@ struct FieldFixResult {
     written: bool,
 }
 
+/// Outcome of `fix --config`: which standard relationships/rules were missing
+/// (and thus added) and whether the file was written.
+#[derive(Debug, Serialize)]
+pub struct ConfigFixResult {
+    relationships_added: Vec<String>,
+    rules_added: Vec<String>,
+    written: bool,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct ReferenceUpdate {
     pub file: String,
@@ -113,6 +124,40 @@ pub fn run(
     } else {
         1
     }
+}
+
+/// Entry point for `fix --config`: inject the missing standard relationships
+/// and rules into `.lazyspec.toml`. Config-only scope — no documents are
+/// touched. Returns the process exit code.
+pub fn run_config(root: &Path, dry_run: bool, json: bool, fs: &dyn FileSystem) -> i32 {
+    let result = match collect_config_fixes(root, dry_run, fs) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return 1;
+        }
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    } else {
+        let human = format_config_human(&result, dry_run);
+        if !human.is_empty() {
+            print!("{}", human);
+        }
+    }
+
+    0
+}
+
+pub fn run_config_json(root: &Path, dry_run: bool, fs: &dyn FileSystem) -> String {
+    let result = collect_config_fixes(root, dry_run, fs).unwrap();
+    serde_json::to_string_pretty(&result).unwrap()
+}
+
+pub fn run_config_human(root: &Path, dry_run: bool, fs: &dyn FileSystem) -> String {
+    let result = collect_config_fixes(root, dry_run, fs).unwrap();
+    format_config_human(&result, dry_run)
 }
 
 #[allow(clippy::too_many_arguments)]

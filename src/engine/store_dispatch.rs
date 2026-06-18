@@ -1433,7 +1433,7 @@ mod tests {
             tags: vec!["tag:with:colons".to_string(), "tag \"quoted\"".to_string()],
             provenance: vec![],
             related: vec![Relation {
-                rel_type: RelationType::Implements,
+                rel_type: RelationType::new("implements"),
                 target: "STORY: special & \"fun\"".to_string(),
             }],
             validate_ignore: false,
@@ -1651,7 +1651,7 @@ mod tests {
     #[test]
     fn cache_frontmatter_round_trips_provenance() {
         use crate::engine::config::{
-            Config, Directories, DocumentConfig, FilesystemConfig, Naming, Templates, UiConfig,
+            Config, DocumentConfig, FilesystemConfig, Naming, Templates, UiConfig,
         };
         use chrono::NaiveDate;
 
@@ -1686,16 +1686,11 @@ mod tests {
                 github: None,
             },
             filesystem: FilesystemConfig {
-                directories: Directories {
-                    rfcs: "docs/rfcs".to_string(),
-                    adrs: "docs/adrs".to_string(),
-                    stories: "docs/stories".to_string(),
-                    iterations: "docs/iterations".to_string(),
-                },
                 templates: Templates {
                     dir: ".lazyspec/templates".to_string(),
                 },
             },
+            relationships: crate::engine::config::starter_relationships(),
             ui: UiConfig::default(),
             rules: vec![],
             ref_count_ceiling: 0,

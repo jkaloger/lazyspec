@@ -9,8 +9,8 @@ tags:
 - distributed
 - sqids
 related:
-- related to: RFC-020
-- related to: RFC-013
+- related-to: RFC-020
+- related-to: RFC-013
 ---
 
 

@@ -9,8 +9,8 @@ tags:
 - tui
 - ergonomics
 related:
-- related to: RFC-018
-- related to: RFC-027
+- related-to: RFC-018
+- related-to: RFC-027
 ---
 
 

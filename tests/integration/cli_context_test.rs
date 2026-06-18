@@ -134,7 +134,7 @@ fn setup_with_related() -> TestFixture {
     let fixture = TestFixture::new();
     fixture.write_doc(
         "docs/rfcs/RFC-001-auth.md",
-        "---\ntitle: \"Auth Redesign\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: [security]\nrelated:\n- related to: docs/adrs/ADR-001-tokens.md\n---\n\nRFC body.\n",
+        "---\ntitle: \"Auth Redesign\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: [security]\nrelated:\n- related-to: docs/adrs/ADR-001-tokens.md\n---\n\nRFC body.\n",
     );
     fixture.write_doc(
         "docs/adrs/ADR-001-tokens.md",
@@ -723,7 +723,7 @@ fn context_depth_two_surfaces_adr_via_rfc() {
     let fixture = TestFixture::new();
     fixture.write_doc(
         "docs/stories/STORY-001-hub.md",
-        "---\ntitle: \"Hub Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- related to: docs/rfcs/RFC-001-spec.md\n---\n\nbody\n",
+        "---\ntitle: \"Hub Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- related-to: docs/rfcs/RFC-001-spec.md\n---\n\nbody\n",
     );
     fixture.write_doc(
         "docs/rfcs/RFC-001-spec.md",
@@ -731,7 +731,7 @@ fn context_depth_two_surfaces_adr_via_rfc() {
     );
     fixture.write_doc(
         "docs/adrs/ADR-001-choice.md",
-        "---\ntitle: \"Choice ADR\"\ntype: adr\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- related to: docs/rfcs/RFC-001-spec.md\n---\n\nbody\n",
+        "---\ntitle: \"Choice ADR\"\ntype: adr\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- related-to: docs/rfcs/RFC-001-spec.md\n---\n\nbody\n",
     );
 
     let store = fixture.store();
@@ -765,15 +765,15 @@ fn context_depth_bounds_traversal() {
     let fixture = TestFixture::new();
     fixture.write_doc(
         "docs/stories/STORY-001-hub.md",
-        "---\ntitle: \"Hub Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- related to: docs/rfcs/RFC-001-hop1.md\n---\n\nbody\n",
+        "---\ntitle: \"Hub Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- related-to: docs/rfcs/RFC-001-hop1.md\n---\n\nbody\n",
     );
     fixture.write_doc(
         "docs/rfcs/RFC-001-hop1.md",
-        "---\ntitle: \"Hop One\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- related to: docs/adrs/ADR-001-hop2.md\n---\n\nbody\n",
+        "---\ntitle: \"Hop One\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- related-to: docs/adrs/ADR-001-hop2.md\n---\n\nbody\n",
     );
     fixture.write_doc(
         "docs/adrs/ADR-001-hop2.md",
-        "---\ntitle: \"Hop Two\"\ntype: adr\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- related to: docs/specs/SPEC-001-hop3.md\n---\n\nbody\n",
+        "---\ntitle: \"Hop Two\"\ntype: adr\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- related-to: docs/specs/SPEC-001-hop3.md\n---\n\nbody\n",
     );
     fixture.write_doc(
         "docs/specs/SPEC-001-hop3.md",
@@ -816,7 +816,7 @@ fn context_json_related_tagged() {
     let fixture = TestFixture::new();
     fixture.write_doc(
         "docs/stories/STORY-001-hub.md",
-        "---\ntitle: \"Hub Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- related to: docs/rfcs/RFC-001-spec.md\n---\n\nbody\n",
+        "---\ntitle: \"Hub Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- related-to: docs/rfcs/RFC-001-spec.md\n---\n\nbody\n",
     );
     fixture.write_doc(
         "docs/rfcs/RFC-001-spec.md",
@@ -824,7 +824,7 @@ fn context_json_related_tagged() {
     );
     fixture.write_doc(
         "docs/adrs/ADR-001-choice.md",
-        "---\ntitle: \"Choice ADR\"\ntype: adr\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- related to: docs/rfcs/RFC-001-spec.md\n---\n\nbody\n",
+        "---\ntitle: \"Choice ADR\"\ntype: adr\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- related-to: docs/rfcs/RFC-001-spec.md\n---\n\nbody\n",
     );
 
     let store = fixture.store();
@@ -916,7 +916,7 @@ fn context_related_shortest_distance() {
     let fixture = TestFixture::new();
     fixture.write_doc(
         "docs/stories/STORY-001-hub.md",
-        "---\ntitle: \"Hub Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- related to: docs/rfcs/RFC-001-near.md\n- related to: docs/rfcs/RFC-002-sibling.md\n---\n\nbody\n",
+        "---\ntitle: \"Hub Story\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated:\n- related-to: docs/rfcs/RFC-001-near.md\n- related-to: docs/rfcs/RFC-002-sibling.md\n---\n\nbody\n",
     );
     fixture.write_doc(
         "docs/rfcs/RFC-001-near.md",
@@ -924,7 +924,7 @@ fn context_related_shortest_distance() {
     );
     fixture.write_doc(
         "docs/rfcs/RFC-002-sibling.md",
-        "---\ntitle: \"Sibling Doc\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- related to: docs/rfcs/RFC-001-near.md\n---\n\nbody\n",
+        "---\ntitle: \"Sibling Doc\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- related-to: docs/rfcs/RFC-001-near.md\n---\n\nbody\n",
     );
 
     let store = fixture.store();

@@ -267,8 +267,6 @@ pub fn draw_status_picker(f: &mut Frame, app: &App) {
 }
 
 pub fn draw_link_editor(f: &mut Frame, app: &App) {
-    use crate::tui::state::forms::REL_TYPES;
-
     let area = f.area();
     let editor = &app.link_editor;
 
@@ -280,9 +278,11 @@ pub fn draw_link_editor(f: &mut Frame, app: &App) {
 
     f.render_widget(Clear, popup_area);
 
-    let rel_label = REL_TYPES
+    let rel_label = app
+        .rel_types
         .get(editor.rel_type_index)
-        .unwrap_or(&"implements");
+        .map(|s| s.as_str())
+        .unwrap_or("implements");
 
     let mut lines: Vec<Line> = Vec::new();
 

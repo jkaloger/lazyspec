@@ -2,6 +2,17 @@ use lazyspec::engine::config::SqidsConfig;
 use lazyspec::engine::template::next_sqids_id;
 use std::fs;
 
+/// Strict load requires a `[[relationships]]` block; these numbering tests append
+/// it to their `[[types]]`-only configs.
+const RELATIONSHIPS: &str = r#"
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "related-to"
+"#;
+
 fn sqids_config(salt: &str, min_length: u8) -> lazyspec::engine::config::Config {
     let toml = format!(
         r#"
@@ -23,7 +34,7 @@ salt = "{salt}"
 min_length = {min_length}
 "#
     );
-    lazyspec::engine::config::Config::parse(&toml).unwrap()
+    lazyspec::engine::config::Config::parse(&format!("{toml}{RELATIONSHIPS}")).unwrap()
 }
 
 // AC-1: sqids numbering produces sqids-based filename
@@ -106,7 +117,8 @@ dir = "docs/rfcs"
 prefix = "RFC"
 numbering = "incremental"
 "#;
-    let config = lazyspec::engine::config::Config::parse(toml).unwrap();
+    let config =
+        lazyspec::engine::config::Config::parse(&format!("{toml}{RELATIONSHIPS}")).unwrap();
 
     let path = lazyspec::cli::create::run(
         root,
@@ -211,7 +223,7 @@ numbering = "sqids"
 salt = "test"
 min_length = 0
 "#;
-    let result = lazyspec::engine::config::Config::parse(toml);
+    let result = lazyspec::engine::config::Config::parse(&format!("{toml}{RELATIONSHIPS}"));
     assert!(result.is_err(), "min_length=0 should fail");
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -234,7 +246,7 @@ numbering = "sqids"
 salt = "test"
 min_length = 11
 "#;
-    let result = lazyspec::engine::config::Config::parse(toml);
+    let result = lazyspec::engine::config::Config::parse(&format!("{toml}{RELATIONSHIPS}"));
     assert!(result.is_err(), "min_length=11 should fail");
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -254,7 +266,7 @@ dir = "docs/rfcs"
 prefix = "RFC"
 numbering = "sqids"
 "#;
-    let result = lazyspec::engine::config::Config::parse(toml);
+    let result = lazyspec::engine::config::Config::parse(&format!("{toml}{RELATIONSHIPS}"));
     assert!(result.is_err(), "sqids without salt should fail");
     let msg = result.unwrap_err().to_string();
     assert!(

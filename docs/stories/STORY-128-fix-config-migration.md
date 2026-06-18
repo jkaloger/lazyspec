@@ -1,7 +1,7 @@
 ---
 title: fix --config migration
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-06-18
 tags: []

@@ -1,7 +1,7 @@
 use crate::cli::resolve::{resolve_to_id, resolve_to_path};
 use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{Config, StoreBackend};
-use crate::engine::document::{resolve_rel_keyword, rewrite_frontmatter, RelationType};
+use crate::engine::document::{rewrite_frontmatter, RelationType};
 use crate::engine::fs::FileSystem;
 use crate::engine::gh::{GhCli, GhIssueReader, GhIssueWriter};
 use crate::engine::git_ref::{GitCli, GitRefOps};
@@ -20,17 +20,6 @@ pub struct LinkOutcome {
     pub source: PathBuf,
     pub rel_type: RelationType,
     pub target: String,
-}
-
-pub fn link(
-    root: &Path,
-    store: &Store,
-    from: &str,
-    rel_type: &str,
-    to: &str,
-    fs: &dyn FileSystem,
-) -> Result<LinkOutcome> {
-    link_with_config(root, store, from, rel_type, to, fs, None)
 }
 
 pub fn link_with_config(
@@ -56,13 +45,11 @@ fn link_inner<G: GhIssueReader + GhIssueWriter>(
     config: Option<&Config>,
     client_factory: impl FnOnce() -> G,
 ) -> Result<LinkOutcome> {
-    let resolved = resolve_rel_keyword(rel_type)?;
-    let (from, to) = if resolved.flipped {
-        (to, from)
-    } else {
-        (from, to)
-    };
-    let rel_str = resolved.rel_type.to_string();
+    let config = config.ok_or_else(|| {
+        anyhow!("link requires a loaded config to resolve relationships from [[relationships]]")
+    })?;
+    let (rel_str, flipped) = config.resolve_relationship(rel_type)?;
+    let (from, to) = if flipped { (to, from) } else { (from, to) };
 
     let resolved_from = resolve_to_path(store, from)?;
     let to_id = resolve_to_id(store, to)?;
@@ -83,24 +70,13 @@ fn link_inner<G: GhIssueReader + GhIssueWriter>(
         Ok(())
     })?;
 
-    push_if_github_backed(root, &resolved_from, config, client_factory)?;
-    push_if_git_ref_backed(root, &resolved_from, config)?;
+    push_if_github_backed(root, &resolved_from, Some(config), client_factory)?;
+    push_if_git_ref_backed(root, &resolved_from, Some(config))?;
     Ok(LinkOutcome {
         source: resolved_from,
-        rel_type: resolved.rel_type,
+        rel_type: RelationType::new(&rel_str),
         target: to_id,
     })
-}
-
-pub fn unlink(
-    root: &Path,
-    store: &Store,
-    from: &str,
-    rel_type: &str,
-    to: &str,
-    fs: &dyn FileSystem,
-) -> Result<LinkOutcome> {
-    unlink_with_config(root, store, from, rel_type, to, fs, None)
 }
 
 pub fn unlink_with_config(
@@ -112,13 +88,11 @@ pub fn unlink_with_config(
     fs: &dyn FileSystem,
     config: Option<&Config>,
 ) -> Result<LinkOutcome> {
-    let resolved = resolve_rel_keyword(rel_type)?;
-    let (from, to) = if resolved.flipped {
-        (to, from)
-    } else {
-        (from, to)
-    };
-    let rel_str = resolved.rel_type.to_string();
+    let config = config.ok_or_else(|| {
+        anyhow!("unlink requires a loaded config to resolve relationships from [[relationships]]")
+    })?;
+    let (rel_str, flipped) = config.resolve_relationship(rel_type)?;
+    let (from, to) = if flipped { (to, from) } else { (from, to) };
 
     let resolved_from = resolve_to_path(store, from)?;
     let to_id = resolve_to_id(store, to)?;
@@ -138,11 +112,11 @@ pub fn unlink_with_config(
         Ok(())
     })?;
 
-    push_if_github_backed(root, &resolved_from, config, GhCli::new)?;
-    push_if_git_ref_backed(root, &resolved_from, config)?;
+    push_if_github_backed(root, &resolved_from, Some(config), GhCli::new)?;
+    push_if_git_ref_backed(root, &resolved_from, Some(config))?;
     Ok(LinkOutcome {
         source: resolved_from,
-        rel_type: resolved.rel_type,
+        rel_type: RelationType::new(&rel_str),
         target: to_id,
     })
 }

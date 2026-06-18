@@ -79,11 +79,11 @@ fn write_deterministic_forest_fixture() -> TestFixture {
     // surface as a `related` annotation on both, pinning annotation ordering.
     fixture.write_doc(
         "docs/stories/STORY-001-login.md",
-        "---\ntitle: \"Login Story\"\ntype: story\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-auth.md\n- related to: docs/stories/STORY-002-signup.md\n---\n",
+        "---\ntitle: \"Login Story\"\ntype: story\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-auth.md\n- related-to: docs/stories/STORY-002-signup.md\n---\n",
     );
     fixture.write_doc(
         "docs/stories/STORY-002-signup.md",
-        "---\ntitle: \"Signup Story\"\ntype: story\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-auth.md\n- related to: docs/stories/STORY-001-login.md\n---\n",
+        "---\ntitle: \"Signup Story\"\ntype: story\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-auth.md\n- related-to: docs/stories/STORY-001-login.md\n---\n",
     );
 
     // ITER-001 implements BOTH stories: the diamond. It is drawn in full under

@@ -9,7 +9,7 @@ tags:
 - fix
 - distributed
 related:
-- related to: RFC-015
+- related-to: RFC-015
 ---
 
 

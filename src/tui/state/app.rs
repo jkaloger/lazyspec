@@ -1,8 +1,6 @@
 #[cfg(feature = "agent")]
 use super::forms::AgentDialog;
-use super::forms::{
-    CreateForm, DeleteConfirm, LinkEditor, ProvenanceEditor, StatusPicker, REL_TYPES,
-};
+use super::forms::{CreateForm, DeleteConfirm, LinkEditor, ProvenanceEditor, StatusPicker};
 use super::graph::flatten_forest;
 
 use crate::engine::cache::DiskCache;
@@ -294,6 +292,10 @@ pub struct App {
     pub gh_issue_map_stale: bool,
     pub status_bar_enabled: bool,
     pub status_bar_components: StatusBarComponents,
+    /// Link-editor keywords (relationship names + inverses), derived from the
+    /// config `[[relationships]]` registry at construction. The link editor
+    /// cycles `rel_type_index` over this list.
+    pub rel_types: Vec<String>,
 }
 
 impl App {
@@ -421,6 +423,7 @@ impl App {
             gh_issue_map_stale: false,
             status_bar_enabled: config.ui.statusbar.enabled,
             status_bar_components,
+            rel_types: config.relationship_keywords(),
         };
         app.status_bar_warnings = status_bar_warnings;
         app.rebuild_search_index();
@@ -1061,13 +1064,14 @@ impl App {
                     if !relations.is_empty() {
                         let store = Store::load(&root, &config).map_err(|e| e.to_string())?;
                         for (rel_type, target_path) in &relations {
-                            crate::cli::link::link(
+                            crate::cli::link::link_with_config(
                                 &root,
                                 &store,
                                 &relative_str,
                                 rel_type,
                                 &target_path.to_string_lossy(),
                                 &thread_fs,
+                                Some(&config),
                             )
                             .map_err(|e| e.to_string())?;
                         }
@@ -1111,13 +1115,14 @@ impl App {
 
         // Apply relations
         for (rel_type, target_path) in &relations {
-            crate::cli::link::link(
+            crate::cli::link::link_with_config(
                 root,
                 &self.store,
                 &relative_str,
                 rel_type,
                 &target_path.to_string_lossy(),
                 &*self.fs,
+                Some(config),
             )?;
         }
 
@@ -1397,13 +1402,18 @@ impl App {
         let target_path = self.link_editor.results[selected].clone();
         let from = self.link_editor.doc_path.to_string_lossy().to_string();
         let to = target_path.to_string_lossy().to_string();
-        let rel_type = REL_TYPES[self.link_editor.rel_type_index];
+        let rel_type = self
+            .rel_types
+            .get(self.link_editor.rel_type_index)
+            .map(|s| s.as_str())
+            .unwrap_or("related-to")
+            .to_string();
 
         let outcome = crate::cli::link::link_with_config(
             root,
             &self.store,
             &from,
-            rel_type,
+            &rel_type,
             &to,
             &*self.fs,
             Some(config),
@@ -1473,7 +1483,7 @@ impl App {
             .filter(|s| !s.is_empty())
         {
             let (rel_type, shorthand) = if let Some((prefix, id)) = entry.split_once(':') {
-                let rel: crate::engine::document::RelationType = prefix.trim().parse()?;
+                let rel = crate::engine::document::RelationType::new(prefix.trim());
                 (rel.to_string(), id.trim().to_string())
             } else {
                 ("related-to".to_string(), entry.to_string())
@@ -1598,6 +1608,7 @@ mod tests {
             gh_issue_map_stale: false,
             status_bar_enabled: true,
             status_bar_components: StatusBarComponents::default(),
+            rel_types: Config::default().relationship_keywords(),
         };
         app
     }

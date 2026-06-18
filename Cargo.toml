@@ -41,6 +41,10 @@ tempfile = "3"
 default = []
 agent = []
 metrics = []
+# Exposes test-only fixtures (e.g. `Config::default()`) to the integration test
+# crates, which compile against the non-test build of the library. The binary
+# never enables this, so the production load path carries no default config.
+test-support = []
 
 [profile.dev]
 debug = "line-tables-only"
@@ -49,3 +53,5 @@ debug = "line-tables-only"
 debug = "line-tables-only"
 
 [dev-dependencies]
+# Self-reference so integration tests link the library with test-only fixtures.
+lazyspec = { path = ".", features = ["test-support"] }

@@ -76,6 +76,10 @@ pub enum ValidationIssue {
         type_name: String,
         parent_type: String,
     },
+    UnknownRelationship {
+        path: PathBuf,
+        name: String,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -240,6 +244,14 @@ impl std::fmt::Display for ValidationIssue {
                     f,
                     "parent type not singleton: type \"{}\" references parent type \"{}\" which is not a singleton",
                     type_name, parent_type
+                )
+            }
+            ValidationIssue::UnknownRelationship { path, name } => {
+                write!(
+                    f,
+                    "unknown relationship \"{}\": {} (not declared in [[relationships]])",
+                    name,
+                    path.display()
                 )
             }
         }
@@ -864,6 +876,37 @@ impl Checker for TypeConstraintChecker {
     }
 }
 
+pub struct UnknownRelationshipRule;
+
+impl Checker for UnknownRelationshipRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        let mut issues = Vec::new();
+
+        for (path, meta) in &store.docs {
+            if meta.validate_ignore {
+                continue;
+            }
+            for rel in &meta.related {
+                if config.relationship_by_name(rel.rel_type.as_str()).is_none() {
+                    issues.push((
+                        Severity::Error,
+                        ValidationIssue::UnknownRelationship {
+                            path: path.clone(),
+                            name: rel.rel_type.as_str().to_string(),
+                        },
+                    ));
+                }
+            }
+        }
+
+        issues
+    }
+}
+
 fn default_checkers() -> Vec<Box<dyn Checker>> {
     vec![
         Box::new(BrokenLinkRule),
@@ -874,6 +917,7 @@ fn default_checkers() -> Vec<Box<dyn Checker>> {
         Box::new(RefScopeRule),
         Box::new(OrphanRefRule),
         Box::new(TypeConstraintChecker),
+        Box::new(UnknownRelationshipRule),
     ]
 }
 

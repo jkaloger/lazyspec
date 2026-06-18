@@ -9,8 +9,8 @@ tags:
 - ux
 - status-bar
 related:
-- related to: RFC-011
-- related to: RFC-018
+- related-to: RFC-011
+- related-to: RFC-018
 ---
 
 

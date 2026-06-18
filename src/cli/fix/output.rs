@@ -1,4 +1,30 @@
-use super::FixOutput;
+use super::{ConfigFixResult, FixOutput};
+
+pub(super) fn format_config_human(result: &ConfigFixResult, dry_run: bool) -> String {
+    let mut out = String::new();
+
+    for name in &result.relationships_added {
+        if dry_run {
+            out.push_str(&format!("Would add relationship {}\n", name));
+        } else {
+            out.push_str(&format!("Added relationship {}\n", name));
+        }
+    }
+
+    for name in &result.rules_added {
+        if dry_run {
+            out.push_str(&format!("Would add rule {}\n", name));
+        } else {
+            out.push_str(&format!("Added rule {}\n", name));
+        }
+    }
+
+    if out.is_empty() {
+        out.push_str("Config already up to date; nothing to add\n");
+    }
+
+    out
+}
 
 pub(super) fn format_human(output: &FixOutput, dry_run: bool) -> String {
     let mut result = String::new();

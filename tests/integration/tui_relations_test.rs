@@ -178,7 +178,7 @@ fn navigate_to_relation_lands_on_relation_items_index_for_multiparent() {
     // Target implements both parents AND is related-to an RFC.
     fixture.write_doc(
         "docs/iterations/ITER-001-target.md",
-        "---\ntitle: \"Target\"\ntype: iteration\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: docs/stories/STORY-001-a.md\n- implements: docs/stories/STORY-002-b.md\n- related to: docs/rfcs/RFC-001-rel.md\n---\n",
+        "---\ntitle: \"Target\"\ntype: iteration\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: docs/stories/STORY-001-a.md\n- implements: docs/stories/STORY-002-b.md\n- related-to: docs/rfcs/RFC-001-rel.md\n---\n",
     );
     // Exactly one forward child (keeps the children section deterministic).
     fixture.write_iteration(

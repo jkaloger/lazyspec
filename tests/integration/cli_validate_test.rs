@@ -489,3 +489,50 @@ fn parent_type_references_non_singleton_error() {
         _ => unreachable!(),
     }
 }
+
+// AC3: validate flags a doc carrying a relationship name not in [[relationships]].
+#[test]
+fn validate_flags_undeclared_relationship_name() {
+    let fixture = crate::common::TestFixture::new();
+    // The target exists so this isn't a broken-link false positive.
+    fixture.write_rfc("RFC-001-target.md", "Target", "accepted");
+    fixture.write_doc(
+        "docs/adrs/ADR-001-uses-tracks.md",
+        "---\ntitle: \"Uses Tracks\"\ntype: adr\nstatus: draft\nauthor: a\ndate: 2026-01-01\ntags: []\nrelated:\n  - tracks: RFC-001\n---\n",
+    );
+
+    // A registry that declares only implements + related-to (not `tracks`).
+    let config = Config {
+        relationships: vec![
+            lazyspec::engine::config::RelationshipDef {
+                name: "implements".to_string(),
+                inverse: Some("implemented-by".to_string()),
+            },
+            lazyspec::engine::config::RelationshipDef {
+                name: "related-to".to_string(),
+                inverse: None,
+            },
+        ],
+        ..Config::default()
+    };
+
+    let store = fixture.store();
+    let result = store.validate_full(&config);
+
+    let flagged: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|e| matches!(e, ValidationIssue::UnknownRelationship { .. }))
+        .collect();
+    assert_eq!(flagged.len(), 1, "expected one unknown-relationship error");
+    match flagged[0] {
+        ValidationIssue::UnknownRelationship { path, name } => {
+            assert_eq!(name, "tracks");
+            assert!(
+                path.ends_with("ADR-001-uses-tracks.md"),
+                "issue should name the offending doc, got {path:?}"
+            );
+        }
+        _ => unreachable!(),
+    }
+}

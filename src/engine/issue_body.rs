@@ -197,7 +197,7 @@ mod tests {
             tags: vec!["performance".to_string()],
             provenance: vec![],
             related: vec![Relation {
-                rel_type: RelationType::Implements,
+                rel_type: RelationType::new("implements"),
                 target: "STORY-075".to_string(),
             }],
             validate_ignore: false,
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(meta.doc_type.as_str(), "rfc");
         assert_eq!(meta.tags, vec!["performance"]);
         assert_eq!(meta.related.len(), 1);
-        assert_eq!(meta.related[0].rel_type, RelationType::Implements);
+        assert_eq!(meta.related[0].rel_type, RelationType::new("implements"));
         assert_eq!(meta.related[0].target, "STORY-075");
         assert_eq!(parsed_body, "Some body text.");
     }
@@ -370,11 +370,11 @@ mod tests {
         let mut doc = sample_doc();
         doc.related = vec![
             Relation {
-                rel_type: RelationType::Implements,
+                rel_type: RelationType::new("implements"),
                 target: "STORY-075".to_string(),
             },
             Relation {
-                rel_type: RelationType::Blocks,
+                rel_type: RelationType::new("blocks"),
                 target: "RFC-010".to_string(),
             },
         ];
@@ -384,7 +384,7 @@ mod tests {
         let (meta, _) = deserialize(&serialized, &ctx).unwrap();
 
         assert_eq!(meta.related.len(), 2);
-        assert_eq!(meta.related[1].rel_type, RelationType::Blocks);
+        assert_eq!(meta.related[1].rel_type, RelationType::new("blocks"));
         assert_eq!(meta.related[1].target, "RFC-010");
     }
 

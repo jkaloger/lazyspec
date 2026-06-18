@@ -225,6 +225,9 @@ pub enum Commands {
         /// Filter to a single document type (e.g. rfc, story)
         #[arg(long = "type")]
         doc_type: Option<String>,
+        /// Repair `.lazyspec.toml` instead of documents (injects missing standard relationships/rules)
+        #[arg(long)]
+        config: bool,
     },
     /// Generate shell completion scripts
     Completions {
