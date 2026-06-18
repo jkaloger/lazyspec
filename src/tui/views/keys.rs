@@ -275,99 +275,76 @@ impl App {
                         self.agent_dialog.text_input = Some(String::new());
                     }
                     AgentAction::Template(prompt) => {
-                        self.dispatch_template_action(prompt, config);
+                        use crate::engine::prompt::RunMode;
+                        match prompt.mode {
+                            RunMode::Headless => {
+                                // Existing slice-4 path (AgentSpawner/AgentRunner, records AgentRecord).
+                                let doc_path = self.agent_dialog.doc_path.clone();
+                                let doc_title = self.agent_dialog.doc_title.clone();
+                                self.agent_dialog.active = false;
+
+                                let doc = match self.store.get(&doc_path).cloned() {
+                                    Some(d) => d,
+                                    None => return,
+                                };
+
+                                let ctx = match crate::engine::prompt::build_render_context(
+                                    &self.store,
+                                    config,
+                                    &doc,
+                                    &*self.fs,
+                                ) {
+                                    Ok(c) => c,
+                                    Err(_) => return,
+                                };
+
+                                let rendered = match crate::engine::prompt::render(&prompt, &ctx) {
+                                    Ok(r) => r,
+                                    Err(_) => return,
+                                };
+
+                                let full_path = self.store.root.join(&doc_path);
+                                let _ = self.agent_spawner.spawn(
+                                    &rendered,
+                                    prompt.allowed_tools.as_deref(),
+                                    &full_path,
+                                    &doc_title,
+                                    &prompt.name,
+                                );
+                            }
+                            RunMode::Interactive => {
+                                // Render the tmpl body for the doc (slice-2 render entrypoint).
+                                let doc_path = self.agent_dialog.doc_path.clone();
+                                let doc = match self.store.get(&doc_path).cloned() {
+                                    Some(d) => d,
+                                    None => return,
+                                };
+                                let ctx = match crate::engine::prompt::build_render_context(
+                                    &self.store,
+                                    config,
+                                    &doc,
+                                    &*self.fs,
+                                ) {
+                                    Ok(c) => c,
+                                    Err(_) => return,
+                                };
+                                let rendered = match crate::engine::prompt::render(&prompt, &ctx) {
+                                    Ok(r) => r,
+                                    Err(_) => return,
+                                };
+                                self.agent_dialog.active = false;
+                                self.interactive_request =
+                                    Some(crate::tui::state::forms::InteractiveRequest {
+                                        cmd: config.agents.interactive.clone().unwrap(),
+                                        prompt: rendered,
+                                        doc_path: self.store.root.join(&doc_path),
+                                    });
+                            }
+                        }
                     }
                 }
             }
             _ => {}
-        }
-    }
-
-    /// Dispatch a selected template action. Headless templates render against the
-    /// selected doc and spawn a background agent immediately (AC4/AC5);
-    /// interactive templates are show-but-disabled for now (slice 5 / STORY-136).
-    #[cfg(feature = "agent")]
-    fn dispatch_template_action(
-        &mut self,
-        prompt: crate::engine::prompt::AgentPrompt,
-        config: &Config,
-    ) {
-        use crate::engine::prompt::RunMode;
-
-        match prompt.mode {
-            RunMode::Interactive => {
-                // slice 5 / STORY-136: terminal handover. Render the body, then set
-                // the request seam (the event loop suspends/runs/restores). No
-                // AgentSpawner -> no AgentRecord (AC7). Defensive: do nothing if the
-                // interactive command is unset (gating should already exclude this).
-                let interactive_cmd = match &config.agents.interactive {
-                    Some(cmd) => cmd.clone(),
-                    None => return,
-                };
-
-                let doc_path = self.agent_dialog.doc_path.clone();
-
-                let doc = match self.store.get(&doc_path).cloned() {
-                    Some(d) => d,
-                    None => return,
-                };
-
-                let ctx = match crate::engine::prompt::build_render_context(
-                    &self.store,
-                    config,
-                    &doc,
-                    &*self.fs,
-                ) {
-                    Ok(c) => c,
-                    Err(_) => return,
-                };
-
-                let rendered = match crate::engine::prompt::render(&prompt, &ctx) {
-                    Ok(r) => r,
-                    Err(_) => return,
-                };
-
-                self.agent_dialog.active = false;
-                self.interactive_request = Some(crate::tui::state::forms::InteractiveRequest {
-                    cmd: interactive_cmd,
-                    prompt: rendered,
-                    doc_path: self.store.root.join(&doc_path),
-                });
-            }
-            RunMode::Headless => {
-                let doc_path = self.agent_dialog.doc_path.clone();
-                let doc_title = self.agent_dialog.doc_title.clone();
-                self.agent_dialog.active = false;
-
-                let doc = match self.store.get(&doc_path).cloned() {
-                    Some(d) => d,
-                    None => return,
-                };
-
-                let ctx = match crate::engine::prompt::build_render_context(
-                    &self.store,
-                    config,
-                    &doc,
-                    &*self.fs,
-                ) {
-                    Ok(c) => c,
-                    Err(_) => return,
-                };
-
-                let rendered = match crate::engine::prompt::render(&prompt, &ctx) {
-                    Ok(r) => r,
-                    Err(_) => return,
-                };
-
-                let full_path = self.store.root.join(&doc_path);
-                let _ = self.agent_spawner.spawn(
-                    &rendered,
-                    prompt.allowed_tools.as_deref(),
-                    &full_path,
-                    &doc_title,
-                    &prompt.name,
-                );
-            }
         }
     }
 
