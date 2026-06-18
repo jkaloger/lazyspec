@@ -13,7 +13,7 @@ use unicode_width::UnicodeWidthChar;
 use std::path::PathBuf;
 
 use crate::engine::config::{Config, StoreBackend};
-use crate::engine::document::{DocMeta, RelationType, Status};
+use crate::engine::document::{DocMeta, Status};
 use crate::engine::git_status::GitFileStatus;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
@@ -987,68 +987,14 @@ pub fn render_relationship_sections(
         return;
     };
 
-    let all_items = app.relation_items(doc);
+    let sections = app.relation_sections(doc);
 
-    if all_items.is_empty() {
+    if sections.chain.is_empty() && sections.children.is_empty() && sections.related.is_empty() {
         let paragraph = Paragraph::new(" No relations.")
             .block(block)
             .wrap(Wrap { trim: false });
         f.render_widget(paragraph, area);
         return;
-    }
-
-    let mut chain_paths = Vec::new();
-    {
-        let mut current_path = doc.path.clone();
-        while let Some(current_doc) = app.store.get(&current_path) {
-            let implements_target = current_doc.related.iter().find_map(|r| {
-                if r.rel_type == RelationType::Implements {
-                    if let Some(fwd) = app.store.forward_links.get(&current_doc.path) {
-                        for (rel, target) in fwd {
-                            if *rel == RelationType::Implements {
-                                return Some(target.clone());
-                            }
-                        }
-                    }
-                    None
-                } else {
-                    None
-                }
-            });
-            match implements_target {
-                Some(parent) => {
-                    chain_paths.push(parent.clone());
-                    current_path = parent;
-                }
-                None => break,
-            }
-        }
-        chain_paths.reverse();
-    }
-
-    let mut children_paths = Vec::new();
-    if let Some(rev) = app.store.reverse_links.get(&doc.path) {
-        for (rel, source) in rev {
-            if *rel == RelationType::Implements {
-                children_paths.push(source.clone());
-            }
-        }
-    }
-
-    let mut related_paths = Vec::new();
-    if let Some(fwd) = app.store.forward_links.get(&doc.path) {
-        for (rel, target) in fwd {
-            if *rel == RelationType::RelatedTo {
-                related_paths.push(target.clone());
-            }
-        }
-    }
-    if let Some(rev) = app.store.reverse_links.get(&doc.path) {
-        for (rel, source) in rev {
-            if *rel == RelationType::RelatedTo {
-                related_paths.push(source.clone());
-            }
-        }
     }
 
     let mut items: Vec<ListItem> = Vec::new();
@@ -1095,13 +1041,13 @@ pub fn render_relationship_sections(
         ]))
     };
 
-    let sections: Vec<(&str, &Vec<std::path::PathBuf>)> = vec![
-        ("chain", &chain_paths),
-        ("children", &children_paths),
-        ("related", &related_paths),
+    let labelled_sections: Vec<(&str, &Vec<std::path::PathBuf>)> = vec![
+        ("chain", &sections.chain),
+        ("children", &sections.children),
+        ("related", &sections.related),
     ];
 
-    for (label, paths) in &sections {
+    for (label, paths) in &labelled_sections {
         if paths.is_empty() {
             continue;
         }
