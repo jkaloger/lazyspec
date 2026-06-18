@@ -3,7 +3,6 @@
 use crate::common::TestFixture;
 use crossterm::event::{KeyCode, KeyModifiers};
 use lazyspec::engine::config::{Config, ValidationRule};
-use lazyspec::tui::agent::{build_create_children_prompt, build_expand_prompt};
 use lazyspec::tui::state::App;
 
 fn press(app: &mut App, fixture: &TestFixture, key: KeyCode) {
@@ -37,27 +36,7 @@ fn select_action(app: &mut App, fixture: &TestFixture, action_name: &str) {
     press(app, fixture, KeyCode::Enter);
 }
 
-// --- AC2: Expand prompt includes document content ---
-
-#[test]
-fn expand_prompt_contains_document_content() {
-    let content = "---\ntitle: \"My RFC\"\n---\n\n# Overview\nSome details here.";
-    let prompt = build_expand_prompt(content, std::path::Path::new("docs/rfcs/RFC-001.md"));
-    assert!(prompt.contains(content));
-    assert!(prompt.contains("Edit"));
-    assert!(prompt.contains("RFC-001.md"));
-}
-
 // --- AC3: Create-children derives child type from ParentChild rules ---
-
-#[test]
-fn create_children_prompt_contains_child_type_and_content() {
-    let content = "---\ntitle: \"Parent RFC\"\n---\n\nRFC body text.";
-    let prompt = build_create_children_prompt(content, "story");
-    assert!(prompt.contains("story"));
-    assert!(prompt.contains(content));
-    assert!(prompt.contains("lazyspec create story"));
-}
 
 #[test]
 fn config_parent_child_rules_derive_child_type() {

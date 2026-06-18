@@ -45,7 +45,7 @@ impl App {
         }
         #[cfg(feature = "agent")]
         if self.agent_dialog.active {
-            return self.handle_agent_dialog_key(code, config);
+            return self.handle_agent_dialog_key(code);
         }
         if self.search_mode {
             return self.handle_search_key(code, modifiers);
@@ -166,7 +166,7 @@ impl App {
     }
 
     #[cfg(feature = "agent")]
-    fn handle_agent_dialog_key(&mut self, code: KeyCode, config: &Config) {
+    fn handle_agent_dialog_key(&mut self, code: KeyCode) {
         if self.agent_dialog.text_input.is_some() {
             self.handle_agent_text_input_key(code);
             return;
@@ -207,52 +207,14 @@ impl App {
 
                 self.agent_dialog.active = false;
 
-                let doc_title = self.agent_dialog.doc_title.clone();
-
-                if action == "Expand document" {
-                    let full_path = self.store.root.join(&doc_path);
-                    if let Ok(content) = self.fs.read_to_string(&full_path) {
-                        let prompt = crate::tui::agent::build_expand_prompt(&content, &full_path);
-                        let _ = self
-                            .agent_spawner
-                            .spawn(&prompt, &full_path, &doc_title, &action);
-                    }
-                } else if action == "Create children" {
-                    self.spawn_create_children(&doc_path, &doc_title, config);
-                }
+                // slice 4 / STORY-135: action dialog becomes template-driven.
+                // The built-in "Expand document" / "Create children" prompt
+                // builders were removed; a later slice wires these actions to
+                // user-authored templates via the engine prompt path.
+                let _ = (doc_path, action);
             }
             _ => {}
         }
-    }
-
-    #[cfg(feature = "agent")]
-    fn spawn_create_children(&mut self, doc_path: &Path, doc_title: &str, config: &Config) {
-        let doc = match self.store.get(doc_path) {
-            Some(d) => d,
-            None => return,
-        };
-        let doc_type_str = doc.doc_type.to_string();
-        let child_type = config.rules.iter().find_map(|rule| match rule {
-            crate::engine::config::ValidationRule::ParentChild { parent, child, .. }
-                if parent == &doc_type_str =>
-            {
-                Some(child.clone())
-            }
-            _ => None,
-        });
-        let child_type = match child_type {
-            Some(ct) => ct,
-            None => return,
-        };
-        let full_path = self.store.root.join(doc_path);
-        let content = match self.fs.read_to_string(&full_path) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let prompt = crate::tui::agent::build_create_children_prompt(&content, &child_type);
-        let _ = self
-            .agent_spawner
-            .spawn(&prompt, &full_path, doc_title, "Create children");
     }
 
     #[cfg(feature = "agent")]

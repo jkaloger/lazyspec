@@ -1,7 +1,7 @@
 ---
 title: Prompt templates from .lazyspec/agents with minijinja rendering
 type: story
-status: draft
+status: complete
 author: jkaloger
 date: 2026-06-18
 tags: []

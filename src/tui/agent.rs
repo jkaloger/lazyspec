@@ -98,30 +98,6 @@ pub fn update_record_status(
     Ok(())
 }
 
-// --- Prompt builders ---
-
-pub fn build_create_children_prompt(doc_content: &str, child_type: &str) -> String {
-    format!(
-        "You are a specification document generator. Given the parent document below, generate \
-child documents of type \"{child_type}\" that break down the parent into actionable pieces. \
-For each child document, run `lazyspec create {child_type}` with an appropriate title \
-and fill in the generated file with relevant content derived from the parent. \
-Preserve traceability by including a relation back to the parent document.\n\n\
----\n\n{doc_content}"
-    )
-}
-
-pub fn build_expand_prompt(doc_content: &str, doc_path: &Path) -> String {
-    format!(
-        "You are editing the specification document at `{}`. Your task is to flesh out and expand any sparse \
-or incomplete sections while preserving the YAML frontmatter exactly as-is. Do not remove \
-or reorder existing content. Focus on adding detail, clarifying intent, and filling gaps. \
-Use the Edit tool to modify the file in place. Do not output the document as text.\n\n---\n\n{}",
-        doc_path.display(),
-        doc_content
-    )
-}
-
 pub struct AgentSpawner {
     running: Vec<(String, Child)>,
     pub records: Vec<AgentRecord>,
