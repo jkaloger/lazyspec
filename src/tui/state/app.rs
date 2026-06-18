@@ -338,6 +338,9 @@ impl App {
         let (status_bar_components, status_bar_warnings) =
             StatusBarComponents::from_config(&config.ui.statusbar);
 
+        #[cfg(feature = "agent")]
+        let agent_spawner = AgentSpawner::new(store.root());
+
         let mut app = App {
             fs,
             store,
@@ -367,7 +370,7 @@ impl App {
             #[cfg(feature = "agent")]
             agent_dialog: AgentDialog::new(),
             #[cfg(feature = "agent")]
-            agent_spawner: AgentSpawner::new(),
+            agent_spawner,
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
@@ -455,7 +458,7 @@ impl App {
         }
         #[cfg(feature = "agent")]
         if self.view_mode == ViewMode::Agents {
-            if let Ok(records) = load_all_records(None) {
+            if let Ok(records) = load_all_records(Some(self.agent_spawner.history_dir())) {
                 self.agent_spawner.records = records;
             }
             self.agent_selected_index = 0;
@@ -1532,6 +1535,9 @@ mod tests {
 
         let (tx, _rx) = crossbeam_channel::unbounded();
 
+        #[cfg(feature = "agent")]
+        let agent_spawner = AgentSpawner::new(store.root());
+
         let app = App {
             fs: Box::new(crate::engine::fs::RealFileSystem),
             store,
@@ -1556,7 +1562,7 @@ mod tests {
             #[cfg(feature = "agent")]
             agent_dialog: AgentDialog::new(),
             #[cfg(feature = "agent")]
-            agent_spawner: AgentSpawner::new(),
+            agent_spawner,
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,

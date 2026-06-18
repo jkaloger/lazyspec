@@ -189,13 +189,13 @@ fn handle_key_returns_after_spawn_action() {
 
 #[test]
 fn agent_spawner_uses_claude_command() {
-    // AgentSpawner::spawn calls Command::new("claude") internally.
-    // We verify this by checking the module source expectation:
-    // the spawn method only constructs Command::new("claude").
-    // Since we can't mock Command, we verify the spawner exists and
-    // that calling spawn with no claude binary returns an error.
+    // The production constructor wires the ClaudeP runner, which invokes the
+    // `claude` binary. Since we can't mock Command here, we verify that the
+    // production spawner either errors (no `claude` on PATH) or tracks a live
+    // child -- the only two outcomes of a real `claude -p` launch.
     use lazyspec::tui::agent::AgentSpawner;
-    let mut spawner = AgentSpawner::new();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut spawner = AgentSpawner::new(tmp.path());
     let result = spawner.spawn(
         "test prompt",
         std::path::Path::new("/tmp/fake.md"),

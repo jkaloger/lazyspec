@@ -1,7 +1,7 @@
 ---
 title: Agent runner trait and headless Claude implementation
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-06-18
 tags: []
