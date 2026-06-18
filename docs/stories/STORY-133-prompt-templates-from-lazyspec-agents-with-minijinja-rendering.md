@@ -1,7 +1,7 @@
 ---
 title: Prompt templates from .lazyspec/agents with minijinja rendering
 type: story
-status: draft
+status: complete
 author: jkaloger
 date: 2026-06-18
 tags: []
@@ -70,6 +70,12 @@ Agent prompts are baked into the Rust binary as `build_expand_prompt` and `build
 **When** the codebase is inspected
 **Then** `build_expand_prompt` and `build_create_children_prompt` no longer exist and no default prompt is embedded or written by `init`
 
+### AC10: context lineage exposed
+
+**Given** a template body referencing `context.ancestors` and `context.related` for a document that implements a parent and links to other documents
+**When** the template is rendered against that document
+**Then** `context.ancestors` resolves to the document's `implements` chain (nearest parent first) and `context.related` to its adjacent `related-to` documents, each entry exposing the same `document.*` fields, sourced from `resolve_chain` rather than a re-derived DAG
+
 ## Scope
 
 ### In Scope
@@ -77,7 +83,7 @@ Agent prompts are baked into the Rust binary as `build_expand_prompt` and `build
 - Discovering `*.md` template files under `.lazyspec/agents/`
 - Parsing YAML frontmatter into an `AgentPrompt`: required `name` and `description`; optional `mode` (`headless` | `interactive`, default `headless`) and optional `allowed_tools`
 - Rendering the markdown body with minijinja in strict-undefined mode
-- Render context exposing `document` (`id`, `title`, `type`, `body`, `status`, `path`) and `child_types` (child type names for the document's type, derived from the parent-child config rules)
+- Render context exposing `document` (`id`, `title`, `type`, `body`, `status`, `path`), `child_types` (child type names for the document's type, derived from the parent-child config rules), and `context` (resolved lineage from `resolve_chain`: `context.ancestors` = the `implements` chain, `context.related` = adjacent `related-to` documents, each entry with the same `document.*` fields)
 - Surfacing an unknown-variable reference as an error rather than an empty string
 - Skipping files with missing/malformed frontmatter, with a warning, so they are not offered
 - Deleting `build_expand_prompt` / `build_create_children_prompt`; the engine ships zero default prompts

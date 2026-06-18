@@ -32,6 +32,7 @@ pub fn starter_config() -> Config {
         ref_count_ceiling: 15,
         certification: CertificationConfig::default(),
         coordination: None,
+        agents: Default::default(),
     }
 }
 

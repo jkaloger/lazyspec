@@ -147,6 +147,8 @@ pub struct TypeDef {
     pub singleton: bool,
     #[serde(default)]
     pub parent_type: Option<String>,
+    #[serde(default)]
+    pub agents: Vec<String>,
 }
 
 /// One entry in the `[[relationships]]` block: a relationship name and its
@@ -277,6 +279,8 @@ pub struct Config {
     pub certification: CertificationConfig,
     #[serde(skip)]
     pub coordination: Option<CoordinationConfig>,
+    #[serde(default)]
+    pub agents: AgentsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -341,6 +345,15 @@ pub struct GithubConfig {
     pub cache_ttl: u64,
 }
 
+/// The global `[agents]` block. `interactive` is the optional `bash -lc` shell
+/// command for terminal handover (e.g. `claude "$LAZYSPEC_PROMPT"`). Zero-defaults
+/// (ADR-015): absent -> None -> interactive run mode is unavailable and not offered.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct AgentsConfig {
+    #[serde(default)]
+    pub interactive: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct RawConfig {
     types: Option<Vec<TypeDef>>,
@@ -357,6 +370,8 @@ struct RawConfig {
     github: Option<GithubConfig>,
     #[serde(default)]
     coordination: Option<CoordinationConfig>,
+    #[serde(default)]
+    agents: Option<AgentsConfig>,
 }
 
 /// The canonical starter document types. The engine carries no built-in types in
@@ -374,6 +389,7 @@ pub fn starter_types() -> Vec<TypeDef> {
         store: StoreBackend::default(),
         singleton: false,
         parent_type: None,
+        agents: Vec::new(),
     };
     vec![
         simple("rfc", "rfcs", "docs/rfcs", "RFC", "●"),
@@ -398,6 +414,7 @@ pub fn starter_types() -> Vec<TypeDef> {
             store: StoreBackend::default(),
             singleton: true,
             parent_type: None,
+            agents: Vec::new(),
         },
         TypeDef {
             name: "dictum".to_string(),
@@ -410,6 +427,7 @@ pub fn starter_types() -> Vec<TypeDef> {
             store: StoreBackend::default(),
             singleton: false,
             parent_type: Some("convention".to_string()),
+            agents: Vec::new(),
         },
     ]
 }
@@ -465,6 +483,7 @@ impl Default for Config {
             ref_count_ceiling: 15,
             certification: CertificationConfig::default(),
             coordination: None,
+            agents: AgentsConfig::default(),
         }
     }
 }
@@ -595,6 +614,7 @@ impl Config {
             ref_count_ceiling,
             certification: raw.certification.unwrap_or_default(),
             coordination: raw.coordination,
+            agents: raw.agents.unwrap_or_default(),
         })
     }
 
@@ -705,6 +725,7 @@ impl TypeDef {
             store,
             singleton: false,
             parent_type: None,
+            agents: Vec::new(),
         }
     }
 }
@@ -1196,6 +1217,99 @@ prefix = "RFC"
         let config = Config::parse(TYPES).unwrap();
         assert!(config.relationship_by_name("implements").is_some());
         assert!(config.relationship_by_name("related-to").is_some());
+    }
+
+    // AC1: a [[types]] entry with no `agents` key loads and resolves to an empty
+    // action set (agent mode off; not an error).
+    #[test]
+    fn type_without_agents_key_parses_and_is_empty() {
+        let config = Config::parse(TYPES).unwrap();
+        let rfc = config.type_by_name("rfc").unwrap();
+        assert!(rfc.agents.is_empty());
+    }
+
+    // AC2: an explicit empty `agents = []` loads and resolves to an empty action
+    // set (off), exactly as an absent key does.
+    #[test]
+    fn type_with_empty_agents_list_parses_empty() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+agents = []
+"#;
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+        assert!(config.type_by_name("rfc").unwrap().agents.is_empty());
+    }
+
+    // AC2-shape: a malformed `agents` (not a list of strings) is a strict-load
+    // error -- the shape is validated even though empty/absent is allowed.
+    #[test]
+    fn type_with_malformed_agents_shape_is_error() {
+        let as_string = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+agents = "expand"
+"#;
+        assert!(Config::parse(&format!("{as_string}{RELATIONSHIPS}")).is_err());
+
+        let as_ints = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+agents = [1, 2]
+"#;
+        assert!(Config::parse(&format!("{as_ints}{RELATIONSHIPS}")).is_err());
+    }
+
+    // AC3: a type that declares `agents` with templates assumed loaded carries the
+    // declared list through parse in declared order.
+    #[test]
+    fn type_with_agents_list_parses_in_declared_order() {
+        let toml_str = r#"
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+agents = ["expand", "create-children"]
+"#;
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+        assert_eq!(
+            config.type_by_name("story").unwrap().agents,
+            vec!["expand".to_string(), "create-children".to_string()]
+        );
+    }
+
+    // AC1: an [agents] block with `interactive` parses into config.
+    #[test]
+    fn agents_config_parses_interactive() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[agents]
+interactive = 'claude "$LAZYSPEC_PROMPT"'
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        assert_eq!(
+            config.agents.interactive,
+            Some("claude \"$LAZYSPEC_PROMPT\"".to_string())
+        );
+    }
+
+    // AC1: absent [agents] block -> interactive is None (zero-defaults: unavailable).
+    #[test]
+    fn agents_config_none_when_absent() {
+        let config = Config::parse(TYPES).unwrap();
+        assert!(config.agents.interactive.is_none());
     }
 
     #[test]

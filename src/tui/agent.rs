@@ -1,9 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
+use std::sync::Arc;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+
+use crate::engine::agent::{AgentContext, AgentRunner, ClaudeP};
 
 // --- Agent record model and persistence ---
 
@@ -26,9 +29,12 @@ pub struct AgentRecord {
 }
 
 pub fn agent_history_dir(override_path: Option<&Path>) -> PathBuf {
+    // The spawner always passes an explicit dir (its `history_dir`, under the
+    // repo's `.lazyspec/cache/agents/`). The `None` fallback exists only for
+    // callers without a repo root in scope.
     let dir = match override_path {
         Some(p) => p.to_path_buf(),
-        None => dirs_home().join(".lazyspec").join("agents"),
+        None => dirs_home().join(".lazyspec").join("cache").join("agents"),
     };
     let _ = fs::create_dir_all(&dir);
     dir
@@ -92,67 +98,50 @@ pub fn update_record_status(
     Ok(())
 }
 
-// --- Prompt builders ---
-
-pub fn build_create_children_prompt(doc_content: &str, child_type: &str) -> String {
-    format!(
-        "You are a specification document generator. Given the parent document below, generate \
-child documents of type \"{child_type}\" that break down the parent into actionable pieces. \
-For each child document, run `lazyspec create {child_type}` with an appropriate title \
-and fill in the generated file with relevant content derived from the parent. \
-Preserve traceability by including a relation back to the parent document.\n\n\
----\n\n{doc_content}"
-    )
-}
-
-pub fn build_expand_prompt(doc_content: &str, doc_path: &Path) -> String {
-    format!(
-        "You are editing the specification document at `{}`. Your task is to flesh out and expand any sparse \
-or incomplete sections while preserving the YAML frontmatter exactly as-is. Do not remove \
-or reorder existing content. Focus on adding detail, clarifying intent, and filling gaps. \
-Use the Edit tool to modify the file in place. Do not output the document as text.\n\n---\n\n{}",
-        doc_path.display(),
-        doc_content
-    )
-}
-
 pub struct AgentSpawner {
     running: Vec<(String, Child)>,
     pub records: Vec<AgentRecord>,
-}
-
-impl Default for AgentSpawner {
-    fn default() -> Self {
-        Self::new()
-    }
+    runner: Arc<dyn AgentRunner>,
+    history_dir: PathBuf,
 }
 
 impl AgentSpawner {
-    pub fn new() -> Self {
-        let records = load_all_records(None).unwrap_or_default();
+    pub fn new(root: &Path) -> Self {
+        Self::with_runner(Arc::new(ClaudeP), root)
+    }
+
+    pub fn with_runner(runner: Arc<dyn AgentRunner>, root: &Path) -> Self {
+        let history_dir = root.join(".lazyspec").join("cache").join("agents");
+        let records = load_all_records(Some(&history_dir)).unwrap_or_default();
         AgentSpawner {
             running: Vec::new(),
             records,
+            runner,
+            history_dir,
         }
+    }
+
+    pub fn history_dir(&self) -> &Path {
+        &self.history_dir
     }
 
     pub fn spawn(
         &mut self,
         prompt: &str,
+        allowed_tools: Option<&str>,
         doc_path: &Path,
         doc_title: &str,
         action: &str,
     ) -> Result<()> {
         let session_id = uuid::Uuid::new_v4().to_string();
 
-        let child = Command::new("claude")
-            .args(["-p", prompt])
-            .args(["--session-id", &session_id])
-            .args(["--allowedTools", "Read,Edit,Write,Bash(lazyspec *)"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
+        let ctx = AgentContext {
+            prompt: prompt.to_string(),
+            allowed_tools: allowed_tools.map(|t| t.to_string()),
+            doc_path: doc_path.to_path_buf(),
+            session_id: session_id.clone(),
+        };
+        let handle = self.runner.spawn(ctx)?;
 
         let record = AgentRecord {
             session_id: session_id.clone(),
@@ -164,9 +153,9 @@ impl AgentSpawner {
             finished_at: None,
         };
 
-        let _ = save_record(&record, None);
+        let _ = save_record(&record, Some(&self.history_dir));
         self.records.push(record);
-        self.running.push((session_id, child));
+        self.running.push((handle.session_id, handle.child));
         Ok(())
     }
 
@@ -193,7 +182,7 @@ impl AgentSpawner {
 
         let now = chrono::Utc::now().to_rfc3339();
         for (session_id, status) in finished {
-            let _ = update_record_status(&session_id, status.clone(), None);
+            let _ = update_record_status(&session_id, status.clone(), Some(&self.history_dir));
             if let Some(rec) = self.records.iter_mut().find(|r| r.session_id == session_id) {
                 rec.status = status;
                 rec.finished_at = Some(now.clone());
@@ -208,6 +197,12 @@ impl AgentSpawner {
 
 #[cfg(test)]
 mod tests {
+    // The test fakes use `RefCell`/single-threaded interior mutability and so are
+    // not `Sync`, but the spawner's seam is `Arc<dyn AgentRunner>`. These fakes
+    // are only ever touched on the test thread, so wrapping them in `Arc` to
+    // match that type is safe; the lint targets cross-thread misuse.
+    #![allow(clippy::arc_with_non_send_sync)]
+
     use super::*;
     use tempfile::TempDir;
 
@@ -273,5 +268,182 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let records = load_all_records(Some(tmp.path())).unwrap();
         assert!(records.is_empty());
+    }
+
+    // --- Spawner delegation, persistence, and polling via the AgentRunner seam ---
+
+    use crate::engine::agent::{AgentContext, AgentHandle, AgentRunner, FakeRunner};
+    use std::process::{Command, Stdio};
+
+    /// A test runner that returns handles wrapping a platform `false` child, so
+    /// `try_wait()` reports a non-zero exit. `FakeRunner` only ever wraps `true`
+    /// (or errors), so it cannot exercise the Failed-via-exit path AC6 needs.
+    struct FailingChildRunner {
+        captured: std::cell::RefCell<Vec<AgentContext>>,
+    }
+
+    impl FailingChildRunner {
+        fn new() -> Self {
+            FailingChildRunner {
+                captured: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl AgentRunner for FailingChildRunner {
+        fn spawn(&self, ctx: AgentContext) -> Result<AgentHandle> {
+            self.captured.borrow_mut().push(ctx.clone());
+            let child = Command::new("false")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
+            Ok(AgentHandle {
+                session_id: ctx.session_id,
+                child,
+            })
+        }
+    }
+
+    fn wait_for_drain(spawner: &mut AgentSpawner) {
+        for _ in 0..10_000 {
+            spawner.poll_finished();
+            if spawner.active_count() == 0 {
+                return;
+            }
+            // Yield (not sleep) so the short-lived `true`/`false` children get
+            // scheduled and exit; keeps the test deterministic, not timed.
+            std::thread::yield_now();
+        }
+        panic!("children did not exit within the poll budget");
+    }
+
+    // AC1: the spawner builds an AgentContext and obtains a handle from the runner.
+    #[test]
+    fn spawner_builds_context_and_delegates_to_runner() {
+        let tmp = TempDir::new().unwrap();
+        let fake = Arc::new(FakeRunner::new());
+        let mut spawner = AgentSpawner::with_runner(fake.clone(), tmp.path());
+
+        let doc_path = Path::new("docs/rfcs/RFC-001.md");
+        spawner
+            .spawn("expand it", None, doc_path, "RFC One", "Expand document")
+            .unwrap();
+
+        let captured = fake.captured.borrow();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].prompt, "expand it");
+        assert_eq!(captured[0].doc_path, doc_path);
+        assert!(!captured[0].session_id.is_empty());
+    }
+
+    // AC5: the spawner -- not the runner -- creates, persists, and tracks the record.
+    #[test]
+    fn spawner_creates_and_persists_record_with_fake_runner() {
+        let tmp = TempDir::new().unwrap();
+        let fake = Arc::new(FakeRunner::new());
+        let mut spawner = AgentSpawner::with_runner(fake, tmp.path());
+
+        let doc_path = Path::new("docs/rfcs/RFC-001.md");
+        spawner
+            .spawn("p", None, doc_path, "RFC One", "Expand document")
+            .unwrap();
+
+        assert_eq!(spawner.records.len(), 1);
+        let rec = &spawner.records[0];
+        assert_eq!(rec.status, AgentStatus::Running);
+        assert_eq!(rec.doc_title, "RFC One");
+        assert_eq!(rec.action, "Expand document");
+        assert_eq!(rec.doc_path, doc_path);
+        assert_eq!(spawner.active_count(), 1);
+
+        let history = tmp.path().join(".lazyspec").join("cache").join("agents");
+        let persisted = load_all_records(Some(&history)).unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].session_id, rec.session_id);
+        assert!(history.join(format!("{}.json", rec.session_id)).exists());
+    }
+
+    // AC6: polling marks the success child Complete and the failure child Failed,
+    // updates and persists both, and clears the active count.
+    #[test]
+    fn poll_marks_complete_and_failed_via_fake_handles() {
+        let tmp = TempDir::new().unwrap();
+        let history = tmp.path().join(".lazyspec").join("cache").join("agents");
+
+        // Success: FakeRunner wraps a platform `true` child.
+        let ok = Arc::new(FakeRunner::new());
+        let mut spawner = AgentSpawner::with_runner(ok, tmp.path());
+        spawner
+            .spawn("ok", None, Path::new("a.md"), "A", "Expand document")
+            .unwrap();
+        let ok_id = spawner.records[0].session_id.clone();
+
+        // Failure: a runner wrapping a platform `false` child.
+        let fail = Arc::new(FailingChildRunner::new());
+        spawner.runner = fail;
+        spawner
+            .spawn("fail", None, Path::new("b.md"), "B", "Expand document")
+            .unwrap();
+        let fail_id = spawner.records[1].session_id.clone();
+
+        assert_eq!(spawner.active_count(), 2);
+        wait_for_drain(&mut spawner);
+        assert_eq!(spawner.active_count(), 0);
+
+        let ok_rec = spawner
+            .records
+            .iter()
+            .find(|r| r.session_id == ok_id)
+            .unwrap();
+        assert_eq!(ok_rec.status, AgentStatus::Complete);
+        assert!(ok_rec.finished_at.is_some());
+
+        let fail_rec = spawner
+            .records
+            .iter()
+            .find(|r| r.session_id == fail_id)
+            .unwrap();
+        assert_eq!(fail_rec.status, AgentStatus::Failed);
+
+        let persisted = load_all_records(Some(&history)).unwrap();
+        let ok_p = persisted.iter().find(|r| r.session_id == ok_id).unwrap();
+        let fail_p = persisted.iter().find(|r| r.session_id == fail_id).unwrap();
+        assert_eq!(ok_p.status, AgentStatus::Complete);
+        assert!(ok_p.finished_at.is_some());
+        assert_eq!(fail_p.status, AgentStatus::Failed);
+        assert!(fail_p.finished_at.is_some());
+    }
+
+    // Per-call tool forwarding: the caller's allowed_tools are threaded verbatim
+    // into the AgentContext (no longer a hardcoded list); None forwards as None.
+    #[test]
+    fn spawn_forwards_per_call_allowed_tools() {
+        let tmp = TempDir::new().unwrap();
+        let fake = Arc::new(FakeRunner::new());
+        let mut spawner = AgentSpawner::with_runner(fake.clone(), tmp.path());
+
+        let full_path = tmp.path().join("docs/rfcs/RFC-001.md");
+        spawner
+            .spawn(
+                "expand prompt",
+                Some("Read,Edit"),
+                &full_path,
+                "RFC One",
+                "refine",
+            )
+            .unwrap();
+        spawner
+            .spawn("no tools", None, &full_path, "RFC One", "refine")
+            .unwrap();
+
+        let captured = fake.captured.borrow();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].allowed_tools, Some("Read,Edit".to_string()));
+        assert_eq!(captured[0].prompt, "expand prompt");
+        assert_eq!(captured[0].doc_path, full_path);
+        // session_id is a v4 uuid (round-trips through the uuid parser).
+        assert!(uuid::Uuid::parse_str(&captured[0].session_id).is_ok());
+        assert_eq!(captured[1].allowed_tools, None);
     }
 }

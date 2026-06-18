@@ -523,6 +523,31 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             app.refresh_validation(config);
         }
 
+        #[cfg(feature = "agent")]
+        if let Some(req) = app.interactive_request.take() {
+            let _stdin_guard = stdin_lock.lock().unwrap();
+            while rx.try_recv().is_ok() {}
+
+            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+            disable_raw_mode()?;
+            let mut command = crate::engine::agent_interactive::build_interactive_command(
+                &req.cmd,
+                &req.prompt,
+                &req.doc_path,
+            );
+            let _ = command.status();
+            enable_raw_mode()?;
+            execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+            terminal.clear()?;
+
+            drain_stdin();
+            while rx.try_recv().is_ok() {}
+            drop(_stdin_guard);
+            let root = app.store.root().to_path_buf();
+            app.store = Store::load(&root, config)?;
+            app.refresh_validation(config);
+        }
+
         if app.fix_request {
             app.fix_request = false;
             let root = app.store.root().to_path_buf();

@@ -354,6 +354,7 @@ mod tests {
             store: StoreBackend::GitRef,
             singleton: false,
             parent_type: None,
+            agents: Vec::new(),
         }
     }
 
@@ -379,6 +380,7 @@ mod tests {
             ref_count_ceiling: 0,
             certification: Default::default(),
             coordination: None,
+            agents: Default::default(),
         }
     }
 

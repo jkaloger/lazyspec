@@ -47,6 +47,7 @@ plural = "iterations"
 dir = "docs/iterations"
 prefix = "ITERATION"
 icon = "◆"
+agents = ["build"]
 
 [[types]]
 name = "adr"
@@ -76,6 +77,9 @@ inverse = "blocked-by"
 
 [[relationships]]
 name = "related-to"
+
+[agents]
+interactive = 'claude "$LAZYSPEC_PROMPT"'
 
 [github]
 repo = 'jkaloger/lazyspec'

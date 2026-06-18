@@ -15,6 +15,7 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = { version = "4", features = ["unstable-dynamic"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
+minijinja = "2"
 tui-markdown = "0.3"
 notify = "7"
 chrono = { version = "0.4", features = ["serde"] }

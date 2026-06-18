@@ -14,6 +14,7 @@ fn singleton_type(name: &str, dir: &str, prefix: &str) -> TypeDef {
         store: Default::default(),
         singleton: true,
         parent_type: None,
+        agents: Vec::new(),
     }
 }
 

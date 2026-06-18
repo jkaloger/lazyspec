@@ -521,6 +521,7 @@ mod tests {
             store,
             singleton: false,
             parent_type: None,
+            agents: Vec::new(),
         }
     }
 
@@ -728,6 +729,7 @@ mod tests {
             store: StoreBackend::GithubIssues,
             singleton: false,
             parent_type: None,
+            agents: Vec::new(),
         };
 
         let result = gh_store.create(&td, "test prefix", "author", "").unwrap();
@@ -1696,6 +1698,7 @@ mod tests {
             ref_count_ceiling: 0,
             certification: Default::default(),
             coordination: None,
+            agents: Default::default(),
         };
 
         let store = Store::load(&root, &config).unwrap();

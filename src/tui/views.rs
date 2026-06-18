@@ -1,7 +1,7 @@
 mod colors;
 pub mod keys;
 mod layout;
-mod overlays;
+pub mod overlays;
 mod panels;
 pub mod status_bar;
 

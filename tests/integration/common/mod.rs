@@ -43,6 +43,16 @@ impl TestFixture {
         path
     }
 
+    /// Write a user-authored agent prompt template under `.lazyspec/agents/`,
+    /// creating the directory if needed.
+    pub fn write_agent_prompt(&self, filename: &str, content: &str) -> PathBuf {
+        let dir = self.root().join(".lazyspec").join("agents");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(filename);
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
     pub fn write_subfolder_doc(&self, rel_path: &str, content: &str) -> PathBuf {
         let dir = self.root().join(rel_path);
         std::fs::create_dir_all(&dir).unwrap();

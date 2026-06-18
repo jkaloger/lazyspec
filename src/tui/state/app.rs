@@ -238,6 +238,10 @@ pub struct App {
     pub agent_dialog: AgentDialog,
     #[cfg(feature = "agent")]
     pub agent_spawner: AgentSpawner,
+    /// User-authored prompt templates discovered under `.lazyspec/agents/`,
+    /// loaded once at construction (ADR-015 zero-defaults: empty when absent).
+    #[cfg(feature = "agent")]
+    pub agent_prompts: Vec<crate::engine::prompt::AgentPrompt>,
     pub view_mode: ViewMode,
     pub graph_nodes: Vec<GraphNode>,
     pub graph_selected: usize,
@@ -265,6 +269,11 @@ pub struct App {
     pub agent_selected_index: usize,
     #[cfg(feature = "agent")]
     pub resume_request: Option<String>,
+    /// A pending interactive-agent terminal handover (RFC-046 slice 5). Set when a
+    /// `mode: interactive` template is selected; drained by the event loop, which
+    /// suspends/runs/restores the terminal. No AgentRecord is written (AC7).
+    #[cfg(feature = "agent")]
+    pub interactive_request: Option<super::forms::InteractiveRequest>,
     pub expanded_body_cache: HashMap<PathBuf, String>,
     pub expansion_in_flight: Option<PathBuf>,
     pub event_tx: crossbeam_channel::Sender<AppEvent>,
@@ -338,6 +347,16 @@ impl App {
         let (status_bar_components, status_bar_warnings) =
             StatusBarComponents::from_config(&config.ui.statusbar);
 
+        #[cfg(feature = "agent")]
+        let agent_spawner = AgentSpawner::new(store.root());
+        // ADR-015 zero-defaults: an absent agents dir yields no prompts; discovery
+        // warnings are surfaced to stderr inside `discover_prompts`, not stored.
+        #[cfg(feature = "agent")]
+        let agent_prompts = {
+            let (prompts, _warnings) = crate::engine::prompt::discover_prompts(store.root(), &*fs);
+            prompts
+        };
+
         let mut app = App {
             fs,
             store,
@@ -367,7 +386,9 @@ impl App {
             #[cfg(feature = "agent")]
             agent_dialog: AgentDialog::new(),
             #[cfg(feature = "agent")]
-            agent_spawner: AgentSpawner::new(),
+            agent_spawner,
+            #[cfg(feature = "agent")]
+            agent_prompts,
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
@@ -395,6 +416,8 @@ impl App {
             agent_selected_index: 0,
             #[cfg(feature = "agent")]
             resume_request: None,
+            #[cfg(feature = "agent")]
+            interactive_request: None,
             expanded_body_cache: HashMap::new(),
             expansion_in_flight: None,
             event_tx,
@@ -455,7 +478,7 @@ impl App {
         }
         #[cfg(feature = "agent")]
         if self.view_mode == ViewMode::Agents {
-            if let Ok(records) = load_all_records(None) {
+            if let Ok(records) = load_all_records(Some(self.agent_spawner.history_dir())) {
                 self.agent_spawner.records = records;
             }
             self.agent_selected_index = 0;
@@ -1532,6 +1555,9 @@ mod tests {
 
         let (tx, _rx) = crossbeam_channel::unbounded();
 
+        #[cfg(feature = "agent")]
+        let agent_spawner = AgentSpawner::new(store.root());
+
         let app = App {
             fs: Box::new(crate::engine::fs::RealFileSystem),
             store,
@@ -1556,7 +1582,9 @@ mod tests {
             #[cfg(feature = "agent")]
             agent_dialog: AgentDialog::new(),
             #[cfg(feature = "agent")]
-            agent_spawner: AgentSpawner::new(),
+            agent_spawner,
+            #[cfg(feature = "agent")]
+            agent_prompts: Vec::new(),
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
@@ -1584,6 +1612,8 @@ mod tests {
             agent_selected_index: 0,
             #[cfg(feature = "agent")]
             resume_request: None,
+            #[cfg(feature = "agent")]
+            interactive_request: None,
             expanded_body_cache: HashMap::new(),
             expansion_in_flight: None,
             event_tx: tx,

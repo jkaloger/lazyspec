@@ -1,4 +1,6 @@
 pub mod agent;
+#[cfg(feature = "agent")]
+pub mod agent_interactive;
 pub mod cache;
 pub mod cache_lock;
 pub mod certification;
@@ -17,6 +19,7 @@ pub mod issue_body;
 pub mod issue_cache;
 pub mod issue_map;
 pub mod lease;
+pub mod prompt;
 pub mod provenance;
 pub mod refs;
 pub mod reservation;
