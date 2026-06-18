@@ -338,6 +338,7 @@ mod tests {
                         store: StoreBackend::default(),
                         singleton: false,
                         parent_type: None,
+                        agents: Vec::new(),
                     },
                     TypeDef {
                         name: "story".to_string(),
@@ -350,6 +351,7 @@ mod tests {
                         store: StoreBackend::default(),
                         singleton: false,
                         parent_type: None,
+                        agents: Vec::new(),
                     },
                 ],
                 naming: Naming {
@@ -376,6 +378,7 @@ mod tests {
                 max_push_retries: 5,
                 max_clock_skew: "5m".to_string(),
             }),
+            agents: Default::default(),
         }
     }
 

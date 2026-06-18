@@ -45,6 +45,36 @@ pub fn resolve_agent_id_with_env(
     Ok(user_name)
 }
 
+/// The result of resolving a document type's opt-in `agents` list against the
+/// templates that actually loaded.
+#[cfg(feature = "agent")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAgents {
+    /// Template stems from the type's `agents` list that DID load, in the type's declared order.
+    pub actions: Vec<String>,
+    /// Stems named in the type's `agents` list with no matching loaded template
+    /// (user named an action they did not author) -- the named-but-missing report
+    /// the dialog surfaces.
+    pub missing: Vec<String>,
+}
+
+#[cfg(feature = "agent")]
+/// Resolve a type's opt-in `agents` list against the templates that actually loaded.
+/// Intersection in declared order; declared-but-not-loaded names go to `missing`.
+/// Empty `type_agents` → empty actions + empty missing (off; not an error).
+pub fn resolve_agent_actions(type_agents: &[String], loaded: &[String]) -> ResolvedAgents {
+    let mut actions = Vec::new();
+    let mut missing = Vec::new();
+    for name in type_agents {
+        if loaded.iter().any(|l| l == name) {
+            actions.push(name.clone());
+        } else {
+            missing.push(name.clone());
+        }
+    }
+    ResolvedAgents { actions, missing }
+}
+
 /// Inputs a headless agent run needs: the rendered prompt, optional tool
 /// allow-list, the document the run is scoped to, and the session id.
 #[cfg(feature = "agent")]
@@ -271,6 +301,70 @@ mod tests {
             .map(|a| a.to_str().unwrap().to_string())
             .collect();
         assert!(!argv_none.iter().any(|a| a == "--allowedTools"));
+    }
+
+    // AC3: the action set is the intersection of the type's declared `agents`
+    // with the loaded templates, in the type's declared order -- an extra
+    // unrelated loaded template proves it is an intersection, not a union.
+    #[cfg(feature = "agent")]
+    #[test]
+    fn resolve_intersects_type_agents_with_loaded() {
+        let type_agents = vec!["expand".to_string(), "create-children".to_string()];
+        let loaded = vec![
+            "expand".to_string(),
+            "create-children".to_string(),
+            "summarize".to_string(),
+        ];
+        let resolved = resolve_agent_actions(&type_agents, &loaded);
+        assert_eq!(
+            resolved.actions,
+            vec!["expand".to_string(), "create-children".to_string()]
+        );
+        assert!(resolved.missing.is_empty());
+    }
+
+    // AC4: a declared name with no matching loaded template is reported in
+    // `missing` and excluded from `actions`.
+    #[cfg(feature = "agent")]
+    #[test]
+    fn resolve_reports_named_but_missing() {
+        let type_agents = vec!["expand".to_string(), "nonexistent".to_string()];
+        let loaded = vec!["expand".to_string()];
+        let resolved = resolve_agent_actions(&type_agents, &loaded);
+        assert_eq!(resolved.actions, vec!["expand".to_string()]);
+        assert_eq!(resolved.missing, vec!["nonexistent".to_string()]);
+    }
+
+    // AC5: a loaded template referenced by no type appears in neither `actions`
+    // nor `missing`.
+    #[cfg(feature = "agent")]
+    #[test]
+    fn resolve_ignores_unreferenced_loaded_template() {
+        let type_agents = vec!["expand".to_string()];
+        let loaded = vec!["expand".to_string(), "orphan".to_string()];
+        let resolved = resolve_agent_actions(&type_agents, &loaded);
+        assert_eq!(resolved.actions, vec!["expand".to_string()]);
+        assert!(resolved.missing.is_empty());
+        assert!(!resolved.actions.contains(&"orphan".to_string()));
+        assert!(!resolved.missing.contains(&"orphan".to_string()));
+    }
+
+    // AC6: resolution is per-type and independent -- one type with a list, another
+    // with none, resolve without cross-coupling.
+    #[cfg(feature = "agent")]
+    #[test]
+    fn resolve_is_per_type_independent() {
+        let loaded = vec!["expand".to_string()];
+
+        let type_a = vec!["expand".to_string()];
+        let resolved_a = resolve_agent_actions(&type_a, &loaded);
+        assert_eq!(resolved_a.actions, vec!["expand".to_string()]);
+        assert!(resolved_a.missing.is_empty());
+
+        let type_b: Vec<String> = Vec::new();
+        let resolved_b = resolve_agent_actions(&type_b, &loaded);
+        assert!(resolved_b.actions.is_empty());
+        assert!(resolved_b.missing.is_empty());
     }
 
     // AC2: a fake runner records the exact AgentContext and spawns no `claude`.

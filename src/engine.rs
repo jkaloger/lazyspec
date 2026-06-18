@@ -1,4 +1,6 @@
 pub mod agent;
+#[cfg(feature = "agent")]
+pub mod agent_interactive;
 pub mod cache;
 pub mod cache_lock;
 pub mod certification;

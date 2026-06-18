@@ -43,7 +43,6 @@ mod sqids_numbering_test;
 mod store_test;
 mod tui_agent_dialog_test;
 mod tui_agent_management_test;
-mod tui_agent_test;
 mod tui_create_form_test;
 mod tui_delete_dialog_test;
 mod tui_diagram_test;

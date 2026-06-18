@@ -410,6 +410,27 @@ pub fn draw_provenance_editor(f: &mut Frame, app: &App) {
     f.render_widget(paragraph, popup_area);
 }
 
+/// The dialog row label for one agent action. Interactive templates carry a
+/// visible `(interactive)` marker (AC2) so the user knows the selection hands the
+/// terminal over to the configured command; headless templates and Custom do not.
+/// Pure (no `app`/frame) so the marking is directly unit-testable.
+#[cfg(feature = "agent")]
+pub fn action_label(action: &crate::tui::state::forms::AgentAction) -> String {
+    use crate::engine::prompt::RunMode;
+    use crate::tui::state::forms::AgentAction;
+
+    match action {
+        AgentAction::Template(p) => {
+            let marker = match p.mode {
+                RunMode::Interactive => "  (interactive)",
+                RunMode::Headless => "",
+            };
+            format!("  {} — {}{}", p.name, p.description, marker)
+        }
+        AgentAction::Custom => "  Custom prompt".to_string(),
+    }
+}
+
 #[cfg(feature = "agent")]
 pub fn draw_agent_dialog(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -454,7 +475,8 @@ pub fn draw_agent_dialog(f: &mut Frame, app: &App) {
     }
 
     let action_count = dialog.actions.len() as u16;
-    let content_height = action_count + 2;
+    let missing_lines = if dialog.missing.is_empty() { 0 } else { 1 };
+    let content_height = action_count + missing_lines + 2;
     let popup_width = (area.width * 40 / 100)
         .max(20)
         .min(area.width.saturating_sub(4));
@@ -465,11 +487,21 @@ pub fn draw_agent_dialog(f: &mut Frame, app: &App) {
 
     f.render_widget(Clear, popup_area);
 
-    let items: Vec<ListItem> = dialog
+    let mut items: Vec<ListItem> = dialog
         .actions
         .iter()
-        .map(|action| ListItem::new(format!("  {}", action)))
+        .map(|action| ListItem::new(action_label(action)))
         .collect();
+
+    // Render-only footer: the named-but-missing templates. It is NOT part of
+    // `dialog.actions`, so Up/Down/Enter (which clamp to actions.len()) never land
+    // on it.
+    if !dialog.missing.is_empty() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!("  ! missing templates: {}", dialog.missing.join(", ")),
+            Style::default().fg(Color::DarkGray),
+        ))));
+    }
 
     let title = format!(" Agent Actions \u{2014} {} ", dialog.doc_title);
 

@@ -45,7 +45,7 @@ impl App {
         }
         #[cfg(feature = "agent")]
         if self.agent_dialog.active {
-            return self.handle_agent_dialog_key(code);
+            return self.handle_agent_dialog_key(code, config);
         }
         if self.search_mode {
             return self.handle_search_key(code, modifiers);
@@ -165,8 +165,75 @@ impl App {
         }
     }
 
+    /// Open the template-driven agent dialog for the selected doc (RFC-046 slice
+    /// 4). Lists one entry per prompt template resolved for the doc's type, plus a
+    /// Custom entry. Opens nothing when the type exposes no agents (AC7).
     #[cfg(feature = "agent")]
-    fn handle_agent_dialog_key(&mut self, code: KeyCode) {
+    fn open_agent_dialog(&mut self, config: &Config) {
+        use crate::tui::state::forms::{AgentAction, AgentDialog};
+
+        let doc = match self.selected_doc_meta() {
+            Some(d) => d,
+            None => return,
+        };
+        let doc_type = doc.doc_type.as_str().to_string();
+        let doc_path = doc.path.clone();
+        let doc_title = doc.title.clone();
+
+        let type_agents = config
+            .type_by_name(&doc_type)
+            .map(|t| t.agents.clone())
+            .unwrap_or_default();
+
+        let loaded_names: Vec<String> = self.agent_prompts.iter().map(|p| p.name.clone()).collect();
+        let resolved = crate::engine::agent::resolve_agent_actions(&type_agents, &loaded_names);
+
+        // AC5: interactive templates are offered ONLY when `[agents] interactive`
+        // is configured (zero-defaults). Headless templates are always included.
+        let interactive_available = config.agents.interactive.is_some();
+
+        let mut actions: Vec<AgentAction> = resolved
+            .actions
+            .iter()
+            .filter_map(|name| {
+                self.agent_prompts
+                    .iter()
+                    .find(|p| &p.name == name)
+                    .cloned()
+                    .map(AgentAction::Template)
+            })
+            .filter(|action| match action {
+                AgentAction::Template(p) => {
+                    interactive_available || p.mode != crate::engine::prompt::RunMode::Interactive
+                }
+                AgentAction::Custom => true,
+            })
+            .collect();
+
+        if !type_agents.is_empty() {
+            actions.push(AgentAction::Custom);
+        }
+
+        // AC7: no resolvable actions (type exposes no agents) -> open nothing.
+        if actions.is_empty() {
+            return;
+        }
+
+        self.agent_dialog = AgentDialog {
+            active: true,
+            selected_index: 0,
+            actions,
+            missing: resolved.missing,
+            doc_path,
+            doc_title,
+            text_input: None,
+        };
+    }
+
+    #[cfg(feature = "agent")]
+    fn handle_agent_dialog_key(&mut self, code: KeyCode, config: &Config) {
+        use crate::tui::state::forms::AgentAction;
+
         if self.agent_dialog.text_input.is_some() {
             self.handle_agent_text_input_key(code);
             return;
@@ -192,28 +259,115 @@ impl App {
                     (self.agent_dialog.selected_index + 1) % self.agent_dialog.actions.len();
             }
             KeyCode::Enter => {
-                let action = self
+                let action = match self
                     .agent_dialog
                     .actions
                     .get(self.agent_dialog.selected_index)
                     .cloned()
-                    .unwrap_or_default();
-                let doc_path = self.agent_dialog.doc_path.clone();
+                {
+                    Some(a) => a,
+                    None => return,
+                };
 
-                if action == "Custom prompt" {
-                    self.agent_dialog.text_input = Some(String::new());
-                    return;
+                match action {
+                    AgentAction::Custom => {
+                        // Full Custom spawn is the next unit; just open the input.
+                        self.agent_dialog.text_input = Some(String::new());
+                    }
+                    AgentAction::Template(prompt) => {
+                        self.dispatch_template_action(prompt, config);
+                    }
                 }
-
-                self.agent_dialog.active = false;
-
-                // slice 4 / STORY-135: action dialog becomes template-driven.
-                // The built-in "Expand document" / "Create children" prompt
-                // builders were removed; a later slice wires these actions to
-                // user-authored templates via the engine prompt path.
-                let _ = (doc_path, action);
             }
             _ => {}
+        }
+    }
+
+    /// Dispatch a selected template action. Headless templates render against the
+    /// selected doc and spawn a background agent immediately (AC4/AC5);
+    /// interactive templates are show-but-disabled for now (slice 5 / STORY-136).
+    #[cfg(feature = "agent")]
+    fn dispatch_template_action(
+        &mut self,
+        prompt: crate::engine::prompt::AgentPrompt,
+        config: &Config,
+    ) {
+        use crate::engine::prompt::RunMode;
+
+        match prompt.mode {
+            RunMode::Interactive => {
+                // slice 5 / STORY-136: terminal handover. Render the body, then set
+                // the request seam (the event loop suspends/runs/restores). No
+                // AgentSpawner -> no AgentRecord (AC7). Defensive: do nothing if the
+                // interactive command is unset (gating should already exclude this).
+                let interactive_cmd = match &config.agents.interactive {
+                    Some(cmd) => cmd.clone(),
+                    None => return,
+                };
+
+                let doc_path = self.agent_dialog.doc_path.clone();
+
+                let doc = match self.store.get(&doc_path).cloned() {
+                    Some(d) => d,
+                    None => return,
+                };
+
+                let ctx = match crate::engine::prompt::build_render_context(
+                    &self.store,
+                    config,
+                    &doc,
+                    &*self.fs,
+                ) {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+
+                let rendered = match crate::engine::prompt::render(&prompt, &ctx) {
+                    Ok(r) => r,
+                    Err(_) => return,
+                };
+
+                self.agent_dialog.active = false;
+                self.interactive_request = Some(crate::tui::state::forms::InteractiveRequest {
+                    cmd: interactive_cmd,
+                    prompt: rendered,
+                    doc_path: self.store.root.join(&doc_path),
+                });
+            }
+            RunMode::Headless => {
+                let doc_path = self.agent_dialog.doc_path.clone();
+                let doc_title = self.agent_dialog.doc_title.clone();
+                self.agent_dialog.active = false;
+
+                let doc = match self.store.get(&doc_path).cloned() {
+                    Some(d) => d,
+                    None => return,
+                };
+
+                let ctx = match crate::engine::prompt::build_render_context(
+                    &self.store,
+                    config,
+                    &doc,
+                    &*self.fs,
+                ) {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+
+                let rendered = match crate::engine::prompt::render(&prompt, &ctx) {
+                    Ok(r) => r,
+                    Err(_) => return,
+                };
+
+                let full_path = self.store.root.join(&doc_path);
+                let _ = self.agent_spawner.spawn(
+                    &rendered,
+                    prompt.allowed_tools.as_deref(),
+                    &full_path,
+                    &doc_title,
+                    &prompt.name,
+                );
+            }
         }
     }
 
@@ -243,6 +397,7 @@ impl App {
                         );
                         let _ = self.agent_spawner.spawn(
                             &full_prompt,
+                            None,
                             &full_path,
                             &doc_title,
                             "Custom prompt",
@@ -612,30 +767,7 @@ impl App {
             }
             #[cfg(feature = "agent")]
             (KeyCode::Char('a'), _) => {
-                if let Some(doc) = self.selected_doc_meta() {
-                    let doc_type_str = doc.doc_type.to_string();
-                    let doc_path = doc.path.clone();
-                    let doc_title = doc.title.clone();
-
-                    let has_children = config.rules.iter().any(|rule| {
-                        matches!(rule, crate::engine::config::ValidationRule::ParentChild { parent, .. } if parent == &doc_type_str)
-                    });
-
-                    let mut actions =
-                        vec!["Expand document".to_string(), "Custom prompt".to_string()];
-                    if has_children {
-                        actions.push("Create children".to_string());
-                    }
-
-                    self.agent_dialog = crate::tui::state::forms::AgentDialog {
-                        active: true,
-                        selected_index: 0,
-                        actions,
-                        doc_path,
-                        doc_title,
-                        text_input: None,
-                    };
-                }
+                self.open_agent_dialog(config);
             }
             _ => {}
         }

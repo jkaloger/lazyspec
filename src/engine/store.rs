@@ -675,6 +675,7 @@ mod tests {
             store: StoreBackend::GithubIssues,
             singleton: false,
             parent_type: None,
+            agents: Vec::new(),
         };
 
         let mut config = Config::default();
@@ -764,6 +765,7 @@ mod tests {
             store: StoreBackend::GitRef,
             singleton: false,
             parent_type: None,
+            agents: Vec::new(),
         };
 
         let mut config = Config::default();

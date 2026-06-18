@@ -128,6 +128,7 @@ impl AgentSpawner {
     pub fn spawn(
         &mut self,
         prompt: &str,
+        allowed_tools: Option<&str>,
         doc_path: &Path,
         doc_title: &str,
         action: &str,
@@ -136,7 +137,7 @@ impl AgentSpawner {
 
         let ctx = AgentContext {
             prompt: prompt.to_string(),
-            allowed_tools: Some("Read,Edit,Write,Bash(lazyspec *)".to_string()),
+            allowed_tools: allowed_tools.map(|t| t.to_string()),
             doc_path: doc_path.to_path_buf(),
             session_id: session_id.clone(),
         };
@@ -326,7 +327,7 @@ mod tests {
 
         let doc_path = Path::new("docs/rfcs/RFC-001.md");
         spawner
-            .spawn("expand it", doc_path, "RFC One", "Expand document")
+            .spawn("expand it", None, doc_path, "RFC One", "Expand document")
             .unwrap();
 
         let captured = fake.captured.borrow();
@@ -345,7 +346,7 @@ mod tests {
 
         let doc_path = Path::new("docs/rfcs/RFC-001.md");
         spawner
-            .spawn("p", doc_path, "RFC One", "Expand document")
+            .spawn("p", None, doc_path, "RFC One", "Expand document")
             .unwrap();
 
         assert_eq!(spawner.records.len(), 1);
@@ -374,7 +375,7 @@ mod tests {
         let ok = Arc::new(FakeRunner::new());
         let mut spawner = AgentSpawner::with_runner(ok, tmp.path());
         spawner
-            .spawn("ok", Path::new("a.md"), "A", "Expand document")
+            .spawn("ok", None, Path::new("a.md"), "A", "Expand document")
             .unwrap();
         let ok_id = spawner.records[0].session_id.clone();
 
@@ -382,7 +383,7 @@ mod tests {
         let fail = Arc::new(FailingChildRunner::new());
         spawner.runner = fail;
         spawner
-            .spawn("fail", Path::new("b.md"), "B", "Expand document")
+            .spawn("fail", None, Path::new("b.md"), "B", "Expand document")
             .unwrap();
         let fail_id = spawner.records[1].session_id.clone();
 
@@ -414,28 +415,35 @@ mod tests {
         assert!(fail_p.finished_at.is_some());
     }
 
-    // AC7: the spawned context is byte-for-byte identical to the pre-refactor command.
+    // Per-call tool forwarding: the caller's allowed_tools are threaded verbatim
+    // into the AgentContext (no longer a hardcoded list); None forwards as None.
     #[test]
-    fn expand_action_spawns_identical_context_as_before() {
+    fn spawn_forwards_per_call_allowed_tools() {
         let tmp = TempDir::new().unwrap();
         let fake = Arc::new(FakeRunner::new());
         let mut spawner = AgentSpawner::with_runner(fake.clone(), tmp.path());
 
         let full_path = tmp.path().join("docs/rfcs/RFC-001.md");
         spawner
-            .spawn("expand prompt", &full_path, "RFC One", "Expand document")
+            .spawn(
+                "expand prompt",
+                Some("Read,Edit"),
+                &full_path,
+                "RFC One",
+                "refine",
+            )
+            .unwrap();
+        spawner
+            .spawn("no tools", None, &full_path, "RFC One", "refine")
             .unwrap();
 
         let captured = fake.captured.borrow();
-        assert_eq!(captured.len(), 1);
-        let ctx = &captured[0];
-        assert_eq!(
-            ctx.allowed_tools,
-            Some("Read,Edit,Write,Bash(lazyspec *)".to_string())
-        );
-        assert_eq!(ctx.prompt, "expand prompt");
-        assert_eq!(ctx.doc_path, full_path);
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].allowed_tools, Some("Read,Edit".to_string()));
+        assert_eq!(captured[0].prompt, "expand prompt");
+        assert_eq!(captured[0].doc_path, full_path);
         // session_id is a v4 uuid (round-trips through the uuid parser).
-        assert!(uuid::Uuid::parse_str(&ctx.session_id).is_ok());
+        assert!(uuid::Uuid::parse_str(&captured[0].session_id).is_ok());
+        assert_eq!(captured[1].allowed_tools, None);
     }
 }

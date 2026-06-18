@@ -392,6 +392,7 @@ fn custom_types_populate_doc_types_and_icons() {
             store: Default::default(),
             singleton: false,
             parent_type: None,
+            agents: Vec::new(),
         },
         TypeDef {
             name: "task".into(),
@@ -404,6 +405,7 @@ fn custom_types_populate_doc_types_and_icons() {
             store: Default::default(),
             singleton: false,
             parent_type: None,
+            agents: Vec::new(),
         },
     ];
     let store = Store::load(fixture.root(), &config).unwrap();

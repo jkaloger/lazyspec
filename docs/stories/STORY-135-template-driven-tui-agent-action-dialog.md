@@ -1,7 +1,7 @@
 ---
 title: Template-driven TUI agent action dialog
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-06-18
 tags: []

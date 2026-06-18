@@ -184,14 +184,41 @@ impl ProvenanceEditor {
     }
 }
 
+/// One entry in the agent dialog: either a resolved user-authored template (the
+/// full `AgentPrompt` is retained so the dialog can render and dispatch it
+/// directly) or the freeform `Custom` prompt. The built-in Expand/Create-children
+/// actions are gone (RFC-046 slice 4).
+#[cfg(feature = "agent")]
+#[derive(Debug, Clone)]
+pub enum AgentAction {
+    Template(crate::engine::prompt::AgentPrompt),
+    Custom,
+}
+
 #[cfg(feature = "agent")]
 pub struct AgentDialog {
     pub active: bool,
     pub selected_index: usize,
-    pub actions: Vec<String>,
+    pub actions: Vec<AgentAction>,
+    /// Stems named in the type's `agents` list with no matching loaded template.
+    /// Captured here for the next unit's missing-template footer.
+    pub missing: Vec<String>,
     pub doc_path: PathBuf,
     pub doc_title: String,
     pub text_input: Option<String>,
+}
+
+/// A pending interactive-agent handover (RFC-046 slice 5 / STORY-136). Set on the
+/// `App` when a `mode: interactive` template is selected; drained by the event loop,
+/// which suspends the TUI, runs `build_interactive_command`, and restores. The
+/// engine builds the Command; the TUI owns the terminal state (convention 3). No
+/// AgentRecord is ever written for an interactive run (AC7).
+#[cfg(feature = "agent")]
+#[derive(Debug, Clone)]
+pub struct InteractiveRequest {
+    pub cmd: String,
+    pub prompt: String,
+    pub doc_path: PathBuf,
 }
 
 #[cfg(feature = "agent")]
@@ -208,6 +235,7 @@ impl AgentDialog {
             active: false,
             selected_index: 0,
             actions: Vec::new(),
+            missing: Vec::new(),
             doc_path: PathBuf::new(),
             doc_title: String::new(),
             text_input: None,

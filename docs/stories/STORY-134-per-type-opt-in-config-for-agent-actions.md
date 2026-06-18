@@ -1,7 +1,7 @@
 ---
 title: Per-type opt-in config for agent actions
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-06-18
 tags: []

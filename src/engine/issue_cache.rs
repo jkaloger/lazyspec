@@ -413,6 +413,7 @@ mod tests {
             store: StoreBackend::GithubIssues,
             singleton: false,
             parent_type: None,
+            agents: Vec::new(),
         }
     }
 

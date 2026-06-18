@@ -19,6 +19,7 @@ fn convention_config(fixture: &TestFixture) -> Config {
         store: Default::default(),
         singleton: true,
         parent_type: None,
+        agents: Vec::new(),
     });
     config.documents.types.push(TypeDef {
         name: "dictum".to_string(),
@@ -31,6 +32,7 @@ fn convention_config(fixture: &TestFixture) -> Config {
         store: Default::default(),
         singleton: false,
         parent_type: Some("convention".to_string()),
+        agents: Vec::new(),
     });
     config
 }
