@@ -1,7 +1,7 @@
 ---
 title: Per-type agent opt-in config and resolution
 type: iteration
-status: accepted
+status: complete
 author: agent
 date: 2026-06-18
 tags: []

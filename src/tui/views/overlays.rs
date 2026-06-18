@@ -16,14 +16,15 @@ pub fn draw_help_overlay(f: &mut Frame) {
     let area = f.area();
 
     let popup_width = 50.min(area.width.saturating_sub(4));
-    let popup_height = 27.min(area.height.saturating_sub(4));
+    let popup_height = 30.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(popup_width)) / 2;
     let y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
 
     f.render_widget(Clear, popup_area);
 
-    let help_text = vec![
+    #[cfg_attr(not(feature = "agent"), allow(unused_mut))]
+    let mut help_text = vec![
         Line::from(Span::styled(
             "Keybindings",
             Style::default()
@@ -66,6 +67,9 @@ pub fn draw_help_overlay(f: &mut Frame) {
         Line::from("  j/k       Scroll"),
         Line::from("  Esc/q     Back to dashboard"),
     ];
+
+    #[cfg(feature = "agent")]
+    help_text.insert(11, Line::from("  a         Agent actions"));
 
     let paragraph = Paragraph::new(help_text).block(
         Block::default()

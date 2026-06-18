@@ -1,7 +1,7 @@
 ---
 title: Pluggable agent runtime and user-authored prompt templates
 type: rfc
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-06-18
 tags: []
