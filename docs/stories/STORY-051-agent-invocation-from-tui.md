@@ -1,7 +1,7 @@
 ---
 title: Agent invocation from TUI
 type: story
-status: accepted
+status: superseded
 author: jkaloger
 date: 2026-03-08
 tags:

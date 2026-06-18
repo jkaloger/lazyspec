@@ -1,7 +1,7 @@
 ---
 title: Custom agent prompts
 type: story
-status: draft
+status: superseded
 author: jkaloger
 date: 2026-03-08
 tags: []

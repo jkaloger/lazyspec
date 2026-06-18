@@ -1,7 +1,7 @@
 ---
 title: Frontmatter-Only Indexing
 type: adr
-status: accepted
+status: superseded
 author: jkaloger
 date: 2026-03-04
 tags:
