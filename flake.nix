@@ -89,6 +89,8 @@
             pkgs.rust-analyzer
             pkgs.ast-grep
             pkgs.ripgrep
+            pkgs.cargo-sweep
+            pkgs.llvmPackages.lld
           ];
         };
       }

@@ -1,119 +1,55 @@
 use crate::cli::json::doc_to_json_with_family;
 use crate::cli::style::{bold, dim, styled_status};
-use crate::engine::document::{DocMeta, RelationType};
-use crate::engine::store::{ResolveError, Store};
+use crate::engine::document::DocMeta;
+use crate::engine::store::Store;
 use anyhow::Result;
 use console::colors_enabled;
-use std::collections::HashSet;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
-pub struct ResolvedContext<'a> {
-    pub chain: Vec<&'a DocMeta>,
-    pub target_index: usize,
-    pub forward: Vec<&'a DocMeta>,
-    pub related: Vec<&'a DocMeta>,
-}
+pub use crate::engine::context::{resolve_chain, ContextNode, RelatedRef, ResolvedContext};
 
-pub fn resolve_chain<'a>(store: &'a Store, id: &str) -> Result<ResolvedContext<'a>> {
-    let doc = store
-        .resolve_shorthand(id)
-        .map_err(|e| match e {
-            ResolveError::NotFound(id) => anyhow::anyhow!("document not found: {}", id),
-            ResolveError::Ambiguous { id, matches } => {
-                let paths: Vec<String> = matches.iter().map(|m| m.to_string_lossy().to_string()).collect();
-                anyhow::anyhow!("Ambiguous ID '{}' matches multiple documents:\n  {}\nSpecify the full path to show a specific document.", id, paths.join("\n  "))
-            }
-        })?;
-
-    let mut chain = vec![doc];
-
-    loop {
-        let current = chain[0];
-        let parent = current.related.iter().find_map(|rel| {
-            if rel.rel_type == RelationType::Implements {
-                store.get(&PathBuf::from(&rel.target))
-            } else {
-                None
-            }
-        });
-
-        match parent {
-            Some(p) => chain.insert(0, p),
-            None => break,
-        }
-    }
-
-    let target_index = chain.iter().position(|d| d.path == doc.path).unwrap_or(0);
-
-    // Forward context: find docs whose `implements` points at the target
-    let target_path = &doc.path;
-    let forward: Vec<&DocMeta> = store
-        .reverse_links
-        .get(target_path)
-        .map(|links| {
-            links
-                .iter()
-                .filter(|(rel_type, _)| *rel_type == RelationType::Implements)
-                .filter_map(|(_, source_path)| store.get(source_path))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Related: collect RelatedTo links from all chain documents, deduplicated
-    let chain_paths: HashSet<&PathBuf> = chain.iter().map(|d| &d.path).collect();
-    let mut seen = HashSet::new();
-    let mut related = Vec::new();
-
-    for chain_doc in &chain {
-        // Forward RelatedTo links from this doc
-        if let Some(fwd) = store.forward_links.get(&chain_doc.path) {
-            for (rel_type, target) in fwd {
-                if *rel_type == RelationType::RelatedTo
-                    && !chain_paths.contains(target)
-                    && seen.insert(target.clone())
-                {
-                    if let Some(resolved) = store.get(target) {
-                        related.push(resolved);
-                    }
-                }
-            }
-        }
-        // Reverse RelatedTo links pointing at this doc
-        if let Some(rev) = store.reverse_links.get(&chain_doc.path) {
-            for (rel_type, source) in rev {
-                if *rel_type == RelationType::RelatedTo
-                    && !chain_paths.contains(source)
-                    && seen.insert(source.clone())
-                {
-                    if let Some(resolved) = store.get(source) {
-                        related.push(resolved);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(ResolvedContext {
-        chain,
-        target_index,
-        forward,
-        related,
-    })
-}
-
-pub fn run_json(store: &Store, id: &str) -> Result<String> {
-    let resolved = resolve_chain(store, id)?;
+pub fn run_json(store: &Store, id: &str, depth: usize) -> Result<String> {
+    let resolved = resolve_chain(store, id, depth)?;
     let chain: Vec<_> = resolved
-        .chain
+        .nodes
         .iter()
-        .map(|d| doc_to_json_with_family(d, store))
+        .map(|n| {
+            let mut value = doc_to_json_with_family(n.doc, store);
+            let edges: Vec<_> = n
+                .parents
+                .iter()
+                .map(|p| serde_json::Value::String(p.to_string_lossy().to_string()))
+                .collect();
+            value.as_object_mut().unwrap().insert(
+                "implements_in_context".to_string(),
+                serde_json::Value::Array(edges),
+            );
+            value
+        })
         .collect();
-    let related: Vec<_> = resolved
-        .related
-        .iter()
-        .map(|d| doc_to_json_with_family(d, store))
-        .collect();
-    let output = serde_json::json!({ "chain": chain, "related": related });
+    let tag = |r: &RelatedRef| {
+        let mut value = doc_to_json_with_family(r.doc, store);
+        let obj = value.as_object_mut().unwrap();
+        obj.insert(
+            "relation".to_string(),
+            serde_json::Value::String(r.relation.to_string()),
+        );
+        obj.insert("distance".to_string(), serde_json::json!(r.distance));
+        obj.insert(
+            "via".to_string(),
+            serde_json::Value::String(r.via.to_string_lossy().to_string()),
+        );
+        value
+    };
+    let forward: Vec<_> = resolved.forward.iter().map(tag).collect();
+    let related: Vec<_> = resolved.related.iter().map(tag).collect();
+    let output = serde_json::json!({
+        "chain": chain,
+        "forward": forward,
+        "related": related,
+        "target": resolved.target.path.to_string_lossy(),
+    });
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
@@ -167,57 +103,175 @@ fn chain_connector() -> String {
     }
 }
 
-pub fn run_human(store: &Store, id: &str) -> Result<String> {
-    let resolved = resolve_chain(store, id)?;
-    let mut output = String::new();
-
-    for (i, doc) in resolved.chain.iter().enumerate() {
+/// Render the backward node set as the vertical stack of mini-cards used for a
+/// single-parent (linear) chain. Each card is separated by `chain_connector()`
+/// and each card's forward children are listed below it.
+fn render_stack(resolved: &ResolvedContext, store: &Store, output: &mut String) {
+    for (i, node) in resolved.nodes.iter().enumerate() {
+        let doc = node.doc;
         if i > 0 {
             output.push_str(&chain_connector());
             output.push('\n');
         }
-        output.push_str(&mini_card(doc, i == resolved.target_index));
+        output.push_str(&mini_card(doc, doc.path == resolved.target.path));
         output.push('\n');
+        push_card_children(store, &doc.path, "", output);
+    }
+}
 
-        let child_paths = store.children_of(&doc.path);
-        if !child_paths.is_empty() {
-            let children: Vec<_> = child_paths.iter().filter_map(|cp| store.get(cp)).collect();
-            for (j, child) in children.iter().enumerate() {
-                let connector = if j == children.len() - 1 {
-                    "\u{2514}\u{2500}"
-                } else {
-                    "\u{251c}\u{2500}"
-                };
-                let shorthand = child.id.to_uppercase();
-                let title = &child.title;
-                let status_display = if colors_enabled() {
-                    styled_status(&child.status)
-                } else {
-                    format!("{}", child.status)
-                };
-                output.push_str(&format!(
-                    "  {} {} {} [{}]\n",
-                    connector, shorthand, title, status_display
-                ));
+/// Render the backward node set as an indented tree for a multi-parent DAG.
+/// Roots (nodes with no in-graph parents) are drawn first, then their children
+/// descend with increasing indentation. A node reached more than once (a
+/// diamond) is drawn fully on first visit; later encounters emit a one-line
+/// shorthand reference and do not recurse, so each node is drawn exactly once.
+fn render_tree(resolved: &ResolvedContext, store: &Store, output: &mut String) {
+    // child adjacency: parent path -> child paths (a child is a node whose
+    // `parents` contains the parent's path).
+    let mut children: HashMap<&PathBuf, Vec<&PathBuf>> = HashMap::new();
+    for node in &resolved.nodes {
+        for parent in &node.parents {
+            children.entry(parent).or_default().push(&node.doc.path);
+        }
+    }
+    for kids in children.values_mut() {
+        kids.sort();
+    }
+
+    let mut roots: Vec<&ContextNode> = resolved
+        .nodes
+        .iter()
+        .filter(|n| n.parents.is_empty())
+        .collect();
+    roots.sort_by(|a, b| a.doc.path.cmp(&b.doc.path));
+
+    let by_path: HashMap<&PathBuf, &ContextNode> =
+        resolved.nodes.iter().map(|n| (&n.doc.path, n)).collect();
+
+    let mut drawn: HashSet<PathBuf> = HashSet::new();
+    for root in roots {
+        render_tree_node(
+            root, 0, resolved, store, &children, &by_path, &mut drawn, output,
+        );
+    }
+
+    // Cyclic input can leave a strongly-connected component with no root, so
+    // the root traversal never reaches it. Draw any still-undrawn node as a
+    // depth-0 subtree (in topological/path order) so the render is complete;
+    // the drawn-set still guarantees each node is drawn exactly once.
+    for node in &resolved.nodes {
+        if !drawn.contains(&node.doc.path) {
+            render_tree_node(
+                node, 0, resolved, store, &children, &by_path, &mut drawn, output,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_tree_node(
+    node: &ContextNode,
+    depth: usize,
+    resolved: &ResolvedContext,
+    store: &Store,
+    children: &HashMap<&PathBuf, Vec<&PathBuf>>,
+    by_path: &HashMap<&PathBuf, &ContextNode>,
+    drawn: &mut HashSet<PathBuf>,
+    output: &mut String,
+) {
+    let indent = "  ".repeat(depth);
+    let doc = node.doc;
+
+    if drawn.contains(&doc.path) {
+        // Diamond re-encounter: shorthand reference, no full card, no recurse.
+        output.push_str(&format!(
+            "{}\u{21B3} {} (see above)\n",
+            indent,
+            doc.id.to_uppercase()
+        ));
+        return;
+    }
+    drawn.insert(doc.path.clone());
+
+    let card = mini_card(doc, doc.path == resolved.target.path);
+    for line in card.lines() {
+        output.push_str(&indent);
+        output.push_str(line);
+        output.push('\n');
+    }
+    push_card_children(store, &doc.path, &indent, output);
+
+    if let Some(kids) = children.get(&doc.path) {
+        for child_path in kids {
+            if let Some(child) = by_path.get(child_path) {
+                render_tree_node(
+                    child,
+                    depth + 1,
+                    resolved,
+                    store,
+                    children,
+                    by_path,
+                    drawn,
+                    output,
+                );
             }
         }
+    }
+}
+
+/// Emit the forward (`implements`-pointing) children of `path` as `├─`/`└─`
+/// lines, each prefixed by `indent`. Shared by the stack and tree renders.
+fn push_card_children(store: &Store, path: &Path, indent: &str, output: &mut String) {
+    let child_paths = store.children_of(path);
+    if child_paths.is_empty() {
+        return;
+    }
+    let children: Vec<_> = child_paths.iter().filter_map(|cp| store.get(cp)).collect();
+    for (j, child) in children.iter().enumerate() {
+        let connector = if j == children.len() - 1 {
+            "\u{2514}\u{2500}"
+        } else {
+            "\u{251c}\u{2500}"
+        };
+        let shorthand = child.id.to_uppercase();
+        let title = &child.title;
+        let status_display = if colors_enabled() {
+            styled_status(&child.status)
+        } else {
+            format!("{}", child.status)
+        };
+        output.push_str(&format!(
+            "{}  {} {} {} [{}]\n",
+            indent, connector, shorthand, title, status_display
+        ));
+    }
+}
+
+pub fn run_human(store: &Store, id: &str, depth: usize) -> Result<String> {
+    let resolved = resolve_chain(store, id, depth)?;
+    let mut output = String::new();
+
+    let linear = resolved.nodes.iter().all(|n| n.parents.len() <= 1);
+    if linear {
+        render_stack(&resolved, store, &mut output);
+    } else {
+        render_tree(&resolved, store, &mut output);
     }
 
     if !resolved.forward.is_empty() {
         output.push_str(&chain_connector());
         output.push('\n');
-        for (j, child) in resolved.forward.iter().enumerate() {
+        for (j, f) in resolved.forward.iter().enumerate() {
             let connector = if j == resolved.forward.len() - 1 {
                 "\u{2514}\u{2500}"
             } else {
                 "\u{251c}\u{2500}"
             };
-            let shorthand = child.id.to_uppercase();
-            let title = &child.title;
+            let shorthand = f.doc.id.to_uppercase();
+            let title = &f.doc.title;
             let status_display = if colors_enabled() {
-                styled_status(&child.status)
+                styled_status(&f.doc.status)
             } else {
-                format!("{}", child.status)
+                format!("{}", f.doc.status)
             };
             output.push_str(&format!(
                 "  {} {} {} [{}]\n",
@@ -236,16 +290,25 @@ pub fn run_human(store: &Store, id: &str) -> Result<String> {
         } else {
             output.push_str("--- related ---\n");
         }
-        for rel_doc in &resolved.related {
-            let shorthand = rel_doc.id.to_uppercase();
+        for rel in &resolved.related {
+            let shorthand = rel.doc.id.to_uppercase();
             let status_display = if colors_enabled() {
-                styled_status(&rel_doc.status)
+                styled_status(&rel.doc.status)
             } else {
-                format!("{}", rel_doc.status)
+                format!("{}", rel.doc.status)
+            };
+            let suffix = if rel.distance > 1 {
+                let via = store
+                    .get(&rel.via)
+                    .map(|d| d.id.to_uppercase())
+                    .unwrap_or_else(|| rel.via.to_string_lossy().to_string());
+                format!(" (via {}, d{})", via, rel.distance)
+            } else {
+                String::new()
             };
             output.push_str(&format!(
-                "  {}  {} [{}]\n",
-                shorthand, rel_doc.title, status_display
+                "  {}  {} [{}]{}\n",
+                shorthand, rel.doc.title, status_display, suffix
             ));
         }
     }

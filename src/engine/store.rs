@@ -196,6 +196,20 @@ impl Store {
             .ok_or_else(|| ResolveError::NotFound(id.to_string()))
     }
 
+    /// Resolve a relation `target` (a doc id like `"RFC-006"` or a path) to the
+    /// `DocMeta` it points at. Mirrors the private link-building `resolve_target`:
+    /// look the target up as a document id first, then fall back to treating it
+    /// as a path.
+    pub fn resolve_relation_target(&self, target: &str) -> Option<&DocMeta> {
+        let path = self
+            .docs
+            .values()
+            .find(|d| d.id == target)
+            .map(|d| d.path.clone())
+            .unwrap_or_else(|| PathBuf::from(target));
+        self.get(&path)
+    }
+
     fn resolve_unqualified(&self, id: &str) -> Result<&DocMeta, ResolveError> {
         let matches: Vec<&DocMeta> = self
             .docs

@@ -56,7 +56,7 @@ fn context_includes_children_json() {
     let fixture = setup_parent_with_children_and_story();
     let store = fixture.store();
 
-    let output = lazyspec::cli::context::run_json(&store, "STORY-001").unwrap();
+    let output = lazyspec::cli::context::run_json(&store, "STORY-001", 1).unwrap();
     let json: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let chain = json["chain"].as_array().expect("chain array missing");
@@ -84,7 +84,7 @@ fn context_human_includes_children() {
     let fixture = setup_parent_with_children_and_story();
     let store = fixture.store();
 
-    let output = lazyspec::cli::context::run_human(&store, "STORY-001").unwrap();
+    let output = lazyspec::cli::context::run_human(&store, "STORY-001", 1).unwrap();
     assert!(
         output.contains("Appendix"),
         "human context should mention child title 'Appendix'"

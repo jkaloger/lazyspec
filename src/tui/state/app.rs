@@ -3,11 +3,11 @@ use super::forms::AgentDialog;
 use super::forms::{
     CreateForm, DeleteConfirm, LinkEditor, ProvenanceEditor, StatusPicker, REL_TYPES,
 };
-use super::graph::traverse_dependency_chain;
+use super::graph::flatten_forest;
 
 use crate::engine::cache::DiskCache;
 use crate::engine::config::{Config, NumberingStrategy, StoreBackend};
-use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, RelationType, Status};
+use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, Status};
 use crate::engine::fs::FileSystem;
 use crate::engine::git_status::{query_git_branch, GitStatusCache};
 use crate::engine::reservation::ReservationProgress;
@@ -122,6 +122,20 @@ pub struct GraphNode {
     pub doc_type: DocType,
     pub status: Status,
     pub depth: usize,
+    /// A diamond/multi-parent re-encounter: drawn as a one-line back-reference
+    /// (Task 3 renders it without recursing). The full node was emitted earlier.
+    pub reference: bool,
+    /// Doc ids of this node's OWN depth-1 `related-to` neighbours, minus those on
+    /// its `implements` lineage (its transitive ancestors and descendants, already
+    /// drawn as tree edges through the node). Siblings/cousins reachable only
+    /// through a shared ancestor ARE included — they have no `implements` path to
+    /// the node, so the link is genuinely cross-cutting. Display-only (RFC-006
+    /// Graph mode Phase 1, rendered `┄▷ <id>` by the renderer), sorted for
+    /// determinism. This is the node's own depth-1 set, NOT the `context`
+    /// command's related set (which also surfaces the related-to links of the
+    /// node's ancestors). Back-reference nodes carry an empty set: the annotation
+    /// belongs on the full first-encounter node line.
+    pub related: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +149,19 @@ pub struct DocListNode {
     pub is_parent: bool,
     pub is_virtual: bool,
     pub has_duplicate_id: bool,
+}
+
+/// The relation tab's three sections, derived from one engine `resolve_chain`:
+/// the upward `implements` lineage (chain), the docs that implement this one
+/// (children / reverse-implements), and the `related-to` neighbours. Holding
+/// `PathBuf`s (not borrowed `&DocMeta`) keeps this owned across the `App`
+/// method boundary; the renderer and the navigable item list both derive from
+/// it so they stay in lock-step.
+#[derive(Debug, Default, Clone)]
+pub struct RelationSections {
+    pub chain: Vec<PathBuf>,
+    pub children: Vec<PathBuf>,
+    pub related: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -616,33 +643,8 @@ impl App {
     }
 
     pub fn rebuild_graph(&mut self) {
-        let all_docs = self.store.all_docs();
-
-        let mut roots: Vec<&DocMeta> = all_docs
-            .iter()
-            .filter(|doc| {
-                !doc.related
-                    .iter()
-                    .any(|r| r.rel_type == RelationType::Implements)
-            })
-            .copied()
-            .collect();
-
-        roots.sort_by(|a, b| {
-            a.doc_type
-                .to_string()
-                .cmp(&b.doc_type.to_string())
-                .then(a.title.cmp(&b.title))
-        });
-
-        let mut nodes = Vec::new();
-        let mut visited = HashSet::new();
-
-        for root in &roots {
-            traverse_dependency_chain(&self.store, &root.path, 0, &mut nodes, &mut visited);
-        }
-
-        self.graph_nodes = nodes;
+        let forest = crate::engine::context::resolve_forest(&self.store);
+        self.graph_nodes = flatten_forest(&forest, &self.store);
         self.graph_selected = 0;
     }
 
@@ -826,63 +828,44 @@ impl App {
         self.selected_relation = 0;
     }
 
+    /// The relation tab's three sections for `doc`, derived from a single
+    /// engine [`resolve_chain`](crate::engine::context::resolve_chain) so the
+    /// navigable list and the rendered list share one source of truth.
+    pub fn relation_sections(&self, doc: &DocMeta) -> RelationSections {
+        let resolved = match crate::engine::context::resolve_chain(&self.store, &doc.id, 1) {
+            Ok(r) => r,
+            Err(_) => return RelationSections::default(),
+        };
+
+        let chain = resolved
+            .nodes
+            .iter()
+            .map(|n| n.doc.path.clone())
+            .filter(|p| *p != doc.path)
+            .collect();
+        let children = resolved
+            .forward
+            .iter()
+            .map(|r| r.doc.path.clone())
+            .collect();
+        let related = resolved
+            .related
+            .iter()
+            .map(|r| r.doc.path.clone())
+            .collect();
+
+        RelationSections {
+            chain,
+            children,
+            related,
+        }
+    }
+
     pub fn relation_items(&self, doc: &DocMeta) -> Vec<PathBuf> {
-        let mut items = Vec::new();
-
-        // Chain: walk Implements links upward from doc
-        let mut chain = Vec::new();
-        let mut current_path = doc.path.clone();
-        while let Some(current_doc) = self.store.get(&current_path) {
-            let implements_target = current_doc.related.iter().find_map(|r| {
-                if r.rel_type == RelationType::Implements {
-                    if let Some(fwd) = self.store.forward_links.get(&current_doc.path) {
-                        for (rel, target) in fwd {
-                            if *rel == RelationType::Implements {
-                                return Some(target.clone());
-                            }
-                        }
-                    }
-                    None
-                } else {
-                    None
-                }
-            });
-            match implements_target {
-                Some(parent) => {
-                    chain.push(parent.clone());
-                    current_path = parent;
-                }
-                None => break,
-            }
-        }
-        chain.reverse();
-        items.extend(chain);
-
-        // Children: docs that implement this doc (reverse Implements)
-        if let Some(rev) = self.store.reverse_links.get(&doc.path) {
-            for (rel, source) in rev {
-                if *rel == RelationType::Implements {
-                    items.push(source.clone());
-                }
-            }
-        }
-
-        // Related: forward and reverse RelatedTo links
-        if let Some(fwd) = self.store.forward_links.get(&doc.path) {
-            for (rel, target) in fwd {
-                if *rel == RelationType::RelatedTo {
-                    items.push(target.clone());
-                }
-            }
-        }
-        if let Some(rev) = self.store.reverse_links.get(&doc.path) {
-            for (rel, source) in rev {
-                if *rel == RelationType::RelatedTo {
-                    items.push(source.clone());
-                }
-            }
-        }
-
+        let sections = self.relation_sections(doc);
+        let mut items = sections.chain;
+        items.extend(sections.children);
+        items.extend(sections.related);
         items
     }
 
@@ -2047,5 +2030,206 @@ mod tests {
         app.wrap_mode = true;
         app.build_doc_tree();
         assert!(app.wrap_mode);
+    }
+
+    // --- relation_items / relation_sections --------------------------------
+
+    fn relations_doc_md(title: &str, doc_type: &str, related: &str) -> String {
+        let related_block = if related == "[]" {
+            "related: []".to_string()
+        } else {
+            format!("related:\n{related}")
+        };
+        format!(
+            "---\ntitle: \"{title}\"\ntype: {doc_type}\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\n{related_block}\n---\n\n{title} body\n"
+        )
+    }
+
+    /// Build an `App` wrapping a real `Store` loaded from in-memory files under
+    /// a fresh TempDir. The TempDir is returned so it outlives the store.
+    fn app_with_store(files: &[(&str, &str)]) -> (tempfile::TempDir, App) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        for (rel_path, contents) in files {
+            let full = tmp.path().join(rel_path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, contents).unwrap();
+        }
+        let store = Store::load(tmp.path(), &Config::default()).unwrap();
+        let mut app = make_test_app(0);
+        app.store = store;
+        (tmp, app)
+    }
+
+    /// The `DocMeta` whose id matches, cloned out of the store.
+    fn doc_by_id(app: &App, id: &str) -> DocMeta {
+        app.store
+            .docs
+            .values()
+            .find(|d| d.id == id)
+            .unwrap_or_else(|| panic!("doc {id} not in store"))
+            .clone()
+    }
+
+    fn ids_for_paths(app: &App, paths: &[PathBuf]) -> Vec<String> {
+        paths
+            .iter()
+            .map(|p| app.store.get(p).unwrap().id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn relation_items_lists_both_parents_of_multiparent_doc() {
+        let (_tmp, app) = app_with_store(&[
+            (
+                "docs/rfcs/RFC-001-a.md",
+                &relations_doc_md("A", "rfc", "[]"),
+            ),
+            (
+                "docs/rfcs/RFC-002-b.md",
+                &relations_doc_md("B", "rfc", "[]"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-leaf.md",
+                &relations_doc_md(
+                    "Leaf",
+                    "iteration",
+                    "- implements: RFC-001\n- implements: RFC-002",
+                ),
+            ),
+        ]);
+
+        let doc = doc_by_id(&app, "ITERATION-001");
+        let items = app.relation_items(&doc);
+        let ids: std::collections::BTreeSet<String> =
+            ids_for_paths(&app, &items).into_iter().collect();
+
+        assert!(
+            ids.contains("RFC-001") && ids.contains("RFC-002"),
+            "both parents must appear in the lineage, got {ids:?}"
+        );
+    }
+
+    #[test]
+    fn relation_items_order_is_chain_then_children_then_related_excluding_target() {
+        // Lineage: RFC-001 <- STORY-001 <- ITERATION-001 (target).
+        // Child of ITERATION-001: ITERATION-002 (implements it).
+        // Related-to of ITERATION-001: RFC-002.
+        let (_tmp, app) = app_with_store(&[
+            (
+                "docs/rfcs/RFC-001-base.md",
+                &relations_doc_md("Base", "rfc", "[]"),
+            ),
+            (
+                "docs/rfcs/RFC-002-side.md",
+                &relations_doc_md("Side", "rfc", "[]"),
+            ),
+            (
+                "docs/stories/STORY-001-mid.md",
+                &relations_doc_md("Mid", "story", "- implements: RFC-001"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-target.md",
+                &relations_doc_md(
+                    "Target",
+                    "iteration",
+                    "- implements: STORY-001\n- related-to: RFC-002",
+                ),
+            ),
+            (
+                "docs/iterations/ITERATION-002-child.md",
+                &relations_doc_md("Child", "iteration", "- implements: ITERATION-001"),
+            ),
+        ]);
+
+        let doc = doc_by_id(&app, "ITERATION-001");
+        let items = app.relation_items(&doc);
+        let ids = ids_for_paths(&app, &items);
+
+        assert_eq!(
+            ids,
+            vec!["RFC-001", "STORY-001", "ITERATION-002", "RFC-002"],
+            "order must be chain (root-first, target excluded), then children, then related"
+        );
+        assert!(
+            !ids.contains(&"ITERATION-001".to_string()),
+            "target must be excluded from its own relation list"
+        );
+    }
+
+    #[test]
+    fn relation_items_related_set_matches_resolve_chain_related() {
+        let (_tmp, app) = app_with_store(&[
+            (
+                "docs/rfcs/RFC-001-anchor.md",
+                &relations_doc_md("Anchor", "rfc", "- related-to: RFC-002"),
+            ),
+            (
+                "docs/rfcs/RFC-002-near.md",
+                &relations_doc_md("Near", "rfc", "[]"),
+            ),
+            (
+                "docs/rfcs/RFC-003-unrelated.md",
+                &relations_doc_md("Unrelated", "rfc", "[]"),
+            ),
+        ]);
+
+        let doc = doc_by_id(&app, "RFC-001");
+
+        let resolved = crate::engine::context::resolve_chain(&app.store, &doc.id, 1).unwrap();
+        let expected: std::collections::BTreeSet<PathBuf> = resolved
+            .related
+            .iter()
+            .map(|r| r.doc.path.clone())
+            .collect();
+
+        let sections = app.relation_sections(&doc);
+        let actual: std::collections::BTreeSet<PathBuf> = sections.related.into_iter().collect();
+
+        assert_eq!(
+            actual, expected,
+            "tab related set must match engine resolve_chain related membership"
+        );
+        // And the related item is present in the flattened items.
+        let item_ids: std::collections::BTreeSet<String> =
+            ids_for_paths(&app, &app.relation_items(&doc))
+                .into_iter()
+                .collect();
+        assert!(item_ids.contains("RFC-002"));
+        assert!(!item_ids.contains("RFC-003"));
+    }
+
+    #[test]
+    fn relation_items_empty_for_isolated_doc() {
+        let (_tmp, app) = app_with_store(&[(
+            "docs/rfcs/RFC-001-lonely.md",
+            &relations_doc_md("Lonely", "rfc", "[]"),
+        )]);
+
+        let doc = doc_by_id(&app, "RFC-001");
+        assert!(
+            app.relation_items(&doc).is_empty(),
+            "an isolated doc has no relations"
+        );
+    }
+
+    #[test]
+    fn relation_sections_single_parent_common_case_unchanged() {
+        let (_tmp, app) = app_with_store(&[
+            (
+                "docs/rfcs/RFC-001-base.md",
+                &relations_doc_md("Base", "rfc", "[]"),
+            ),
+            (
+                "docs/stories/STORY-001-leaf.md",
+                &relations_doc_md("Leaf", "story", "- implements: RFC-001"),
+            ),
+        ]);
+
+        let doc = doc_by_id(&app, "STORY-001");
+        let sections = app.relation_sections(&doc);
+
+        assert_eq!(ids_for_paths(&app, &sections.chain), vec!["RFC-001"]);
+        assert!(sections.children.is_empty());
+        assert!(sections.related.is_empty());
     }
 }

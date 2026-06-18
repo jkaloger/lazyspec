@@ -40,19 +40,23 @@ fn setup_cross_backend(implements_target: &str) -> (TestFixture, Store) {
 fn context_resolves_chain_across_fs_story_and_git_ref_iteration() {
     let (_fixture, store) = setup_cross_backend("docs/stories/STORY-001-feature.md");
 
-    let resolved = lazyspec::cli::context::resolve_chain(&store, "ITERATION-001").unwrap();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "ITERATION-001", 1).unwrap();
 
     assert_eq!(
-        resolved.chain.len(),
+        resolved.nodes.len(),
         2,
         "chain should contain story + iteration; got: {:?}",
-        resolved.chain.iter().map(|d| &d.title).collect::<Vec<_>>()
+        resolved
+            .nodes
+            .iter()
+            .map(|n| &n.doc.title)
+            .collect::<Vec<_>>()
     );
-    assert_eq!(resolved.chain[0].title, "Feature Story");
-    assert_eq!(resolved.chain[1].title, "Impl Iteration");
-    assert_eq!(resolved.target_index, 1);
+    assert_eq!(resolved.nodes[0].doc.title, "Feature Story");
+    assert_eq!(resolved.nodes[1].doc.title, "Impl Iteration");
+    assert_eq!(resolved.target.title, "Impl Iteration");
 
-    let json_output = lazyspec::cli::context::run_json(&store, "ITERATION-001").unwrap();
+    let json_output = lazyspec::cli::context::run_json(&store, "ITERATION-001", 1).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
     let chain = parsed["chain"].as_array().unwrap();
     assert_eq!(chain.len(), 2);
@@ -64,12 +68,16 @@ fn context_resolves_chain_across_fs_story_and_git_ref_iteration() {
 fn context_reverse_links_show_git_ref_iteration_from_fs_story() {
     let (_fixture, store) = setup_cross_backend("docs/stories/STORY-001-feature.md");
 
-    let resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001").unwrap();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001", 1).unwrap();
 
-    assert_eq!(resolved.chain.len(), 1);
-    assert_eq!(resolved.chain[0].title, "Feature Story");
+    assert_eq!(resolved.nodes.len(), 1);
+    assert_eq!(resolved.nodes[0].doc.title, "Feature Story");
 
-    let forward_titles: Vec<&str> = resolved.forward.iter().map(|d| d.title.as_str()).collect();
+    let forward_titles: Vec<&str> = resolved
+        .forward
+        .iter()
+        .map(|f| f.doc.title.as_str())
+        .collect();
     assert!(
         forward_titles.contains(&"Impl Iteration"),
         "forward deps should include git-ref iteration; got: {:?}",
@@ -81,31 +89,32 @@ fn context_reverse_links_show_git_ref_iteration_from_fs_story() {
 fn context_with_id_based_target() {
     let (_fixture, store) = setup_cross_backend("STORY-001");
 
-    let resolved = lazyspec::cli::context::resolve_chain(&store, "ITERATION-001").unwrap();
+    let resolved = lazyspec::cli::context::resolve_chain(&store, "ITERATION-001", 1).unwrap();
 
-    // The upward chain walk in resolve_chain does `store.get(&PathBuf::from(&rel.target))`
-    // which creates PathBuf("STORY-001") -- this won't match any key in the store
-    // (keys are full relative paths like "docs/stories/STORY-001-feature.md").
-    // So the chain should only contain the iteration itself (parent lookup fails silently).
-    //
-    // NOTE: This is a pre-existing bug in resolve_chain's upward traversal (lines 30-44
-    // of context.rs). It uses raw rel.target as a path key instead of resolving IDs.
-    // Forward/reverse links DO handle ID resolution (via build_links -> resolve_target),
-    // so the reverse direction works fine. Fixing this is out of scope for this iteration.
+    // The upward walk resolves the `implements` target via
+    // `store.resolve_relation_target`, which looks the target up as a document id
+    // before falling back to a path. So an ID-based parent ("STORY-001") resolves
+    // to the FS story and joins the chain, matching the path-based target case.
     assert_eq!(
-        resolved.chain.len(),
-        1,
-        "ID-based target breaks upward chain walk; chain should only contain the iteration itself; got: {:?}",
-        resolved.chain.iter().map(|d| &d.title).collect::<Vec<_>>()
+        resolved.nodes.len(),
+        2,
+        "ID-based target resolves the parent; chain should contain story + iteration; got: {:?}",
+        resolved
+            .nodes
+            .iter()
+            .map(|n| &n.doc.title)
+            .collect::<Vec<_>>()
     );
-    assert_eq!(resolved.chain[0].title, "Impl Iteration");
+    assert_eq!(resolved.nodes[0].doc.title, "Feature Story");
+    assert_eq!(resolved.nodes[1].doc.title, "Impl Iteration");
+    assert_eq!(resolved.target.title, "Impl Iteration");
 
-    // However, reverse links (story -> iteration) still work because build_links resolves IDs.
-    let story_resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001").unwrap();
+    // Reverse links (story -> iteration) also resolve ID-based targets via build_links.
+    let story_resolved = lazyspec::cli::context::resolve_chain(&store, "STORY-001", 1).unwrap();
     let forward_titles: Vec<&str> = story_resolved
         .forward
         .iter()
-        .map(|d| d.title.as_str())
+        .map(|f| f.doc.title.as_str())
         .collect();
     assert!(
         forward_titles.contains(&"Impl Iteration"),

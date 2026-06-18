@@ -126,7 +126,7 @@ All document management is available as subcommands. Most accept `--json` for ma
 | `link <from> <rel> <to>`             | Add a typed relationship (canonical or inverse keyword)               |
 | `unlink <from> <rel> <to>`           | Remove a relationship (canonical or inverse keyword)                  |
 | `search <query> [--doc-type X]`      | Full-text search across all documents                                 |
-| `context <id>`                       | Show the full document chain (RFC -> Story -> Iteration)              |
+| `context <id> [--depth N]`           | Show the full document chain (RFC -> Story -> Iteration)              |
 | `status`                             | Show full project status with all documents and validation            |
 | `ignore <path>`                      | Mark a document to skip validation                                    |
 | `unignore <path>`                    | Remove validation skip from a document                                |
@@ -157,6 +157,12 @@ lazyspec link STORY-9 blocked-by RFC-2
 | --------------------------- | ------------------------------------------------ |
 | `-e`, `--expand-references` | Expand `@ref` directives into fenced code blocks |
 | `--max-ref-lines N`         | Max lines per expanded ref (default: 25)         |
+
+#### `context` Flags
+
+| Flag        | Description                                                          |
+| ----------- | ------------------------------------------------------------------- |
+| `--depth N` | Max hops to follow `related-to` links when collecting related records (default: 1) |
 
 #### `provenance` Subcommands
 
