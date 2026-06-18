@@ -90,6 +90,7 @@ For each task, dispatch an implementer subagent (general-purpose, Opus) with:
 - Lazyspec workflow rules: use `lazyspec` CLI for doc ops, `--json` always, `--help` before unfamiliar commands, `lazyspec show -e <id>` to expand `@ref` directives
 - "Before you begin: ask questions about unclear requirements. Don't guess."
 - TDD: failing test first, then implementation, then verify
+- Run **scoped** tests during the loop, never the full suite: `cargo test <module>` (e.g. `cargo test engine::document`) or `cargo test --test integration <name>`. Full suite is ~20s/run; scoped is sub-second. The full suite runs once, at the orchestrator's Final Review.
 - Self-review: completeness (ACs met?), YAGNI (only what was asked?), test quality (behavioral, isolated, deterministic, readable, specific)
 - Report: what was implemented, test results, files changed, concerns
 
@@ -97,7 +98,7 @@ Handle implementer questions before letting them proceed.
 
 After the implementer reports, dispatch a **separate** reviewer subagent with task text, Story ACs, and implementer report:
 
-- **Stage 1 (AC compliance):** Run test suite, verify each claimed AC has a passing test, check for missing requirements or scope creep. If any AC unmet: report specifics.
+- **Stage 1 (AC compliance):** Run the tests covering this task's ACs (scoped: `cargo test <module>` / `cargo test --test integration <name>`), verify each claimed AC has a passing test, check for missing requirements or scope creep. If any AC unmet: report specifics. Do NOT run the full suite here — that is the orchestrator's Final Review gate.
 - **Stage 2 (code quality, only if Stage 1 passes):** Correctness, clarity, YAGNI, DRY, security. Evaluate test properties (behavioral, structure-insensitive, isolated, deterministic, readable, specific). Flag unjustified tradeoffs.
 
 On failure: dispatch fresh implementer with specific issues, then re-review. Repeat until both stages pass. Mark task complete.
@@ -108,10 +109,13 @@ Every 2 completed tasks, re-read the chain (`lazyspec context`, `lazyspec show` 
 
 ## Final Review
 
+The orchestrator runs this gate itself after all tasks complete. Subagents only ran scoped tests; this is the one place the full suite runs.
+
 1. Verify all tasks in `## Changes` completed, no out-of-scope work
-2. Run `lazyspec validate --json`
-3. Dispatch final reviewer (Opus) with all Story ACs and implementation summary
-4. On pass: `lazyspec update <path> --status accepted` for iteration, then story (if all ACs covered), then RFC (if all stories accepted)
+2. **Run the full test suite once: `cargo test`. All tests must pass — required gate, no acceptance on failure.** On failure, dispatch a targeted fix subagent, then re-run.
+3. Run `lazyspec validate --json`
+4. Dispatch final reviewer (Opus) with all Story ACs and implementation summary
+5. On pass: `lazyspec update <path> --status accepted` for iteration, then story (if all ACs covered), then RFC (if all stories accepted)
 
 ## Rules
 
@@ -121,4 +125,5 @@ Every 2 completed tasks, re-read the chain (`lazyspec context`, `lazyspec show` 
 - Subagents receive full task text, not file references
 - One task, one review cycle. No batching tasks.
 - Sequential dispatch only. No parallel implementers.
+- Subagents run scoped tests only. Full `cargo test` runs once, by the orchestrator, at Final Review.
 - Update document statuses after successful final review
