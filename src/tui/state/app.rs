@@ -169,6 +169,7 @@ pub enum ViewMode {
     #[cfg(feature = "metrics")]
     Metrics,
     Graph,
+    Settings,
     #[cfg(feature = "agent")]
     Agents,
 }
@@ -183,10 +184,11 @@ impl ViewMode {
             ViewMode::Metrics => ViewMode::Graph,
             #[cfg(not(feature = "metrics"))]
             ViewMode::Filters => ViewMode::Graph,
+            ViewMode::Graph => ViewMode::Settings,
             #[cfg(feature = "agent")]
-            ViewMode::Graph => ViewMode::Agents,
+            ViewMode::Settings => ViewMode::Agents,
             #[cfg(not(feature = "agent"))]
-            ViewMode::Graph => ViewMode::Types,
+            ViewMode::Settings => ViewMode::Types,
             #[cfg(feature = "agent")]
             ViewMode::Agents => ViewMode::Types,
         }
@@ -199,6 +201,7 @@ impl ViewMode {
             #[cfg(feature = "metrics")]
             ViewMode::Metrics => "Metrics",
             ViewMode::Graph => "Graph",
+            ViewMode::Settings => "Settings",
             #[cfg(feature = "agent")]
             ViewMode::Agents => "Agents",
         }
@@ -305,6 +308,9 @@ pub struct App {
     /// config `[[relationships]]` registry at construction. The link editor
     /// cycles `rel_type_index` over this list.
     pub rel_types: Vec<String>,
+    pub settings_category: usize,
+    pub settings_entry: usize,
+    pub settings_drill: Option<usize>,
 }
 
 impl App {
@@ -447,6 +453,9 @@ impl App {
             status_bar_enabled: config.ui.statusbar.enabled,
             status_bar_components,
             rel_types: config.relationship_keywords(),
+            settings_category: 0,
+            settings_entry: 0,
+            settings_drill: None,
         };
         app.status_bar_warnings = status_bar_warnings;
         app.rebuild_search_index();
@@ -469,6 +478,10 @@ impl App {
             self.reset_filters();
         }
         self.view_mode = self.view_mode.next();
+        if self.view_mode == ViewMode::Settings {
+            self.settings_drill = None;
+            self.settings_entry = 0;
+        }
         if self.view_mode == ViewMode::Graph {
             self.rebuild_graph();
         }
@@ -483,6 +496,21 @@ impl App {
             }
             self.agent_selected_index = 0;
         }
+    }
+
+    pub fn settings_categories() -> &'static [&'static str] {
+        &[
+            "General",
+            "Document Types",
+            "Relationships",
+            "Validation Rules",
+            "Numbering",
+            "GitHub",
+            "Coordination",
+            "Certification",
+            "Agents",
+            "Interface",
+        ]
     }
 
     pub fn toggle_expanded(&mut self, path: &Path) {
@@ -1639,6 +1667,9 @@ mod tests {
             status_bar_enabled: true,
             status_bar_components: StatusBarComponents::default(),
             rel_types: Config::default().relationship_keywords(),
+            settings_category: 0,
+            settings_entry: 0,
+            settings_drill: None,
         };
         app
     }

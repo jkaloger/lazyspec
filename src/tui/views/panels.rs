@@ -12,7 +12,9 @@ use unicode_width::UnicodeWidthChar;
 
 use std::path::PathBuf;
 
-use crate::engine::config::{Config, StoreBackend};
+use crate::engine::config::{
+    Config, NumberingStrategy, ReservedFormat, Severity, StoreBackend, ValidationRule,
+};
 use crate::engine::document::{DocMeta, Status};
 use crate::engine::git_status::GitFileStatus;
 #[cfg(feature = "agent")]
@@ -1599,6 +1601,357 @@ pub fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, layout[1], &mut state);
 }
 
+fn severity_str(s: &Severity) -> &'static str {
+    match s {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+    }
+}
+
+fn reserved_format_str(f: &ReservedFormat) -> &'static str {
+    match f {
+        ReservedFormat::Incremental => "incremental",
+        ReservedFormat::Sqids => "sqids",
+    }
+}
+
+fn settings_lines_inner(
+    category: usize,
+    entry: usize,
+    drill: Option<usize>,
+    config: &Config,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    match category {
+        0 => {
+            lines.push(format!(
+                "naming.pattern: {}",
+                config.documents.naming.pattern
+            ));
+            lines.push(format!("ref_count_ceiling: {}", config.ref_count_ceiling));
+            lines.push(format!(
+                "templates.dir: {}",
+                config.filesystem.templates.dir
+            ));
+        }
+        1 => {
+            if let Some(d) = drill {
+                if let Some(t) = config.documents.types.get(d) {
+                    lines.push(format!("name: {}", t.name));
+                    lines.push(format!("plural: {}", t.plural));
+                    lines.push(format!("dir: {}", t.dir));
+                    lines.push(format!("prefix: {}", t.prefix));
+                    lines.push(format!("icon: {}", t.icon.as_deref().unwrap_or("(unset)")));
+                    lines.push(format!(
+                        "numbering: {}",
+                        match t.numbering {
+                            NumberingStrategy::Incremental => "incremental",
+                            NumberingStrategy::Sqids => "sqids",
+                            NumberingStrategy::Reserved => "reserved",
+                        }
+                    ));
+                    lines.push(format!("subdirectory: {}", t.subdirectory));
+                    lines.push(format!("store: {}", t.store));
+                    lines.push(format!("singleton: {}", t.singleton));
+                    lines.push(format!(
+                        "parent_type: {}",
+                        t.parent_type.as_deref().unwrap_or("(unset)")
+                    ));
+                    let agents = if t.agents.is_empty() {
+                        "(unset)".to_string()
+                    } else {
+                        t.agents.join(", ")
+                    };
+                    lines.push(format!("agents: {}", agents));
+                }
+            } else {
+                for (i, t) in config.documents.types.iter().enumerate() {
+                    let pfx = if i == entry { "▸ " } else { "  " };
+                    lines.push(format!("{}{}", pfx, t.name));
+                }
+            }
+        }
+        2 => {
+            if let Some(d) = drill {
+                if let Some(r) = config.relationships.get(d) {
+                    lines.push(format!("name: {}", r.name));
+                    lines.push(format!(
+                        "inverse: {}",
+                        r.inverse.as_deref().unwrap_or("(unset)")
+                    ));
+                }
+            } else {
+                for (i, r) in config.relationships.iter().enumerate() {
+                    let pfx = if i == entry { "▸ " } else { "  " };
+                    lines.push(format!("{}{}", pfx, r.name));
+                }
+            }
+        }
+        3 => {
+            if let Some(d) = drill {
+                if let Some(rule) = config.rules.get(d) {
+                    match rule {
+                        ValidationRule::ParentChild {
+                            name,
+                            child,
+                            parent,
+                            link,
+                            severity,
+                        } => {
+                            lines.push(format!("name: {}", name));
+                            lines.push("shape: parent-child".to_string());
+                            lines.push(format!("child: {}", child));
+                            lines.push(format!("parent: {}", parent));
+                            lines.push(format!("link: {}", link));
+                            lines.push(format!("severity: {}", severity_str(severity)));
+                        }
+                        ValidationRule::RelationExistence {
+                            name,
+                            doc_type,
+                            require,
+                            severity,
+                        } => {
+                            lines.push(format!("name: {}", name));
+                            lines.push("shape: relation-existence".to_string());
+                            lines.push(format!("doc_type: {}", doc_type));
+                            lines.push(format!("require: {}", require));
+                            lines.push(format!("severity: {}", severity_str(severity)));
+                        }
+                    }
+                }
+            } else {
+                for (i, rule) in config.rules.iter().enumerate() {
+                    let pfx = if i == entry { "▸ " } else { "  " };
+                    let name = match rule {
+                        ValidationRule::ParentChild { name, .. } => name.as_str(),
+                        ValidationRule::RelationExistence { name, .. } => name.as_str(),
+                    };
+                    lines.push(format!("{}{}", pfx, name));
+                }
+            }
+        }
+        4 => {
+            match &config.documents.sqids {
+                Some(s) => {
+                    lines.push(format!("sqids.salt: {}", s.salt));
+                    lines.push(format!("sqids.min_length: {}", s.min_length));
+                }
+                None => {
+                    lines.push("sqids.salt: (unset)".to_string());
+                    lines.push("sqids.min_length: (unset)".to_string());
+                }
+            }
+            match &config.documents.reserved {
+                Some(r) => {
+                    lines.push(format!("reserved.remote: {}", r.remote));
+                    lines.push(format!(
+                        "reserved.format: {}",
+                        reserved_format_str(&r.format)
+                    ));
+                    lines.push(format!("reserved.max_retries: {}", r.max_retries));
+                }
+                None => {
+                    lines.push("reserved.remote: (unset)".to_string());
+                    lines.push("reserved.format: (unset)".to_string());
+                    lines.push("reserved.max_retries: (unset)".to_string());
+                }
+            }
+        }
+        5 => match &config.documents.github {
+            Some(g) => {
+                lines.push(format!("repo: {}", g.repo.as_deref().unwrap_or("(unset)")));
+                lines.push(format!("cache_ttl: {}", g.cache_ttl));
+            }
+            None => {
+                lines.push("repo: (unset)".to_string());
+                lines.push("cache_ttl: (unset)".to_string());
+            }
+        },
+        6 => match &config.coordination {
+            Some(c) => {
+                lines.push(format!("remote: {}", c.remote));
+                lines.push(format!("lease_duration: {}", c.lease_duration));
+                lines.push(format!("grace_period: {}", c.grace_period));
+                lines.push(format!("max_push_retries: {}", c.max_push_retries));
+                lines.push(format!("max_clock_skew: {}", c.max_clock_skew));
+            }
+            None => {
+                lines.push("remote: (unset)".to_string());
+                lines.push("lease_duration: (unset)".to_string());
+                lines.push("grace_period: (unset)".to_string());
+                lines.push("max_push_retries: (unset)".to_string());
+                lines.push("max_clock_skew: (unset)".to_string());
+            }
+        },
+        7 => {
+            lines.push(format!("normalize: {}", config.certification.normalize));
+            let mut keys: Vec<&String> = config.certification.overrides.keys().collect();
+            keys.sort();
+            if keys.is_empty() {
+                lines.push("(no overrides configured)".to_string());
+            } else if let Some(d) = drill {
+                if let Some(key) = keys.get(d) {
+                    if let Some(ov) = config.certification.overrides.get(*key) {
+                        lines.push(format!("normalize: {}", ov.normalize));
+                    }
+                }
+            } else {
+                for (i, key) in keys.iter().enumerate() {
+                    let pfx = if i == entry { "▸ " } else { "  " };
+                    lines.push(format!("{}{}", pfx, key));
+                }
+            }
+        }
+        8 => {
+            lines.push(format!(
+                "interactive: {}",
+                config.agents.interactive.as_deref().unwrap_or("(unset)")
+            ));
+        }
+        9 => {
+            lines.push(format!("ascii_diagrams: {}", config.ui.ascii_diagrams));
+            lines.push(format!(
+                "statusbar.enabled: {}",
+                config.ui.statusbar.enabled
+            ));
+            let left = config.ui.statusbar.left.as_ref().map_or_else(
+                || "(unset)".to_string(),
+                |v| {
+                    if v.is_empty() {
+                        "(unset)".to_string()
+                    } else {
+                        v.join(", ")
+                    }
+                },
+            );
+            lines.push(format!("statusbar.left: {}", left));
+            let center = config.ui.statusbar.center.as_ref().map_or_else(
+                || "(unset)".to_string(),
+                |v| {
+                    if v.is_empty() {
+                        "(unset)".to_string()
+                    } else {
+                        v.join(", ")
+                    }
+                },
+            );
+            lines.push(format!("statusbar.center: {}", center));
+            let right = config.ui.statusbar.right.as_ref().map_or_else(
+                || "(unset)".to_string(),
+                |v| {
+                    if v.is_empty() {
+                        "(unset)".to_string()
+                    } else {
+                        v.join(", ")
+                    }
+                },
+            );
+            lines.push(format!("statusbar.right: {}", right));
+            lines.push(format!(
+                "multiline.max_expanded_height: {}",
+                config.ui.multiline.max_expanded_height
+            ));
+        }
+        _ => {}
+    }
+    lines
+}
+
+pub fn settings_lines(app: &App, config: &Config) -> Vec<String> {
+    settings_lines_inner(
+        app.settings_category,
+        app.settings_entry,
+        app.settings_drill,
+        config,
+    )
+}
+
+fn drill_entry_name(cat: usize, idx: usize, config: &Config) -> String {
+    match cat {
+        1 => config
+            .documents
+            .types
+            .get(idx)
+            .map(|t| t.name.clone())
+            .unwrap_or_default(),
+        2 => config
+            .relationships
+            .get(idx)
+            .map(|r| r.name.clone())
+            .unwrap_or_default(),
+        3 => config.rules.get(idx).map_or_else(
+            || String::new(),
+            |r| match r {
+                ValidationRule::ParentChild { name, .. } => name.clone(),
+                ValidationRule::RelationExistence { name, .. } => name.clone(),
+            },
+        ),
+        7 => {
+            let mut keys: Vec<&String> = config.certification.overrides.keys().collect();
+            keys.sort();
+            keys.get(idx).map(|k| (*k).clone()).unwrap_or_default()
+        }
+        _ => String::new(),
+    }
+}
+
+pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
+    let main = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
+        .split(area);
+
+    let left_items: Vec<ListItem> = App::settings_categories()
+        .iter()
+        .enumerate()
+        .map(|(i, cat)| {
+            let prefix = if i == app.settings_category {
+                "▸ "
+            } else {
+                "  "
+            };
+            ListItem::new(format!("{}{}", prefix, cat))
+        })
+        .collect();
+
+    let left_list = List::new(left_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title(" Categories "),
+        )
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+    let mut state = ListState::default().with_selected(Some(app.settings_category));
+    f.render_stateful_widget(left_list, main[0], &mut state);
+
+    let cat_name = App::settings_categories()[app.settings_category];
+    let title = match app.settings_drill {
+        Some(i) => format!(
+            " {} > {} ",
+            cat_name,
+            drill_entry_name(app.settings_category, i, config)
+        ),
+        None => format!(" {} ", cat_name),
+    };
+
+    let lines = settings_lines(app, config);
+    let text: Vec<Line> = lines.iter().map(|l| Line::from(l.as_str())).collect();
+    let paragraph = Paragraph::new(text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(title),
+    );
+    f.render_widget(paragraph, main[1]);
+}
+
 #[cfg(test)]
 pub(super) fn doc_row_cells_for_test(
     id: &str,
@@ -2180,5 +2533,205 @@ mod tests {
         let node = graph_node_fixture(0, false, vec![]);
         let text = spans_text(&graph_node_spans(&node, "◆", true, "ITERATION-001"));
         assert_eq!(text, "\u{25C6} Design draft");
+    }
+
+    #[test]
+    fn settings_lines_general_shows_three_fields() {
+        let config = Config::default();
+        let lines = settings_lines_inner(0, 0, None, &config);
+        assert_eq!(lines.len(), 3);
+        assert!(
+            lines.iter().any(|l| l.starts_with("naming.pattern:")),
+            "missing naming.pattern, got: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("ref_count_ceiling:")),
+            "missing ref_count_ceiling, got: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("templates.dir:")),
+            "missing templates.dir, got: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn settings_lines_general_includes_values() {
+        let config = Config::default();
+        let lines = settings_lines_inner(0, 0, None, &config);
+        assert!(lines
+            .iter()
+            .any(|l| l.contains(&config.documents.naming.pattern)));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains(&config.ref_count_ceiling.to_string())));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains(&config.filesystem.templates.dir)));
+    }
+
+    #[test]
+    fn settings_lines_github_absent_shows_unset() {
+        let config = Config::default();
+        let lines = settings_lines_inner(5, 0, None, &config);
+        assert_eq!(lines.len(), 2);
+        assert!(lines.contains(&"repo: (unset)".to_string()));
+        assert!(lines.contains(&"cache_ttl: (unset)".to_string()));
+    }
+
+    #[test]
+    fn settings_lines_doc_types_drilled_shows_eleven_fields() {
+        let config = Config::default();
+        let lines = settings_lines_inner(1, 0, Some(0), &config);
+        let expected_labels = [
+            "name:",
+            "plural:",
+            "dir:",
+            "prefix:",
+            "icon:",
+            "numbering:",
+            "subdirectory:",
+            "store:",
+            "singleton:",
+            "parent_type:",
+            "agents:",
+        ];
+        for label in &expected_labels {
+            assert!(
+                lines.iter().any(|l| l.starts_with(label)),
+                "missing field {label}, got: {lines:?}"
+            );
+        }
+        // rfc (index 0) has icon Some("●"), not (unset)
+        assert!(
+            lines.contains(&"icon: ●".to_string()),
+            "expected icon: ●, got: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn settings_lines_doc_types_not_drilled_shows_entries() {
+        let config = Config::default();
+        let lines = settings_lines_inner(1, 0, None, &config);
+        assert_eq!(lines.len(), config.documents.types.len());
+        assert!(lines.iter().any(|l| l.contains("rfc")));
+        assert!(lines.iter().any(|l| l.contains("▸")));
+    }
+
+    #[test]
+    fn settings_lines_coordination_absent_shows_unset() {
+        let config = Config::default();
+        let lines = settings_lines_inner(6, 0, None, &config);
+        assert_eq!(lines.len(), 5);
+        assert!(lines.contains(&"remote: (unset)".to_string()));
+        assert!(lines.contains(&"lease_duration: (unset)".to_string()));
+        assert!(lines.contains(&"grace_period: (unset)".to_string()));
+        assert!(lines.contains(&"max_push_retries: (unset)".to_string()));
+        assert!(lines.contains(&"max_clock_skew: (unset)".to_string()));
+    }
+
+    #[test]
+    fn settings_lines_agents_absent_shows_unset() {
+        let config = Config::default();
+        let lines = settings_lines_inner(8, 0, None, &config);
+        assert!(lines.contains(&"interactive: (unset)".to_string()));
+    }
+
+    #[test]
+    fn settings_lines_numbering_all_unset() {
+        let config = Config::default();
+        let lines = settings_lines_inner(4, 0, None, &config);
+        assert_eq!(lines.len(), 5);
+        assert!(lines.contains(&"sqids.salt: (unset)".to_string()));
+        assert!(lines.contains(&"sqids.min_length: (unset)".to_string()));
+        assert!(lines.contains(&"reserved.remote: (unset)".to_string()));
+        assert!(lines.contains(&"reserved.format: (unset)".to_string()));
+        assert!(lines.contains(&"reserved.max_retries: (unset)".to_string()));
+    }
+
+    #[test]
+    fn settings_lines_interface_default() {
+        let config = Config::default();
+        let lines = settings_lines_inner(9, 0, None, &config);
+        assert_eq!(lines.len(), 6);
+        assert!(lines.contains(&"ascii_diagrams: false".to_string()));
+        assert!(lines.contains(&"statusbar.enabled: true".to_string()));
+        assert!(lines.contains(&"statusbar.left: (unset)".to_string()));
+        assert!(lines.contains(&"statusbar.center: (unset)".to_string()));
+        assert!(lines.contains(&"statusbar.right: (unset)".to_string()));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("multiline.max_expanded_height:")),
+            "missing multiline field, got: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn settings_lines_relationships_not_drilled_shows_entries() {
+        let config = Config::default();
+        let lines = settings_lines_inner(2, 0, None, &config);
+        assert_eq!(lines.len(), config.relationships.len());
+        assert!(lines.iter().any(|l| l.contains("implements")));
+        assert!(lines.iter().any(|l| l.contains("related-to")));
+    }
+
+    #[test]
+    fn settings_lines_relationships_drilled_shows_fields() {
+        let config = Config::default();
+        let lines = settings_lines_inner(2, 0, Some(0), &config);
+        assert!(lines.iter().any(|l| l.starts_with("name:")));
+        assert!(lines.iter().any(|l| l.starts_with("inverse:")));
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn settings_lines_certification_empty_overrides() {
+        let config = Config::default();
+        let lines = settings_lines_inner(7, 0, None, &config);
+        assert!(lines.iter().any(|l| l.starts_with("normalize:")));
+        assert!(lines.contains(&"(no overrides configured)".to_string()));
+    }
+
+    #[test]
+    fn settings_lines_unknown_category_returns_empty() {
+        let config = Config::default();
+        let lines = settings_lines_inner(999, 0, None, &config);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn settings_lines_validation_rules_not_drilled_shows_entries() {
+        let config = Config::default();
+        let lines = settings_lines_inner(3, 0, None, &config);
+        assert_eq!(lines.len(), config.rules.len());
+        assert!(lines.iter().any(|l| l.contains("stories-need-rfcs")));
+        assert!(lines.iter().any(|l| l.contains("iterations-need-stories")));
+        assert!(lines.iter().any(|l| l.contains("adrs-need-relations")));
+        assert!(lines.iter().any(|l| l.contains("▸")));
+    }
+
+    #[test]
+    fn settings_lines_validation_rules_drilled_parent_child() {
+        let config = Config::default();
+        let lines = settings_lines_inner(3, 0, Some(0), &config);
+        assert!(lines.contains(&"name: stories-need-rfcs".to_string()));
+        assert!(lines.contains(&"shape: parent-child".to_string()));
+        assert!(lines.contains(&"child: story".to_string()));
+        assert!(lines.contains(&"parent: rfc".to_string()));
+        assert!(lines.contains(&"link: implements".to_string()));
+        assert!(lines.contains(&"severity: warning".to_string()));
+        assert_eq!(lines.len(), 6);
+    }
+
+    #[test]
+    fn settings_lines_validation_rules_drilled_relation_existence() {
+        let config = Config::default();
+        let lines = settings_lines_inner(3, 0, Some(2), &config);
+        assert!(lines.contains(&"name: adrs-need-relations".to_string()));
+        assert!(lines.contains(&"shape: relation-existence".to_string()));
+        assert!(lines.contains(&"doc_type: adr".to_string()));
+        assert!(lines.contains(&"require: any-relation".to_string()));
+        assert!(lines.contains(&"severity: error".to_string()));
+        assert_eq!(lines.len(), 5);
     }
 }

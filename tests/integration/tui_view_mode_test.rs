@@ -40,13 +40,14 @@ fn test_view_mode_next_cycles() {
     }
     #[cfg(not(feature = "metrics"))]
     assert_eq!(ViewMode::Filters.next(), ViewMode::Graph);
+    assert_eq!(ViewMode::Graph.next(), ViewMode::Settings);
     #[cfg(feature = "agent")]
     {
-        assert_eq!(ViewMode::Graph.next(), ViewMode::Agents);
+        assert_eq!(ViewMode::Settings.next(), ViewMode::Agents);
         assert_eq!(ViewMode::Agents.next(), ViewMode::Types);
     }
     #[cfg(not(feature = "agent"))]
-    assert_eq!(ViewMode::Graph.next(), ViewMode::Types);
+    assert_eq!(ViewMode::Settings.next(), ViewMode::Types);
 }
 
 #[test]
@@ -226,4 +227,49 @@ fn test_backtick_ignored_in_modal_states() {
         fixture.root(),
         &fixture.config(),
     );
+}
+
+#[test]
+fn test_settings_left_right_moves_category() {
+    let (fixture, mut app) = setup_app_with_docs();
+    let key = |app: &mut App, c: KeyCode| {
+        app.handle_key(c, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    };
+
+    key(&mut app, KeyCode::Char('5'));
+    assert_eq!(app.view_mode, ViewMode::Settings);
+    assert_eq!(app.settings_category, 0);
+
+    // l/Right walks across every category, including past the collection
+    // categories (Document Types is index 1) that used to trap navigation.
+    let last = App::settings_categories().len() - 1;
+    for expected in 1..=last {
+        key(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.settings_category, expected);
+    }
+    // No wrap past the end.
+    key(&mut app, KeyCode::Char('l'));
+    assert_eq!(app.settings_category, last);
+
+    // h walks back to the first category; no wrap past the start.
+    for expected in (0..last).rev() {
+        key(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.settings_category, expected);
+    }
+    key(&mut app, KeyCode::Char('h'));
+    assert_eq!(app.settings_category, 0);
+}
+
+#[test]
+fn test_settings_arrow_keys_move_category() {
+    let (fixture, mut app) = setup_app_with_docs();
+    let key = |app: &mut App, c: KeyCode| {
+        app.handle_key(c, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    };
+
+    key(&mut app, KeyCode::Char('5'));
+    key(&mut app, KeyCode::Right);
+    assert_eq!(app.settings_category, 1);
+    key(&mut app, KeyCode::Left);
+    assert_eq!(app.settings_category, 0);
 }

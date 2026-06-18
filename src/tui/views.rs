@@ -33,7 +33,7 @@ use panels::draw_agents_screen;
 #[cfg(feature = "metrics")]
 use panels::draw_metrics_skeleton;
 use panels::{
-    draw_doc_list, draw_graph, draw_preview, draw_type_panel, render_filter_panel,
+    draw_doc_list, draw_graph, draw_preview, draw_settings, draw_type_panel, render_filter_panel,
     render_fullscreen_document,
 };
 
@@ -200,6 +200,7 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
         #[cfg(feature = "metrics")]
         ViewMode::Metrics => draw_metrics_skeleton(f, outer[1]),
         ViewMode::Graph => draw_graph(f, app, outer[1]),
+        ViewMode::Settings => draw_settings(f, app, outer[1], config),
         #[cfg(feature = "agent")]
         ViewMode::Agents => draw_agents_screen(f, app, outer[1]),
     }

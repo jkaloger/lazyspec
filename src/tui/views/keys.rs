@@ -485,6 +485,9 @@ impl App {
             KeyCode::Char('`') => {
                 self.cycle_mode();
             }
+            KeyCode::Char('5') => {
+                self.enter_settings();
+            }
             _ => {}
         }
     }
@@ -565,6 +568,9 @@ impl App {
             KeyCode::Char('`') => {
                 self.cycle_mode();
             }
+            KeyCode::Char('5') => {
+                self.enter_settings();
+            }
             KeyCode::Char('?') => {
                 self.show_help = true;
             }
@@ -630,11 +636,78 @@ impl App {
             KeyCode::Char('`') => {
                 self.cycle_mode();
             }
+            KeyCode::Char('5') => {
+                self.enter_settings();
+            }
             _ => {}
         }
     }
 
-    #[allow(unused_variables)]
+    fn enter_settings(&mut self) {
+        self.view_mode = ViewMode::Settings;
+        self.settings_category = 0;
+        self.settings_drill = None;
+        self.settings_entry = 0;
+    }
+
+    fn handle_settings_key(&mut self, code: KeyCode, _modifiers: KeyModifiers) {
+        const COLLECTIONS: [usize; 4] = [1, 2, 3, 7];
+        let is_collection = COLLECTIONS.contains(&self.settings_category);
+
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.settings_drill.is_some() {
+                } else if is_collection {
+                    self.settings_entry = self.settings_entry.saturating_add(1);
+                } else {
+                    let max = App::settings_categories().len().saturating_sub(1);
+                    self.settings_category = (self.settings_category + 1).min(max);
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.settings_drill.is_some() {
+                } else if is_collection {
+                    self.settings_entry = self.settings_entry.saturating_sub(1);
+                } else {
+                    self.settings_category = self.settings_category.saturating_sub(1);
+                }
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                if self.settings_drill.is_none() {
+                    let max = App::settings_categories().len().saturating_sub(1);
+                    self.settings_category = (self.settings_category + 1).min(max);
+                    self.settings_entry = 0;
+                }
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                if self.settings_drill.is_none() {
+                    self.settings_category = self.settings_category.saturating_sub(1);
+                    self.settings_entry = 0;
+                }
+            }
+            KeyCode::Enter => {
+                if is_collection && self.settings_drill.is_none() {
+                    self.settings_drill = Some(self.settings_entry);
+                }
+            }
+            KeyCode::Esc => {
+                if self.settings_drill.is_some() {
+                    self.settings_drill = None;
+                }
+            }
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+            }
+            KeyCode::Char('`') => {
+                self.cycle_mode();
+            }
+            KeyCode::Char('5') => {
+                // Re-entering Settings from Settings is a no-op
+            }
+            _ => {}
+        }
+    }
+
     fn handle_normal_key(
         &mut self,
         code: KeyCode,
@@ -645,6 +718,7 @@ impl App {
         match self.view_mode {
             ViewMode::Filters => return self.handle_filters_key(code, modifiers, root),
             ViewMode::Graph => return self.handle_graph_key(code, modifiers, root),
+            ViewMode::Settings => return self.handle_settings_key(code, modifiers),
             #[cfg(feature = "agent")]
             ViewMode::Agents => return self.handle_agents_key(code, modifiers),
             _ => {}
@@ -736,6 +810,9 @@ impl App {
             (KeyCode::Char('g'), _) => self.move_to_top(),
             (KeyCode::Char('G'), _) => self.move_to_bottom(),
             (KeyCode::Char('`'), _) => self.cycle_mode(),
+            (KeyCode::Char('5'), _) => {
+                self.enter_settings();
+            }
             (KeyCode::Char('w'), _) => self.open_warnings(),
             (KeyCode::Char('s'), _) => self.open_status_picker(),
             (KeyCode::Char('p'), _) => self.open_provenance_editor(),
