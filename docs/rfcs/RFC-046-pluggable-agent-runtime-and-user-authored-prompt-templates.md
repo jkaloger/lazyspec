@@ -110,6 +110,7 @@ Render context:
 
 - `document`: the selected document, exposing `id`, `title`, `type`, `body`, `status`, `path`.
 - `child_types`: the list of child type names for `document.type`, derived from the parent-child rules already in config. This is what lets a user author a "create children" prompt without the engine hardcoding one: the template decides how to use `child_types`.
+- `context`: the selected document's resolved lineage, so a template can carry parent RFCs, Stories, and ADRs into the prompt as constraints (e.g. "refine this iteration against the RFC it implements"). It exposes `context.ancestors` (the `implements` chain, nearest parent first) and `context.related` (adjacent `related-to` documents). Each entry exposes the same `document.*` fields, so a template iterates `{% for node in context.ancestors %}{{ node.type }} {{ node.id }}: {{ node.body }}{% endfor %}`. Sourced from the existing @ref src/engine/context.rs#resolve_chain (`ResolvedContext`), already consumed by the resolve-context CLI and the TUI Relations/Graph views; this RFC reuses it for the render scope rather than re-deriving the DAG. The descendant/forward direction is omitted -- a prompt's constraints come from what a document implements, not from what implements it.
 
 The engine owns loading, frontmatter parsing, and rendering. The result is a fully rendered prompt string plus the template's metadata; the headless path passes the string to `AgentRunner::spawn`, the interactive path exports it as `$LAZYSPEC_PROMPT`.
 
@@ -152,13 +153,14 @@ If the document's type has no resolved templates, the dialog offers only Custom 
 - @draft AgentPrompt / @draft RunMode -- parsed template (frontmatter + minijinja body), `mode` selecting headless vs interactive.
 - @draft AgentsConfig -- the `[agents]` block; `interactive` is the optional shell command for terminal handover.
 - @ref src/engine/config.rs#TypeDef -- gains `agents: Vec<String>`.
+- @ref src/engine/context.rs#resolve_chain -- existing DAG resolver; reused to populate the `context` render variable (ancestors + related).
 - @ref src/tui/agent.rs#AgentSpawner -- refactored to delegate process creation to an `AgentRunner`; history dir relocated.
 
 ## Stories
 
 1. **AgentRunner trait + ClaudeP impl.** Introduce the `AgentRunner` trait (`spawn` headless) and `AgentContext` / `AgentHandle` in the engine. Implement `ClaudeP` running `claude -p`. Refactor @ref src/tui/agent.rs#AgentSpawner so it owns records/polling and delegates spawning to an injected `AgentRunner`. No behaviour change to the existing actions yet; this is the seam.
 
-2. **Prompt template load + render.** `.lazyspec/agents/*.md` discovery, frontmatter parse (`name`, `description`, optional `mode`, optional `allowed_tools`), minijinja strict-undefined render with `document.*` and `child_types` context. Skip-and-warn on malformed files. Delete `build_expand_prompt` / `build_create_children_prompt`. Subsumes STORY-053 (custom agent prompts) -- STORY-053 should be superseded.
+2. **Prompt template load + render.** `.lazyspec/agents/*.md` discovery, frontmatter parse (`name`, `description`, optional `mode`, optional `allowed_tools`), minijinja strict-undefined render with `document.*`, `child_types`, and `context` (resolved lineage from @ref src/engine/context.rs#resolve_chain -- ancestors + related). Skip-and-warn on malformed files. Delete `build_expand_prompt` / `build_create_children_prompt`. Subsumes STORY-053 (custom agent prompts) -- STORY-053 should be superseded.
 
 3. **Per-type opt-in config.** Add `agents: Vec<String>` to `TypeDef`, default empty. Resolution from a document's type to its allowed template set, with reporting of named-but-missing templates. Agent mode off when the list is absent/empty.
 
