@@ -3,9 +3,10 @@ use super::forms::AgentDialog;
 use super::forms::{
     CreateForm, DeleteConfirm, EditableField, FieldEditor, FieldPath, LinkEditor,
     OverrideKeyPrompt, ProvenanceEditor, RelKey, RuleKey, SettingsDeleteConfirm,
-    SettingsDeleteTarget, SettingsQuitPrompt, StatusPicker, TypeKey,
+    SettingsDeleteTarget, SettingsImpactConfirm, SettingsQuitPrompt, StatusPicker, TypeKey,
 };
 use super::graph::flatten_forest;
+use super::settings_guard;
 
 use crate::engine::cache::DiskCache;
 use crate::engine::config::{
@@ -551,6 +552,11 @@ pub struct App {
     /// The confirm prompt for removing a settings collection entry from the
     /// buffer. Removal is buffer-only and happens only on confirm (no disk).
     pub settings_delete_confirm: SettingsDeleteConfirm,
+    /// The confirm prompt raised before a save that orphans existing documents by
+    /// altering a load-bearing `[[types]]` field (`dir`/`prefix`/`store`) on a type
+    /// with docs on disk (RFC-023 slice 6). When active, the save is paused: nothing
+    /// is written until the user confirms.
+    pub settings_impact_confirm: SettingsImpactConfirm,
     /// The spec-path key prompt for seeding a new certification override. The key
     /// is entered before the override is inserted into the buffer.
     pub override_key_prompt: OverrideKeyPrompt,
@@ -681,6 +687,7 @@ impl App {
             settings_quit_prompt: SettingsQuitPrompt::new(),
             settings_scaffold_offer: None,
             settings_delete_confirm: SettingsDeleteConfirm::new(),
+            settings_impact_confirm: SettingsImpactConfirm::new(),
             override_key_prompt: OverrideKeyPrompt::new(),
         };
         app.apply_config(config);
@@ -1304,6 +1311,45 @@ impl App {
         self.settings_dirty = true;
     }
 
+    /// Save the settings buffer to `.lazyspec.toml`, pausing first when the edit
+    /// would orphan existing documents. If the dirty buffer changes a load-bearing
+    /// `[[types]]` field (`dir`/`prefix`/`store`) on a type that already has docs on
+    /// disk, the save is held: the computed impacts are stashed on
+    /// `settings_impact_confirm` (active) and NOTHING is written -- the buffer and
+    /// dirty flag retain the pending edit until the user confirms or cancels (RFC-023
+    /// slice 6). Otherwise (non-load-bearing edits, or load-bearing edits on
+    /// zero-doc types) the save commits atomically via `settings_commit_write`.
+    pub fn settings_save(&mut self, root: &Path, config_on_disk: &Config) {
+        let impacts = settings_guard::detect_type_field_impacts(
+            &self.settings_buffer,
+            config_on_disk,
+            &self.store,
+        );
+        if impacts.is_empty() {
+            self.settings_commit_write(root);
+            return;
+        }
+        self.settings_impact_confirm.impacts = impacts;
+        self.settings_impact_confirm.active = true;
+    }
+
+    /// Confirm a paused document-impact save: clear the guard and commit the
+    /// pending buffer to `.lazyspec.toml` atomically, exactly as a guard-free save
+    /// would. No document files are moved/renamed/renumbered (RFC-023 slice 6, AC3).
+    pub fn confirm_settings_impact(&mut self, root: &Path) {
+        self.settings_impact_confirm.active = false;
+        self.settings_impact_confirm.impacts.clear();
+        self.settings_commit_write(root);
+    }
+
+    /// Cancel a paused document-impact save: clear the guard and write nothing.
+    /// `.lazyspec.toml` is untouched and the buffer + `settings_dirty` retain the
+    /// pending edit (RFC-023 slice 6, AC4).
+    pub fn cancel_settings_impact(&mut self) {
+        self.settings_impact_confirm.active = false;
+        self.settings_impact_confirm.impacts.clear();
+    }
+
     /// Validate the whole buffer, then write `.lazyspec.toml` once, atomically,
     /// preserving comments. Disk is touched only on success: the new file string
     /// is rendered in memory by `write_config_in_place` and validated by
@@ -1313,7 +1359,7 @@ impl App {
     /// failure also jumps focus to the offending field. On success the dirty flag
     /// and footer clear and `config_reload_request` is raised so the run loop
     /// re-loads the config, rebuilds the store, and re-seeds the clean buffer.
-    pub fn settings_save(&mut self, root: &Path) {
+    fn settings_commit_write(&mut self, root: &Path) {
         let path = root.join(".lazyspec.toml");
         let src = match std::fs::read_to_string(&path) {
             Ok(s) => s,
@@ -2842,6 +2888,7 @@ mod tests {
             settings_quit_prompt: SettingsQuitPrompt::new(),
             settings_scaffold_offer: None,
             settings_delete_confirm: SettingsDeleteConfirm::new(),
+            settings_impact_confirm: SettingsImpactConfirm::new(),
             override_key_prompt: OverrideKeyPrompt::new(),
         };
         app
@@ -4320,7 +4367,7 @@ inverse = "implemented-by"
         app.settings_buffer.documents.naming.pattern = "{type}-{title}.md".to_string();
         app.settings_dirty = true;
 
-        app.settings_save(tmp.path());
+        app.settings_save(tmp.path(), &Config::default());
 
         let out = read_config_file(&tmp);
         // Re-parses OK -- the file on disk is a valid config.
@@ -4362,7 +4409,7 @@ inverse = "implemented-by"
         app.settings_dirty = true;
         let before = read_config_file(&tmp);
 
-        app.settings_save(tmp.path());
+        app.settings_save(tmp.path(), &Config::default());
 
         // No write happened -- the file is byte-for-byte unchanged.
         assert_eq!(read_config_file(&tmp), before, "no write on failed save");
@@ -4410,7 +4457,7 @@ inverse = "implemented-by"
         app.settings_dirty = true;
         let before = read_config_file(&tmp);
 
-        app.settings_save(tmp.path());
+        app.settings_save(tmp.path(), &Config::default());
 
         assert_eq!(read_config_file(&tmp), before, "no write on failed save");
         let msg = app
@@ -4474,7 +4521,7 @@ inverse = "implemented-by"
         app.settings_dirty = true;
         let before = read_config_file(&tmp);
 
-        app.settings_save(tmp.path());
+        app.settings_save(tmp.path(), &Config::default());
 
         assert_eq!(
             read_config_file(&tmp),
@@ -4517,7 +4564,7 @@ inverse = "implemented-by"
         );
         assert!(app.settings_buffer.documents.github.is_some());
 
-        app.settings_save(tmp.path());
+        app.settings_save(tmp.path(), &Config::default());
 
         let out = read_config_file(&tmp);
         assert!(
@@ -4564,7 +4611,7 @@ inverse = "implemented-by"
             .expect("reserved scaffolded");
         assert_eq!(reserved.remote, "origin");
 
-        app.settings_save(tmp.path());
+        app.settings_save(tmp.path(), &Config::default());
 
         let out = read_config_file(&tmp);
         assert!(
@@ -4601,7 +4648,7 @@ inverse = "implemented-by"
         // Fill the scaffolded salt so the save is not rejected for an empty salt.
         app.settings_buffer.documents.sqids.as_mut().unwrap().salt = "filled-seed".to_string();
 
-        app.settings_save(tmp.path());
+        app.settings_save(tmp.path(), &Config::default());
 
         let out = read_config_file(&tmp);
         assert!(
@@ -4617,6 +4664,348 @@ inverse = "implemented-by"
         assert_eq!(s.min_length, 3);
         assert!(!app.settings_dirty, "dirty clears on a successful save");
         assert_eq!(app.settings_footer_error, None, "footer clears on success");
+    }
+
+    // --- Document-impact save guard (RFC-023 slice 6 / ITERATION-191) ---
+
+    fn impact_doc_md(title: &str, ty: &str) -> String {
+        format!(
+            concat!(
+                "---\n",
+                "title: \"{title}\"\n",
+                "type: {ty}\n",
+                "status: draft\n",
+                "author: \"test\"\n",
+                "date: 2026-01-01\n",
+                "tags: []\n",
+                "---\n",
+                "Body.\n",
+            ),
+            title = title,
+            ty = ty,
+        )
+    }
+
+    /// Build an `App` whose store has `count` docs of `ty` written on disk under a
+    /// fresh TempDir, with `.lazyspec.toml` rendered from `Config::default()`. The
+    /// buffer is seeded from the on-disk config (clean). Returns the TempDir (so it
+    /// outlives the app), the app, and a clone of the on-disk config to pass to
+    /// `settings_save` as the session config.
+    fn impact_app(docs: &[(&str, usize)]) -> (tempfile::TempDir, App, Config) {
+        let on_disk = Config::default();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".lazyspec.toml"), on_disk.to_toml().unwrap()).unwrap();
+        for (ty_name, count) in docs {
+            let td = on_disk
+                .documents
+                .types
+                .iter()
+                .find(|t| &t.name == ty_name)
+                .expect("type in config");
+            let dir = root.join(&td.dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            for i in 1..=*count {
+                let file = dir.join(format!("{}-{:03}-doc.md", td.prefix, i));
+                std::fs::write(&file, impact_doc_md(&format!("{ty_name} {i}"), ty_name)).unwrap();
+            }
+        }
+        let store = Store::load(root, &on_disk).unwrap();
+        let mut app = make_test_app(0);
+        app.store = store;
+        app.settings_buffer = on_disk.clone();
+        app.settings_dirty = false;
+        (tmp, app, on_disk)
+    }
+
+    fn buffer_type_dir<'a>(app: &'a mut App, name: &str) -> &'a mut String {
+        &mut app
+            .settings_buffer
+            .documents
+            .types
+            .iter_mut()
+            .find(|t| t.name == name)
+            .unwrap()
+            .dir
+    }
+
+    /// AC1: a load-bearing dir change on a type WITH docs pauses the save -- the
+    /// guard activates and `.lazyspec.toml` is left byte-unchanged.
+    #[test]
+    fn ac1_load_bearing_change_with_docs_pauses_save_without_writing() {
+        let (tmp, mut app, on_disk) = impact_app(&[("rfc", 3)]);
+        let before = read_config_file(&tmp);
+        *buffer_type_dir(&mut app, "rfc") = "docs/proposals".to_string();
+        app.settings_dirty = true;
+
+        app.settings_save(tmp.path(), &on_disk);
+
+        assert!(
+            app.settings_impact_confirm.active,
+            "guard must be flagged for a load-bearing change on a type with docs"
+        );
+        assert_eq!(
+            read_config_file(&tmp),
+            before,
+            "no write may happen while the impact guard is pending"
+        );
+        assert!(app.settings_dirty, "pending edit is retained");
+    }
+
+    /// AC3: confirming the guard commits the buffer atomically (new dir on disk),
+    /// clears the guard + dirty flag, and moves/renames NO document files.
+    #[test]
+    fn ac3_confirm_commits_buffer_and_leaves_docs_in_place() {
+        let (tmp, mut app, on_disk) = impact_app(&[("rfc", 3)]);
+        let root = tmp.path();
+        let original_files: Vec<PathBuf> = (1..=3)
+            .map(|i| root.join("docs/rfcs").join(format!("RFC-{:03}-doc.md", i)))
+            .collect();
+        for f in &original_files {
+            assert!(f.exists(), "fixture doc must exist before save: {f:?}");
+        }
+
+        *buffer_type_dir(&mut app, "rfc") = "docs/proposals".to_string();
+        app.settings_dirty = true;
+        app.settings_save(root, &on_disk);
+        assert!(app.settings_impact_confirm.active);
+
+        app.confirm_settings_impact(root);
+
+        let out = read_config_file(&tmp);
+        Config::parse(&out).unwrap();
+        assert!(
+            out.contains("docs/proposals"),
+            "confirmed save must persist the new dir, got:\n{out}"
+        );
+        assert!(
+            !app.settings_impact_confirm.active,
+            "guard clears after confirm"
+        );
+        assert!(!app.settings_dirty, "dirty clears after a confirmed commit");
+        assert!(app.config_reload_request, "reload raised on commit");
+
+        // No document file was moved/renamed/renumbered: every original path still
+        // exists, and the (new) dir holds no migrated docs.
+        for f in &original_files {
+            assert!(
+                f.exists(),
+                "document files must NOT be moved on confirm: {f:?}"
+            );
+        }
+        assert!(
+            !root.join("docs/proposals").exists(),
+            "confirm must not create or populate the new dir"
+        );
+    }
+
+    /// AC4: cancelling the guard writes nothing -- `.lazyspec.toml` is byte-identical
+    /// to its pre-save snapshot, the buffer keeps the pending value, and the buffer
+    /// stays dirty.
+    #[test]
+    fn ac4_cancel_writes_nothing_and_retains_pending_edit() {
+        let (tmp, mut app, on_disk) = impact_app(&[("rfc", 3)]);
+        *buffer_type_dir(&mut app, "rfc") = "docs/proposals".to_string();
+        app.settings_dirty = true;
+        app.settings_save(tmp.path(), &on_disk);
+        assert!(app.settings_impact_confirm.active);
+        let snapshot = read_config_file(&tmp);
+
+        app.cancel_settings_impact();
+
+        assert!(
+            !app.settings_impact_confirm.active,
+            "guard clears after cancel"
+        );
+        assert_eq!(
+            read_config_file(&tmp),
+            snapshot,
+            "cancel must not write .lazyspec.toml"
+        );
+        assert_eq!(
+            app.settings_buffer
+                .documents
+                .types
+                .iter()
+                .find(|t| t.name == "rfc")
+                .unwrap()
+                .dir,
+            "docs/proposals",
+            "buffer retains the pending dir after cancel"
+        );
+        assert!(app.settings_dirty, "buffer stays dirty after cancel");
+    }
+
+    /// AC5a: a change to only non-load-bearing fields (icon/plural) commits with no
+    /// guard, identical to a guard-free save.
+    #[test]
+    fn ac5a_non_load_bearing_change_commits_without_guard() {
+        let (tmp, mut app, on_disk) = impact_app(&[("rfc", 3)]);
+        let rfc = app
+            .settings_buffer
+            .documents
+            .types
+            .iter_mut()
+            .find(|t| t.name == "rfc")
+            .unwrap();
+        rfc.icon = Some("★".to_string());
+        rfc.plural = "requests".to_string();
+        app.settings_dirty = true;
+
+        app.settings_save(tmp.path(), &on_disk);
+
+        assert!(
+            !app.settings_impact_confirm.active,
+            "non-load-bearing edits must not raise the guard"
+        );
+        let out = read_config_file(&tmp);
+        assert!(
+            out.contains("requests"),
+            "non-load-bearing edit must be written, got:\n{out}"
+        );
+        assert!(!app.settings_dirty, "dirty clears on the committed save");
+    }
+
+    /// AC5b: a load-bearing change on a type with ZERO docs commits with no guard.
+    #[test]
+    fn ac5b_load_bearing_change_on_zero_doc_type_commits_without_guard() {
+        // Only rfc docs on disk; story has zero docs.
+        let (tmp, mut app, on_disk) = impact_app(&[("rfc", 3)]);
+        *buffer_type_dir(&mut app, "story") = "docs/tickets".to_string();
+        app.settings_dirty = true;
+
+        app.settings_save(tmp.path(), &on_disk);
+
+        assert!(
+            !app.settings_impact_confirm.active,
+            "a load-bearing change on a zero-doc type must not raise the guard"
+        );
+        let out = read_config_file(&tmp);
+        assert!(
+            out.contains("docs/tickets"),
+            "zero-doc load-bearing edit must be written, got:\n{out}"
+        );
+        assert!(!app.settings_dirty, "dirty clears on the committed save");
+    }
+
+    // --- AC3/AC4 impact-guard key routing (ITERATION-191 Task 4) ---
+
+    /// Arm the document-impact guard via a real `settings_save`: a load-bearing dir
+    /// change on a type with docs. Returns the app parked with the guard active and
+    /// a pending dirty buffer, ready for the key path.
+    fn armed_impact_app() -> (tempfile::TempDir, App, Config) {
+        let (tmp, mut app, on_disk) = impact_app(&[("rfc", 3)]);
+        *buffer_type_dir(&mut app, "rfc") = "docs/proposals".to_string();
+        app.settings_dirty = true;
+        app.settings_save(tmp.path(), &on_disk);
+        assert!(
+            app.settings_impact_confirm.active,
+            "fixture must arm the impact guard"
+        );
+        (tmp, app, on_disk)
+    }
+
+    /// AC3 via keys: Enter while the guard is active routes to confirm -- the buffer
+    /// is written and the guard clears.
+    #[test]
+    fn impact_guard_enter_routes_to_confirm() {
+        let (tmp, mut app, config) = armed_impact_app();
+
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(
+            !app.settings_impact_confirm.active,
+            "Enter must clear the guard via confirm"
+        );
+        assert!(
+            read_config_file(&tmp).contains("docs/proposals"),
+            "Enter must commit the pending buffer"
+        );
+        assert!(!app.settings_dirty, "confirmed commit clears dirty");
+    }
+
+    /// AC3 via keys: 'y' while the guard is active routes to confirm.
+    #[test]
+    fn impact_guard_y_routes_to_confirm() {
+        let (tmp, mut app, config) = armed_impact_app();
+
+        app.handle_key(KeyCode::Char('y'), KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(
+            !app.settings_impact_confirm.active,
+            "'y' must clear the guard via confirm"
+        );
+        assert!(
+            read_config_file(&tmp).contains("docs/proposals"),
+            "'y' must commit the pending buffer"
+        );
+    }
+
+    /// AC4 via keys: Esc while the guard is active routes to cancel -- nothing is
+    /// written, the guard clears, and the buffer keeps its pending edit.
+    #[test]
+    fn impact_guard_esc_routes_to_cancel() {
+        let (tmp, mut app, config) = armed_impact_app();
+        let snapshot = read_config_file(&tmp);
+
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(
+            !app.settings_impact_confirm.active,
+            "Esc must clear the guard via cancel"
+        );
+        assert_eq!(
+            read_config_file(&tmp),
+            snapshot,
+            "Esc (cancel) must not write .lazyspec.toml"
+        );
+        assert_eq!(
+            buffer_type_dir(&mut app, "rfc"),
+            "docs/proposals",
+            "buffer retains the pending edit after cancel"
+        );
+        assert!(app.settings_dirty, "buffer stays dirty after cancel");
+    }
+
+    /// AC4 via keys: 'n' while the guard is active routes to cancel.
+    #[test]
+    fn impact_guard_n_routes_to_cancel() {
+        let (tmp, mut app, config) = armed_impact_app();
+        let snapshot = read_config_file(&tmp);
+
+        app.handle_key(KeyCode::Char('n'), KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(
+            !app.settings_impact_confirm.active,
+            "'n' must clear the guard via cancel"
+        );
+        assert_eq!(
+            read_config_file(&tmp),
+            snapshot,
+            "'n' (cancel) must not write .lazyspec.toml"
+        );
+        assert!(app.settings_dirty, "buffer stays dirty after cancel");
+    }
+
+    /// A non-handled key while the guard is active is swallowed: the gate keeps the
+    /// guard up and nothing is written (no fall-through to normal nav / save).
+    #[test]
+    fn impact_guard_swallows_unhandled_key() {
+        let (tmp, mut app, config) = armed_impact_app();
+        let snapshot = read_config_file(&tmp);
+
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(
+            app.settings_impact_confirm.active,
+            "an unhandled key must leave the guard active"
+        );
+        assert_eq!(
+            read_config_file(&tmp),
+            snapshot,
+            "an unhandled key must not write .lazyspec.toml"
+        );
+        assert!(app.settings_dirty, "buffer stays dirty");
     }
 
     // --- AC10 save/discard quit prompt (ITERATION-188 Task 7) ---
@@ -5165,7 +5554,7 @@ name = "related-to"
         assert!(app.settings_delete_confirm.active);
         app.settings_confirm_delete();
 
-        app.settings_save(tmp.path());
+        app.settings_save(tmp.path(), &Config::default());
 
         // The written file is a valid config.
         let out = read_config_file(&tmp);

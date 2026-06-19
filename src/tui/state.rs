@@ -1,6 +1,7 @@
 mod expansion;
 pub mod forms;
 mod graph;
+pub mod settings_guard;
 
 mod app;
 

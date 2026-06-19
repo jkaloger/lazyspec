@@ -1,7 +1,7 @@
 ---
 title: Document-impact guard on type field changes
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-06-19
 tags: []

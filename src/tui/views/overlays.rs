@@ -280,6 +280,64 @@ pub fn draw_settings_delete_confirm(f: &mut Frame, app: &App) {
     f.render_widget(paragraph, popup_area);
 }
 
+pub fn draw_settings_impact_confirm(f: &mut Frame, app: &App) {
+    use crate::tui::state::settings_guard::impact_consequence;
+
+    let area = f.area();
+    let impacts = &app.settings_impact_confirm.impacts;
+
+    // Per type: a header line, a field old->new line, and a wrapped consequence
+    // line; blank line between blocks. Plus a leading blank, a blank, and a
+    // footer line, on top of the 2 border rows.
+    let block_lines = (impacts.len() as u16).saturating_mul(4);
+    let content_height = block_lines.saturating_add(4);
+    let popup_width = 64u16.min(area.width.saturating_sub(4));
+    let popup_height = content_height
+        .saturating_add(2)
+        .min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let mut lines = vec![Line::from("")];
+
+    for impact in impacts {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", impact.type_name),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(format!(
+            "    {}.{}: {} -> {}",
+            impact.type_name, impact.field, impact.old, impact.new
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("    {}", impact_consequence(impact)),
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from(Span::styled(
+        "  [Enter/y: confirm write]  [Esc/n: cancel]",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let paragraph = Paragraph::new(lines)
+        .wrap(ratatui::widgets::Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Red))
+                .title(" Affected documents "),
+        );
+    f.render_widget(paragraph, popup_area);
+}
+
 pub fn draw_override_key_prompt(f: &mut Frame, app: &App) {
     let area = f.area();
 

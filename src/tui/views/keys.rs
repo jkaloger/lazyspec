@@ -40,6 +40,9 @@ impl App {
         if self.settings_delete_confirm.active {
             return self.handle_settings_delete_confirm_key(code);
         }
+        if self.settings_impact_confirm.active {
+            return self.handle_settings_impact_key(code, root);
+        }
         if self.status_picker.active {
             return self.handle_status_picker_key(code, root, config);
         }
@@ -96,6 +99,14 @@ impl App {
         match code {
             KeyCode::Enter => self.settings_confirm_delete(),
             KeyCode::Esc => self.settings_close_delete_confirm(),
+            _ => {}
+        }
+    }
+
+    fn handle_settings_impact_key(&mut self, code: KeyCode, root: &Path) {
+        match code {
+            KeyCode::Enter | KeyCode::Char('y') => self.confirm_settings_impact(root),
+            KeyCode::Esc | KeyCode::Char('n') => self.cancel_settings_impact(),
             _ => {}
         }
     }
@@ -732,7 +743,7 @@ impl App {
         if self.settings_quit_prompt.active {
             match code {
                 KeyCode::Char('s') => {
-                    self.settings_save(root);
+                    self.settings_save(root, config);
                     self.settings_quit_prompt.active = false;
                     // A successful save clears `settings_dirty`; honour the quit.
                     // A failed save (validation) keeps it dirty and leaves the
@@ -797,7 +808,7 @@ impl App {
         if matches!(code, KeyCode::Char('w'))
             || (matches!(code, KeyCode::Char('s')) && modifiers.contains(KeyModifiers::CONTROL))
         {
-            self.settings_save(root);
+            self.settings_save(root, config);
             return;
         }
 

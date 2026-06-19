@@ -1,4 +1,5 @@
 use crate::engine::document::DocType;
+use crate::tui::state::settings_guard::TypeFieldImpact;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -166,6 +167,32 @@ impl OverrideKeyPrompt {
         OverrideKeyPrompt {
             active: false,
             input: String::new(),
+        }
+    }
+}
+
+/// The confirm prompt shown before a save that alters a load-bearing `[[types]]`
+/// field (`dir`/`prefix`/`store`) of a type that already has documents on disk.
+/// Changing such a field only rewrites config -- the settings screen never moves
+/// files -- so the save pauses to report impact and require explicit confirmation
+/// (RFC-023 slice 6). Holds ONLY the computed impacts for rendering; the buffer is
+/// not copied here.
+pub struct SettingsImpactConfirm {
+    pub active: bool,
+    pub impacts: Vec<TypeFieldImpact>,
+}
+
+impl Default for SettingsImpactConfirm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SettingsImpactConfirm {
+    pub fn new() -> Self {
+        SettingsImpactConfirm {
+            active: false,
+            impacts: Vec::new(),
         }
     }
 }
