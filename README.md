@@ -137,6 +137,7 @@ Press `5` (or cycle to it with `` ` ``) to open the Settings view, which edits `
 | `j` / `k`          | Move between fields / entries (also `Down` / `Up`)            |
 | `Enter`            | Drill into a collection entry, or start editing a field       |
 | `Space`            | Toggle a boolean / cycle an enum field                        |
+| `g`                | When a dependency section is auto-scaffolded (e.g. cycling numbering to `sqids`), jump to the required field it needs filled |
 | type + `Enter`     | Confirm a text / number / duration / list edit                |
 | `Esc`              | Cancel an in-progress edit, or undrill from an entry          |
 | `w` / `Ctrl-S`     | Save changes to `.lazyspec.toml` (validates the whole config) |

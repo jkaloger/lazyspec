@@ -753,6 +753,22 @@ impl App {
             return;
         }
 
+        // A pending dependency-scaffold offer is answered before any nav/edit:
+        // `g` ("go to field") jumps focus to the required-but-empty field it points
+        // at and clears the offer; any other key declines (clears the offer) and
+        // falls through to its normal handling. The AC2 required-but-empty flag is
+        // driven off buffer state, so it persists past a decline.
+        if let Some(offer) = self.settings_scaffold_offer.clone() {
+            if matches!(code, KeyCode::Char('g')) {
+                if let Some(path) = offer.required_empty_field {
+                    self.settings_jump_to_scaffolded_field(&path);
+                }
+                self.settings_scaffold_offer = None;
+                return;
+            }
+            self.settings_scaffold_offer = None;
+        }
+
         // `w` or Ctrl-S validates the whole buffer and writes `.lazyspec.toml`.
         if matches!(code, KeyCode::Char('w'))
             || (matches!(code, KeyCode::Char('s')) && modifiers.contains(KeyModifiers::CONTROL))

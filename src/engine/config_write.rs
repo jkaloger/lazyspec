@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use toml_edit::{Array, DocumentMut, Item, Value};
+use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
 use crate::engine::config::{Config, NumberingStrategy, ReservedFormat, Severity, ValidationRule};
 
@@ -95,47 +95,71 @@ fn write_tui(doc: &mut DocumentMut, buffer: &Config) {
 }
 
 fn write_numbering(doc: &mut DocumentMut, buffer: &Config) {
-    let Some(numbering) = doc.get_mut("numbering").and_then(Item::as_table_like_mut) else {
-        return;
-    };
-
-    // A None buffer field leaves the existing section untouched; section removal
-    // is a later slice's concern (no scalar edit nulls these sections).
-    if let Some(sqids_table) = numbering.get_mut("sqids").and_then(Item::as_table_like_mut) {
-        if let Some(sqids) = &buffer.documents.sqids {
-            set_str(sqids_table, "salt", &sqids.salt);
-            set_int_defaulted(sqids_table, "min_length", sqids.min_length as i64, 3);
-        }
+    // Each sub-section follows the same Option contract as the top-level
+    // dependency sections: Some-and-present updates in place (decor preserved),
+    // Some-but-absent fabricates the sub-table under [numbering], and None leaves
+    // an absent section absent (section removal is a later slice's concern; no
+    // scalar edit nulls these). The parent [numbering] table is created on demand
+    // and kept implicit so an empty `[numbering]` header is never emitted.
+    if let Some(sqids) = &buffer.documents.sqids {
+        let sqids_table = numbering_subtable(doc, "sqids");
+        set_str(sqids_table, "salt", &sqids.salt);
+        set_int_defaulted(sqids_table, "min_length", sqids.min_length as i64, 3);
     }
 
-    if let Some(reserved_table) = numbering
-        .get_mut("reserved")
-        .and_then(Item::as_table_like_mut)
-    {
-        if let Some(reserved) = &buffer.documents.reserved {
-            set_str_defaulted(reserved_table, "remote", &reserved.remote, "origin");
-            set_str(
-                reserved_table,
-                "format",
-                reserved_format_str(&reserved.format),
-            );
-            set_int_defaulted(
-                reserved_table,
-                "max_retries",
-                reserved.max_retries as i64,
-                5,
-            );
-        }
+    if let Some(reserved) = &buffer.documents.reserved {
+        let reserved_table = numbering_subtable(doc, "reserved");
+        set_str_defaulted(reserved_table, "remote", &reserved.remote, "origin");
+        set_str(
+            reserved_table,
+            "format",
+            reserved_format_str(&reserved.format),
+        );
+        set_int_defaulted(
+            reserved_table,
+            "max_retries",
+            reserved.max_retries as i64,
+            5,
+        );
     }
 }
 
+// Borrow `[numbering.<key>]`, creating the implicit `[numbering]` parent and/or
+// the named sub-table when either is absent. Returns the sub-table for in-place
+// key edits, so a present section keeps its decor while a fabricated one is a
+// fresh `Item::Table`.
+fn numbering_subtable<'a>(doc: &'a mut DocumentMut, key: &str) -> &'a mut dyn toml_edit::TableLike {
+    if !doc.contains_key("numbering") {
+        let mut numbering = Table::new();
+        // Implicit so toml_edit renders the sub-tables (e.g. [numbering.sqids])
+        // without emitting a bare `[numbering]` header.
+        numbering.set_implicit(true);
+        doc.insert("numbering", Item::Table(numbering));
+    }
+    let numbering = doc
+        .get_mut("numbering")
+        .and_then(Item::as_table_mut)
+        .expect("numbering inserted/present as a table above");
+    if !numbering.contains_key(key) {
+        numbering.insert(key, Item::Table(Table::new()));
+    }
+    numbering
+        .get_mut(key)
+        .and_then(Item::as_table_like_mut)
+        .expect("sub-table inserted/present above")
+}
+
 fn write_github(doc: &mut DocumentMut, buffer: &Config) {
-    let Some(github) = doc.get_mut("github").and_then(Item::as_table_like_mut) else {
-        return;
-    };
     let Some(cfg) = &buffer.documents.github else {
         return;
     };
+    if !doc.contains_key("github") {
+        doc.insert("github", Item::Table(Table::new()));
+    }
+    let github = doc
+        .get_mut("github")
+        .and_then(Item::as_table_like_mut)
+        .expect("github inserted/present as a table above");
     set_opt_str(github, "repo", cfg.repo.as_deref());
     set_int_defaulted(github, "cache_ttl", cfg.cache_ttl as i64, 60);
 }
@@ -497,21 +521,89 @@ name = "related-to"
     }
 
     #[test]
-    fn absent_optional_section_is_not_fabricated() {
-        // SRC has no [github] section; setting a github value on the buffer must
-        // not invent the section.
+    fn absent_optional_section_with_none_buffer_stays_absent() {
+        // SRC has no [github]/[numbering] sections, and the buffer leaves those
+        // Option fields None: the writer must not invent any of them.
         let buffer = {
             let mut c = Config::parse(SRC).unwrap();
-            c.documents.github = Some(crate::engine::config::GithubConfig {
+            c.documents.github = None;
+            c.documents.sqids = None;
+            c.documents.reserved = None;
+            c
+        };
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+        assert!(!out.contains("[github]"));
+        assert!(!out.contains("[numbering"));
+        Config::parse(&out).unwrap();
+    }
+
+    #[test]
+    fn some_optional_section_is_fabricated_when_absent() {
+        use crate::engine::config::{GithubConfig, ReservedConfig, SqidsConfig};
+
+        // [github]: Some-but-absent -> fabricate a top-level table; repo present.
+        let github_buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.documents.github = Some(GithubConfig {
                 repo: Some("owner/repo".to_string()),
                 cache_ttl: 99,
             });
             c
         };
-        let out = write_config_in_place(SRC, &buffer).unwrap();
-        assert!(!out.contains("[github]"));
-        assert!(!out.contains("owner/repo"));
-        Config::parse(&out).unwrap();
+        let out = write_config_in_place(SRC, &github_buffer).unwrap();
+        assert!(out.contains("[github]"), "github section fabricated");
+        assert!(out.contains(r#"repo = "owner/repo""#));
+        assert!(out.contains("cache_ttl = 99"));
+        let reparsed = Config::parse(&out).unwrap();
+        let gh = reparsed.documents.github.unwrap();
+        assert_eq!(gh.repo.as_deref(), Some("owner/repo"));
+        assert_eq!(gh.cache_ttl, 99);
+
+        // [numbering.reserved]: Some-but-absent -> fabricate a sub-table under an
+        // implicit [numbering] parent (no bare [numbering] header).
+        let reserved_buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.documents.reserved = Some(ReservedConfig {
+                remote: "upstream".to_string(),
+                format: ReservedFormat::Incremental,
+                max_retries: 9,
+            });
+            c
+        };
+        let out = write_config_in_place(SRC, &reserved_buffer).unwrap();
+        assert!(
+            out.contains("[numbering.reserved]"),
+            "reserved sub-table fabricated"
+        );
+        assert!(
+            !out.contains("[numbering]\n") && !out.ends_with("[numbering]"),
+            "no bare [numbering] header is emitted"
+        );
+        let reparsed = Config::parse(&out).unwrap();
+        let r = reparsed.documents.reserved.unwrap();
+        assert_eq!(r.remote, "upstream");
+        assert_eq!(r.format, ReservedFormat::Incremental);
+        assert_eq!(r.max_retries, 9);
+
+        // [numbering.sqids]: Some-but-absent (non-empty salt) -> fabricate a
+        // sub-table; the non-empty salt keeps Config::parse happy.
+        let sqids_buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.documents.sqids = Some(SqidsConfig {
+                salt: "round-trip-salt".to_string(),
+                min_length: 7,
+            });
+            c
+        };
+        let out = write_config_in_place(SRC, &sqids_buffer).unwrap();
+        assert!(
+            out.contains("[numbering.sqids]"),
+            "sqids sub-table fabricated"
+        );
+        let reparsed = Config::parse(&out).unwrap();
+        let s = reparsed.documents.sqids.unwrap();
+        assert_eq!(s.salt, "round-trip-salt");
+        assert_eq!(s.min_length, 7);
     }
 
     const RULES_SRC: &str = r#"[[types]]

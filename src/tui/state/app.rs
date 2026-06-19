@@ -8,7 +8,8 @@ use super::graph::flatten_forest;
 
 use crate::engine::cache::DiskCache;
 use crate::engine::config::{
-    Config, NumberingStrategy, ReservedFormat, Severity, StoreBackend, ValidationRule,
+    Config, GithubConfig, NumberingStrategy, ReservedConfig, ReservedFormat, Severity, SqidsConfig,
+    StoreBackend, ValidationRule,
 };
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, Status};
 use crate::engine::fs::FileSystem;
@@ -49,6 +50,76 @@ fn validate_bounded(input: &str, min: u64, max: u64) -> Result<u64, String> {
         return Err(format!("value must be between {} and {}", min, max));
     }
     Ok(n)
+}
+
+/// An optional config section a just-cycled enum value depends on: `numbering =
+/// sqids` needs `[numbering.sqids]`, `numbering = reserved` needs
+/// `[numbering.reserved]`, `store = github-issues` needs `[github]`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ConfigDep {
+    NumberingSqids,
+    NumberingReserved,
+    Github,
+}
+
+/// What `scaffold_dependency` did: the section it inserted, plus the first
+/// required-but-empty field that scaffolding produced (only the sqids salt; the
+/// other sections scaffold complete with parser defaults).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScaffoldResult {
+    pub inserted: ConfigDep,
+    pub required_empty_field: Option<FieldPath>,
+}
+
+/// Insert the optional config section `dep` requires into `buffer` with
+/// parser-matching defaults, or skip if it already exists. Returns `Some` with a
+/// record of the insert when a section was added, or `None` when the section was
+/// already present (the buffer is left untouched). Pure: operates only on the
+/// passed buffer. The scaffolded section is byte-identical to what `Config::parse`
+/// would have produced for an empty section, so a later save round-trips cleanly.
+pub fn scaffold_dependency(buffer: &mut Config, dep: ConfigDep) -> Option<ScaffoldResult> {
+    match dep {
+        ConfigDep::NumberingSqids => {
+            if buffer.documents.sqids.is_some() {
+                return None;
+            }
+            buffer.documents.sqids = Some(SqidsConfig {
+                salt: String::new(),
+                min_length: 3,
+            });
+            Some(ScaffoldResult {
+                inserted: ConfigDep::NumberingSqids,
+                required_empty_field: Some(FieldPath::SqidsSalt),
+            })
+        }
+        ConfigDep::NumberingReserved => {
+            if buffer.documents.reserved.is_some() {
+                return None;
+            }
+            buffer.documents.reserved = Some(ReservedConfig {
+                remote: "origin".to_string(),
+                format: ReservedFormat::Incremental,
+                max_retries: 5,
+            });
+            Some(ScaffoldResult {
+                inserted: ConfigDep::NumberingReserved,
+                required_empty_field: None,
+            })
+        }
+        ConfigDep::Github => {
+            if buffer.documents.github.is_some() {
+                return None;
+            }
+            buffer.documents.github = Some(GithubConfig {
+                repo: None,
+                cache_ttl: 60,
+            });
+            Some(ScaffoldResult {
+                inserted: ConfigDep::Github,
+                required_empty_field: None,
+            })
+        }
+    }
 }
 
 fn numbering_variant(n: &NumberingStrategy) -> &'static str {
@@ -469,6 +540,12 @@ pub struct App {
     /// The save/discard/cancel prompt shown when quitting Settings with unsaved
     /// buffer edits (AC10).
     pub settings_quit_prompt: SettingsQuitPrompt,
+    /// A pending dependency-scaffold offer raised by `settings_cycle_enum` when a
+    /// just-cycled enum value (numbering = sqids/reserved, store = github-issues)
+    /// auto-inserts its required config section. When the section carries a
+    /// required-but-empty field (only the sqids salt), the offer prompts a jump to
+    /// fill it; any non-accept key dismisses it (the buffer-state flag persists).
+    pub settings_scaffold_offer: Option<ScaffoldResult>,
 }
 
 impl App {
@@ -594,6 +671,7 @@ impl App {
             settings_edit_error: None,
             settings_footer_error: None,
             settings_quit_prompt: SettingsQuitPrompt::new(),
+            settings_scaffold_offer: None,
         };
         app.apply_config(config);
         app.rebuild_search_index();
@@ -1114,6 +1192,7 @@ impl App {
                 if let Some(n) = numbering_from_variant(next) {
                     self.settings_write(path, SettingsValue::Numbering(n));
                     self.settings_dirty = true;
+                    self.scaffold_for_cycled_value(path, next);
                 }
             }
             FieldPath::Type {
@@ -1123,6 +1202,7 @@ impl App {
                 if let Some(s) = store_from_variant(next) {
                     self.settings_write(path, SettingsValue::Store(s));
                     self.settings_dirty = true;
+                    self.scaffold_for_cycled_value(path, next);
                 }
             }
             FieldPath::ReservedFormat => {
@@ -1141,6 +1221,48 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// After a numbering/store enum is cycled to `next`, auto-insert the optional
+    /// config section that value depends on. Only sqids/reserved/github-issues
+    /// introduce a dependency; every other variant (and field) is a no-op. When the
+    /// scaffolded section carries a required-but-empty field (only the sqids salt)
+    /// the result is stashed as a jump offer; sections that scaffold complete
+    /// (reserved/github) set no offer, since there is nothing to jump to. A section
+    /// that was already present scaffolds nothing and sets no offer (AC6).
+    fn scaffold_for_cycled_value(&mut self, path: &FieldPath, next: &str) {
+        let dep = match (path, next) {
+            (
+                FieldPath::Type {
+                    key: TypeKey::Numbering,
+                    ..
+                },
+                "sqids",
+            ) => Some(ConfigDep::NumberingSqids),
+            (
+                FieldPath::Type {
+                    key: TypeKey::Numbering,
+                    ..
+                },
+                "reserved",
+            ) => Some(ConfigDep::NumberingReserved),
+            (
+                FieldPath::Type {
+                    key: TypeKey::Store,
+                    ..
+                },
+                "github-issues",
+            ) => Some(ConfigDep::Github),
+            _ => None,
+        };
+        let Some(dep) = dep else {
+            return;
+        };
+        if let Some(result) = scaffold_dependency(&mut self.settings_buffer, dep) {
+            if result.required_empty_field.is_some() {
+                self.settings_scaffold_offer = Some(result);
+            }
         }
     }
 
@@ -1291,6 +1413,20 @@ impl App {
         // 3. Any other constraint (reserved/relationships): best-effort landing on
         // a relevant category, clamped, never crashing.
         self.settings_jump_to_field(4, None, |_| false);
+    }
+
+    /// Land the settings nav on the scaffold offer's required-but-empty field
+    /// (only the sqids salt: Numbering category, the salt field) so the user can
+    /// fill it. Reuses `settings_jump_to_field` rather than re-deriving focus.
+    pub(crate) fn settings_jump_to_scaffolded_field(&mut self, path: &FieldPath) {
+        match path {
+            FieldPath::SqidsSalt => {
+                self.settings_jump_to_field(4, None, |f| matches!(f.path, FieldPath::SqidsSalt));
+            }
+            // No other scaffolded section produces a required-empty field today; a
+            // best-effort landing keeps this total without crashing.
+            _ => self.settings_jump_to_field(4, None, |_| false),
+        }
     }
 
     /// Land the settings nav on `category` (optionally drilled into `drill`) and
@@ -2484,6 +2620,7 @@ mod tests {
             settings_edit_error: None,
             settings_footer_error: None,
             settings_quit_prompt: SettingsQuitPrompt::new(),
+            settings_scaffold_offer: None,
         };
         app
     }
@@ -3702,6 +3839,191 @@ mod tests {
         );
     }
 
+    // --- ITERATION-189 config dependency auto-scaffolding (Tasks 2/3) ---
+
+    /// A drilled-type app focused on the type's `numbering` EnumCycle, clean and
+    /// not editing. cat 1 (Document Types), drilled into type 0, field 5.
+    fn numbering_app(config: Config) -> App {
+        let mut app = settings_app(config, 1, 5);
+        app.settings_drill = Some(0);
+        app
+    }
+
+    // AC1: cycling numbering to `sqids` (section absent) auto-inserts the
+    // [numbering.sqids] section with an empty salt + min_length 3, dirties the
+    // buffer, and raises a scaffold offer pointing at the salt.
+    #[test]
+    fn ac1_numbering_to_sqids_scaffolds_section_and_offers_salt() {
+        let mut app = numbering_app(config_one_type());
+        assert!(app.settings_buffer.documents.sqids.is_none());
+
+        app.settings_space();
+
+        let sqids = app
+            .settings_buffer
+            .documents
+            .sqids
+            .as_ref()
+            .expect("sqids section scaffolded");
+        assert_eq!(sqids.salt, "", "salt scaffolded empty");
+        assert_eq!(
+            sqids.min_length, 3,
+            "min_length scaffolded to parser default"
+        );
+        assert!(app.settings_dirty);
+        assert_eq!(
+            app.settings_scaffold_offer,
+            Some(ScaffoldResult {
+                inserted: ConfigDep::NumberingSqids,
+                required_empty_field: Some(FieldPath::SqidsSalt),
+            })
+        );
+    }
+
+    // AC4: cycling numbering to `reserved` (section absent) scaffolds the
+    // [numbering.reserved] section with defaults, dirties the buffer, and sets NO
+    // required-empty offer (the section scaffolds complete).
+    #[test]
+    fn ac4_numbering_to_reserved_scaffolds_complete_section_no_offer() {
+        // sqids is the first numbering variant after incremental, so cycle twice to
+        // reach reserved; the first hop scaffolds sqids, so clear the offer between.
+        let mut config = config_one_type();
+        config.documents.sqids = Some(SqidsConfig {
+            salt: "seed".to_string(),
+            min_length: 3,
+        });
+        let mut app = numbering_app(config);
+
+        app.settings_space(); // -> sqids (section present, no scaffold)
+        assert!(app.settings_scaffold_offer.is_none());
+        app.settings_space(); // -> reserved
+
+        let reserved = app
+            .settings_buffer
+            .documents
+            .reserved
+            .as_ref()
+            .expect("reserved section scaffolded");
+        assert_eq!(reserved.remote, "origin");
+        assert_eq!(reserved.format, ReservedFormat::Incremental);
+        assert_eq!(reserved.max_retries, 5);
+        assert!(app.settings_dirty);
+        assert!(
+            app.settings_scaffold_offer.is_none(),
+            "reserved has no required-empty field, so no offer is raised"
+        );
+    }
+
+    // AC5: cycling store to `github-issues` (section absent) scaffolds the [github]
+    // section with repo None / cache_ttl 60, dirties the buffer, and sets no
+    // required-empty offer.
+    #[test]
+    fn ac5_store_to_github_issues_scaffolds_section_no_offer() {
+        let mut app = settings_app(config_one_type(), 1, 7); // store field
+        app.settings_drill = Some(0);
+        assert!(app.settings_buffer.documents.github.is_none());
+
+        app.settings_space(); // filesystem -> github-issues
+
+        let github = app
+            .settings_buffer
+            .documents
+            .github
+            .as_ref()
+            .expect("github section scaffolded");
+        assert_eq!(github.repo, None);
+        assert_eq!(github.cache_ttl, 60);
+        assert!(app.settings_dirty);
+        assert!(
+            app.settings_scaffold_offer.is_none(),
+            "github has no required-empty field, so no offer is raised"
+        );
+    }
+
+    // AC6: cycling numbering to `sqids` when the section already exists leaves it
+    // untouched and raises no offer.
+    #[test]
+    fn ac6_numbering_to_sqids_with_existing_section_is_skip() {
+        let mut config = config_one_type();
+        config.documents.sqids = Some(SqidsConfig {
+            salt: "x".to_string(),
+            min_length: 7,
+        });
+        let mut app = numbering_app(config);
+
+        app.settings_space(); // incremental -> sqids
+
+        let sqids = app.settings_buffer.documents.sqids.as_ref().unwrap();
+        assert_eq!(sqids.salt, "x", "existing salt untouched");
+        assert_eq!(sqids.min_length, 7, "existing min_length untouched");
+        assert!(
+            app.settings_scaffold_offer.is_none(),
+            "an already-present section raises no offer (AC6)"
+        );
+    }
+
+    // AC3 (accept): with a pending sqids offer, `g` jumps focus to the sqids salt
+    // field and clears the offer.
+    #[test]
+    fn ac3_accept_key_jumps_to_salt_and_clears_offer() {
+        let mut app = numbering_app(config_one_type());
+        app.settings_space(); // scaffold sqids, raise offer
+        assert!(app.settings_scaffold_offer.is_some());
+        let config = Config::default();
+
+        app.handle_settings_key(
+            KeyCode::Char('g'),
+            KeyModifiers::NONE,
+            Path::new("."),
+            &config,
+        );
+
+        assert_eq!(app.settings_category, 4, "landed on the Numbering category");
+        assert_eq!(app.settings_drill, None);
+        let fields = crate::tui::views::panels::settings_fields(
+            app.settings_category,
+            app.settings_entry,
+            app.settings_drill,
+            &app.settings_buffer,
+        );
+        assert_eq!(
+            fields[app.settings_field].path,
+            FieldPath::SqidsSalt,
+            "cursor resolves to the sqids salt field"
+        );
+        assert!(
+            app.settings_scaffold_offer.is_none(),
+            "offer cleared on accept"
+        );
+    }
+
+    // AC3 (decline): with a pending sqids offer, a non-accept key (`j`) clears the
+    // offer without jumping to the salt.
+    #[test]
+    fn ac3_non_accept_key_declines_offer_without_jumping() {
+        let mut app = numbering_app(config_one_type());
+        app.settings_space(); // scaffold sqids, raise offer
+        assert!(app.settings_scaffold_offer.is_some());
+        let config = Config::default();
+        let before_category = app.settings_category;
+
+        app.handle_settings_key(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+            Path::new("."),
+            &config,
+        );
+
+        assert!(
+            app.settings_scaffold_offer.is_none(),
+            "any non-accept key dismisses the offer"
+        );
+        assert_eq!(
+            app.settings_category, before_category,
+            "decline does not jump to the Numbering category"
+        );
+    }
+
     // --- start_edit / space no-op on ReadOnly ---
 
     #[test]
@@ -3897,6 +4219,184 @@ inverse = "implemented-by"
         assert!(app.settings_dirty);
     }
 
+    // AC7 (ITERATION-189): auto-scaffolding does NOT weaken the salt requirement.
+    // A buffer mirroring the AC1 end-state (type numbering = sqids, scaffolded
+    // [numbering.sqids] with an empty salt) is rejected by save: the file is not
+    // written, the footer error names the salt, and the buffer stays dirty.
+    #[test]
+    fn ac7_save_still_rejects_scaffolded_empty_salt() {
+        const SQIDS_SRC: &str = r#"[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[templates]
+dir = ".lazyspec/templates"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+numbering = "sqids"
+
+[numbering.sqids]
+salt = "seed"
+min_length = 3
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+"#;
+        let (tmp, mut app) = save_app(SQIDS_SRC);
+        // Mirror the scaffold end-state: the salt is blank.
+        app.settings_buffer.documents.sqids.as_mut().unwrap().salt = String::new();
+        app.settings_dirty = true;
+        let before = read_config_file(&tmp);
+
+        app.settings_save(tmp.path());
+
+        assert_eq!(
+            read_config_file(&tmp),
+            before,
+            "no write on a save rejected for an empty salt"
+        );
+        let msg = app
+            .settings_footer_error
+            .as_deref()
+            .expect("footer error set on rejected save");
+        assert!(
+            msg.contains("salt"),
+            "footer should name the salt constraint, got: {msg}"
+        );
+        assert!(
+            app.settings_dirty,
+            "buffer stays dirty after a rejected save"
+        );
+        assert!(
+            !app.config_reload_request,
+            "no reload triggered on a rejected save"
+        );
+    }
+
+    // ITERATION-189: cycling a type's store to `github-issues` (no [github] in
+    // source) scaffolds the section into the buffer; the save writer must now
+    // fabricate the absent [github] section so the rendered TOML re-parses.
+    #[test]
+    fn save_fabricates_github_section_after_store_cycled_to_github_issues() {
+        let (tmp, mut app) = save_app(SAVE_SRC);
+        // Cycle the rfc type's store via the editor path: cat 1, drill 0, field 7.
+        app.settings_category = 1;
+        app.settings_drill = Some(0);
+        app.settings_field = 7;
+        app.settings_space(); // filesystem -> github-issues, scaffolds github buffer
+
+        assert_eq!(
+            app.settings_buffer.documents.types[0].store,
+            StoreBackend::GithubIssues
+        );
+        assert!(app.settings_buffer.documents.github.is_some());
+
+        app.settings_save(tmp.path());
+
+        let out = read_config_file(&tmp);
+        assert!(
+            out.contains("[github]"),
+            "writer must fabricate the absent [github] section, got:\n{out}"
+        );
+        let reparsed = Config::parse(&out).expect("fabricated config re-parses");
+        let gh = reparsed
+            .documents
+            .github
+            .expect("re-parsed config carries the github section");
+        assert_eq!(gh.cache_ttl, 60, "scaffolded cache_ttl round-trips");
+        assert_eq!(gh.repo, None, "no repo key fabricated when None");
+        assert!(!app.settings_dirty, "dirty clears on a successful save");
+        assert_eq!(app.settings_footer_error, None, "footer clears on success");
+    }
+
+    // ITERATION-189: cycling a type's numbering to `reserved` (no
+    // [numbering.reserved] in source) scaffolds the section; the writer must
+    // fabricate it (as a sub-table of [numbering]) so the save re-parses.
+    #[test]
+    fn save_fabricates_reserved_section_after_numbering_cycled_to_reserved() {
+        let (tmp, mut app) = save_app(SAVE_SRC);
+        // Numbering EnumCycle is cat 1, drill 0, field 5. Two hops reach reserved
+        // (incremental -> sqids -> reserved); the first hop scaffolds sqids.
+        app.settings_category = 1;
+        app.settings_drill = Some(0);
+        app.settings_field = 5;
+        app.settings_space(); // -> sqids (scaffolds sqids buffer)
+        app.settings_space(); // -> reserved (scaffolds reserved buffer)
+
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering,
+            NumberingStrategy::Reserved
+        );
+        // The dangling sqids scaffold (empty salt) would otherwise reject the save;
+        // drop it so we isolate the reserved-fabrication behaviour.
+        app.settings_buffer.documents.sqids = None;
+        let reserved = app
+            .settings_buffer
+            .documents
+            .reserved
+            .as_ref()
+            .expect("reserved scaffolded");
+        assert_eq!(reserved.remote, "origin");
+
+        app.settings_save(tmp.path());
+
+        let out = read_config_file(&tmp);
+        assert!(
+            out.contains("[numbering.reserved]"),
+            "writer must fabricate the absent [numbering.reserved] section, got:\n{out}"
+        );
+        let reparsed = Config::parse(&out).expect("fabricated config re-parses");
+        let r = reparsed
+            .documents
+            .reserved
+            .expect("re-parsed config carries the reserved section");
+        assert_eq!(r.remote, "origin");
+        assert_eq!(r.format, ReservedFormat::Incremental);
+        assert_eq!(r.max_retries, 5);
+        assert!(!app.settings_dirty, "dirty clears on a successful save");
+        assert_eq!(app.settings_footer_error, None, "footer clears on success");
+    }
+
+    // ITERATION-189: cycling numbering to `sqids` then filling the scaffolded salt
+    // produces a buffer whose [numbering.sqids] section is absent from source; the
+    // writer must fabricate it (sub-table of [numbering]) so the save re-parses.
+    #[test]
+    fn save_fabricates_sqids_section_after_salt_filled() {
+        let (tmp, mut app) = save_app(SAVE_SRC);
+        app.settings_category = 1;
+        app.settings_drill = Some(0);
+        app.settings_field = 5;
+        app.settings_space(); // incremental -> sqids, scaffolds empty-salt sqids buffer
+
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering,
+            NumberingStrategy::Sqids
+        );
+        // Fill the scaffolded salt so the save is not rejected for an empty salt.
+        app.settings_buffer.documents.sqids.as_mut().unwrap().salt = "filled-seed".to_string();
+
+        app.settings_save(tmp.path());
+
+        let out = read_config_file(&tmp);
+        assert!(
+            out.contains("[numbering.sqids]"),
+            "writer must fabricate the absent [numbering.sqids] section, got:\n{out}"
+        );
+        let reparsed = Config::parse(&out).expect("fabricated config re-parses");
+        let s = reparsed
+            .documents
+            .sqids
+            .expect("re-parsed config carries the sqids section");
+        assert_eq!(s.salt, "filled-seed");
+        assert_eq!(s.min_length, 3);
+        assert!(!app.settings_dirty, "dirty clears on a successful save");
+        assert_eq!(app.settings_footer_error, None, "footer clears on success");
+    }
+
     // --- AC10 save/discard quit prompt (ITERATION-188 Task 7) ---
 
     /// A settings app parked in the Settings view, not editing, not drilled, with
@@ -4084,5 +4584,119 @@ inverse = "implemented-by"
             !app.settings_quit_prompt.active,
             "no prompt when the buffer is clean"
         );
+    }
+
+    // AC1: scaffolding NumberingSqids into a buffer with no [numbering.sqids]
+    // inserts the section with parser defaults and points at the empty salt.
+    #[test]
+    fn scaffold_sqids_inserts_defaults_and_targets_salt() {
+        let mut buffer = Config::default();
+        assert!(buffer.documents.sqids.is_none());
+
+        let result = scaffold_dependency(&mut buffer, ConfigDep::NumberingSqids);
+
+        assert_eq!(
+            result,
+            Some(ScaffoldResult {
+                inserted: ConfigDep::NumberingSqids,
+                required_empty_field: Some(FieldPath::SqidsSalt),
+            })
+        );
+        assert_eq!(
+            buffer.documents.sqids,
+            Some(SqidsConfig {
+                salt: String::new(),
+                min_length: 3,
+            })
+        );
+    }
+
+    // AC4: scaffolding NumberingReserved into a buffer with no
+    // [numbering.reserved] inserts parser defaults; no required-empty field.
+    #[test]
+    fn scaffold_reserved_inserts_defaults_no_empty_field() {
+        let mut buffer = Config::default();
+        assert!(buffer.documents.reserved.is_none());
+
+        let result = scaffold_dependency(&mut buffer, ConfigDep::NumberingReserved);
+
+        assert_eq!(
+            result,
+            Some(ScaffoldResult {
+                inserted: ConfigDep::NumberingReserved,
+                required_empty_field: None,
+            })
+        );
+        assert_eq!(
+            buffer.documents.reserved,
+            Some(ReservedConfig {
+                remote: "origin".to_string(),
+                format: ReservedFormat::Incremental,
+                max_retries: 5,
+            })
+        );
+    }
+
+    // AC5: scaffolding Github into a buffer with no [github] inserts parser
+    // defaults (repo None, cache_ttl 60); no required-empty field.
+    #[test]
+    fn scaffold_github_inserts_defaults_no_empty_field() {
+        let mut buffer = Config::default();
+        assert!(buffer.documents.github.is_none());
+
+        let result = scaffold_dependency(&mut buffer, ConfigDep::Github);
+
+        assert_eq!(
+            result,
+            Some(ScaffoldResult {
+                inserted: ConfigDep::Github,
+                required_empty_field: None,
+            })
+        );
+        assert_eq!(
+            buffer.documents.github,
+            Some(GithubConfig {
+                repo: None,
+                cache_ttl: 60,
+            })
+        );
+    }
+
+    // AC6: an already-present section is left untouched and scaffolding returns
+    // None, for each of the three dependencies.
+    #[test]
+    fn scaffold_skips_and_does_not_mutate_when_present() {
+        let mut buffer = Config::default();
+
+        let existing_sqids = SqidsConfig {
+            salt: "user-salt".to_string(),
+            min_length: 7,
+        };
+        buffer.documents.sqids = Some(existing_sqids.clone());
+        assert_eq!(
+            scaffold_dependency(&mut buffer, ConfigDep::NumberingSqids),
+            None
+        );
+        assert_eq!(buffer.documents.sqids, Some(existing_sqids));
+
+        let existing_reserved = ReservedConfig {
+            remote: "upstream".to_string(),
+            format: ReservedFormat::Sqids,
+            max_retries: 9,
+        };
+        buffer.documents.reserved = Some(existing_reserved.clone());
+        assert_eq!(
+            scaffold_dependency(&mut buffer, ConfigDep::NumberingReserved),
+            None
+        );
+        assert_eq!(buffer.documents.reserved, Some(existing_reserved));
+
+        let existing_github = GithubConfig {
+            repo: Some("owner/repo".to_string()),
+            cache_ttl: 120,
+        };
+        buffer.documents.github = Some(existing_github.clone());
+        assert_eq!(scaffold_dependency(&mut buffer, ConfigDep::Github), None);
+        assert_eq!(buffer.documents.github, Some(existing_github));
     }
 }

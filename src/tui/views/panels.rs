@@ -20,8 +20,8 @@ use crate::engine::git_status::GitFileStatus;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
 use crate::tui::state::{
-    App, DocListNode, EditableField, FieldEditor, FieldPath, FilterField, GraphNode, PreviewTab,
-    RelKey, RuleKey, TypeKey,
+    App, ConfigDep, DocListNode, EditableField, FieldEditor, FieldPath, FilterField, GraphNode,
+    PreviewTab, RelKey, RuleKey, TypeKey,
 };
 
 use super::colors::{status_color, tag_color};
@@ -2137,6 +2137,28 @@ fn field_line(f: &EditableField) -> String {
     format!("{}: {}", f.label, f.value)
 }
 
+/// True when the sqids salt is required but empty: the `[numbering.sqids]` section
+/// exists (so a type uses sqids numbering) but its salt is blank. Drives the AC2
+/// required-but-empty flag in the Numbering view. Reads buffer state only, so the
+/// flag persists after a scaffold offer is dismissed and clears once the salt is
+/// filled. A non-empty salt is never flagged.
+pub(super) fn sqids_salt_required_empty(config: &Config) -> bool {
+    config
+        .documents
+        .sqids
+        .as_ref()
+        .is_some_and(|s| s.salt.is_empty())
+}
+
+/// The `[section]` label shown in a scaffold offer prompt.
+fn scaffold_section_label(dep: ConfigDep) -> &'static str {
+    match dep {
+        ConfigDep::NumberingSqids => "numbering.sqids",
+        ConfigDep::NumberingReserved => "numbering.reserved",
+        ConfigDep::Github => "github",
+    }
+}
+
 /// The value to show for a field's value column. While the field is the focused
 /// row AND an edit is in progress, echo the live `edit_input` with the house
 /// caret (`_`) appended so the user sees what they are typing; otherwise show
@@ -2334,10 +2356,15 @@ pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
     } else {
         None
     };
+    // AC2: flag the sqids salt as required-but-empty whenever the section exists
+    // with a blank salt (driven off buffer state, not the scaffold offer).
+    let salt_required_empty = sqids_salt_required_empty(config);
     let mut text: Vec<Line> = lines
         .iter()
         .enumerate()
         .map(|(i, l)| {
+            let is_salt_required = salt_required_empty
+                && matches!(fields.get(i).map(|f| &f.path), Some(FieldPath::SqidsSalt));
             if highlight_row == Some(i) {
                 // While editing, echo the live input + caret on the focused row
                 // instead of the stale buffer value (`settings_display_value`).
@@ -2358,6 +2385,13 @@ pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ))
+            } else if is_salt_required {
+                Line::from(Span::styled(
+                    format!("{} (required)", l),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ))
             } else {
                 Line::from(l.as_str())
             }
@@ -2376,6 +2410,24 @@ pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 )),
             );
+        }
+    }
+
+    // AC3: an active scaffold offer with a required-but-empty field shows an inline
+    // prompt to jump there. Offers without a required field (reserved/github) carry
+    // no prompt and are dropped on the next keypress.
+    if let Some(offer) = &app.settings_scaffold_offer {
+        if offer.required_empty_field.is_some() {
+            text.push(Line::from(""));
+            text.push(Line::from(Span::styled(
+                format!(
+                    "Scaffolded [{}] -- press g to set salt",
+                    scaffold_section_label(offer.inserted)
+                ),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
         }
     }
 
@@ -3071,6 +3123,36 @@ mod tests {
         let config = Config::default();
         let lines = settings_lines_inner(8, 0, None, &config);
         assert!(lines.contains(&"interactive: (unset)".to_string()));
+    }
+
+    // AC2 (ITERATION-189): the render keys the required-but-empty salt flag off
+    // this buffer-state predicate. A scaffolded (empty-salt) section flags; a
+    // non-empty salt does not; an absent section does not.
+    #[test]
+    fn sqids_salt_required_empty_flags_only_empty_present_salt() {
+        let mut config = Config::default();
+        assert!(
+            !sqids_salt_required_empty(&config),
+            "no section => not flagged"
+        );
+
+        config.documents.sqids = Some(crate::engine::config::SqidsConfig {
+            salt: String::new(),
+            min_length: 3,
+        });
+        assert!(
+            sqids_salt_required_empty(&config),
+            "present section with empty salt => flagged (AC2)"
+        );
+
+        config.documents.sqids = Some(crate::engine::config::SqidsConfig {
+            salt: "seed".to_string(),
+            min_length: 3,
+        });
+        assert!(
+            !sqids_salt_required_empty(&config),
+            "a non-empty salt is never flagged"
+        );
     }
 
     #[test]
