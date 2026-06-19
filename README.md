@@ -108,7 +108,22 @@ lazyspec
 
 ### TUI
 
-Running `lazyspec` with no subcommand opens the interactive dashboard. It provides fuzzy search, markdown preview, document creation, and live file watching -- documents update automatically when changed on disk.
+Running `lazyspec` with no subcommand opens the interactive dashboard. It provides fuzzy search, markdown preview, document creation, and live file watching -- documents update automatically when changed on disk. An external edit of `.lazyspec.toml` (e.g. a `git pull`) reloads the running session automatically; press `R` to reload it manually. Press `?` for the full keybindings overlay.
+
+| Key       | Action                                  |
+| --------- | --------------------------------------- |
+| `j` / `k` | Navigate up/down                        |
+| `h` / `l` | Switch document type                    |
+| `Enter`   | Open document fullscreen                |
+| `/`       | Fuzzy search                            |
+| `n`       | Create new document                     |
+| `e`       | Edit document in `$EDITOR`              |
+| `d`       | Delete document                         |
+| `r`       | Add relation                            |
+| `R`       | Reload config from `.lazyspec.toml`     |
+| `w`       | Warnings / validation panel             |
+| `q`       | Quit                                    |
+| `?`       | Toggle keybindings help                 |
 
 <details>
 <summary><h3>CLI</h3></summary>

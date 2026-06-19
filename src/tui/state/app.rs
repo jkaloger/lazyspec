@@ -264,6 +264,7 @@ pub struct App {
     pub validation_warnings: Vec<String>,
     pub status_bar_warnings: Vec<String>,
     pub fix_request: bool,
+    pub config_reload_request: bool,
     pub fix_result: Option<String>,
     pub doc_list_offset: usize,
     pub doc_list_height: usize,
@@ -320,27 +321,6 @@ impl App {
         picker: ratatui_image::picker::Picker,
         fs: Box<dyn FileSystem>,
     ) -> Self {
-        let default_glyphs = ["●", "■", "▲", "◆", "★", "◎"];
-        let type_icons: HashMap<String, String> = config
-            .documents
-            .types
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                let icon = t
-                    .icon
-                    .clone()
-                    .unwrap_or_else(|| default_glyphs[i % default_glyphs.len()].to_string());
-                (t.name.clone(), icon)
-            })
-            .collect();
-        let type_plurals: HashMap<String, String> = config
-            .documents
-            .types
-            .iter()
-            .map(|t| (t.name.clone(), t.plural.clone()))
-            .collect();
-
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
         let git_branch = query_git_branch(store.root());
         let git_status_cache = GitStatusCache::new(store.root());
@@ -349,9 +329,6 @@ impl App {
             .types
             .iter()
             .any(|t| t.store == StoreBackend::GithubIssues);
-
-        let (status_bar_components, status_bar_warnings) =
-            StatusBarComponents::from_config(&config.ui.statusbar);
 
         #[cfg(feature = "agent")]
         let agent_spawner = AgentSpawner::new(store.root());
@@ -368,12 +345,7 @@ impl App {
             store,
             selected_type: 0,
             selected_doc: 0,
-            doc_types: config
-                .documents
-                .types
-                .iter()
-                .map(|t| DocType::new(&t.name))
-                .collect(),
+            doc_types: Vec::new(),
             should_quit: false,
             fullscreen_doc: false,
             scroll_offset: 0,
@@ -403,8 +375,8 @@ impl App {
             filter_status: None,
             filter_tag: None,
             available_tags: Vec::new(),
-            type_icons,
-            type_plurals,
+            type_icons: HashMap::new(),
+            type_plurals: HashMap::new(),
             expanded_parents: HashSet::new(),
             wrap_mode: false,
             doc_tree: Vec::new(),
@@ -414,6 +386,7 @@ impl App {
             validation_warnings: Vec::new(),
             status_bar_warnings: Vec::new(),
             fix_request: false,
+            config_reload_request: false,
             fix_result: None,
             doc_list_offset: 0,
             doc_list_height: 0,
@@ -436,7 +409,7 @@ impl App {
             picker,
             image_states: HashMap::new(),
             image_dimensions_cache: HashMap::new(),
-            ascii_diagrams: config.ui.ascii_diagrams,
+            ascii_diagrams: false,
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
             search_index: Vec::new(),
@@ -450,17 +423,44 @@ impl App {
                 None
             },
             gh_issue_map_stale: false,
-            status_bar_enabled: config.ui.statusbar.enabled,
-            status_bar_components,
-            rel_types: config.relationship_keywords(),
+            status_bar_enabled: false,
+            status_bar_components: StatusBarComponents::default(),
+            rel_types: Vec::new(),
             settings_category: 0,
             settings_entry: 0,
             settings_drill: None,
         };
-        app.status_bar_warnings = status_bar_warnings;
+        app.apply_config(config);
         app.rebuild_search_index();
         app.build_doc_tree();
         app
+    }
+
+    pub fn apply_config(&mut self, config: &Config) {
+        let default_glyphs = ["●", "■", "▲", "◆", "★", "◎"];
+        self.type_icons.clear();
+        self.type_plurals.clear();
+        self.doc_types.clear();
+        for (i, t) in config.documents.types.iter().enumerate() {
+            let icon = t
+                .icon
+                .clone()
+                .unwrap_or_else(|| default_glyphs[i % default_glyphs.len()].to_string());
+            self.type_icons.insert(t.name.clone(), icon);
+            self.type_plurals.insert(t.name.clone(), t.plural.clone());
+            self.doc_types.push(DocType::new(&t.name));
+        }
+
+        let (components, warnings) = StatusBarComponents::from_config(&config.ui.statusbar);
+        self.status_bar_components = components;
+        self.status_bar_warnings = warnings;
+        self.status_bar_enabled = config.ui.statusbar.enabled;
+        self.ascii_diagrams = config.ui.ascii_diagrams;
+        self.rel_types = config.relationship_keywords();
+
+        if self.selected_type >= self.doc_types.len() {
+            self.selected_type = self.doc_types.len().saturating_sub(1);
+        }
     }
 
     pub fn refresh_validation(&mut self, config: &Config) {
@@ -1553,6 +1553,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::config::TypeDef;
     use crate::engine::store::Store;
     use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -1632,6 +1633,7 @@ mod tests {
             validation_warnings: Vec::new(),
             status_bar_warnings: Vec::new(),
             fix_request: false,
+            config_reload_request: false,
             fix_result: None,
             doc_list_offset: 0,
             doc_list_height: 0,
@@ -2281,6 +2283,80 @@ mod tests {
         assert!(
             app.relation_items(&doc).is_empty(),
             "an isolated doc has no relations"
+        );
+    }
+
+    fn config_with_types(types: &[&str]) -> Config {
+        let mut config = Config::default();
+        let template = config.documents.types[0].clone();
+        config.documents.types = types
+            .iter()
+            .map(|name| TypeDef {
+                name: name.to_string(),
+                plural: format!("{name}s"),
+                dir: format!("docs/{name}s"),
+                prefix: name.to_uppercase(),
+                ..template.clone()
+            })
+            .collect();
+        config
+    }
+
+    #[test]
+    fn apply_config_drops_type_and_clamps_selected_type() {
+        let mut app = make_test_app(0);
+        app.apply_config(&config_with_types(&["rfc", "story"]));
+        app.selected_type = app.doc_types.len() - 1;
+
+        app.apply_config(&config_with_types(&["rfc"]));
+
+        let names: Vec<String> = app
+            .doc_types
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect();
+        assert_eq!(names, vec!["rfc"], "dropped type must be excluded");
+        assert!(
+            app.selected_type < app.doc_types.len(),
+            "selected_type must stay in bounds after types shrink"
+        );
+        // current_type() indexes doc_types[selected_type] -- must not panic.
+        assert_eq!(app.current_type().as_str(), "rfc");
+    }
+
+    #[test]
+    fn apply_config_refreshes_rel_types() {
+        use crate::engine::config::RelationshipDef;
+
+        let mut app = make_test_app(0);
+        let mut config = config_with_types(&["rfc"]);
+        config.relationships = vec![RelationshipDef {
+            name: "derives-from".to_string(),
+            inverse: Some("derived-by".to_string()),
+        }];
+
+        app.apply_config(&config);
+
+        assert_eq!(
+            app.rel_types,
+            vec!["derives-from".to_string(), "derived-by".to_string()],
+            "rel_types must reflect the reloaded [[relationships]] (name then inverse)"
+        );
+    }
+
+    #[test]
+    fn apply_config_refreshes_icon_and_plural() {
+        let mut app = make_test_app(0);
+
+        let mut config = config_with_types(&["rfc"]);
+        config.documents.types[0].icon = Some("@".to_string());
+        config.documents.types[0].plural = "rfcen".to_string();
+        app.apply_config(&config);
+
+        assert_eq!(app.type_icons.get("rfc").map(String::as_str), Some("@"));
+        assert_eq!(
+            app.type_plurals.get("rfc").map(String::as_str),
+            Some("rfcen")
         );
     }
 

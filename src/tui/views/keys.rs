@@ -708,6 +708,7 @@ impl App {
         }
     }
 
+    #[cfg_attr(not(feature = "agent"), allow(unused_variables))]
     fn handle_normal_key(
         &mut self,
         code: KeyCode,
@@ -818,6 +819,9 @@ impl App {
             (KeyCode::Char('p'), _) => self.open_provenance_editor(),
             (KeyCode::Char('r'), _) => {
                 self.open_link_editor();
+            }
+            (KeyCode::Char('R'), _) => {
+                self.config_reload_request = true;
             }
             #[cfg(feature = "agent")]
             (KeyCode::Char('a'), _) => {

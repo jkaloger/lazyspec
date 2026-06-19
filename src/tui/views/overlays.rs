@@ -44,6 +44,7 @@ pub fn draw_help_overlay(f: &mut Frame) {
         Line::from("  Tab       Switch preview tab"),
         Line::from("  g         Jump to top"),
         Line::from("  G         Jump to bottom"),
+        Line::from("  R         Reload config from .lazyspec.toml"),
         Line::from("  q         Quit"),
         Line::from("  ?         Toggle this help"),
         Line::from(""),

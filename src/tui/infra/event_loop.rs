@@ -21,7 +21,7 @@ use crossterm::{
 use notify::{EventKind, RecursiveMode, Watcher};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -118,6 +118,93 @@ fn try_push_git_ref_edit(root: &Path, relative: &Path, config: &Config) -> Resul
         .map_err(|e| e.to_string())
 }
 
+// The filesystem paths the TUI watcher monitors: `.lazyspec.toml` plus each
+// existing type directory of the current config. Pure (no side effects) so the
+// watch set is unit-testable independent of `notify`.
+fn watch_paths(root: &Path, config: &Config) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let config_path = root.join(".lazyspec.toml");
+    if config_path.exists() {
+        paths.push(config_path);
+    }
+    for t in &config.documents.types {
+        let full = root.join(&t.dir);
+        if full.exists() {
+            paths.push(full);
+        }
+    }
+    paths
+}
+
+// Rebuild the watcher over the current config's watch set. `notify` has no
+// reliable cross-reload "unwatch all" when the watched dirs change, so we
+// replace the watcher wholesale: a fresh watcher is constructed and the old one
+// dropped, which stops all of its prior watches. Used by both startup and reload.
+fn rewatch(
+    watcher: &mut notify::RecommendedWatcher,
+    root: &Path,
+    config: &Config,
+    tx: &crossbeam_channel::Sender<AppEvent>,
+) -> Result<()> {
+    let fs_tx = tx.clone();
+    let mut new_watcher =
+        notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(event) = res {
+                let _ = fs_tx.send(AppEvent::FileChange(event));
+            }
+        })?;
+    for path in watch_paths(root, config) {
+        new_watcher.watch(&path, RecursiveMode::NonRecursive)?;
+    }
+    *watcher = new_watcher;
+    Ok(())
+}
+
+// Re-load `Config` from `.lazyspec.toml`, rebuild the `Store`, refresh all
+// config-derived App caches, and re-establish the watcher. The whole iteration
+// is built on this single primitive.
+//
+// AC8: a failed reload leaves the running session completely intact. Both
+// fallible loads (Config, Store) are computed into locals BEFORE any state is
+// mutated; an early `Err` therefore leaves `*config`, `app`, and `*watcher`
+// untouched, so the previous Config/Store/watch set stay in effect.
+//
+// AC7: no redraw flag is needed -- `run`'s loop calls `terminal.draw` every
+// iteration, so a reload performed inside the loop body is rendered next pass.
+//
+// Driven by `App::config_reload_request`: the FileChange arm (external
+// `.lazyspec.toml` edit) and the manual reload keybinding both set the flag,
+// which the `run` loop drains and dispatches here.
+fn reload_session(
+    app: &mut App,
+    config: &mut Config,
+    watcher: &mut notify::RecommendedWatcher,
+    root: &Path,
+    tx: &crossbeam_channel::Sender<AppEvent>,
+) -> Result<()> {
+    // 1. Re-parse Config (strict). On Err, nothing is mutated (AC8).
+    let new_config = Config::load(root, &crate::engine::fs::RealFileSystem)?;
+    // 2. Rebuild Store against the new Config. On Err, still nothing mutated (AC8).
+    let new_store = Store::load(root, &new_config)?;
+
+    // 3. Commit: both loads succeeded, so it is now safe to mutate.
+    *config = new_config;
+    app.store = new_store;
+    app.apply_config(config);
+    app.refresh_validation(config);
+    // Mirror the cache resets the CacheRefresh and GhPushResult(Ok) arms perform.
+    app.filtered_docs_cache = None;
+    app.rebuild_search_index();
+    app.build_doc_tree();
+    app.git_status_cache.invalidate();
+    app.expanded_body_cache.clear();
+    app.disk_cache.clear();
+
+    // 4. Re-establish the watcher over the new config's watch set (AC4, AC5).
+    rewatch(watcher, root, config, tx)?;
+    Ok(())
+}
+
 fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config) {
     match event {
         AppEvent::Terminal(key) => {
@@ -126,6 +213,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
         AppEvent::FileChange(event) => match event.kind {
             EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
                 let mut has_non_md = false;
+                let config_path = root.join(".lazyspec.toml");
                 for path in &event.paths {
                     if path.extension().and_then(|e| e.to_str()) == Some("md") {
                         if let Ok(relative) = path.strip_prefix(root) {
@@ -135,6 +223,14 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                         }
                     } else {
                         has_non_md = true;
+                        // The root `.lazyspec.toml` changed externally (e.g. a
+                        // `git pull`). Request a full session reload; the `run`
+                        // loop drains this flag and calls `reload_session`.
+                        // `handle_app_event` only holds `&Config` and no
+                        // `&mut watcher`, so it cannot reload directly.
+                        if path == &config_path {
+                            app.config_reload_request = true;
+                        }
                     }
                 }
                 if has_non_md {
@@ -237,6 +333,10 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
 }
 
 pub fn run(store: Store, config: &Config) -> Result<()> {
+    // Owned, reassignable session config: `reload_session` re-parses
+    // `.lazyspec.toml` and rebinds this so subsequent reads see it.
+    let mut config: Config = config.clone();
+
     // Probe terminal capabilities BEFORE entering raw mode and spawning the input thread.
     // `Picker::from_query_stdio` reads stdin directly to capture terminal capability responses;
     // running it concurrently with the crossterm input thread races for stdin and silently
@@ -253,13 +353,13 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
 
     let mut app = App::new(
         store,
-        config,
+        &config,
         picker,
         Box::new(crate::engine::fs::RealFileSystem),
     );
     app.terminal_image_protocol = protocol;
     app.tool_availability = tool_availability;
-    app.refresh_validation(config);
+    app.refresh_validation(&config);
 
     let (tx, rx) = crossbeam_channel::unbounded();
     app.event_tx = tx.clone();
@@ -309,19 +409,9 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             let _ = fs_tx.send(AppEvent::FileChange(event));
         }
     })?;
-
-    let dirs: Vec<&str> = config
-        .documents
-        .types
-        .iter()
-        .map(|t| t.dir.as_str())
-        .collect();
-    for dir in &dirs {
-        let full = root.join(dir);
-        if full.exists() {
-            _watcher.watch(&full, RecursiveMode::NonRecursive)?;
-        }
-    }
+    // Route startup through the same helper reload uses, so `.lazyspec.toml` is
+    // watched from startup (AC5) and both paths share one watch-set source.
+    rewatch(&mut _watcher, &root, &config, &tx)?;
 
     // Dedicated terminal input thread: sends key events through the unified channel.
     // The mutex enforces single-reader ownership of stdin: the main thread acquires it
@@ -350,7 +440,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         let loop_start = Instant::now();
 
         let t = Instant::now();
-        terminal.draw(|f| views::draw(f, &mut app, config))?;
+        terminal.draw(|f| views::draw(f, &mut app, &config))?;
         perf_log::log_duration("draw", t);
 
         let t = Instant::now();
@@ -383,10 +473,10 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 perf_log::log_duration("recv_wait", t);
                 let t2 = Instant::now();
                 let mut event_count = 1u32;
-                handle_app_event(&mut app, event, &root, config);
+                handle_app_event(&mut app, event, &root, &config);
                 while let Ok(event) = rx.try_recv() {
                     event_count += 1;
-                    handle_app_event(&mut app, event, &root, config);
+                    handle_app_event(&mut app, event, &root, &config);
                 }
                 perf_log::log_duration(&format!("handle_events({})", event_count), t2);
             }
@@ -498,7 +588,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                     });
                 }
             }
-            app.refresh_validation(config);
+            app.refresh_validation(&config);
         }
 
         #[cfg(feature = "agent")]
@@ -519,8 +609,8 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             while rx.try_recv().is_ok() {}
             drop(_stdin_guard);
             let root = app.store.root().to_path_buf();
-            app.store = Store::load(&root, config)?;
-            app.refresh_validation(config);
+            app.store = Store::load(&root, &config)?;
+            app.refresh_validation(&config);
         }
 
         #[cfg(feature = "agent")]
@@ -544,8 +634,8 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             while rx.try_recv().is_ok() {}
             drop(_stdin_guard);
             let root = app.store.root().to_path_buf();
-            app.store = Store::load(&root, config)?;
-            app.refresh_validation(config);
+            app.store = Store::load(&root, &config)?;
+            app.refresh_validation(&config);
         }
 
         if app.fix_request {
@@ -558,15 +648,29 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 .map(|e| e.path.to_string_lossy().to_string())
                 .collect();
             let fs = crate::engine::fs::RealFileSystem;
-            let output = crate::cli::fix::run_human(&root, &app.store, config, &paths, false, &fs);
-            app.store = Store::load(&root, config)?;
-            app.refresh_validation(config);
+            let output = crate::cli::fix::run_human(&root, &app.store, &config, &paths, false, &fs);
+            app.store = Store::load(&root, &config)?;
+            app.refresh_validation(&config);
             app.fix_result = if output.is_empty() {
                 None
             } else {
                 Some(output)
             };
             app.warnings_selected = 0;
+        }
+
+        if app.config_reload_request {
+            app.config_reload_request = false;
+            // TODO(slice-3): gate on dirty buffer; prompt keep/discard when edits unsaved.
+            // There is no dirty edit buffer this iteration, so the buffer is always
+            // clean -> honor the reload unconditionally (AC6).
+            //
+            // AC8: a failed reload must not kill the session. `reload_session`
+            // mutates nothing on Err, so swallow it here and keep looping; the
+            // previous Config/Store/watch set remain in effect.
+            if let Err(e) = reload_session(&mut app, &mut config, &mut _watcher, &root, &tx) {
+                perf_log::log(&format!("config reload failed: {e}"));
+            }
         }
 
         if app.should_quit {
@@ -579,4 +683,255 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     terminal.show_cursor()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::config::TypeDef;
+    use tempfile::TempDir;
+
+    fn config_with_dirs(dirs: &[&str]) -> Config {
+        let mut config = Config::default();
+        config.documents.types = dirs
+            .iter()
+            .map(|dir| {
+                let mut t = TypeDef::test_fixture("doc", StoreBackend::Filesystem);
+                t.dir = dir.to_string();
+                t
+            })
+            .collect();
+        config
+    }
+
+    // AC5: `.lazyspec.toml` is always in the watch set, regardless of which type
+    // dirs exist.
+    #[test]
+    fn watch_paths_always_includes_lazyspec_toml() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".lazyspec.toml"), "").unwrap();
+        let config = config_with_dirs(&[]);
+
+        let paths = watch_paths(root, &config);
+
+        assert!(
+            paths.contains(&root.join(".lazyspec.toml")),
+            "expected watch set to contain .lazyspec.toml, got {paths:?}"
+        );
+    }
+
+    // AC4: the watch set contains existing type dirs and excludes missing ones.
+    #[test]
+    fn watch_paths_includes_existing_dirs_excludes_missing() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".lazyspec.toml"), "").unwrap();
+        std::fs::create_dir_all(root.join("docs/present")).unwrap();
+        let config = config_with_dirs(&["docs/present", "docs/missing"]);
+
+        let paths = watch_paths(root, &config);
+
+        assert!(
+            paths.contains(&root.join("docs/present")),
+            "expected the existing dir in the watch set, got {paths:?}"
+        );
+        assert!(
+            !paths.contains(&root.join("docs/missing")),
+            "expected the missing dir excluded from the watch set, got {paths:?}"
+        );
+    }
+
+    // Build an App over `root` with the given config, using a deterministic
+    // halfblocks picker so no terminal probing happens in tests.
+    fn make_app(root: &Path, config: &Config) -> App {
+        let store = Store::load(root, config).unwrap();
+        let mut app = App::new(
+            store,
+            config,
+            ratatui_image::picker::Picker::halfblocks(),
+            Box::new(crate::engine::fs::RealFileSystem),
+        );
+        app.refresh_validation(config);
+        app
+    }
+
+    // A real notify watcher; never awaited, so it cannot make tests flaky.
+    fn make_watcher(tx: &crossbeam_channel::Sender<AppEvent>) -> notify::RecommendedWatcher {
+        let fs_tx = tx.clone();
+        notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(event) = res {
+                let _ = fs_tx.send(AppEvent::FileChange(event));
+            }
+        })
+        .unwrap()
+    }
+
+    // A valid config carrying `count` distinct filesystem doc types, written via
+    // `to_toml` so it round-trips through strict `Config::parse`.
+    fn valid_config_toml(count: usize) -> String {
+        let mut config = Config::default();
+        config.documents.types = (0..count)
+            .map(|i| {
+                let name = format!("type{i}");
+                let mut t = TypeDef::test_fixture(&name, StoreBackend::Filesystem);
+                t.dir = format!("docs/{name}");
+                t
+            })
+            .collect();
+        config.to_toml().unwrap()
+    }
+
+    // AC2/AC3: the success path makes the new Config and Store active and
+    // refreshes config-derived App caches (here, `doc_types`).
+    #[test]
+    fn reload_session_activates_new_config_and_store() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".lazyspec.toml"), valid_config_toml(1)).unwrap();
+
+        let mut config = Config::load(root, &crate::engine::fs::RealFileSystem).unwrap();
+        let mut app = make_app(root, &config);
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut watcher = make_watcher(&tx);
+
+        assert_eq!(config.documents.types.len(), 1);
+        assert_eq!(app.doc_types.len(), 1);
+
+        // Config B: two types.
+        std::fs::write(root.join(".lazyspec.toml"), valid_config_toml(2)).unwrap();
+
+        reload_session(&mut app, &mut config, &mut watcher, root, &tx).unwrap();
+
+        assert_eq!(
+            config.documents.types.len(),
+            2,
+            "config B should be active after reload"
+        );
+        assert_eq!(
+            app.doc_types.len(),
+            2,
+            "App caches should reflect config B after reload"
+        );
+        assert_eq!(app.doc_types[0].as_str(), "type0");
+        assert_eq!(app.doc_types[1].as_str(), "type1");
+    }
+
+    // AC8: a Config parse error leaves `*config`, `app.store`, and the
+    // config-derived caches untouched (still config A).
+    #[test]
+    fn reload_session_invalid_config_leaves_state_intact() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".lazyspec.toml"), valid_config_toml(1)).unwrap();
+
+        let mut config = Config::load(root, &crate::engine::fs::RealFileSystem).unwrap();
+        let mut app = make_app(root, &config);
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut watcher = make_watcher(&tx);
+
+        let docs_before = app.store.list(&Default::default()).len();
+
+        // Config B: malformed TOML -- strict parse fails.
+        std::fs::write(
+            root.join(".lazyspec.toml"),
+            "this is not = valid = toml [[[",
+        )
+        .unwrap();
+
+        let result = reload_session(&mut app, &mut config, &mut watcher, root, &tx);
+
+        assert!(result.is_err(), "reload should fail on malformed TOML");
+        assert_eq!(
+            config.documents.types.len(),
+            1,
+            "config A must remain active after a failed reload"
+        );
+        assert_eq!(
+            app.doc_types.len(),
+            1,
+            "App caches must remain config A after a failed reload"
+        );
+        assert_eq!(
+            app.store.list(&Default::default()).len(),
+            docs_before,
+            "store must be unchanged after a failed reload"
+        );
+    }
+
+    // AC8: a strict-parse violation (missing `[[relationships]]`) is rejected by
+    // `Config::load`, so state stays intact -- the prev Config/Store remain.
+    #[test]
+    fn reload_session_missing_relationships_leaves_state_intact() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".lazyspec.toml"), valid_config_toml(2)).unwrap();
+
+        let mut config = Config::load(root, &crate::engine::fs::RealFileSystem).unwrap();
+        let mut app = make_app(root, &config);
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut watcher = make_watcher(&tx);
+
+        // Config B: a single type but NO `[[relationships]]` block. Strict parse rejects it.
+        let invalid =
+            "[[documents.types]]\nname = \"solo\"\nplural = \"solos\"\ndir = \"docs/solo\"\n";
+        std::fs::write(root.join(".lazyspec.toml"), invalid).unwrap();
+
+        let result = reload_session(&mut app, &mut config, &mut watcher, root, &tx);
+
+        assert!(
+            result.is_err(),
+            "reload should fail when [[relationships]] is missing"
+        );
+        assert_eq!(
+            config.documents.types.len(),
+            2,
+            "config A must remain active after the rejected reload"
+        );
+        assert_eq!(app.doc_types.len(), 2, "App caches must remain config A");
+    }
+
+    // AC6: a FileChange whose paths include `<root>/.lazyspec.toml` requests a
+    // session reload. The `run` loop drains the flag and calls `reload_session`
+    // (covered by the reload_session unit tests above).
+    #[test]
+    fn file_change_on_lazyspec_toml_requests_reload() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".lazyspec.toml"), valid_config_toml(1)).unwrap();
+
+        let config = Config::load(root, &crate::engine::fs::RealFileSystem).unwrap();
+        let mut app = make_app(root, &config);
+        assert!(!app.config_reload_request);
+
+        let event = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(root.join(".lazyspec.toml"));
+        handle_app_event(&mut app, AppEvent::FileChange(event), root, &config);
+
+        assert!(
+            app.config_reload_request,
+            "a .lazyspec.toml FileChange must request a reload"
+        );
+    }
+
+    // AC6 negative: an md-only FileChange must NOT request a reload, otherwise
+    // every doc edit would re-parse the config and rebuild the store.
+    #[test]
+    fn file_change_on_md_only_does_not_request_reload() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".lazyspec.toml"), valid_config_toml(1)).unwrap();
+
+        let config = Config::load(root, &crate::engine::fs::RealFileSystem).unwrap();
+        let mut app = make_app(root, &config);
+
+        let event = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(root.join("docs/type0/STORY-001-example.md"));
+        handle_app_event(&mut app, AppEvent::FileChange(event), root, &config);
+
+        assert!(
+            !app.config_reload_request,
+            "an md-only FileChange must not request a reload"
+        );
+    }
 }

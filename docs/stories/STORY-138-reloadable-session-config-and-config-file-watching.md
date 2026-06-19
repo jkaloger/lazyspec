@@ -1,7 +1,7 @@
 ---
 title: Reloadable session config and config-file watching
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-06-19
 tags: []

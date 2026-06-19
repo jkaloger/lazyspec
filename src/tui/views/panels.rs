@@ -1879,13 +1879,10 @@ fn drill_entry_name(cat: usize, idx: usize, config: &Config) -> String {
             .get(idx)
             .map(|r| r.name.clone())
             .unwrap_or_default(),
-        3 => config.rules.get(idx).map_or_else(
-            || String::new(),
-            |r| match r {
-                ValidationRule::ParentChild { name, .. } => name.clone(),
-                ValidationRule::RelationExistence { name, .. } => name.clone(),
-            },
-        ),
+        3 => config.rules.get(idx).map_or_else(String::new, |r| match r {
+            ValidationRule::ParentChild { name, .. } => name.clone(),
+            ValidationRule::RelationExistence { name, .. } => name.clone(),
+        }),
         7 => {
             let mut keys: Vec<&String> = config.certification.overrides.keys().collect();
             keys.sort();
