@@ -1,7 +1,7 @@
 ---
 title: Inline scalar config editing with atomic save
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-06-19
 tags: []

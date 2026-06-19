@@ -19,7 +19,10 @@ use crate::engine::document::{DocMeta, Status};
 use crate::engine::git_status::GitFileStatus;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
-use crate::tui::state::{App, DocListNode, FilterField, GraphNode, PreviewTab};
+use crate::tui::state::{
+    App, DocListNode, EditableField, FieldEditor, FieldPath, FilterField, GraphNode, PreviewTab,
+    RelKey, RuleKey, TypeKey,
+};
 
 use super::colors::{status_color, tag_color};
 use super::layout::{calculate_image_height, wrapped_line_count, wrapped_lines_total};
@@ -1615,81 +1618,190 @@ fn reserved_format_str(f: &ReservedFormat) -> &'static str {
     }
 }
 
-fn settings_lines_inner(
+fn numbering_str(n: &NumberingStrategy) -> &'static str {
+    match n {
+        NumberingStrategy::Incremental => "incremental",
+        NumberingStrategy::Sqids => "sqids",
+        NumberingStrategy::Reserved => "reserved",
+    }
+}
+
+const NUMBERING_VARIANTS: &[&str] = &["incremental", "sqids", "reserved"];
+const STORE_VARIANTS: &[&str] = &["filesystem", "github-issues", "git-ref"];
+const RULE_SHAPE_VARIANTS: &[&str] = &["parent-child", "relation-existence"];
+const SEVERITY_VARIANTS: &[&str] = &["error", "warning"];
+const RESERVED_FORMAT_VARIANTS: &[&str] = &["incremental", "sqids"];
+
+fn field(label: &str, value: String, editor: FieldEditor, path: FieldPath) -> EditableField {
+    EditableField {
+        label: label.to_string(),
+        value,
+        editor,
+        path,
+    }
+}
+
+fn nullable_value(opt: Option<&str>) -> String {
+    opt.unwrap_or("(unset)").to_string()
+}
+
+fn statusbar_value(slot: Option<&Vec<String>>) -> String {
+    slot.map_or_else(
+        || "(unset)".to_string(),
+        |v| {
+            if v.is_empty() {
+                "(unset)".to_string()
+            } else {
+                v.join(", ")
+            }
+        },
+    )
+}
+
+/// The FIELD list for the current settings field-view, mirroring the display
+/// rendered by `settings_lines_inner` exactly (same fields, order, values) with
+/// the editor kind and buffer path per field. Entry-LIST views (a collection
+/// category that is not drilled) carry no fields and return empty; the cat-7
+/// override entries below `normalize` are likewise an entry-list, not fields, so
+/// the not-drilled cat-7 view returns only the top-level `normalize` field.
+pub fn settings_fields(
     category: usize,
-    entry: usize,
+    _entry: usize,
     drill: Option<usize>,
     config: &Config,
-) -> Vec<String> {
-    let mut lines = Vec::new();
+) -> Vec<EditableField> {
+    let mut fields = Vec::new();
     match category {
         0 => {
-            lines.push(format!(
-                "naming.pattern: {}",
-                config.documents.naming.pattern
+            fields.push(field(
+                "naming.pattern",
+                config.documents.naming.pattern.clone(),
+                FieldEditor::Text,
+                FieldPath::Naming,
             ));
-            lines.push(format!("ref_count_ceiling: {}", config.ref_count_ceiling));
-            lines.push(format!(
-                "templates.dir: {}",
-                config.filesystem.templates.dir
+            fields.push(field(
+                "ref_count_ceiling",
+                config.ref_count_ceiling.to_string(),
+                FieldEditor::BoundedNum { min: 1, max: 1000 },
+                FieldPath::RefCountCeiling,
+            ));
+            fields.push(field(
+                "templates.dir",
+                config.filesystem.templates.dir.clone(),
+                FieldEditor::Text,
+                FieldPath::TemplatesDir,
             ));
         }
         1 => {
             if let Some(d) = drill {
                 if let Some(t) = config.documents.types.get(d) {
-                    lines.push(format!("name: {}", t.name));
-                    lines.push(format!("plural: {}", t.plural));
-                    lines.push(format!("dir: {}", t.dir));
-                    lines.push(format!("prefix: {}", t.prefix));
-                    lines.push(format!("icon: {}", t.icon.as_deref().unwrap_or("(unset)")));
-                    lines.push(format!(
-                        "numbering: {}",
-                        match t.numbering {
-                            NumberingStrategy::Incremental => "incremental",
-                            NumberingStrategy::Sqids => "sqids",
-                            NumberingStrategy::Reserved => "reserved",
-                        }
+                    let key = |k| FieldPath::Type { index: d, key: k };
+                    fields.push(field(
+                        "name",
+                        t.name.clone(),
+                        FieldEditor::Text,
+                        key(TypeKey::Name),
                     ));
-                    lines.push(format!("subdirectory: {}", t.subdirectory));
-                    lines.push(format!("store: {}", t.store));
-                    lines.push(format!("singleton: {}", t.singleton));
-                    lines.push(format!(
-                        "parent_type: {}",
-                        t.parent_type.as_deref().unwrap_or("(unset)")
+                    fields.push(field(
+                        "plural",
+                        t.plural.clone(),
+                        FieldEditor::Text,
+                        key(TypeKey::Plural),
+                    ));
+                    fields.push(field(
+                        "dir",
+                        t.dir.clone(),
+                        FieldEditor::Text,
+                        key(TypeKey::Dir),
+                    ));
+                    fields.push(field(
+                        "prefix",
+                        t.prefix.clone(),
+                        FieldEditor::Text,
+                        key(TypeKey::Prefix),
+                    ));
+                    fields.push(field(
+                        "icon",
+                        nullable_value(t.icon.as_deref()),
+                        FieldEditor::Nullable,
+                        key(TypeKey::Icon),
+                    ));
+                    fields.push(field(
+                        "numbering",
+                        numbering_str(&t.numbering).to_string(),
+                        FieldEditor::EnumCycle {
+                            variants: NUMBERING_VARIANTS,
+                        },
+                        key(TypeKey::Numbering),
+                    ));
+                    fields.push(field(
+                        "subdirectory",
+                        t.subdirectory.to_string(),
+                        FieldEditor::Toggle,
+                        key(TypeKey::Subdirectory),
+                    ));
+                    fields.push(field(
+                        "store",
+                        t.store.to_string(),
+                        FieldEditor::EnumCycle {
+                            variants: STORE_VARIANTS,
+                        },
+                        key(TypeKey::Store),
+                    ));
+                    fields.push(field(
+                        "singleton",
+                        t.singleton.to_string(),
+                        FieldEditor::Toggle,
+                        key(TypeKey::Singleton),
+                    ));
+                    fields.push(field(
+                        "parent_type",
+                        nullable_value(t.parent_type.as_deref()),
+                        FieldEditor::Nullable,
+                        key(TypeKey::ParentType),
                     ));
                     let agents = if t.agents.is_empty() {
                         "(unset)".to_string()
                     } else {
                         t.agents.join(", ")
                     };
-                    lines.push(format!("agents: {}", agents));
-                }
-            } else {
-                for (i, t) in config.documents.types.iter().enumerate() {
-                    let pfx = if i == entry { "▸ " } else { "  " };
-                    lines.push(format!("{}{}", pfx, t.name));
+                    fields.push(field(
+                        "agents",
+                        agents,
+                        FieldEditor::List,
+                        key(TypeKey::Agents),
+                    ));
                 }
             }
         }
         2 => {
             if let Some(d) = drill {
                 if let Some(r) = config.relationships.get(d) {
-                    lines.push(format!("name: {}", r.name));
-                    lines.push(format!(
-                        "inverse: {}",
-                        r.inverse.as_deref().unwrap_or("(unset)")
+                    fields.push(field(
+                        "name",
+                        r.name.clone(),
+                        FieldEditor::Text,
+                        FieldPath::Rel {
+                            index: d,
+                            key: RelKey::Name,
+                        },
                     ));
-                }
-            } else {
-                for (i, r) in config.relationships.iter().enumerate() {
-                    let pfx = if i == entry { "▸ " } else { "  " };
-                    lines.push(format!("{}{}", pfx, r.name));
+                    fields.push(field(
+                        "inverse",
+                        nullable_value(r.inverse.as_deref()),
+                        FieldEditor::Nullable,
+                        FieldPath::Rel {
+                            index: d,
+                            key: RelKey::Inverse,
+                        },
+                    ));
                 }
             }
         }
         3 => {
             if let Some(d) = drill {
                 if let Some(rule) = config.rules.get(d) {
+                    let key = |k| FieldPath::Rule { index: d, key: k };
                     match rule {
                         ValidationRule::ParentChild {
                             name,
@@ -1698,12 +1810,46 @@ fn settings_lines_inner(
                             link,
                             severity,
                         } => {
-                            lines.push(format!("name: {}", name));
-                            lines.push("shape: parent-child".to_string());
-                            lines.push(format!("child: {}", child));
-                            lines.push(format!("parent: {}", parent));
-                            lines.push(format!("link: {}", link));
-                            lines.push(format!("severity: {}", severity_str(severity)));
+                            fields.push(field(
+                                "name",
+                                name.clone(),
+                                FieldEditor::Text,
+                                key(RuleKey::Name),
+                            ));
+                            fields.push(field(
+                                "shape",
+                                "parent-child".to_string(),
+                                FieldEditor::EnumCycle {
+                                    variants: RULE_SHAPE_VARIANTS,
+                                },
+                                key(RuleKey::Shape),
+                            ));
+                            fields.push(field(
+                                "child",
+                                child.clone(),
+                                FieldEditor::Text,
+                                key(RuleKey::Child),
+                            ));
+                            fields.push(field(
+                                "parent",
+                                parent.clone(),
+                                FieldEditor::Text,
+                                key(RuleKey::Parent),
+                            ));
+                            fields.push(field(
+                                "link",
+                                link.clone(),
+                                FieldEditor::Text,
+                                key(RuleKey::Link),
+                            ));
+                            fields.push(field(
+                                "severity",
+                                severity_str(severity).to_string(),
+                                FieldEditor::EnumCycle {
+                                    variants: SEVERITY_VARIANTS,
+                                },
+                                key(RuleKey::Severity),
+                            ));
                         }
                         ValidationRule::RelationExistence {
                             name,
@@ -1711,15 +1857,329 @@ fn settings_lines_inner(
                             require,
                             severity,
                         } => {
-                            lines.push(format!("name: {}", name));
-                            lines.push("shape: relation-existence".to_string());
-                            lines.push(format!("doc_type: {}", doc_type));
-                            lines.push(format!("require: {}", require));
-                            lines.push(format!("severity: {}", severity_str(severity)));
+                            fields.push(field(
+                                "name",
+                                name.clone(),
+                                FieldEditor::Text,
+                                key(RuleKey::Name),
+                            ));
+                            fields.push(field(
+                                "shape",
+                                "relation-existence".to_string(),
+                                FieldEditor::EnumCycle {
+                                    variants: RULE_SHAPE_VARIANTS,
+                                },
+                                key(RuleKey::Shape),
+                            ));
+                            fields.push(field(
+                                "doc_type",
+                                doc_type.clone(),
+                                FieldEditor::Text,
+                                key(RuleKey::DocType),
+                            ));
+                            fields.push(field(
+                                "require",
+                                require.clone(),
+                                FieldEditor::Text,
+                                key(RuleKey::Require),
+                            ));
+                            fields.push(field(
+                                "severity",
+                                severity_str(severity).to_string(),
+                                FieldEditor::EnumCycle {
+                                    variants: SEVERITY_VARIANTS,
+                                },
+                                key(RuleKey::Severity),
+                            ));
                         }
                     }
                 }
+            }
+        }
+        4 => {
+            match &config.documents.sqids {
+                Some(s) => {
+                    fields.push(field(
+                        "sqids.salt",
+                        s.salt.clone(),
+                        FieldEditor::Text,
+                        FieldPath::SqidsSalt,
+                    ));
+                    fields.push(field(
+                        "sqids.min_length",
+                        s.min_length.to_string(),
+                        FieldEditor::BoundedNum { min: 1, max: 10 },
+                        FieldPath::SqidsMinLength,
+                    ));
+                }
+                None => {
+                    fields.push(field(
+                        "sqids.salt",
+                        "(unset)".to_string(),
+                        FieldEditor::ReadOnly,
+                        FieldPath::Unset,
+                    ));
+                    fields.push(field(
+                        "sqids.min_length",
+                        "(unset)".to_string(),
+                        FieldEditor::ReadOnly,
+                        FieldPath::Unset,
+                    ));
+                }
+            }
+            match &config.documents.reserved {
+                Some(r) => {
+                    fields.push(field(
+                        "reserved.remote",
+                        r.remote.clone(),
+                        FieldEditor::Text,
+                        FieldPath::ReservedRemote,
+                    ));
+                    fields.push(field(
+                        "reserved.format",
+                        reserved_format_str(&r.format).to_string(),
+                        FieldEditor::EnumCycle {
+                            variants: RESERVED_FORMAT_VARIANTS,
+                        },
+                        FieldPath::ReservedFormat,
+                    ));
+                    fields.push(field(
+                        "reserved.max_retries",
+                        r.max_retries.to_string(),
+                        FieldEditor::BoundedNum { min: 0, max: 1000 },
+                        FieldPath::ReservedMaxRetries,
+                    ));
+                }
+                None => {
+                    fields.push(field(
+                        "reserved.remote",
+                        "(unset)".to_string(),
+                        FieldEditor::ReadOnly,
+                        FieldPath::Unset,
+                    ));
+                    fields.push(field(
+                        "reserved.format",
+                        "(unset)".to_string(),
+                        FieldEditor::ReadOnly,
+                        FieldPath::Unset,
+                    ));
+                    fields.push(field(
+                        "reserved.max_retries",
+                        "(unset)".to_string(),
+                        FieldEditor::ReadOnly,
+                        FieldPath::Unset,
+                    ));
+                }
+            }
+        }
+        5 => match &config.documents.github {
+            Some(g) => {
+                fields.push(field(
+                    "repo",
+                    nullable_value(g.repo.as_deref()),
+                    FieldEditor::Nullable,
+                    FieldPath::GithubRepo,
+                ));
+                fields.push(field(
+                    "cache_ttl",
+                    g.cache_ttl.to_string(),
+                    FieldEditor::BoundedNum {
+                        min: 0,
+                        max: u64::MAX,
+                    },
+                    FieldPath::GithubCacheTtl,
+                ));
+            }
+            None => {
+                fields.push(field(
+                    "repo",
+                    "(unset)".to_string(),
+                    FieldEditor::ReadOnly,
+                    FieldPath::Unset,
+                ));
+                fields.push(field(
+                    "cache_ttl",
+                    "(unset)".to_string(),
+                    FieldEditor::ReadOnly,
+                    FieldPath::Unset,
+                ));
+            }
+        },
+        6 => match &config.coordination {
+            Some(c) => {
+                fields.push(field(
+                    "remote",
+                    c.remote.clone(),
+                    FieldEditor::Text,
+                    FieldPath::CoordinationRemote,
+                ));
+                fields.push(field(
+                    "lease_duration",
+                    c.lease_duration.clone(),
+                    FieldEditor::Duration,
+                    FieldPath::CoordinationLeaseDuration,
+                ));
+                fields.push(field(
+                    "grace_period",
+                    c.grace_period.clone(),
+                    FieldEditor::Duration,
+                    FieldPath::CoordinationGracePeriod,
+                ));
+                fields.push(field(
+                    "max_push_retries",
+                    c.max_push_retries.to_string(),
+                    FieldEditor::BoundedNum { min: 0, max: 1000 },
+                    FieldPath::CoordinationMaxPushRetries,
+                ));
+                fields.push(field(
+                    "max_clock_skew",
+                    c.max_clock_skew.clone(),
+                    FieldEditor::Duration,
+                    FieldPath::CoordinationMaxClockSkew,
+                ));
+            }
+            None => {
+                for label in [
+                    "remote",
+                    "lease_duration",
+                    "grace_period",
+                    "max_push_retries",
+                    "max_clock_skew",
+                ] {
+                    fields.push(field(
+                        label,
+                        "(unset)".to_string(),
+                        FieldEditor::ReadOnly,
+                        FieldPath::Unset,
+                    ));
+                }
+            }
+        },
+        7 => {
+            if let Some(d) = drill {
+                let mut keys: Vec<&String> = config.certification.overrides.keys().collect();
+                keys.sort();
+                if let Some(key) = keys.get(d) {
+                    if let Some(ov) = config.certification.overrides.get(*key) {
+                        fields.push(field(
+                            "normalize",
+                            ov.normalize.to_string(),
+                            FieldEditor::Toggle,
+                            FieldPath::CertOverride {
+                                key: (*key).clone(),
+                            },
+                        ));
+                    }
+                }
             } else {
+                fields.push(field(
+                    "normalize",
+                    config.certification.normalize.to_string(),
+                    FieldEditor::Toggle,
+                    FieldPath::CertNormalize,
+                ));
+            }
+        }
+        8 => {
+            fields.push(field(
+                "interactive",
+                nullable_value(config.agents.interactive.as_deref()),
+                FieldEditor::Nullable,
+                FieldPath::AgentsInteractive,
+            ));
+        }
+        9 => {
+            fields.push(field(
+                "ascii_diagrams",
+                config.ui.ascii_diagrams.to_string(),
+                FieldEditor::Toggle,
+                FieldPath::UiAsciiDiagrams,
+            ));
+            fields.push(field(
+                "statusbar.enabled",
+                config.ui.statusbar.enabled.to_string(),
+                FieldEditor::Toggle,
+                FieldPath::StatusbarEnabled,
+            ));
+            fields.push(field(
+                "statusbar.left",
+                statusbar_value(config.ui.statusbar.left.as_ref()),
+                FieldEditor::ReadOnly,
+                FieldPath::StatusbarLeft,
+            ));
+            fields.push(field(
+                "statusbar.center",
+                statusbar_value(config.ui.statusbar.center.as_ref()),
+                FieldEditor::ReadOnly,
+                FieldPath::StatusbarCenter,
+            ));
+            fields.push(field(
+                "statusbar.right",
+                statusbar_value(config.ui.statusbar.right.as_ref()),
+                FieldEditor::ReadOnly,
+                FieldPath::StatusbarRight,
+            ));
+            fields.push(field(
+                "multiline.max_expanded_height",
+                config.ui.multiline.max_expanded_height.to_string(),
+                FieldEditor::BoundedNum { min: 1, max: 1000 },
+                FieldPath::MultilineMaxExpandedHeight,
+            ));
+        }
+        _ => {}
+    }
+    fields
+}
+
+/// Render one field-view field as a display line, the single source of truth
+/// shared with `settings_fields`.
+fn field_line(f: &EditableField) -> String {
+    format!("{}: {}", f.label, f.value)
+}
+
+/// The value to show for a field's value column. While the field is the focused
+/// row AND an edit is in progress, echo the live `edit_input` with the house
+/// caret (`_`) appended so the user sees what they are typing; otherwise show
+/// the buffer-derived `field.value`.
+fn settings_display_value(
+    field: &EditableField,
+    is_focused_editing: bool,
+    edit_input: &str,
+) -> String {
+    if is_focused_editing {
+        format!("{}_", edit_input)
+    } else {
+        field.value.clone()
+    }
+}
+
+fn settings_lines_inner(
+    category: usize,
+    entry: usize,
+    drill: Option<usize>,
+    config: &Config,
+) -> Vec<String> {
+    const COLLECTIONS: [usize; 3] = [1, 2, 3];
+    // Entry-list categories (1,2,3) that are NOT drilled render a navigable name
+    // list, not a field list. cat 7 is a hybrid: the top `normalize` field plus an
+    // override entry-list below it. Everything else (including drilled collections)
+    // is a pure field-view derived from `settings_fields`.
+    if COLLECTIONS.contains(&category) && drill.is_none() {
+        let mut lines = Vec::new();
+        match category {
+            1 => {
+                for (i, t) in config.documents.types.iter().enumerate() {
+                    let pfx = if i == entry { "▸ " } else { "  " };
+                    lines.push(format!("{}{}", pfx, t.name));
+                }
+            }
+            2 => {
+                for (i, r) in config.relationships.iter().enumerate() {
+                    let pfx = if i == entry { "▸ " } else { "  " };
+                    lines.push(format!("{}{}", pfx, r.name));
+                }
+            }
+            3 => {
                 for (i, rule) in config.rules.iter().enumerate() {
                     let pfx = if i == entry { "▸ " } else { "  " };
                     let name = match rule {
@@ -1729,72 +2189,21 @@ fn settings_lines_inner(
                     lines.push(format!("{}{}", pfx, name));
                 }
             }
+            _ => {}
         }
-        4 => {
-            match &config.documents.sqids {
-                Some(s) => {
-                    lines.push(format!("sqids.salt: {}", s.salt));
-                    lines.push(format!("sqids.min_length: {}", s.min_length));
-                }
-                None => {
-                    lines.push("sqids.salt: (unset)".to_string());
-                    lines.push("sqids.min_length: (unset)".to_string());
-                }
-            }
-            match &config.documents.reserved {
-                Some(r) => {
-                    lines.push(format!("reserved.remote: {}", r.remote));
-                    lines.push(format!(
-                        "reserved.format: {}",
-                        reserved_format_str(&r.format)
-                    ));
-                    lines.push(format!("reserved.max_retries: {}", r.max_retries));
-                }
-                None => {
-                    lines.push("reserved.remote: (unset)".to_string());
-                    lines.push("reserved.format: (unset)".to_string());
-                    lines.push("reserved.max_retries: (unset)".to_string());
-                }
-            }
-        }
-        5 => match &config.documents.github {
-            Some(g) => {
-                lines.push(format!("repo: {}", g.repo.as_deref().unwrap_or("(unset)")));
-                lines.push(format!("cache_ttl: {}", g.cache_ttl));
-            }
-            None => {
-                lines.push("repo: (unset)".to_string());
-                lines.push("cache_ttl: (unset)".to_string());
-            }
-        },
-        6 => match &config.coordination {
-            Some(c) => {
-                lines.push(format!("remote: {}", c.remote));
-                lines.push(format!("lease_duration: {}", c.lease_duration));
-                lines.push(format!("grace_period: {}", c.grace_period));
-                lines.push(format!("max_push_retries: {}", c.max_push_retries));
-                lines.push(format!("max_clock_skew: {}", c.max_clock_skew));
-            }
-            None => {
-                lines.push("remote: (unset)".to_string());
-                lines.push("lease_duration: (unset)".to_string());
-                lines.push("grace_period: (unset)".to_string());
-                lines.push("max_push_retries: (unset)".to_string());
-                lines.push("max_clock_skew: (unset)".to_string());
-            }
-        },
-        7 => {
-            lines.push(format!("normalize: {}", config.certification.normalize));
+        return lines;
+    }
+
+    if category == 7 {
+        let mut lines: Vec<String> = settings_fields(category, entry, drill, config)
+            .iter()
+            .map(field_line)
+            .collect();
+        if drill.is_none() {
             let mut keys: Vec<&String> = config.certification.overrides.keys().collect();
             keys.sort();
             if keys.is_empty() {
                 lines.push("(no overrides configured)".to_string());
-            } else if let Some(d) = drill {
-                if let Some(key) = keys.get(d) {
-                    if let Some(ov) = config.certification.overrides.get(*key) {
-                        lines.push(format!("normalize: {}", ov.normalize));
-                    }
-                }
             } else {
                 for (i, key) in keys.iter().enumerate() {
                     let pfx = if i == entry { "▸ " } else { "  " };
@@ -1802,59 +2211,13 @@ fn settings_lines_inner(
                 }
             }
         }
-        8 => {
-            lines.push(format!(
-                "interactive: {}",
-                config.agents.interactive.as_deref().unwrap_or("(unset)")
-            ));
-        }
-        9 => {
-            lines.push(format!("ascii_diagrams: {}", config.ui.ascii_diagrams));
-            lines.push(format!(
-                "statusbar.enabled: {}",
-                config.ui.statusbar.enabled
-            ));
-            let left = config.ui.statusbar.left.as_ref().map_or_else(
-                || "(unset)".to_string(),
-                |v| {
-                    if v.is_empty() {
-                        "(unset)".to_string()
-                    } else {
-                        v.join(", ")
-                    }
-                },
-            );
-            lines.push(format!("statusbar.left: {}", left));
-            let center = config.ui.statusbar.center.as_ref().map_or_else(
-                || "(unset)".to_string(),
-                |v| {
-                    if v.is_empty() {
-                        "(unset)".to_string()
-                    } else {
-                        v.join(", ")
-                    }
-                },
-            );
-            lines.push(format!("statusbar.center: {}", center));
-            let right = config.ui.statusbar.right.as_ref().map_or_else(
-                || "(unset)".to_string(),
-                |v| {
-                    if v.is_empty() {
-                        "(unset)".to_string()
-                    } else {
-                        v.join(", ")
-                    }
-                },
-            );
-            lines.push(format!("statusbar.right: {}", right));
-            lines.push(format!(
-                "multiline.max_expanded_height: {}",
-                config.ui.multiline.max_expanded_height
-            ));
-        }
-        _ => {}
+        return lines;
     }
-    lines
+
+    settings_fields(category, entry, drill, config)
+        .iter()
+        .map(field_line)
+        .collect()
 }
 
 pub fn settings_lines(app: &App, config: &Config) -> Vec<String> {
@@ -1928,17 +2291,94 @@ pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
     f.render_stateful_widget(left_list, main[0], &mut state);
 
     let cat_name = App::settings_categories()[app.settings_category];
+    let dirty = if app.settings_dirty { "● " } else { "" };
     let title = match app.settings_drill {
         Some(i) => format!(
-            " {} > {} ",
+            " {}{} > {} ",
+            dirty,
             cat_name,
             drill_entry_name(app.settings_category, i, config)
         ),
-        None => format!(" {} ", cat_name),
+        None => format!(" {}{} ", dirty, cat_name),
+    };
+
+    // A save footer-error claims one line under the right panel; the field-level
+    // edit error is separate (rendered while editing, not here).
+    let right = if app.settings_footer_error.is_some() {
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(main[1]);
+        let footer = Paragraph::new(Line::from(Span::styled(
+            format!(" {}", app.settings_footer_error.as_deref().unwrap_or("")),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+        f.render_widget(footer, split[1]);
+        split[0]
+    } else {
+        main[1]
     };
 
     let lines = settings_lines(app, config);
-    let text: Vec<Line> = lines.iter().map(|l| Line::from(l.as_str())).collect();
+    // Highlight the field cursor only in field-views; entry-list views mark the
+    // selected entry inline with `▸` and ignore `settings_field`.
+    let fields = settings_fields(
+        app.settings_category,
+        app.settings_entry,
+        app.settings_drill,
+        config,
+    );
+    let field_count = fields.len();
+    let highlight_row = if field_count > 0 {
+        Some(app.settings_field.min(field_count - 1))
+    } else {
+        None
+    };
+    let mut text: Vec<Line> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            if highlight_row == Some(i) {
+                // While editing, echo the live input + caret on the focused row
+                // instead of the stale buffer value (`settings_display_value`).
+                let owned = if app.settings_editing {
+                    fields.get(i).map(|f| {
+                        format!(
+                            "{}: {}",
+                            f.label,
+                            settings_display_value(f, true, &app.settings_edit_input)
+                        )
+                    })
+                } else {
+                    None
+                };
+                Line::from(Span::styled(
+                    owned.unwrap_or_else(|| l.clone()),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(l.as_str())
+            }
+        })
+        .collect();
+
+    // The field-level edit error is distinct from the save footer error: render
+    // it (red) on the line directly below the field being edited.
+    if app.settings_editing {
+        if let (Some(row), Some(err)) = (highlight_row, app.settings_edit_error.as_deref()) {
+            let insert_at = (row + 1).min(text.len());
+            text.insert(
+                insert_at,
+                Line::from(Span::styled(
+                    format!("  {}", err),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )),
+            );
+        }
+    }
+
     let paragraph = Paragraph::new(text).block(
         Block::default()
             .borders(Borders::ALL)
@@ -1946,7 +2386,7 @@ pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
             .border_style(Style::default().fg(Color::Cyan))
             .title(title),
     );
-    f.render_widget(paragraph, main[1]);
+    f.render_widget(paragraph, right);
 }
 
 #[cfg(test)]
@@ -2730,5 +3170,167 @@ mod tests {
         assert!(lines.contains(&"require: any-relation".to_string()));
         assert!(lines.contains(&"severity: error".to_string()));
         assert_eq!(lines.len(), 5);
+    }
+
+    fn field_by_label<'a>(fields: &'a [EditableField], label: &str) -> &'a EditableField {
+        fields
+            .iter()
+            .find(|f| f.label == label)
+            .unwrap_or_else(|| panic!("no field labelled {label}, got: {fields:?}"))
+    }
+
+    #[test]
+    fn settings_fields_general_ref_count_ceiling_is_bounded_num() {
+        let config = Config::default();
+        let fields = settings_fields(0, 0, None, &config);
+        let f = field_by_label(&fields, "ref_count_ceiling");
+        assert_eq!(f.editor, FieldEditor::BoundedNum { min: 1, max: 1000 });
+        assert_eq!(f.value, config.ref_count_ceiling.to_string());
+        assert_eq!(f.path, FieldPath::RefCountCeiling);
+    }
+
+    #[test]
+    fn settings_fields_type_numbering_is_enum_cycle() {
+        let config = Config::default();
+        let fields = settings_fields(1, 0, Some(0), &config);
+        let f = field_by_label(&fields, "numbering");
+        assert_eq!(
+            f.editor,
+            FieldEditor::EnumCycle {
+                variants: &["incremental", "sqids", "reserved"]
+            }
+        );
+    }
+
+    #[test]
+    fn settings_fields_type_subdirectory_is_toggle() {
+        let config = Config::default();
+        let fields = settings_fields(1, 0, Some(0), &config);
+        let f = field_by_label(&fields, "subdirectory");
+        assert_eq!(f.editor, FieldEditor::Toggle);
+    }
+
+    #[test]
+    fn settings_fields_github_repo_nullable_when_present() {
+        let toml_str = r#"
+[github]
+repo = "owner/repo"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "related-to"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let fields = settings_fields(5, 0, None, &config);
+        let repo = field_by_label(&fields, "repo");
+        assert_eq!(repo.editor, FieldEditor::Nullable);
+        assert_eq!(repo.path, FieldPath::GithubRepo);
+        let ttl = field_by_label(&fields, "cache_ttl");
+        assert!(matches!(ttl.editor, FieldEditor::BoundedNum { .. }));
+    }
+
+    #[test]
+    fn settings_fields_sqids_read_only_when_section_absent() {
+        let config = Config::default();
+        let fields = settings_fields(4, 0, None, &config);
+        let salt = field_by_label(&fields, "sqids.salt");
+        assert_eq!(salt.editor, FieldEditor::ReadOnly);
+        assert_eq!(salt.path, FieldPath::Unset);
+        let min = field_by_label(&fields, "sqids.min_length");
+        assert_eq!(min.editor, FieldEditor::ReadOnly);
+    }
+
+    #[test]
+    fn settings_fields_statusbar_left_is_read_only() {
+        let config = Config::default();
+        let fields = settings_fields(9, 0, None, &config);
+        let f = field_by_label(&fields, "statusbar.left");
+        assert_eq!(f.editor, FieldEditor::ReadOnly);
+        assert_eq!(f.path, FieldPath::StatusbarLeft);
+    }
+
+    #[test]
+    fn settings_fields_entry_list_views_are_empty() {
+        let config = Config::default();
+        assert!(settings_fields(1, 0, None, &config).is_empty());
+        assert!(settings_fields(2, 0, None, &config).is_empty());
+        assert!(settings_fields(3, 0, None, &config).is_empty());
+    }
+
+    #[test]
+    fn settings_fields_cert_normalize_top_is_toggle() {
+        let config = Config::default();
+        let fields = settings_fields(7, 0, None, &config);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].label, "normalize");
+        assert_eq!(fields[0].editor, FieldEditor::Toggle);
+        assert_eq!(fields[0].path, FieldPath::CertNormalize);
+    }
+
+    #[test]
+    fn settings_fields_and_lines_agree_for_field_view() {
+        let config = Config::default();
+        // A representative field-view (drilled doc type) and a scalar category.
+        for (cat, drill) in [(0usize, None), (1usize, Some(0usize)), (9usize, None)] {
+            let fields = settings_fields(cat, 0, drill, &config);
+            let lines = settings_lines_inner(cat, 0, drill, &config);
+            let derived: Vec<String> = fields
+                .iter()
+                .map(|f| format!("{}: {}", f.label, f.value))
+                .collect();
+            assert_eq!(
+                derived, lines,
+                "settings_fields and settings_lines_inner must agree for cat {cat}"
+            );
+        }
+    }
+
+    #[test]
+    fn settings_display_value_echoes_input_with_caret_while_editing() {
+        let field = EditableField {
+            label: "naming.pattern".to_string(),
+            value: "{type}-{title}.md".to_string(),
+            editor: FieldEditor::Text,
+            path: FieldPath::Naming,
+        };
+        // The focused, editing row shows the live input + caret, NOT the buffer value.
+        let shown = settings_display_value(&field, true, "edited-{title}");
+        assert_eq!(shown, "edited-{title}_");
+        assert!(
+            !shown.contains(&field.value),
+            "stale buffer value must not leak while editing: {shown}"
+        );
+    }
+
+    #[test]
+    fn settings_display_value_shows_buffer_when_not_editing() {
+        let field = EditableField {
+            label: "naming.pattern".to_string(),
+            value: "{type}-{title}.md".to_string(),
+            editor: FieldEditor::Text,
+            path: FieldPath::Naming,
+        };
+        // A non-editing row ignores the input buffer and shows the buffer value.
+        assert_eq!(
+            settings_display_value(&field, false, "ignored"),
+            "{type}-{title}.md"
+        );
+    }
+
+    #[test]
+    fn settings_display_value_empty_input_shows_just_caret() {
+        let field = EditableField {
+            label: "github.repo".to_string(),
+            value: "(unset)".to_string(),
+            editor: FieldEditor::Nullable,
+            path: FieldPath::GithubRepo,
+        };
+        // Editing an unset nullable starts from empty input -- caret only, not `(unset)`.
+        assert_eq!(settings_display_value(&field, true, ""), "_");
     }
 }

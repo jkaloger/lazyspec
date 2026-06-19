@@ -273,3 +273,48 @@ fn test_settings_arrow_keys_move_category() {
     key(&mut app, KeyCode::Left);
     assert_eq!(app.settings_category, 0);
 }
+
+#[test]
+fn test_settings_jk_move_field_cursor_in_field_view() {
+    let (fixture, mut app) = setup_app_with_docs();
+    let key = |app: &mut App, c: KeyCode| {
+        app.handle_key(c, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    };
+
+    key(&mut app, KeyCode::Char('5'));
+    // General (cat 0) is a field-view with 3 fields.
+    assert_eq!(app.settings_category, 0);
+    assert_eq!(app.settings_field, 0);
+
+    key(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.settings_field, 1);
+    key(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.settings_field, 2);
+    // Clamped at the last field (3 fields => max index 2); no overrun.
+    key(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.settings_field, 2);
+
+    key(&mut app, KeyCode::Char('k'));
+    assert_eq!(app.settings_field, 1);
+    // Category does not move while j/k drive the field cursor.
+    assert_eq!(app.settings_category, 0);
+}
+
+#[test]
+fn test_settings_hl_reset_field_cursor() {
+    let (fixture, mut app) = setup_app_with_docs();
+    let key = |app: &mut App, c: KeyCode| {
+        app.handle_key(c, KeyModifiers::NONE, fixture.root(), &fixture.config());
+    };
+
+    key(&mut app, KeyCode::Char('5'));
+    key(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.settings_field, 1);
+
+    // Moving category resets the field cursor (and entry/drill).
+    key(&mut app, KeyCode::Char('l'));
+    assert_eq!(app.settings_category, 1);
+    assert_eq!(app.settings_field, 0);
+    assert_eq!(app.settings_entry, 0);
+    assert_eq!(app.settings_drill, None);
+}

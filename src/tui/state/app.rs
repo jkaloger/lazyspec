@@ -1,10 +1,15 @@
 #[cfg(feature = "agent")]
 use super::forms::AgentDialog;
-use super::forms::{CreateForm, DeleteConfirm, LinkEditor, ProvenanceEditor, StatusPicker};
+use super::forms::{
+    CreateForm, DeleteConfirm, EditableField, FieldEditor, FieldPath, LinkEditor, ProvenanceEditor,
+    RelKey, RuleKey, SettingsQuitPrompt, StatusPicker, TypeKey,
+};
 use super::graph::flatten_forest;
 
 use crate::engine::cache::DiskCache;
-use crate::engine::config::{Config, NumberingStrategy, StoreBackend};
+use crate::engine::config::{
+    Config, NumberingStrategy, ReservedFormat, Severity, StoreBackend, ValidationRule,
+};
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, Status};
 use crate::engine::fs::FileSystem;
 use crate::engine::git_status::{query_git_branch, GitStatusCache};
@@ -19,6 +24,143 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// A typed value destined for a settings buffer field, dispatched by
+/// `App::settings_write`'s exhaustive `FieldPath` match. Carries the field's
+/// real type so the writer never re-parses.
+enum SettingsValue {
+    Text(String),
+    OptText(Option<String>),
+    List(Vec<String>),
+    Bool(bool),
+    Num(u64),
+    Numbering(NumberingStrategy),
+    Store(StoreBackend),
+    ReservedFormat(ReservedFormat),
+    Severity(Severity),
+}
+
+/// Parse and bounds-check a numeric settings input. Pure and unit-testable.
+fn validate_bounded(input: &str, min: u64, max: u64) -> Result<u64, String> {
+    let n: u64 = input
+        .parse()
+        .map_err(|_| format!("'{}' is not a number", input))?;
+    if n < min || n > max {
+        return Err(format!("value must be between {} and {}", min, max));
+    }
+    Ok(n)
+}
+
+fn numbering_variant(n: &NumberingStrategy) -> &'static str {
+    match n {
+        NumberingStrategy::Incremental => "incremental",
+        NumberingStrategy::Sqids => "sqids",
+        NumberingStrategy::Reserved => "reserved",
+    }
+}
+
+fn numbering_from_variant(v: &str) -> Option<NumberingStrategy> {
+    match v {
+        "incremental" => Some(NumberingStrategy::Incremental),
+        "sqids" => Some(NumberingStrategy::Sqids),
+        "reserved" => Some(NumberingStrategy::Reserved),
+        _ => None,
+    }
+}
+
+fn store_from_variant(v: &str) -> Option<StoreBackend> {
+    match v {
+        "filesystem" => Some(StoreBackend::Filesystem),
+        "github-issues" => Some(StoreBackend::GithubIssues),
+        "git-ref" => Some(StoreBackend::GitRef),
+        _ => None,
+    }
+}
+
+fn reserved_format_variant(f: &ReservedFormat) -> &'static str {
+    match f {
+        ReservedFormat::Incremental => "incremental",
+        ReservedFormat::Sqids => "sqids",
+    }
+}
+
+fn reserved_format_from_variant(v: &str) -> Option<ReservedFormat> {
+    match v {
+        "incremental" => Some(ReservedFormat::Incremental),
+        "sqids" => Some(ReservedFormat::Sqids),
+        _ => None,
+    }
+}
+
+fn severity_from_variant(v: &str) -> Option<Severity> {
+    match v {
+        "error" => Some(Severity::Error),
+        "warning" => Some(Severity::Warning),
+        _ => None,
+    }
+}
+
+fn statusbar_raw(slot: Option<&Vec<String>>) -> String {
+    slot.map(|v| v.join(", ")).unwrap_or_default()
+}
+
+/// The raw editable string for a rule body field, read from the variant in play.
+/// Fields absent from the current variant render empty.
+fn rule_raw(rule: &ValidationRule, key: &RuleKey) -> String {
+    match (rule, key) {
+        (ValidationRule::ParentChild { name, .. }, RuleKey::Name)
+        | (ValidationRule::RelationExistence { name, .. }, RuleKey::Name) => name.clone(),
+        (ValidationRule::ParentChild { .. }, RuleKey::Shape) => "parent-child".to_string(),
+        (ValidationRule::RelationExistence { .. }, RuleKey::Shape) => {
+            "relation-existence".to_string()
+        }
+        (ValidationRule::ParentChild { child, .. }, RuleKey::Child) => child.clone(),
+        (ValidationRule::ParentChild { parent, .. }, RuleKey::Parent) => parent.clone(),
+        (ValidationRule::ParentChild { link, .. }, RuleKey::Link) => link.clone(),
+        (ValidationRule::RelationExistence { doc_type, .. }, RuleKey::DocType) => doc_type.clone(),
+        (ValidationRule::RelationExistence { require, .. }, RuleKey::Require) => require.clone(),
+        (ValidationRule::ParentChild { severity, .. }, RuleKey::Severity)
+        | (ValidationRule::RelationExistence { severity, .. }, RuleKey::Severity) => match severity
+        {
+            Severity::Error => "error".to_string(),
+            Severity::Warning => "warning".to_string(),
+        },
+        _ => String::new(),
+    }
+}
+
+/// Write a typed value into a rule body field. Mismatched key/variant
+/// combinations and value-kind mismatches are no-ops.
+fn rule_write(rule: &mut ValidationRule, key: &RuleKey, value: SettingsValue) {
+    match rule {
+        ValidationRule::ParentChild {
+            name,
+            child,
+            parent,
+            link,
+            severity,
+        } => match (key, value) {
+            (RuleKey::Name, SettingsValue::Text(s)) => *name = s,
+            (RuleKey::Child, SettingsValue::Text(s)) => *child = s,
+            (RuleKey::Parent, SettingsValue::Text(s)) => *parent = s,
+            (RuleKey::Link, SettingsValue::Text(s)) => *link = s,
+            (RuleKey::Severity, SettingsValue::Severity(sev)) => *severity = sev,
+            _ => {}
+        },
+        ValidationRule::RelationExistence {
+            name,
+            doc_type,
+            require,
+            severity,
+        } => match (key, value) {
+            (RuleKey::Name, SettingsValue::Text(s)) => *name = s,
+            (RuleKey::DocType, SettingsValue::Text(s)) => *doc_type = s,
+            (RuleKey::Require, SettingsValue::Text(s)) => *require = s,
+            (RuleKey::Severity, SettingsValue::Severity(sev)) => *severity = sev,
+            _ => {}
+        },
+    }
+}
 
 pub struct SearchEntry {
     pub path: PathBuf,
@@ -312,6 +454,21 @@ pub struct App {
     pub settings_category: usize,
     pub settings_entry: usize,
     pub settings_drill: Option<usize>,
+    /// Field cursor within the current settings field-view (0-based). Reset to 0
+    /// on category change. Unused by entry-list views (those track `settings_entry`).
+    pub settings_field: usize,
+    /// The in-memory edit buffer the settings view renders from, so future edits
+    /// show immediately. Seeded from the session config; while clean it tracks
+    /// config reloads (see `apply_config`).
+    pub settings_buffer: Config,
+    pub settings_dirty: bool,
+    pub settings_editing: bool,
+    pub settings_edit_input: String,
+    pub settings_edit_error: Option<String>,
+    pub settings_footer_error: Option<String>,
+    /// The save/discard/cancel prompt shown when quitting Settings with unsaved
+    /// buffer edits (AC10).
+    pub settings_quit_prompt: SettingsQuitPrompt,
 }
 
 impl App {
@@ -429,6 +586,14 @@ impl App {
             settings_category: 0,
             settings_entry: 0,
             settings_drill: None,
+            settings_field: 0,
+            settings_buffer: config.clone(),
+            settings_dirty: false,
+            settings_editing: false,
+            settings_edit_input: String::new(),
+            settings_edit_error: None,
+            settings_footer_error: None,
+            settings_quit_prompt: SettingsQuitPrompt::new(),
         };
         app.apply_config(config);
         app.rebuild_search_index();
@@ -458,6 +623,12 @@ impl App {
         self.ascii_diagrams = config.ui.ascii_diagrams;
         self.rel_types = config.relationship_keywords();
 
+        // A clean buffer follows external/session config reloads; a dirty buffer
+        // (pending edits) is preserved.
+        if !self.settings_dirty {
+            self.settings_buffer = config.clone();
+        }
+
         if self.selected_type >= self.doc_types.len() {
             self.selected_type = self.doc_types.len().saturating_sub(1);
         }
@@ -481,6 +652,7 @@ impl App {
         if self.view_mode == ViewMode::Settings {
             self.settings_drill = None;
             self.settings_entry = 0;
+            self.settings_field = 0;
         }
         if self.view_mode == ViewMode::Graph {
             self.rebuild_graph();
@@ -511,6 +683,638 @@ impl App {
             "Agents",
             "Interface",
         ]
+    }
+
+    /// The `EditableField` under the field cursor in the current settings
+    /// field-view, read from `settings_buffer`. None for entry-list views or an
+    /// out-of-range cursor.
+    pub fn settings_focused_field(&self) -> Option<EditableField> {
+        let fields = crate::tui::views::panels::settings_fields(
+            self.settings_category,
+            self.settings_entry,
+            self.settings_drill,
+            &self.settings_buffer,
+        );
+        fields.get(self.settings_field).cloned()
+    }
+
+    /// The current RAW editable string for the focused field, used to seed the
+    /// edit input. Unlike the rendered `value`, an unset Nullable yields `""`
+    /// (not `(unset)`) and a List yields a comma-joined string. Derived directly
+    /// from the buffer via the focused `FieldPath`.
+    fn settings_focused_raw(&self) -> String {
+        let Some(focused) = self.settings_focused_field() else {
+            return String::new();
+        };
+        let buf = &self.settings_buffer;
+        match &focused.path {
+            FieldPath::Naming => buf.documents.naming.pattern.clone(),
+            FieldPath::RefCountCeiling => buf.ref_count_ceiling.to_string(),
+            FieldPath::TemplatesDir => buf.filesystem.templates.dir.clone(),
+            FieldPath::Type { index, key } => buf
+                .documents
+                .types
+                .get(*index)
+                .map(|t| match key {
+                    TypeKey::Name => t.name.clone(),
+                    TypeKey::Plural => t.plural.clone(),
+                    TypeKey::Dir => t.dir.clone(),
+                    TypeKey::Prefix => t.prefix.clone(),
+                    TypeKey::Icon => t.icon.clone().unwrap_or_default(),
+                    TypeKey::Numbering => numbering_variant(&t.numbering).to_string(),
+                    TypeKey::Subdirectory => t.subdirectory.to_string(),
+                    TypeKey::Store => t.store.to_string(),
+                    TypeKey::Singleton => t.singleton.to_string(),
+                    TypeKey::ParentType => t.parent_type.clone().unwrap_or_default(),
+                    TypeKey::Agents => t.agents.join(", "),
+                })
+                .unwrap_or_default(),
+            FieldPath::Rel { index, key } => buf
+                .relationships
+                .get(*index)
+                .map(|r| match key {
+                    RelKey::Name => r.name.clone(),
+                    RelKey::Inverse => r.inverse.clone().unwrap_or_default(),
+                })
+                .unwrap_or_default(),
+            FieldPath::Rule { index, key } => buf
+                .rules
+                .get(*index)
+                .map(|r| rule_raw(r, key))
+                .unwrap_or_default(),
+            FieldPath::SqidsSalt => buf
+                .documents
+                .sqids
+                .as_ref()
+                .map(|s| s.salt.clone())
+                .unwrap_or_default(),
+            FieldPath::SqidsMinLength => buf
+                .documents
+                .sqids
+                .as_ref()
+                .map(|s| s.min_length.to_string())
+                .unwrap_or_default(),
+            FieldPath::ReservedRemote => buf
+                .documents
+                .reserved
+                .as_ref()
+                .map(|r| r.remote.clone())
+                .unwrap_or_default(),
+            FieldPath::ReservedFormat => buf
+                .documents
+                .reserved
+                .as_ref()
+                .map(|r| reserved_format_variant(&r.format).to_string())
+                .unwrap_or_default(),
+            FieldPath::ReservedMaxRetries => buf
+                .documents
+                .reserved
+                .as_ref()
+                .map(|r| r.max_retries.to_string())
+                .unwrap_or_default(),
+            FieldPath::GithubRepo => buf
+                .documents
+                .github
+                .as_ref()
+                .and_then(|g| g.repo.clone())
+                .unwrap_or_default(),
+            FieldPath::GithubCacheTtl => buf
+                .documents
+                .github
+                .as_ref()
+                .map(|g| g.cache_ttl.to_string())
+                .unwrap_or_default(),
+            FieldPath::CoordinationRemote => buf
+                .coordination
+                .as_ref()
+                .map(|c| c.remote.clone())
+                .unwrap_or_default(),
+            FieldPath::CoordinationLeaseDuration => buf
+                .coordination
+                .as_ref()
+                .map(|c| c.lease_duration.clone())
+                .unwrap_or_default(),
+            FieldPath::CoordinationGracePeriod => buf
+                .coordination
+                .as_ref()
+                .map(|c| c.grace_period.clone())
+                .unwrap_or_default(),
+            FieldPath::CoordinationMaxPushRetries => buf
+                .coordination
+                .as_ref()
+                .map(|c| c.max_push_retries.to_string())
+                .unwrap_or_default(),
+            FieldPath::CoordinationMaxClockSkew => buf
+                .coordination
+                .as_ref()
+                .map(|c| c.max_clock_skew.clone())
+                .unwrap_or_default(),
+            FieldPath::CertNormalize => buf.certification.normalize.to_string(),
+            FieldPath::CertOverride { key } => buf
+                .certification
+                .overrides
+                .get(key)
+                .map(|o| o.normalize.to_string())
+                .unwrap_or_default(),
+            FieldPath::AgentsInteractive => buf.agents.interactive.clone().unwrap_or_default(),
+            FieldPath::UiAsciiDiagrams => buf.ui.ascii_diagrams.to_string(),
+            FieldPath::StatusbarEnabled => buf.ui.statusbar.enabled.to_string(),
+            FieldPath::StatusbarLeft => statusbar_raw(buf.ui.statusbar.left.as_ref()),
+            FieldPath::StatusbarCenter => statusbar_raw(buf.ui.statusbar.center.as_ref()),
+            FieldPath::StatusbarRight => statusbar_raw(buf.ui.statusbar.right.as_ref()),
+            FieldPath::MultilineMaxExpandedHeight => {
+                buf.ui.multiline.max_expanded_height.to_string()
+            }
+            FieldPath::Unset => String::new(),
+        }
+    }
+
+    /// Write a typed value into `settings_buffer` at the given `FieldPath`. The
+    /// single, exhaustive read/write site for settings edits (Principle 6). The
+    /// `SettingsValue` variant must match the field's editor kind; mismatches and
+    /// `Unset`/`ReadOnly` paths are no-ops.
+    fn settings_write(&mut self, path: &FieldPath, value: SettingsValue) {
+        let buf = &mut self.settings_buffer;
+        match path {
+            FieldPath::Naming => {
+                if let SettingsValue::Text(s) = value {
+                    buf.documents.naming.pattern = s;
+                }
+            }
+            FieldPath::RefCountCeiling => {
+                if let SettingsValue::Num(n) = value {
+                    buf.ref_count_ceiling = n as usize;
+                }
+            }
+            FieldPath::TemplatesDir => {
+                if let SettingsValue::Text(s) = value {
+                    buf.filesystem.templates.dir = s;
+                }
+            }
+            FieldPath::Type { index, key } => {
+                if let Some(t) = buf.documents.types.get_mut(*index) {
+                    match (key, value) {
+                        (TypeKey::Name, SettingsValue::Text(s)) => t.name = s,
+                        (TypeKey::Plural, SettingsValue::Text(s)) => t.plural = s,
+                        (TypeKey::Dir, SettingsValue::Text(s)) => t.dir = s,
+                        (TypeKey::Prefix, SettingsValue::Text(s)) => t.prefix = s,
+                        (TypeKey::Icon, SettingsValue::OptText(o)) => t.icon = o,
+                        (TypeKey::Numbering, SettingsValue::Numbering(n)) => t.numbering = n,
+                        (TypeKey::Subdirectory, SettingsValue::Bool(b)) => t.subdirectory = b,
+                        (TypeKey::Store, SettingsValue::Store(s)) => t.store = s,
+                        (TypeKey::Singleton, SettingsValue::Bool(b)) => t.singleton = b,
+                        (TypeKey::ParentType, SettingsValue::OptText(o)) => t.parent_type = o,
+                        (TypeKey::Agents, SettingsValue::List(v)) => t.agents = v,
+                        _ => {}
+                    }
+                }
+            }
+            FieldPath::Rel { index, key } => {
+                if let Some(r) = buf.relationships.get_mut(*index) {
+                    match (key, value) {
+                        (RelKey::Name, SettingsValue::Text(s)) => r.name = s,
+                        (RelKey::Inverse, SettingsValue::OptText(o)) => r.inverse = o,
+                        _ => {}
+                    }
+                }
+            }
+            FieldPath::Rule { index, key } => {
+                if let Some(rule) = buf.rules.get_mut(*index) {
+                    rule_write(rule, key, value);
+                }
+            }
+            FieldPath::SqidsSalt => {
+                if let (Some(s), SettingsValue::Text(v)) = (buf.documents.sqids.as_mut(), value) {
+                    s.salt = v;
+                }
+            }
+            FieldPath::SqidsMinLength => {
+                if let (Some(s), SettingsValue::Num(n)) = (buf.documents.sqids.as_mut(), value) {
+                    s.min_length = n as u8;
+                }
+            }
+            FieldPath::ReservedRemote => {
+                if let (Some(r), SettingsValue::Text(v)) = (buf.documents.reserved.as_mut(), value)
+                {
+                    r.remote = v;
+                }
+            }
+            FieldPath::ReservedFormat => {
+                if let (Some(r), SettingsValue::ReservedFormat(f)) =
+                    (buf.documents.reserved.as_mut(), value)
+                {
+                    r.format = f;
+                }
+            }
+            FieldPath::ReservedMaxRetries => {
+                if let (Some(r), SettingsValue::Num(n)) = (buf.documents.reserved.as_mut(), value) {
+                    r.max_retries = n as u8;
+                }
+            }
+            FieldPath::GithubRepo => {
+                if let (Some(g), SettingsValue::OptText(o)) = (buf.documents.github.as_mut(), value)
+                {
+                    g.repo = o;
+                }
+            }
+            FieldPath::GithubCacheTtl => {
+                if let (Some(g), SettingsValue::Num(n)) = (buf.documents.github.as_mut(), value) {
+                    g.cache_ttl = n;
+                }
+            }
+            FieldPath::CoordinationRemote => {
+                if let (Some(c), SettingsValue::Text(v)) = (buf.coordination.as_mut(), value) {
+                    c.remote = v;
+                }
+            }
+            FieldPath::CoordinationLeaseDuration => {
+                if let (Some(c), SettingsValue::Text(v)) = (buf.coordination.as_mut(), value) {
+                    c.lease_duration = v;
+                }
+            }
+            FieldPath::CoordinationGracePeriod => {
+                if let (Some(c), SettingsValue::Text(v)) = (buf.coordination.as_mut(), value) {
+                    c.grace_period = v;
+                }
+            }
+            FieldPath::CoordinationMaxPushRetries => {
+                if let (Some(c), SettingsValue::Num(n)) = (buf.coordination.as_mut(), value) {
+                    c.max_push_retries = n as u8;
+                }
+            }
+            FieldPath::CoordinationMaxClockSkew => {
+                if let (Some(c), SettingsValue::Text(v)) = (buf.coordination.as_mut(), value) {
+                    c.max_clock_skew = v;
+                }
+            }
+            FieldPath::CertNormalize => {
+                if let SettingsValue::Bool(b) = value {
+                    buf.certification.normalize = b;
+                }
+            }
+            FieldPath::CertOverride { key } => {
+                if let (Some(o), SettingsValue::Bool(b)) =
+                    (buf.certification.overrides.get_mut(key), value)
+                {
+                    o.normalize = b;
+                }
+            }
+            FieldPath::AgentsInteractive => {
+                if let SettingsValue::OptText(o) = value {
+                    buf.agents.interactive = o;
+                }
+            }
+            FieldPath::UiAsciiDiagrams => {
+                if let SettingsValue::Bool(b) = value {
+                    buf.ui.ascii_diagrams = b;
+                }
+            }
+            FieldPath::StatusbarEnabled => {
+                if let SettingsValue::Bool(b) = value {
+                    buf.ui.statusbar.enabled = b;
+                }
+            }
+            FieldPath::MultilineMaxExpandedHeight => {
+                if let SettingsValue::Num(n) = value {
+                    buf.ui.multiline.max_expanded_height = n as usize;
+                }
+            }
+            // Statusbar slot ordering and unset placeholders are not editable here.
+            FieldPath::StatusbarLeft
+            | FieldPath::StatusbarCenter
+            | FieldPath::StatusbarRight
+            | FieldPath::Unset => {}
+        }
+    }
+
+    /// Begin text-entry editing on the focused field, seeding the input with its
+    /// current raw string. No-op for Toggle/EnumCycle/ReadOnly (those edit via
+    /// Space or not at all).
+    pub fn settings_start_edit(&mut self) {
+        let Some(focused) = self.settings_focused_field() else {
+            return;
+        };
+        let editable = matches!(
+            focused.editor,
+            FieldEditor::Text
+                | FieldEditor::BoundedNum { .. }
+                | FieldEditor::Nullable
+                | FieldEditor::Duration
+                | FieldEditor::List
+        );
+        if !editable {
+            return;
+        }
+        self.settings_editing = true;
+        self.settings_edit_input = self.settings_focused_raw();
+        self.settings_edit_error = None;
+    }
+
+    pub fn settings_cancel_edit(&mut self) {
+        self.settings_editing = false;
+        self.settings_edit_input.clear();
+        self.settings_edit_error = None;
+    }
+
+    /// Commit the in-progress text edit into the buffer. Validating editors
+    /// (BoundedNum/Duration) that reject the input keep edit mode active and set
+    /// `settings_edit_error` without touching the buffer or dirty flag.
+    pub fn settings_confirm_edit(&mut self) {
+        let Some(focused) = self.settings_focused_field() else {
+            return;
+        };
+        let input = self.settings_edit_input.trim().to_string();
+        match focused.editor {
+            FieldEditor::Text => {
+                self.settings_write(&focused.path, SettingsValue::Text(input));
+                self.settings_dirty = true;
+                self.settings_editing = false;
+            }
+            FieldEditor::Nullable => {
+                let opt = if input.is_empty() { None } else { Some(input) };
+                self.settings_write(&focused.path, SettingsValue::OptText(opt));
+                self.settings_dirty = true;
+                self.settings_editing = false;
+            }
+            FieldEditor::List => {
+                let list: Vec<String> = input
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                self.settings_write(&focused.path, SettingsValue::List(list));
+                self.settings_dirty = true;
+                self.settings_editing = false;
+            }
+            FieldEditor::BoundedNum { min, max } => match validate_bounded(&input, min, max) {
+                Ok(n) => {
+                    self.settings_write(&focused.path, SettingsValue::Num(n));
+                    self.settings_dirty = true;
+                    self.settings_editing = false;
+                }
+                Err(msg) => {
+                    self.settings_edit_error = Some(msg);
+                }
+            },
+            FieldEditor::Duration => match crate::engine::lease::parse_duration(&input) {
+                Ok(_) => {
+                    self.settings_write(&focused.path, SettingsValue::Text(input));
+                    self.settings_dirty = true;
+                    self.settings_editing = false;
+                }
+                Err(e) => {
+                    self.settings_edit_error = Some(e.to_string());
+                }
+            },
+            FieldEditor::Toggle | FieldEditor::EnumCycle { .. } | FieldEditor::ReadOnly => {}
+        }
+    }
+
+    /// Space on the focused field: flip a Toggle or advance an EnumCycle in the
+    /// buffer. No-op for text-entry and ReadOnly kinds.
+    pub fn settings_space(&mut self) {
+        let Some(focused) = self.settings_focused_field() else {
+            return;
+        };
+        match focused.editor {
+            FieldEditor::Toggle => {
+                let current = self.settings_focused_raw() == "true";
+                self.settings_write(&focused.path, SettingsValue::Bool(!current));
+                self.settings_dirty = true;
+            }
+            FieldEditor::EnumCycle { variants } => {
+                self.settings_cycle_enum(&focused.path, variants);
+            }
+            _ => {}
+        }
+    }
+
+    fn settings_cycle_enum(&mut self, path: &FieldPath, variants: &'static [&'static str]) {
+        if variants.is_empty() {
+            return;
+        }
+        // Rule `shape` is special: cycling converts the whole ValidationRule to
+        // the other variant, preserving name + severity.
+        if let FieldPath::Rule {
+            index,
+            key: RuleKey::Shape,
+        } = path
+        {
+            self.settings_cycle_rule_shape(*index);
+            return;
+        }
+        let current = self.settings_focused_raw();
+        let idx = variants.iter().position(|v| *v == current).unwrap_or(0);
+        let next = variants[(idx + 1) % variants.len()];
+        match path {
+            FieldPath::Type {
+                key: TypeKey::Numbering,
+                ..
+            } => {
+                if let Some(n) = numbering_from_variant(next) {
+                    self.settings_write(path, SettingsValue::Numbering(n));
+                    self.settings_dirty = true;
+                }
+            }
+            FieldPath::Type {
+                key: TypeKey::Store,
+                ..
+            } => {
+                if let Some(s) = store_from_variant(next) {
+                    self.settings_write(path, SettingsValue::Store(s));
+                    self.settings_dirty = true;
+                }
+            }
+            FieldPath::ReservedFormat => {
+                if let Some(f) = reserved_format_from_variant(next) {
+                    self.settings_write(path, SettingsValue::ReservedFormat(f));
+                    self.settings_dirty = true;
+                }
+            }
+            FieldPath::Rule {
+                key: RuleKey::Severity,
+                ..
+            } => {
+                if let Some(sev) = severity_from_variant(next) {
+                    self.settings_write(path, SettingsValue::Severity(sev));
+                    self.settings_dirty = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Convert `rules[index]` to the other `ValidationRule` variant, preserving
+    /// `name` and `severity` and seeding the new body fields to empty strings.
+    fn settings_cycle_rule_shape(&mut self, index: usize) {
+        let Some(rule) = self.settings_buffer.rules.get_mut(index) else {
+            return;
+        };
+        *rule = match rule {
+            ValidationRule::ParentChild { name, severity, .. } => {
+                ValidationRule::RelationExistence {
+                    name: std::mem::take(name),
+                    doc_type: String::new(),
+                    require: String::new(),
+                    severity: severity.clone(),
+                }
+            }
+            ValidationRule::RelationExistence { name, severity, .. } => {
+                ValidationRule::ParentChild {
+                    name: std::mem::take(name),
+                    child: String::new(),
+                    parent: String::new(),
+                    link: String::new(),
+                    severity: severity.clone(),
+                }
+            }
+        };
+        self.settings_dirty = true;
+    }
+
+    /// Validate the whole buffer, then write `.lazyspec.toml` once, atomically,
+    /// preserving comments. Disk is touched only on success: the new file string
+    /// is rendered in memory by `write_config_in_place` and validated by
+    /// re-parsing those exact bytes via `Config::parse` before any write. On
+    /// either failure path (writer error or re-parse error) nothing is written,
+    /// `settings_dirty` stays true, and `settings_footer_error` is set; a parse
+    /// failure also jumps focus to the offending field. On success the dirty flag
+    /// and footer clear and `config_reload_request` is raised so the run loop
+    /// re-loads the config, rebuilds the store, and re-seeds the clean buffer.
+    pub fn settings_save(&mut self, root: &Path) {
+        let path = root.join(".lazyspec.toml");
+        let src = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            // A first save in a session whose file is gone falls back to a fresh
+            // render so the write still succeeds.
+            Err(_) => match self.settings_buffer.to_toml() {
+                Ok(s) => s,
+                Err(e) => {
+                    self.settings_footer_error = Some(e.to_string());
+                    return;
+                }
+            },
+        };
+
+        let new_src =
+            match crate::engine::config_write::write_config_in_place(&src, &self.settings_buffer) {
+                Ok(s) => s,
+                Err(e) => {
+                    self.settings_footer_error = Some(e.to_string());
+                    return;
+                }
+            };
+
+        // Validate the exact bytes destined for disk (catches every field-level
+        // and cross-field constraint, plus any toml_edit slip), so the file never
+        // holds an invalid intermediate.
+        if let Err(e) = Config::parse(&new_src) {
+            self.settings_footer_error = Some(e.to_string());
+            self.settings_jump_to_violation();
+            return;
+        }
+
+        if let Err(e) = std::fs::write(&path, &new_src) {
+            self.settings_footer_error = Some(e.to_string());
+            return;
+        }
+
+        self.settings_dirty = false;
+        self.settings_footer_error = None;
+        self.config_reload_request = true;
+    }
+
+    /// Move the settings nav onto the first buffer constraint a save can violate,
+    /// in `Config::parse`'s order. The offending field is found by inspecting the
+    /// buffer (more reliable than string-matching the error). Best-effort: an
+    /// unrecognised violation lands on a relevant category without crashing, and
+    /// the field cursor is clamped to the resolved field list.
+    fn settings_jump_to_violation(&mut self) {
+        self.settings_editing = false;
+
+        let buf = &self.settings_buffer;
+
+        // 1. A Sqids type with no valid [numbering.sqids] salt.
+        let needs_sqids = buf
+            .documents
+            .types
+            .iter()
+            .position(|t| t.numbering == NumberingStrategy::Sqids);
+        if let Some(type_index) = needs_sqids {
+            let salt_ok = buf
+                .documents
+                .sqids
+                .as_ref()
+                .is_some_and(|s| !s.salt.is_empty());
+            if !salt_ok {
+                // The salt is a focusable field only when the section exists.
+                if buf.documents.sqids.is_some() {
+                    self.settings_jump_to_field(4, None, |f| {
+                        matches!(f.path, FieldPath::SqidsSalt)
+                    });
+                } else {
+                    self.settings_jump_to_field(1, Some(type_index), |f| {
+                        matches!(
+                            f.path,
+                            FieldPath::Type {
+                                key: TypeKey::Numbering,
+                                ..
+                            }
+                        )
+                    });
+                }
+                return;
+            }
+        }
+
+        // 2. A GithubIssues type with no [github] section.
+        if buf.documents.github.is_none() {
+            let offending = buf
+                .documents
+                .types
+                .iter()
+                .position(|t| t.store == StoreBackend::GithubIssues);
+            if let Some(type_index) = offending {
+                self.settings_jump_to_field(1, Some(type_index), |f| {
+                    matches!(
+                        f.path,
+                        FieldPath::Type {
+                            key: TypeKey::Store,
+                            ..
+                        }
+                    )
+                });
+                return;
+            }
+        }
+
+        // 3. Any other constraint (reserved/relationships): best-effort landing on
+        // a relevant category, clamped, never crashing.
+        self.settings_jump_to_field(4, None, |_| false);
+    }
+
+    /// Land the settings nav on `category` (optionally drilled into `drill`) and
+    /// set the field cursor to the first field matching `pick`, clamped to the
+    /// field list. With no match the cursor is 0.
+    fn settings_jump_to_field(
+        &mut self,
+        category: usize,
+        drill: Option<usize>,
+        pick: impl Fn(&EditableField) -> bool,
+    ) {
+        self.settings_category = category;
+        self.settings_drill = drill;
+        if let Some(d) = drill {
+            self.settings_entry = d;
+        }
+        let fields = crate::tui::views::panels::settings_fields(
+            category,
+            self.settings_entry,
+            drill,
+            &self.settings_buffer,
+        );
+        let field = fields.iter().position(pick).unwrap_or(0);
+        self.settings_field = field.min(fields.len().saturating_sub(1));
     }
 
     pub fn toggle_expanded(&mut self, path: &Path) {
@@ -1672,6 +2476,14 @@ mod tests {
             settings_category: 0,
             settings_entry: 0,
             settings_drill: None,
+            settings_field: 0,
+            settings_buffer: Config::default(),
+            settings_dirty: false,
+            settings_editing: false,
+            settings_edit_input: String::new(),
+            settings_edit_error: None,
+            settings_footer_error: None,
+            settings_quit_prompt: SettingsQuitPrompt::new(),
         };
         app
     }
@@ -2303,6 +3115,67 @@ mod tests {
     }
 
     #[test]
+    fn settings_buffer_initialised_clean_from_config() {
+        let app = make_test_app(0);
+        assert!(!app.settings_dirty);
+        assert_eq!(app.settings_field, 0);
+        let buffer_types: Vec<String> = app
+            .settings_buffer
+            .documents
+            .types
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        let config_types: Vec<String> = Config::default()
+            .documents
+            .types
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(buffer_types, config_types);
+    }
+
+    #[test]
+    fn apply_config_reseeds_buffer_when_clean() {
+        let mut app = make_test_app(0);
+        assert!(!app.settings_dirty);
+        app.apply_config(&config_with_types(&["rfc", "story", "adr"]));
+        let buffer_types: Vec<&str> = app
+            .settings_buffer
+            .documents
+            .types
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(buffer_types, vec!["rfc", "story", "adr"]);
+    }
+
+    #[test]
+    fn apply_config_preserves_dirty_buffer() {
+        let mut app = make_test_app(0);
+        app.settings_dirty = true;
+        let before: Vec<String> = app
+            .settings_buffer
+            .documents
+            .types
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        app.apply_config(&config_with_types(&["rfc", "story", "adr"]));
+        let after: Vec<String> = app
+            .settings_buffer
+            .documents
+            .types
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(
+            before, after,
+            "dirty buffer must not be clobbered by reload"
+        );
+    }
+
+    #[test]
     fn apply_config_drops_type_and_clamps_selected_type() {
         let mut app = make_test_app(0);
         app.apply_config(&config_with_types(&["rfc", "story"]));
@@ -2379,5 +3252,837 @@ mod tests {
         assert_eq!(ids_for_paths(&app, &sections.chain), vec!["RFC-001"]);
         assert!(sections.children.is_empty());
         assert!(sections.related.is_empty());
+    }
+
+    // --- Settings field editors (ITERATION-188 Tasks 3/4/5) ---
+
+    use crate::engine::config::{
+        CoordinationConfig, GithubConfig, ReservedFormat, Severity, SqidsConfig, StoreBackend,
+        ValidationRule,
+    };
+
+    /// Build a settings-edit-ready app: set the buffer to `config`, focus the
+    /// given category and field, leave it clean and not editing.
+    fn settings_app(config: Config, category: usize, field: usize) -> App {
+        let mut app = make_test_app(0);
+        app.settings_buffer = config;
+        app.settings_dirty = false;
+        app.settings_category = category;
+        app.settings_entry = 0;
+        app.settings_drill = None;
+        app.settings_field = field;
+        app
+    }
+
+    fn type_a() -> String {
+        // A single editable type so drilled type-views are deterministic.
+        "a".to_string()
+    }
+
+    fn config_one_type() -> Config {
+        config_with_types(&[&type_a()])
+    }
+
+    fn type_chars(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.settings_edit_input.push(c);
+        }
+    }
+
+    // --- AC3 / AC5 pure validators ---
+
+    #[test]
+    fn validate_bounded_rejects_out_of_range_and_nonnumeric() {
+        assert!(validate_bounded("0", 1, 10).is_err());
+        assert!(validate_bounded("11", 1, 10).is_err());
+        assert!(validate_bounded("abc", 1, 10).is_err());
+    }
+
+    #[test]
+    fn validate_bounded_accepts_in_range() {
+        assert_eq!(validate_bounded("1", 1, 10).unwrap(), 1);
+        assert_eq!(validate_bounded("10", 1, 10).unwrap(), 10);
+        assert_eq!(validate_bounded("5", 1, 10).unwrap(), 5);
+    }
+
+    #[test]
+    fn parse_duration_rejects_bad_and_accepts_good() {
+        assert!(crate::engine::lease::parse_duration("abc").is_err());
+        assert!(crate::engine::lease::parse_duration("30").is_err());
+        assert!(crate::engine::lease::parse_duration("60m").is_ok());
+    }
+
+    // --- AC1 Text ---
+
+    #[test]
+    fn ac1_text_edit_writes_to_buffer_and_dirties() {
+        let mut app = settings_app(config_one_type(), 0, 0); // naming.pattern
+        app.settings_start_edit();
+        assert!(app.settings_editing);
+        // Replace seeded input with a fresh value.
+        app.settings_edit_input.clear();
+        type_chars(&mut app, "{type}-{title}.md");
+        app.settings_confirm_edit();
+
+        assert_eq!(
+            app.settings_buffer.documents.naming.pattern,
+            "{type}-{title}.md"
+        );
+        assert!(app.settings_dirty);
+        assert!(!app.settings_editing);
+    }
+
+    // --- AC2 Toggle ---
+
+    #[test]
+    fn ac2_toggle_statusbar_enabled_flips_and_dirties() {
+        let mut config = config_one_type();
+        config.ui.statusbar.enabled = true;
+        let mut app = settings_app(config, 9, 1); // Interface > statusbar.enabled
+
+        app.settings_space();
+        assert!(!app.settings_buffer.ui.statusbar.enabled);
+        assert!(app.settings_dirty);
+
+        app.settings_space();
+        assert!(
+            app.settings_buffer.ui.statusbar.enabled,
+            "second Space flips back"
+        );
+    }
+
+    #[test]
+    fn ac2_toggle_drilled_type_subdirectory_flips() {
+        let config = config_one_type();
+        let mut app = settings_app(config, 1, 6); // Document Types, subdirectory
+        app.settings_drill = Some(0);
+
+        let before = app.settings_buffer.documents.types[0].subdirectory;
+        app.settings_space();
+        assert_eq!(app.settings_buffer.documents.types[0].subdirectory, !before);
+        assert!(app.settings_dirty);
+    }
+
+    // --- AC3 BoundedNum (app-state) ---
+
+    #[test]
+    fn ac3_bounded_num_rejects_keeps_buffer_then_accepts() {
+        let mut config = config_one_type();
+        config.documents.sqids = Some(SqidsConfig {
+            salt: "seed".to_string(),
+            min_length: 3,
+        });
+        let mut app = settings_app(config, 4, 1); // Numbering > sqids.min_length
+
+        // Reject "0".
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        type_chars(&mut app, "0");
+        app.settings_confirm_edit();
+        assert_eq!(
+            app.settings_buffer
+                .documents
+                .sqids
+                .as_ref()
+                .unwrap()
+                .min_length,
+            3
+        );
+        assert!(!app.settings_dirty);
+        assert!(app.settings_edit_error.is_some());
+        assert!(app.settings_editing, "rejected edit stays in edit mode");
+
+        // Accept "7".
+        app.settings_edit_input.clear();
+        type_chars(&mut app, "7");
+        app.settings_confirm_edit();
+        assert_eq!(
+            app.settings_buffer
+                .documents
+                .sqids
+                .as_ref()
+                .unwrap()
+                .min_length,
+            7
+        );
+        assert!(app.settings_dirty);
+        assert!(!app.settings_editing);
+    }
+
+    // --- AC4 Nullable ---
+
+    #[test]
+    fn ac4_nullable_empty_is_none_value_is_some() {
+        let mut config = config_one_type();
+        config.documents.github = Some(GithubConfig {
+            repo: Some("old/repo".to_string()),
+            cache_ttl: 60,
+        });
+        let mut app = settings_app(config, 5, 0); // GitHub > repo
+
+        // Empty => None (not Some("")).
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        app.settings_confirm_edit();
+        assert_eq!(
+            app.settings_buffer.documents.github.as_ref().unwrap().repo,
+            None
+        );
+        assert!(app.settings_dirty);
+
+        // Non-empty => Some.
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        type_chars(&mut app, "owner/repo");
+        app.settings_confirm_edit();
+        assert_eq!(
+            app.settings_buffer
+                .documents
+                .github
+                .as_ref()
+                .unwrap()
+                .repo
+                .as_deref(),
+            Some("owner/repo")
+        );
+    }
+
+    // --- AC5 Duration (app-state) ---
+
+    #[test]
+    fn ac5_duration_rejects_keeps_buffer_then_accepts() {
+        let mut config = config_one_type();
+        config.coordination = Some(CoordinationConfig {
+            remote: "origin".to_string(),
+            lease_duration: "60m".to_string(),
+            grace_period: "2m".to_string(),
+            max_push_retries: 5,
+            max_clock_skew: "5m".to_string(),
+        });
+        let mut app = settings_app(config, 6, 1); // Coordination > lease_duration
+
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        type_chars(&mut app, "abc");
+        app.settings_confirm_edit();
+        assert_eq!(
+            app.settings_buffer
+                .coordination
+                .as_ref()
+                .unwrap()
+                .lease_duration,
+            "60m"
+        );
+        assert!(app.settings_edit_error.is_some());
+        assert!(!app.settings_dirty);
+        assert!(app.settings_editing);
+
+        app.settings_edit_input.clear();
+        type_chars(&mut app, "30m");
+        app.settings_confirm_edit();
+        assert_eq!(
+            app.settings_buffer
+                .coordination
+                .as_ref()
+                .unwrap()
+                .lease_duration,
+            "30m"
+        );
+        assert!(app.settings_dirty);
+        assert!(!app.settings_editing);
+    }
+
+    // --- AC6 List ---
+
+    #[test]
+    fn ac6_list_splits_trims_drops_empties() {
+        let config = config_one_type();
+        let mut app = settings_app(config, 1, 10); // Document Types, agents
+        app.settings_drill = Some(0);
+
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        type_chars(&mut app, "expand, create-children");
+        app.settings_confirm_edit();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].agents,
+            vec!["expand".to_string(), "create-children".to_string()]
+        );
+
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        app.settings_confirm_edit();
+        assert!(app.settings_buffer.documents.types[0].agents.is_empty());
+
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        type_chars(&mut app, " a , b ,");
+        app.settings_confirm_edit();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].agents,
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    // --- AC7 EnumCycle ---
+
+    #[test]
+    fn ac7_numbering_cycles_and_wraps() {
+        let config = config_one_type();
+        let mut app = settings_app(config, 1, 5); // Document Types, numbering
+        app.settings_drill = Some(0);
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering,
+            NumberingStrategy::Incremental
+        );
+
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering,
+            NumberingStrategy::Sqids
+        );
+        assert!(app.settings_dirty);
+
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering,
+            NumberingStrategy::Reserved
+        );
+
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering,
+            NumberingStrategy::Incremental,
+            "wraps back to first after last"
+        );
+    }
+
+    #[test]
+    fn ac7_store_cycles_through_three_variants() {
+        let config = config_one_type();
+        let mut app = settings_app(config, 1, 7); // Document Types, store
+        app.settings_drill = Some(0);
+        assert_eq!(
+            app.settings_buffer.documents.types[0].store,
+            StoreBackend::Filesystem
+        );
+
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].store,
+            StoreBackend::GithubIssues
+        );
+        assert!(app.settings_dirty);
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].store,
+            StoreBackend::GitRef
+        );
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].store,
+            StoreBackend::Filesystem
+        );
+    }
+
+    #[test]
+    fn ac7_rule_severity_cycles() {
+        let mut config = config_one_type();
+        config.rules = vec![ValidationRule::ParentChild {
+            name: "r".to_string(),
+            child: "story".to_string(),
+            parent: "rfc".to_string(),
+            link: "implements".to_string(),
+            severity: Severity::Error,
+        }];
+        let mut app = settings_app(config, 3, 5); // Validation Rules, severity (ParentChild)
+        app.settings_drill = Some(0);
+
+        app.settings_space();
+        match &app.settings_buffer.rules[0] {
+            ValidationRule::ParentChild { severity, .. } => {
+                assert_eq!(*severity, Severity::Warning)
+            }
+            _ => panic!("variant changed unexpectedly"),
+        }
+        assert!(app.settings_dirty);
+
+        app.settings_space();
+        match &app.settings_buffer.rules[0] {
+            ValidationRule::ParentChild { severity, .. } => {
+                assert_eq!(*severity, Severity::Error, "wraps")
+            }
+            _ => panic!("variant changed unexpectedly"),
+        }
+    }
+
+    #[test]
+    fn ac7_rule_shape_converts_variant_preserving_name_and_severity() {
+        let mut config = config_one_type();
+        config.rules = vec![ValidationRule::ParentChild {
+            name: "my-rule".to_string(),
+            child: "story".to_string(),
+            parent: "rfc".to_string(),
+            link: "implements".to_string(),
+            severity: Severity::Warning,
+        }];
+        let mut app = settings_app(config, 3, 1); // Validation Rules, shape
+        app.settings_drill = Some(0);
+
+        app.settings_space();
+        match &app.settings_buffer.rules[0] {
+            ValidationRule::RelationExistence {
+                name,
+                doc_type,
+                require,
+                severity,
+            } => {
+                assert_eq!(name, "my-rule", "name preserved");
+                assert_eq!(*severity, Severity::Warning, "severity preserved");
+                assert_eq!(doc_type, "", "new body seeded empty");
+                assert_eq!(require, "", "new body seeded empty");
+            }
+            _ => panic!("shape cycle must convert to relation-existence"),
+        }
+        assert!(app.settings_dirty);
+
+        // Cycling shape again converts back to parent-child.
+        app.settings_space();
+        match &app.settings_buffer.rules[0] {
+            ValidationRule::ParentChild {
+                name,
+                child,
+                parent,
+                link,
+                severity,
+            } => {
+                assert_eq!(name, "my-rule");
+                assert_eq!(*severity, Severity::Warning);
+                assert_eq!(child, "");
+                assert_eq!(parent, "");
+                assert_eq!(link, "");
+            }
+            _ => panic!("shape cycle must convert back to parent-child"),
+        }
+    }
+
+    #[test]
+    fn ac7_reserved_format_cycles() {
+        let mut config = config_one_type();
+        config.documents.reserved = Some(crate::engine::config::ReservedConfig {
+            remote: "origin".to_string(),
+            format: ReservedFormat::Incremental,
+            max_retries: 5,
+        });
+        // Numbering view: sqids absent => 2 ReadOnly fields, then reserved.remote(2),
+        // reserved.format(3), reserved.max_retries(4).
+        let mut app = settings_app(config, 4, 3);
+
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer
+                .documents
+                .reserved
+                .as_ref()
+                .unwrap()
+                .format,
+            ReservedFormat::Sqids
+        );
+        assert!(app.settings_dirty);
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer
+                .documents
+                .reserved
+                .as_ref()
+                .unwrap()
+                .format,
+            ReservedFormat::Incremental,
+            "wraps"
+        );
+    }
+
+    // --- start_edit / space no-op on ReadOnly ---
+
+    #[test]
+    fn readonly_field_start_edit_and_space_are_noops() {
+        // Numbering view with no sqids section: sqids.salt is ReadOnly/Unset.
+        let mut app = settings_app(config_one_type(), 4, 0);
+        app.settings_start_edit();
+        assert!(!app.settings_editing, "start_edit no-op on ReadOnly");
+        app.settings_space();
+        assert!(!app.settings_dirty, "space no-op on ReadOnly");
+    }
+
+    #[test]
+    fn start_edit_noop_on_toggle_and_enumcycle() {
+        let config = config_one_type();
+        // Toggle field (Interface > ascii_diagrams at index 0).
+        let mut app = settings_app(config.clone(), 9, 0);
+        app.settings_start_edit();
+        assert!(!app.settings_editing, "Toggle does not use edit mode");
+
+        // EnumCycle field (drilled type numbering).
+        let mut app = settings_app(config, 1, 5);
+        app.settings_drill = Some(0);
+        app.settings_start_edit();
+        assert!(!app.settings_editing, "EnumCycle does not use edit mode");
+    }
+
+    // --- Settings save (ITERATION-188 Tasks 6/8) ---
+
+    /// A valid `.lazyspec.toml` carrying a standalone comment, an inline trailing
+    /// comment, `[[types]]`, and `[[relationships]]` -- the comment-survival and
+    /// single-edit assertions key off these distinctive lines.
+    const SAVE_SRC: &str = r#"# lazyspec save fixture
+[naming]
+pattern = "{type}-{n:03}-{title}.md"  # filename template
+
+[templates]
+dir = ".lazyspec/templates"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+"#;
+
+    /// Write `SAVE_SRC` (or `src`) into a fresh TempDir's `.lazyspec.toml`, build
+    /// an app whose buffer is the parsed config, and return both. The TempDir is
+    /// returned so it outlives the app/file.
+    fn save_app(src: &str) -> (tempfile::TempDir, App) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".lazyspec.toml"), src).unwrap();
+        let mut app = make_test_app(0);
+        app.settings_buffer = Config::parse(src).unwrap();
+        app.settings_dirty = false;
+        (tmp, app)
+    }
+
+    fn read_config_file(tmp: &tempfile::TempDir) -> String {
+        std::fs::read_to_string(tmp.path().join(".lazyspec.toml")).unwrap()
+    }
+
+    // AC8: a valid save writes once atomically, preserves comments, changes only
+    // the edited value, clears dirty + footer, and raises the reload flag.
+    #[test]
+    fn ac8_save_writes_atomically_preserves_comments_and_triggers_reload() {
+        let (tmp, mut app) = save_app(SAVE_SRC);
+        app.settings_buffer.documents.naming.pattern = "{type}-{title}.md".to_string();
+        app.settings_dirty = true;
+
+        app.settings_save(tmp.path());
+
+        let out = read_config_file(&tmp);
+        // Re-parses OK -- the file on disk is a valid config.
+        Config::parse(&out).unwrap();
+        // The standalone and inline trailing comments survive.
+        assert!(out.contains("# lazyspec save fixture"));
+        assert!(out.contains("# filename template"));
+        // Only the edited value changed: the new pattern is present, the old gone,
+        // and every other distinctive line is byte-identical to the source.
+        assert!(out.contains("{type}-{title}.md"));
+        assert!(!out.contains("{type}-{n:03}-{title}.md"));
+        for line in [
+            r#"dir = ".lazyspec/templates""#,
+            r#"name = "rfc""#,
+            r#"prefix = "RFC""#,
+            r#"name = "implements""#,
+            r#"inverse = "implemented-by""#,
+        ] {
+            assert!(out.contains(line), "unchanged line vanished: {line}");
+        }
+        assert_eq!(
+            out.lines().count(),
+            SAVE_SRC.lines().count(),
+            "an in-place scalar edit must not change the line count"
+        );
+
+        assert!(!app.settings_dirty, "dirty clears on success");
+        assert_eq!(app.settings_footer_error, None, "footer clears on success");
+        assert!(app.config_reload_request, "reload is triggered on success");
+    }
+
+    // AC9: a save that would violate a cross-field constraint shows the footer,
+    // jumps to the offending field, leaves the buffer dirty, and writes NOTHING.
+    #[test]
+    fn ac9_failed_save_shows_footer_jumps_and_does_not_write() {
+        // github-issues store with no [github] section is a parse-time violation.
+        let (tmp, mut app) = save_app(SAVE_SRC);
+        app.settings_buffer.documents.types[0].store = StoreBackend::GithubIssues;
+        app.settings_dirty = true;
+        let before = read_config_file(&tmp);
+
+        app.settings_save(tmp.path());
+
+        // No write happened -- the file is byte-for-byte unchanged.
+        assert_eq!(read_config_file(&tmp), before, "no write on failed save");
+
+        let msg = app
+            .settings_footer_error
+            .as_deref()
+            .expect("footer error set on failed save");
+        assert!(
+            msg.contains("github") || msg.contains("[github]"),
+            "footer should name the github constraint, got: {msg}"
+        );
+
+        // Focus jumped to the offending type's `store` field: cat 1, drilled into
+        // type 0, cursor on the Store field.
+        assert_eq!(app.settings_category, 1);
+        assert_eq!(app.settings_drill, Some(0));
+        let fields =
+            crate::tui::views::panels::settings_fields(1, 0, Some(0), &app.settings_buffer);
+        assert!(
+            matches!(
+                fields[app.settings_field].path,
+                FieldPath::Type {
+                    key: TypeKey::Store,
+                    ..
+                }
+            ),
+            "cursor should land on the store field"
+        );
+
+        assert!(app.settings_dirty, "buffer stays dirty after a failed save");
+        assert!(
+            !app.config_reload_request,
+            "no reload is triggered on a failed save"
+        );
+    }
+
+    // AC9 (sqids variant): a Sqids type with no sqids section jumps to that type's
+    // numbering field and writes nothing.
+    #[test]
+    fn ac9_failed_save_sqids_missing_section_jumps_to_numbering() {
+        let (tmp, mut app) = save_app(SAVE_SRC);
+        app.settings_buffer.documents.types[0].numbering = NumberingStrategy::Sqids;
+        app.settings_buffer.documents.sqids = None;
+        app.settings_dirty = true;
+        let before = read_config_file(&tmp);
+
+        app.settings_save(tmp.path());
+
+        assert_eq!(read_config_file(&tmp), before, "no write on failed save");
+        let msg = app
+            .settings_footer_error
+            .as_deref()
+            .expect("footer error set");
+        assert!(
+            msg.contains("sqids") || msg.contains("salt"),
+            "footer should name the sqids constraint, got: {msg}"
+        );
+
+        // Section absent => salt isn't focusable, so we land on the type's
+        // numbering field (cat 1, drill 0).
+        assert_eq!(app.settings_category, 1);
+        assert_eq!(app.settings_drill, Some(0));
+        let fields =
+            crate::tui::views::panels::settings_fields(1, 0, Some(0), &app.settings_buffer);
+        assert!(
+            matches!(
+                fields[app.settings_field].path,
+                FieldPath::Type {
+                    key: TypeKey::Numbering,
+                    ..
+                }
+            ),
+            "cursor should land on the numbering field"
+        );
+        assert!(app.settings_dirty);
+    }
+
+    // --- AC10 save/discard quit prompt (ITERATION-188 Task 7) ---
+
+    /// A settings app parked in the Settings view, not editing, not drilled, with
+    /// its buffer set to the parsed `src` (clean). The TempDir holds the
+    /// `.lazyspec.toml` so it outlives the app/file.
+    fn quit_prompt_app(src: &str) -> (tempfile::TempDir, App) {
+        let (tmp, mut app) = save_app(src);
+        app.view_mode = ViewMode::Settings;
+        app.settings_editing = false;
+        app.settings_drill = None;
+        (tmp, app)
+    }
+
+    #[test]
+    fn ac10_quit_with_dirty_buffer_activates_prompt() {
+        let (tmp, mut app) = quit_prompt_app(SAVE_SRC);
+        app.settings_dirty = true;
+        let config = Config::parse(SAVE_SRC).unwrap();
+
+        app.handle_settings_key(KeyCode::Char('q'), KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(
+            app.settings_quit_prompt.active,
+            "q with dirty buffer opens the prompt"
+        );
+        assert!(
+            !app.should_quit,
+            "the quit is deferred until the prompt is answered"
+        );
+        assert_eq!(
+            app.view_mode,
+            ViewMode::Settings,
+            "still in settings, not exited"
+        );
+    }
+
+    #[test]
+    fn ac10_esc_with_dirty_buffer_activates_prompt() {
+        let (tmp, mut app) = quit_prompt_app(SAVE_SRC);
+        app.settings_dirty = true;
+        let config = Config::parse(SAVE_SRC).unwrap();
+
+        app.handle_settings_key(KeyCode::Esc, KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(
+            app.settings_quit_prompt.active,
+            "Esc with dirty buffer opens the prompt"
+        );
+        assert!(!app.should_quit);
+        assert_eq!(app.view_mode, ViewMode::Settings);
+    }
+
+    #[test]
+    fn ac10_esc_undrills_before_prompting_even_when_dirty() {
+        let (tmp, mut app) = quit_prompt_app(SAVE_SRC);
+        app.settings_dirty = true;
+        app.settings_drill = Some(0);
+        let config = Config::parse(SAVE_SRC).unwrap();
+
+        app.handle_settings_key(KeyCode::Esc, KeyModifiers::NONE, tmp.path(), &config);
+
+        assert_eq!(app.settings_drill, None, "Esc undrills first");
+        assert!(
+            !app.settings_quit_prompt.active,
+            "no prompt while a drill is open"
+        );
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn ac10_discard_drops_buffer_edits_quits_and_leaves_file_untouched() {
+        let (tmp, mut app) = quit_prompt_app(SAVE_SRC);
+        let config = Config::parse(SAVE_SRC).unwrap();
+        // A dirty buffer that differs from the session config.
+        app.settings_buffer.documents.naming.pattern = "edited-{title}.md".to_string();
+        app.settings_dirty = true;
+        app.settings_quit_prompt.active = true;
+        let before = read_config_file(&tmp);
+
+        app.handle_settings_key(KeyCode::Char('d'), KeyModifiers::NONE, tmp.path(), &config);
+
+        // Buffer re-seeded to the session config (edit dropped).
+        assert_eq!(
+            app.settings_buffer.documents.naming.pattern, config.documents.naming.pattern,
+            "discard re-seeds the buffer from the session config"
+        );
+        assert!(!app.settings_dirty, "dirty clears on discard");
+        assert!(!app.settings_quit_prompt.active, "prompt closes on discard");
+        assert!(app.should_quit, "discard honours the quit");
+        assert_eq!(app.settings_footer_error, None);
+        assert_eq!(
+            read_config_file(&tmp),
+            before,
+            "discard performs no write -- the file is untouched"
+        );
+    }
+
+    #[test]
+    fn ac10_save_valid_writes_clears_dirty_quits_and_reloads() {
+        let (tmp, mut app) = quit_prompt_app(SAVE_SRC);
+        let config = Config::parse(SAVE_SRC).unwrap();
+        app.settings_buffer.documents.naming.pattern = "{type}-{title}.md".to_string();
+        app.settings_dirty = true;
+        app.settings_quit_prompt.active = true;
+
+        app.handle_settings_key(KeyCode::Char('s'), KeyModifiers::NONE, tmp.path(), &config);
+
+        let out = read_config_file(&tmp);
+        Config::parse(&out).unwrap();
+        assert!(
+            out.contains("{type}-{title}.md"),
+            "the valid edit was written"
+        );
+        assert!(!app.settings_dirty, "dirty clears on a valid save");
+        assert!(
+            !app.settings_quit_prompt.active,
+            "prompt closes on a valid save"
+        );
+        assert!(app.should_quit, "a successful save honours the quit");
+        assert!(
+            app.config_reload_request,
+            "save runs the same reload-raising path as w"
+        );
+    }
+
+    #[test]
+    fn ac10_save_invalid_keeps_dirty_stays_in_settings_with_footer() {
+        let (tmp, mut app) = quit_prompt_app(SAVE_SRC);
+        let config = Config::parse(SAVE_SRC).unwrap();
+        // github-issues store with no [github] section is a parse-time violation.
+        app.settings_buffer.documents.types[0].store = StoreBackend::GithubIssues;
+        app.settings_dirty = true;
+        app.settings_quit_prompt.active = true;
+        let before = read_config_file(&tmp);
+
+        app.handle_settings_key(KeyCode::Char('s'), KeyModifiers::NONE, tmp.path(), &config);
+
+        assert_eq!(read_config_file(&tmp), before, "no write on a failed save");
+        assert!(
+            app.settings_footer_error.is_some(),
+            "the failed save sets the footer error"
+        );
+        assert!(app.settings_dirty, "buffer stays dirty after a failed save");
+        assert!(
+            !app.settings_quit_prompt.active,
+            "prompt closes after a failed save"
+        );
+        assert!(!app.should_quit, "a failed save cancels the quit");
+        assert_eq!(
+            app.view_mode,
+            ViewMode::Settings,
+            "stays in settings to fix and retry"
+        );
+    }
+
+    #[test]
+    fn ac10_cancel_closes_prompt_keeps_buffer_and_stays() {
+        let (tmp, mut app) = quit_prompt_app(SAVE_SRC);
+        let config = Config::parse(SAVE_SRC).unwrap();
+        app.settings_buffer.documents.naming.pattern = "edited-{title}.md".to_string();
+        app.settings_dirty = true;
+        app.settings_quit_prompt.active = true;
+
+        app.handle_settings_key(KeyCode::Esc, KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(!app.settings_quit_prompt.active, "Esc cancels the prompt");
+        assert!(!app.should_quit, "cancel keeps the app running");
+        assert!(app.settings_dirty, "cancel leaves the buffer dirty");
+        assert_eq!(
+            app.settings_buffer.documents.naming.pattern, "edited-{title}.md",
+            "cancel leaves the buffer untouched"
+        );
+    }
+
+    #[test]
+    fn ac10_quit_when_clean_quits_without_prompting() {
+        let (tmp, mut app) = quit_prompt_app(SAVE_SRC);
+        app.settings_dirty = false;
+        let config = Config::parse(SAVE_SRC).unwrap();
+
+        app.handle_settings_key(KeyCode::Char('q'), KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(app.should_quit, "a clean quit exits immediately");
+        assert!(
+            !app.settings_quit_prompt.active,
+            "no prompt when the buffer is clean"
+        );
     }
 }

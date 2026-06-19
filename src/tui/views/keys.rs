@@ -5,7 +5,7 @@ use std::path::Path;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
 
-use crate::tui::state::{App, FilterField, PreviewTab, ViewMode};
+use crate::tui::state::{App, FieldEditor, FilterField, PreviewTab, ViewMode};
 
 impl App {
     pub fn handle_key(
@@ -648,55 +648,173 @@ impl App {
         self.settings_category = 0;
         self.settings_drill = None;
         self.settings_entry = 0;
+        self.settings_field = 0;
     }
 
-    fn handle_settings_key(&mut self, code: KeyCode, _modifiers: KeyModifiers) {
+    /// True when the current settings view is an entry-LIST (a collection category
+    /// that is not drilled). Drilled collections and scalar categories are
+    /// field-views; cat 7 is a hybrid whose not-drilled view is an entry-list of
+    /// certification overlays below the top `normalize` field, navigated by entry.
+    fn settings_in_entry_list(&self) -> bool {
         const COLLECTIONS: [usize; 4] = [1, 2, 3, 7];
-        let is_collection = COLLECTIONS.contains(&self.settings_category);
+        COLLECTIONS.contains(&self.settings_category) && self.settings_drill.is_none()
+    }
+
+    fn settings_field_count(&self) -> usize {
+        super::panels::settings_fields(
+            self.settings_category,
+            self.settings_entry,
+            self.settings_drill,
+            &self.settings_buffer,
+        )
+        .len()
+    }
+
+    /// Navigable entry count for the current entry-list collection (from the
+    /// buffer). cat 7's entries are its certification overrides.
+    fn settings_entry_count(&self) -> usize {
+        let cfg = &self.settings_buffer;
+        match self.settings_category {
+            1 => cfg.documents.types.len(),
+            2 => cfg.relationships.len(),
+            3 => cfg.rules.len(),
+            7 => cfg.certification.overrides.len(),
+            _ => 0,
+        }
+    }
+
+    fn settings_move_category(&mut self, delta: isize) {
+        let max = App::settings_categories().len().saturating_sub(1);
+        let next = if delta >= 0 {
+            (self.settings_category + delta as usize).min(max)
+        } else {
+            self.settings_category.saturating_sub(delta.unsigned_abs())
+        };
+        self.settings_category = next;
+        self.settings_field = 0;
+        self.settings_entry = 0;
+        self.settings_drill = None;
+    }
+
+    pub(crate) fn handle_settings_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        root: &Path,
+        config: &Config,
+    ) {
+        // The save/discard/cancel quit prompt intercepts keys before any nav or
+        // edit (AC10). It is only ever active when the buffer was dirty.
+        if self.settings_quit_prompt.active {
+            match code {
+                KeyCode::Char('s') => {
+                    self.settings_save(root);
+                    self.settings_quit_prompt.active = false;
+                    // A successful save clears `settings_dirty`; honour the quit.
+                    // A failed save (validation) keeps it dirty and leaves the
+                    // footer error visible -- stay so the user can fix and retry.
+                    if !self.settings_dirty {
+                        self.should_quit = true;
+                    }
+                }
+                KeyCode::Char('d') => {
+                    // Drop the buffer edits: re-seed from the session config. No
+                    // write happens, so `.lazyspec.toml` is left untouched.
+                    self.settings_buffer = config.clone();
+                    self.settings_dirty = false;
+                    self.settings_footer_error = None;
+                    self.settings_quit_prompt.active = false;
+                    self.should_quit = true;
+                }
+                KeyCode::Esc => {
+                    // Cancel the quit; the buffer and dirty flag are untouched.
+                    self.settings_quit_prompt.active = false;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // While editing a text-entry field, keystrokes flow into the input buffer
+        // and nav is suppressed.
+        if self.settings_editing {
+            match code {
+                KeyCode::Esc => self.settings_cancel_edit(),
+                KeyCode::Enter => self.settings_confirm_edit(),
+                KeyCode::Backspace => {
+                    self.settings_edit_input.pop();
+                }
+                KeyCode::Char(c) => {
+                    self.settings_edit_input.push(c);
+                    self.settings_edit_error = None;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // `w` or Ctrl-S validates the whole buffer and writes `.lazyspec.toml`.
+        if matches!(code, KeyCode::Char('w'))
+            || (matches!(code, KeyCode::Char('s')) && modifiers.contains(KeyModifiers::CONTROL))
+        {
+            self.settings_save(root);
+            return;
+        }
 
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.settings_drill.is_some() {
-                } else if is_collection {
-                    self.settings_entry = self.settings_entry.saturating_add(1);
+                if self.settings_in_entry_list() {
+                    let count = self.settings_entry_count();
+                    if count > 0 {
+                        self.settings_entry = (self.settings_entry + 1).min(count - 1);
+                    }
                 } else {
-                    let max = App::settings_categories().len().saturating_sub(1);
-                    self.settings_category = (self.settings_category + 1).min(max);
+                    let count = self.settings_field_count();
+                    if count > 0 {
+                        self.settings_field = (self.settings_field + 1).min(count - 1);
+                    }
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                if self.settings_drill.is_some() {
-                } else if is_collection {
+                if self.settings_in_entry_list() {
                     self.settings_entry = self.settings_entry.saturating_sub(1);
                 } else {
-                    self.settings_category = self.settings_category.saturating_sub(1);
+                    self.settings_field = self.settings_field.saturating_sub(1);
                 }
             }
             KeyCode::Char('l') | KeyCode::Right => {
-                if self.settings_drill.is_none() {
-                    let max = App::settings_categories().len().saturating_sub(1);
-                    self.settings_category = (self.settings_category + 1).min(max);
-                    self.settings_entry = 0;
-                }
+                self.settings_move_category(1);
             }
             KeyCode::Char('h') | KeyCode::Left => {
-                if self.settings_drill.is_none() {
-                    self.settings_category = self.settings_category.saturating_sub(1);
-                    self.settings_entry = 0;
-                }
+                self.settings_move_category(-1);
+            }
+            KeyCode::Char(' ') => {
+                self.settings_space();
             }
             KeyCode::Enter => {
-                if is_collection && self.settings_drill.is_none() {
+                // Enter drills in an entry-list; in a field-view it starts an
+                // edit on the focused text-entry field.
+                if self.settings_in_entry_list() {
                     self.settings_drill = Some(self.settings_entry);
+                    self.settings_field = 0;
+                } else if self.settings_focused_is_text_entry() {
+                    self.settings_start_edit();
                 }
             }
             KeyCode::Esc => {
                 if self.settings_drill.is_some() {
                     self.settings_drill = None;
+                    self.settings_field = 0;
+                } else if self.settings_dirty {
+                    self.settings_quit_prompt.active = true;
                 }
             }
             KeyCode::Char('q') => {
-                self.should_quit = true;
+                if self.settings_dirty {
+                    self.settings_quit_prompt.active = true;
+                } else {
+                    self.should_quit = true;
+                }
             }
             KeyCode::Char('`') => {
                 self.cycle_mode();
@@ -706,6 +824,21 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// True when the focused field uses a text-entry editor (so Enter starts an
+    /// edit rather than drilling).
+    fn settings_focused_is_text_entry(&self) -> bool {
+        matches!(
+            self.settings_focused_field().map(|f| f.editor),
+            Some(
+                FieldEditor::Text
+                    | FieldEditor::BoundedNum { .. }
+                    | FieldEditor::Nullable
+                    | FieldEditor::Duration
+                    | FieldEditor::List
+            )
+        )
     }
 
     #[cfg_attr(not(feature = "agent"), allow(unused_variables))]
@@ -719,7 +852,7 @@ impl App {
         match self.view_mode {
             ViewMode::Filters => return self.handle_filters_key(code, modifiers, root),
             ViewMode::Graph => return self.handle_graph_key(code, modifiers, root),
-            ViewMode::Settings => return self.handle_settings_key(code, modifiers),
+            ViewMode::Settings => return self.handle_settings_key(code, modifiers, root, config),
             #[cfg(feature = "agent")]
             ViewMode::Agents => return self.handle_agents_key(code, modifiers),
             _ => {}

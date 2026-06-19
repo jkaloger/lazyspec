@@ -2,7 +2,7 @@ mod colors;
 pub mod keys;
 mod layout;
 pub mod overlays;
-mod panels;
+pub(crate) mod panels;
 pub mod status_bar;
 
 pub use colors::{status_color, tag_color};
@@ -26,7 +26,8 @@ use status_bar::draw_status_bar;
 use overlays::draw_agent_dialog;
 use overlays::{
     draw_create_form, draw_delete_confirm, draw_gh_conflict, draw_help_overlay, draw_link_editor,
-    draw_provenance_editor, draw_search_overlay, draw_status_picker, draw_warnings_panel,
+    draw_provenance_editor, draw_search_overlay, draw_settings_quit_prompt, draw_status_picker,
+    draw_warnings_panel,
 };
 #[cfg(feature = "agent")]
 use panels::draw_agents_screen;
@@ -200,7 +201,7 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
         #[cfg(feature = "metrics")]
         ViewMode::Metrics => draw_metrics_skeleton(f, outer[1]),
         ViewMode::Graph => draw_graph(f, app, outer[1]),
-        ViewMode::Settings => draw_settings(f, app, outer[1], config),
+        ViewMode::Settings => draw_settings(f, app, outer[1], &app.settings_buffer),
         #[cfg(feature = "agent")]
         ViewMode::Agents => draw_agents_screen(f, app, outer[1]),
     }
@@ -211,6 +212,10 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
 
     if app.delete_confirm.active {
         draw_delete_confirm(f, app);
+    }
+
+    if app.settings_quit_prompt.active {
+        draw_settings_quit_prompt(f);
     }
 
     if app.status_picker.active {

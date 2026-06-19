@@ -122,8 +122,25 @@ Running `lazyspec` with no subcommand opens the interactive dashboard. It provid
 | `r`       | Add relation                            |
 | `R`       | Reload config from `.lazyspec.toml`     |
 | `w`       | Warnings / validation panel             |
+| `5`       | Open the Settings view                   |
+| `` ` ``   | Cycle view (documents / filters / graph / settings) |
 | `q`       | Quit                                    |
 | `?`       | Toggle keybindings help                 |
+
+#### Settings View
+
+Press `5` (or cycle to it with `` ` ``) to open the Settings view, which edits `.lazyspec.toml` in place. Categories are listed on the left; the right panel shows the fields (or entries) of the selected category. Saving rewrites `.lazyspec.toml`, preserving its comments and formatting, after validating the whole config; an invalid config is reported and not written.
+
+| Key                | Action                                                        |
+| ------------------ | ------------------------------------------------------------- |
+| `h` / `l`          | Switch category (also `Left` / `Right`)                       |
+| `j` / `k`          | Move between fields / entries (also `Down` / `Up`)            |
+| `Enter`            | Drill into a collection entry, or start editing a field       |
+| `Space`            | Toggle a boolean / cycle an enum field                        |
+| type + `Enter`     | Confirm a text / number / duration / list edit                |
+| `Esc`              | Cancel an in-progress edit, or undrill from an entry          |
+| `w` / `Ctrl-S`     | Save changes to `.lazyspec.toml` (validates the whole config) |
+| `q` / `Esc`        | Quit; with unsaved changes, prompts `(s)ave / (d)iscard / (Esc) cancel` |
 
 <details>
 <summary><h3>CLI</h3></summary>

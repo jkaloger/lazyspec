@@ -110,6 +110,24 @@ impl DeleteConfirm {
     }
 }
 
+/// The save/discard/cancel prompt shown when quitting Settings with unsaved
+/// buffer edits (AC10). Mirrors `DeleteConfirm`: a one-flag overlay state.
+pub struct SettingsQuitPrompt {
+    pub active: bool,
+}
+
+impl Default for SettingsQuitPrompt {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SettingsQuitPrompt {
+    pub fn new() -> Self {
+        SettingsQuitPrompt { active: false }
+    }
+}
+
 pub struct StatusPicker {
     pub active: bool,
     pub selected: usize,
@@ -241,4 +259,121 @@ impl AgentDialog {
             text_input: None,
         }
     }
+}
+
+/// How a settings field is edited. A later increment dispatches the actual edit
+/// behaviour on this; this increment only renders from the model, so `ReadOnly`
+/// marks fields that are display-only for now (unset optional sections, statusbar
+/// component slots whose ordering is a later slice).
+#[derive(Debug, Clone, PartialEq)]
+pub enum FieldEditor {
+    Text,
+    Toggle,
+    BoundedNum { min: u64, max: u64 },
+    Nullable,
+    Duration,
+    List,
+    EnumCycle { variants: &'static [&'static str] },
+    ReadOnly,
+}
+
+/// A type-key inside a drilled [[types]] entry. The buffer target a later
+/// increment writes to is `(index, key)`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeKey {
+    Name,
+    Plural,
+    Dir,
+    Prefix,
+    Icon,
+    Numbering,
+    Subdirectory,
+    Store,
+    Singleton,
+    ParentType,
+    Agents,
+}
+
+/// A relationship-key inside a drilled [[relationships]] entry.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RelKey {
+    Name,
+    Inverse,
+}
+
+/// A rule-key inside a drilled [[rules]] entry. `child`/`parent`/`link` are
+/// ParentChild-only; `doc_type`/`require` are RelationExistence-only.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RuleKey {
+    Name,
+    Shape,
+    Child,
+    Parent,
+    Link,
+    DocType,
+    Require,
+    Severity,
+}
+
+/// Uniquely identifies the buffer target for one editable settings field, so a
+/// later increment can read/write `App.settings_buffer` (a `Config`) for it via
+/// an exhaustive `match`. Collection variants carry the entry index; the
+/// certification override variant carries the override map key. This increment
+/// only attaches paths to the model -- nothing dispatches on them yet.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FieldPath {
+    Naming,
+    RefCountCeiling,
+    TemplatesDir,
+    Type {
+        index: usize,
+        key: TypeKey,
+    },
+    Rel {
+        index: usize,
+        key: RelKey,
+    },
+    Rule {
+        index: usize,
+        key: RuleKey,
+    },
+    SqidsSalt,
+    SqidsMinLength,
+    ReservedRemote,
+    ReservedFormat,
+    ReservedMaxRetries,
+    GithubRepo,
+    GithubCacheTtl,
+    CoordinationRemote,
+    CoordinationLeaseDuration,
+    CoordinationGracePeriod,
+    CoordinationMaxPushRetries,
+    CoordinationMaxClockSkew,
+    CertNormalize,
+    CertOverride {
+        key: String,
+    },
+    AgentsInteractive,
+    UiAsciiDiagrams,
+    StatusbarEnabled,
+    StatusbarLeft,
+    StatusbarCenter,
+    StatusbarRight,
+    MultilineMaxExpandedHeight,
+    /// An unset optional-section placeholder line (rendered ReadOnly). It targets
+    /// no concrete config field; a later increment surfaces "create section"
+    /// rather than an in-place edit for these.
+    Unset,
+}
+
+/// One row in a settings FIELD-view: the rendered key label, the current display
+/// value, the editor kind, and the buffer path. The render derives its lines from
+/// `format!("{}: {}", label, value)` so the view and the (future) editors share
+/// one source of truth.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EditableField {
+    pub label: String,
+    pub value: String,
+    pub editor: FieldEditor,
+    pub path: FieldPath,
 }
