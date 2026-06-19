@@ -1,15 +1,17 @@
 #[cfg(feature = "agent")]
 use super::forms::AgentDialog;
 use super::forms::{
-    CreateForm, DeleteConfirm, EditableField, FieldEditor, FieldPath, LinkEditor, ProvenanceEditor,
-    RelKey, RuleKey, SettingsQuitPrompt, StatusPicker, TypeKey,
+    CreateForm, DeleteConfirm, EditableField, FieldEditor, FieldPath, LinkEditor,
+    OverrideKeyPrompt, ProvenanceEditor, RelKey, RuleKey, SettingsDeleteConfirm,
+    SettingsDeleteTarget, SettingsQuitPrompt, StatusPicker, TypeKey,
 };
 use super::graph::flatten_forest;
 
 use crate::engine::cache::DiskCache;
 use crate::engine::config::{
-    Config, GithubConfig, NumberingStrategy, ReservedConfig, ReservedFormat, Severity, SqidsConfig,
-    StoreBackend, ValidationRule,
+    default_normalize, CertificationOverride, Config, GithubConfig, NumberingStrategy,
+    RelationshipDef, ReservedConfig, ReservedFormat, Severity, SqidsConfig, StoreBackend, TypeDef,
+    ValidationRule,
 };
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, Status};
 use crate::engine::fs::FileSystem;
@@ -546,6 +548,12 @@ pub struct App {
     /// required-but-empty field (only the sqids salt), the offer prompts a jump to
     /// fill it; any non-accept key dismisses it (the buffer-state flag persists).
     pub settings_scaffold_offer: Option<ScaffoldResult>,
+    /// The confirm prompt for removing a settings collection entry from the
+    /// buffer. Removal is buffer-only and happens only on confirm (no disk).
+    pub settings_delete_confirm: SettingsDeleteConfirm,
+    /// The spec-path key prompt for seeding a new certification override. The key
+    /// is entered before the override is inserted into the buffer.
+    pub override_key_prompt: OverrideKeyPrompt,
 }
 
 impl App {
@@ -672,6 +680,8 @@ impl App {
             settings_footer_error: None,
             settings_quit_prompt: SettingsQuitPrompt::new(),
             settings_scaffold_offer: None,
+            settings_delete_confirm: SettingsDeleteConfirm::new(),
+            override_key_prompt: OverrideKeyPrompt::new(),
         };
         app.apply_config(config);
         app.rebuild_search_index();
@@ -2176,6 +2186,216 @@ impl App {
         Ok(())
     }
 
+    /// Seed a default entry into the current Vec-backed collection (Document
+    /// Types / Relationships / Validation Rules) and drill into it. Placeholder
+    /// fields carry starter/default values so the new entry is immediately
+    /// editable. Buffer-only; sets `settings_dirty`.
+    pub fn settings_seed_entry(&mut self) {
+        match self.settings_category {
+            1 => {
+                self.settings_buffer.documents.types.push(TypeDef {
+                    name: "type".to_string(),
+                    plural: "types".to_string(),
+                    dir: "docs".to_string(),
+                    prefix: "TYPE".to_string(),
+                    icon: None,
+                    numbering: NumberingStrategy::default(),
+                    subdirectory: false,
+                    store: StoreBackend::default(),
+                    singleton: false,
+                    parent_type: None,
+                    agents: Vec::new(),
+                });
+                self.settings_entry = self.settings_buffer.documents.types.len() - 1;
+            }
+            2 => {
+                self.settings_buffer.relationships.push(RelationshipDef {
+                    name: "relationship".to_string(),
+                    inverse: None,
+                });
+                self.settings_entry = self.settings_buffer.relationships.len() - 1;
+            }
+            3 => {
+                self.settings_buffer
+                    .rules
+                    .push(ValidationRule::ParentChild {
+                        name: "rule".to_string(),
+                        child: String::new(),
+                        parent: String::new(),
+                        link: String::new(),
+                        severity: Severity::Error,
+                    });
+                self.settings_entry = self.settings_buffer.rules.len() - 1;
+            }
+            _ => return,
+        }
+        self.settings_drill = Some(self.settings_entry);
+        self.settings_field = 0;
+        self.settings_dirty = true;
+    }
+
+    /// Open the spec-path key prompt for a new certification override. The
+    /// override is not inserted until the prompt is confirmed with a non-empty
+    /// key (`settings_confirm_override`).
+    pub fn settings_seed_override(&mut self) {
+        self.override_key_prompt.active = true;
+        self.override_key_prompt.input.clear();
+    }
+
+    pub fn settings_override_type_char(&mut self, c: char) {
+        self.override_key_prompt.input.push(c);
+    }
+
+    pub fn settings_override_backspace(&mut self) {
+        self.override_key_prompt.input.pop();
+    }
+
+    pub fn settings_cancel_override(&mut self) {
+        self.override_key_prompt.active = false;
+        self.override_key_prompt.input.clear();
+    }
+
+    /// Confirm the override key prompt: insert a new override under the trimmed
+    /// key (with the default normalize) and drill into it. An empty key inserts
+    /// nothing and leaves the prompt active. Buffer-only; sets `settings_dirty`.
+    pub fn settings_confirm_override(&mut self) {
+        let key = self.override_key_prompt.input.trim().to_string();
+        if key.is_empty() {
+            return;
+        }
+        self.settings_buffer.certification.overrides.insert(
+            key.clone(),
+            CertificationOverride {
+                normalize: default_normalize(),
+            },
+        );
+        self.settings_dirty = true;
+        self.override_key_prompt.active = false;
+        self.override_key_prompt.input.clear();
+
+        let mut keys: Vec<&String> = self
+            .settings_buffer
+            .certification
+            .overrides
+            .keys()
+            .collect();
+        keys.sort();
+        if let Some(index) = keys.iter().position(|k| **k == key) {
+            self.settings_entry = index;
+            self.settings_drill = Some(index);
+            self.settings_field = 0;
+        }
+    }
+
+    /// Open the confirm prompt for removing the selected settings collection
+    /// entry. Resolves the target from `settings_entry` (sorted-key for cat 7).
+    /// ADR-011: refuses to delete the last `[[relationships]]` entry (cat 2),
+    /// returning without activating the confirm. No buffer mutation here.
+    pub fn settings_open_delete_confirm(&mut self) {
+        let category = self.settings_category;
+        let (target, entry_label) = match category {
+            1 => {
+                let Some(t) = self
+                    .settings_buffer
+                    .documents
+                    .types
+                    .get(self.settings_entry)
+                else {
+                    return;
+                };
+                (
+                    SettingsDeleteTarget::Index(self.settings_entry),
+                    t.name.clone(),
+                )
+            }
+            2 => {
+                // ADR-011: a real config must keep at least one relationship.
+                if self.settings_buffer.relationships.len() <= 1 {
+                    return;
+                }
+                let Some(r) = self.settings_buffer.relationships.get(self.settings_entry) else {
+                    return;
+                };
+                (
+                    SettingsDeleteTarget::Index(self.settings_entry),
+                    r.name.clone(),
+                )
+            }
+            3 => {
+                let Some(rule) = self.settings_buffer.rules.get(self.settings_entry) else {
+                    return;
+                };
+                let name = match rule {
+                    ValidationRule::ParentChild { name, .. } => name.clone(),
+                    ValidationRule::RelationExistence { name, .. } => name.clone(),
+                };
+                (SettingsDeleteTarget::Index(self.settings_entry), name)
+            }
+            7 => {
+                let mut keys: Vec<&String> = self
+                    .settings_buffer
+                    .certification
+                    .overrides
+                    .keys()
+                    .collect();
+                keys.sort();
+                let Some(key) = keys.get(self.settings_entry) else {
+                    return;
+                };
+                let key = (*key).clone();
+                (SettingsDeleteTarget::Key(key.clone()), key)
+            }
+            _ => return,
+        };
+        self.settings_delete_confirm = SettingsDeleteConfirm {
+            active: true,
+            category,
+            entry_label,
+            target,
+        };
+    }
+
+    pub fn settings_close_delete_confirm(&mut self) {
+        self.settings_delete_confirm = SettingsDeleteConfirm::new();
+    }
+
+    /// Remove the targeted entry from the buffer (the only removal site, after
+    /// confirm). Clamps `settings_entry` to the new collection length and closes
+    /// the confirm. Buffer-only; sets `settings_dirty`.
+    pub fn settings_confirm_delete(&mut self) {
+        let category = self.settings_delete_confirm.category;
+        let new_len = match self.settings_delete_confirm.target.clone() {
+            SettingsDeleteTarget::Index(i) => match category {
+                1 => {
+                    if i < self.settings_buffer.documents.types.len() {
+                        self.settings_buffer.documents.types.remove(i);
+                    }
+                    self.settings_buffer.documents.types.len()
+                }
+                2 => {
+                    if i < self.settings_buffer.relationships.len() {
+                        self.settings_buffer.relationships.remove(i);
+                    }
+                    self.settings_buffer.relationships.len()
+                }
+                3 => {
+                    if i < self.settings_buffer.rules.len() {
+                        self.settings_buffer.rules.remove(i);
+                    }
+                    self.settings_buffer.rules.len()
+                }
+                _ => 0,
+            },
+            SettingsDeleteTarget::Key(k) => {
+                self.settings_buffer.certification.overrides.remove(&k);
+                self.settings_buffer.certification.overrides.len()
+            }
+        };
+        self.settings_dirty = true;
+        self.settings_entry = self.settings_entry.min(new_len.saturating_sub(1));
+        self.settings_close_delete_confirm();
+    }
+
     pub fn open_status_picker(&mut self) {
         let doc = if self.view_mode == ViewMode::Filters {
             match self.selected_filtered_doc() {
@@ -2621,6 +2841,8 @@ mod tests {
             settings_footer_error: None,
             settings_quit_prompt: SettingsQuitPrompt::new(),
             settings_scaffold_offer: None,
+            settings_delete_confirm: SettingsDeleteConfirm::new(),
+            override_key_prompt: OverrideKeyPrompt::new(),
         };
         app
     }
@@ -4698,5 +4920,273 @@ inverse = "implemented-by"
         buffer.documents.github = Some(existing_github.clone());
         assert_eq!(scaffold_dependency(&mut buffer, ConfigDep::Github), None);
         assert_eq!(buffer.documents.github, Some(existing_github));
+    }
+
+    // --- ITERATION-190: settings collection management (AC1-AC7) ---
+
+    // AC1: seeding a Document Type appends a default TypeDef and drills in.
+    #[test]
+    fn ac1_seed_document_type_appends_default_and_drills() {
+        let mut app = settings_app(Config::default(), 1, 0);
+        let before = app.settings_buffer.documents.types.len();
+
+        app.settings_seed_entry();
+
+        assert_eq!(app.settings_buffer.documents.types.len(), before + 1);
+        let last = app.settings_buffer.documents.types.last().unwrap();
+        assert_eq!(last.numbering, NumberingStrategy::Incremental);
+        assert_eq!(last.store, StoreBackend::Filesystem);
+        assert!(last.agents.is_empty());
+        assert!(last.icon.is_none());
+        assert!(last.parent_type.is_none());
+        assert!(!last.name.is_empty());
+        assert_eq!(app.settings_entry, before);
+        assert_eq!(app.settings_drill, Some(before));
+        assert!(app.settings_dirty);
+    }
+
+    // AC2: seeding a Validation Rule appends a ParentChild rule and drills in.
+    #[test]
+    fn ac2_seed_validation_rule_appends_parent_child_and_drills() {
+        let mut app = settings_app(Config::default(), 3, 0);
+        let before = app.settings_buffer.rules.len();
+
+        app.settings_seed_entry();
+
+        assert_eq!(app.settings_buffer.rules.len(), before + 1);
+        assert!(matches!(
+            app.settings_buffer.rules.last().unwrap(),
+            ValidationRule::ParentChild { .. }
+        ));
+        assert_eq!(app.settings_entry, before);
+        assert_eq!(app.settings_drill, Some(before));
+        assert!(app.settings_dirty);
+    }
+
+    // AC3: seeding an override opens the key prompt without inserting; confirming
+    // a non-empty key inserts the override (default normalize) and drills in.
+    #[test]
+    fn ac3_seed_override_prompts_then_inserts_on_confirm() {
+        let mut app = settings_app(Config::default(), 7, 0);
+        let before = app.settings_buffer.certification.overrides.len();
+
+        app.settings_seed_override();
+        assert!(app.override_key_prompt.active);
+        assert_eq!(
+            app.settings_buffer.certification.overrides.len(),
+            before,
+            "no insert before confirm"
+        );
+        assert!(!app.settings_dirty);
+
+        for c in "docs/specs/SPEC-007".chars() {
+            app.settings_override_type_char(c);
+        }
+        app.settings_confirm_override();
+
+        let ov = app
+            .settings_buffer
+            .certification
+            .overrides
+            .get("docs/specs/SPEC-007")
+            .expect("override inserted");
+        assert!(ov.normalize, "default normalize is true");
+        assert!(!app.override_key_prompt.active);
+        assert!(app.settings_dirty);
+
+        let mut keys: Vec<&String> = app.settings_buffer.certification.overrides.keys().collect();
+        keys.sort();
+        let expected = keys
+            .iter()
+            .position(|k| **k == "docs/specs/SPEC-007")
+            .unwrap();
+        assert_eq!(app.settings_entry, expected);
+        assert_eq!(app.settings_drill, Some(expected));
+    }
+
+    // AC3 edge: an empty key on confirm inserts nothing.
+    #[test]
+    fn ac3_empty_override_key_inserts_nothing() {
+        let mut app = settings_app(Config::default(), 7, 0);
+        app.settings_seed_override();
+        app.settings_confirm_override();
+        assert!(app.settings_buffer.certification.overrides.is_empty());
+    }
+
+    // AC4: opening the delete confirm targets the selected entry without mutating
+    // the buffer; confirming removes it and dirties.
+    #[test]
+    fn ac4_delete_confirm_targets_then_removes_on_confirm() {
+        let mut app = settings_app(Config::default(), 1, 0);
+        app.settings_entry = 0;
+        let target_name = app.settings_buffer.documents.types[0].name.clone();
+        let before = app.settings_buffer.documents.types.len();
+
+        app.settings_open_delete_confirm();
+        assert!(app.settings_delete_confirm.active);
+        assert_eq!(app.settings_delete_confirm.entry_label, target_name);
+        assert_eq!(
+            app.settings_delete_confirm.target,
+            SettingsDeleteTarget::Index(0)
+        );
+        assert_eq!(
+            app.settings_buffer.documents.types.len(),
+            before,
+            "buffer unchanged until confirm"
+        );
+
+        app.settings_confirm_delete();
+        assert_eq!(app.settings_buffer.documents.types.len(), before - 1);
+        assert!(!app
+            .settings_buffer
+            .documents
+            .types
+            .iter()
+            .any(|t| t.name == target_name));
+        assert!(app.settings_dirty);
+        assert!(!app.settings_delete_confirm.active);
+    }
+
+    // AC5: cancelling the delete confirm leaves the buffer intact.
+    #[test]
+    fn ac5_delete_confirm_cancel_leaves_buffer_intact() {
+        let mut app = settings_app(Config::default(), 1, 0);
+        let before = app.settings_buffer.documents.types.clone();
+
+        app.settings_open_delete_confirm();
+        assert!(app.settings_delete_confirm.active);
+
+        app.settings_close_delete_confirm();
+        assert_eq!(app.settings_buffer.documents.types, before);
+        assert!(!app.settings_delete_confirm.active);
+        assert_eq!(app.settings_drill, None);
+    }
+
+    // AC6: ADR-011 guard refuses to delete the last relationship, with no confirm.
+    #[test]
+    fn ac6_delete_last_relationship_is_refused() {
+        let config = Config {
+            relationships: vec![RelationshipDef {
+                name: "related-to".to_string(),
+                inverse: None,
+            }],
+            ..Config::default()
+        };
+        let mut app = settings_app(config, 2, 0);
+        app.settings_entry = 0;
+
+        app.settings_open_delete_confirm();
+
+        assert!(
+            !app.settings_delete_confirm.active,
+            "no confirm shown for last relationship"
+        );
+        assert_eq!(app.settings_buffer.relationships.len(), 1);
+    }
+
+    // AC7: with >=2 relationships, delete is allowed and removes one on confirm.
+    #[test]
+    fn ac7_delete_relationship_allowed_when_more_than_one() {
+        let config = Config {
+            relationships: vec![
+                RelationshipDef {
+                    name: "implements".to_string(),
+                    inverse: Some("implemented-by".to_string()),
+                },
+                RelationshipDef {
+                    name: "related-to".to_string(),
+                    inverse: None,
+                },
+            ],
+            ..Config::default()
+        };
+        let mut app = settings_app(config, 2, 0);
+        app.settings_entry = 0;
+        let removed = app.settings_buffer.relationships[0].name.clone();
+
+        app.settings_open_delete_confirm();
+        assert!(app.settings_delete_confirm.active);
+
+        app.settings_confirm_delete();
+        assert_eq!(app.settings_buffer.relationships.len(), 1);
+        assert!(!app
+            .settings_buffer
+            .relationships
+            .iter()
+            .any(|r| r.name == removed));
+    }
+
+    // A save fixture with two relationships so a non-last delete is legal under the
+    // ADR-011 guard.
+    const COLLECTION_SAVE_SRC: &str = r#"# lazyspec collection fixture
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[templates]
+dir = ".lazyspec/templates"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "related-to"
+"#;
+
+    // AC8 (STORY-141): a save persists buffer-only collection add/remove. Seed a
+    // Document Type, give it save-valid non-colliding fields, delete a non-last
+    // relationship, then save -- the written file re-parses, holds the new type,
+    // drops the deleted relationship (>=1 remaining), and dirty clears.
+    #[test]
+    fn ac8_save_persists_collection_add_and_remove() {
+        let (tmp, mut app) = save_app(COLLECTION_SAVE_SRC);
+
+        // Seed a Document Type (cat 1) and make its placeholder fields save-valid
+        // and non-colliding with the existing `rfc`.
+        app.settings_category = 1;
+        app.settings_seed_entry();
+        let seeded = app.settings_buffer.documents.types.last_mut().unwrap();
+        seeded.name = "adr".to_string();
+        seeded.plural = "adrs".to_string();
+        seeded.dir = "docs/adrs".to_string();
+        seeded.prefix = "ADR".to_string();
+
+        // Delete the FIRST (non-last) relationship via the confirm flow (cat 2).
+        app.settings_category = 2;
+        app.settings_entry = 0;
+        let removed = app.settings_buffer.relationships[0].name.clone();
+        app.settings_open_delete_confirm();
+        assert!(app.settings_delete_confirm.active);
+        app.settings_confirm_delete();
+
+        app.settings_save(tmp.path());
+
+        // The written file is a valid config.
+        let out = read_config_file(&tmp);
+        let reparsed = Config::parse(&out).unwrap();
+
+        // The added type survived the round-trip.
+        assert!(
+            reparsed.type_by_name("adr").is_some(),
+            "added type should be persisted"
+        );
+        // The deleted relationship is gone, but at least one remains.
+        assert!(
+            reparsed.relationship_by_name(&removed).is_none(),
+            "deleted relationship should be absent"
+        );
+        assert!(
+            !reparsed.relationships.is_empty(),
+            "at least one relationship remains"
+        );
+
+        assert!(!app.settings_dirty, "dirty clears on a successful save");
+        assert_eq!(app.settings_footer_error, None);
     }
 }

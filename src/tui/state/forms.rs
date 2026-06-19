@@ -110,6 +110,66 @@ impl DeleteConfirm {
     }
 }
 
+/// Which buffer entry a `SettingsDeleteConfirm` targets. Vec-backed collections
+/// (Document Types / Relationships / Validation Rules) carry the entry index;
+/// certification overrides carry the sorted-key (spec-path) they live under.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SettingsDeleteTarget {
+    Index(usize),
+    Key(String),
+}
+
+/// The confirm prompt shown before a settings collection entry is removed from
+/// the in-memory buffer. Mirrors `DeleteConfirm`, but targets a buffer entry
+/// (not a doc file): no disk is touched, removal is buffer-only and happens only
+/// on confirm.
+pub struct SettingsDeleteConfirm {
+    pub active: bool,
+    pub category: usize,
+    pub entry_label: String,
+    pub target: SettingsDeleteTarget,
+}
+
+impl Default for SettingsDeleteConfirm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SettingsDeleteConfirm {
+    pub fn new() -> Self {
+        SettingsDeleteConfirm {
+            active: false,
+            category: 0,
+            entry_label: String::new(),
+            target: SettingsDeleteTarget::Index(0),
+        }
+    }
+}
+
+/// The spec-path key prompt shown when seeding a new certification override
+/// (`n` on the Certification category). The key is entered before the override
+/// is inserted into the buffer; an empty key inserts nothing.
+pub struct OverrideKeyPrompt {
+    pub active: bool,
+    pub input: String,
+}
+
+impl Default for OverrideKeyPrompt {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OverrideKeyPrompt {
+    pub fn new() -> Self {
+        OverrideKeyPrompt {
+            active: false,
+            input: String::new(),
+        }
+    }
+}
+
 /// The save/discard/cancel prompt shown when quitting Settings with unsaved
 /// buffer edits (AC10). Mirrors `DeleteConfirm`: a one-flag overlay state.
 pub struct SettingsQuitPrompt {

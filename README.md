@@ -136,6 +136,8 @@ Press `5` (or cycle to it with `` ` ``) to open the Settings view, which edits `
 | `h` / `l`          | Switch category (also `Left` / `Right`)                       |
 | `j` / `k`          | Move between fields / entries (also `Down` / `Up`)            |
 | `Enter`            | Drill into a collection entry, or start editing a field       |
+| `n`                | Add a new entry to a collection (Document Types / Relationships / Validation Rules seed a default and drill in; Certification prompts for a spec-path key) |
+| `d`                | Delete the selected collection entry, behind a confirm (refuses the last relationship) |
 | `Space`            | Toggle a boolean / cycle an enum field                        |
 | `g`                | When a dependency section is auto-scaffolded (e.g. cycling numbering to `sqids`), jump to the required field it needs filled |
 | type + `Enter`     | Confirm a text / number / duration / list edit                |

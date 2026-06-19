@@ -34,6 +34,12 @@ impl App {
         if self.delete_confirm.active {
             return self.handle_delete_confirm_key(code, root, config);
         }
+        if self.override_key_prompt.active {
+            return self.handle_override_key_prompt_key(code);
+        }
+        if self.settings_delete_confirm.active {
+            return self.handle_settings_delete_confirm_key(code);
+        }
         if self.status_picker.active {
             return self.handle_status_picker_key(code, root, config);
         }
@@ -82,6 +88,24 @@ impl App {
                 let _ = self.confirm_delete(root, config);
             }
             KeyCode::Esc => self.close_delete_confirm(),
+            _ => {}
+        }
+    }
+
+    fn handle_settings_delete_confirm_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter => self.settings_confirm_delete(),
+            KeyCode::Esc => self.settings_close_delete_confirm(),
+            _ => {}
+        }
+    }
+
+    fn handle_override_key_prompt_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter => self.settings_confirm_override(),
+            KeyCode::Esc => self.settings_cancel_override(),
+            KeyCode::Backspace => self.settings_override_backspace(),
+            KeyCode::Char(c) => self.settings_override_type_char(c),
             _ => {}
         }
     }
@@ -806,6 +830,24 @@ impl App {
             }
             KeyCode::Char(' ') => {
                 self.settings_space();
+            }
+            KeyCode::Char('n') if self.settings_drill.is_none() => {
+                // Seed a new entry in the current collection: Vec collections push
+                // a default and drill in; certification overrides open a key prompt.
+                match self.settings_category {
+                    1..=3 => self.settings_seed_entry(),
+                    7 => self.settings_seed_override(),
+                    _ => {}
+                }
+            }
+            KeyCode::Char('d')
+                if self.settings_drill.is_none()
+                    && self.settings_entry_count() > 0
+                    && matches!(self.settings_category, 1 | 2 | 3 | 7) =>
+            {
+                // Delete the selected entry behind a confirm (buffer-only). cat 2
+                // refuses its last relationship inside the open path (ADR-011).
+                self.settings_open_delete_confirm();
             }
             KeyCode::Enter => {
                 // Enter drills in an entry-list; in a field-view it starts an

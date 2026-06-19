@@ -248,6 +248,69 @@ pub fn draw_settings_quit_prompt(f: &mut Frame) {
     f.render_widget(paragraph, popup_area);
 }
 
+pub fn draw_settings_delete_confirm(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let dc = &app.settings_delete_confirm;
+
+    let popup_width = 50u16.min(area.width.saturating_sub(4));
+    let popup_height = 4u16.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(format!("  Delete \"{}\"?", dc.entry_label)),
+        Line::from(""),
+        Line::from(Span::styled(
+            "         [Enter: delete]  [Esc: cancel]",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Red))
+            .title(" Delete? "),
+    );
+    f.render_widget(paragraph, popup_area);
+}
+
+pub fn draw_override_key_prompt(f: &mut Frame, app: &App) {
+    let area = f.area();
+
+    let popup_width = 60u16.min(area.width.saturating_sub(4));
+    let popup_height = 5u16.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(format!("  {}", app.override_key_prompt.input)),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  [Enter: add]  [Esc: cancel]",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" Override spec-path "),
+    );
+    f.render_widget(paragraph, popup_area);
+}
+
 pub fn draw_status_picker(f: &mut Frame, app: &App) {
     let area = f.area();
 

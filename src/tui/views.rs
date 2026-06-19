@@ -26,7 +26,8 @@ use status_bar::draw_status_bar;
 use overlays::draw_agent_dialog;
 use overlays::{
     draw_create_form, draw_delete_confirm, draw_gh_conflict, draw_help_overlay, draw_link_editor,
-    draw_provenance_editor, draw_search_overlay, draw_settings_quit_prompt, draw_status_picker,
+    draw_override_key_prompt, draw_provenance_editor, draw_search_overlay,
+    draw_settings_delete_confirm, draw_settings_quit_prompt, draw_status_picker,
     draw_warnings_panel,
 };
 #[cfg(feature = "agent")]
@@ -216,6 +217,14 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
 
     if app.settings_quit_prompt.active {
         draw_settings_quit_prompt(f);
+    }
+
+    if app.settings_delete_confirm.active {
+        draw_settings_delete_confirm(f, app);
+    }
+
+    if app.override_key_prompt.active {
+        draw_override_key_prompt(f, app);
     }
 
     if app.status_picker.active {

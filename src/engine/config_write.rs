@@ -1,7 +1,10 @@
-use anyhow::{bail, Result};
-use toml_edit::{Array, DocumentMut, Item, Table, Value};
+use anyhow::Result;
+use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value};
 
-use crate::engine::config::{Config, NumberingStrategy, ReservedFormat, Severity, ValidationRule};
+use crate::engine::config::{
+    default_normalize, Config, NumberingStrategy, RelationshipDef, ReservedFormat, Severity,
+    TypeDef, ValidationRule,
+};
 
 pub fn write_config_in_place(existing_src: &str, buffer: &Config) -> Result<String> {
     let mut doc: DocumentMut = existing_src.parse()?;
@@ -9,14 +12,15 @@ pub fn write_config_in_place(existing_src: &str, buffer: &Config) -> Result<Stri
     write_naming(&mut doc, buffer);
     write_ref_count_ceiling(&mut doc, buffer);
     write_templates(&mut doc, buffer);
-    write_types(&mut doc, buffer)?;
+    write_types(&mut doc, buffer);
+    write_relationships(&mut doc, buffer);
     write_tui(&mut doc, buffer);
     write_numbering(&mut doc, buffer);
     write_github(&mut doc, buffer);
     write_coordination(&mut doc, buffer);
     write_certification(&mut doc, buffer);
     write_agents(&mut doc, buffer);
-    write_rules(&mut doc, buffer)?;
+    write_rules(&mut doc, buffer);
 
     Ok(doc.to_string())
 }
@@ -43,32 +47,70 @@ fn write_templates(doc: &mut DocumentMut, buffer: &Config) {
     }
 }
 
-fn write_types(doc: &mut DocumentMut, buffer: &Config) -> Result<()> {
+fn write_types(doc: &mut DocumentMut, buffer: &Config) {
+    if !doc.contains_key("types") {
+        if buffer.documents.types.is_empty() {
+            return;
+        }
+        doc.insert("types", Item::ArrayOfTables(ArrayOfTables::new()));
+    }
     let Some(types) = doc.get_mut("types").and_then(Item::as_array_of_tables_mut) else {
-        return Ok(());
+        return;
     };
-    if types.len() != buffer.documents.types.len() {
-        bail!("in-place config writer requires equal [[types]] counts (add/remove entries is not supported here)");
+    reconcile_array_of_tables(
+        types,
+        &buffer.documents.types,
+        |def| def.name.as_str(),
+        update_type_table,
+    );
+}
+
+// Update the scalar keys of an existing [[types]] table in place, preserving its
+// decor. Also used to populate a freshly appended table (a new Table is empty, so
+// every key is inserted).
+fn update_type_table(entry: &mut Table, def: &TypeDef) {
+    set_str(entry, "name", &def.name);
+    set_str(entry, "plural", &def.plural);
+    set_str(entry, "dir", &def.dir);
+    set_str(entry, "prefix", &def.prefix);
+    set_opt_str(entry, "icon", def.icon.as_deref());
+    set_str_defaulted(
+        entry,
+        "numbering",
+        numbering_str(&def.numbering),
+        "incremental",
+    );
+    set_bool_defaulted(entry, "subdirectory", def.subdirectory, false);
+    set_str_defaulted(entry, "store", &def.store.to_string(), "filesystem");
+    set_bool_defaulted(entry, "singleton", def.singleton, false);
+    set_opt_str(entry, "parent_type", def.parent_type.as_deref());
+    set_str_array_defaulted(entry, "agents", &def.agents);
+}
+
+fn write_relationships(doc: &mut DocumentMut, buffer: &Config) {
+    if !doc.contains_key("relationships") {
+        if buffer.relationships.is_empty() {
+            return;
+        }
+        doc.insert("relationships", Item::ArrayOfTables(ArrayOfTables::new()));
     }
-    for (entry, def) in types.iter_mut().zip(buffer.documents.types.iter()) {
-        set_str(entry, "name", &def.name);
-        set_str(entry, "plural", &def.plural);
-        set_str(entry, "dir", &def.dir);
-        set_str(entry, "prefix", &def.prefix);
-        set_opt_str(entry, "icon", def.icon.as_deref());
-        set_str_defaulted(
-            entry,
-            "numbering",
-            numbering_str(&def.numbering),
-            "incremental",
-        );
-        set_bool_defaulted(entry, "subdirectory", def.subdirectory, false);
-        set_str_defaulted(entry, "store", &def.store.to_string(), "filesystem");
-        set_bool_defaulted(entry, "singleton", def.singleton, false);
-        set_opt_str(entry, "parent_type", def.parent_type.as_deref());
-        set_str_array_defaulted(entry, "agents", &def.agents);
-    }
-    Ok(())
+    let Some(relationships) = doc
+        .get_mut("relationships")
+        .and_then(Item::as_array_of_tables_mut)
+    else {
+        return;
+    };
+    reconcile_array_of_tables(
+        relationships,
+        &buffer.relationships,
+        |def| def.name.as_str(),
+        update_relationship_table,
+    );
+}
+
+fn update_relationship_table(entry: &mut Table, def: &RelationshipDef) {
+    set_str(entry, "name", &def.name);
+    set_opt_str(entry, "inverse", def.inverse.as_deref());
 }
 
 fn write_tui(doc: &mut DocumentMut, buffer: &Config) {
@@ -187,6 +229,21 @@ fn write_coordination(doc: &mut DocumentMut, buffer: &Config) {
 }
 
 fn write_certification(doc: &mut DocumentMut, buffer: &Config) {
+    // The [certification] parent is fabricated only when needed -- either a
+    // non-default normalize on an absent section (preserved 188 behavior is
+    // delegated to set_bool_defaulted) or a non-empty overrides map below.
+    let has_overrides = !buffer.certification.overrides.is_empty();
+    if !doc.contains_key("certification") {
+        if !has_overrides && buffer.certification.normalize == default_normalize() {
+            return;
+        }
+        let mut table = Table::new();
+        // Implicit so a bare `[certification]` header is only emitted if the
+        // section carries its own scalar (normalize); a sub-table-only section
+        // renders as `[certification.overrides...]`.
+        table.set_implicit(true);
+        doc.insert("certification", Item::Table(table));
+    }
     let Some(certification) = doc
         .get_mut("certification")
         .and_then(Item::as_table_like_mut)
@@ -197,19 +254,49 @@ fn write_certification(doc: &mut DocumentMut, buffer: &Config) {
         certification,
         "normalize",
         buffer.certification.normalize,
-        true,
+        default_normalize(),
     );
 
-    if let Some(overrides) = certification
+    write_overrides(certification, buffer);
+}
+
+// Reconcile [certification.overrides] to the buffer map: drop sub-tables whose key
+// left the map, update/insert a `normalize` sub-table for every buffer key, and
+// remove the parent overrides table entirely when the buffer map is empty (no
+// dangling empty table is left behind, and none is fabricated for an empty map).
+fn write_overrides(certification: &mut dyn toml_edit::TableLike, buffer: &Config) {
+    if buffer.certification.overrides.is_empty() {
+        certification.remove("overrides");
+        return;
+    }
+
+    if !certification.contains_key("overrides") {
+        let mut table = Table::new();
+        table.set_implicit(true);
+        certification.insert("overrides", Item::Table(table));
+    }
+    let Some(overrides) = certification
         .get_mut("overrides")
         .and_then(Item::as_table_like_mut)
-    {
-        for (key, value) in overrides.iter_mut() {
-            if let Some(override_table) = value.as_table_like_mut() {
-                if let Some(cfg) = buffer.certification.overrides.get(key.get()) {
-                    set_bool(override_table, "normalize", cfg.normalize);
-                }
-            }
+    else {
+        return;
+    };
+
+    let stale: Vec<String> = overrides
+        .iter()
+        .map(|(key, _)| key.to_string())
+        .filter(|key| !buffer.certification.overrides.contains_key(key))
+        .collect();
+    for key in stale {
+        overrides.remove(&key);
+    }
+
+    for (key, cfg) in &buffer.certification.overrides {
+        if !overrides.contains_key(key) {
+            overrides.insert(key, Item::Table(Table::new()));
+        }
+        if let Some(sub) = overrides.get_mut(key).and_then(Item::as_table_like_mut) {
+            set_bool(sub, "normalize", cfg.normalize);
         }
     }
 }
@@ -221,53 +308,98 @@ fn write_agents(doc: &mut DocumentMut, buffer: &Config) {
     set_opt_str(agents, "interactive", buffer.agents.interactive.as_deref());
 }
 
-fn write_rules(doc: &mut DocumentMut, buffer: &Config) -> Result<()> {
+fn write_rules(doc: &mut DocumentMut, buffer: &Config) {
+    if !doc.contains_key("rules") {
+        if buffer.rules.is_empty() {
+            return;
+        }
+        doc.insert("rules", Item::ArrayOfTables(ArrayOfTables::new()));
+    }
     let Some(rules) = doc.get_mut("rules").and_then(Item::as_array_of_tables_mut) else {
-        return Ok(());
+        return;
     };
-    if rules.len() != buffer.rules.len() {
-        bail!("in-place config writer requires equal [[rules]] counts (add/remove entries is not supported here)");
+    reconcile_array_of_tables(rules, &buffer.rules, rule_name, update_rule_table);
+}
+
+fn rule_name(rule: &ValidationRule) -> &str {
+    match rule {
+        ValidationRule::ParentChild { name, .. } => name,
+        ValidationRule::RelationExistence { name, .. } => name,
     }
-    for (entry, rule) in rules.iter_mut().zip(buffer.rules.iter()) {
-        let shape_changed = entry.get("shape").and_then(Item::as_str) != Some(rule_shape(rule));
-        // A shape (enum) edit switches the rule's variant, so the previous
-        // variant's body keys are no longer valid and must be cleared before the
-        // new variant is written. `name`/`severity` are common to both variants.
-        if shape_changed {
-            for key in ["child", "parent", "link", "type", "require"] {
-                entry.remove(key);
-            }
-        }
-        match rule {
-            ValidationRule::ParentChild {
-                name,
-                child,
-                parent,
-                link,
-                severity,
-            } => {
-                set_str(entry, "name", name);
-                set_str(entry, "shape", "parent-child");
-                set_str(entry, "child", child);
-                set_str(entry, "parent", parent);
-                set_str(entry, "link", link);
-                set_str(entry, "severity", severity_str(severity));
-            }
-            ValidationRule::RelationExistence {
-                name,
-                doc_type,
-                require,
-                severity,
-            } => {
-                set_str(entry, "name", name);
-                set_str(entry, "shape", "relation-existence");
-                set_str(entry, "type", doc_type);
-                set_str(entry, "require", require);
-                set_str(entry, "severity", severity_str(severity));
-            }
+}
+
+fn update_rule_table(entry: &mut Table, rule: &ValidationRule) {
+    let shape_changed = entry.get("shape").and_then(Item::as_str) != Some(rule_shape(rule));
+    // A shape (enum) edit switches the rule's variant, so the previous variant's
+    // body keys are no longer valid and must be cleared before the new variant is
+    // written. `name`/`severity` are common to both variants.
+    if shape_changed {
+        for key in ["child", "parent", "link", "type", "require"] {
+            entry.remove(key);
         }
     }
-    Ok(())
+    match rule {
+        ValidationRule::ParentChild {
+            name,
+            child,
+            parent,
+            link,
+            severity,
+        } => {
+            set_str(entry, "name", name);
+            set_str(entry, "shape", "parent-child");
+            set_str(entry, "child", child);
+            set_str(entry, "parent", parent);
+            set_str(entry, "link", link);
+            set_str(entry, "severity", severity_str(severity));
+        }
+        ValidationRule::RelationExistence {
+            name,
+            doc_type,
+            require,
+            severity,
+        } => {
+            set_str(entry, "name", name);
+            set_str(entry, "shape", "relation-existence");
+            set_str(entry, "type", doc_type);
+            set_str(entry, "require", require);
+            set_str(entry, "severity", severity_str(severity));
+        }
+    }
+}
+
+// Reconcile an `[[...]]` array-of-tables to `buffer` entries by IDENTITY (the
+// entry's `name`, unique per collection). Each surviving source table is updated
+// in place via `update` (preserving its decor/comments); deleted source tables
+// are removed by retaining only names still in the buffer (a middle delete drops
+// only that one table, others keep their comments); new buffer entries (names not
+// in the source) are appended as fresh tables. A rename (buffer name absent from
+// source) is treated as remove-old + append-new.
+fn reconcile_array_of_tables<T>(
+    tables: &mut ArrayOfTables,
+    buffer: &[T],
+    name_of: impl Fn(&T) -> &str,
+    update: impl Fn(&mut Table, &T),
+) {
+    let buffer_names: Vec<&str> = buffer.iter().map(&name_of).collect();
+    tables.retain(|table| {
+        let name = table.get("name").and_then(Item::as_str);
+        name.is_some_and(|n| buffer_names.contains(&n))
+    });
+    for def in buffer {
+        let name = name_of(def);
+        let existing = tables
+            .iter_mut()
+            .find(|t| t.get("name").and_then(Item::as_str) == Some(name));
+        match existing {
+            Some(table) => update(table, def),
+            None => {
+                let mut table = Table::new();
+                update(&mut table, def);
+                tables.push(table);
+            }
+        }
+    }
 }
 
 fn rule_shape(rule: &ValidationRule) -> &'static str {
@@ -422,7 +554,9 @@ fn set_value(table: &mut dyn toml_edit::TableLike, key: &str, new: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::Config;
+    use crate::engine::config::{
+        CertificationOverride, Config, RelationshipDef, StoreBackend, TypeDef,
+    };
 
     const SRC: &str = r#"# lazyspec configuration
 ref_count_ceiling = 15
@@ -650,23 +784,268 @@ severity = "error"
     }
 
     #[test]
-    fn type_count_mismatch_errors() {
-        // One extra [[types]] entry in the buffer.
-        let buffer_more = {
+    fn adding_a_type_appends_and_preserves_existing_comments() {
+        // SRC has 2 [[types]]; the `# document types follow` comment sits above the
+        // first. Append a third type to the buffer.
+        let buffer = {
             let mut c = Config::parse(SRC).unwrap();
-            let extra = c.documents.types[0].clone();
-            c.documents.types.push(extra);
+            c.documents.types.push(TypeDef {
+                name: "adr".to_string(),
+                plural: "adrs".to_string(),
+                dir: "docs/adrs".to_string(),
+                prefix: "ADR".to_string(),
+                icon: Some("#".to_string()),
+                numbering: NumberingStrategy::default(),
+                subdirectory: false,
+                store: StoreBackend::default(),
+                singleton: false,
+                parent_type: None,
+                agents: Vec::new(),
+            });
             c
         };
-        assert!(write_config_in_place(SRC, &buffer_more).is_err());
 
-        // One fewer [[types]] entry in the buffer.
-        let buffer_fewer = {
-            let mut c = Config::parse(SRC).unwrap();
-            c.documents.types.pop();
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+
+        // The existing entries' surrounding comment survives.
+        assert!(out.contains("# document types follow"));
+        // The new entry is present.
+        assert!(out.contains(r#"name = "adr""#));
+        assert!(out.contains(r#"prefix = "ADR""#));
+        // Re-parses with exactly three types in declared order.
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(reparsed.documents.types.len(), 3);
+        assert_eq!(reparsed.documents.types[2].name, "adr");
+        assert_eq!(reparsed.documents.types[2].icon.as_deref(), Some("#"));
+    }
+
+    const RELS_WITH_COMMENTS_SRC: &str = r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+# first relationship
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+# second relationship
+[[relationships]]
+name = "supersedes"
+inverse = "superseded-by"
+
+# third relationship
+[[relationships]]
+name = "related-to"
+"#;
+
+    #[test]
+    fn deleting_a_middle_relationship_removes_it_and_keeps_survivors_decor() {
+        // Drop the MIDDLE relationship (supersedes) from the buffer.
+        let buffer = {
+            let mut c = Config::parse(RELS_WITH_COMMENTS_SRC).unwrap();
+            c.relationships.retain(|r| r.name != "supersedes");
             c
         };
-        assert!(write_config_in_place(SRC, &buffer_fewer).is_err());
+
+        let out = write_config_in_place(RELS_WITH_COMMENTS_SRC, &buffer).unwrap();
+
+        // The deleted entry's block is gone.
+        assert!(!out.contains(r#"name = "supersedes""#));
+        assert!(!out.contains("# second relationship"));
+        // The other two entries' comments survive.
+        assert!(out.contains("# first relationship"));
+        assert!(out.contains("# third relationship"));
+        assert!(out.contains(r#"name = "implements""#));
+        assert!(out.contains(r#"name = "related-to""#));
+
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(reparsed.relationships.len(), 2);
+        assert!(reparsed.relationship_by_name("implements").is_some());
+        assert!(reparsed.relationship_by_name("related-to").is_some());
+        assert!(reparsed.relationship_by_name("supersedes").is_none());
+    }
+
+    #[test]
+    fn add_and_delete_in_one_render() {
+        // Buffer: add a type AND remove the one rule.
+        let buffer = {
+            let mut c = Config::parse(RULES_SRC).unwrap();
+            c.documents.types.push(TypeDef {
+                name: "spec".to_string(),
+                plural: "specs".to_string(),
+                dir: "docs/specs".to_string(),
+                prefix: "SPEC".to_string(),
+                icon: None,
+                numbering: NumberingStrategy::default(),
+                subdirectory: false,
+                store: StoreBackend::default(),
+                singleton: false,
+                parent_type: None,
+                agents: Vec::new(),
+            });
+            c.rules.clear();
+            c
+        };
+
+        let out = write_config_in_place(RULES_SRC, &buffer).unwrap();
+
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(reparsed.documents.types.len(), 2);
+        assert!(reparsed.type_by_name("spec").is_some());
+        assert!(reparsed.rules.is_empty());
+        assert!(!out.contains(r#"name = "story-has-rfc""#));
+    }
+
+    #[test]
+    fn relationship_scalar_edit_persists() {
+        // Source carries `implements`/`implemented-by`. Change the inverse to a new
+        // value (Some -> other), then to None (Some -> None). This closes the latent
+        // slice-3 gap where relationship scalar edits were never written.
+        let buffer_some = {
+            let mut c = Config::parse(RULES_SRC).unwrap();
+            c.relationships[0].inverse = Some("done-by".to_string());
+            c
+        };
+        let out = write_config_in_place(RULES_SRC, &buffer_some).unwrap();
+        assert!(out.contains(r#"inverse = "done-by""#));
+        assert!(!out.contains(r#"inverse = "implemented-by""#));
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(
+            reparsed.relationship_by_name("implements").unwrap().inverse,
+            Some("done-by".to_string())
+        );
+
+        let buffer_none = {
+            let mut c = Config::parse(RULES_SRC).unwrap();
+            c.relationships[0].inverse = None;
+            c
+        };
+        let out = write_config_in_place(RULES_SRC, &buffer_none).unwrap();
+        assert!(!out.contains("inverse"));
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(
+            reparsed.relationship_by_name("implements").unwrap().inverse,
+            None
+        );
+    }
+
+    #[test]
+    fn adding_a_relationship_appends_and_reparses() {
+        let buffer = {
+            let mut c = Config::parse(RULES_SRC).unwrap();
+            c.relationships.push(RelationshipDef {
+                name: "blocks".to_string(),
+                inverse: Some("blocked-by".to_string()),
+            });
+            c
+        };
+        let out = write_config_in_place(RULES_SRC, &buffer).unwrap();
+        assert!(out.contains(r#"name = "blocks""#));
+        assert!(out.contains(r#"inverse = "blocked-by""#));
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(reparsed.relationships.len(), 2);
+        assert!(reparsed.relationship_by_name("blocks").is_some());
+    }
+
+    #[test]
+    fn adding_a_rule_appends_and_reparses() {
+        let buffer = {
+            let mut c = Config::parse(RULES_SRC).unwrap();
+            c.rules.push(ValidationRule::RelationExistence {
+                name: "adrs-need-relations".to_string(),
+                doc_type: "adr".to_string(),
+                require: "any-relation".to_string(),
+                severity: Severity::Error,
+            });
+            c
+        };
+        let out = write_config_in_place(RULES_SRC, &buffer).unwrap();
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(reparsed.rules.len(), 2);
+        assert!(matches!(
+            &reparsed.rules[1],
+            ValidationRule::RelationExistence { name, .. } if name == "adrs-need-relations"
+        ));
+    }
+
+    const OVERRIDES_SRC: &str = r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[certification]
+normalize = true
+
+[certification.overrides."docs/specs/SPEC-001"]
+normalize = false
+"#;
+
+    #[test]
+    fn overrides_add_key_creates_subtable() {
+        let buffer = {
+            let mut c = Config::parse(OVERRIDES_SRC).unwrap();
+            c.certification.overrides.insert(
+                "docs/specs/SPEC-002".to_string(),
+                CertificationOverride { normalize: false },
+            );
+            c
+        };
+        let out = write_config_in_place(OVERRIDES_SRC, &buffer).unwrap();
+        assert!(out.contains(r#"[certification.overrides."docs/specs/SPEC-002"]"#));
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(reparsed.certification.overrides.len(), 2);
+        assert!(reparsed
+            .certification
+            .overrides
+            .contains_key("docs/specs/SPEC-002"));
+    }
+
+    #[test]
+    fn overrides_remove_key_drops_subtable() {
+        let buffer = {
+            let mut c = Config::parse(OVERRIDES_SRC).unwrap();
+            c.certification.overrides.clear();
+            c
+        };
+        let out = write_config_in_place(OVERRIDES_SRC, &buffer).unwrap();
+        assert!(!out.contains("SPEC-001"));
+        let reparsed = Config::parse(&out).unwrap();
+        assert!(reparsed.certification.overrides.is_empty());
+    }
+
+    #[test]
+    fn overrides_fabricated_when_absent_but_buffer_has_them() {
+        // SRC has no [certification.overrides] table at all; the buffer adds one.
+        let buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.certification.overrides.insert(
+                "docs/specs/SPEC-009".to_string(),
+                CertificationOverride { normalize: false },
+            );
+            c
+        };
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+        assert!(out.contains(r#"[certification.overrides."docs/specs/SPEC-009"]"#));
+        let reparsed = Config::parse(&out).unwrap();
+        assert!(!reparsed
+            .certification
+            .should_normalize("docs/specs/SPEC-009"));
+    }
+
+    #[test]
+    fn empty_overrides_map_does_not_fabricate_table() {
+        // SRC has no overrides and the buffer has none either: no table appears.
+        let buffer = Config::parse(SRC).unwrap();
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+        assert!(!out.contains("[certification.overrides"));
+        Config::parse(&out).unwrap();
     }
 
     const STATUSBAR_SRC: &str = r#"[[types]]

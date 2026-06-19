@@ -1,7 +1,7 @@
 ---
 title: Settings collection management
 type: iteration
-status: draft
+status: accepted
 author: agent
 date: 2026-06-19
 tags: []
