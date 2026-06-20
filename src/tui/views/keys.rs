@@ -788,6 +788,51 @@ impl App {
             return;
         }
 
+        // The status-bar zone ordering editor owns all keys while open, so it
+        // intercepts before nav/space/save. `c` commits (not `w`/Ctrl-S -- those
+        // stay the global buffer save); Esc cancels without writing.
+        if self.settings_zone_editor.is_some() {
+            match (code, modifiers) {
+                (KeyCode::Tab, _) => {
+                    if let Some(z) = self.settings_zone_editor.as_mut() {
+                        z.toggle_pane();
+                    }
+                }
+                (KeyCode::Char('j') | KeyCode::Down, _) => {
+                    if let Some(z) = self.settings_zone_editor.as_mut() {
+                        z.cursor_down();
+                    }
+                }
+                (KeyCode::Char('k') | KeyCode::Up, _) => {
+                    if let Some(z) = self.settings_zone_editor.as_mut() {
+                        z.cursor_up();
+                    }
+                }
+                (KeyCode::Char(' ') | KeyCode::Enter, _) => {
+                    if let Some(z) = self.settings_zone_editor.as_mut() {
+                        match z.pane {
+                            crate::tui::state::forms::ZonePane::Available => z.add(),
+                            crate::tui::state::forms::ZonePane::Selected => z.remove(),
+                        }
+                    }
+                }
+                (KeyCode::Char('K'), _) => {
+                    if let Some(z) = self.settings_zone_editor.as_mut() {
+                        z.move_up();
+                    }
+                }
+                (KeyCode::Char('J'), _) => {
+                    if let Some(z) = self.settings_zone_editor.as_mut() {
+                        z.move_down();
+                    }
+                }
+                (KeyCode::Char('c'), _) => self.settings_commit_zone(),
+                (KeyCode::Esc, _) => self.settings_cancel_zone(),
+                _ => {}
+            }
+            return;
+        }
+
         // A pending dependency-scaffold offer is answered before any nav/edit:
         // `g` ("go to field") jumps focus to the required-but-empty field it points
         // at and clears the offer; any other key declines (clears the offer) and
@@ -866,7 +911,14 @@ impl App {
                 if self.settings_in_entry_list() {
                     self.settings_drill = Some(self.settings_entry);
                     self.settings_field = 0;
-                } else if self.settings_focused_is_text_entry() {
+                } else if self.settings_focused_is_text_entry()
+                    || matches!(
+                        self.settings_focused_field().map(|f| f.editor),
+                        Some(FieldEditor::ZoneOrdering)
+                    )
+                {
+                    // Text-entry fields begin inline editing; a ZoneOrdering field
+                    // opens the two-pane zone editor (both routed via start_edit).
                     self.settings_start_edit();
                 }
             }

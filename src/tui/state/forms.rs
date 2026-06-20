@@ -356,12 +356,160 @@ impl AgentDialog {
 pub enum FieldEditor {
     Text,
     Toggle,
-    BoundedNum { min: u64, max: u64 },
+    BoundedNum {
+        min: u64,
+        max: u64,
+    },
     Nullable,
     Duration,
     List,
-    EnumCycle { variants: &'static [&'static str] },
+    EnumCycle {
+        variants: &'static [&'static str],
+    },
+    /// A two-pane (Selected/Available) reorderable editor for a status-bar zone
+    /// (`statusbar.left/center/right`). The current value + per-zone defaults are
+    /// derived from the `FieldPath` when the editor opens, so the variant is unit.
+    ZoneOrdering,
     ReadOnly,
+}
+
+/// Which pane the status-bar zone editor cursor is on: the ordered `Selected`
+/// list (the zone's chosen components) or the `Available` vocabulary list.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ZonePane {
+    Selected,
+    Available,
+}
+
+/// The two-pane reorderable editor state for one status-bar zone. `selected` is
+/// the zone's components in render order; `available` is the remaining
+/// `STATUS_BAR_COMPONENTS` vocabulary (const order preserved). `path` records
+/// which zone the commit writes back to. Operations are pure (no terminal), so
+/// they are App-testable.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ZoneOrderingEditor {
+    pub path: FieldPath,
+    pub selected: Vec<String>,
+    pub available: Vec<String>,
+    pub cursor: usize,
+    pub pane: ZonePane,
+}
+
+impl ZoneOrderingEditor {
+    /// Seed the editor for `path` from the zone's current buffer value: `selected`
+    /// is the current names (or `defaults` when the zone is `None`); `available`
+    /// is `STATUS_BAR_COMPONENTS` minus the selected names, in const order.
+    pub fn new(path: FieldPath, current: Option<&Vec<String>>, defaults: &[&str]) -> Self {
+        let selected: Vec<String> = match current {
+            Some(names) => names.clone(),
+            None => defaults.iter().map(|s| s.to_string()).collect(),
+        };
+        let available = Self::available_for(&selected);
+        ZoneOrderingEditor {
+            path,
+            selected,
+            available,
+            cursor: 0,
+            pane: ZonePane::Selected,
+        }
+    }
+
+    /// The vocabulary minus `selected`, in `STATUS_BAR_COMPONENTS` order. Only
+    /// const names can ever appear here (AC5).
+    fn available_for(selected: &[String]) -> Vec<String> {
+        crate::tui::views::status_bar::STATUS_BAR_COMPONENTS
+            .iter()
+            .filter(|name| !selected.iter().any(|s| s == *name))
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    fn active_len(&self) -> usize {
+        match self.pane {
+            ZonePane::Selected => self.selected.len(),
+            ZonePane::Available => self.available.len(),
+        }
+    }
+
+    fn clamp_cursor(&mut self) {
+        let len = self.active_len();
+        if len == 0 {
+            self.cursor = 0;
+        } else if self.cursor >= len {
+            self.cursor = len - 1;
+        }
+    }
+
+    pub fn toggle_pane(&mut self) {
+        self.pane = match self.pane {
+            ZonePane::Selected => ZonePane::Available,
+            ZonePane::Available => ZonePane::Selected,
+        };
+        self.clamp_cursor();
+    }
+
+    pub fn cursor_up(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn cursor_down(&mut self) {
+        let len = self.active_len();
+        if len > 0 {
+            self.cursor = (self.cursor + 1).min(len - 1);
+        }
+    }
+
+    /// Move the focused Available name to the end of `selected`. No-op unless the
+    /// Available pane is focused and non-empty. Only ever surfaces a const name.
+    pub fn add(&mut self) {
+        if self.pane != ZonePane::Available {
+            return;
+        }
+        if self.cursor >= self.available.len() {
+            return;
+        }
+        let name = self.available.remove(self.cursor);
+        self.selected.push(name);
+        self.clamp_cursor();
+    }
+
+    /// Move the focused Selected name back into `available`, restoring const order
+    /// among the available names. No-op unless the Selected pane is focused and
+    /// non-empty.
+    pub fn remove(&mut self) {
+        if self.pane != ZonePane::Selected {
+            return;
+        }
+        if self.cursor >= self.selected.len() {
+            return;
+        }
+        self.selected.remove(self.cursor);
+        self.available = Self::available_for(&self.selected);
+        self.clamp_cursor();
+    }
+
+    /// Swap the focused Selected name with the one above it. No-op off the Selected
+    /// pane or at the top.
+    pub fn move_up(&mut self) {
+        if self.pane != ZonePane::Selected || self.cursor == 0 {
+            return;
+        }
+        self.selected.swap(self.cursor, self.cursor - 1);
+        self.cursor -= 1;
+    }
+
+    /// Swap the focused Selected name with the one below it. No-op off the Selected
+    /// pane or at the bottom.
+    pub fn move_down(&mut self) {
+        if self.pane != ZonePane::Selected {
+            return;
+        }
+        if self.cursor + 1 >= self.selected.len() {
+            return;
+        }
+        self.selected.swap(self.cursor, self.cursor + 1);
+        self.cursor += 1;
+    }
 }
 
 /// A type-key inside a drilled [[types]] entry. The buffer target a later

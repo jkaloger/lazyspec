@@ -4,6 +4,7 @@ use super::forms::{
     CreateForm, DeleteConfirm, EditableField, FieldEditor, FieldPath, LinkEditor,
     OverrideKeyPrompt, ProvenanceEditor, RelKey, RuleKey, SettingsDeleteConfirm,
     SettingsDeleteTarget, SettingsImpactConfirm, SettingsQuitPrompt, StatusPicker, TypeKey,
+    ZoneOrderingEditor,
 };
 use super::graph::flatten_forest;
 use super::settings_guard;
@@ -560,6 +561,11 @@ pub struct App {
     /// The spec-path key prompt for seeding a new certification override. The key
     /// is entered before the override is inserted into the buffer.
     pub override_key_prompt: OverrideKeyPrompt,
+    /// The two-pane status-bar zone ordering editor, active while a
+    /// `statusbar.left/center/right` row is being reordered. `Some` routes keys to
+    /// the zone editor instead of the field list; commit writes the chosen order
+    /// back into `settings_buffer` (RFC-023 slice 7).
+    pub settings_zone_editor: Option<ZoneOrderingEditor>,
 }
 
 impl App {
@@ -689,6 +695,7 @@ impl App {
             settings_delete_confirm: SettingsDeleteConfirm::new(),
             settings_impact_confirm: SettingsImpactConfirm::new(),
             override_key_prompt: OverrideKeyPrompt::new(),
+            settings_zone_editor: None,
         };
         app.apply_config(config);
         app.rebuild_search_index();
@@ -1089,6 +1096,11 @@ impl App {
         let Some(focused) = self.settings_focused_field() else {
             return;
         };
+        // A status-bar zone row opens the two-pane ordering editor, not text entry.
+        if focused.editor == FieldEditor::ZoneOrdering {
+            self.settings_open_zone_editor(focused.path);
+            return;
+        }
         let editable = matches!(
             focused.editor,
             FieldEditor::Text
@@ -1103,6 +1115,48 @@ impl App {
         self.settings_editing = true;
         self.settings_edit_input = self.settings_focused_raw();
         self.settings_edit_error = None;
+    }
+
+    /// Open the status-bar zone ordering editor for `path`, seeding it from the
+    /// matching buffer zone and its RFC-022 default names (so an unset zone starts
+    /// from what the bar actually renders, not a blank).
+    fn settings_open_zone_editor(&mut self, path: FieldPath) {
+        use crate::tui::views::status_bar::{
+            STATUS_BAR_DEFAULT_CENTER, STATUS_BAR_DEFAULT_LEFT, STATUS_BAR_DEFAULT_RIGHT,
+        };
+        let sb = &self.settings_buffer.ui.statusbar;
+        let (current, defaults): (Option<&Vec<String>>, &[&str]) = match path {
+            FieldPath::StatusbarLeft => (sb.left.as_ref(), STATUS_BAR_DEFAULT_LEFT),
+            FieldPath::StatusbarCenter => (sb.center.as_ref(), STATUS_BAR_DEFAULT_CENTER),
+            FieldPath::StatusbarRight => (sb.right.as_ref(), STATUS_BAR_DEFAULT_RIGHT),
+            _ => return,
+        };
+        self.settings_zone_editor = Some(ZoneOrderingEditor::new(path.clone(), current, defaults));
+    }
+
+    /// Commit the active zone editor into the buffer at its `path`: a non-empty
+    /// list writes `Some(order)`; an empty list writes `Some(vec![])` (an explicit
+    /// clear, distinct from an untouched zone's `None`). Dirties the buffer and
+    /// closes the editor.
+    pub fn settings_commit_zone(&mut self) {
+        let Some(editor) = self.settings_zone_editor.take() else {
+            return;
+        };
+        let value = Some(editor.selected);
+        let sb = &mut self.settings_buffer.ui.statusbar;
+        match editor.path {
+            FieldPath::StatusbarLeft => sb.left = value,
+            FieldPath::StatusbarCenter => sb.center = value,
+            FieldPath::StatusbarRight => sb.right = value,
+            _ => return,
+        }
+        self.settings_dirty = true;
+    }
+
+    /// Close the zone editor without writing; the buffer is untouched (an untouched
+    /// zone stays `None`).
+    pub fn settings_cancel_zone(&mut self) {
+        self.settings_zone_editor = None;
     }
 
     pub fn settings_cancel_edit(&mut self) {
@@ -1161,7 +1215,10 @@ impl App {
                     self.settings_edit_error = Some(e.to_string());
                 }
             },
-            FieldEditor::Toggle | FieldEditor::EnumCycle { .. } | FieldEditor::ReadOnly => {}
+            FieldEditor::Toggle
+            | FieldEditor::EnumCycle { .. }
+            | FieldEditor::ZoneOrdering
+            | FieldEditor::ReadOnly => {}
         }
     }
 
@@ -2890,6 +2947,7 @@ mod tests {
             settings_delete_confirm: SettingsDeleteConfirm::new(),
             settings_impact_confirm: SettingsImpactConfirm::new(),
             override_key_prompt: OverrideKeyPrompt::new(),
+            settings_zone_editor: None,
         };
         app
     }
@@ -5577,5 +5635,215 @@ name = "related-to"
 
         assert!(!app.settings_dirty, "dirty clears on a successful save");
         assert_eq!(app.settings_footer_error, None);
+    }
+
+    // --- RFC-023 slice 7 / ITERATION-192: Interface category + zone ordering ---
+
+    // AC2: the ascii_diagrams boolean toggles through the slice-3 Space path and
+    // dirties the buffer. (statusbar.enabled is covered by
+    // ac2_toggle_statusbar_enabled_flips_and_dirties.)
+    #[test]
+    fn iter192_ac2_ascii_diagrams_toggle_flips_and_dirties() {
+        let mut config = config_one_type();
+        config.ui.ascii_diagrams = false;
+        let mut app = settings_app(config, 9, 0); // Interface > ascii_diagrams
+
+        app.settings_space();
+        assert!(app.settings_buffer.ui.ascii_diagrams);
+        assert!(app.settings_dirty);
+
+        app.settings_space();
+        assert!(!app.settings_buffer.ui.ascii_diagrams, "Space flips back");
+    }
+
+    // AC3: max_expanded_height bounded-numeric edit rejects out-of-range (keeping
+    // the prior value) and accepts a valid value.
+    #[test]
+    fn iter192_ac3_max_expanded_height_rejects_then_accepts() {
+        let config = config_one_type(); // [tui.multiline] absent -> default 5
+        let mut app = settings_app(config, 9, 5); // Interface > multiline.max_expanded_height
+        assert_eq!(app.settings_buffer.ui.multiline.max_expanded_height, 5);
+
+        // Reject "0" (below min 1): prior value retained, error set, still editing.
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        type_chars(&mut app, "0");
+        app.settings_confirm_edit();
+        assert_eq!(app.settings_buffer.ui.multiline.max_expanded_height, 5);
+        assert!(app.settings_edit_error.is_some());
+        assert!(app.settings_editing);
+
+        // Accept "8".
+        app.settings_edit_input.clear();
+        type_chars(&mut app, "8");
+        app.settings_confirm_edit();
+        assert_eq!(app.settings_buffer.ui.multiline.max_expanded_height, 8);
+        assert!(app.settings_dirty);
+        assert!(!app.settings_editing);
+    }
+
+    // AC4: opening a zone editor on an unset zone seeds it from the RFC-022 default
+    // names; add/remove/reorder then commit writes the chosen order into the buffer
+    // and dirties it.
+    #[test]
+    fn iter192_ac4_zone_ordering_round_trip_into_buffer() {
+        use crate::tui::state::forms::ZonePane;
+        use crate::tui::views::status_bar::STATUS_BAR_DEFAULT_LEFT;
+
+        let config = config_one_type(); // statusbar.left is None
+        let mut app = settings_app(config, 9, 2); // Interface > statusbar.left
+
+        // Enter opens the zone editor (routed via start_edit).
+        app.settings_start_edit();
+        let editor = app
+            .settings_zone_editor
+            .as_ref()
+            .expect("zone editor opens for a ZoneOrdering field");
+        let defaults: Vec<String> = STATUS_BAR_DEFAULT_LEFT
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            editor.selected, defaults,
+            "unset zone seeds from RFC-022 defaults"
+        );
+
+        // Remove the first selected name (default left = [mode, type_filter, doc_count]).
+        let z = app.settings_zone_editor.as_mut().unwrap();
+        z.pane = ZonePane::Selected;
+        z.cursor = 0;
+        let removed = z.selected[0].clone();
+        z.remove();
+        assert!(!z.selected.contains(&removed));
+        assert!(z.available.contains(&removed));
+
+        // Add git_branch from Available, then move it up one.
+        let z = app.settings_zone_editor.as_mut().unwrap();
+        z.pane = ZonePane::Available;
+        z.cursor = z
+            .available
+            .iter()
+            .position(|n| n == "git_branch")
+            .expect("git_branch available");
+        z.add();
+        z.pane = ZonePane::Selected;
+        z.cursor = z.selected.len() - 1; // git_branch landed at the end
+        z.move_up();
+        let expected = z.selected.clone();
+
+        app.settings_commit_zone();
+        assert!(
+            app.settings_zone_editor.is_none(),
+            "commit closes the editor"
+        );
+        assert_eq!(
+            app.settings_buffer.ui.statusbar.left,
+            Some(expected),
+            "committed order is written to the buffer"
+        );
+        assert!(app.settings_dirty);
+    }
+
+    // AC4: a zone the user never opens stays None; an explicitly cleared zone
+    // persists as Some(vec![]); both survive an atomic save round-trip.
+    #[test]
+    fn iter192_ac4_untouched_vs_cleared_zone_persist() {
+        use crate::tui::state::forms::ZonePane;
+
+        const SRC: &str = r#"[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+
+[tui.statusbar]
+enabled = true
+left = ["mode"]
+center = ["warnings"]
+"#;
+        let (tmp, mut app) = save_app(SRC);
+        app.settings_category = 9;
+
+        // Clear `center`: open its editor, remove all, commit -> Some(vec![]).
+        app.settings_field = 3; // statusbar.center
+        app.settings_start_edit();
+        let z = app.settings_zone_editor.as_mut().expect("center editor");
+        z.pane = ZonePane::Selected;
+        while !z.selected.is_empty() {
+            z.cursor = 0;
+            z.remove();
+        }
+        app.settings_commit_zone();
+        assert_eq!(
+            app.settings_buffer.ui.statusbar.center,
+            Some(vec![]),
+            "cleared zone is an explicit empty list"
+        );
+
+        // `right` is never opened -> stays None (untouched).
+        assert_eq!(app.settings_buffer.ui.statusbar.right, None);
+
+        app.settings_dirty = true;
+        app.settings_save(tmp.path(), &Config::parse(SRC).unwrap());
+        assert_eq!(app.settings_footer_error, None, "save succeeds");
+
+        let out = read_config_file(&tmp);
+        let reparsed = Config::parse(&out).unwrap();
+        // left untouched in this test -> preserved as written.
+        assert_eq!(
+            reparsed.ui.statusbar.left,
+            Some(vec!["mode".to_string()]),
+            "untouched left preserved"
+        );
+        // right never set -> remains absent (None).
+        assert_eq!(
+            reparsed.ui.statusbar.right, None,
+            "untouched right stays unset"
+        );
+        // cleared center -> absent array per slice-3 list semantics (empty == absent).
+        assert!(
+            reparsed.ui.statusbar.center.unwrap_or_default().is_empty(),
+            "cleared center round-trips as empty/absent"
+        );
+    }
+
+    // AC5: the ordering editor only ever surfaces RFC-022 vocabulary -- both the
+    // seeded selected set and the available set are subsets of STATUS_BAR_COMPONENTS,
+    // and adding can only ever move a const name into selected.
+    #[test]
+    fn iter192_ac5_editor_offers_only_vocabulary() {
+        use crate::tui::state::forms::{FieldPath, ZoneOrderingEditor, ZonePane};
+        use crate::tui::views::status_bar::{STATUS_BAR_COMPONENTS, STATUS_BAR_DEFAULT_RIGHT};
+
+        let vocab: std::collections::HashSet<&str> =
+            STATUS_BAR_COMPONENTS.iter().copied().collect();
+        let mut editor =
+            ZoneOrderingEditor::new(FieldPath::StatusbarRight, None, STATUS_BAR_DEFAULT_RIGHT);
+
+        for name in editor.selected.iter().chain(editor.available.iter()) {
+            assert!(
+                vocab.contains(name.as_str()),
+                "{name} is offered but not in the RFC-022 vocabulary"
+            );
+        }
+
+        // Exhaustively add everything available; selected must remain within vocab
+        // and never exceed the full vocabulary.
+        editor.pane = ZonePane::Available;
+        while !editor.available.is_empty() {
+            editor.cursor = 0;
+            editor.add();
+        }
+        assert!(editor.available.is_empty());
+        assert_eq!(editor.selected.len(), STATUS_BAR_COMPONENTS.len());
+        for name in &editor.selected {
+            assert!(vocab.contains(name.as_str()));
+        }
     }
 }

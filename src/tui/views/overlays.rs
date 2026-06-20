@@ -369,6 +369,86 @@ pub fn draw_override_key_prompt(f: &mut Frame, app: &App) {
     f.render_widget(paragraph, popup_area);
 }
 
+/// The two-pane status-bar zone ordering editor: `Selected` (ordered, left) and
+/// `Available` (the remaining RFC-022 vocabulary, right). The focused pane gets a
+/// cyan border, the cursor row is highlighted. Render-only; all state lives in
+/// `app.settings_zone_editor`.
+pub fn draw_settings_zone_editor(f: &mut Frame, app: &App) {
+    use crate::tui::state::forms::ZonePane;
+
+    let Some(editor) = app.settings_zone_editor.as_ref() else {
+        return;
+    };
+
+    let area = f.area();
+    let popup_width = 60u16.min(area.width.saturating_sub(4));
+    let popup_height = 18u16.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Status-bar zone order ");
+    let inner = outer.inner(popup_area);
+    f.render_widget(outer, popup_area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[0]);
+
+    let pane = |title: &'static str, names: &[String], active: bool| {
+        let border = if active { Color::Cyan } else { Color::DarkGray };
+        let items: Vec<ListItem> = names.iter().map(|n| ListItem::new(n.clone())).collect();
+        List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(border))
+                    .title(format!(" {} ", title)),
+            )
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+    };
+
+    let selected_active = editor.pane == ZonePane::Selected;
+    let available_active = editor.pane == ZonePane::Available;
+    let selected_list = pane("Selected", &editor.selected, selected_active);
+    let available_list = pane("Available", &editor.available, available_active);
+
+    // The single cursor highlights only the active pane.
+    let mut selected_state = ListState::default();
+    if selected_active && !editor.selected.is_empty() {
+        selected_state.select(Some(editor.cursor.min(editor.selected.len() - 1)));
+    }
+    let mut available_state = ListState::default();
+    if available_active && !editor.available.is_empty() {
+        available_state.select(Some(editor.cursor.min(editor.available.len() - 1)));
+    }
+
+    f.render_stateful_widget(selected_list, panes[0], &mut selected_state);
+    f.render_stateful_widget(available_list, panes[1], &mut available_state);
+
+    let hint = Paragraph::new(Line::from(Span::styled(
+        "[Tab: pane] [Space/Enter: add/remove] [K/J: reorder] [c: commit] [Esc: cancel]",
+        Style::default().fg(Color::DarkGray),
+    )));
+    f.render_widget(hint, rows[1]);
+}
+
 pub fn draw_status_picker(f: &mut Frame, app: &App) {
     let area = f.area();
 

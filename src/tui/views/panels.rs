@@ -2104,19 +2104,19 @@ pub fn settings_fields(
             fields.push(field(
                 "statusbar.left",
                 statusbar_value(config.ui.statusbar.left.as_ref()),
-                FieldEditor::ReadOnly,
+                FieldEditor::ZoneOrdering,
                 FieldPath::StatusbarLeft,
             ));
             fields.push(field(
                 "statusbar.center",
                 statusbar_value(config.ui.statusbar.center.as_ref()),
-                FieldEditor::ReadOnly,
+                FieldEditor::ZoneOrdering,
                 FieldPath::StatusbarCenter,
             ));
             fields.push(field(
                 "statusbar.right",
                 statusbar_value(config.ui.statusbar.right.as_ref()),
-                FieldEditor::ReadOnly,
+                FieldEditor::ZoneOrdering,
                 FieldPath::StatusbarRight,
             ));
             fields.push(field(
@@ -3327,13 +3327,97 @@ name = "related-to"
         assert_eq!(min.editor, FieldEditor::ReadOnly);
     }
 
+    // AC1: the Interface category surfaces the full UiConfig as editable rows,
+    // reflecting defaults when [tui] is unset.
     #[test]
-    fn settings_fields_statusbar_left_is_read_only() {
+    fn settings_fields_interface_surfaces_full_uiconfig_with_defaults() {
         let config = Config::default();
         let fields = settings_fields(9, 0, None, &config);
-        let f = field_by_label(&fields, "statusbar.left");
-        assert_eq!(f.editor, FieldEditor::ReadOnly);
-        assert_eq!(f.path, FieldPath::StatusbarLeft);
+
+        let expected: &[(&str, FieldEditor, FieldPath)] = &[
+            (
+                "ascii_diagrams",
+                FieldEditor::Toggle,
+                FieldPath::UiAsciiDiagrams,
+            ),
+            (
+                "statusbar.enabled",
+                FieldEditor::Toggle,
+                FieldPath::StatusbarEnabled,
+            ),
+            (
+                "statusbar.left",
+                FieldEditor::ZoneOrdering,
+                FieldPath::StatusbarLeft,
+            ),
+            (
+                "statusbar.center",
+                FieldEditor::ZoneOrdering,
+                FieldPath::StatusbarCenter,
+            ),
+            (
+                "statusbar.right",
+                FieldEditor::ZoneOrdering,
+                FieldPath::StatusbarRight,
+            ),
+            (
+                "multiline.max_expanded_height",
+                FieldEditor::BoundedNum { min: 1, max: 1000 },
+                FieldPath::MultilineMaxExpandedHeight,
+            ),
+        ];
+        assert_eq!(fields.len(), expected.len(), "got: {fields:?}");
+        for (label, editor, path) in expected {
+            let f = field_by_label(&fields, label);
+            assert_eq!(&f.editor, editor, "editor mismatch for {label}");
+            assert_eq!(&f.path, path, "path mismatch for {label}");
+        }
+
+        // Default values surface, not (unset): ascii false, statusbar enabled true,
+        // multiline 5.
+        assert_eq!(field_by_label(&fields, "ascii_diagrams").value, "false");
+        assert_eq!(field_by_label(&fields, "statusbar.enabled").value, "true");
+        assert_eq!(
+            field_by_label(&fields, "multiline.max_expanded_height").value,
+            "5"
+        );
+    }
+
+    // AC1: explicit [tui] values surface in the rows.
+    #[test]
+    fn settings_fields_interface_reflects_explicit_values() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "related-to"
+
+[tui]
+ascii_diagrams = true
+
+[tui.statusbar]
+enabled = false
+left = ["mode", "git_branch"]
+
+[tui.multiline]
+max_expanded_height = 8
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let fields = settings_fields(9, 0, None, &config);
+        assert_eq!(field_by_label(&fields, "ascii_diagrams").value, "true");
+        assert_eq!(field_by_label(&fields, "statusbar.enabled").value, "false");
+        assert_eq!(
+            field_by_label(&fields, "multiline.max_expanded_height").value,
+            "8"
+        );
+        assert_eq!(
+            field_by_label(&fields, "statusbar.left").value,
+            "mode, git_branch"
+        );
     }
 
     #[test]

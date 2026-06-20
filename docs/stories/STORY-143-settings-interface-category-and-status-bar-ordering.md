@@ -1,7 +1,7 @@
 ---
 title: Settings Interface category and status bar ordering
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-06-19
 tags: []

@@ -1,7 +1,7 @@
 ---
 title: TUI Settings Screen
 type: rfc
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-03-15
 tags:
