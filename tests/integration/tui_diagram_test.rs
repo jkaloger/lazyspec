@@ -263,3 +263,54 @@ fn test_build_segments_with_cached_text() {
     assert!(matches!(&segments[1], PreviewSegment::DiagramText(t) if t.contains("┌───┐")));
     assert!(matches!(&segments[2], PreviewSegment::Markdown(_)));
 }
+
+// Callers cache extracted blocks keyed by document path; async ref-expansion can
+// replace the body while the cached blocks still describe the old one. Passing
+// stale byte ranges that exceed the new body must not panic on slicing.
+#[test]
+fn test_build_segments_stale_blocks_shorter_body() {
+    let long_body = "# Title\n\nLots of prose here.\n\n```d2\na -> b\n```\n\nTrailing text.\n";
+    let stale_blocks = extract_diagram_blocks(long_body);
+    assert_eq!(stale_blocks.len(), 1);
+
+    let short_body = "x\n";
+    let cache = DiagramCache::new();
+    let tools = ToolAvailability { d2: true };
+
+    let segments = build_preview_segments(
+        short_body,
+        &cache,
+        TerminalImageProtocol::KittyGraphics,
+        &tools,
+        &stale_blocks,
+    );
+
+    assert_eq!(segments.len(), 1);
+    assert!(matches!(&segments[0], PreviewSegment::Markdown(t) if t == short_body));
+}
+
+// Stale ranges that fall mid-UTF-8-char in the new body must not panic.
+#[test]
+fn test_build_segments_stale_blocks_char_boundary() {
+    let original = "```d2\na -> b\n```\nplain ascii tail\n";
+    let stale_blocks = extract_diagram_blocks(original);
+    assert_eq!(stale_blocks.len(), 1);
+    // Stale block ends at byte 17; that index lands mid-crab in `new_body`.
+    assert_eq!(stale_blocks[0].byte_range.end, 17);
+
+    let new_body = "🦀🦀🦀🦀🦀🦀🦀🦀🦀\n"; // 9 * 4 + 1 = 37 bytes, boundaries at 0,4,8,...,36
+    assert!(!new_body.is_char_boundary(17));
+    let cache = DiagramCache::new();
+    let tools = ToolAvailability { d2: true };
+
+    let segments = build_preview_segments(
+        new_body,
+        &cache,
+        TerminalImageProtocol::KittyGraphics,
+        &tools,
+        &stale_blocks,
+    );
+
+    assert_eq!(segments.len(), 1);
+    assert!(matches!(&segments[0], PreviewSegment::Markdown(t) if t == new_body));
+}

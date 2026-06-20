@@ -24,7 +24,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 // Discard any pending crossterm events buffered in stdin. Called after a child
@@ -345,6 +345,17 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     let protocol = terminal_caps::TerminalImageProtocol::from(picker.protocol_type());
     let tool_availability = content::diagram::ToolAvailability::detect();
 
+    // Restore the terminal on panic. Without this, an unwinding panic skips the
+    // teardown at the end of `run`, leaving raw mode and the alternate screen
+    // active: the panic message overwrites the UI and the cursor is left
+    // mispositioned. Chain the original hook so the message still prints.
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+        original_hook(info);
+    }));
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -421,7 +432,11 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     let term_tx = tx.clone();
     let thread_stdin_lock = stdin_lock.clone();
     std::thread::spawn(move || loop {
-        let _guard = thread_stdin_lock.lock().unwrap();
+        // The lock guards `()`: a poisoned mutex carries no corrupt state, so
+        // recover the guard rather than panicking and silently killing input.
+        let _guard = thread_stdin_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         if let Ok(true) = crossterm::event::poll(Duration::from_millis(50)) {
             if let Ok(Event::Key(key)) = crossterm::event::read() {
                 if key.kind == KeyEventKind::Press {
@@ -548,7 +563,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         perf_log::log_duration("loop_total", loop_start);
 
         if let Some(path) = app.editor_request.take() {
-            let _stdin_guard = stdin_lock.lock().unwrap();
+            let _stdin_guard = stdin_lock.lock().unwrap_or_else(PoisonError::into_inner);
             while rx.try_recv().is_ok() {}
             run_editor(&mut terminal, &path)?;
             drain_stdin();
@@ -593,7 +608,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
 
         #[cfg(feature = "agent")]
         if let Some(session_id) = app.resume_request.take() {
-            let _stdin_guard = stdin_lock.lock().unwrap();
+            let _stdin_guard = stdin_lock.lock().unwrap_or_else(PoisonError::into_inner);
             while rx.try_recv().is_ok() {}
 
             execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -615,7 +630,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
 
         #[cfg(feature = "agent")]
         if let Some(req) = app.interactive_request.take() {
-            let _stdin_guard = stdin_lock.lock().unwrap();
+            let _stdin_guard = stdin_lock.lock().unwrap_or_else(PoisonError::into_inner);
             while rx.try_recv().is_ok() {}
 
             execute!(terminal.backend_mut(), LeaveAlternateScreen)?;

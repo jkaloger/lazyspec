@@ -207,6 +207,14 @@ pub enum PreviewSegment {
     DiagramError(String),
 }
 
+fn blocks_fit_body(body: &str, blocks: &[DiagramBlock]) -> bool {
+    blocks.iter().all(|b| {
+        b.byte_range.end <= body.len()
+            && body.is_char_boundary(b.byte_range.start)
+            && body.is_char_boundary(b.byte_range.end)
+    })
+}
+
 fn should_render_block(
     block: &DiagramBlock,
     tools: &ToolAvailability,
@@ -222,6 +230,18 @@ pub fn build_preview_segments(
     tools: &ToolAvailability,
     blocks: &[DiagramBlock],
 ) -> Vec<PreviewSegment> {
+    // Callers cache blocks keyed by document path; async ref-expansion can replace
+    // `body` while the cached ranges still describe the previous one. Slicing with
+    // stale ranges panics (out of bounds / mid-char), killing the TUI. Re-derive
+    // from `body` whenever the ranges don't index into it.
+    let re_extracted;
+    let blocks = if blocks_fit_body(body, blocks) {
+        blocks
+    } else {
+        re_extracted = extract_diagram_blocks(body);
+        &re_extracted
+    };
+
     if blocks.is_empty() {
         return vec![PreviewSegment::Markdown(body.to_string())];
     }

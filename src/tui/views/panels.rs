@@ -935,8 +935,9 @@ pub fn render_document_preview(
     let header_lines = build_preview_header_lines(doc, expanding);
     let mut lines = header_lines.clone();
 
+    let body_hash = crate::engine::cache::DiskCache::body_hash(&body);
     let diagram_blocks = match &app.diagram_blocks_cache {
-        Some((p, _, b)) if p == &doc.path => b.clone(),
+        Some((p, h, b)) if p == &doc.path && *h == body_hash => b.clone(),
         _ => crate::tui::content::diagram::extract_diagram_blocks(&body),
     };
     let panel_width = area.width.saturating_sub(2);
@@ -1135,8 +1136,9 @@ pub fn render_fullscreen_document(f: &mut Frame, app: &mut App) {
     let panel_width = layout[1].width.saturating_sub(2);
     let panel_height = layout[1].height.saturating_sub(2);
 
+    let display_body_hash = crate::engine::cache::DiskCache::body_hash(&display_body);
     let fullscreen_blocks = match &app.diagram_blocks_cache {
-        Some((p, _, b)) if p == &doc.path => b.clone(),
+        Some((p, h, b)) if p == &doc.path && *h == display_body_hash => b.clone(),
         _ => crate::tui::content::diagram::extract_diagram_blocks(&display_body),
     };
     let segments = crate::tui::content::diagram::build_preview_segments(
