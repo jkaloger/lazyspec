@@ -237,6 +237,44 @@ impl StatusPicker {
     }
 }
 
+/// The variant-picker overlay shown when an enum settings field is opened with
+/// `Enter` (numbering, store, reserved format, rule severity, or rule shape). It
+/// lists the field's variants; the chosen one is written back to the buffer at
+/// `path` (RFC-023 / STORY-144). Cursor ops are pure (no terminal).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingsVariantPicker {
+    pub path: FieldPath,
+    pub variants: &'static [&'static str],
+    pub selected: usize,
+}
+
+impl SettingsVariantPicker {
+    /// Seed the picker for `path` with `variants`, pre-selecting `current_index`
+    /// (clamped to the variant range).
+    pub fn new(path: FieldPath, variants: &'static [&'static str], current_index: usize) -> Self {
+        let selected = if variants.is_empty() {
+            0
+        } else {
+            current_index.min(variants.len() - 1)
+        };
+        SettingsVariantPicker {
+            path,
+            variants,
+            selected,
+        }
+    }
+
+    pub fn cursor_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn cursor_down(&mut self) {
+        if !self.variants.is_empty() {
+            self.selected = (self.selected + 1).min(self.variants.len() - 1);
+        }
+    }
+}
+
 pub struct LinkEditor {
     pub active: bool,
     pub doc_path: PathBuf,
@@ -611,4 +649,40 @@ pub struct EditableField {
     pub value: String,
     pub editor: FieldEditor,
     pub path: FieldPath,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // RFC-023 STORY-144 enum variant picker (Task 5). The variant set used here
+    // mirrors the numbering variants the settings render carries.
+    const NUMBERING: &[&str] = &["incremental", "sqids", "reserved"];
+
+    // AC4: the picker pre-selects the current variant's index.
+    #[test]
+    fn ac4_variant_picker_new_selects_current_index() {
+        let picker = SettingsVariantPicker::new(FieldPath::Unset, NUMBERING, 1);
+        assert_eq!(picker.selected, 1);
+    }
+
+    // AC4: cursor_down stops at the last variant and does not run past it.
+    #[test]
+    fn ac4_variant_picker_cursor_down_clamps_at_last() {
+        let mut picker = SettingsVariantPicker::new(FieldPath::Unset, NUMBERING, 2);
+        picker.cursor_down();
+        assert_eq!(
+            picker.selected,
+            NUMBERING.len() - 1,
+            "cursor_down clamps at the final variant"
+        );
+    }
+
+    // AC4: cursor_up saturates at the first variant.
+    #[test]
+    fn ac4_variant_picker_cursor_up_saturates_at_zero() {
+        let mut picker = SettingsVariantPicker::new(FieldPath::Unset, NUMBERING, 0);
+        picker.cursor_up();
+        assert_eq!(picker.selected, 0, "cursor_up saturates at 0");
+    }
 }

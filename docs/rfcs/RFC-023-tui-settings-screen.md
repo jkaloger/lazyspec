@@ -54,13 +54,20 @@ The settings screen has two panels:
 └──────────────────────┘ └─────────────────────────────────────────┘
 ```
 
-Left panel: categories derived from config structure. Right panel: settings within the selected category, rendered as a form.
+Left panel: categories derived from config structure. Right panel: settings within the selected category, rendered as a two-column table (field, value) with a header row and a selection cursor, matching the table rendering used by the document list (`@ref src/tui/views/panels.rs#draw_doc_list`) and the agents screen. The settings right panel is the only data view that diverged into a `Paragraph`; this aligns it.
 
 ### Interaction model
 
-Editing is **inline in the right panel**, not via modal overlays and not via an `$EDITOR` handoff. This is a new interaction pattern for the TUI: existing mutations either open an overlay (`CreateForm`, `StatusPicker`, `LinkEditor`) or suspend the TUI to run `$EDITOR` on a document file. Config editing instead operates directly on the focused field.
+Editing operates **directly on the focused field** rather than via an `$EDITOR` handoff. Scalar edits (text, numeric, nullable, duration, list) happen inline in the right panel; enum selection opens a variant-picker overlay (the one overlay case, since cycling hides the available variants). This contrasts with document mutations, which either open an overlay (`CreateForm`, `StatusPicker`, `LinkEditor`) or suspend the TUI to run `$EDITOR`.
 
-`j`/`k` move between fields, `Enter` starts editing the focused field, `Esc` cancels, `Enter` again confirms the field into the buffer. `Space` toggles bools and cycles enums without entering edit mode.
+**`Enter` is the single entry point for field interaction.** `j`/`k` move between fields; `Enter` on the focused field acts by editor type:
+- text / numeric / nullable / duration / list -> begins an inline edit (`Esc` cancels, `Enter` confirms the value into the buffer)
+- bool -> flips the value
+- enum -> opens the variant picker (`j`/`k` to choose, `Enter` selects, `Esc` cancels)
+- status-bar zone -> opens the zone-ordering editor
+- read-only -> no-op
+
+There is no separate `Space` binding; every field is reached the same way, so the user never has to know which key a given field type wants.
 
 **Commit is atomic via a dirty buffer.** Confirmed edits accumulate in an in-memory `Config` buffer, not the file. A `dirty` indicator marks unsaved changes. `w` (or `Ctrl-S`) validates the *whole* buffer (including cross-field constraints) and, if valid, writes `.lazyspec.toml` once. `q`/`Esc` out of the view with unsaved changes prompts save/discard. The file never holds an invalid intermediate state, and a multi-field edit (e.g. switching a type to `sqids` numbering and supplying its salt) saves as one unit.
 
@@ -94,12 +101,12 @@ Each field renders as an editable form element. The editor depends on the field 
 | Field Type | Example | Editor |
 |-----------|---------|--------|
 | `String` | `naming.pattern`, `dir` | Inline text input |
-| `bool` | `ascii_diagrams`, `certification.normalize` | Toggle (`Space` to flip) |
+| `bool` | `ascii_diagrams`, `certification.normalize` | Toggle (`Enter` flips) |
 | `u8` / `usize` (bounded) | `sqids.min_length` (1-10), `ref_count_ceiling` | Numeric input, rejects out-of-range |
 | `Option<String>` | `github.repo`, `parent_type`, `agents.interactive`, `inverse` | Nullable text input (empty = unset) |
 | duration string | `lease_duration` (`60m`), `grace_period` (`2m`) | Text input, validated as a duration on save |
 | `Vec<String>` | `agents`, `statusbar.left` | Comma-separated text input |
-| `enum` | `numbering`, `store`, `format`, `severity`, rule `shape` | Cycle through variants with `Space` |
+| `enum` | `numbering`, `store`, `format`, `severity`, rule `shape` | `Enter` opens a variant-picker overlay |
 
 Enum variant sets are taken from the config enums: `numbering` is `incremental`/`sqids`/`reserved`, `store` is `filesystem`/`github-issues`/`git-ref`, reserved `format` is `incremental`/`sqids`, rule `severity` is `error`/`warning`, rule `shape` is `parent-child`/`relation-existence`.
 
@@ -121,7 +128,7 @@ Adding and removing entries:
 
 ### Dependency auto-scaffolding
 
-Some edits create a dependency on another section. When a type's `numbering` is cycled to `sqids` and the buffer has no `[numbering.sqids]`, the buffer auto-inserts a default `[numbering.sqids]` (empty `salt`, `min_length = 3`), marks the required-but-empty `salt`, and offers to jump focus to it. The same applies to `numbering = "reserved"` (inserts `[numbering.reserved]`) and `store = "github-issues"` (inserts `[github]`). Save-time validation still enforces the constraint (a `sqids` salt must be non-empty), so auto-scaffolding guides the user without weakening validation.
+Some edits create a dependency on another section. When a type's `numbering` is set to `sqids` (via the variant picker) and the buffer has no `[numbering.sqids]`, the buffer auto-inserts a default `[numbering.sqids]` (empty `salt`, `min_length = 3`), marks the required-but-empty `salt`, and offers to jump focus to it. The same applies to `numbering = "reserved"` (inserts `[numbering.reserved]`) and `store = "github-issues"` (inserts `[github]`). Save-time validation still enforces the constraint (a `sqids` salt must be non-empty), so auto-scaffolding guides the user without weakening validation.
 
 ### Validation and write-back
 
@@ -147,7 +154,7 @@ Some type-field changes have consequences for documents already on disk. When a 
 
 2. **Reloadable session config** -- Make the TUI `Config` reloadable rather than a startup constant: a save (initially a no-op re-load) re-loads `Config`, rebuilds the `Store`, and re-establishes the watcher over the type dirs; `.lazyspec.toml` is added to the watch set. This is the foundation any write depends on.
 
-3. **Inline scalar editing with atomic save** -- Field editors for text, bool, numeric (bounded), nullable, duration, list, and enum-cycle. Dirty buffer, `w`/`Ctrl-S` whole-config validation, `toml_edit` write-back, save/discard prompt on exit, live reload after save.
+3. **Inline scalar editing with atomic save** -- Field editors for text, bool, numeric (bounded), nullable, duration, list, and enum. Dirty buffer, `w`/`Ctrl-S` whole-config validation, `toml_edit` write-back, save/discard prompt on exit, live reload after save.
 
 4. **Dependency auto-scaffolding** -- On enum edits that create a section dependency (`numbering` -> sqids/reserved, `store` -> github-issues), insert the dependent section with defaults, mark required-but-empty fields, offer to jump focus. Save-time validation enforces the constraint.
 
@@ -156,3 +163,5 @@ Some type-field changes have consequences for documents already on disk. When a 
 6. **Document-impact guard** -- Detect saves that change a type's `dir`/`prefix`/`store` for a type with existing documents, list the affected documents, and require confirmation before writing.
 
 7. **Interface settings integration** -- Once RFC-022 lands, the Interface category controls `[tui.statusbar]` component ordering (`left`/`center`/`right`) alongside `ascii_diagrams` and `[tui.multiline]`.
+
+8. **Consistent settings rendering and interaction** (amendment, after Stories 1-7 shipped) -- Re-render the right panel as a two-column table (field, value) with a header row and a `TableState` selection cursor, matching `draw_doc_list`/`draw_agents_screen`. Unify field interaction on `Enter`: drop the `Space` binding and route `Enter` by editor type (inline edit for scalars, flip for bool, variant-picker overlay for enum, zone editor for status-bar zones, no-op for read-only). Inline edit-error and dependency-scaffold prompts move from text lines spliced into a `Paragraph` to table-compatible rendering.

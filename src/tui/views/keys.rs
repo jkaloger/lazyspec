@@ -5,6 +5,7 @@ use std::path::Path;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
 
+use crate::tui::state::forms::SettingsVariantPicker;
 use crate::tui::state::{App, FieldEditor, FilterField, PreviewTab, ViewMode};
 
 impl App {
@@ -22,7 +23,22 @@ impl App {
             return;
         }
         if self.show_help {
-            self.show_help = false;
+            // Help is modal. When its content overflows the viewport (per the
+            // render-fed `help_max_scroll`), j/k (and arrows) scroll within it;
+            // any other key dismisses. When it fits, any key dismisses.
+            if self.help_max_scroll > 0 {
+                match code {
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        self.help_scroll = (self.help_scroll + 1).min(self.help_max_scroll);
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        self.help_scroll = self.help_scroll.saturating_sub(1);
+                    }
+                    _ => self.show_help = false,
+                }
+            } else {
+                self.show_help = false;
+            }
             return;
         }
         if self.show_warnings {
@@ -468,6 +484,10 @@ impl App {
                     .scroll_offset
                     .saturating_sub(self.fullscreen_height as u16 / 2);
             }
+            (KeyCode::Char('?'), _) => {
+                self.show_help = true;
+                self.help_scroll = 0;
+            }
             _ => {}
         }
     }
@@ -522,6 +542,10 @@ impl App {
             }
             KeyCode::Char('5') => {
                 self.enter_settings();
+            }
+            KeyCode::Char('?') => {
+                self.show_help = true;
+                self.help_scroll = 0;
             }
             _ => {}
         }
@@ -608,6 +632,7 @@ impl App {
             }
             KeyCode::Char('?') => {
                 self.show_help = true;
+                self.help_scroll = 0;
             }
             KeyCode::Char('/') => {
                 self.enter_search();
@@ -673,6 +698,10 @@ impl App {
             }
             KeyCode::Char('5') => {
                 self.enter_settings();
+            }
+            KeyCode::Char('?') => {
+                self.show_help = true;
+                self.help_scroll = 0;
             }
             _ => {}
         }
@@ -833,6 +862,39 @@ impl App {
             return;
         }
 
+        // The enum variant picker owns all keys while open (RFC-023 STORY-144):
+        // j/k move the selection, Enter writes the chosen variant into the buffer
+        // (firing dependency scaffolding), Esc closes without writing. Either way
+        // the picker is cleared on Enter/Esc.
+        if self.settings_variant_picker.is_some() {
+            match code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if let Some(p) = self.settings_variant_picker.as_mut() {
+                        p.cursor_down();
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if let Some(p) = self.settings_variant_picker.as_mut() {
+                        p.cursor_up();
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(p) = self.settings_variant_picker.take() {
+                        if let Some(variant) = p.variants.get(p.selected) {
+                            // Dirties only on a real change, so re-picking the
+                            // current variant stays clean (no save-on-quit prompt).
+                            self.settings_set_enum_variant(&p.path, variant);
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    self.settings_variant_picker = None;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // A pending dependency-scaffold offer is answered before any nav/edit:
         // `g` ("go to field") jumps focus to the required-but-empty field it points
         // at and clears the offer; any other key declines (clears the offer) and
@@ -884,9 +946,6 @@ impl App {
             KeyCode::Char('h') | KeyCode::Left => {
                 self.settings_move_category(-1);
             }
-            KeyCode::Char(' ') => {
-                self.settings_space();
-            }
             KeyCode::Char('n') if self.settings_drill.is_none() => {
                 // Seed a new entry in the current collection: Vec collections push
                 // a default and drill in; certification overrides open a key prompt.
@@ -906,20 +965,33 @@ impl App {
                 self.settings_open_delete_confirm();
             }
             KeyCode::Enter => {
-                // Enter drills in an entry-list; in a field-view it starts an
-                // edit on the focused text-entry field.
+                // Enter is the single field entry point (RFC-023 STORY-144),
+                // dispatched by editor kind. In an entry-list it drills in (AC9).
                 if self.settings_in_entry_list() {
                     self.settings_drill = Some(self.settings_entry);
                     self.settings_field = 0;
-                } else if self.settings_focused_is_text_entry()
-                    || matches!(
-                        self.settings_focused_field().map(|f| f.editor),
-                        Some(FieldEditor::ZoneOrdering)
-                    )
-                {
-                    // Text-entry fields begin inline editing; a ZoneOrdering field
-                    // opens the two-pane zone editor (both routed via start_edit).
-                    self.settings_start_edit();
+                } else if let Some(focused) = self.settings_focused_field() {
+                    match focused.editor {
+                        // Text-family fields begin inline editing; a ZoneOrdering
+                        // field opens the two-pane zone editor (both via start_edit).
+                        FieldEditor::Text
+                        | FieldEditor::BoundedNum { .. }
+                        | FieldEditor::Nullable
+                        | FieldEditor::Duration
+                        | FieldEditor::List
+                        | FieldEditor::ZoneOrdering => self.settings_start_edit(),
+                        // A bool flips in the buffer and is marked dirty.
+                        FieldEditor::Toggle => self.settings_toggle_bool(),
+                        // An enum opens the variant picker, pre-selecting the
+                        // current value's position.
+                        FieldEditor::EnumCycle { variants } => {
+                            let current = self.settings_focused_raw();
+                            let idx = variants.iter().position(|v| *v == current).unwrap_or(0);
+                            self.settings_variant_picker =
+                                Some(SettingsVariantPicker::new(focused.path, variants, idx));
+                        }
+                        FieldEditor::ReadOnly => {}
+                    }
                 }
             }
             KeyCode::Esc => {
@@ -943,23 +1015,12 @@ impl App {
             KeyCode::Char('5') => {
                 // Re-entering Settings from Settings is a no-op
             }
+            KeyCode::Char('?') => {
+                self.show_help = true;
+                self.help_scroll = 0;
+            }
             _ => {}
         }
-    }
-
-    /// True when the focused field uses a text-entry editor (so Enter starts an
-    /// edit rather than drilling).
-    fn settings_focused_is_text_entry(&self) -> bool {
-        matches!(
-            self.settings_focused_field().map(|f| f.editor),
-            Some(
-                FieldEditor::Text
-                    | FieldEditor::BoundedNum { .. }
-                    | FieldEditor::Nullable
-                    | FieldEditor::Duration
-                    | FieldEditor::List
-            )
-        )
     }
 
     #[cfg_attr(not(feature = "agent"), allow(unused_variables))]
@@ -985,6 +1046,7 @@ impl App {
             }
             (KeyCode::Char('?'), _) => {
                 self.show_help = true;
+                self.help_scroll = 0;
             }
             (KeyCode::Char('/'), _) => self.enter_search(),
             (KeyCode::Char('n'), _) => self.open_create_form(),

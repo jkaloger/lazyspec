@@ -11,75 +11,70 @@ use crate::engine::git_status::GitFileStatus;
 use crate::tui::state::{App, FormField};
 
 use super::colors::status_color;
+use super::keybinds::{context_label, keybinds_for};
 
-pub fn draw_help_overlay(f: &mut Frame) {
+pub fn draw_help_overlay(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
-    let popup_width = 50.min(area.width.saturating_sub(4));
-    let popup_height = 30.min(area.height.saturating_sub(4));
+    let ctx = app.active_key_context();
+    let lines = help_lines(ctx);
+
+    // Width fits the longest content line (plus 2 for borders), capped at the
+    // current 50 cap and clamped to the area.
+    let longest = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
+    let popup_width = longest
+        .saturating_add(2)
+        .clamp(20, 50)
+        .min(area.width.saturating_sub(4));
+    // Height fits the content (plus 2 for borders), capped at the area.
+    let popup_height = (lines.len() as u16)
+        .saturating_add(2)
+        .min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(popup_width)) / 2;
     let y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
 
     f.render_widget(Clear, popup_area);
 
-    #[cfg_attr(not(feature = "agent"), allow(unused_mut))]
-    let mut help_text = vec![
-        Line::from(Span::styled(
-            "Keybindings",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from("  h/l       Switch type"),
-        Line::from("  Space     Expand/collapse tree node"),
-        Line::from("  x         Toggle wrap mode (selected row wraps content)"),
-        Line::from("  j/k       Navigate up/down"),
-        Line::from("  Enter     Open document fullscreen"),
-        Line::from("  Esc       Back / close"),
-        Line::from("  /         Search"),
-        Line::from("  n         Create new document"),
-        Line::from("  d         Delete document"),
-        Line::from("  Tab       Switch preview tab"),
-        Line::from("  g         Jump to top"),
-        Line::from("  G         Jump to bottom"),
-        Line::from("  R         Reload config from .lazyspec.toml"),
-        Line::from("  q         Quit"),
-        Line::from("  ?         Toggle this help"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Relations",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from("  r         Add relation"),
-        Line::from("  p         Add provenance entry"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Fullscreen",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from("  j/k       Scroll"),
-        Line::from("  Esc/q     Back to dashboard"),
-    ];
+    // Render-feeds-state: publish the max legal scroll so the key handler can
+    // tell whether the content overflows (and clamp to it). 0 when it fits.
+    let inner_height = popup_height.saturating_sub(2);
+    app.help_max_scroll = (lines.len() as u16).saturating_sub(inner_height);
+    app.help_scroll = app.help_scroll.min(app.help_max_scroll);
+    let scroll = app.help_scroll;
 
-    #[cfg(feature = "agent")]
-    help_text.insert(11, Line::from("  a         Agent actions"));
-
-    let paragraph = Paragraph::new(help_text).block(
+    let paragraph = Paragraph::new(lines).scroll((scroll, 0)).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(" Help "),
+            .title(format!(" Help \u{2014} {} ", context_label(ctx))),
     );
     f.render_widget(paragraph, popup_area);
+}
+
+/// The help-overlay content lines for one context: each group renders a
+/// bold/cyan section-title, a blank line, one line per bind, and a trailing
+/// blank between groups. Pure so it is directly unit-testable.
+fn help_lines(ctx: crate::tui::views::keybinds::KeyContext) -> Vec<Line<'static>> {
+    let groups = keybinds_for(ctx);
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, group) in groups.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(
+            group.title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        for kb in &group.binds {
+            lines.push(Line::from(format!("  {:<9} {}", kb.keys, kb.desc)));
+        }
+    }
+    lines
 }
 
 pub fn draw_create_form(f: &mut Frame, app: &App) {
@@ -444,6 +439,55 @@ pub fn draw_settings_zone_editor(f: &mut Frame, app: &App) {
 
     let hint = Paragraph::new(Line::from(Span::styled(
         "[Tab: pane] [Space/Enter: add/remove] [K/J: reorder] [c: commit] [Esc: cancel]",
+        Style::default().fg(Color::DarkGray),
+    )));
+    f.render_widget(hint, rows[1]);
+}
+
+/// The enum variant-picker overlay: a centered list of the field's variants with
+/// the current cursor highlighted. Render-only; all state lives in
+/// `app.settings_variant_picker` (RFC-023 / STORY-144).
+pub fn draw_settings_variant_picker(f: &mut Frame, app: &App) {
+    let Some(picker) = app.settings_variant_picker.as_ref() else {
+        return;
+    };
+
+    let area = f.area();
+    let popup_width = 30u16.min(area.width.saturating_sub(4));
+    let popup_height = (picker.variants.len() as u16 + 4).min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Select value ");
+    let inner = outer.inner(popup_area);
+    f.render_widget(outer, popup_area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    let items: Vec<ListItem> = picker.variants.iter().map(|v| ListItem::new(*v)).collect();
+    let list = List::new(items).highlight_style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
+    let mut state = ListState::default();
+    if !picker.variants.is_empty() {
+        state.select(Some(picker.selected.min(picker.variants.len() - 1)));
+    }
+    f.render_stateful_widget(list, rows[0], &mut state);
+
+    let hint = Paragraph::new(Line::from(Span::styled(
+        "[j/k: move] [Enter: select] [Esc: cancel]",
         Style::default().fg(Color::DarkGray),
     )));
     f.render_widget(hint, rows[1]);

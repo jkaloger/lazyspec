@@ -3,8 +3,8 @@ use super::forms::AgentDialog;
 use super::forms::{
     CreateForm, DeleteConfirm, EditableField, FieldEditor, FieldPath, LinkEditor,
     OverrideKeyPrompt, ProvenanceEditor, RelKey, RuleKey, SettingsDeleteConfirm,
-    SettingsDeleteTarget, SettingsImpactConfirm, SettingsQuitPrompt, StatusPicker, TypeKey,
-    ZoneOrderingEditor,
+    SettingsDeleteTarget, SettingsImpactConfirm, SettingsQuitPrompt, SettingsVariantPicker,
+    StatusPicker, TypeKey, ZoneOrderingEditor,
 };
 use super::graph::flatten_forest;
 use super::settings_guard;
@@ -22,6 +22,7 @@ use crate::engine::reservation::ReservationProgress;
 use crate::engine::store::{Filter, Store};
 #[cfg(feature = "agent")]
 use crate::tui::agent::{load_all_records, AgentSpawner};
+use crate::tui::views::keybinds::KeyContext;
 use crate::tui::views::status_bar::StatusBarComponents;
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
@@ -447,6 +448,11 @@ pub struct App {
     pub search_results: Vec<std::path::PathBuf>,
     pub search_selected: usize,
     pub show_help: bool,
+    pub help_scroll: u16,
+    /// Maximum legal `help_scroll` for the current help content + viewport,
+    /// written by `draw_help_overlay` each frame (render-feeds-state, like
+    /// `doc_list_height`/`fullscreen_height`). 0 when the content fits.
+    pub help_max_scroll: u16,
     pub preview_tab: PreviewTab,
     pub selected_relation: usize,
     pub create_form: CreateForm,
@@ -566,6 +572,11 @@ pub struct App {
     /// the zone editor instead of the field list; commit writes the chosen order
     /// back into `settings_buffer` (RFC-023 slice 7).
     pub settings_zone_editor: Option<ZoneOrderingEditor>,
+    /// The enum variant-picker overlay, active while an enum field (numbering,
+    /// store, reserved format, rule severity, or rule shape) is being edited via
+    /// `Enter`. `Some` routes keys to the picker; selecting writes the chosen
+    /// variant back into `settings_buffer` (RFC-023 / STORY-144).
+    pub settings_variant_picker: Option<SettingsVariantPicker>,
 }
 
 impl App {
@@ -608,6 +619,8 @@ impl App {
             search_results: Vec::new(),
             search_selected: 0,
             show_help: false,
+            help_scroll: 0,
+            help_max_scroll: 0,
             preview_tab: PreviewTab::Preview,
             selected_relation: 0,
             create_form: CreateForm::new(),
@@ -696,6 +709,7 @@ impl App {
             settings_impact_confirm: SettingsImpactConfirm::new(),
             override_key_prompt: OverrideKeyPrompt::new(),
             settings_zone_editor: None,
+            settings_variant_picker: None,
         };
         app.apply_config(config);
         app.rebuild_search_index();
@@ -772,6 +786,89 @@ impl App {
         }
     }
 
+    /// The [`KeyContext`] whose handler is currently live, mirroring
+    /// `handle_key`'s precedence ladder exactly (`keys.rs:19-66`) plus the
+    /// `handle_normal_key` view-mode dispatch (`keys.rs:1002-1009`) and the
+    /// nested `handle_settings_key` sub-state order (`keys.rs:744-885`).
+    ///
+    /// The `show_help` short-circuit (`keys.rs:25-28`) is intentionally skipped:
+    /// help is an overlay drawn *on top of* a context, so we resolve the context
+    /// underneath it. Keeping this match structurally identical to the handlers
+    /// is the drift guard the help renderer (T3) and parity test (T5) rely on.
+    pub fn active_key_context(&self) -> KeyContext {
+        if self.gh_conflict_message.is_some() {
+            return KeyContext::GhConflict;
+        }
+        // NB: the `show_help` check at keys.rs:25 is skipped on purpose.
+        if self.show_warnings {
+            return KeyContext::Warnings;
+        }
+        if self.create_form.active {
+            return KeyContext::CreateForm;
+        }
+        if self.delete_confirm.active {
+            return KeyContext::DeleteConfirm;
+        }
+        if self.override_key_prompt.active {
+            return KeyContext::OverrideKeyPrompt;
+        }
+        if self.settings_delete_confirm.active {
+            return KeyContext::SettingsDeleteConfirm;
+        }
+        if self.settings_impact_confirm.active {
+            return KeyContext::SettingsImpact;
+        }
+        if self.status_picker.active {
+            return KeyContext::StatusPicker;
+        }
+        if self.link_editor.active {
+            return KeyContext::LinkEditor;
+        }
+        if self.provenance_editor.active {
+            return KeyContext::ProvenanceEditor;
+        }
+        #[cfg(feature = "agent")]
+        if self.agent_dialog.active {
+            return if self.agent_dialog.text_input.is_some() {
+                KeyContext::AgentTextInput
+            } else {
+                KeyContext::AgentDialog
+            };
+        }
+        if self.search_mode {
+            return KeyContext::Search;
+        }
+        if self.fullscreen_doc {
+            return KeyContext::Fullscreen;
+        }
+        match self.view_mode {
+            ViewMode::Filters => KeyContext::Filters,
+            ViewMode::Graph => KeyContext::Graph,
+            ViewMode::Settings => self.active_settings_key_context(),
+            #[cfg(feature = "agent")]
+            ViewMode::Agents => KeyContext::Agents,
+            _ => KeyContext::Types,
+        }
+    }
+
+    /// The settings sub-state context, resolved in the same precedence
+    /// `handle_settings_key` checks (`keys.rs:744-885`).
+    fn active_settings_key_context(&self) -> KeyContext {
+        if self.settings_quit_prompt.active {
+            KeyContext::SettingsQuitPrompt
+        } else if self.settings_editing {
+            KeyContext::SettingsEditing
+        } else if self.settings_zone_editor.is_some() {
+            KeyContext::SettingsZoneEditor
+        } else if self.settings_variant_picker.is_some() {
+            KeyContext::SettingsVariantPicker
+        } else if self.settings_scaffold_offer.is_some() {
+            KeyContext::SettingsScaffoldOffer
+        } else {
+            KeyContext::Settings
+        }
+    }
+
     pub fn settings_categories() -> &'static [&'static str] {
         &[
             "General",
@@ -804,7 +901,7 @@ impl App {
     /// edit input. Unlike the rendered `value`, an unset Nullable yields `""`
     /// (not `(unset)`) and a List yields a comma-joined string. Derived directly
     /// from the buffer via the focused `FieldPath`.
-    fn settings_focused_raw(&self) -> String {
+    pub(crate) fn settings_focused_raw(&self) -> String {
         let Some(focused) = self.settings_focused_field() else {
             return String::new();
         };
@@ -1229,11 +1326,7 @@ impl App {
             return;
         };
         match focused.editor {
-            FieldEditor::Toggle => {
-                let current = self.settings_focused_raw() == "true";
-                self.settings_write(&focused.path, SettingsValue::Bool(!current));
-                self.settings_dirty = true;
-            }
+            FieldEditor::Toggle => self.settings_toggle_bool(),
             FieldEditor::EnumCycle { variants } => {
                 self.settings_cycle_enum(&focused.path, variants);
             }
@@ -1241,12 +1334,44 @@ impl App {
         }
     }
 
+    /// Flip the focused bool field in the buffer and mark it dirty (AC3). No-op
+    /// when the focused field is not a Toggle.
+    pub fn settings_toggle_bool(&mut self) {
+        let Some(focused) = self.settings_focused_field() else {
+            return;
+        };
+        if focused.editor != FieldEditor::Toggle {
+            return;
+        }
+        let current = self.settings_focused_raw() == "true";
+        self.settings_write(&focused.path, SettingsValue::Bool(!current));
+        self.settings_dirty = true;
+    }
+
     fn settings_cycle_enum(&mut self, path: &FieldPath, variants: &'static [&'static str]) {
         if variants.is_empty() {
             return;
         }
-        // Rule `shape` is special: cycling converts the whole ValidationRule to
-        // the other variant, preserving name + severity.
+        let current = self.settings_focused_raw();
+        let idx = variants.iter().position(|v| *v == current).unwrap_or(0);
+        let next = variants[(idx + 1) % variants.len()];
+        self.settings_set_enum_variant(path, next);
+    }
+
+    /// Write `variant` into the enum field at `path`, firing the same dependency
+    /// auto-scaffolding the enum-cycle path does. This is the shared write the
+    /// cycle path and the variant picker both call: the cycle computes `next` then
+    /// delegates here, so cycle and pick converge on identical behaviour (RFC-023
+    /// STORY-144). Rule `shape` is special: it routes through the whole-rule
+    /// conversion (preserving name + severity) when `variant` names the *other*
+    /// shape, and is a no-op when it names the current one.
+    pub fn settings_set_enum_variant(&mut self, path: &FieldPath, variant: &str) {
+        // Re-selecting the current variant is a no-op: no buffer write, no dirty.
+        // The cycle path never reaches here unchanged (it advances the index); the
+        // picker can, when the user re-picks the row already in force.
+        if variant == self.settings_focused_raw() {
+            return;
+        }
         if let FieldPath::Rule {
             index,
             key: RuleKey::Shape,
@@ -1255,32 +1380,29 @@ impl App {
             self.settings_cycle_rule_shape(*index);
             return;
         }
-        let current = self.settings_focused_raw();
-        let idx = variants.iter().position(|v| *v == current).unwrap_or(0);
-        let next = variants[(idx + 1) % variants.len()];
         match path {
             FieldPath::Type {
                 key: TypeKey::Numbering,
                 ..
             } => {
-                if let Some(n) = numbering_from_variant(next) {
+                if let Some(n) = numbering_from_variant(variant) {
                     self.settings_write(path, SettingsValue::Numbering(n));
                     self.settings_dirty = true;
-                    self.scaffold_for_cycled_value(path, next);
+                    self.scaffold_for_cycled_value(path, variant);
                 }
             }
             FieldPath::Type {
                 key: TypeKey::Store,
                 ..
             } => {
-                if let Some(s) = store_from_variant(next) {
+                if let Some(s) = store_from_variant(variant) {
                     self.settings_write(path, SettingsValue::Store(s));
                     self.settings_dirty = true;
-                    self.scaffold_for_cycled_value(path, next);
+                    self.scaffold_for_cycled_value(path, variant);
                 }
             }
             FieldPath::ReservedFormat => {
-                if let Some(f) = reserved_format_from_variant(next) {
+                if let Some(f) = reserved_format_from_variant(variant) {
                     self.settings_write(path, SettingsValue::ReservedFormat(f));
                     self.settings_dirty = true;
                 }
@@ -1289,7 +1411,7 @@ impl App {
                 key: RuleKey::Severity,
                 ..
             } => {
-                if let Some(sev) = severity_from_variant(next) {
+                if let Some(sev) = severity_from_variant(variant) {
                     self.settings_write(path, SettingsValue::Severity(sev));
                     self.settings_dirty = true;
                 }
@@ -2813,6 +2935,594 @@ impl App {
     }
 }
 
+/// Test-only observable-state fingerprint and per-context seeding, used by the
+/// keybind parity test (`keybinds.rs`). `pub(crate)` so the sibling module's test
+/// can build a seeded `App` and detect whether a keypress mutated it. None of this
+/// compiles into the production binary.
+#[cfg(test)]
+impl App {
+    /// A string capturing every observable `App` field a `handle_*_key` handler
+    /// can mutate. A keypress is "handled" iff it changes this fingerprint. Errs
+    /// toward including MORE fields: a missing mutation sink would let a real
+    /// keypress read as a no-op (a false parity PASS, the dangerous direction).
+    pub(crate) fn key_fingerprint(&self) -> String {
+        // Expanded-parent set: size + sorted contents (Space toggles membership).
+        let mut expanded: Vec<String> = self
+            .expanded_parents
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        expanded.sort();
+
+        // Zone editor inner state (pane / cursor / both lists), or None.
+        let zone = self.settings_zone_editor.as_ref().map(|z| {
+            format!(
+                "{:?}|{}|{:?}|{:?}",
+                z.pane, z.cursor, z.selected, z.available
+            )
+        });
+        // Variant picker inner state (selected index), or None.
+        let variant = self
+            .settings_variant_picker
+            .as_ref()
+            .map(|p| format!("{}|{:?}", p.selected, p.path));
+
+        #[cfg(feature = "agent")]
+        let agent = format!(
+            "agent_dialog.active={} sel={} text={:?} agent_idx={} resume={} interactive={}",
+            self.agent_dialog.active,
+            self.agent_dialog.selected_index,
+            self.agent_dialog.text_input,
+            self.agent_selected_index,
+            self.resume_request.is_some(),
+            self.interactive_request.is_some(),
+        );
+        #[cfg(not(feature = "agent"))]
+        let agent = String::new();
+
+        format!(
+            concat!(
+                "view_mode={:?} selected_type={} selected_doc={} doc_list_offset={} ",
+                "graph_selected={} scroll_offset={} wrap_mode={} show_help={} help_scroll={} ",
+                "search_mode={} fullscreen_doc={} should_quit={} preview_tab={:?} ",
+                "filter_focused={:?} filter_status={:?} filter_tag={:?} selected_relation={} ",
+                "expanded_len={} expanded={:?} ",
+                "editor_request={} config_reload_request={} fix_request={} ",
+                "create_form.active={} create_form.field={:?} create_form.title={} ",
+                "create_form.author={} create_form.tags={} create_form.related={} ",
+                "delete_confirm.active={} override_key_prompt.active={} override_input={} ",
+                "settings_delete_confirm.active={} settings_impact_confirm.active={} ",
+                "status_picker.active={} status_picker.selected={} ",
+                "link_editor.active={} link_editor.selected={} link_editor.query_len={} ",
+                "link_editor.rel_type_index={} link_editor.results_len={} ",
+                "provenance_editor.active={} provenance_buf_len={} ",
+                "gh_conflict={} show_warnings={} warnings_selected={} ",
+                "search_query_len={} search_selected={} ",
+                "settings_editing={} settings_edit_input_len={} settings_dirty={} ",
+                "settings_category={} settings_field={} settings_entry={} settings_drill={:?} ",
+                "settings_quit_prompt.active={} zone={:?} variant={:?} ",
+                "scaffold_offer={} settings_footer_error={} settings_edit_error={} {}",
+            ),
+            self.view_mode,
+            self.selected_type,
+            self.selected_doc,
+            self.doc_list_offset,
+            self.graph_selected,
+            self.scroll_offset,
+            self.wrap_mode,
+            self.show_help,
+            self.help_scroll,
+            self.search_mode,
+            self.fullscreen_doc,
+            self.should_quit,
+            self.preview_tab,
+            self.filter_focused,
+            self.filter_status,
+            self.filter_tag,
+            self.selected_relation,
+            expanded.len(),
+            expanded,
+            self.editor_request.is_some(),
+            self.config_reload_request,
+            self.fix_request,
+            self.create_form.active,
+            self.create_form.focused_field,
+            self.create_form.title,
+            self.create_form.author,
+            self.create_form.tags,
+            self.create_form.related,
+            self.delete_confirm.active,
+            self.override_key_prompt.active,
+            self.override_key_prompt.input,
+            self.settings_delete_confirm.active,
+            self.settings_impact_confirm.active,
+            self.status_picker.active,
+            self.status_picker.selected,
+            self.link_editor.active,
+            self.link_editor.selected,
+            self.link_editor.query.len(),
+            self.link_editor.rel_type_index,
+            self.link_editor.results.len(),
+            self.provenance_editor.active,
+            self.provenance_editor.input.len(),
+            self.gh_conflict_message.is_some(),
+            self.show_warnings,
+            self.warnings_selected,
+            self.search_query.len(),
+            self.search_selected,
+            self.settings_editing,
+            self.settings_edit_input.len(),
+            self.settings_dirty,
+            self.settings_category,
+            self.settings_field,
+            self.settings_entry,
+            self.settings_drill,
+            self.settings_quit_prompt.active,
+            zone,
+            variant,
+            self.settings_scaffold_offer.is_some(),
+            self.settings_footer_error.is_some(),
+            self.settings_edit_error.is_some(),
+            agent,
+        )
+    }
+}
+
+/// Test-only per-`KeyContext` seeding for the keybind parity test. Each seed is
+/// built so that EVERY key the registry documents for that context is "live": no
+/// boundary no-ops (lists carry >= 3 items with the cursor in the middle), and
+/// every doc-dependent action has a real doc behind it. `pub(crate)` so the
+/// parity test in `keybinds.rs` can call it. Not compiled into production.
+#[cfg(test)]
+pub(crate) mod parity_seed {
+    use super::*;
+    use crate::tui::views::keybinds::KeyContext;
+    use tempfile::TempDir;
+
+    /// Markdown for one seeded doc, with an optional `related:` block.
+    fn doc_md(id: &str, doc_type: &str, related: &str) -> String {
+        let related_block = if related.is_empty() {
+            "related: []".to_string()
+        } else {
+            format!("related:\n{related}")
+        };
+        format!(
+            "---\ntitle: \"{id} title\"\ntype: {doc_type}\nstatus: draft\nauthor: tester\ndate: 2026-01-01\ntags:\n  - alpha\n{related_block}\n---\n\n{id} body line 1\n{id} body line 2\n"
+        )
+    }
+
+    /// A bare `App` over a real, empty `Store` rooted at `tmp`, with the default
+    /// config applied (7 doc types). The TempDir is returned so the root outlives
+    /// the App (handlers that save touch `<root>/.lazyspec.toml`).
+    fn bare_app() -> (TempDir, App) {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::load(tmp.path(), &Config::default()).unwrap();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        #[cfg(feature = "agent")]
+        let agent_spawner = AgentSpawner::new(store.root());
+        let config = Config::default();
+        let mut app = App {
+            fs: Box::new(crate::engine::fs::RealFileSystem),
+            store,
+            selected_type: 0,
+            selected_doc: 0,
+            doc_types: Vec::new(),
+            should_quit: false,
+            fullscreen_doc: false,
+            scroll_offset: 0,
+            search_mode: false,
+            search_query: String::new(),
+            search_results: Vec::new(),
+            search_selected: 0,
+            show_help: false,
+            help_scroll: 0,
+            help_max_scroll: 0,
+            preview_tab: PreviewTab::Preview,
+            selected_relation: 0,
+            create_form: CreateForm::new(),
+            delete_confirm: DeleteConfirm::new(),
+            status_picker: StatusPicker::new(),
+            link_editor: LinkEditor::new(),
+            provenance_editor: ProvenanceEditor::new(),
+            #[cfg(feature = "agent")]
+            agent_dialog: AgentDialog::new(),
+            #[cfg(feature = "agent")]
+            agent_spawner,
+            #[cfg(feature = "agent")]
+            agent_prompts: Vec::new(),
+            view_mode: ViewMode::Types,
+            graph_nodes: Vec::new(),
+            graph_selected: 0,
+            editor_request: None,
+            filter_focused: FilterField::Status,
+            filter_status: None,
+            filter_tag: None,
+            available_tags: Vec::new(),
+            type_icons: HashMap::new(),
+            type_plurals: HashMap::new(),
+            expanded_parents: HashSet::new(),
+            wrap_mode: false,
+            doc_tree: Vec::new(),
+            show_warnings: false,
+            warnings_selected: 0,
+            validation_errors: Vec::new(),
+            validation_warnings: Vec::new(),
+            status_bar_warnings: Vec::new(),
+            fix_request: false,
+            config_reload_request: false,
+            fix_result: None,
+            doc_list_offset: 0,
+            doc_list_height: 10,
+            fullscreen_height: 20,
+            #[cfg(feature = "agent")]
+            agent_selected_index: 0,
+            #[cfg(feature = "agent")]
+            resume_request: None,
+            #[cfg(feature = "agent")]
+            interactive_request: None,
+            expanded_body_cache: HashMap::new(),
+            expansion_in_flight: None,
+            event_tx: tx,
+            expansion_cancel: None,
+            disk_cache: DiskCache::new(),
+            terminal_image_protocol:
+                crate::tui::infra::terminal_caps::TerminalImageProtocol::Unsupported,
+            tool_availability: crate::tui::content::diagram::ToolAvailability { d2: false },
+            diagram_cache: crate::tui::content::diagram::DiagramCache::new(),
+            picker: ratatui_image::picker::Picker::halfblocks(),
+            image_states: HashMap::new(),
+            image_dimensions_cache: HashMap::new(),
+            ascii_diagrams: false,
+            diagram_blocks_cache: None,
+            filtered_docs_cache: None,
+            search_index: Vec::new(),
+            git_branch: None,
+            git_status_cache: GitStatusCache::new(tmp.path()),
+            gh_conflict_message: None,
+            gh_push_in_flight: Arc::new(AtomicBool::new(false)),
+            last_sync: None,
+            gh_issue_map_stale: false,
+            status_bar_enabled: true,
+            status_bar_components: StatusBarComponents::default(),
+            rel_types: config.relationship_keywords(),
+            settings_category: 0,
+            settings_entry: 0,
+            settings_drill: None,
+            settings_field: 0,
+            settings_buffer: config.clone(),
+            settings_dirty: false,
+            settings_editing: false,
+            settings_edit_input: String::new(),
+            settings_edit_error: None,
+            settings_footer_error: None,
+            settings_quit_prompt: SettingsQuitPrompt::new(),
+            settings_scaffold_offer: None,
+            settings_delete_confirm: SettingsDeleteConfirm::new(),
+            settings_impact_confirm: SettingsImpactConfirm::new(),
+            override_key_prompt: OverrideKeyPrompt::new(),
+            settings_zone_editor: None,
+            settings_variant_picker: None,
+        };
+        app.apply_config(&config);
+        (tmp, app)
+    }
+
+    /// Write a doc set into `app`'s root and reload the store through the public
+    /// `Store::load` (so forward/reverse links, children, and parents are built
+    /// the real way). The set: 5 top-level rfcs; a `convention` subdirectory type
+    /// (`subdirectory = true` in the default config) holding an `index.md` parent
+    /// plus a child, so the rfc... actually the convention type carries the
+    /// parent/child pair (so Space has a real parent to toggle); and a
+    /// story+iteration relation chain off RFC-002 (so Relations/Graph can walk).
+    fn populate_docs(app: &mut App) {
+        let root = app.store.root.clone();
+        let write = |rel: &str, contents: String| {
+            let full = root.join(rel);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, contents).unwrap();
+        };
+
+        for i in 1..=5 {
+            write(
+                &format!("docs/rfcs/RFC-{i:03}-a.md"),
+                doc_md(&format!("RFC-{i:03}"), "rfc", ""),
+            );
+        }
+        // A relation chain so the selected rfc has children/related to walk.
+        write(
+            "docs/stories/STORY-001-s.md",
+            doc_md("STORY-001", "story", "  - implements: RFC-002"),
+        );
+        write(
+            "docs/iterations/ITERATION-001-i.md",
+            doc_md("ITERATION-001", "iteration", "  - implements: STORY-001"),
+        );
+        // The `convention` type is `subdirectory = true`: a folder with an
+        // index.md becomes a parent of its sibling .md files. Three such folders
+        // give the convention docs list >= 3 top-level PARENT nodes -- so in that
+        // type both `j`/`k` move (middle cursor) AND Space has a parent to toggle.
+        for (i, slug) in ["style", "naming", "review"].iter().enumerate() {
+            let n = i + 1;
+            write(
+                &format!("docs/convention/{slug}/index.md"),
+                doc_md(&format!("CONVENTION-{n:03}"), "convention", ""),
+            );
+            write(
+                &format!("docs/convention/{slug}/DICTUM-{n:03}-d.md"),
+                doc_md(&format!("DICTUM-{n:03}"), "dictum", ""),
+            );
+        }
+
+        app.store = Store::load(&root, &Config::default()).unwrap();
+        app.rebuild_search_index();
+        app.build_doc_tree();
+    }
+
+    /// Build a fully-seeded `App` for `ctx`, returning the owning TempDir and the
+    /// `Config` the parity test must pass to `handle_key` (it differs from the
+    /// default only for the `agent`-feature Types `a` case, which needs the
+    /// selected doc's type to carry an agent so `open_agent_dialog` opens).
+    pub(crate) fn seed(ctx: KeyContext) -> (TempDir, App, Config) {
+        let (tmp, mut app) = bare_app();
+        // `config` is mutated only under the `agent` feature (Types `a` setup).
+        #[cfg_attr(not(feature = "agent"), allow(unused_mut))]
+        let mut config = Config::default();
+        match ctx {
+            KeyContext::GhConflict => {
+                app.gh_conflict_message = Some("boom".to_string());
+            }
+            KeyContext::Warnings => {
+                app.validation_warnings =
+                    vec!["w1".to_string(), "w2".to_string(), "w3".to_string()];
+                app.show_warnings = true;
+                app.warnings_selected = 1; // middle: j and k both move
+            }
+            KeyContext::CreateForm => {
+                app.open_create_form();
+                app.create_form.title = "seed".to_string();
+            }
+            KeyContext::DeleteConfirm => {
+                // A real doc behind the confirm so Enter (confirm_delete) lands a
+                // deletion; RFC-005 is a leaf with no inbound relations.
+                populate_docs(&mut app);
+                app.delete_confirm.active = true;
+                app.delete_confirm.doc_path = PathBuf::from("docs/rfcs/RFC-005-a.md");
+            }
+            KeyContext::OverrideKeyPrompt => {
+                app.override_key_prompt.active = true;
+                app.override_key_prompt.input = "spec/x".to_string();
+            }
+            KeyContext::SettingsDeleteConfirm => {
+                app.settings_delete_confirm.active = true;
+            }
+            KeyContext::SettingsImpact => {
+                app.settings_impact_confirm.active = true;
+            }
+            KeyContext::StatusPicker => {
+                // A real doc behind the picker so Enter (confirm_status_change)
+                // writes a status and reloads (changing the fingerprint).
+                populate_docs(&mut app);
+                app.status_picker.active = true;
+                app.status_picker.selected = 3; // middle of 0..6
+                app.status_picker.doc_path = PathBuf::from("docs/rfcs/RFC-001-a.md");
+            }
+            KeyContext::LinkEditor => {
+                populate_docs(&mut app);
+                app.link_editor.active = true;
+                app.link_editor.doc_path = PathBuf::from("docs/rfcs/RFC-001-a.md");
+                // A non-empty query so Backspace pops a char and re-filters the
+                // result set (an empty query would make Backspace a no-op). "rfc"
+                // still matches >= 2 RFC docs, so j/k/Enter stay live too.
+                app.link_editor.query = "rfc".to_string();
+                app.link_editor.rel_type_index = 0;
+                app.update_link_search(); // results non-empty (other docs exist)
+                app.link_editor.selected = 1; // middle: j and k both move
+            }
+            KeyContext::ProvenanceEditor => {
+                // A real doc behind the editor so Enter (submit_provenance) writes
+                // a citation and closes (changing the fingerprint).
+                populate_docs(&mut app);
+                app.provenance_editor.active = true;
+                app.provenance_editor.doc_path = PathBuf::from("docs/rfcs/RFC-001-a.md");
+                app.provenance_editor.input = "cite".to_string();
+            }
+            #[cfg(feature = "agent")]
+            KeyContext::AgentDialog => {
+                use crate::tui::state::forms::{AgentAction, AgentDialog};
+                app.agent_dialog = AgentDialog {
+                    active: true,
+                    selected_index: 0,
+                    actions: vec![AgentAction::Custom, AgentAction::Custom],
+                    missing: Vec::new(),
+                    doc_path: PathBuf::from("docs/rfcs/RFC-001-a.md"),
+                    doc_title: "t".to_string(),
+                    text_input: None,
+                };
+            }
+            #[cfg(feature = "agent")]
+            KeyContext::AgentTextInput => {
+                use crate::tui::state::forms::{AgentAction, AgentDialog};
+                app.agent_dialog = AgentDialog {
+                    active: true,
+                    selected_index: 0,
+                    actions: vec![AgentAction::Custom],
+                    missing: Vec::new(),
+                    doc_path: PathBuf::from("docs/rfcs/RFC-001-a.md"),
+                    doc_title: "t".to_string(),
+                    text_input: Some("draft".to_string()),
+                };
+            }
+            KeyContext::Search => {
+                populate_docs(&mut app);
+                app.search_mode = true;
+                app.search_query = "title".to_string();
+                app.update_search(); // results non-empty
+                app.search_selected = 1; // middle: Up and Down both move
+            }
+            KeyContext::Fullscreen => {
+                populate_docs(&mut app);
+                app.fullscreen_doc = true;
+                app.fullscreen_height = 20;
+                app.scroll_offset = 10; // middle: j/k/Ctrl-d/Ctrl-u all change it
+            }
+            KeyContext::Types => {
+                populate_docs(&mut app);
+                app.view_mode = ViewMode::Types;
+                // The `convention` type (index 5 of 7) holds three subdirectory
+                // PARENT nodes. Index 5 is interior (h: 5->4, l: 5->6 both move).
+                let conv_idx = app
+                    .doc_types
+                    .iter()
+                    .position(|t| t.as_str() == "convention")
+                    .expect("default config has a convention type");
+                app.selected_type = conv_idx;
+                app.build_doc_tree();
+                // Cursor on the middle parent: Space toggles it and j/k both move
+                // (>= 3 top-level parent nodes).
+                let parents: Vec<usize> = app
+                    .doc_tree
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, n)| n.is_parent)
+                    .map(|(i, _)| i)
+                    .collect();
+                assert!(
+                    parents.len() >= 3,
+                    "Types seeding needs >= 3 parent nodes, got {}",
+                    parents.len()
+                );
+                app.selected_doc = parents[1];
+                app.preview_tab = PreviewTab::Preview;
+
+                // (agent) Make `a` live: the selected doc's type (convention)
+                // must carry an agent whose template is loaded, so
+                // open_agent_dialog resolves at least one action and opens.
+                #[cfg(feature = "agent")]
+                {
+                    use crate::engine::prompt::{AgentPrompt, RunMode};
+                    let conv_name = app.doc_types[conv_idx].as_str().to_string();
+                    if let Some(t) = config
+                        .documents
+                        .types
+                        .iter_mut()
+                        .find(|t| t.name == conv_name)
+                    {
+                        t.agents = vec!["review".to_string()];
+                    }
+                    app.agent_prompts = vec![AgentPrompt {
+                        name: "review".to_string(),
+                        description: "review".to_string(),
+                        mode: RunMode::Headless,
+                        allowed_tools: None,
+                        body_template: "body".to_string(),
+                    }];
+                }
+            }
+            KeyContext::Filters => {
+                populate_docs(&mut app);
+                app.view_mode = ViewMode::Filters;
+                app.enter_filters_mode();
+                app.filter_focused = FilterField::Tag; // Tab/BackTab change it; h/l cycle tag values
+                app.filtered_docs_cache = None;
+                let _ = app.filtered_docs_count();
+                app.selected_doc = 1; // middle of filtered list: j/k both move
+                app.preview_tab = PreviewTab::Preview;
+            }
+            KeyContext::Graph => {
+                populate_docs(&mut app);
+                app.view_mode = ViewMode::Graph;
+                app.rebuild_graph();
+                // Ensure >= 3 nodes with the cursor in the middle.
+                assert!(
+                    app.graph_nodes.len() >= 3,
+                    "graph seeding needs >= 3 nodes, got {}",
+                    app.graph_nodes.len()
+                );
+                app.graph_selected = 1;
+            }
+            #[cfg(feature = "agent")]
+            KeyContext::Agents => {
+                use crate::tui::agent::{AgentRecord, AgentStatus};
+                app.view_mode = ViewMode::Agents;
+                app.agent_spawner.records = (0..3)
+                    .map(|i| AgentRecord {
+                        session_id: format!("s{i}"),
+                        doc_title: format!("doc {i}"),
+                        doc_path: PathBuf::from(format!("docs/rfcs/RFC-{i:03}-a.md")),
+                        action: "a".to_string(),
+                        status: AgentStatus::Complete, // not Running, so `r` resumes
+                        started_at: "t".to_string(),
+                        finished_at: None,
+                    })
+                    .collect();
+                app.agent_selected_index = 1; // middle: j/k both move
+            }
+            KeyContext::Settings => {
+                populate_docs(&mut app);
+                app.view_mode = ViewMode::Settings;
+                // Category 1 (Document Types) is a collection: in its entry-list
+                // (drill = None) j/k navigate entries, `n` seeds, `d` deletes.
+                // Dirtying up-front makes Esc/q open the quit prompt (they would
+                // otherwise no-op when clean and undrilled).
+                app.settings_category = 1;
+                app.settings_drill = None;
+                app.settings_entry = 1; // middle of >= 3 type entries: j/k both move
+                app.settings_dirty = true;
+            }
+            KeyContext::SettingsEditing => {
+                app.view_mode = ViewMode::Settings;
+                app.settings_category = 0; // General: field 0 is a Text field
+                app.settings_field = 0;
+                app.settings_editing = true;
+                app.settings_edit_input = "abc".to_string();
+            }
+            KeyContext::SettingsQuitPrompt => {
+                app.view_mode = ViewMode::Settings;
+                app.settings_dirty = true;
+                app.settings_quit_prompt.active = true;
+            }
+            KeyContext::SettingsZoneEditor => {
+                use crate::tui::state::forms::{FieldPath, ZoneOrderingEditor, ZonePane};
+                app.view_mode = ViewMode::Settings;
+                // >= 2 selected + >= 2 available, cursor in the middle of selected
+                // (so K/J move-up/down both act and j/k both move).
+                let mut z = ZoneOrderingEditor::new(
+                    FieldPath::StatusbarLeft,
+                    Some(&vec![
+                        "branch".to_string(),
+                        "filter".to_string(),
+                        "sync".to_string(),
+                    ]),
+                    &[],
+                );
+                z.pane = ZonePane::Selected;
+                z.cursor = 1;
+                assert!(z.available.len() >= 2, "zone editor needs >= 2 available");
+                app.settings_zone_editor = Some(z);
+            }
+            KeyContext::SettingsVariantPicker => {
+                use crate::tui::state::forms::{FieldPath, SettingsVariantPicker};
+                app.view_mode = ViewMode::Settings;
+                app.settings_variant_picker = Some(SettingsVariantPicker::new(
+                    FieldPath::Naming,
+                    &["incremental", "sqids", "reserved"],
+                    1, // middle: j and k both move
+                ));
+            }
+            KeyContext::SettingsScaffoldOffer => {
+                use crate::tui::state::forms::FieldPath;
+                app.view_mode = ViewMode::Settings;
+                // `g` jumps to the required-empty field; a Some(field) makes `g` act.
+                app.settings_scaffold_offer = Some(ScaffoldResult {
+                    inserted: ConfigDep::NumberingSqids,
+                    required_empty_field: Some(FieldPath::Naming),
+                });
+            }
+        }
+        (tmp, app, config)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2864,6 +3574,8 @@ mod tests {
             search_results: Vec::new(),
             search_selected: 0,
             show_help: false,
+            help_scroll: 0,
+            help_max_scroll: 0,
             preview_tab: PreviewTab::Preview,
             selected_relation: 0,
             create_form: CreateForm::new(),
@@ -2948,6 +3660,7 @@ mod tests {
             settings_impact_confirm: SettingsImpactConfirm::new(),
             override_key_prompt: OverrideKeyPrompt::new(),
             settings_zone_editor: None,
+            settings_variant_picker: None,
         };
         app
     }
@@ -4348,6 +5061,239 @@ mod tests {
         assert_eq!(
             app.settings_category, before_category,
             "decline does not jump to the Numbering category"
+        );
+    }
+
+    // --- RFC-023 STORY-144: Enter dispatch + variant picker (Task 5) ---
+
+    // AC3: Enter on a bool field flips the buffer value and marks it dirty.
+    #[test]
+    fn ac3_enter_on_bool_flips_buffer_and_dirties() {
+        let mut config = config_one_type();
+        config.ui.statusbar.enabled = true;
+        let mut app = settings_app(config, 9, 1); // Interface > statusbar.enabled
+        let config = Config::default();
+
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+
+        assert!(
+            !app.settings_buffer.ui.statusbar.enabled,
+            "Enter flips the bool"
+        );
+        assert!(app.settings_dirty, "the flip marks the buffer dirty");
+    }
+
+    // AC4: Enter on an enum field opens the variant picker, carrying the numbering
+    // variant set and pre-selecting the current value's index.
+    #[test]
+    fn ac4_enter_on_enum_opens_picker_with_current_selected() {
+        let mut app = numbering_app(config_one_type()); // type numbering, value incremental
+        let config = Config::default();
+
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+
+        let picker = app
+            .settings_variant_picker
+            .as_ref()
+            .expect("Enter on an enum opens the picker");
+        assert_eq!(
+            picker.variants,
+            &["incremental", "sqids", "reserved"],
+            "picker carries the numbering variant set"
+        );
+        assert_eq!(
+            picker.selected, 0,
+            "picker pre-selects the current value (incremental)"
+        );
+    }
+
+    // AC2: Enter on a text field begins inline editing.
+    #[test]
+    fn ac2_enter_on_text_starts_editing() {
+        let mut app = settings_app(config_one_type(), 0, 0); // naming.pattern (Text)
+        let config = Config::default();
+
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+
+        assert!(app.settings_editing, "Enter on a text field starts editing");
+    }
+
+    // AC7: Enter on a ReadOnly field changes nothing -- no edit, no picker, clean.
+    #[test]
+    fn ac7_enter_on_readonly_is_noop() {
+        // Numbering view with no sqids section: field 0 is ReadOnly.
+        let mut app = settings_app(config_one_type(), 4, 0);
+        let config = Config::default();
+
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+
+        assert!(!app.settings_editing, "ReadOnly does not start editing");
+        assert!(
+            app.settings_variant_picker.is_none(),
+            "ReadOnly does not open a picker"
+        );
+        assert!(!app.settings_dirty, "ReadOnly leaves the buffer clean");
+    }
+
+    // AC8: Space is dropped -- it makes no state change on any field.
+    #[test]
+    fn ac8_space_is_inert_on_enum_field() {
+        let mut app = numbering_app(config_one_type());
+        let before = app.settings_buffer.documents.types[0].numbering.clone();
+        let config = Config::default();
+
+        app.handle_settings_key(
+            KeyCode::Char(' '),
+            KeyModifiers::NONE,
+            Path::new("."),
+            &config,
+        );
+
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering, before,
+            "Space does not cycle the enum"
+        );
+        assert!(
+            app.settings_variant_picker.is_none(),
+            "Space does not open a picker"
+        );
+        assert!(!app.settings_editing, "Space does not start editing");
+        assert!(!app.settings_dirty, "Space leaves the buffer clean");
+    }
+
+    // AC9: Enter on an entry in a collection list drills into that entry.
+    #[test]
+    fn ac9_enter_on_entry_list_drills_into_entry() {
+        let config = config_with_types(&["rfc", "story"]);
+        let mut app = settings_app(config, 1, 0); // Document Types collection, not drilled
+        app.settings_entry = 1;
+        let config = Config::default();
+
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+
+        assert_eq!(
+            app.settings_drill,
+            Some(1),
+            "Enter drills into the selected entry"
+        );
+    }
+
+    // AC5: committing `sqids` through the picker path produces the same scaffold
+    // post-conditions as the cycle path (mirrors
+    // `ac1_numbering_to_sqids_scaffolds_section_and_offers_salt`).
+    #[test]
+    fn ac5_picker_commit_sqids_scaffolds_section_like_cycle() {
+        let mut app = numbering_app(config_one_type());
+        assert!(app.settings_buffer.documents.sqids.is_none());
+        let config = Config::default();
+
+        // Open the picker, move incremental -> sqids, commit.
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+        app.handle_settings_key(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+            Path::new("."),
+            &config,
+        );
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering,
+            NumberingStrategy::Sqids,
+            "the chosen variant is written"
+        );
+        let sqids = app
+            .settings_buffer
+            .documents
+            .sqids
+            .as_ref()
+            .expect("sqids section scaffolded via the picker path");
+        assert_eq!(sqids.salt, "", "salt scaffolded empty (cycle parity)");
+        assert_eq!(
+            sqids.min_length, 3,
+            "min_length scaffolded to parser default (cycle parity)"
+        );
+        assert!(app.settings_dirty);
+        assert_eq!(
+            app.settings_scaffold_offer,
+            Some(ScaffoldResult {
+                inserted: ConfigDep::NumberingSqids,
+                required_empty_field: Some(FieldPath::SqidsSalt),
+            }),
+            "the same scaffold offer the cycle path raises"
+        );
+        assert!(
+            app.settings_variant_picker.is_none(),
+            "the picker closes on commit"
+        );
+    }
+
+    // AC4: Esc closes the picker and leaves the buffer untouched.
+    #[test]
+    fn ac4_picker_esc_closes_without_writing() {
+        let mut app = numbering_app(config_one_type());
+        let before = app.settings_buffer.documents.types[0].numbering.clone();
+        let config = Config::default();
+
+        // Open the picker, move selection, then cancel.
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+        app.handle_settings_key(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+            Path::new("."),
+            &config,
+        );
+        app.handle_settings_key(KeyCode::Esc, KeyModifiers::NONE, Path::new("."), &config);
+
+        assert!(
+            app.settings_variant_picker.is_none(),
+            "Esc closes the picker"
+        );
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering, before,
+            "Esc leaves the numbering value unchanged"
+        );
+    }
+
+    // Re-picking the variant already in force is a no-op: the picker commit must
+    // not dirty the buffer, so quitting afterward raises no save prompt.
+    #[test]
+    fn repicking_current_variant_does_not_dirty() {
+        let mut app = numbering_app(config_one_type()); // numbering = incremental
+        let config = Config::default();
+
+        // Open the picker (pre-selects the current value) and commit without moving.
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+
+        assert!(
+            !app.settings_dirty,
+            "re-picking the current variant leaves the buffer clean"
+        );
+        assert!(
+            app.settings_variant_picker.is_none(),
+            "the picker closes on commit"
+        );
+    }
+
+    // Re-selecting the current variant directly is a no-op on the buffer, while a
+    // genuinely different variant still writes + dirties.
+    #[test]
+    fn set_enum_variant_noop_on_current_writes_on_change() {
+        let mut app = numbering_app(config_one_type()); // numbering = incremental
+        let path = FieldPath::Type {
+            index: 0,
+            key: TypeKey::Numbering,
+        };
+
+        app.settings_set_enum_variant(&path, "incremental");
+        assert!(!app.settings_dirty, "same variant does not dirty");
+
+        app.settings_set_enum_variant(&path, "sqids");
+        assert!(app.settings_dirty, "a different variant dirties");
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering,
+            NumberingStrategy::Sqids
         );
     }
 
@@ -5845,5 +6791,430 @@ center = ["warnings"]
         for name in &editor.selected {
             assert!(vocab.contains(name.as_str()));
         }
+    }
+
+    fn dummy_variant_picker() -> SettingsVariantPicker {
+        SettingsVariantPicker::new(FieldPath::Naming, &["sqids", "reserved"], 0)
+    }
+
+    fn dummy_zone_editor() -> ZoneOrderingEditor {
+        ZoneOrderingEditor::new(FieldPath::Naming, None, &["branch"])
+    }
+
+    fn dummy_scaffold_offer() -> ScaffoldResult {
+        ScaffoldResult {
+            inserted: ConfigDep::Github,
+            required_empty_field: None,
+        }
+    }
+
+    #[test]
+    fn active_key_context_defaults_to_types() {
+        let app = make_test_app(1);
+        assert_eq!(app.active_key_context(), KeyContext::Types);
+    }
+
+    #[test]
+    fn active_key_context_view_modes() {
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Filters;
+        assert_eq!(app.active_key_context(), KeyContext::Filters);
+        app.view_mode = ViewMode::Graph;
+        assert_eq!(app.active_key_context(), KeyContext::Graph);
+        app.view_mode = ViewMode::Settings;
+        assert_eq!(app.active_key_context(), KeyContext::Settings);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn active_key_context_metrics_mode_falls_through_to_types() {
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Metrics;
+        assert_eq!(app.active_key_context(), KeyContext::Types);
+    }
+
+    #[test]
+    fn active_key_context_overlay_bools() {
+        let mut app = make_test_app(1);
+        app.show_warnings = true;
+        assert_eq!(app.active_key_context(), KeyContext::Warnings);
+
+        let mut app = make_test_app(1);
+        app.create_form.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::CreateForm);
+
+        let mut app = make_test_app(1);
+        app.delete_confirm.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::DeleteConfirm);
+
+        let mut app = make_test_app(1);
+        app.override_key_prompt.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::OverrideKeyPrompt);
+
+        let mut app = make_test_app(1);
+        app.settings_delete_confirm.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::SettingsDeleteConfirm);
+
+        let mut app = make_test_app(1);
+        app.settings_impact_confirm.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::SettingsImpact);
+
+        let mut app = make_test_app(1);
+        app.status_picker.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::StatusPicker);
+
+        let mut app = make_test_app(1);
+        app.link_editor.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::LinkEditor);
+
+        let mut app = make_test_app(1);
+        app.provenance_editor.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::ProvenanceEditor);
+    }
+
+    #[test]
+    fn active_key_context_gh_conflict() {
+        let mut app = make_test_app(1);
+        app.gh_conflict_message = Some("boom".to_string());
+        assert_eq!(app.active_key_context(), KeyContext::GhConflict);
+    }
+
+    #[test]
+    fn active_key_context_search_and_fullscreen() {
+        let mut app = make_test_app(1);
+        app.search_mode = true;
+        assert_eq!(app.active_key_context(), KeyContext::Search);
+
+        let mut app = make_test_app(1);
+        app.fullscreen_doc = true;
+        assert_eq!(app.active_key_context(), KeyContext::Fullscreen);
+    }
+
+    #[test]
+    fn active_key_context_gh_conflict_outranks_lower_overlays() {
+        // GhConflict sits at the top of the ladder, so it wins even when a lower
+        // overlay is also active.
+        let mut app = make_test_app(1);
+        app.gh_conflict_message = Some("boom".to_string());
+        app.create_form.active = true;
+        app.search_mode = true;
+        assert_eq!(app.active_key_context(), KeyContext::GhConflict);
+    }
+
+    #[test]
+    fn active_key_context_show_help_is_transparent() {
+        // Help is an overlay drawn on top of a context; it must not change which
+        // context is reported (matches the skipped show_help short-circuit).
+        let mut app = make_test_app(1);
+        app.show_help = true;
+        assert_eq!(app.active_key_context(), KeyContext::Types);
+
+        app.view_mode = ViewMode::Settings;
+        assert_eq!(app.active_key_context(), KeyContext::Settings);
+
+        app.view_mode = ViewMode::Types;
+        app.search_mode = true;
+        assert_eq!(app.active_key_context(), KeyContext::Search);
+    }
+
+    #[test]
+    fn active_key_context_settings_substate_precedence() {
+        // Each settings sub-state in isolation.
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Settings;
+        app.settings_quit_prompt.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::SettingsQuitPrompt);
+
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Settings;
+        app.settings_editing = true;
+        assert_eq!(app.active_key_context(), KeyContext::SettingsEditing);
+
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Settings;
+        app.settings_zone_editor = Some(dummy_zone_editor());
+        assert_eq!(app.active_key_context(), KeyContext::SettingsZoneEditor);
+
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Settings;
+        app.settings_variant_picker = Some(dummy_variant_picker());
+        assert_eq!(app.active_key_context(), KeyContext::SettingsVariantPicker);
+
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Settings;
+        app.settings_scaffold_offer = Some(dummy_scaffold_offer());
+        assert_eq!(app.active_key_context(), KeyContext::SettingsScaffoldOffer);
+    }
+
+    #[test]
+    fn active_key_context_settings_substate_higher_precedence_wins() {
+        // quit-prompt outranks editing (keys.rs checks quit_prompt first).
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Settings;
+        app.settings_quit_prompt.active = true;
+        app.settings_editing = true;
+        assert_eq!(app.active_key_context(), KeyContext::SettingsQuitPrompt);
+
+        // editing outranks the zone editor.
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Settings;
+        app.settings_editing = true;
+        app.settings_zone_editor = Some(dummy_zone_editor());
+        assert_eq!(app.active_key_context(), KeyContext::SettingsEditing);
+
+        // zone editor outranks the variant picker.
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Settings;
+        app.settings_zone_editor = Some(dummy_zone_editor());
+        app.settings_variant_picker = Some(dummy_variant_picker());
+        assert_eq!(app.active_key_context(), KeyContext::SettingsZoneEditor);
+
+        // variant picker outranks the scaffold offer.
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Settings;
+        app.settings_variant_picker = Some(dummy_variant_picker());
+        app.settings_scaffold_offer = Some(dummy_scaffold_offer());
+        assert_eq!(app.active_key_context(), KeyContext::SettingsVariantPicker);
+    }
+
+    #[cfg(feature = "agent")]
+    #[test]
+    fn active_key_context_agent_dialog_vs_text_input() {
+        let mut app = make_test_app(1);
+        app.agent_dialog.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::AgentDialog);
+
+        app.agent_dialog.text_input = Some(String::new());
+        assert_eq!(app.active_key_context(), KeyContext::AgentTextInput);
+    }
+
+    #[cfg(feature = "agent")]
+    #[test]
+    fn active_key_context_agents_view_mode() {
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Agents;
+        assert_eq!(app.active_key_context(), KeyContext::Agents);
+    }
+
+    /// Render the help overlay for `app` into a fresh TestBackend and return the
+    /// whole buffer flattened to a single string.
+    fn render_help_to_string(app: &mut App, w: u16, h: u16) -> String {
+        use crate::tui::views::overlays::draw_help_overlay;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| draw_help_overlay(f, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .flat_map(|y| {
+                (0..buffer.area.width)
+                    .map(move |x| (x, y))
+                    .chain(std::iter::once((u16::MAX, y)))
+            })
+            .map(|(x, y)| {
+                if x == u16::MAX {
+                    "\n".to_string()
+                } else {
+                    buffer.cell((x, y)).unwrap().symbol().to_string()
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn help_overlay_renders_only_active_context() {
+        // Default mode is Types: its keybinds (e.g. the `x` wrap toggle and the
+        // help toggle) must show; a Settings-only action (Save) must not.
+        let mut app = make_test_app(1);
+        app.show_help = true;
+        assert_eq!(app.active_key_context(), KeyContext::Types);
+
+        // A tall viewport so all Types groups fit unscrolled and the assertions
+        // test mode-awareness, not scroll position.
+        let content = render_help_to_string(&mut app, 60, 50);
+        assert!(
+            content.contains("Toggle wrap"),
+            "Types help should show the wrap toggle, got:\n{content}"
+        );
+        assert!(
+            content.contains("Toggle help"),
+            "Types help should show the help toggle, got:\n{content}"
+        );
+        assert!(
+            content.contains("Types"),
+            "title should label the Types context, got:\n{content}"
+        );
+        assert!(
+            !content.contains("Save"),
+            "Types help must not show Settings-only Save, got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn help_overlay_is_mode_aware_for_graph() {
+        // Graph mode: its title label appears, and the Types-only `x` wrap toggle
+        // does not.
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Graph;
+        app.show_help = true;
+        assert_eq!(app.active_key_context(), KeyContext::Graph);
+
+        let content = render_help_to_string(&mut app, 60, 30);
+        let graph_label = crate::tui::views::keybinds::context_label(KeyContext::Graph);
+        assert!(
+            content.contains(graph_label),
+            "Graph help title should appear, got:\n{content}"
+        );
+        assert!(
+            !content.contains("Toggle wrap"),
+            "Graph help must not show the Types-only wrap toggle, got:\n{content}"
+        );
+    }
+
+    // ---- T4: `?` opens help in the four non-text contexts ----
+
+    #[test]
+    fn help_opens_in_graph_context() {
+        let mut app = make_test_app(1);
+        let root = PathBuf::from(".");
+        let config = Config::default();
+        app.view_mode = ViewMode::Graph;
+        app.help_scroll = 7;
+
+        app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE, &root, &config);
+
+        assert!(app.show_help);
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    #[test]
+    fn help_opens_in_fullscreen_context() {
+        let mut app = make_test_app(1);
+        let root = PathBuf::from(".");
+        let config = Config::default();
+        app.fullscreen_doc = true;
+        app.help_scroll = 7;
+
+        app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE, &root, &config);
+
+        assert!(app.show_help);
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    #[test]
+    fn help_opens_in_settings_nav_context() {
+        let mut app = make_test_app(1);
+        let root = PathBuf::from(".");
+        let config = Config::default();
+        app.view_mode = ViewMode::Settings;
+        // Plain nav: no sub-state active.
+        app.help_scroll = 7;
+
+        app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE, &root, &config);
+
+        assert!(app.show_help);
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    #[cfg(feature = "agent")]
+    #[test]
+    fn help_opens_in_agents_context() {
+        let mut app = make_test_app(1);
+        let root = PathBuf::from(".");
+        let config = Config::default();
+        app.view_mode = ViewMode::Agents;
+        app.help_scroll = 7;
+
+        app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE, &root, &config);
+
+        assert!(app.show_help);
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    #[test]
+    fn question_mark_does_not_open_help_in_settings_edit() {
+        let mut app = make_test_app(1);
+        let root = PathBuf::from(".");
+        let config = Config::default();
+        app.view_mode = ViewMode::Settings;
+        app.settings_editing = true;
+        app.settings_edit_input.clear();
+
+        app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE, &root, &config);
+
+        assert!(!app.show_help, "edit sub-state must not open help");
+        assert!(
+            app.settings_edit_input.contains('?'),
+            "`?` should be a literal char in the edit buffer, got: {:?}",
+            app.settings_edit_input
+        );
+    }
+
+    // ---- T4: overflow-aware dismiss/scroll while help is open ----
+
+    #[test]
+    fn help_any_key_dismisses_when_content_fits() {
+        let mut app = make_test_app(1);
+        let root = PathBuf::from(".");
+        let config = Config::default();
+        app.show_help = true;
+        app.help_max_scroll = 0;
+
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, &root, &config);
+
+        assert!(!app.show_help, "j must dismiss when content fits");
+    }
+
+    #[test]
+    fn help_scrolls_and_clamps_when_content_overflows() {
+        let mut app = make_test_app(1);
+        let root = PathBuf::from(".");
+        let config = Config::default();
+        app.show_help = true;
+        app.help_max_scroll = 5;
+        app.help_scroll = 0;
+
+        // `j` scrolls down without dismissing.
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, &root, &config);
+        assert!(app.show_help);
+        assert_eq!(app.help_scroll, 1);
+
+        // Four more `j` reach the max.
+        for _ in 0..4 {
+            app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, &root, &config);
+        }
+        assert_eq!(app.help_scroll, 5);
+
+        // A sixth `j` clamps at max.
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, &root, &config);
+        assert_eq!(app.help_scroll, 5);
+
+        // `k` scrolls back up.
+        app.handle_key(KeyCode::Char('k'), KeyModifiers::NONE, &root, &config);
+        assert_eq!(app.help_scroll, 4);
+
+        // Any other key dismisses.
+        app.handle_key(KeyCode::Char('x'), KeyModifiers::NONE, &root, &config);
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn help_render_writes_overflow_for_small_viewport_only() {
+        // A small viewport: the Types help content is taller than the inner
+        // area, so the render must publish a positive max scroll.
+        let mut app = make_test_app(1);
+        app.show_help = true;
+        assert_eq!(app.active_key_context(), KeyContext::Types);
+
+        let _ = render_help_to_string(&mut app, 40, 8);
+        assert!(
+            app.help_max_scroll > 0,
+            "small viewport should overflow, got {}",
+            app.help_max_scroll
+        );
+
+        // A tall viewport: everything fits, so max scroll is 0.
+        let _ = render_help_to_string(&mut app, 40, 60);
+        assert_eq!(app.help_max_scroll, 0);
     }
 }

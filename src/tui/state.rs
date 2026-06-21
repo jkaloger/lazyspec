@@ -5,6 +5,9 @@ pub mod settings_guard;
 
 mod app;
 
+/// Per-context App seeding for the keybind-registry parity test (keybinds.rs).
+#[cfg(test)]
+pub(crate) use app::parity_seed;
 pub use app::{
     resolve_editor, resolve_editor_from, App, AppEvent, ConfigDep, CreateResult, DocListNode,
     FilterField, GraphNode, PreviewTab, ScaffoldResult, SearchEntry, ViewMode,

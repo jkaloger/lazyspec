@@ -3,8 +3,8 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Scrollbar,
-        ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
+        Block, BorderType, Borders, Cell, List, ListItem, ListState, Padding, Paragraph, Row,
+        Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
     },
     Frame,
 };
@@ -2177,6 +2177,46 @@ fn settings_display_value(
     }
 }
 
+/// The navigable entry names for an entry-list collection (categories 1/2/3 and
+/// cat 7's certification overrides), read straight from the config model. The
+/// single source of truth for entry-list content: the render, the drilled-view
+/// title (`drill_entry_name`), and the legacy display-line builder all derive
+/// from it, so nothing reconstructs entry text from a rendered string.
+pub(super) fn settings_entry_names(category: usize, config: &Config) -> Vec<String> {
+    match category {
+        1 => config
+            .documents
+            .types
+            .iter()
+            .map(|t| t.name.clone())
+            .collect(),
+        2 => config
+            .relationships
+            .iter()
+            .map(|r| r.name.clone())
+            .collect(),
+        3 => config
+            .rules
+            .iter()
+            .map(|rule| match rule {
+                ValidationRule::ParentChild { name, .. } => name.clone(),
+                ValidationRule::RelationExistence { name, .. } => name.clone(),
+            })
+            .collect(),
+        7 => {
+            let mut keys: Vec<&String> = config.certification.overrides.keys().collect();
+            keys.sort();
+            keys.into_iter().cloned().collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Compose the full settings display lines for one view. The render no longer
+/// uses this (it derives field-views from `settings_fields` two-column and
+/// entry-lists from `settings_entry_names`); it survives as a test reference that
+/// pins field order, values, and entry-list content against those same accessors.
+#[cfg(test)]
 fn settings_lines_inner(
     category: usize,
     entry: usize,
@@ -2189,33 +2229,14 @@ fn settings_lines_inner(
     // override entry-list below it. Everything else (including drilled collections)
     // is a pure field-view derived from `settings_fields`.
     if COLLECTIONS.contains(&category) && drill.is_none() {
-        let mut lines = Vec::new();
-        match category {
-            1 => {
-                for (i, t) in config.documents.types.iter().enumerate() {
-                    let pfx = if i == entry { "▸ " } else { "  " };
-                    lines.push(format!("{}{}", pfx, t.name));
-                }
-            }
-            2 => {
-                for (i, r) in config.relationships.iter().enumerate() {
-                    let pfx = if i == entry { "▸ " } else { "  " };
-                    lines.push(format!("{}{}", pfx, r.name));
-                }
-            }
-            3 => {
-                for (i, rule) in config.rules.iter().enumerate() {
-                    let pfx = if i == entry { "▸ " } else { "  " };
-                    let name = match rule {
-                        ValidationRule::ParentChild { name, .. } => name.as_str(),
-                        ValidationRule::RelationExistence { name, .. } => name.as_str(),
-                    };
-                    lines.push(format!("{}{}", pfx, name));
-                }
-            }
-            _ => {}
-        }
-        return lines;
+        return settings_entry_names(category, config)
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let pfx = if i == entry { "▸ " } else { "  " };
+                format!("{}{}", pfx, name)
+            })
+            .collect();
     }
 
     if category == 7 {
@@ -2224,14 +2245,13 @@ fn settings_lines_inner(
             .map(field_line)
             .collect();
         if drill.is_none() {
-            let mut keys: Vec<&String> = config.certification.overrides.keys().collect();
-            keys.sort();
-            if keys.is_empty() {
+            let names = settings_entry_names(category, config);
+            if names.is_empty() {
                 lines.push("(no overrides configured)".to_string());
             } else {
-                for (i, key) in keys.iter().enumerate() {
+                for (i, name) in names.iter().enumerate() {
                     let pfx = if i == entry { "▸ " } else { "  " };
-                    lines.push(format!("{}{}", pfx, key));
+                    lines.push(format!("{}{}", pfx, name));
                 }
             }
         }
@@ -2244,39 +2264,11 @@ fn settings_lines_inner(
         .collect()
 }
 
-pub fn settings_lines(app: &App, config: &Config) -> Vec<String> {
-    settings_lines_inner(
-        app.settings_category,
-        app.settings_entry,
-        app.settings_drill,
-        config,
-    )
-}
-
 fn drill_entry_name(cat: usize, idx: usize, config: &Config) -> String {
-    match cat {
-        1 => config
-            .documents
-            .types
-            .get(idx)
-            .map(|t| t.name.clone())
-            .unwrap_or_default(),
-        2 => config
-            .relationships
-            .get(idx)
-            .map(|r| r.name.clone())
-            .unwrap_or_default(),
-        3 => config.rules.get(idx).map_or_else(String::new, |r| match r {
-            ValidationRule::ParentChild { name, .. } => name.clone(),
-            ValidationRule::RelationExistence { name, .. } => name.clone(),
-        }),
-        7 => {
-            let mut keys: Vec<&String> = config.certification.overrides.keys().collect();
-            keys.sort();
-            keys.get(idx).map(|k| (*k).clone()).unwrap_or_default()
-        }
-        _ => String::new(),
-    }
+    settings_entry_names(cat, config)
+        .get(idx)
+        .cloned()
+        .unwrap_or_default()
 }
 
 pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
@@ -2326,16 +2318,46 @@ pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
         None => format!(" {}{} ", dirty, cat_name),
     };
 
-    // A save footer-error claims one line under the right panel; the field-level
-    // edit error is separate (rendered while editing, not here).
-    let right = if app.settings_footer_error.is_some() {
+    // AC10: a save error, an in-progress field-validation error, and a pending
+    // scaffold prompt all surface in a single footer line UNDER the table (not
+    // spliced into it). At most one is meaningful at a time: an edit error only
+    // exists while editing, a save error only after a save, a scaffold prompt only
+    // with an active offer; priority edit > save > scaffold keeps the focused
+    // interaction's message foremost.
+    let footer_msg: Option<(String, Color)> = if app.settings_editing {
+        app.settings_edit_error
+            .as_deref()
+            .map(|e| (e.to_string(), Color::Red))
+    } else {
+        None
+    }
+    .or_else(|| {
+        app.settings_footer_error
+            .as_deref()
+            .map(|e| (e.to_string(), Color::Red))
+    })
+    .or_else(|| {
+        app.settings_scaffold_offer.as_ref().and_then(|offer| {
+            offer.required_empty_field.is_some().then(|| {
+                (
+                    format!(
+                        "Scaffolded [{}] -- press g to set salt",
+                        scaffold_section_label(offer.inserted)
+                    ),
+                    Color::Yellow,
+                )
+            })
+        })
+    });
+
+    let right = if let Some((msg, color)) = &footer_msg {
         let split = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(1)])
             .split(main[1]);
         let footer = Paragraph::new(Line::from(Span::styled(
-            format!(" {}", app.settings_footer_error.as_deref().unwrap_or("")),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            format!(" {}", msg),
+            Style::default().fg(*color).add_modifier(Modifier::BOLD),
         )));
         f.render_widget(footer, split[1]);
         split[0]
@@ -2343,9 +2365,57 @@ pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
         main[1]
     };
 
-    let lines = settings_lines(app, config);
-    // Highlight the field cursor only in field-views; entry-list views mark the
-    // selected entry inline with `▸` and ignore `settings_field`.
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .padding(Padding::horizontal(1))
+        .title(title);
+
+    // Collection categories (1,2,3,7) that are not drilled render a navigable
+    // entry-name LIST; everything else is a two-column field-view.
+    let in_entry_list =
+        matches!(app.settings_category, 1 | 2 | 3 | 7) && app.settings_drill.is_none();
+
+    let highlight_style = Style::default().add_modifier(Modifier::REVERSED);
+
+    if in_entry_list {
+        // AC1 sibling: a single-column table whose selection cursor replaces the
+        // former inline `▸` marker. Rows are sourced straight from the config model
+        // (`settings_entry_names`), not by stripping a prefix off a rendered line.
+        let mut rows: Vec<Row> = Vec::new();
+        // cat 7 keeps a non-selectable `normalize` field above its override entries.
+        if app.settings_category == 7 {
+            if let Some(fld) = settings_fields(7, app.settings_entry, None, config).first() {
+                rows.push(Row::new([Cell::from(field_line(fld))]));
+            }
+        }
+        let names = settings_entry_names(app.settings_category, config);
+        if app.settings_category == 7 && names.is_empty() {
+            rows.push(Row::new([Cell::from("(no overrides configured)")]));
+        } else {
+            rows.extend(names.into_iter().map(|n| Row::new([Cell::from(n)])));
+        }
+        // cat 7's leading `normalize` field offsets the entry cursor by one; other
+        // collections select the entry row directly.
+        let selected = if app.settings_category == 7 {
+            app.settings_entry + 1
+        } else {
+            app.settings_entry
+        };
+        let selected = if rows.is_empty() {
+            None
+        } else {
+            Some(selected.min(rows.len() - 1))
+        };
+        let table = Table::new(rows, [Constraint::Percentage(100)])
+            .block(block)
+            .row_highlight_style(highlight_style);
+        let mut state = TableState::default().with_selected(selected);
+        f.render_stateful_widget(table, right, &mut state);
+        return;
+    }
+
     let fields = settings_fields(
         app.settings_category,
         app.settings_entry,
@@ -2361,86 +2431,49 @@ pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
     // AC2: flag the sqids salt as required-but-empty whenever the section exists
     // with a blank salt (driven off buffer state, not the scaffold offer).
     let salt_required_empty = sqids_salt_required_empty(config);
-    let mut text: Vec<Line> = lines
+
+    let rows: Vec<Row> = fields
         .iter()
         .enumerate()
-        .map(|(i, l)| {
-            let is_salt_required = salt_required_empty
-                && matches!(fields.get(i).map(|f| &f.path), Some(FieldPath::SqidsSalt));
-            if highlight_row == Some(i) {
-                // While editing, echo the live input + caret on the focused row
-                // instead of the stale buffer value (`settings_display_value`).
-                let owned = if app.settings_editing {
-                    fields.get(i).map(|f| {
-                        format!(
-                            "{}: {}",
-                            f.label,
-                            settings_display_value(f, true, &app.settings_edit_input)
-                        )
-                    })
-                } else {
-                    None
-                };
-                Line::from(Span::styled(
-                    owned.unwrap_or_else(|| l.clone()),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ))
+        .map(|(i, fld)| {
+            let is_salt_required = salt_required_empty && matches!(fld.path, FieldPath::SqidsSalt);
+            // While editing the focused row, echo the live input + caret in the
+            // value cell instead of the stale buffer value.
+            let value = if highlight_row == Some(i) && app.settings_editing {
+                settings_display_value(fld, true, &app.settings_edit_input)
             } else if is_salt_required {
-                Line::from(Span::styled(
-                    format!("{} (required)", l),
+                format!("{} (required)", fld.value)
+            } else {
+                fld.value.clone()
+            };
+            let value_cell = if is_salt_required && !app.settings_editing {
+                Cell::from(Span::styled(
+                    value,
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 ))
             } else {
-                Line::from(l.as_str())
-            }
+                Cell::from(value)
+            };
+            Row::new([Cell::from(fld.label.clone()), value_cell])
         })
         .collect();
 
-    // The field-level edit error is distinct from the save footer error: render
-    // it (red) on the line directly below the field being edited.
-    if app.settings_editing {
-        if let (Some(row), Some(err)) = (highlight_row, app.settings_edit_error.as_deref()) {
-            let insert_at = (row + 1).min(text.len());
-            text.insert(
-                insert_at,
-                Line::from(Span::styled(
-                    format!("  {}", err),
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                )),
-            );
-        }
-    }
-
-    // AC3: an active scaffold offer with a required-but-empty field shows an inline
-    // prompt to jump there. Offers without a required field (reserved/github) carry
-    // no prompt and are dropped on the next keypress.
-    if let Some(offer) = &app.settings_scaffold_offer {
-        if offer.required_empty_field.is_some() {
-            text.push(Line::from(""));
-            text.push(Line::from(Span::styled(
-                format!(
-                    "Scaffolded [{}] -- press g to set salt",
-                    scaffold_section_label(offer.inserted)
-                ),
+    let widths = [Constraint::Percentage(40), Constraint::Percentage(60)];
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(["Field", "Value"]).style(
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD),
-            )));
-        }
-    }
+            ),
+        )
+        .block(block)
+        .row_highlight_style(highlight_style);
 
-    let paragraph = Paragraph::new(text).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Cyan))
-            .title(title),
-    );
-    f.render_widget(paragraph, right);
+    let mut state = TableState::default().with_selected(highlight_row);
+    f.render_stateful_widget(table, right, &mut state);
 }
 
 #[cfg(test)]
@@ -3106,6 +3139,33 @@ mod tests {
         assert_eq!(lines.len(), config.documents.types.len());
         assert!(lines.iter().any(|l| l.contains("rfc")));
         assert!(lines.iter().any(|l| l.contains("▸")));
+    }
+
+    // The render and the legacy display-line builder share one model accessor:
+    // entry names come straight from config, with no prefix decoration.
+    #[test]
+    fn settings_entry_names_source_from_model_without_prefix() {
+        let config = Config::default();
+        let names = settings_entry_names(1, &config);
+        assert_eq!(
+            names,
+            config
+                .documents
+                .types
+                .iter()
+                .map(|t| t.name.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            names
+                .iter()
+                .all(|n| !n.starts_with('▸') && !n.starts_with(' ')),
+            "names carry no selection prefix"
+        );
+        assert!(
+            settings_entry_names(0, &config).is_empty(),
+            "non-collection categories have no entries"
+        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
 mod colors;
+pub mod keybinds;
 pub mod keys;
 mod layout;
 pub mod overlays;
@@ -28,7 +29,8 @@ use overlays::{
     draw_create_form, draw_delete_confirm, draw_gh_conflict, draw_help_overlay, draw_link_editor,
     draw_override_key_prompt, draw_provenance_editor, draw_search_overlay,
     draw_settings_delete_confirm, draw_settings_impact_confirm, draw_settings_quit_prompt,
-    draw_settings_zone_editor, draw_status_picker, draw_warnings_panel,
+    draw_settings_variant_picker, draw_settings_zone_editor, draw_status_picker,
+    draw_warnings_panel,
 };
 #[cfg(feature = "agent")]
 use panels::draw_agents_screen;
@@ -67,7 +69,7 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
             draw_warnings_panel(f, app);
         }
         if app.show_help {
-            draw_help_overlay(f);
+            draw_help_overlay(f, app);
         }
         return;
     }
@@ -86,7 +88,7 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
             draw_warnings_panel(f, app);
         }
         if app.show_help {
-            draw_help_overlay(f);
+            draw_help_overlay(f, app);
         }
         return;
     }
@@ -105,7 +107,7 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
             draw_warnings_panel(f, app);
         }
         if app.show_help {
-            draw_help_overlay(f);
+            draw_help_overlay(f, app);
         }
         return;
     }
@@ -235,6 +237,10 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
         draw_settings_zone_editor(f, app);
     }
 
+    if app.settings_variant_picker.is_some() {
+        draw_settings_variant_picker(f, app);
+    }
+
     if app.status_picker.active {
         draw_status_picker(f, app);
     }
@@ -261,7 +267,7 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
     }
 
     if app.show_help {
-        draw_help_overlay(f);
+        draw_help_overlay(f, app);
     }
 }
 
