@@ -140,6 +140,28 @@ pub struct StatusBarComponents {
     pub right: Vec<StatusComponent>,
 }
 
+/// The status-bar component vocabulary defined by RFC-022. Must stay in sync
+/// with `lookup_component`: every name here must resolve there, and every name
+/// `lookup_component` accepts must appear here.
+pub const STATUS_BAR_COMPONENTS: &[&str] = &[
+    "mode",
+    "type_filter",
+    "doc_count",
+    "warnings",
+    "errors",
+    "version",
+    "help_hint",
+    "search",
+    "git_branch",
+];
+
+/// The default component names per zone, mirroring `StatusBarComponents::default`.
+/// The settings zone editor seeds an unset (`None`) zone from these so the row
+/// reflects what the bar actually renders rather than a blank.
+pub const STATUS_BAR_DEFAULT_LEFT: &[&str] = &["mode", "type_filter", "doc_count"];
+pub const STATUS_BAR_DEFAULT_CENTER: &[&str] = &["warnings", "errors"];
+pub const STATUS_BAR_DEFAULT_RIGHT: &[&str] = &["git_branch", "search", "version", "help_hint"];
+
 fn lookup_component(name: &str) -> Option<StatusComponent> {
     match name {
         "mode" => Some(mode_component),
@@ -218,6 +240,7 @@ fn mode_bg(mode: &ViewMode) -> Color {
         #[cfg(feature = "metrics")]
         ViewMode::Metrics => Color::Cyan,
         ViewMode::Graph => Color::Green,
+        ViewMode::Settings => Color::White,
         #[cfg(feature = "agent")]
         ViewMode::Agents => Color::Yellow,
     }
@@ -437,6 +460,59 @@ mod tests {
         let cell = buffer.cell((0, 0)).unwrap();
         assert_eq!(cell.bg, Color::DarkGray, "background should be DarkGray");
         assert_eq!(cell.fg, Color::White, "foreground should be White");
+    }
+
+    #[test]
+    fn status_bar_components_const_matches_lookup() {
+        // Every offered name resolves to a real component.
+        for name in STATUS_BAR_COMPONENTS {
+            assert!(
+                lookup_component(name).is_some(),
+                "STATUS_BAR_COMPONENTS lists '{}' but lookup_component does not accept it",
+                name
+            );
+        }
+
+        // No resolvable name is missing from the const. lookup_component is a
+        // closed match, so guard the boundary: out-of-vocabulary names must be
+        // absent from the const AND rejected by lookup_component, and the const
+        // must hold exactly the known vocabulary.
+        for unknown in ["clock", "battery"] {
+            assert!(
+                !STATUS_BAR_COMPONENTS.contains(&unknown),
+                "'{}' should not be in the vocabulary",
+                unknown
+            );
+            assert!(
+                lookup_component(unknown).is_none(),
+                "lookup_component should reject '{}'",
+                unknown
+            );
+        }
+
+        assert_eq!(
+            STATUS_BAR_COMPONENTS.len(),
+            9,
+            "vocabulary size changed; update STATUS_BAR_COMPONENTS and lookup_component together"
+        );
+    }
+
+    #[test]
+    fn default_zone_names_are_in_vocabulary() {
+        // The settings zone editor seeds unset zones from these, then offers only
+        // STATUS_BAR_COMPONENTS; a default name not in the vocabulary would be
+        // un-re-addable once removed.
+        for name in STATUS_BAR_DEFAULT_LEFT
+            .iter()
+            .chain(STATUS_BAR_DEFAULT_CENTER)
+            .chain(STATUS_BAR_DEFAULT_RIGHT)
+        {
+            assert!(
+                STATUS_BAR_COMPONENTS.contains(name),
+                "default zone name '{}' is not in STATUS_BAR_COMPONENTS",
+                name
+            );
+        }
     }
 
     #[test]

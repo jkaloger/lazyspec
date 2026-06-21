@@ -106,7 +106,7 @@ fn main() -> anyhow::Result<()> {
             json,
         }) => {
             let body_content = lazyspec::cli::resolve_body(&body, &body_file)?;
-            lazyspec::cli::lease::check_lease_gate(&cwd, &config, None)?;
+            lazyspec::cli::lease::check_lease_gate_for_create(&cwd, &config, &doc_type)?;
             let store = Store::load(&cwd, &config)?;
             if json {
                 let output = lazyspec::cli::create::run_json_with_body(
@@ -171,7 +171,7 @@ fn main() -> anyhow::Result<()> {
             body_file,
             json,
         }) => {
-            lazyspec::cli::lease::check_lease_gate(&cwd, &config, Some(&path))?;
+            lazyspec::cli::lease::check_lease_gate(&cwd, &config, &path)?;
             let body_content = lazyspec::cli::resolve_body(&body, &body_file)?;
             let store = Store::load(&cwd, &config)?;
             let mut updates = Vec::new();
@@ -196,7 +196,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Delete { path }) => {
-            lazyspec::cli::lease::check_lease_gate(&cwd, &config, Some(&path))?;
+            lazyspec::cli::lease::check_lease_gate(&cwd, &config, &path)?;
             let store = Store::load(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
             lazyspec::cli::delete::run_with_config(&cwd, &store, &path, Some(&config))?;

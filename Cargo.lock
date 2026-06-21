@@ -1211,6 +1211,7 @@ dependencies = [
  "tempfile",
  "textwrap",
  "toml",
+ "toml_edit 0.22.27",
  "tree-sitter",
  "tree-sitter-rust",
  "tree-sitter-typescript",

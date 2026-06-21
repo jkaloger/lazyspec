@@ -5,7 +5,8 @@ use std::path::Path;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
 
-use crate::tui::state::{App, FilterField, PreviewTab, ViewMode};
+use crate::tui::state::forms::SettingsVariantPicker;
+use crate::tui::state::{App, FieldEditor, FilterField, PreviewTab, ViewMode};
 
 impl App {
     pub fn handle_key(
@@ -22,7 +23,22 @@ impl App {
             return;
         }
         if self.show_help {
-            self.show_help = false;
+            // Help is modal. When its content overflows the viewport (per the
+            // render-fed `help_max_scroll`), j/k (and arrows) scroll within it;
+            // any other key dismisses. When it fits, any key dismisses.
+            if self.help_max_scroll > 0 {
+                match code {
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        self.help_scroll = (self.help_scroll + 1).min(self.help_max_scroll);
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        self.help_scroll = self.help_scroll.saturating_sub(1);
+                    }
+                    _ => self.show_help = false,
+                }
+            } else {
+                self.show_help = false;
+            }
             return;
         }
         if self.show_warnings {
@@ -33,6 +49,15 @@ impl App {
         }
         if self.delete_confirm.active {
             return self.handle_delete_confirm_key(code, root, config);
+        }
+        if self.override_key_prompt.active {
+            return self.handle_override_key_prompt_key(code);
+        }
+        if self.settings_delete_confirm.active {
+            return self.handle_settings_delete_confirm_key(code);
+        }
+        if self.settings_impact_confirm.active {
+            return self.handle_settings_impact_key(code, root);
         }
         if self.status_picker.active {
             return self.handle_status_picker_key(code, root, config);
@@ -82,6 +107,32 @@ impl App {
                 let _ = self.confirm_delete(root, config);
             }
             KeyCode::Esc => self.close_delete_confirm(),
+            _ => {}
+        }
+    }
+
+    fn handle_settings_delete_confirm_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter => self.settings_confirm_delete(),
+            KeyCode::Esc => self.settings_close_delete_confirm(),
+            _ => {}
+        }
+    }
+
+    fn handle_settings_impact_key(&mut self, code: KeyCode, root: &Path) {
+        match code {
+            KeyCode::Enter | KeyCode::Char('y') => self.confirm_settings_impact(root),
+            KeyCode::Esc | KeyCode::Char('n') => self.cancel_settings_impact(),
+            _ => {}
+        }
+    }
+
+    fn handle_override_key_prompt_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter => self.settings_confirm_override(),
+            KeyCode::Esc => self.settings_cancel_override(),
+            KeyCode::Backspace => self.settings_override_backspace(),
+            KeyCode::Char(c) => self.settings_override_type_char(c),
             _ => {}
         }
     }
@@ -433,6 +484,10 @@ impl App {
                     .scroll_offset
                     .saturating_sub(self.fullscreen_height as u16 / 2);
             }
+            (KeyCode::Char('?'), _) => {
+                self.show_help = true;
+                self.help_scroll = 0;
+            }
             _ => {}
         }
     }
@@ -484,6 +539,13 @@ impl App {
             }
             KeyCode::Char('`') => {
                 self.cycle_mode();
+            }
+            KeyCode::Char('5') => {
+                self.enter_settings();
+            }
+            KeyCode::Char('?') => {
+                self.show_help = true;
+                self.help_scroll = 0;
             }
             _ => {}
         }
@@ -565,8 +627,12 @@ impl App {
             KeyCode::Char('`') => {
                 self.cycle_mode();
             }
+            KeyCode::Char('5') => {
+                self.enter_settings();
+            }
             KeyCode::Char('?') => {
                 self.show_help = true;
+                self.help_scroll = 0;
             }
             KeyCode::Char('/') => {
                 self.enter_search();
@@ -630,11 +696,334 @@ impl App {
             KeyCode::Char('`') => {
                 self.cycle_mode();
             }
+            KeyCode::Char('5') => {
+                self.enter_settings();
+            }
+            KeyCode::Char('?') => {
+                self.show_help = true;
+                self.help_scroll = 0;
+            }
             _ => {}
         }
     }
 
-    #[allow(unused_variables)]
+    fn enter_settings(&mut self) {
+        self.view_mode = ViewMode::Settings;
+        self.settings_category = 0;
+        self.settings_drill = None;
+        self.settings_entry = 0;
+        self.settings_field = 0;
+    }
+
+    /// True when the current settings view is an entry-LIST (a collection category
+    /// that is not drilled). Drilled collections and scalar categories are
+    /// field-views; cat 7 is a hybrid whose not-drilled view is an entry-list of
+    /// certification overlays below the top `normalize` field, navigated by entry.
+    fn settings_in_entry_list(&self) -> bool {
+        const COLLECTIONS: [usize; 4] = [1, 2, 3, 7];
+        COLLECTIONS.contains(&self.settings_category) && self.settings_drill.is_none()
+    }
+
+    fn settings_field_count(&self) -> usize {
+        super::panels::settings_fields(
+            self.settings_category,
+            self.settings_entry,
+            self.settings_drill,
+            &self.settings_buffer,
+        )
+        .len()
+    }
+
+    /// Navigable entry count for the current entry-list collection (from the
+    /// buffer). cat 7's entries are its certification overrides.
+    fn settings_entry_count(&self) -> usize {
+        let cfg = &self.settings_buffer;
+        match self.settings_category {
+            1 => cfg.documents.types.len(),
+            2 => cfg.relationships.len(),
+            3 => cfg.rules.len(),
+            7 => cfg.certification.overrides.len(),
+            _ => 0,
+        }
+    }
+
+    fn settings_move_category(&mut self, delta: isize) {
+        let max = App::settings_categories().len().saturating_sub(1);
+        let next = if delta >= 0 {
+            (self.settings_category + delta as usize).min(max)
+        } else {
+            self.settings_category.saturating_sub(delta.unsigned_abs())
+        };
+        self.settings_category = next;
+        self.settings_field = 0;
+        self.settings_entry = 0;
+        self.settings_drill = None;
+    }
+
+    pub(crate) fn handle_settings_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        root: &Path,
+        config: &Config,
+    ) {
+        // The save/discard/cancel quit prompt intercepts keys before any nav or
+        // edit (AC10). It is only ever active when the buffer was dirty.
+        if self.settings_quit_prompt.active {
+            match code {
+                KeyCode::Char('s') => {
+                    self.settings_save(root, config);
+                    self.settings_quit_prompt.active = false;
+                    // A successful save clears `settings_dirty`; honour the quit.
+                    // A failed save (validation) keeps it dirty and leaves the
+                    // footer error visible -- stay so the user can fix and retry.
+                    if !self.settings_dirty {
+                        self.should_quit = true;
+                    }
+                }
+                KeyCode::Char('d') => {
+                    // Drop the buffer edits: re-seed from the session config. No
+                    // write happens, so `.lazyspec.toml` is left untouched.
+                    self.settings_buffer = config.clone();
+                    self.settings_dirty = false;
+                    self.settings_footer_error = None;
+                    self.settings_quit_prompt.active = false;
+                    self.should_quit = true;
+                }
+                KeyCode::Esc => {
+                    // Cancel the quit; the buffer and dirty flag are untouched.
+                    self.settings_quit_prompt.active = false;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // While editing a text-entry field, keystrokes flow into the input buffer
+        // and nav is suppressed.
+        if self.settings_editing {
+            match code {
+                KeyCode::Esc => self.settings_cancel_edit(),
+                KeyCode::Enter => self.settings_confirm_edit(),
+                KeyCode::Backspace => {
+                    self.settings_edit_input.pop();
+                }
+                KeyCode::Char(c) => {
+                    self.settings_edit_input.push(c);
+                    self.settings_edit_error = None;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // The status-bar zone ordering editor owns all keys while open, so it
+        // intercepts before nav/space/save. `c` commits (not `w`/Ctrl-S -- those
+        // stay the global buffer save); Esc cancels without writing.
+        if self.settings_zone_editor.is_some() {
+            match (code, modifiers) {
+                (KeyCode::Tab, _) => {
+                    if let Some(z) = self.settings_zone_editor.as_mut() {
+                        z.toggle_pane();
+                    }
+                }
+                (KeyCode::Char('j') | KeyCode::Down, _) => {
+                    if let Some(z) = self.settings_zone_editor.as_mut() {
+                        z.cursor_down();
+                    }
+                }
+                (KeyCode::Char('k') | KeyCode::Up, _) => {
+                    if let Some(z) = self.settings_zone_editor.as_mut() {
+                        z.cursor_up();
+                    }
+                }
+                (KeyCode::Char(' ') | KeyCode::Enter, _) => {
+                    if let Some(z) = self.settings_zone_editor.as_mut() {
+                        match z.pane {
+                            crate::tui::state::forms::ZonePane::Available => z.add(),
+                            crate::tui::state::forms::ZonePane::Selected => z.remove(),
+                        }
+                    }
+                }
+                (KeyCode::Char('K'), _) => {
+                    if let Some(z) = self.settings_zone_editor.as_mut() {
+                        z.move_up();
+                    }
+                }
+                (KeyCode::Char('J'), _) => {
+                    if let Some(z) = self.settings_zone_editor.as_mut() {
+                        z.move_down();
+                    }
+                }
+                (KeyCode::Char('c'), _) => self.settings_commit_zone(),
+                (KeyCode::Esc, _) => self.settings_cancel_zone(),
+                _ => {}
+            }
+            return;
+        }
+
+        // The enum variant picker owns all keys while open (RFC-023 STORY-144):
+        // j/k move the selection, Enter writes the chosen variant into the buffer
+        // (firing dependency scaffolding), Esc closes without writing. Either way
+        // the picker is cleared on Enter/Esc.
+        if self.settings_variant_picker.is_some() {
+            match code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if let Some(p) = self.settings_variant_picker.as_mut() {
+                        p.cursor_down();
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if let Some(p) = self.settings_variant_picker.as_mut() {
+                        p.cursor_up();
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(p) = self.settings_variant_picker.take() {
+                        if let Some(variant) = p.variants.get(p.selected) {
+                            // Dirties only on a real change, so re-picking the
+                            // current variant stays clean (no save-on-quit prompt).
+                            self.settings_set_enum_variant(&p.path, variant);
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    self.settings_variant_picker = None;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // A pending dependency-scaffold offer is answered before any nav/edit:
+        // `g` ("go to field") jumps focus to the required-but-empty field it points
+        // at and clears the offer; any other key declines (clears the offer) and
+        // falls through to its normal handling. The AC2 required-but-empty flag is
+        // driven off buffer state, so it persists past a decline.
+        if let Some(offer) = self.settings_scaffold_offer.clone() {
+            if matches!(code, KeyCode::Char('g')) {
+                if let Some(path) = offer.required_empty_field {
+                    self.settings_jump_to_scaffolded_field(&path);
+                }
+                self.settings_scaffold_offer = None;
+                return;
+            }
+            self.settings_scaffold_offer = None;
+        }
+
+        // `w` or Ctrl-S validates the whole buffer and writes `.lazyspec.toml`.
+        if matches!(code, KeyCode::Char('w'))
+            || (matches!(code, KeyCode::Char('s')) && modifiers.contains(KeyModifiers::CONTROL))
+        {
+            self.settings_save(root, config);
+            return;
+        }
+
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.settings_in_entry_list() {
+                    let count = self.settings_entry_count();
+                    if count > 0 {
+                        self.settings_entry = (self.settings_entry + 1).min(count - 1);
+                    }
+                } else {
+                    let count = self.settings_field_count();
+                    if count > 0 {
+                        self.settings_field = (self.settings_field + 1).min(count - 1);
+                    }
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.settings_in_entry_list() {
+                    self.settings_entry = self.settings_entry.saturating_sub(1);
+                } else {
+                    self.settings_field = self.settings_field.saturating_sub(1);
+                }
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.settings_move_category(1);
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.settings_move_category(-1);
+            }
+            KeyCode::Char('n') if self.settings_drill.is_none() => {
+                // Seed a new entry in the current collection: Vec collections push
+                // a default and drill in; certification overrides open a key prompt.
+                match self.settings_category {
+                    1..=3 => self.settings_seed_entry(),
+                    7 => self.settings_seed_override(),
+                    _ => {}
+                }
+            }
+            KeyCode::Char('d')
+                if self.settings_drill.is_none()
+                    && self.settings_entry_count() > 0
+                    && matches!(self.settings_category, 1 | 2 | 3 | 7) =>
+            {
+                // Delete the selected entry behind a confirm (buffer-only). cat 2
+                // refuses its last relationship inside the open path (ADR-011).
+                self.settings_open_delete_confirm();
+            }
+            KeyCode::Enter => {
+                // Enter is the single field entry point (RFC-023 STORY-144),
+                // dispatched by editor kind. In an entry-list it drills in (AC9).
+                if self.settings_in_entry_list() {
+                    self.settings_drill = Some(self.settings_entry);
+                    self.settings_field = 0;
+                } else if let Some(focused) = self.settings_focused_field() {
+                    match focused.editor {
+                        // Text-family fields begin inline editing; a ZoneOrdering
+                        // field opens the two-pane zone editor (both via start_edit).
+                        FieldEditor::Text
+                        | FieldEditor::BoundedNum { .. }
+                        | FieldEditor::Nullable
+                        | FieldEditor::Duration
+                        | FieldEditor::List
+                        | FieldEditor::ZoneOrdering => self.settings_start_edit(),
+                        // A bool flips in the buffer and is marked dirty.
+                        FieldEditor::Toggle => self.settings_toggle_bool(),
+                        // An enum opens the variant picker, pre-selecting the
+                        // current value's position.
+                        FieldEditor::EnumCycle { variants } => {
+                            let current = self.settings_focused_raw();
+                            let idx = variants.iter().position(|v| *v == current).unwrap_or(0);
+                            self.settings_variant_picker =
+                                Some(SettingsVariantPicker::new(focused.path, variants, idx));
+                        }
+                        FieldEditor::ReadOnly => {}
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                if self.settings_drill.is_some() {
+                    self.settings_drill = None;
+                    self.settings_field = 0;
+                } else if self.settings_dirty {
+                    self.settings_quit_prompt.active = true;
+                }
+            }
+            KeyCode::Char('q') => {
+                if self.settings_dirty {
+                    self.settings_quit_prompt.active = true;
+                } else {
+                    self.should_quit = true;
+                }
+            }
+            KeyCode::Char('`') => {
+                self.cycle_mode();
+            }
+            KeyCode::Char('5') => {
+                // Re-entering Settings from Settings is a no-op
+            }
+            KeyCode::Char('?') => {
+                self.show_help = true;
+                self.help_scroll = 0;
+            }
+            _ => {}
+        }
+    }
+
+    #[cfg_attr(not(feature = "agent"), allow(unused_variables))]
     fn handle_normal_key(
         &mut self,
         code: KeyCode,
@@ -645,6 +1034,7 @@ impl App {
         match self.view_mode {
             ViewMode::Filters => return self.handle_filters_key(code, modifiers, root),
             ViewMode::Graph => return self.handle_graph_key(code, modifiers, root),
+            ViewMode::Settings => return self.handle_settings_key(code, modifiers, root, config),
             #[cfg(feature = "agent")]
             ViewMode::Agents => return self.handle_agents_key(code, modifiers),
             _ => {}
@@ -656,6 +1046,7 @@ impl App {
             }
             (KeyCode::Char('?'), _) => {
                 self.show_help = true;
+                self.help_scroll = 0;
             }
             (KeyCode::Char('/'), _) => self.enter_search(),
             (KeyCode::Char('n'), _) => self.open_create_form(),
@@ -736,11 +1127,17 @@ impl App {
             (KeyCode::Char('g'), _) => self.move_to_top(),
             (KeyCode::Char('G'), _) => self.move_to_bottom(),
             (KeyCode::Char('`'), _) => self.cycle_mode(),
+            (KeyCode::Char('5'), _) => {
+                self.enter_settings();
+            }
             (KeyCode::Char('w'), _) => self.open_warnings(),
             (KeyCode::Char('s'), _) => self.open_status_picker(),
             (KeyCode::Char('p'), _) => self.open_provenance_editor(),
             (KeyCode::Char('r'), _) => {
                 self.open_link_editor();
+            }
+            (KeyCode::Char('R'), _) => {
+                self.config_reload_request = true;
             }
             #[cfg(feature = "agent")]
             (KeyCode::Char('a'), _) => {

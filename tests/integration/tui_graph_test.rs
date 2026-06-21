@@ -329,7 +329,14 @@ fn test_graph_rebuilds_on_mode_switch() {
 
     let first_count = app.graph_nodes.len();
 
-    // Cycle away: Graph -> Agents -> Types (or Graph -> Types without agent feature)
+    // Cycle away: Graph -> Settings -> Agents -> Types
+    app.handle_key(
+        KeyCode::Char('`'),
+        KeyModifiers::NONE,
+        fixture.root(),
+        &fixture.config(),
+    );
+    assert_eq!(app.view_mode, ViewMode::Settings);
     app.handle_key(
         KeyCode::Char('`'),
         KeyModifiers::NONE,

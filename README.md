@@ -108,7 +108,42 @@ lazyspec
 
 ### TUI
 
-Running `lazyspec` with no subcommand opens the interactive dashboard. It provides fuzzy search, markdown preview, document creation, and live file watching -- documents update automatically when changed on disk.
+Running `lazyspec` with no subcommand opens the interactive dashboard. It provides fuzzy search, markdown preview, document creation, and live file watching -- documents update automatically when changed on disk. An external edit of `.lazyspec.toml` (e.g. a `git pull`) reloads the running session automatically; press `R` to reload it manually. Press `?` for the full keybindings overlay.
+
+| Key       | Action                                  |
+| --------- | --------------------------------------- |
+| `j` / `k` | Navigate up/down                        |
+| `h` / `l` | Switch document type                    |
+| `Enter`   | Open document fullscreen                |
+| `/`       | Fuzzy search                            |
+| `n`       | Create new document                     |
+| `e`       | Edit document in `$EDITOR`              |
+| `d`       | Delete document                         |
+| `r`       | Add relation                            |
+| `R`       | Reload config from `.lazyspec.toml`     |
+| `w`       | Warnings / validation panel             |
+| `5`       | Open the Settings view                   |
+| `` ` ``   | Cycle view (documents / filters / graph / settings) |
+| `q`       | Quit                                    |
+| `?`       | Toggle keybindings help                 |
+
+#### Settings View
+
+Press `5` (or cycle to it with `` ` ``) to open the Settings view, which edits `.lazyspec.toml` in place. Categories are listed on the left; the right panel shows the fields (or entries) of the selected category. Saving rewrites `.lazyspec.toml`, preserving its comments and formatting, after validating the whole config; an invalid config is reported and not written.
+
+| Key                | Action                                                        |
+| ------------------ | ------------------------------------------------------------- |
+| `h` / `l`          | Switch category (also `Left` / `Right`)                       |
+| `j` / `k`          | Move between fields / entries (also `Down` / `Up`)            |
+| `Enter`            | Drill into a collection entry, or start editing a field       |
+| `n`                | Add a new entry to a collection (Document Types / Relationships / Validation Rules seed a default and drill in; Certification prompts for a spec-path key) |
+| `d`                | Delete the selected collection entry, behind a confirm (refuses the last relationship) |
+| `Space`            | Toggle a boolean / cycle an enum field                        |
+| `g`                | When a dependency section is auto-scaffolded (e.g. cycling numbering to `sqids`), jump to the required field it needs filled |
+| type + `Enter`     | Confirm a text / number / duration / list edit                |
+| `Esc`              | Cancel an in-progress edit, or undrill from an entry          |
+| `w` / `Ctrl-S`     | Save changes to `.lazyspec.toml` (validates the whole config) |
+| `q` / `Esc`        | Quit; with unsaved changes, prompts `(s)ave / (d)iscard / (Esc) cancel` |
 
 <details>
 <summary><h3>CLI</h3></summary>

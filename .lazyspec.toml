@@ -79,7 +79,7 @@ inverse = "blocked-by"
 name = "related-to"
 
 [agents]
-interactive = 'claude "$LAZYSPEC_PROMPT"'
+interactive = 'opencode run "$LAZYSPEC_PROMPT"'
 
 [github]
 repo = 'jkaloger/lazyspec'

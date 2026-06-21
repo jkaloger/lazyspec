@@ -5,6 +5,7 @@ pub mod cache;
 pub mod cache_lock;
 pub mod certification;
 pub mod config;
+pub mod config_write;
 pub mod context;
 pub mod document;
 pub mod fs;

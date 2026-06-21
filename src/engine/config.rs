@@ -315,7 +315,7 @@ pub struct CertificationOverride {
     pub normalize: bool,
 }
 
-fn default_normalize() -> bool {
+pub fn default_normalize() -> bool {
     true
 }
 

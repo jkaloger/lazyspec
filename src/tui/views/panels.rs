@@ -3,8 +3,8 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Scrollbar,
-        ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
+        Block, BorderType, Borders, Cell, List, ListItem, ListState, Padding, Paragraph, Row,
+        Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
     },
     Frame,
 };
@@ -12,12 +12,17 @@ use unicode_width::UnicodeWidthChar;
 
 use std::path::PathBuf;
 
-use crate::engine::config::{Config, StoreBackend};
+use crate::engine::config::{
+    Config, NumberingStrategy, ReservedFormat, Severity, StoreBackend, ValidationRule,
+};
 use crate::engine::document::{DocMeta, Status};
 use crate::engine::git_status::GitFileStatus;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
-use crate::tui::state::{App, DocListNode, FilterField, GraphNode, PreviewTab};
+use crate::tui::state::{
+    App, ConfigDep, DocListNode, EditableField, FieldEditor, FieldPath, FilterField, GraphNode,
+    PreviewTab, RelKey, RuleKey, TypeKey,
+};
 
 use super::colors::{status_color, tag_color};
 use super::layout::{calculate_image_height, wrapped_line_count, wrapped_lines_total};
@@ -930,8 +935,9 @@ pub fn render_document_preview(
     let header_lines = build_preview_header_lines(doc, expanding);
     let mut lines = header_lines.clone();
 
+    let body_hash = crate::engine::cache::DiskCache::body_hash(&body);
     let diagram_blocks = match &app.diagram_blocks_cache {
-        Some((p, _, b)) if p == &doc.path => b.clone(),
+        Some((p, h, b)) if p == &doc.path && *h == body_hash => b.clone(),
         _ => crate::tui::content::diagram::extract_diagram_blocks(&body),
     };
     let panel_width = area.width.saturating_sub(2);
@@ -1130,8 +1136,9 @@ pub fn render_fullscreen_document(f: &mut Frame, app: &mut App) {
     let panel_width = layout[1].width.saturating_sub(2);
     let panel_height = layout[1].height.saturating_sub(2);
 
+    let display_body_hash = crate::engine::cache::DiskCache::body_hash(&display_body);
     let fullscreen_blocks = match &app.diagram_blocks_cache {
-        Some((p, _, b)) if p == &doc.path => b.clone(),
+        Some((p, h, b)) if p == &doc.path && *h == display_body_hash => b.clone(),
         _ => crate::tui::content::diagram::extract_diagram_blocks(&display_body),
     };
     let segments = crate::tui::content::diagram::build_preview_segments(
@@ -1597,6 +1604,876 @@ pub fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
 
     let mut state = ListState::default().with_selected(Some(app.graph_selected));
     f.render_stateful_widget(list, layout[1], &mut state);
+}
+
+fn severity_str(s: &Severity) -> &'static str {
+    match s {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+    }
+}
+
+fn reserved_format_str(f: &ReservedFormat) -> &'static str {
+    match f {
+        ReservedFormat::Incremental => "incremental",
+        ReservedFormat::Sqids => "sqids",
+    }
+}
+
+fn numbering_str(n: &NumberingStrategy) -> &'static str {
+    match n {
+        NumberingStrategy::Incremental => "incremental",
+        NumberingStrategy::Sqids => "sqids",
+        NumberingStrategy::Reserved => "reserved",
+    }
+}
+
+const NUMBERING_VARIANTS: &[&str] = &["incremental", "sqids", "reserved"];
+const STORE_VARIANTS: &[&str] = &["filesystem", "github-issues", "git-ref"];
+const RULE_SHAPE_VARIANTS: &[&str] = &["parent-child", "relation-existence"];
+const SEVERITY_VARIANTS: &[&str] = &["error", "warning"];
+const RESERVED_FORMAT_VARIANTS: &[&str] = &["incremental", "sqids"];
+
+fn field(label: &str, value: String, editor: FieldEditor, path: FieldPath) -> EditableField {
+    EditableField {
+        label: label.to_string(),
+        value,
+        editor,
+        path,
+    }
+}
+
+fn nullable_value(opt: Option<&str>) -> String {
+    opt.unwrap_or("(unset)").to_string()
+}
+
+fn statusbar_value(slot: Option<&Vec<String>>) -> String {
+    slot.map_or_else(
+        || "(unset)".to_string(),
+        |v| {
+            if v.is_empty() {
+                "(unset)".to_string()
+            } else {
+                v.join(", ")
+            }
+        },
+    )
+}
+
+/// The FIELD list for the current settings field-view, mirroring the display
+/// rendered by `settings_lines_inner` exactly (same fields, order, values) with
+/// the editor kind and buffer path per field. Entry-LIST views (a collection
+/// category that is not drilled) carry no fields and return empty; the cat-7
+/// override entries below `normalize` are likewise an entry-list, not fields, so
+/// the not-drilled cat-7 view returns only the top-level `normalize` field.
+pub fn settings_fields(
+    category: usize,
+    _entry: usize,
+    drill: Option<usize>,
+    config: &Config,
+) -> Vec<EditableField> {
+    let mut fields = Vec::new();
+    match category {
+        0 => {
+            fields.push(field(
+                "naming.pattern",
+                config.documents.naming.pattern.clone(),
+                FieldEditor::Text,
+                FieldPath::Naming,
+            ));
+            fields.push(field(
+                "ref_count_ceiling",
+                config.ref_count_ceiling.to_string(),
+                FieldEditor::BoundedNum { min: 1, max: 1000 },
+                FieldPath::RefCountCeiling,
+            ));
+            fields.push(field(
+                "templates.dir",
+                config.filesystem.templates.dir.clone(),
+                FieldEditor::Text,
+                FieldPath::TemplatesDir,
+            ));
+        }
+        1 => {
+            if let Some(d) = drill {
+                if let Some(t) = config.documents.types.get(d) {
+                    let key = |k| FieldPath::Type { index: d, key: k };
+                    fields.push(field(
+                        "name",
+                        t.name.clone(),
+                        FieldEditor::Text,
+                        key(TypeKey::Name),
+                    ));
+                    fields.push(field(
+                        "plural",
+                        t.plural.clone(),
+                        FieldEditor::Text,
+                        key(TypeKey::Plural),
+                    ));
+                    fields.push(field(
+                        "dir",
+                        t.dir.clone(),
+                        FieldEditor::Text,
+                        key(TypeKey::Dir),
+                    ));
+                    fields.push(field(
+                        "prefix",
+                        t.prefix.clone(),
+                        FieldEditor::Text,
+                        key(TypeKey::Prefix),
+                    ));
+                    fields.push(field(
+                        "icon",
+                        nullable_value(t.icon.as_deref()),
+                        FieldEditor::Nullable,
+                        key(TypeKey::Icon),
+                    ));
+                    fields.push(field(
+                        "numbering",
+                        numbering_str(&t.numbering).to_string(),
+                        FieldEditor::EnumCycle {
+                            variants: NUMBERING_VARIANTS,
+                        },
+                        key(TypeKey::Numbering),
+                    ));
+                    fields.push(field(
+                        "subdirectory",
+                        t.subdirectory.to_string(),
+                        FieldEditor::Toggle,
+                        key(TypeKey::Subdirectory),
+                    ));
+                    fields.push(field(
+                        "store",
+                        t.store.to_string(),
+                        FieldEditor::EnumCycle {
+                            variants: STORE_VARIANTS,
+                        },
+                        key(TypeKey::Store),
+                    ));
+                    fields.push(field(
+                        "singleton",
+                        t.singleton.to_string(),
+                        FieldEditor::Toggle,
+                        key(TypeKey::Singleton),
+                    ));
+                    fields.push(field(
+                        "parent_type",
+                        nullable_value(t.parent_type.as_deref()),
+                        FieldEditor::Nullable,
+                        key(TypeKey::ParentType),
+                    ));
+                    let agents = if t.agents.is_empty() {
+                        "(unset)".to_string()
+                    } else {
+                        t.agents.join(", ")
+                    };
+                    fields.push(field(
+                        "agents",
+                        agents,
+                        FieldEditor::List,
+                        key(TypeKey::Agents),
+                    ));
+                }
+            }
+        }
+        2 => {
+            if let Some(d) = drill {
+                if let Some(r) = config.relationships.get(d) {
+                    fields.push(field(
+                        "name",
+                        r.name.clone(),
+                        FieldEditor::Text,
+                        FieldPath::Rel {
+                            index: d,
+                            key: RelKey::Name,
+                        },
+                    ));
+                    fields.push(field(
+                        "inverse",
+                        nullable_value(r.inverse.as_deref()),
+                        FieldEditor::Nullable,
+                        FieldPath::Rel {
+                            index: d,
+                            key: RelKey::Inverse,
+                        },
+                    ));
+                }
+            }
+        }
+        3 => {
+            if let Some(d) = drill {
+                if let Some(rule) = config.rules.get(d) {
+                    let key = |k| FieldPath::Rule { index: d, key: k };
+                    match rule {
+                        ValidationRule::ParentChild {
+                            name,
+                            child,
+                            parent,
+                            link,
+                            severity,
+                        } => {
+                            fields.push(field(
+                                "name",
+                                name.clone(),
+                                FieldEditor::Text,
+                                key(RuleKey::Name),
+                            ));
+                            fields.push(field(
+                                "shape",
+                                "parent-child".to_string(),
+                                FieldEditor::EnumCycle {
+                                    variants: RULE_SHAPE_VARIANTS,
+                                },
+                                key(RuleKey::Shape),
+                            ));
+                            fields.push(field(
+                                "child",
+                                child.clone(),
+                                FieldEditor::Text,
+                                key(RuleKey::Child),
+                            ));
+                            fields.push(field(
+                                "parent",
+                                parent.clone(),
+                                FieldEditor::Text,
+                                key(RuleKey::Parent),
+                            ));
+                            fields.push(field(
+                                "link",
+                                link.clone(),
+                                FieldEditor::Text,
+                                key(RuleKey::Link),
+                            ));
+                            fields.push(field(
+                                "severity",
+                                severity_str(severity).to_string(),
+                                FieldEditor::EnumCycle {
+                                    variants: SEVERITY_VARIANTS,
+                                },
+                                key(RuleKey::Severity),
+                            ));
+                        }
+                        ValidationRule::RelationExistence {
+                            name,
+                            doc_type,
+                            require,
+                            severity,
+                        } => {
+                            fields.push(field(
+                                "name",
+                                name.clone(),
+                                FieldEditor::Text,
+                                key(RuleKey::Name),
+                            ));
+                            fields.push(field(
+                                "shape",
+                                "relation-existence".to_string(),
+                                FieldEditor::EnumCycle {
+                                    variants: RULE_SHAPE_VARIANTS,
+                                },
+                                key(RuleKey::Shape),
+                            ));
+                            fields.push(field(
+                                "doc_type",
+                                doc_type.clone(),
+                                FieldEditor::Text,
+                                key(RuleKey::DocType),
+                            ));
+                            fields.push(field(
+                                "require",
+                                require.clone(),
+                                FieldEditor::Text,
+                                key(RuleKey::Require),
+                            ));
+                            fields.push(field(
+                                "severity",
+                                severity_str(severity).to_string(),
+                                FieldEditor::EnumCycle {
+                                    variants: SEVERITY_VARIANTS,
+                                },
+                                key(RuleKey::Severity),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        4 => {
+            match &config.documents.sqids {
+                Some(s) => {
+                    fields.push(field(
+                        "sqids.salt",
+                        s.salt.clone(),
+                        FieldEditor::Text,
+                        FieldPath::SqidsSalt,
+                    ));
+                    fields.push(field(
+                        "sqids.min_length",
+                        s.min_length.to_string(),
+                        FieldEditor::BoundedNum { min: 1, max: 10 },
+                        FieldPath::SqidsMinLength,
+                    ));
+                }
+                None => {
+                    fields.push(field(
+                        "sqids.salt",
+                        "(unset)".to_string(),
+                        FieldEditor::ReadOnly,
+                        FieldPath::Unset,
+                    ));
+                    fields.push(field(
+                        "sqids.min_length",
+                        "(unset)".to_string(),
+                        FieldEditor::ReadOnly,
+                        FieldPath::Unset,
+                    ));
+                }
+            }
+            match &config.documents.reserved {
+                Some(r) => {
+                    fields.push(field(
+                        "reserved.remote",
+                        r.remote.clone(),
+                        FieldEditor::Text,
+                        FieldPath::ReservedRemote,
+                    ));
+                    fields.push(field(
+                        "reserved.format",
+                        reserved_format_str(&r.format).to_string(),
+                        FieldEditor::EnumCycle {
+                            variants: RESERVED_FORMAT_VARIANTS,
+                        },
+                        FieldPath::ReservedFormat,
+                    ));
+                    fields.push(field(
+                        "reserved.max_retries",
+                        r.max_retries.to_string(),
+                        FieldEditor::BoundedNum { min: 0, max: 1000 },
+                        FieldPath::ReservedMaxRetries,
+                    ));
+                }
+                None => {
+                    fields.push(field(
+                        "reserved.remote",
+                        "(unset)".to_string(),
+                        FieldEditor::ReadOnly,
+                        FieldPath::Unset,
+                    ));
+                    fields.push(field(
+                        "reserved.format",
+                        "(unset)".to_string(),
+                        FieldEditor::ReadOnly,
+                        FieldPath::Unset,
+                    ));
+                    fields.push(field(
+                        "reserved.max_retries",
+                        "(unset)".to_string(),
+                        FieldEditor::ReadOnly,
+                        FieldPath::Unset,
+                    ));
+                }
+            }
+        }
+        5 => match &config.documents.github {
+            Some(g) => {
+                fields.push(field(
+                    "repo",
+                    nullable_value(g.repo.as_deref()),
+                    FieldEditor::Nullable,
+                    FieldPath::GithubRepo,
+                ));
+                fields.push(field(
+                    "cache_ttl",
+                    g.cache_ttl.to_string(),
+                    FieldEditor::BoundedNum {
+                        min: 0,
+                        max: u64::MAX,
+                    },
+                    FieldPath::GithubCacheTtl,
+                ));
+            }
+            None => {
+                fields.push(field(
+                    "repo",
+                    "(unset)".to_string(),
+                    FieldEditor::ReadOnly,
+                    FieldPath::Unset,
+                ));
+                fields.push(field(
+                    "cache_ttl",
+                    "(unset)".to_string(),
+                    FieldEditor::ReadOnly,
+                    FieldPath::Unset,
+                ));
+            }
+        },
+        6 => match &config.coordination {
+            Some(c) => {
+                fields.push(field(
+                    "remote",
+                    c.remote.clone(),
+                    FieldEditor::Text,
+                    FieldPath::CoordinationRemote,
+                ));
+                fields.push(field(
+                    "lease_duration",
+                    c.lease_duration.clone(),
+                    FieldEditor::Duration,
+                    FieldPath::CoordinationLeaseDuration,
+                ));
+                fields.push(field(
+                    "grace_period",
+                    c.grace_period.clone(),
+                    FieldEditor::Duration,
+                    FieldPath::CoordinationGracePeriod,
+                ));
+                fields.push(field(
+                    "max_push_retries",
+                    c.max_push_retries.to_string(),
+                    FieldEditor::BoundedNum { min: 0, max: 1000 },
+                    FieldPath::CoordinationMaxPushRetries,
+                ));
+                fields.push(field(
+                    "max_clock_skew",
+                    c.max_clock_skew.clone(),
+                    FieldEditor::Duration,
+                    FieldPath::CoordinationMaxClockSkew,
+                ));
+            }
+            None => {
+                for label in [
+                    "remote",
+                    "lease_duration",
+                    "grace_period",
+                    "max_push_retries",
+                    "max_clock_skew",
+                ] {
+                    fields.push(field(
+                        label,
+                        "(unset)".to_string(),
+                        FieldEditor::ReadOnly,
+                        FieldPath::Unset,
+                    ));
+                }
+            }
+        },
+        7 => {
+            if let Some(d) = drill {
+                let mut keys: Vec<&String> = config.certification.overrides.keys().collect();
+                keys.sort();
+                if let Some(key) = keys.get(d) {
+                    if let Some(ov) = config.certification.overrides.get(*key) {
+                        fields.push(field(
+                            "normalize",
+                            ov.normalize.to_string(),
+                            FieldEditor::Toggle,
+                            FieldPath::CertOverride {
+                                key: (*key).clone(),
+                            },
+                        ));
+                    }
+                }
+            } else {
+                fields.push(field(
+                    "normalize",
+                    config.certification.normalize.to_string(),
+                    FieldEditor::Toggle,
+                    FieldPath::CertNormalize,
+                ));
+            }
+        }
+        8 => {
+            fields.push(field(
+                "interactive",
+                nullable_value(config.agents.interactive.as_deref()),
+                FieldEditor::Nullable,
+                FieldPath::AgentsInteractive,
+            ));
+        }
+        9 => {
+            fields.push(field(
+                "ascii_diagrams",
+                config.ui.ascii_diagrams.to_string(),
+                FieldEditor::Toggle,
+                FieldPath::UiAsciiDiagrams,
+            ));
+            fields.push(field(
+                "statusbar.enabled",
+                config.ui.statusbar.enabled.to_string(),
+                FieldEditor::Toggle,
+                FieldPath::StatusbarEnabled,
+            ));
+            fields.push(field(
+                "statusbar.left",
+                statusbar_value(config.ui.statusbar.left.as_ref()),
+                FieldEditor::ZoneOrdering,
+                FieldPath::StatusbarLeft,
+            ));
+            fields.push(field(
+                "statusbar.center",
+                statusbar_value(config.ui.statusbar.center.as_ref()),
+                FieldEditor::ZoneOrdering,
+                FieldPath::StatusbarCenter,
+            ));
+            fields.push(field(
+                "statusbar.right",
+                statusbar_value(config.ui.statusbar.right.as_ref()),
+                FieldEditor::ZoneOrdering,
+                FieldPath::StatusbarRight,
+            ));
+            fields.push(field(
+                "multiline.max_expanded_height",
+                config.ui.multiline.max_expanded_height.to_string(),
+                FieldEditor::BoundedNum { min: 1, max: 1000 },
+                FieldPath::MultilineMaxExpandedHeight,
+            ));
+        }
+        _ => {}
+    }
+    fields
+}
+
+/// Render one field-view field as a display line, the single source of truth
+/// shared with `settings_fields`.
+fn field_line(f: &EditableField) -> String {
+    format!("{}: {}", f.label, f.value)
+}
+
+/// True when the sqids salt is required but empty: the `[numbering.sqids]` section
+/// exists (so a type uses sqids numbering) but its salt is blank. Drives the AC2
+/// required-but-empty flag in the Numbering view. Reads buffer state only, so the
+/// flag persists after a scaffold offer is dismissed and clears once the salt is
+/// filled. A non-empty salt is never flagged.
+pub(super) fn sqids_salt_required_empty(config: &Config) -> bool {
+    config
+        .documents
+        .sqids
+        .as_ref()
+        .is_some_and(|s| s.salt.is_empty())
+}
+
+/// The `[section]` label shown in a scaffold offer prompt.
+fn scaffold_section_label(dep: ConfigDep) -> &'static str {
+    match dep {
+        ConfigDep::NumberingSqids => "numbering.sqids",
+        ConfigDep::NumberingReserved => "numbering.reserved",
+        ConfigDep::Github => "github",
+    }
+}
+
+/// The value to show for a field's value column. While the field is the focused
+/// row AND an edit is in progress, echo the live `edit_input` with the house
+/// caret (`_`) appended so the user sees what they are typing; otherwise show
+/// the buffer-derived `field.value`.
+fn settings_display_value(
+    field: &EditableField,
+    is_focused_editing: bool,
+    edit_input: &str,
+) -> String {
+    if is_focused_editing {
+        format!("{}_", edit_input)
+    } else {
+        field.value.clone()
+    }
+}
+
+/// The navigable entry names for an entry-list collection (categories 1/2/3 and
+/// cat 7's certification overrides), read straight from the config model. The
+/// single source of truth for entry-list content: the render, the drilled-view
+/// title (`drill_entry_name`), and the legacy display-line builder all derive
+/// from it, so nothing reconstructs entry text from a rendered string.
+pub(super) fn settings_entry_names(category: usize, config: &Config) -> Vec<String> {
+    match category {
+        1 => config
+            .documents
+            .types
+            .iter()
+            .map(|t| t.name.clone())
+            .collect(),
+        2 => config
+            .relationships
+            .iter()
+            .map(|r| r.name.clone())
+            .collect(),
+        3 => config
+            .rules
+            .iter()
+            .map(|rule| match rule {
+                ValidationRule::ParentChild { name, .. } => name.clone(),
+                ValidationRule::RelationExistence { name, .. } => name.clone(),
+            })
+            .collect(),
+        7 => {
+            let mut keys: Vec<&String> = config.certification.overrides.keys().collect();
+            keys.sort();
+            keys.into_iter().cloned().collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Compose the full settings display lines for one view. The render no longer
+/// uses this (it derives field-views from `settings_fields` two-column and
+/// entry-lists from `settings_entry_names`); it survives as a test reference that
+/// pins field order, values, and entry-list content against those same accessors.
+#[cfg(test)]
+fn settings_lines_inner(
+    category: usize,
+    entry: usize,
+    drill: Option<usize>,
+    config: &Config,
+) -> Vec<String> {
+    const COLLECTIONS: [usize; 3] = [1, 2, 3];
+    // Entry-list categories (1,2,3) that are NOT drilled render a navigable name
+    // list, not a field list. cat 7 is a hybrid: the top `normalize` field plus an
+    // override entry-list below it. Everything else (including drilled collections)
+    // is a pure field-view derived from `settings_fields`.
+    if COLLECTIONS.contains(&category) && drill.is_none() {
+        return settings_entry_names(category, config)
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let pfx = if i == entry { "▸ " } else { "  " };
+                format!("{}{}", pfx, name)
+            })
+            .collect();
+    }
+
+    if category == 7 {
+        let mut lines: Vec<String> = settings_fields(category, entry, drill, config)
+            .iter()
+            .map(field_line)
+            .collect();
+        if drill.is_none() {
+            let names = settings_entry_names(category, config);
+            if names.is_empty() {
+                lines.push("(no overrides configured)".to_string());
+            } else {
+                for (i, name) in names.iter().enumerate() {
+                    let pfx = if i == entry { "▸ " } else { "  " };
+                    lines.push(format!("{}{}", pfx, name));
+                }
+            }
+        }
+        return lines;
+    }
+
+    settings_fields(category, entry, drill, config)
+        .iter()
+        .map(field_line)
+        .collect()
+}
+
+fn drill_entry_name(cat: usize, idx: usize, config: &Config) -> String {
+    settings_entry_names(cat, config)
+        .get(idx)
+        .cloned()
+        .unwrap_or_default()
+}
+
+pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
+    let main = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
+        .split(area);
+
+    let left_items: Vec<ListItem> = App::settings_categories()
+        .iter()
+        .enumerate()
+        .map(|(i, cat)| {
+            let prefix = if i == app.settings_category {
+                "▸ "
+            } else {
+                "  "
+            };
+            ListItem::new(format!("{}{}", prefix, cat))
+        })
+        .collect();
+
+    let left_list = List::new(left_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title(" Categories "),
+        )
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+    let mut state = ListState::default().with_selected(Some(app.settings_category));
+    f.render_stateful_widget(left_list, main[0], &mut state);
+
+    let cat_name = App::settings_categories()[app.settings_category];
+    let dirty = if app.settings_dirty { "● " } else { "" };
+    let title = match app.settings_drill {
+        Some(i) => format!(
+            " {}{} > {} ",
+            dirty,
+            cat_name,
+            drill_entry_name(app.settings_category, i, config)
+        ),
+        None => format!(" {}{} ", dirty, cat_name),
+    };
+
+    // AC10: a save error, an in-progress field-validation error, and a pending
+    // scaffold prompt all surface in a single footer line UNDER the table (not
+    // spliced into it). At most one is meaningful at a time: an edit error only
+    // exists while editing, a save error only after a save, a scaffold prompt only
+    // with an active offer; priority edit > save > scaffold keeps the focused
+    // interaction's message foremost.
+    let footer_msg: Option<(String, Color)> = if app.settings_editing {
+        app.settings_edit_error
+            .as_deref()
+            .map(|e| (e.to_string(), Color::Red))
+    } else {
+        None
+    }
+    .or_else(|| {
+        app.settings_footer_error
+            .as_deref()
+            .map(|e| (e.to_string(), Color::Red))
+    })
+    .or_else(|| {
+        app.settings_scaffold_offer.as_ref().and_then(|offer| {
+            offer.required_empty_field.is_some().then(|| {
+                (
+                    format!(
+                        "Scaffolded [{}] -- press g to set salt",
+                        scaffold_section_label(offer.inserted)
+                    ),
+                    Color::Yellow,
+                )
+            })
+        })
+    });
+
+    let right = if let Some((msg, color)) = &footer_msg {
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(main[1]);
+        let footer = Paragraph::new(Line::from(Span::styled(
+            format!(" {}", msg),
+            Style::default().fg(*color).add_modifier(Modifier::BOLD),
+        )));
+        f.render_widget(footer, split[1]);
+        split[0]
+    } else {
+        main[1]
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .padding(Padding::horizontal(1))
+        .title(title);
+
+    // Collection categories (1,2,3,7) that are not drilled render a navigable
+    // entry-name LIST; everything else is a two-column field-view.
+    let in_entry_list =
+        matches!(app.settings_category, 1 | 2 | 3 | 7) && app.settings_drill.is_none();
+
+    let highlight_style = Style::default().add_modifier(Modifier::REVERSED);
+
+    if in_entry_list {
+        // AC1 sibling: a single-column table whose selection cursor replaces the
+        // former inline `▸` marker. Rows are sourced straight from the config model
+        // (`settings_entry_names`), not by stripping a prefix off a rendered line.
+        let mut rows: Vec<Row> = Vec::new();
+        // cat 7 keeps a non-selectable `normalize` field above its override entries.
+        if app.settings_category == 7 {
+            if let Some(fld) = settings_fields(7, app.settings_entry, None, config).first() {
+                rows.push(Row::new([Cell::from(field_line(fld))]));
+            }
+        }
+        let names = settings_entry_names(app.settings_category, config);
+        if app.settings_category == 7 && names.is_empty() {
+            rows.push(Row::new([Cell::from("(no overrides configured)")]));
+        } else {
+            rows.extend(names.into_iter().map(|n| Row::new([Cell::from(n)])));
+        }
+        // cat 7's leading `normalize` field offsets the entry cursor by one; other
+        // collections select the entry row directly.
+        let selected = if app.settings_category == 7 {
+            app.settings_entry + 1
+        } else {
+            app.settings_entry
+        };
+        let selected = if rows.is_empty() {
+            None
+        } else {
+            Some(selected.min(rows.len() - 1))
+        };
+        let table = Table::new(rows, [Constraint::Percentage(100)])
+            .block(block)
+            .row_highlight_style(highlight_style);
+        let mut state = TableState::default().with_selected(selected);
+        f.render_stateful_widget(table, right, &mut state);
+        return;
+    }
+
+    let fields = settings_fields(
+        app.settings_category,
+        app.settings_entry,
+        app.settings_drill,
+        config,
+    );
+    let field_count = fields.len();
+    let highlight_row = if field_count > 0 {
+        Some(app.settings_field.min(field_count - 1))
+    } else {
+        None
+    };
+    // AC2: flag the sqids salt as required-but-empty whenever the section exists
+    // with a blank salt (driven off buffer state, not the scaffold offer).
+    let salt_required_empty = sqids_salt_required_empty(config);
+
+    let rows: Vec<Row> = fields
+        .iter()
+        .enumerate()
+        .map(|(i, fld)| {
+            let is_salt_required = salt_required_empty && matches!(fld.path, FieldPath::SqidsSalt);
+            // While editing the focused row, echo the live input + caret in the
+            // value cell instead of the stale buffer value.
+            let value = if highlight_row == Some(i) && app.settings_editing {
+                settings_display_value(fld, true, &app.settings_edit_input)
+            } else if is_salt_required {
+                format!("{} (required)", fld.value)
+            } else {
+                fld.value.clone()
+            };
+            let value_cell = if is_salt_required && !app.settings_editing {
+                Cell::from(Span::styled(
+                    value,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Cell::from(value)
+            };
+            Row::new([Cell::from(fld.label.clone()), value_cell])
+        })
+        .collect();
+
+    let widths = [Constraint::Percentage(40), Constraint::Percentage(60)];
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(["Field", "Value"]).style(
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+        .block(block)
+        .row_highlight_style(highlight_style);
+
+    let mut state = TableState::default().with_selected(highlight_row);
+    f.render_stateful_widget(table, right, &mut state);
 }
 
 #[cfg(test)]
@@ -2180,5 +3057,508 @@ mod tests {
         let node = graph_node_fixture(0, false, vec![]);
         let text = spans_text(&graph_node_spans(&node, "◆", true, "ITERATION-001"));
         assert_eq!(text, "\u{25C6} Design draft");
+    }
+
+    #[test]
+    fn settings_lines_general_shows_three_fields() {
+        let config = Config::default();
+        let lines = settings_lines_inner(0, 0, None, &config);
+        assert_eq!(lines.len(), 3);
+        assert!(
+            lines.iter().any(|l| l.starts_with("naming.pattern:")),
+            "missing naming.pattern, got: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("ref_count_ceiling:")),
+            "missing ref_count_ceiling, got: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("templates.dir:")),
+            "missing templates.dir, got: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn settings_lines_general_includes_values() {
+        let config = Config::default();
+        let lines = settings_lines_inner(0, 0, None, &config);
+        assert!(lines
+            .iter()
+            .any(|l| l.contains(&config.documents.naming.pattern)));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains(&config.ref_count_ceiling.to_string())));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains(&config.filesystem.templates.dir)));
+    }
+
+    #[test]
+    fn settings_lines_github_absent_shows_unset() {
+        let config = Config::default();
+        let lines = settings_lines_inner(5, 0, None, &config);
+        assert_eq!(lines.len(), 2);
+        assert!(lines.contains(&"repo: (unset)".to_string()));
+        assert!(lines.contains(&"cache_ttl: (unset)".to_string()));
+    }
+
+    #[test]
+    fn settings_lines_doc_types_drilled_shows_eleven_fields() {
+        let config = Config::default();
+        let lines = settings_lines_inner(1, 0, Some(0), &config);
+        let expected_labels = [
+            "name:",
+            "plural:",
+            "dir:",
+            "prefix:",
+            "icon:",
+            "numbering:",
+            "subdirectory:",
+            "store:",
+            "singleton:",
+            "parent_type:",
+            "agents:",
+        ];
+        for label in &expected_labels {
+            assert!(
+                lines.iter().any(|l| l.starts_with(label)),
+                "missing field {label}, got: {lines:?}"
+            );
+        }
+        // rfc (index 0) has icon Some("●"), not (unset)
+        assert!(
+            lines.contains(&"icon: ●".to_string()),
+            "expected icon: ●, got: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn settings_lines_doc_types_not_drilled_shows_entries() {
+        let config = Config::default();
+        let lines = settings_lines_inner(1, 0, None, &config);
+        assert_eq!(lines.len(), config.documents.types.len());
+        assert!(lines.iter().any(|l| l.contains("rfc")));
+        assert!(lines.iter().any(|l| l.contains("▸")));
+    }
+
+    // The render and the legacy display-line builder share one model accessor:
+    // entry names come straight from config, with no prefix decoration.
+    #[test]
+    fn settings_entry_names_source_from_model_without_prefix() {
+        let config = Config::default();
+        let names = settings_entry_names(1, &config);
+        assert_eq!(
+            names,
+            config
+                .documents
+                .types
+                .iter()
+                .map(|t| t.name.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            names
+                .iter()
+                .all(|n| !n.starts_with('▸') && !n.starts_with(' ')),
+            "names carry no selection prefix"
+        );
+        assert!(
+            settings_entry_names(0, &config).is_empty(),
+            "non-collection categories have no entries"
+        );
+    }
+
+    #[test]
+    fn settings_lines_coordination_absent_shows_unset() {
+        let config = Config::default();
+        let lines = settings_lines_inner(6, 0, None, &config);
+        assert_eq!(lines.len(), 5);
+        assert!(lines.contains(&"remote: (unset)".to_string()));
+        assert!(lines.contains(&"lease_duration: (unset)".to_string()));
+        assert!(lines.contains(&"grace_period: (unset)".to_string()));
+        assert!(lines.contains(&"max_push_retries: (unset)".to_string()));
+        assert!(lines.contains(&"max_clock_skew: (unset)".to_string()));
+    }
+
+    #[test]
+    fn settings_lines_agents_absent_shows_unset() {
+        let config = Config::default();
+        let lines = settings_lines_inner(8, 0, None, &config);
+        assert!(lines.contains(&"interactive: (unset)".to_string()));
+    }
+
+    // AC2 (ITERATION-189): the render keys the required-but-empty salt flag off
+    // this buffer-state predicate. A scaffolded (empty-salt) section flags; a
+    // non-empty salt does not; an absent section does not.
+    #[test]
+    fn sqids_salt_required_empty_flags_only_empty_present_salt() {
+        let mut config = Config::default();
+        assert!(
+            !sqids_salt_required_empty(&config),
+            "no section => not flagged"
+        );
+
+        config.documents.sqids = Some(crate::engine::config::SqidsConfig {
+            salt: String::new(),
+            min_length: 3,
+        });
+        assert!(
+            sqids_salt_required_empty(&config),
+            "present section with empty salt => flagged (AC2)"
+        );
+
+        config.documents.sqids = Some(crate::engine::config::SqidsConfig {
+            salt: "seed".to_string(),
+            min_length: 3,
+        });
+        assert!(
+            !sqids_salt_required_empty(&config),
+            "a non-empty salt is never flagged"
+        );
+    }
+
+    #[test]
+    fn settings_lines_numbering_all_unset() {
+        let config = Config::default();
+        let lines = settings_lines_inner(4, 0, None, &config);
+        assert_eq!(lines.len(), 5);
+        assert!(lines.contains(&"sqids.salt: (unset)".to_string()));
+        assert!(lines.contains(&"sqids.min_length: (unset)".to_string()));
+        assert!(lines.contains(&"reserved.remote: (unset)".to_string()));
+        assert!(lines.contains(&"reserved.format: (unset)".to_string()));
+        assert!(lines.contains(&"reserved.max_retries: (unset)".to_string()));
+    }
+
+    #[test]
+    fn settings_lines_interface_default() {
+        let config = Config::default();
+        let lines = settings_lines_inner(9, 0, None, &config);
+        assert_eq!(lines.len(), 6);
+        assert!(lines.contains(&"ascii_diagrams: false".to_string()));
+        assert!(lines.contains(&"statusbar.enabled: true".to_string()));
+        assert!(lines.contains(&"statusbar.left: (unset)".to_string()));
+        assert!(lines.contains(&"statusbar.center: (unset)".to_string()));
+        assert!(lines.contains(&"statusbar.right: (unset)".to_string()));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("multiline.max_expanded_height:")),
+            "missing multiline field, got: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn settings_lines_relationships_not_drilled_shows_entries() {
+        let config = Config::default();
+        let lines = settings_lines_inner(2, 0, None, &config);
+        assert_eq!(lines.len(), config.relationships.len());
+        assert!(lines.iter().any(|l| l.contains("implements")));
+        assert!(lines.iter().any(|l| l.contains("related-to")));
+    }
+
+    #[test]
+    fn settings_lines_relationships_drilled_shows_fields() {
+        let config = Config::default();
+        let lines = settings_lines_inner(2, 0, Some(0), &config);
+        assert!(lines.iter().any(|l| l.starts_with("name:")));
+        assert!(lines.iter().any(|l| l.starts_with("inverse:")));
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn settings_lines_certification_empty_overrides() {
+        let config = Config::default();
+        let lines = settings_lines_inner(7, 0, None, &config);
+        assert!(lines.iter().any(|l| l.starts_with("normalize:")));
+        assert!(lines.contains(&"(no overrides configured)".to_string()));
+    }
+
+    #[test]
+    fn settings_lines_unknown_category_returns_empty() {
+        let config = Config::default();
+        let lines = settings_lines_inner(999, 0, None, &config);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn settings_lines_validation_rules_not_drilled_shows_entries() {
+        let config = Config::default();
+        let lines = settings_lines_inner(3, 0, None, &config);
+        assert_eq!(lines.len(), config.rules.len());
+        assert!(lines.iter().any(|l| l.contains("stories-need-rfcs")));
+        assert!(lines.iter().any(|l| l.contains("iterations-need-stories")));
+        assert!(lines.iter().any(|l| l.contains("adrs-need-relations")));
+        assert!(lines.iter().any(|l| l.contains("▸")));
+    }
+
+    #[test]
+    fn settings_lines_validation_rules_drilled_parent_child() {
+        let config = Config::default();
+        let lines = settings_lines_inner(3, 0, Some(0), &config);
+        assert!(lines.contains(&"name: stories-need-rfcs".to_string()));
+        assert!(lines.contains(&"shape: parent-child".to_string()));
+        assert!(lines.contains(&"child: story".to_string()));
+        assert!(lines.contains(&"parent: rfc".to_string()));
+        assert!(lines.contains(&"link: implements".to_string()));
+        assert!(lines.contains(&"severity: warning".to_string()));
+        assert_eq!(lines.len(), 6);
+    }
+
+    #[test]
+    fn settings_lines_validation_rules_drilled_relation_existence() {
+        let config = Config::default();
+        let lines = settings_lines_inner(3, 0, Some(2), &config);
+        assert!(lines.contains(&"name: adrs-need-relations".to_string()));
+        assert!(lines.contains(&"shape: relation-existence".to_string()));
+        assert!(lines.contains(&"doc_type: adr".to_string()));
+        assert!(lines.contains(&"require: any-relation".to_string()));
+        assert!(lines.contains(&"severity: error".to_string()));
+        assert_eq!(lines.len(), 5);
+    }
+
+    fn field_by_label<'a>(fields: &'a [EditableField], label: &str) -> &'a EditableField {
+        fields
+            .iter()
+            .find(|f| f.label == label)
+            .unwrap_or_else(|| panic!("no field labelled {label}, got: {fields:?}"))
+    }
+
+    #[test]
+    fn settings_fields_general_ref_count_ceiling_is_bounded_num() {
+        let config = Config::default();
+        let fields = settings_fields(0, 0, None, &config);
+        let f = field_by_label(&fields, "ref_count_ceiling");
+        assert_eq!(f.editor, FieldEditor::BoundedNum { min: 1, max: 1000 });
+        assert_eq!(f.value, config.ref_count_ceiling.to_string());
+        assert_eq!(f.path, FieldPath::RefCountCeiling);
+    }
+
+    #[test]
+    fn settings_fields_type_numbering_is_enum_cycle() {
+        let config = Config::default();
+        let fields = settings_fields(1, 0, Some(0), &config);
+        let f = field_by_label(&fields, "numbering");
+        assert_eq!(
+            f.editor,
+            FieldEditor::EnumCycle {
+                variants: &["incremental", "sqids", "reserved"]
+            }
+        );
+    }
+
+    #[test]
+    fn settings_fields_type_subdirectory_is_toggle() {
+        let config = Config::default();
+        let fields = settings_fields(1, 0, Some(0), &config);
+        let f = field_by_label(&fields, "subdirectory");
+        assert_eq!(f.editor, FieldEditor::Toggle);
+    }
+
+    #[test]
+    fn settings_fields_github_repo_nullable_when_present() {
+        let toml_str = r#"
+[github]
+repo = "owner/repo"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "related-to"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let fields = settings_fields(5, 0, None, &config);
+        let repo = field_by_label(&fields, "repo");
+        assert_eq!(repo.editor, FieldEditor::Nullable);
+        assert_eq!(repo.path, FieldPath::GithubRepo);
+        let ttl = field_by_label(&fields, "cache_ttl");
+        assert!(matches!(ttl.editor, FieldEditor::BoundedNum { .. }));
+    }
+
+    #[test]
+    fn settings_fields_sqids_read_only_when_section_absent() {
+        let config = Config::default();
+        let fields = settings_fields(4, 0, None, &config);
+        let salt = field_by_label(&fields, "sqids.salt");
+        assert_eq!(salt.editor, FieldEditor::ReadOnly);
+        assert_eq!(salt.path, FieldPath::Unset);
+        let min = field_by_label(&fields, "sqids.min_length");
+        assert_eq!(min.editor, FieldEditor::ReadOnly);
+    }
+
+    // AC1: the Interface category surfaces the full UiConfig as editable rows,
+    // reflecting defaults when [tui] is unset.
+    #[test]
+    fn settings_fields_interface_surfaces_full_uiconfig_with_defaults() {
+        let config = Config::default();
+        let fields = settings_fields(9, 0, None, &config);
+
+        let expected: &[(&str, FieldEditor, FieldPath)] = &[
+            (
+                "ascii_diagrams",
+                FieldEditor::Toggle,
+                FieldPath::UiAsciiDiagrams,
+            ),
+            (
+                "statusbar.enabled",
+                FieldEditor::Toggle,
+                FieldPath::StatusbarEnabled,
+            ),
+            (
+                "statusbar.left",
+                FieldEditor::ZoneOrdering,
+                FieldPath::StatusbarLeft,
+            ),
+            (
+                "statusbar.center",
+                FieldEditor::ZoneOrdering,
+                FieldPath::StatusbarCenter,
+            ),
+            (
+                "statusbar.right",
+                FieldEditor::ZoneOrdering,
+                FieldPath::StatusbarRight,
+            ),
+            (
+                "multiline.max_expanded_height",
+                FieldEditor::BoundedNum { min: 1, max: 1000 },
+                FieldPath::MultilineMaxExpandedHeight,
+            ),
+        ];
+        assert_eq!(fields.len(), expected.len(), "got: {fields:?}");
+        for (label, editor, path) in expected {
+            let f = field_by_label(&fields, label);
+            assert_eq!(&f.editor, editor, "editor mismatch for {label}");
+            assert_eq!(&f.path, path, "path mismatch for {label}");
+        }
+
+        // Default values surface, not (unset): ascii false, statusbar enabled true,
+        // multiline 5.
+        assert_eq!(field_by_label(&fields, "ascii_diagrams").value, "false");
+        assert_eq!(field_by_label(&fields, "statusbar.enabled").value, "true");
+        assert_eq!(
+            field_by_label(&fields, "multiline.max_expanded_height").value,
+            "5"
+        );
+    }
+
+    // AC1: explicit [tui] values surface in the rows.
+    #[test]
+    fn settings_fields_interface_reflects_explicit_values() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "related-to"
+
+[tui]
+ascii_diagrams = true
+
+[tui.statusbar]
+enabled = false
+left = ["mode", "git_branch"]
+
+[tui.multiline]
+max_expanded_height = 8
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let fields = settings_fields(9, 0, None, &config);
+        assert_eq!(field_by_label(&fields, "ascii_diagrams").value, "true");
+        assert_eq!(field_by_label(&fields, "statusbar.enabled").value, "false");
+        assert_eq!(
+            field_by_label(&fields, "multiline.max_expanded_height").value,
+            "8"
+        );
+        assert_eq!(
+            field_by_label(&fields, "statusbar.left").value,
+            "mode, git_branch"
+        );
+    }
+
+    #[test]
+    fn settings_fields_entry_list_views_are_empty() {
+        let config = Config::default();
+        assert!(settings_fields(1, 0, None, &config).is_empty());
+        assert!(settings_fields(2, 0, None, &config).is_empty());
+        assert!(settings_fields(3, 0, None, &config).is_empty());
+    }
+
+    #[test]
+    fn settings_fields_cert_normalize_top_is_toggle() {
+        let config = Config::default();
+        let fields = settings_fields(7, 0, None, &config);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].label, "normalize");
+        assert_eq!(fields[0].editor, FieldEditor::Toggle);
+        assert_eq!(fields[0].path, FieldPath::CertNormalize);
+    }
+
+    #[test]
+    fn settings_fields_and_lines_agree_for_field_view() {
+        let config = Config::default();
+        // A representative field-view (drilled doc type) and a scalar category.
+        for (cat, drill) in [(0usize, None), (1usize, Some(0usize)), (9usize, None)] {
+            let fields = settings_fields(cat, 0, drill, &config);
+            let lines = settings_lines_inner(cat, 0, drill, &config);
+            let derived: Vec<String> = fields
+                .iter()
+                .map(|f| format!("{}: {}", f.label, f.value))
+                .collect();
+            assert_eq!(
+                derived, lines,
+                "settings_fields and settings_lines_inner must agree for cat {cat}"
+            );
+        }
+    }
+
+    #[test]
+    fn settings_display_value_echoes_input_with_caret_while_editing() {
+        let field = EditableField {
+            label: "naming.pattern".to_string(),
+            value: "{type}-{title}.md".to_string(),
+            editor: FieldEditor::Text,
+            path: FieldPath::Naming,
+        };
+        // The focused, editing row shows the live input + caret, NOT the buffer value.
+        let shown = settings_display_value(&field, true, "edited-{title}");
+        assert_eq!(shown, "edited-{title}_");
+        assert!(
+            !shown.contains(&field.value),
+            "stale buffer value must not leak while editing: {shown}"
+        );
+    }
+
+    #[test]
+    fn settings_display_value_shows_buffer_when_not_editing() {
+        let field = EditableField {
+            label: "naming.pattern".to_string(),
+            value: "{type}-{title}.md".to_string(),
+            editor: FieldEditor::Text,
+            path: FieldPath::Naming,
+        };
+        // A non-editing row ignores the input buffer and shows the buffer value.
+        assert_eq!(
+            settings_display_value(&field, false, "ignored"),
+            "{type}-{title}.md"
+        );
+    }
+
+    #[test]
+    fn settings_display_value_empty_input_shows_just_caret() {
+        let field = EditableField {
+            label: "github.repo".to_string(),
+            value: "(unset)".to_string(),
+            editor: FieldEditor::Nullable,
+            path: FieldPath::GithubRepo,
+        };
+        // Editing an unset nullable starts from empty input -- caret only, not `(unset)`.
+        assert_eq!(settings_display_value(&field, true, ""), "_");
     }
 }

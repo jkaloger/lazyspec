@@ -1,10 +1,20 @@
 #[cfg(feature = "agent")]
 use super::forms::AgentDialog;
-use super::forms::{CreateForm, DeleteConfirm, LinkEditor, ProvenanceEditor, StatusPicker};
+use super::forms::{
+    CreateForm, DeleteConfirm, EditableField, FieldEditor, FieldPath, LinkEditor,
+    OverrideKeyPrompt, ProvenanceEditor, RelKey, RuleKey, SettingsDeleteConfirm,
+    SettingsDeleteTarget, SettingsImpactConfirm, SettingsQuitPrompt, SettingsVariantPicker,
+    StatusPicker, TypeKey, ZoneOrderingEditor,
+};
 use super::graph::flatten_forest;
+use super::settings_guard;
 
 use crate::engine::cache::DiskCache;
-use crate::engine::config::{Config, NumberingStrategy, StoreBackend};
+use crate::engine::config::{
+    default_normalize, CertificationOverride, Config, GithubConfig, NumberingStrategy,
+    RelationshipDef, ReservedConfig, ReservedFormat, Severity, SqidsConfig, StoreBackend, TypeDef,
+    ValidationRule,
+};
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, Status};
 use crate::engine::fs::FileSystem;
 use crate::engine::git_status::{query_git_branch, GitStatusCache};
@@ -12,6 +22,7 @@ use crate::engine::reservation::ReservationProgress;
 use crate::engine::store::{Filter, Store};
 #[cfg(feature = "agent")]
 use crate::tui::agent::{load_all_records, AgentSpawner};
+use crate::tui::views::keybinds::KeyContext;
 use crate::tui::views::status_bar::StatusBarComponents;
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
@@ -19,6 +30,213 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// A typed value destined for a settings buffer field, dispatched by
+/// `App::settings_write`'s exhaustive `FieldPath` match. Carries the field's
+/// real type so the writer never re-parses.
+enum SettingsValue {
+    Text(String),
+    OptText(Option<String>),
+    List(Vec<String>),
+    Bool(bool),
+    Num(u64),
+    Numbering(NumberingStrategy),
+    Store(StoreBackend),
+    ReservedFormat(ReservedFormat),
+    Severity(Severity),
+}
+
+/// Parse and bounds-check a numeric settings input. Pure and unit-testable.
+fn validate_bounded(input: &str, min: u64, max: u64) -> Result<u64, String> {
+    let n: u64 = input
+        .parse()
+        .map_err(|_| format!("'{}' is not a number", input))?;
+    if n < min || n > max {
+        return Err(format!("value must be between {} and {}", min, max));
+    }
+    Ok(n)
+}
+
+/// An optional config section a just-cycled enum value depends on: `numbering =
+/// sqids` needs `[numbering.sqids]`, `numbering = reserved` needs
+/// `[numbering.reserved]`, `store = github-issues` needs `[github]`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ConfigDep {
+    NumberingSqids,
+    NumberingReserved,
+    Github,
+}
+
+/// What `scaffold_dependency` did: the section it inserted, plus the first
+/// required-but-empty field that scaffolding produced (only the sqids salt; the
+/// other sections scaffold complete with parser defaults).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScaffoldResult {
+    pub inserted: ConfigDep,
+    pub required_empty_field: Option<FieldPath>,
+}
+
+/// Insert the optional config section `dep` requires into `buffer` with
+/// parser-matching defaults, or skip if it already exists. Returns `Some` with a
+/// record of the insert when a section was added, or `None` when the section was
+/// already present (the buffer is left untouched). Pure: operates only on the
+/// passed buffer. The scaffolded section is byte-identical to what `Config::parse`
+/// would have produced for an empty section, so a later save round-trips cleanly.
+pub fn scaffold_dependency(buffer: &mut Config, dep: ConfigDep) -> Option<ScaffoldResult> {
+    match dep {
+        ConfigDep::NumberingSqids => {
+            if buffer.documents.sqids.is_some() {
+                return None;
+            }
+            buffer.documents.sqids = Some(SqidsConfig {
+                salt: String::new(),
+                min_length: 3,
+            });
+            Some(ScaffoldResult {
+                inserted: ConfigDep::NumberingSqids,
+                required_empty_field: Some(FieldPath::SqidsSalt),
+            })
+        }
+        ConfigDep::NumberingReserved => {
+            if buffer.documents.reserved.is_some() {
+                return None;
+            }
+            buffer.documents.reserved = Some(ReservedConfig {
+                remote: "origin".to_string(),
+                format: ReservedFormat::Incremental,
+                max_retries: 5,
+            });
+            Some(ScaffoldResult {
+                inserted: ConfigDep::NumberingReserved,
+                required_empty_field: None,
+            })
+        }
+        ConfigDep::Github => {
+            if buffer.documents.github.is_some() {
+                return None;
+            }
+            buffer.documents.github = Some(GithubConfig {
+                repo: None,
+                cache_ttl: 60,
+            });
+            Some(ScaffoldResult {
+                inserted: ConfigDep::Github,
+                required_empty_field: None,
+            })
+        }
+    }
+}
+
+fn numbering_variant(n: &NumberingStrategy) -> &'static str {
+    match n {
+        NumberingStrategy::Incremental => "incremental",
+        NumberingStrategy::Sqids => "sqids",
+        NumberingStrategy::Reserved => "reserved",
+    }
+}
+
+fn numbering_from_variant(v: &str) -> Option<NumberingStrategy> {
+    match v {
+        "incremental" => Some(NumberingStrategy::Incremental),
+        "sqids" => Some(NumberingStrategy::Sqids),
+        "reserved" => Some(NumberingStrategy::Reserved),
+        _ => None,
+    }
+}
+
+fn store_from_variant(v: &str) -> Option<StoreBackend> {
+    match v {
+        "filesystem" => Some(StoreBackend::Filesystem),
+        "github-issues" => Some(StoreBackend::GithubIssues),
+        "git-ref" => Some(StoreBackend::GitRef),
+        _ => None,
+    }
+}
+
+fn reserved_format_variant(f: &ReservedFormat) -> &'static str {
+    match f {
+        ReservedFormat::Incremental => "incremental",
+        ReservedFormat::Sqids => "sqids",
+    }
+}
+
+fn reserved_format_from_variant(v: &str) -> Option<ReservedFormat> {
+    match v {
+        "incremental" => Some(ReservedFormat::Incremental),
+        "sqids" => Some(ReservedFormat::Sqids),
+        _ => None,
+    }
+}
+
+fn severity_from_variant(v: &str) -> Option<Severity> {
+    match v {
+        "error" => Some(Severity::Error),
+        "warning" => Some(Severity::Warning),
+        _ => None,
+    }
+}
+
+fn statusbar_raw(slot: Option<&Vec<String>>) -> String {
+    slot.map(|v| v.join(", ")).unwrap_or_default()
+}
+
+/// The raw editable string for a rule body field, read from the variant in play.
+/// Fields absent from the current variant render empty.
+fn rule_raw(rule: &ValidationRule, key: &RuleKey) -> String {
+    match (rule, key) {
+        (ValidationRule::ParentChild { name, .. }, RuleKey::Name)
+        | (ValidationRule::RelationExistence { name, .. }, RuleKey::Name) => name.clone(),
+        (ValidationRule::ParentChild { .. }, RuleKey::Shape) => "parent-child".to_string(),
+        (ValidationRule::RelationExistence { .. }, RuleKey::Shape) => {
+            "relation-existence".to_string()
+        }
+        (ValidationRule::ParentChild { child, .. }, RuleKey::Child) => child.clone(),
+        (ValidationRule::ParentChild { parent, .. }, RuleKey::Parent) => parent.clone(),
+        (ValidationRule::ParentChild { link, .. }, RuleKey::Link) => link.clone(),
+        (ValidationRule::RelationExistence { doc_type, .. }, RuleKey::DocType) => doc_type.clone(),
+        (ValidationRule::RelationExistence { require, .. }, RuleKey::Require) => require.clone(),
+        (ValidationRule::ParentChild { severity, .. }, RuleKey::Severity)
+        | (ValidationRule::RelationExistence { severity, .. }, RuleKey::Severity) => match severity
+        {
+            Severity::Error => "error".to_string(),
+            Severity::Warning => "warning".to_string(),
+        },
+        _ => String::new(),
+    }
+}
+
+/// Write a typed value into a rule body field. Mismatched key/variant
+/// combinations and value-kind mismatches are no-ops.
+fn rule_write(rule: &mut ValidationRule, key: &RuleKey, value: SettingsValue) {
+    match rule {
+        ValidationRule::ParentChild {
+            name,
+            child,
+            parent,
+            link,
+            severity,
+        } => match (key, value) {
+            (RuleKey::Name, SettingsValue::Text(s)) => *name = s,
+            (RuleKey::Child, SettingsValue::Text(s)) => *child = s,
+            (RuleKey::Parent, SettingsValue::Text(s)) => *parent = s,
+            (RuleKey::Link, SettingsValue::Text(s)) => *link = s,
+            (RuleKey::Severity, SettingsValue::Severity(sev)) => *severity = sev,
+            _ => {}
+        },
+        ValidationRule::RelationExistence {
+            name,
+            doc_type,
+            require,
+            severity,
+        } => match (key, value) {
+            (RuleKey::Name, SettingsValue::Text(s)) => *name = s,
+            (RuleKey::DocType, SettingsValue::Text(s)) => *doc_type = s,
+            (RuleKey::Require, SettingsValue::Text(s)) => *require = s,
+            (RuleKey::Severity, SettingsValue::Severity(sev)) => *severity = sev,
+            _ => {}
+        },
+    }
+}
 
 pub struct SearchEntry {
     pub path: PathBuf,
@@ -169,6 +387,7 @@ pub enum ViewMode {
     #[cfg(feature = "metrics")]
     Metrics,
     Graph,
+    Settings,
     #[cfg(feature = "agent")]
     Agents,
 }
@@ -183,10 +402,11 @@ impl ViewMode {
             ViewMode::Metrics => ViewMode::Graph,
             #[cfg(not(feature = "metrics"))]
             ViewMode::Filters => ViewMode::Graph,
+            ViewMode::Graph => ViewMode::Settings,
             #[cfg(feature = "agent")]
-            ViewMode::Graph => ViewMode::Agents,
+            ViewMode::Settings => ViewMode::Agents,
             #[cfg(not(feature = "agent"))]
-            ViewMode::Graph => ViewMode::Types,
+            ViewMode::Settings => ViewMode::Types,
             #[cfg(feature = "agent")]
             ViewMode::Agents => ViewMode::Types,
         }
@@ -199,6 +419,7 @@ impl ViewMode {
             #[cfg(feature = "metrics")]
             ViewMode::Metrics => "Metrics",
             ViewMode::Graph => "Graph",
+            ViewMode::Settings => "Settings",
             #[cfg(feature = "agent")]
             ViewMode::Agents => "Agents",
         }
@@ -227,6 +448,11 @@ pub struct App {
     pub search_results: Vec<std::path::PathBuf>,
     pub search_selected: usize,
     pub show_help: bool,
+    pub help_scroll: u16,
+    /// Maximum legal `help_scroll` for the current help content + viewport,
+    /// written by `draw_help_overlay` each frame (render-feeds-state, like
+    /// `doc_list_height`/`fullscreen_height`). 0 when the content fits.
+    pub help_max_scroll: u16,
     pub preview_tab: PreviewTab,
     pub selected_relation: usize,
     pub create_form: CreateForm,
@@ -261,6 +487,7 @@ pub struct App {
     pub validation_warnings: Vec<String>,
     pub status_bar_warnings: Vec<String>,
     pub fix_request: bool,
+    pub config_reload_request: bool,
     pub fix_result: Option<String>,
     pub doc_list_offset: usize,
     pub doc_list_height: usize,
@@ -305,6 +532,51 @@ pub struct App {
     /// config `[[relationships]]` registry at construction. The link editor
     /// cycles `rel_type_index` over this list.
     pub rel_types: Vec<String>,
+    pub settings_category: usize,
+    pub settings_entry: usize,
+    pub settings_drill: Option<usize>,
+    /// Field cursor within the current settings field-view (0-based). Reset to 0
+    /// on category change. Unused by entry-list views (those track `settings_entry`).
+    pub settings_field: usize,
+    /// The in-memory edit buffer the settings view renders from, so future edits
+    /// show immediately. Seeded from the session config; while clean it tracks
+    /// config reloads (see `apply_config`).
+    pub settings_buffer: Config,
+    pub settings_dirty: bool,
+    pub settings_editing: bool,
+    pub settings_edit_input: String,
+    pub settings_edit_error: Option<String>,
+    pub settings_footer_error: Option<String>,
+    /// The save/discard/cancel prompt shown when quitting Settings with unsaved
+    /// buffer edits (AC10).
+    pub settings_quit_prompt: SettingsQuitPrompt,
+    /// A pending dependency-scaffold offer raised by `settings_cycle_enum` when a
+    /// just-cycled enum value (numbering = sqids/reserved, store = github-issues)
+    /// auto-inserts its required config section. When the section carries a
+    /// required-but-empty field (only the sqids salt), the offer prompts a jump to
+    /// fill it; any non-accept key dismisses it (the buffer-state flag persists).
+    pub settings_scaffold_offer: Option<ScaffoldResult>,
+    /// The confirm prompt for removing a settings collection entry from the
+    /// buffer. Removal is buffer-only and happens only on confirm (no disk).
+    pub settings_delete_confirm: SettingsDeleteConfirm,
+    /// The confirm prompt raised before a save that orphans existing documents by
+    /// altering a load-bearing `[[types]]` field (`dir`/`prefix`/`store`) on a type
+    /// with docs on disk (RFC-023 slice 6). When active, the save is paused: nothing
+    /// is written until the user confirms.
+    pub settings_impact_confirm: SettingsImpactConfirm,
+    /// The spec-path key prompt for seeding a new certification override. The key
+    /// is entered before the override is inserted into the buffer.
+    pub override_key_prompt: OverrideKeyPrompt,
+    /// The two-pane status-bar zone ordering editor, active while a
+    /// `statusbar.left/center/right` row is being reordered. `Some` routes keys to
+    /// the zone editor instead of the field list; commit writes the chosen order
+    /// back into `settings_buffer` (RFC-023 slice 7).
+    pub settings_zone_editor: Option<ZoneOrderingEditor>,
+    /// The enum variant-picker overlay, active while an enum field (numbering,
+    /// store, reserved format, rule severity, or rule shape) is being edited via
+    /// `Enter`. `Some` routes keys to the picker; selecting writes the chosen
+    /// variant back into `settings_buffer` (RFC-023 / STORY-144).
+    pub settings_variant_picker: Option<SettingsVariantPicker>,
 }
 
 impl App {
@@ -314,27 +586,6 @@ impl App {
         picker: ratatui_image::picker::Picker,
         fs: Box<dyn FileSystem>,
     ) -> Self {
-        let default_glyphs = ["●", "■", "▲", "◆", "★", "◎"];
-        let type_icons: HashMap<String, String> = config
-            .documents
-            .types
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                let icon = t
-                    .icon
-                    .clone()
-                    .unwrap_or_else(|| default_glyphs[i % default_glyphs.len()].to_string());
-                (t.name.clone(), icon)
-            })
-            .collect();
-        let type_plurals: HashMap<String, String> = config
-            .documents
-            .types
-            .iter()
-            .map(|t| (t.name.clone(), t.plural.clone()))
-            .collect();
-
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
         let git_branch = query_git_branch(store.root());
         let git_status_cache = GitStatusCache::new(store.root());
@@ -343,9 +594,6 @@ impl App {
             .types
             .iter()
             .any(|t| t.store == StoreBackend::GithubIssues);
-
-        let (status_bar_components, status_bar_warnings) =
-            StatusBarComponents::from_config(&config.ui.statusbar);
 
         #[cfg(feature = "agent")]
         let agent_spawner = AgentSpawner::new(store.root());
@@ -362,12 +610,7 @@ impl App {
             store,
             selected_type: 0,
             selected_doc: 0,
-            doc_types: config
-                .documents
-                .types
-                .iter()
-                .map(|t| DocType::new(&t.name))
-                .collect(),
+            doc_types: Vec::new(),
             should_quit: false,
             fullscreen_doc: false,
             scroll_offset: 0,
@@ -376,6 +619,8 @@ impl App {
             search_results: Vec::new(),
             search_selected: 0,
             show_help: false,
+            help_scroll: 0,
+            help_max_scroll: 0,
             preview_tab: PreviewTab::Preview,
             selected_relation: 0,
             create_form: CreateForm::new(),
@@ -397,8 +642,8 @@ impl App {
             filter_status: None,
             filter_tag: None,
             available_tags: Vec::new(),
-            type_icons,
-            type_plurals,
+            type_icons: HashMap::new(),
+            type_plurals: HashMap::new(),
             expanded_parents: HashSet::new(),
             wrap_mode: false,
             doc_tree: Vec::new(),
@@ -408,6 +653,7 @@ impl App {
             validation_warnings: Vec::new(),
             status_bar_warnings: Vec::new(),
             fix_request: false,
+            config_reload_request: false,
             fix_result: None,
             doc_list_offset: 0,
             doc_list_height: 0,
@@ -430,7 +676,7 @@ impl App {
             picker,
             image_states: HashMap::new(),
             image_dimensions_cache: HashMap::new(),
-            ascii_diagrams: config.ui.ascii_diagrams,
+            ascii_diagrams: false,
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
             search_index: Vec::new(),
@@ -444,14 +690,64 @@ impl App {
                 None
             },
             gh_issue_map_stale: false,
-            status_bar_enabled: config.ui.statusbar.enabled,
-            status_bar_components,
-            rel_types: config.relationship_keywords(),
+            status_bar_enabled: false,
+            status_bar_components: StatusBarComponents::default(),
+            rel_types: Vec::new(),
+            settings_category: 0,
+            settings_entry: 0,
+            settings_drill: None,
+            settings_field: 0,
+            settings_buffer: config.clone(),
+            settings_dirty: false,
+            settings_editing: false,
+            settings_edit_input: String::new(),
+            settings_edit_error: None,
+            settings_footer_error: None,
+            settings_quit_prompt: SettingsQuitPrompt::new(),
+            settings_scaffold_offer: None,
+            settings_delete_confirm: SettingsDeleteConfirm::new(),
+            settings_impact_confirm: SettingsImpactConfirm::new(),
+            override_key_prompt: OverrideKeyPrompt::new(),
+            settings_zone_editor: None,
+            settings_variant_picker: None,
         };
-        app.status_bar_warnings = status_bar_warnings;
+        app.apply_config(config);
         app.rebuild_search_index();
         app.build_doc_tree();
         app
+    }
+
+    pub fn apply_config(&mut self, config: &Config) {
+        let default_glyphs = ["●", "■", "▲", "◆", "★", "◎"];
+        self.type_icons.clear();
+        self.type_plurals.clear();
+        self.doc_types.clear();
+        for (i, t) in config.documents.types.iter().enumerate() {
+            let icon = t
+                .icon
+                .clone()
+                .unwrap_or_else(|| default_glyphs[i % default_glyphs.len()].to_string());
+            self.type_icons.insert(t.name.clone(), icon);
+            self.type_plurals.insert(t.name.clone(), t.plural.clone());
+            self.doc_types.push(DocType::new(&t.name));
+        }
+
+        let (components, warnings) = StatusBarComponents::from_config(&config.ui.statusbar);
+        self.status_bar_components = components;
+        self.status_bar_warnings = warnings;
+        self.status_bar_enabled = config.ui.statusbar.enabled;
+        self.ascii_diagrams = config.ui.ascii_diagrams;
+        self.rel_types = config.relationship_keywords();
+
+        // A clean buffer follows external/session config reloads; a dirty buffer
+        // (pending edits) is preserved.
+        if !self.settings_dirty {
+            self.settings_buffer = config.clone();
+        }
+
+        if self.selected_type >= self.doc_types.len() {
+            self.selected_type = self.doc_types.len().saturating_sub(1);
+        }
     }
 
     pub fn refresh_validation(&mut self, config: &Config) {
@@ -469,6 +765,11 @@ impl App {
             self.reset_filters();
         }
         self.view_mode = self.view_mode.next();
+        if self.view_mode == ViewMode::Settings {
+            self.settings_drill = None;
+            self.settings_entry = 0;
+            self.settings_field = 0;
+        }
         if self.view_mode == ViewMode::Graph {
             self.rebuild_graph();
         }
@@ -483,6 +784,908 @@ impl App {
             }
             self.agent_selected_index = 0;
         }
+    }
+
+    /// The [`KeyContext`] whose handler is currently live, mirroring
+    /// `handle_key`'s precedence ladder exactly (`keys.rs:19-66`) plus the
+    /// `handle_normal_key` view-mode dispatch (`keys.rs:1002-1009`) and the
+    /// nested `handle_settings_key` sub-state order (`keys.rs:744-885`).
+    ///
+    /// The `show_help` short-circuit (`keys.rs:25-28`) is intentionally skipped:
+    /// help is an overlay drawn *on top of* a context, so we resolve the context
+    /// underneath it. Keeping this match structurally identical to the handlers
+    /// is the drift guard the help renderer (T3) and parity test (T5) rely on.
+    pub fn active_key_context(&self) -> KeyContext {
+        if self.gh_conflict_message.is_some() {
+            return KeyContext::GhConflict;
+        }
+        // NB: the `show_help` check at keys.rs:25 is skipped on purpose.
+        if self.show_warnings {
+            return KeyContext::Warnings;
+        }
+        if self.create_form.active {
+            return KeyContext::CreateForm;
+        }
+        if self.delete_confirm.active {
+            return KeyContext::DeleteConfirm;
+        }
+        if self.override_key_prompt.active {
+            return KeyContext::OverrideKeyPrompt;
+        }
+        if self.settings_delete_confirm.active {
+            return KeyContext::SettingsDeleteConfirm;
+        }
+        if self.settings_impact_confirm.active {
+            return KeyContext::SettingsImpact;
+        }
+        if self.status_picker.active {
+            return KeyContext::StatusPicker;
+        }
+        if self.link_editor.active {
+            return KeyContext::LinkEditor;
+        }
+        if self.provenance_editor.active {
+            return KeyContext::ProvenanceEditor;
+        }
+        #[cfg(feature = "agent")]
+        if self.agent_dialog.active {
+            return if self.agent_dialog.text_input.is_some() {
+                KeyContext::AgentTextInput
+            } else {
+                KeyContext::AgentDialog
+            };
+        }
+        if self.search_mode {
+            return KeyContext::Search;
+        }
+        if self.fullscreen_doc {
+            return KeyContext::Fullscreen;
+        }
+        match self.view_mode {
+            ViewMode::Filters => KeyContext::Filters,
+            ViewMode::Graph => KeyContext::Graph,
+            ViewMode::Settings => self.active_settings_key_context(),
+            #[cfg(feature = "agent")]
+            ViewMode::Agents => KeyContext::Agents,
+            _ => KeyContext::Types,
+        }
+    }
+
+    /// The settings sub-state context, resolved in the same precedence
+    /// `handle_settings_key` checks (`keys.rs:744-885`).
+    fn active_settings_key_context(&self) -> KeyContext {
+        if self.settings_quit_prompt.active {
+            KeyContext::SettingsQuitPrompt
+        } else if self.settings_editing {
+            KeyContext::SettingsEditing
+        } else if self.settings_zone_editor.is_some() {
+            KeyContext::SettingsZoneEditor
+        } else if self.settings_variant_picker.is_some() {
+            KeyContext::SettingsVariantPicker
+        } else if self.settings_scaffold_offer.is_some() {
+            KeyContext::SettingsScaffoldOffer
+        } else {
+            KeyContext::Settings
+        }
+    }
+
+    pub fn settings_categories() -> &'static [&'static str] {
+        &[
+            "General",
+            "Document Types",
+            "Relationships",
+            "Validation Rules",
+            "Numbering",
+            "GitHub",
+            "Coordination",
+            "Certification",
+            "Agents",
+            "Interface",
+        ]
+    }
+
+    /// The `EditableField` under the field cursor in the current settings
+    /// field-view, read from `settings_buffer`. None for entry-list views or an
+    /// out-of-range cursor.
+    pub fn settings_focused_field(&self) -> Option<EditableField> {
+        let fields = crate::tui::views::panels::settings_fields(
+            self.settings_category,
+            self.settings_entry,
+            self.settings_drill,
+            &self.settings_buffer,
+        );
+        fields.get(self.settings_field).cloned()
+    }
+
+    /// The current RAW editable string for the focused field, used to seed the
+    /// edit input. Unlike the rendered `value`, an unset Nullable yields `""`
+    /// (not `(unset)`) and a List yields a comma-joined string. Derived directly
+    /// from the buffer via the focused `FieldPath`.
+    pub(crate) fn settings_focused_raw(&self) -> String {
+        let Some(focused) = self.settings_focused_field() else {
+            return String::new();
+        };
+        let buf = &self.settings_buffer;
+        match &focused.path {
+            FieldPath::Naming => buf.documents.naming.pattern.clone(),
+            FieldPath::RefCountCeiling => buf.ref_count_ceiling.to_string(),
+            FieldPath::TemplatesDir => buf.filesystem.templates.dir.clone(),
+            FieldPath::Type { index, key } => buf
+                .documents
+                .types
+                .get(*index)
+                .map(|t| match key {
+                    TypeKey::Name => t.name.clone(),
+                    TypeKey::Plural => t.plural.clone(),
+                    TypeKey::Dir => t.dir.clone(),
+                    TypeKey::Prefix => t.prefix.clone(),
+                    TypeKey::Icon => t.icon.clone().unwrap_or_default(),
+                    TypeKey::Numbering => numbering_variant(&t.numbering).to_string(),
+                    TypeKey::Subdirectory => t.subdirectory.to_string(),
+                    TypeKey::Store => t.store.to_string(),
+                    TypeKey::Singleton => t.singleton.to_string(),
+                    TypeKey::ParentType => t.parent_type.clone().unwrap_or_default(),
+                    TypeKey::Agents => t.agents.join(", "),
+                })
+                .unwrap_or_default(),
+            FieldPath::Rel { index, key } => buf
+                .relationships
+                .get(*index)
+                .map(|r| match key {
+                    RelKey::Name => r.name.clone(),
+                    RelKey::Inverse => r.inverse.clone().unwrap_or_default(),
+                })
+                .unwrap_or_default(),
+            FieldPath::Rule { index, key } => buf
+                .rules
+                .get(*index)
+                .map(|r| rule_raw(r, key))
+                .unwrap_or_default(),
+            FieldPath::SqidsSalt => buf
+                .documents
+                .sqids
+                .as_ref()
+                .map(|s| s.salt.clone())
+                .unwrap_or_default(),
+            FieldPath::SqidsMinLength => buf
+                .documents
+                .sqids
+                .as_ref()
+                .map(|s| s.min_length.to_string())
+                .unwrap_or_default(),
+            FieldPath::ReservedRemote => buf
+                .documents
+                .reserved
+                .as_ref()
+                .map(|r| r.remote.clone())
+                .unwrap_or_default(),
+            FieldPath::ReservedFormat => buf
+                .documents
+                .reserved
+                .as_ref()
+                .map(|r| reserved_format_variant(&r.format).to_string())
+                .unwrap_or_default(),
+            FieldPath::ReservedMaxRetries => buf
+                .documents
+                .reserved
+                .as_ref()
+                .map(|r| r.max_retries.to_string())
+                .unwrap_or_default(),
+            FieldPath::GithubRepo => buf
+                .documents
+                .github
+                .as_ref()
+                .and_then(|g| g.repo.clone())
+                .unwrap_or_default(),
+            FieldPath::GithubCacheTtl => buf
+                .documents
+                .github
+                .as_ref()
+                .map(|g| g.cache_ttl.to_string())
+                .unwrap_or_default(),
+            FieldPath::CoordinationRemote => buf
+                .coordination
+                .as_ref()
+                .map(|c| c.remote.clone())
+                .unwrap_or_default(),
+            FieldPath::CoordinationLeaseDuration => buf
+                .coordination
+                .as_ref()
+                .map(|c| c.lease_duration.clone())
+                .unwrap_or_default(),
+            FieldPath::CoordinationGracePeriod => buf
+                .coordination
+                .as_ref()
+                .map(|c| c.grace_period.clone())
+                .unwrap_or_default(),
+            FieldPath::CoordinationMaxPushRetries => buf
+                .coordination
+                .as_ref()
+                .map(|c| c.max_push_retries.to_string())
+                .unwrap_or_default(),
+            FieldPath::CoordinationMaxClockSkew => buf
+                .coordination
+                .as_ref()
+                .map(|c| c.max_clock_skew.clone())
+                .unwrap_or_default(),
+            FieldPath::CertNormalize => buf.certification.normalize.to_string(),
+            FieldPath::CertOverride { key } => buf
+                .certification
+                .overrides
+                .get(key)
+                .map(|o| o.normalize.to_string())
+                .unwrap_or_default(),
+            FieldPath::AgentsInteractive => buf.agents.interactive.clone().unwrap_or_default(),
+            FieldPath::UiAsciiDiagrams => buf.ui.ascii_diagrams.to_string(),
+            FieldPath::StatusbarEnabled => buf.ui.statusbar.enabled.to_string(),
+            FieldPath::StatusbarLeft => statusbar_raw(buf.ui.statusbar.left.as_ref()),
+            FieldPath::StatusbarCenter => statusbar_raw(buf.ui.statusbar.center.as_ref()),
+            FieldPath::StatusbarRight => statusbar_raw(buf.ui.statusbar.right.as_ref()),
+            FieldPath::MultilineMaxExpandedHeight => {
+                buf.ui.multiline.max_expanded_height.to_string()
+            }
+            FieldPath::Unset => String::new(),
+        }
+    }
+
+    /// Write a typed value into `settings_buffer` at the given `FieldPath`. The
+    /// single, exhaustive read/write site for settings edits (Principle 6). The
+    /// `SettingsValue` variant must match the field's editor kind; mismatches and
+    /// `Unset`/`ReadOnly` paths are no-ops.
+    fn settings_write(&mut self, path: &FieldPath, value: SettingsValue) {
+        let buf = &mut self.settings_buffer;
+        match path {
+            FieldPath::Naming => {
+                if let SettingsValue::Text(s) = value {
+                    buf.documents.naming.pattern = s;
+                }
+            }
+            FieldPath::RefCountCeiling => {
+                if let SettingsValue::Num(n) = value {
+                    buf.ref_count_ceiling = n as usize;
+                }
+            }
+            FieldPath::TemplatesDir => {
+                if let SettingsValue::Text(s) = value {
+                    buf.filesystem.templates.dir = s;
+                }
+            }
+            FieldPath::Type { index, key } => {
+                if let Some(t) = buf.documents.types.get_mut(*index) {
+                    match (key, value) {
+                        (TypeKey::Name, SettingsValue::Text(s)) => t.name = s,
+                        (TypeKey::Plural, SettingsValue::Text(s)) => t.plural = s,
+                        (TypeKey::Dir, SettingsValue::Text(s)) => t.dir = s,
+                        (TypeKey::Prefix, SettingsValue::Text(s)) => t.prefix = s,
+                        (TypeKey::Icon, SettingsValue::OptText(o)) => t.icon = o,
+                        (TypeKey::Numbering, SettingsValue::Numbering(n)) => t.numbering = n,
+                        (TypeKey::Subdirectory, SettingsValue::Bool(b)) => t.subdirectory = b,
+                        (TypeKey::Store, SettingsValue::Store(s)) => t.store = s,
+                        (TypeKey::Singleton, SettingsValue::Bool(b)) => t.singleton = b,
+                        (TypeKey::ParentType, SettingsValue::OptText(o)) => t.parent_type = o,
+                        (TypeKey::Agents, SettingsValue::List(v)) => t.agents = v,
+                        _ => {}
+                    }
+                }
+            }
+            FieldPath::Rel { index, key } => {
+                if let Some(r) = buf.relationships.get_mut(*index) {
+                    match (key, value) {
+                        (RelKey::Name, SettingsValue::Text(s)) => r.name = s,
+                        (RelKey::Inverse, SettingsValue::OptText(o)) => r.inverse = o,
+                        _ => {}
+                    }
+                }
+            }
+            FieldPath::Rule { index, key } => {
+                if let Some(rule) = buf.rules.get_mut(*index) {
+                    rule_write(rule, key, value);
+                }
+            }
+            FieldPath::SqidsSalt => {
+                if let (Some(s), SettingsValue::Text(v)) = (buf.documents.sqids.as_mut(), value) {
+                    s.salt = v;
+                }
+            }
+            FieldPath::SqidsMinLength => {
+                if let (Some(s), SettingsValue::Num(n)) = (buf.documents.sqids.as_mut(), value) {
+                    s.min_length = n as u8;
+                }
+            }
+            FieldPath::ReservedRemote => {
+                if let (Some(r), SettingsValue::Text(v)) = (buf.documents.reserved.as_mut(), value)
+                {
+                    r.remote = v;
+                }
+            }
+            FieldPath::ReservedFormat => {
+                if let (Some(r), SettingsValue::ReservedFormat(f)) =
+                    (buf.documents.reserved.as_mut(), value)
+                {
+                    r.format = f;
+                }
+            }
+            FieldPath::ReservedMaxRetries => {
+                if let (Some(r), SettingsValue::Num(n)) = (buf.documents.reserved.as_mut(), value) {
+                    r.max_retries = n as u8;
+                }
+            }
+            FieldPath::GithubRepo => {
+                if let (Some(g), SettingsValue::OptText(o)) = (buf.documents.github.as_mut(), value)
+                {
+                    g.repo = o;
+                }
+            }
+            FieldPath::GithubCacheTtl => {
+                if let (Some(g), SettingsValue::Num(n)) = (buf.documents.github.as_mut(), value) {
+                    g.cache_ttl = n;
+                }
+            }
+            FieldPath::CoordinationRemote => {
+                if let (Some(c), SettingsValue::Text(v)) = (buf.coordination.as_mut(), value) {
+                    c.remote = v;
+                }
+            }
+            FieldPath::CoordinationLeaseDuration => {
+                if let (Some(c), SettingsValue::Text(v)) = (buf.coordination.as_mut(), value) {
+                    c.lease_duration = v;
+                }
+            }
+            FieldPath::CoordinationGracePeriod => {
+                if let (Some(c), SettingsValue::Text(v)) = (buf.coordination.as_mut(), value) {
+                    c.grace_period = v;
+                }
+            }
+            FieldPath::CoordinationMaxPushRetries => {
+                if let (Some(c), SettingsValue::Num(n)) = (buf.coordination.as_mut(), value) {
+                    c.max_push_retries = n as u8;
+                }
+            }
+            FieldPath::CoordinationMaxClockSkew => {
+                if let (Some(c), SettingsValue::Text(v)) = (buf.coordination.as_mut(), value) {
+                    c.max_clock_skew = v;
+                }
+            }
+            FieldPath::CertNormalize => {
+                if let SettingsValue::Bool(b) = value {
+                    buf.certification.normalize = b;
+                }
+            }
+            FieldPath::CertOverride { key } => {
+                if let (Some(o), SettingsValue::Bool(b)) =
+                    (buf.certification.overrides.get_mut(key), value)
+                {
+                    o.normalize = b;
+                }
+            }
+            FieldPath::AgentsInteractive => {
+                if let SettingsValue::OptText(o) = value {
+                    buf.agents.interactive = o;
+                }
+            }
+            FieldPath::UiAsciiDiagrams => {
+                if let SettingsValue::Bool(b) = value {
+                    buf.ui.ascii_diagrams = b;
+                }
+            }
+            FieldPath::StatusbarEnabled => {
+                if let SettingsValue::Bool(b) = value {
+                    buf.ui.statusbar.enabled = b;
+                }
+            }
+            FieldPath::MultilineMaxExpandedHeight => {
+                if let SettingsValue::Num(n) = value {
+                    buf.ui.multiline.max_expanded_height = n as usize;
+                }
+            }
+            // Statusbar slot ordering and unset placeholders are not editable here.
+            FieldPath::StatusbarLeft
+            | FieldPath::StatusbarCenter
+            | FieldPath::StatusbarRight
+            | FieldPath::Unset => {}
+        }
+    }
+
+    /// Begin text-entry editing on the focused field, seeding the input with its
+    /// current raw string. No-op for Toggle/EnumCycle/ReadOnly (those edit via
+    /// Space or not at all).
+    pub fn settings_start_edit(&mut self) {
+        let Some(focused) = self.settings_focused_field() else {
+            return;
+        };
+        // A status-bar zone row opens the two-pane ordering editor, not text entry.
+        if focused.editor == FieldEditor::ZoneOrdering {
+            self.settings_open_zone_editor(focused.path);
+            return;
+        }
+        let editable = matches!(
+            focused.editor,
+            FieldEditor::Text
+                | FieldEditor::BoundedNum { .. }
+                | FieldEditor::Nullable
+                | FieldEditor::Duration
+                | FieldEditor::List
+        );
+        if !editable {
+            return;
+        }
+        self.settings_editing = true;
+        self.settings_edit_input = self.settings_focused_raw();
+        self.settings_edit_error = None;
+    }
+
+    /// Open the status-bar zone ordering editor for `path`, seeding it from the
+    /// matching buffer zone and its RFC-022 default names (so an unset zone starts
+    /// from what the bar actually renders, not a blank).
+    fn settings_open_zone_editor(&mut self, path: FieldPath) {
+        use crate::tui::views::status_bar::{
+            STATUS_BAR_DEFAULT_CENTER, STATUS_BAR_DEFAULT_LEFT, STATUS_BAR_DEFAULT_RIGHT,
+        };
+        let sb = &self.settings_buffer.ui.statusbar;
+        let (current, defaults): (Option<&Vec<String>>, &[&str]) = match path {
+            FieldPath::StatusbarLeft => (sb.left.as_ref(), STATUS_BAR_DEFAULT_LEFT),
+            FieldPath::StatusbarCenter => (sb.center.as_ref(), STATUS_BAR_DEFAULT_CENTER),
+            FieldPath::StatusbarRight => (sb.right.as_ref(), STATUS_BAR_DEFAULT_RIGHT),
+            _ => return,
+        };
+        self.settings_zone_editor = Some(ZoneOrderingEditor::new(path.clone(), current, defaults));
+    }
+
+    /// Commit the active zone editor into the buffer at its `path`: a non-empty
+    /// list writes `Some(order)`; an empty list writes `Some(vec![])` (an explicit
+    /// clear, distinct from an untouched zone's `None`). Dirties the buffer and
+    /// closes the editor.
+    pub fn settings_commit_zone(&mut self) {
+        let Some(editor) = self.settings_zone_editor.take() else {
+            return;
+        };
+        let value = Some(editor.selected);
+        let sb = &mut self.settings_buffer.ui.statusbar;
+        match editor.path {
+            FieldPath::StatusbarLeft => sb.left = value,
+            FieldPath::StatusbarCenter => sb.center = value,
+            FieldPath::StatusbarRight => sb.right = value,
+            _ => return,
+        }
+        self.settings_dirty = true;
+    }
+
+    /// Close the zone editor without writing; the buffer is untouched (an untouched
+    /// zone stays `None`).
+    pub fn settings_cancel_zone(&mut self) {
+        self.settings_zone_editor = None;
+    }
+
+    pub fn settings_cancel_edit(&mut self) {
+        self.settings_editing = false;
+        self.settings_edit_input.clear();
+        self.settings_edit_error = None;
+    }
+
+    /// Commit the in-progress text edit into the buffer. Validating editors
+    /// (BoundedNum/Duration) that reject the input keep edit mode active and set
+    /// `settings_edit_error` without touching the buffer or dirty flag.
+    pub fn settings_confirm_edit(&mut self) {
+        let Some(focused) = self.settings_focused_field() else {
+            return;
+        };
+        let input = self.settings_edit_input.trim().to_string();
+        match focused.editor {
+            FieldEditor::Text => {
+                self.settings_write(&focused.path, SettingsValue::Text(input));
+                self.settings_dirty = true;
+                self.settings_editing = false;
+            }
+            FieldEditor::Nullable => {
+                let opt = if input.is_empty() { None } else { Some(input) };
+                self.settings_write(&focused.path, SettingsValue::OptText(opt));
+                self.settings_dirty = true;
+                self.settings_editing = false;
+            }
+            FieldEditor::List => {
+                let list: Vec<String> = input
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                self.settings_write(&focused.path, SettingsValue::List(list));
+                self.settings_dirty = true;
+                self.settings_editing = false;
+            }
+            FieldEditor::BoundedNum { min, max } => match validate_bounded(&input, min, max) {
+                Ok(n) => {
+                    self.settings_write(&focused.path, SettingsValue::Num(n));
+                    self.settings_dirty = true;
+                    self.settings_editing = false;
+                }
+                Err(msg) => {
+                    self.settings_edit_error = Some(msg);
+                }
+            },
+            FieldEditor::Duration => match crate::engine::lease::parse_duration(&input) {
+                Ok(_) => {
+                    self.settings_write(&focused.path, SettingsValue::Text(input));
+                    self.settings_dirty = true;
+                    self.settings_editing = false;
+                }
+                Err(e) => {
+                    self.settings_edit_error = Some(e.to_string());
+                }
+            },
+            FieldEditor::Toggle
+            | FieldEditor::EnumCycle { .. }
+            | FieldEditor::ZoneOrdering
+            | FieldEditor::ReadOnly => {}
+        }
+    }
+
+    /// Space on the focused field: flip a Toggle or advance an EnumCycle in the
+    /// buffer. No-op for text-entry and ReadOnly kinds.
+    pub fn settings_space(&mut self) {
+        let Some(focused) = self.settings_focused_field() else {
+            return;
+        };
+        match focused.editor {
+            FieldEditor::Toggle => self.settings_toggle_bool(),
+            FieldEditor::EnumCycle { variants } => {
+                self.settings_cycle_enum(&focused.path, variants);
+            }
+            _ => {}
+        }
+    }
+
+    /// Flip the focused bool field in the buffer and mark it dirty (AC3). No-op
+    /// when the focused field is not a Toggle.
+    pub fn settings_toggle_bool(&mut self) {
+        let Some(focused) = self.settings_focused_field() else {
+            return;
+        };
+        if focused.editor != FieldEditor::Toggle {
+            return;
+        }
+        let current = self.settings_focused_raw() == "true";
+        self.settings_write(&focused.path, SettingsValue::Bool(!current));
+        self.settings_dirty = true;
+    }
+
+    fn settings_cycle_enum(&mut self, path: &FieldPath, variants: &'static [&'static str]) {
+        if variants.is_empty() {
+            return;
+        }
+        let current = self.settings_focused_raw();
+        let idx = variants.iter().position(|v| *v == current).unwrap_or(0);
+        let next = variants[(idx + 1) % variants.len()];
+        self.settings_set_enum_variant(path, next);
+    }
+
+    /// Write `variant` into the enum field at `path`, firing the same dependency
+    /// auto-scaffolding the enum-cycle path does. This is the shared write the
+    /// cycle path and the variant picker both call: the cycle computes `next` then
+    /// delegates here, so cycle and pick converge on identical behaviour (RFC-023
+    /// STORY-144). Rule `shape` is special: it routes through the whole-rule
+    /// conversion (preserving name + severity) when `variant` names the *other*
+    /// shape, and is a no-op when it names the current one.
+    pub fn settings_set_enum_variant(&mut self, path: &FieldPath, variant: &str) {
+        // Re-selecting the current variant is a no-op: no buffer write, no dirty.
+        // The cycle path never reaches here unchanged (it advances the index); the
+        // picker can, when the user re-picks the row already in force.
+        if variant == self.settings_focused_raw() {
+            return;
+        }
+        if let FieldPath::Rule {
+            index,
+            key: RuleKey::Shape,
+        } = path
+        {
+            self.settings_cycle_rule_shape(*index);
+            return;
+        }
+        match path {
+            FieldPath::Type {
+                key: TypeKey::Numbering,
+                ..
+            } => {
+                if let Some(n) = numbering_from_variant(variant) {
+                    self.settings_write(path, SettingsValue::Numbering(n));
+                    self.settings_dirty = true;
+                    self.scaffold_for_cycled_value(path, variant);
+                }
+            }
+            FieldPath::Type {
+                key: TypeKey::Store,
+                ..
+            } => {
+                if let Some(s) = store_from_variant(variant) {
+                    self.settings_write(path, SettingsValue::Store(s));
+                    self.settings_dirty = true;
+                    self.scaffold_for_cycled_value(path, variant);
+                }
+            }
+            FieldPath::ReservedFormat => {
+                if let Some(f) = reserved_format_from_variant(variant) {
+                    self.settings_write(path, SettingsValue::ReservedFormat(f));
+                    self.settings_dirty = true;
+                }
+            }
+            FieldPath::Rule {
+                key: RuleKey::Severity,
+                ..
+            } => {
+                if let Some(sev) = severity_from_variant(variant) {
+                    self.settings_write(path, SettingsValue::Severity(sev));
+                    self.settings_dirty = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// After a numbering/store enum is cycled to `next`, auto-insert the optional
+    /// config section that value depends on. Only sqids/reserved/github-issues
+    /// introduce a dependency; every other variant (and field) is a no-op. When the
+    /// scaffolded section carries a required-but-empty field (only the sqids salt)
+    /// the result is stashed as a jump offer; sections that scaffold complete
+    /// (reserved/github) set no offer, since there is nothing to jump to. A section
+    /// that was already present scaffolds nothing and sets no offer (AC6).
+    fn scaffold_for_cycled_value(&mut self, path: &FieldPath, next: &str) {
+        let dep = match (path, next) {
+            (
+                FieldPath::Type {
+                    key: TypeKey::Numbering,
+                    ..
+                },
+                "sqids",
+            ) => Some(ConfigDep::NumberingSqids),
+            (
+                FieldPath::Type {
+                    key: TypeKey::Numbering,
+                    ..
+                },
+                "reserved",
+            ) => Some(ConfigDep::NumberingReserved),
+            (
+                FieldPath::Type {
+                    key: TypeKey::Store,
+                    ..
+                },
+                "github-issues",
+            ) => Some(ConfigDep::Github),
+            _ => None,
+        };
+        let Some(dep) = dep else {
+            return;
+        };
+        if let Some(result) = scaffold_dependency(&mut self.settings_buffer, dep) {
+            if result.required_empty_field.is_some() {
+                self.settings_scaffold_offer = Some(result);
+            }
+        }
+    }
+
+    /// Convert `rules[index]` to the other `ValidationRule` variant, preserving
+    /// `name` and `severity` and seeding the new body fields to empty strings.
+    fn settings_cycle_rule_shape(&mut self, index: usize) {
+        let Some(rule) = self.settings_buffer.rules.get_mut(index) else {
+            return;
+        };
+        *rule = match rule {
+            ValidationRule::ParentChild { name, severity, .. } => {
+                ValidationRule::RelationExistence {
+                    name: std::mem::take(name),
+                    doc_type: String::new(),
+                    require: String::new(),
+                    severity: severity.clone(),
+                }
+            }
+            ValidationRule::RelationExistence { name, severity, .. } => {
+                ValidationRule::ParentChild {
+                    name: std::mem::take(name),
+                    child: String::new(),
+                    parent: String::new(),
+                    link: String::new(),
+                    severity: severity.clone(),
+                }
+            }
+        };
+        self.settings_dirty = true;
+    }
+
+    /// Save the settings buffer to `.lazyspec.toml`, pausing first when the edit
+    /// would orphan existing documents. If the dirty buffer changes a load-bearing
+    /// `[[types]]` field (`dir`/`prefix`/`store`) on a type that already has docs on
+    /// disk, the save is held: the computed impacts are stashed on
+    /// `settings_impact_confirm` (active) and NOTHING is written -- the buffer and
+    /// dirty flag retain the pending edit until the user confirms or cancels (RFC-023
+    /// slice 6). Otherwise (non-load-bearing edits, or load-bearing edits on
+    /// zero-doc types) the save commits atomically via `settings_commit_write`.
+    pub fn settings_save(&mut self, root: &Path, config_on_disk: &Config) {
+        let impacts = settings_guard::detect_type_field_impacts(
+            &self.settings_buffer,
+            config_on_disk,
+            &self.store,
+        );
+        if impacts.is_empty() {
+            self.settings_commit_write(root);
+            return;
+        }
+        self.settings_impact_confirm.impacts = impacts;
+        self.settings_impact_confirm.active = true;
+    }
+
+    /// Confirm a paused document-impact save: clear the guard and commit the
+    /// pending buffer to `.lazyspec.toml` atomically, exactly as a guard-free save
+    /// would. No document files are moved/renamed/renumbered (RFC-023 slice 6, AC3).
+    pub fn confirm_settings_impact(&mut self, root: &Path) {
+        self.settings_impact_confirm.active = false;
+        self.settings_impact_confirm.impacts.clear();
+        self.settings_commit_write(root);
+    }
+
+    /// Cancel a paused document-impact save: clear the guard and write nothing.
+    /// `.lazyspec.toml` is untouched and the buffer + `settings_dirty` retain the
+    /// pending edit (RFC-023 slice 6, AC4).
+    pub fn cancel_settings_impact(&mut self) {
+        self.settings_impact_confirm.active = false;
+        self.settings_impact_confirm.impacts.clear();
+    }
+
+    /// Validate the whole buffer, then write `.lazyspec.toml` once, atomically,
+    /// preserving comments. Disk is touched only on success: the new file string
+    /// is rendered in memory by `write_config_in_place` and validated by
+    /// re-parsing those exact bytes via `Config::parse` before any write. On
+    /// either failure path (writer error or re-parse error) nothing is written,
+    /// `settings_dirty` stays true, and `settings_footer_error` is set; a parse
+    /// failure also jumps focus to the offending field. On success the dirty flag
+    /// and footer clear and `config_reload_request` is raised so the run loop
+    /// re-loads the config, rebuilds the store, and re-seeds the clean buffer.
+    fn settings_commit_write(&mut self, root: &Path) {
+        let path = root.join(".lazyspec.toml");
+        let src = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            // A first save in a session whose file is gone falls back to a fresh
+            // render so the write still succeeds.
+            Err(_) => match self.settings_buffer.to_toml() {
+                Ok(s) => s,
+                Err(e) => {
+                    self.settings_footer_error = Some(e.to_string());
+                    return;
+                }
+            },
+        };
+
+        let new_src =
+            match crate::engine::config_write::write_config_in_place(&src, &self.settings_buffer) {
+                Ok(s) => s,
+                Err(e) => {
+                    self.settings_footer_error = Some(e.to_string());
+                    return;
+                }
+            };
+
+        // Validate the exact bytes destined for disk (catches every field-level
+        // and cross-field constraint, plus any toml_edit slip), so the file never
+        // holds an invalid intermediate.
+        if let Err(e) = Config::parse(&new_src) {
+            self.settings_footer_error = Some(e.to_string());
+            self.settings_jump_to_violation();
+            return;
+        }
+
+        if let Err(e) = std::fs::write(&path, &new_src) {
+            self.settings_footer_error = Some(e.to_string());
+            return;
+        }
+
+        self.settings_dirty = false;
+        self.settings_footer_error = None;
+        self.config_reload_request = true;
+    }
+
+    /// Move the settings nav onto the first buffer constraint a save can violate,
+    /// in `Config::parse`'s order. The offending field is found by inspecting the
+    /// buffer (more reliable than string-matching the error). Best-effort: an
+    /// unrecognised violation lands on a relevant category without crashing, and
+    /// the field cursor is clamped to the resolved field list.
+    fn settings_jump_to_violation(&mut self) {
+        self.settings_editing = false;
+
+        let buf = &self.settings_buffer;
+
+        // 1. A Sqids type with no valid [numbering.sqids] salt.
+        let needs_sqids = buf
+            .documents
+            .types
+            .iter()
+            .position(|t| t.numbering == NumberingStrategy::Sqids);
+        if let Some(type_index) = needs_sqids {
+            let salt_ok = buf
+                .documents
+                .sqids
+                .as_ref()
+                .is_some_and(|s| !s.salt.is_empty());
+            if !salt_ok {
+                // The salt is a focusable field only when the section exists.
+                if buf.documents.sqids.is_some() {
+                    self.settings_jump_to_field(4, None, |f| {
+                        matches!(f.path, FieldPath::SqidsSalt)
+                    });
+                } else {
+                    self.settings_jump_to_field(1, Some(type_index), |f| {
+                        matches!(
+                            f.path,
+                            FieldPath::Type {
+                                key: TypeKey::Numbering,
+                                ..
+                            }
+                        )
+                    });
+                }
+                return;
+            }
+        }
+
+        // 2. A GithubIssues type with no [github] section.
+        if buf.documents.github.is_none() {
+            let offending = buf
+                .documents
+                .types
+                .iter()
+                .position(|t| t.store == StoreBackend::GithubIssues);
+            if let Some(type_index) = offending {
+                self.settings_jump_to_field(1, Some(type_index), |f| {
+                    matches!(
+                        f.path,
+                        FieldPath::Type {
+                            key: TypeKey::Store,
+                            ..
+                        }
+                    )
+                });
+                return;
+            }
+        }
+
+        // 3. Any other constraint (reserved/relationships): best-effort landing on
+        // a relevant category, clamped, never crashing.
+        self.settings_jump_to_field(4, None, |_| false);
+    }
+
+    /// Land the settings nav on the scaffold offer's required-but-empty field
+    /// (only the sqids salt: Numbering category, the salt field) so the user can
+    /// fill it. Reuses `settings_jump_to_field` rather than re-deriving focus.
+    pub(crate) fn settings_jump_to_scaffolded_field(&mut self, path: &FieldPath) {
+        match path {
+            FieldPath::SqidsSalt => {
+                self.settings_jump_to_field(4, None, |f| matches!(f.path, FieldPath::SqidsSalt));
+            }
+            // No other scaffolded section produces a required-empty field today; a
+            // best-effort landing keeps this total without crashing.
+            _ => self.settings_jump_to_field(4, None, |_| false),
+        }
+    }
+
+    /// Land the settings nav on `category` (optionally drilled into `drill`) and
+    /// set the field cursor to the first field matching `pick`, clamped to the
+    /// field list. With no match the cursor is 0.
+    fn settings_jump_to_field(
+        &mut self,
+        category: usize,
+        drill: Option<usize>,
+        pick: impl Fn(&EditableField) -> bool,
+    ) {
+        self.settings_category = category;
+        self.settings_drill = drill;
+        if let Some(d) = drill {
+            self.settings_entry = d;
+        }
+        let fields = crate::tui::views::panels::settings_fields(
+            category,
+            self.settings_entry,
+            drill,
+            &self.settings_buffer,
+        );
+        let field = fields.iter().position(pick).unwrap_or(0);
+        self.settings_field = field.min(fields.len().saturating_sub(1));
     }
 
     pub fn toggle_expanded(&mut self, path: &Path) {
@@ -1208,6 +2411,216 @@ impl App {
         Ok(())
     }
 
+    /// Seed a default entry into the current Vec-backed collection (Document
+    /// Types / Relationships / Validation Rules) and drill into it. Placeholder
+    /// fields carry starter/default values so the new entry is immediately
+    /// editable. Buffer-only; sets `settings_dirty`.
+    pub fn settings_seed_entry(&mut self) {
+        match self.settings_category {
+            1 => {
+                self.settings_buffer.documents.types.push(TypeDef {
+                    name: "type".to_string(),
+                    plural: "types".to_string(),
+                    dir: "docs".to_string(),
+                    prefix: "TYPE".to_string(),
+                    icon: None,
+                    numbering: NumberingStrategy::default(),
+                    subdirectory: false,
+                    store: StoreBackend::default(),
+                    singleton: false,
+                    parent_type: None,
+                    agents: Vec::new(),
+                });
+                self.settings_entry = self.settings_buffer.documents.types.len() - 1;
+            }
+            2 => {
+                self.settings_buffer.relationships.push(RelationshipDef {
+                    name: "relationship".to_string(),
+                    inverse: None,
+                });
+                self.settings_entry = self.settings_buffer.relationships.len() - 1;
+            }
+            3 => {
+                self.settings_buffer
+                    .rules
+                    .push(ValidationRule::ParentChild {
+                        name: "rule".to_string(),
+                        child: String::new(),
+                        parent: String::new(),
+                        link: String::new(),
+                        severity: Severity::Error,
+                    });
+                self.settings_entry = self.settings_buffer.rules.len() - 1;
+            }
+            _ => return,
+        }
+        self.settings_drill = Some(self.settings_entry);
+        self.settings_field = 0;
+        self.settings_dirty = true;
+    }
+
+    /// Open the spec-path key prompt for a new certification override. The
+    /// override is not inserted until the prompt is confirmed with a non-empty
+    /// key (`settings_confirm_override`).
+    pub fn settings_seed_override(&mut self) {
+        self.override_key_prompt.active = true;
+        self.override_key_prompt.input.clear();
+    }
+
+    pub fn settings_override_type_char(&mut self, c: char) {
+        self.override_key_prompt.input.push(c);
+    }
+
+    pub fn settings_override_backspace(&mut self) {
+        self.override_key_prompt.input.pop();
+    }
+
+    pub fn settings_cancel_override(&mut self) {
+        self.override_key_prompt.active = false;
+        self.override_key_prompt.input.clear();
+    }
+
+    /// Confirm the override key prompt: insert a new override under the trimmed
+    /// key (with the default normalize) and drill into it. An empty key inserts
+    /// nothing and leaves the prompt active. Buffer-only; sets `settings_dirty`.
+    pub fn settings_confirm_override(&mut self) {
+        let key = self.override_key_prompt.input.trim().to_string();
+        if key.is_empty() {
+            return;
+        }
+        self.settings_buffer.certification.overrides.insert(
+            key.clone(),
+            CertificationOverride {
+                normalize: default_normalize(),
+            },
+        );
+        self.settings_dirty = true;
+        self.override_key_prompt.active = false;
+        self.override_key_prompt.input.clear();
+
+        let mut keys: Vec<&String> = self
+            .settings_buffer
+            .certification
+            .overrides
+            .keys()
+            .collect();
+        keys.sort();
+        if let Some(index) = keys.iter().position(|k| **k == key) {
+            self.settings_entry = index;
+            self.settings_drill = Some(index);
+            self.settings_field = 0;
+        }
+    }
+
+    /// Open the confirm prompt for removing the selected settings collection
+    /// entry. Resolves the target from `settings_entry` (sorted-key for cat 7).
+    /// ADR-011: refuses to delete the last `[[relationships]]` entry (cat 2),
+    /// returning without activating the confirm. No buffer mutation here.
+    pub fn settings_open_delete_confirm(&mut self) {
+        let category = self.settings_category;
+        let (target, entry_label) = match category {
+            1 => {
+                let Some(t) = self
+                    .settings_buffer
+                    .documents
+                    .types
+                    .get(self.settings_entry)
+                else {
+                    return;
+                };
+                (
+                    SettingsDeleteTarget::Index(self.settings_entry),
+                    t.name.clone(),
+                )
+            }
+            2 => {
+                // ADR-011: a real config must keep at least one relationship.
+                if self.settings_buffer.relationships.len() <= 1 {
+                    return;
+                }
+                let Some(r) = self.settings_buffer.relationships.get(self.settings_entry) else {
+                    return;
+                };
+                (
+                    SettingsDeleteTarget::Index(self.settings_entry),
+                    r.name.clone(),
+                )
+            }
+            3 => {
+                let Some(rule) = self.settings_buffer.rules.get(self.settings_entry) else {
+                    return;
+                };
+                let name = match rule {
+                    ValidationRule::ParentChild { name, .. } => name.clone(),
+                    ValidationRule::RelationExistence { name, .. } => name.clone(),
+                };
+                (SettingsDeleteTarget::Index(self.settings_entry), name)
+            }
+            7 => {
+                let mut keys: Vec<&String> = self
+                    .settings_buffer
+                    .certification
+                    .overrides
+                    .keys()
+                    .collect();
+                keys.sort();
+                let Some(key) = keys.get(self.settings_entry) else {
+                    return;
+                };
+                let key = (*key).clone();
+                (SettingsDeleteTarget::Key(key.clone()), key)
+            }
+            _ => return,
+        };
+        self.settings_delete_confirm = SettingsDeleteConfirm {
+            active: true,
+            category,
+            entry_label,
+            target,
+        };
+    }
+
+    pub fn settings_close_delete_confirm(&mut self) {
+        self.settings_delete_confirm = SettingsDeleteConfirm::new();
+    }
+
+    /// Remove the targeted entry from the buffer (the only removal site, after
+    /// confirm). Clamps `settings_entry` to the new collection length and closes
+    /// the confirm. Buffer-only; sets `settings_dirty`.
+    pub fn settings_confirm_delete(&mut self) {
+        let category = self.settings_delete_confirm.category;
+        let new_len = match self.settings_delete_confirm.target.clone() {
+            SettingsDeleteTarget::Index(i) => match category {
+                1 => {
+                    if i < self.settings_buffer.documents.types.len() {
+                        self.settings_buffer.documents.types.remove(i);
+                    }
+                    self.settings_buffer.documents.types.len()
+                }
+                2 => {
+                    if i < self.settings_buffer.relationships.len() {
+                        self.settings_buffer.relationships.remove(i);
+                    }
+                    self.settings_buffer.relationships.len()
+                }
+                3 => {
+                    if i < self.settings_buffer.rules.len() {
+                        self.settings_buffer.rules.remove(i);
+                    }
+                    self.settings_buffer.rules.len()
+                }
+                _ => 0,
+            },
+            SettingsDeleteTarget::Key(k) => {
+                self.settings_buffer.certification.overrides.remove(&k);
+                self.settings_buffer.certification.overrides.len()
+            }
+        };
+        self.settings_dirty = true;
+        self.settings_entry = self.settings_entry.min(new_len.saturating_sub(1));
+        self.settings_close_delete_confirm();
+    }
+
     pub fn open_status_picker(&mut self) {
         let doc = if self.view_mode == ViewMode::Filters {
             match self.selected_filtered_doc() {
@@ -1522,9 +2935,598 @@ impl App {
     }
 }
 
+/// Test-only observable-state fingerprint and per-context seeding, used by the
+/// keybind parity test (`keybinds.rs`). `pub(crate)` so the sibling module's test
+/// can build a seeded `App` and detect whether a keypress mutated it. None of this
+/// compiles into the production binary.
+#[cfg(test)]
+impl App {
+    /// A string capturing every observable `App` field a `handle_*_key` handler
+    /// can mutate. A keypress is "handled" iff it changes this fingerprint. Errs
+    /// toward including MORE fields: a missing mutation sink would let a real
+    /// keypress read as a no-op (a false parity PASS, the dangerous direction).
+    pub(crate) fn key_fingerprint(&self) -> String {
+        // Expanded-parent set: size + sorted contents (Space toggles membership).
+        let mut expanded: Vec<String> = self
+            .expanded_parents
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        expanded.sort();
+
+        // Zone editor inner state (pane / cursor / both lists), or None.
+        let zone = self.settings_zone_editor.as_ref().map(|z| {
+            format!(
+                "{:?}|{}|{:?}|{:?}",
+                z.pane, z.cursor, z.selected, z.available
+            )
+        });
+        // Variant picker inner state (selected index), or None.
+        let variant = self
+            .settings_variant_picker
+            .as_ref()
+            .map(|p| format!("{}|{:?}", p.selected, p.path));
+
+        #[cfg(feature = "agent")]
+        let agent = format!(
+            "agent_dialog.active={} sel={} text={:?} agent_idx={} resume={} interactive={}",
+            self.agent_dialog.active,
+            self.agent_dialog.selected_index,
+            self.agent_dialog.text_input,
+            self.agent_selected_index,
+            self.resume_request.is_some(),
+            self.interactive_request.is_some(),
+        );
+        #[cfg(not(feature = "agent"))]
+        let agent = String::new();
+
+        format!(
+            concat!(
+                "view_mode={:?} selected_type={} selected_doc={} doc_list_offset={} ",
+                "graph_selected={} scroll_offset={} wrap_mode={} show_help={} help_scroll={} ",
+                "search_mode={} fullscreen_doc={} should_quit={} preview_tab={:?} ",
+                "filter_focused={:?} filter_status={:?} filter_tag={:?} selected_relation={} ",
+                "expanded_len={} expanded={:?} ",
+                "editor_request={} config_reload_request={} fix_request={} ",
+                "create_form.active={} create_form.field={:?} create_form.title={} ",
+                "create_form.author={} create_form.tags={} create_form.related={} ",
+                "delete_confirm.active={} override_key_prompt.active={} override_input={} ",
+                "settings_delete_confirm.active={} settings_impact_confirm.active={} ",
+                "status_picker.active={} status_picker.selected={} ",
+                "link_editor.active={} link_editor.selected={} link_editor.query_len={} ",
+                "link_editor.rel_type_index={} link_editor.results_len={} ",
+                "provenance_editor.active={} provenance_buf_len={} ",
+                "gh_conflict={} show_warnings={} warnings_selected={} ",
+                "search_query_len={} search_selected={} ",
+                "settings_editing={} settings_edit_input_len={} settings_dirty={} ",
+                "settings_category={} settings_field={} settings_entry={} settings_drill={:?} ",
+                "settings_quit_prompt.active={} zone={:?} variant={:?} ",
+                "scaffold_offer={} settings_footer_error={} settings_edit_error={} {}",
+            ),
+            self.view_mode,
+            self.selected_type,
+            self.selected_doc,
+            self.doc_list_offset,
+            self.graph_selected,
+            self.scroll_offset,
+            self.wrap_mode,
+            self.show_help,
+            self.help_scroll,
+            self.search_mode,
+            self.fullscreen_doc,
+            self.should_quit,
+            self.preview_tab,
+            self.filter_focused,
+            self.filter_status,
+            self.filter_tag,
+            self.selected_relation,
+            expanded.len(),
+            expanded,
+            self.editor_request.is_some(),
+            self.config_reload_request,
+            self.fix_request,
+            self.create_form.active,
+            self.create_form.focused_field,
+            self.create_form.title,
+            self.create_form.author,
+            self.create_form.tags,
+            self.create_form.related,
+            self.delete_confirm.active,
+            self.override_key_prompt.active,
+            self.override_key_prompt.input,
+            self.settings_delete_confirm.active,
+            self.settings_impact_confirm.active,
+            self.status_picker.active,
+            self.status_picker.selected,
+            self.link_editor.active,
+            self.link_editor.selected,
+            self.link_editor.query.len(),
+            self.link_editor.rel_type_index,
+            self.link_editor.results.len(),
+            self.provenance_editor.active,
+            self.provenance_editor.input.len(),
+            self.gh_conflict_message.is_some(),
+            self.show_warnings,
+            self.warnings_selected,
+            self.search_query.len(),
+            self.search_selected,
+            self.settings_editing,
+            self.settings_edit_input.len(),
+            self.settings_dirty,
+            self.settings_category,
+            self.settings_field,
+            self.settings_entry,
+            self.settings_drill,
+            self.settings_quit_prompt.active,
+            zone,
+            variant,
+            self.settings_scaffold_offer.is_some(),
+            self.settings_footer_error.is_some(),
+            self.settings_edit_error.is_some(),
+            agent,
+        )
+    }
+}
+
+/// Test-only per-`KeyContext` seeding for the keybind parity test. Each seed is
+/// built so that EVERY key the registry documents for that context is "live": no
+/// boundary no-ops (lists carry >= 3 items with the cursor in the middle), and
+/// every doc-dependent action has a real doc behind it. `pub(crate)` so the
+/// parity test in `keybinds.rs` can call it. Not compiled into production.
+#[cfg(test)]
+pub(crate) mod parity_seed {
+    use super::*;
+    use crate::tui::views::keybinds::KeyContext;
+    use tempfile::TempDir;
+
+    /// Markdown for one seeded doc, with an optional `related:` block.
+    fn doc_md(id: &str, doc_type: &str, related: &str) -> String {
+        let related_block = if related.is_empty() {
+            "related: []".to_string()
+        } else {
+            format!("related:\n{related}")
+        };
+        format!(
+            "---\ntitle: \"{id} title\"\ntype: {doc_type}\nstatus: draft\nauthor: tester\ndate: 2026-01-01\ntags:\n  - alpha\n{related_block}\n---\n\n{id} body line 1\n{id} body line 2\n"
+        )
+    }
+
+    /// A bare `App` over a real, empty `Store` rooted at `tmp`, with the default
+    /// config applied (7 doc types). The TempDir is returned so the root outlives
+    /// the App (handlers that save touch `<root>/.lazyspec.toml`).
+    fn bare_app() -> (TempDir, App) {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::load(tmp.path(), &Config::default()).unwrap();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        #[cfg(feature = "agent")]
+        let agent_spawner = AgentSpawner::new(store.root());
+        let config = Config::default();
+        let mut app = App {
+            fs: Box::new(crate::engine::fs::RealFileSystem),
+            store,
+            selected_type: 0,
+            selected_doc: 0,
+            doc_types: Vec::new(),
+            should_quit: false,
+            fullscreen_doc: false,
+            scroll_offset: 0,
+            search_mode: false,
+            search_query: String::new(),
+            search_results: Vec::new(),
+            search_selected: 0,
+            show_help: false,
+            help_scroll: 0,
+            help_max_scroll: 0,
+            preview_tab: PreviewTab::Preview,
+            selected_relation: 0,
+            create_form: CreateForm::new(),
+            delete_confirm: DeleteConfirm::new(),
+            status_picker: StatusPicker::new(),
+            link_editor: LinkEditor::new(),
+            provenance_editor: ProvenanceEditor::new(),
+            #[cfg(feature = "agent")]
+            agent_dialog: AgentDialog::new(),
+            #[cfg(feature = "agent")]
+            agent_spawner,
+            #[cfg(feature = "agent")]
+            agent_prompts: Vec::new(),
+            view_mode: ViewMode::Types,
+            graph_nodes: Vec::new(),
+            graph_selected: 0,
+            editor_request: None,
+            filter_focused: FilterField::Status,
+            filter_status: None,
+            filter_tag: None,
+            available_tags: Vec::new(),
+            type_icons: HashMap::new(),
+            type_plurals: HashMap::new(),
+            expanded_parents: HashSet::new(),
+            wrap_mode: false,
+            doc_tree: Vec::new(),
+            show_warnings: false,
+            warnings_selected: 0,
+            validation_errors: Vec::new(),
+            validation_warnings: Vec::new(),
+            status_bar_warnings: Vec::new(),
+            fix_request: false,
+            config_reload_request: false,
+            fix_result: None,
+            doc_list_offset: 0,
+            doc_list_height: 10,
+            fullscreen_height: 20,
+            #[cfg(feature = "agent")]
+            agent_selected_index: 0,
+            #[cfg(feature = "agent")]
+            resume_request: None,
+            #[cfg(feature = "agent")]
+            interactive_request: None,
+            expanded_body_cache: HashMap::new(),
+            expansion_in_flight: None,
+            event_tx: tx,
+            expansion_cancel: None,
+            disk_cache: DiskCache::new(),
+            terminal_image_protocol:
+                crate::tui::infra::terminal_caps::TerminalImageProtocol::Unsupported,
+            tool_availability: crate::tui::content::diagram::ToolAvailability { d2: false },
+            diagram_cache: crate::tui::content::diagram::DiagramCache::new(),
+            picker: ratatui_image::picker::Picker::halfblocks(),
+            image_states: HashMap::new(),
+            image_dimensions_cache: HashMap::new(),
+            ascii_diagrams: false,
+            diagram_blocks_cache: None,
+            filtered_docs_cache: None,
+            search_index: Vec::new(),
+            git_branch: None,
+            git_status_cache: GitStatusCache::new(tmp.path()),
+            gh_conflict_message: None,
+            gh_push_in_flight: Arc::new(AtomicBool::new(false)),
+            last_sync: None,
+            gh_issue_map_stale: false,
+            status_bar_enabled: true,
+            status_bar_components: StatusBarComponents::default(),
+            rel_types: config.relationship_keywords(),
+            settings_category: 0,
+            settings_entry: 0,
+            settings_drill: None,
+            settings_field: 0,
+            settings_buffer: config.clone(),
+            settings_dirty: false,
+            settings_editing: false,
+            settings_edit_input: String::new(),
+            settings_edit_error: None,
+            settings_footer_error: None,
+            settings_quit_prompt: SettingsQuitPrompt::new(),
+            settings_scaffold_offer: None,
+            settings_delete_confirm: SettingsDeleteConfirm::new(),
+            settings_impact_confirm: SettingsImpactConfirm::new(),
+            override_key_prompt: OverrideKeyPrompt::new(),
+            settings_zone_editor: None,
+            settings_variant_picker: None,
+        };
+        app.apply_config(&config);
+        (tmp, app)
+    }
+
+    /// Write a doc set into `app`'s root and reload the store through the public
+    /// `Store::load` (so forward/reverse links, children, and parents are built
+    /// the real way). The set: 5 top-level rfcs; a `convention` subdirectory type
+    /// (`subdirectory = true` in the default config) holding an `index.md` parent
+    /// plus a child, so the rfc... actually the convention type carries the
+    /// parent/child pair (so Space has a real parent to toggle); and a
+    /// story+iteration relation chain off RFC-002 (so Relations/Graph can walk).
+    fn populate_docs(app: &mut App) {
+        let root = app.store.root.clone();
+        let write = |rel: &str, contents: String| {
+            let full = root.join(rel);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, contents).unwrap();
+        };
+
+        for i in 1..=5 {
+            write(
+                &format!("docs/rfcs/RFC-{i:03}-a.md"),
+                doc_md(&format!("RFC-{i:03}"), "rfc", ""),
+            );
+        }
+        // A relation chain so the selected rfc has children/related to walk.
+        write(
+            "docs/stories/STORY-001-s.md",
+            doc_md("STORY-001", "story", "  - implements: RFC-002"),
+        );
+        write(
+            "docs/iterations/ITERATION-001-i.md",
+            doc_md("ITERATION-001", "iteration", "  - implements: STORY-001"),
+        );
+        // The `convention` type is `subdirectory = true`: a folder with an
+        // index.md becomes a parent of its sibling .md files. Three such folders
+        // give the convention docs list >= 3 top-level PARENT nodes -- so in that
+        // type both `j`/`k` move (middle cursor) AND Space has a parent to toggle.
+        for (i, slug) in ["style", "naming", "review"].iter().enumerate() {
+            let n = i + 1;
+            write(
+                &format!("docs/convention/{slug}/index.md"),
+                doc_md(&format!("CONVENTION-{n:03}"), "convention", ""),
+            );
+            write(
+                &format!("docs/convention/{slug}/DICTUM-{n:03}-d.md"),
+                doc_md(&format!("DICTUM-{n:03}"), "dictum", ""),
+            );
+        }
+
+        app.store = Store::load(&root, &Config::default()).unwrap();
+        app.rebuild_search_index();
+        app.build_doc_tree();
+    }
+
+    /// Build a fully-seeded `App` for `ctx`, returning the owning TempDir and the
+    /// `Config` the parity test must pass to `handle_key` (it differs from the
+    /// default only for the `agent`-feature Types `a` case, which needs the
+    /// selected doc's type to carry an agent so `open_agent_dialog` opens).
+    pub(crate) fn seed(ctx: KeyContext) -> (TempDir, App, Config) {
+        let (tmp, mut app) = bare_app();
+        // `config` is mutated only under the `agent` feature (Types `a` setup).
+        #[cfg_attr(not(feature = "agent"), allow(unused_mut))]
+        let mut config = Config::default();
+        match ctx {
+            KeyContext::GhConflict => {
+                app.gh_conflict_message = Some("boom".to_string());
+            }
+            KeyContext::Warnings => {
+                app.validation_warnings =
+                    vec!["w1".to_string(), "w2".to_string(), "w3".to_string()];
+                app.show_warnings = true;
+                app.warnings_selected = 1; // middle: j and k both move
+            }
+            KeyContext::CreateForm => {
+                app.open_create_form();
+                app.create_form.title = "seed".to_string();
+            }
+            KeyContext::DeleteConfirm => {
+                // A real doc behind the confirm so Enter (confirm_delete) lands a
+                // deletion; RFC-005 is a leaf with no inbound relations.
+                populate_docs(&mut app);
+                app.delete_confirm.active = true;
+                app.delete_confirm.doc_path = PathBuf::from("docs/rfcs/RFC-005-a.md");
+            }
+            KeyContext::OverrideKeyPrompt => {
+                app.override_key_prompt.active = true;
+                app.override_key_prompt.input = "spec/x".to_string();
+            }
+            KeyContext::SettingsDeleteConfirm => {
+                app.settings_delete_confirm.active = true;
+            }
+            KeyContext::SettingsImpact => {
+                app.settings_impact_confirm.active = true;
+            }
+            KeyContext::StatusPicker => {
+                // A real doc behind the picker so Enter (confirm_status_change)
+                // writes a status and reloads (changing the fingerprint).
+                populate_docs(&mut app);
+                app.status_picker.active = true;
+                app.status_picker.selected = 3; // middle of 0..6
+                app.status_picker.doc_path = PathBuf::from("docs/rfcs/RFC-001-a.md");
+            }
+            KeyContext::LinkEditor => {
+                populate_docs(&mut app);
+                app.link_editor.active = true;
+                app.link_editor.doc_path = PathBuf::from("docs/rfcs/RFC-001-a.md");
+                // A non-empty query so Backspace pops a char and re-filters the
+                // result set (an empty query would make Backspace a no-op). "rfc"
+                // still matches >= 2 RFC docs, so j/k/Enter stay live too.
+                app.link_editor.query = "rfc".to_string();
+                app.link_editor.rel_type_index = 0;
+                app.update_link_search(); // results non-empty (other docs exist)
+                app.link_editor.selected = 1; // middle: j and k both move
+            }
+            KeyContext::ProvenanceEditor => {
+                // A real doc behind the editor so Enter (submit_provenance) writes
+                // a citation and closes (changing the fingerprint).
+                populate_docs(&mut app);
+                app.provenance_editor.active = true;
+                app.provenance_editor.doc_path = PathBuf::from("docs/rfcs/RFC-001-a.md");
+                app.provenance_editor.input = "cite".to_string();
+            }
+            #[cfg(feature = "agent")]
+            KeyContext::AgentDialog => {
+                use crate::tui::state::forms::{AgentAction, AgentDialog};
+                app.agent_dialog = AgentDialog {
+                    active: true,
+                    selected_index: 0,
+                    actions: vec![AgentAction::Custom, AgentAction::Custom],
+                    missing: Vec::new(),
+                    doc_path: PathBuf::from("docs/rfcs/RFC-001-a.md"),
+                    doc_title: "t".to_string(),
+                    text_input: None,
+                };
+            }
+            #[cfg(feature = "agent")]
+            KeyContext::AgentTextInput => {
+                use crate::tui::state::forms::{AgentAction, AgentDialog};
+                app.agent_dialog = AgentDialog {
+                    active: true,
+                    selected_index: 0,
+                    actions: vec![AgentAction::Custom],
+                    missing: Vec::new(),
+                    doc_path: PathBuf::from("docs/rfcs/RFC-001-a.md"),
+                    doc_title: "t".to_string(),
+                    text_input: Some("draft".to_string()),
+                };
+            }
+            KeyContext::Search => {
+                populate_docs(&mut app);
+                app.search_mode = true;
+                app.search_query = "title".to_string();
+                app.update_search(); // results non-empty
+                app.search_selected = 1; // middle: Up and Down both move
+            }
+            KeyContext::Fullscreen => {
+                populate_docs(&mut app);
+                app.fullscreen_doc = true;
+                app.fullscreen_height = 20;
+                app.scroll_offset = 10; // middle: j/k/Ctrl-d/Ctrl-u all change it
+            }
+            KeyContext::Types => {
+                populate_docs(&mut app);
+                app.view_mode = ViewMode::Types;
+                // The `convention` type (index 5 of 7) holds three subdirectory
+                // PARENT nodes. Index 5 is interior (h: 5->4, l: 5->6 both move).
+                let conv_idx = app
+                    .doc_types
+                    .iter()
+                    .position(|t| t.as_str() == "convention")
+                    .expect("default config has a convention type");
+                app.selected_type = conv_idx;
+                app.build_doc_tree();
+                // Cursor on the middle parent: Space toggles it and j/k both move
+                // (>= 3 top-level parent nodes).
+                let parents: Vec<usize> = app
+                    .doc_tree
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, n)| n.is_parent)
+                    .map(|(i, _)| i)
+                    .collect();
+                assert!(
+                    parents.len() >= 3,
+                    "Types seeding needs >= 3 parent nodes, got {}",
+                    parents.len()
+                );
+                app.selected_doc = parents[1];
+                app.preview_tab = PreviewTab::Preview;
+
+                // (agent) Make `a` live: the selected doc's type (convention)
+                // must carry an agent whose template is loaded, so
+                // open_agent_dialog resolves at least one action and opens.
+                #[cfg(feature = "agent")]
+                {
+                    use crate::engine::prompt::{AgentPrompt, RunMode};
+                    let conv_name = app.doc_types[conv_idx].as_str().to_string();
+                    if let Some(t) = config
+                        .documents
+                        .types
+                        .iter_mut()
+                        .find(|t| t.name == conv_name)
+                    {
+                        t.agents = vec!["review".to_string()];
+                    }
+                    app.agent_prompts = vec![AgentPrompt {
+                        name: "review".to_string(),
+                        description: "review".to_string(),
+                        mode: RunMode::Headless,
+                        allowed_tools: None,
+                        body_template: "body".to_string(),
+                    }];
+                }
+            }
+            KeyContext::Filters => {
+                populate_docs(&mut app);
+                app.view_mode = ViewMode::Filters;
+                app.enter_filters_mode();
+                app.filter_focused = FilterField::Tag; // Tab/BackTab change it; h/l cycle tag values
+                app.filtered_docs_cache = None;
+                let _ = app.filtered_docs_count();
+                app.selected_doc = 1; // middle of filtered list: j/k both move
+                app.preview_tab = PreviewTab::Preview;
+            }
+            KeyContext::Graph => {
+                populate_docs(&mut app);
+                app.view_mode = ViewMode::Graph;
+                app.rebuild_graph();
+                // Ensure >= 3 nodes with the cursor in the middle.
+                assert!(
+                    app.graph_nodes.len() >= 3,
+                    "graph seeding needs >= 3 nodes, got {}",
+                    app.graph_nodes.len()
+                );
+                app.graph_selected = 1;
+            }
+            #[cfg(feature = "agent")]
+            KeyContext::Agents => {
+                use crate::tui::agent::{AgentRecord, AgentStatus};
+                app.view_mode = ViewMode::Agents;
+                app.agent_spawner.records = (0..3)
+                    .map(|i| AgentRecord {
+                        session_id: format!("s{i}"),
+                        doc_title: format!("doc {i}"),
+                        doc_path: PathBuf::from(format!("docs/rfcs/RFC-{i:03}-a.md")),
+                        action: "a".to_string(),
+                        status: AgentStatus::Complete, // not Running, so `r` resumes
+                        started_at: "t".to_string(),
+                        finished_at: None,
+                    })
+                    .collect();
+                app.agent_selected_index = 1; // middle: j/k both move
+            }
+            KeyContext::Settings => {
+                populate_docs(&mut app);
+                app.view_mode = ViewMode::Settings;
+                // Category 1 (Document Types) is a collection: in its entry-list
+                // (drill = None) j/k navigate entries, `n` seeds, `d` deletes.
+                // Dirtying up-front makes Esc/q open the quit prompt (they would
+                // otherwise no-op when clean and undrilled).
+                app.settings_category = 1;
+                app.settings_drill = None;
+                app.settings_entry = 1; // middle of >= 3 type entries: j/k both move
+                app.settings_dirty = true;
+            }
+            KeyContext::SettingsEditing => {
+                app.view_mode = ViewMode::Settings;
+                app.settings_category = 0; // General: field 0 is a Text field
+                app.settings_field = 0;
+                app.settings_editing = true;
+                app.settings_edit_input = "abc".to_string();
+            }
+            KeyContext::SettingsQuitPrompt => {
+                app.view_mode = ViewMode::Settings;
+                app.settings_dirty = true;
+                app.settings_quit_prompt.active = true;
+            }
+            KeyContext::SettingsZoneEditor => {
+                use crate::tui::state::forms::{FieldPath, ZoneOrderingEditor, ZonePane};
+                app.view_mode = ViewMode::Settings;
+                // >= 2 selected + >= 2 available, cursor in the middle of selected
+                // (so K/J move-up/down both act and j/k both move).
+                let mut z = ZoneOrderingEditor::new(
+                    FieldPath::StatusbarLeft,
+                    Some(&vec![
+                        "branch".to_string(),
+                        "filter".to_string(),
+                        "sync".to_string(),
+                    ]),
+                    &[],
+                );
+                z.pane = ZonePane::Selected;
+                z.cursor = 1;
+                assert!(z.available.len() >= 2, "zone editor needs >= 2 available");
+                app.settings_zone_editor = Some(z);
+            }
+            KeyContext::SettingsVariantPicker => {
+                use crate::tui::state::forms::{FieldPath, SettingsVariantPicker};
+                app.view_mode = ViewMode::Settings;
+                app.settings_variant_picker = Some(SettingsVariantPicker::new(
+                    FieldPath::Naming,
+                    &["incremental", "sqids", "reserved"],
+                    1, // middle: j and k both move
+                ));
+            }
+            KeyContext::SettingsScaffoldOffer => {
+                use crate::tui::state::forms::FieldPath;
+                app.view_mode = ViewMode::Settings;
+                // `g` jumps to the required-empty field; a Some(field) makes `g` act.
+                app.settings_scaffold_offer = Some(ScaffoldResult {
+                    inserted: ConfigDep::NumberingSqids,
+                    required_empty_field: Some(FieldPath::Naming),
+                });
+            }
+        }
+        (tmp, app, config)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::config::TypeDef;
     use crate::engine::store::Store;
     use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -1572,6 +3574,8 @@ mod tests {
             search_results: Vec::new(),
             search_selected: 0,
             show_help: false,
+            help_scroll: 0,
+            help_max_scroll: 0,
             preview_tab: PreviewTab::Preview,
             selected_relation: 0,
             create_form: CreateForm::new(),
@@ -1604,6 +3608,7 @@ mod tests {
             validation_warnings: Vec::new(),
             status_bar_warnings: Vec::new(),
             fix_request: false,
+            config_reload_request: false,
             fix_result: None,
             doc_list_offset: 0,
             doc_list_height: 0,
@@ -1639,6 +3644,23 @@ mod tests {
             status_bar_enabled: true,
             status_bar_components: StatusBarComponents::default(),
             rel_types: Config::default().relationship_keywords(),
+            settings_category: 0,
+            settings_entry: 0,
+            settings_drill: None,
+            settings_field: 0,
+            settings_buffer: Config::default(),
+            settings_dirty: false,
+            settings_editing: false,
+            settings_edit_input: String::new(),
+            settings_edit_error: None,
+            settings_footer_error: None,
+            settings_quit_prompt: SettingsQuitPrompt::new(),
+            settings_scaffold_offer: None,
+            settings_delete_confirm: SettingsDeleteConfirm::new(),
+            settings_impact_confirm: SettingsImpactConfirm::new(),
+            override_key_prompt: OverrideKeyPrompt::new(),
+            settings_zone_editor: None,
+            settings_variant_picker: None,
         };
         app
     }
@@ -2253,6 +4275,141 @@ mod tests {
         );
     }
 
+    fn config_with_types(types: &[&str]) -> Config {
+        let mut config = Config::default();
+        let template = config.documents.types[0].clone();
+        config.documents.types = types
+            .iter()
+            .map(|name| TypeDef {
+                name: name.to_string(),
+                plural: format!("{name}s"),
+                dir: format!("docs/{name}s"),
+                prefix: name.to_uppercase(),
+                ..template.clone()
+            })
+            .collect();
+        config
+    }
+
+    #[test]
+    fn settings_buffer_initialised_clean_from_config() {
+        let app = make_test_app(0);
+        assert!(!app.settings_dirty);
+        assert_eq!(app.settings_field, 0);
+        let buffer_types: Vec<String> = app
+            .settings_buffer
+            .documents
+            .types
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        let config_types: Vec<String> = Config::default()
+            .documents
+            .types
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(buffer_types, config_types);
+    }
+
+    #[test]
+    fn apply_config_reseeds_buffer_when_clean() {
+        let mut app = make_test_app(0);
+        assert!(!app.settings_dirty);
+        app.apply_config(&config_with_types(&["rfc", "story", "adr"]));
+        let buffer_types: Vec<&str> = app
+            .settings_buffer
+            .documents
+            .types
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(buffer_types, vec!["rfc", "story", "adr"]);
+    }
+
+    #[test]
+    fn apply_config_preserves_dirty_buffer() {
+        let mut app = make_test_app(0);
+        app.settings_dirty = true;
+        let before: Vec<String> = app
+            .settings_buffer
+            .documents
+            .types
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        app.apply_config(&config_with_types(&["rfc", "story", "adr"]));
+        let after: Vec<String> = app
+            .settings_buffer
+            .documents
+            .types
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(
+            before, after,
+            "dirty buffer must not be clobbered by reload"
+        );
+    }
+
+    #[test]
+    fn apply_config_drops_type_and_clamps_selected_type() {
+        let mut app = make_test_app(0);
+        app.apply_config(&config_with_types(&["rfc", "story"]));
+        app.selected_type = app.doc_types.len() - 1;
+
+        app.apply_config(&config_with_types(&["rfc"]));
+
+        let names: Vec<String> = app
+            .doc_types
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect();
+        assert_eq!(names, vec!["rfc"], "dropped type must be excluded");
+        assert!(
+            app.selected_type < app.doc_types.len(),
+            "selected_type must stay in bounds after types shrink"
+        );
+        // current_type() indexes doc_types[selected_type] -- must not panic.
+        assert_eq!(app.current_type().as_str(), "rfc");
+    }
+
+    #[test]
+    fn apply_config_refreshes_rel_types() {
+        use crate::engine::config::RelationshipDef;
+
+        let mut app = make_test_app(0);
+        let mut config = config_with_types(&["rfc"]);
+        config.relationships = vec![RelationshipDef {
+            name: "derives-from".to_string(),
+            inverse: Some("derived-by".to_string()),
+        }];
+
+        app.apply_config(&config);
+
+        assert_eq!(
+            app.rel_types,
+            vec!["derives-from".to_string(), "derived-by".to_string()],
+            "rel_types must reflect the reloaded [[relationships]] (name then inverse)"
+        );
+    }
+
+    #[test]
+    fn apply_config_refreshes_icon_and_plural() {
+        let mut app = make_test_app(0);
+
+        let mut config = config_with_types(&["rfc"]);
+        config.documents.types[0].icon = Some("@".to_string());
+        config.documents.types[0].plural = "rfcen".to_string();
+        app.apply_config(&config);
+
+        assert_eq!(app.type_icons.get("rfc").map(String::as_str), Some("@"));
+        assert_eq!(
+            app.type_plurals.get("rfc").map(String::as_str),
+            Some("rfcen")
+        );
+    }
+
     #[test]
     fn relation_sections_single_parent_common_case_unchanged() {
         let (_tmp, app) = app_with_store(&[
@@ -2272,5 +4429,2792 @@ mod tests {
         assert_eq!(ids_for_paths(&app, &sections.chain), vec!["RFC-001"]);
         assert!(sections.children.is_empty());
         assert!(sections.related.is_empty());
+    }
+
+    // --- Settings field editors (ITERATION-188 Tasks 3/4/5) ---
+
+    use crate::engine::config::{
+        CoordinationConfig, GithubConfig, ReservedFormat, Severity, SqidsConfig, StoreBackend,
+        ValidationRule,
+    };
+
+    /// Build a settings-edit-ready app: set the buffer to `config`, focus the
+    /// given category and field, leave it clean and not editing.
+    fn settings_app(config: Config, category: usize, field: usize) -> App {
+        let mut app = make_test_app(0);
+        app.settings_buffer = config;
+        app.settings_dirty = false;
+        app.settings_category = category;
+        app.settings_entry = 0;
+        app.settings_drill = None;
+        app.settings_field = field;
+        app
+    }
+
+    fn type_a() -> String {
+        // A single editable type so drilled type-views are deterministic.
+        "a".to_string()
+    }
+
+    fn config_one_type() -> Config {
+        config_with_types(&[&type_a()])
+    }
+
+    fn type_chars(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.settings_edit_input.push(c);
+        }
+    }
+
+    // --- AC3 / AC5 pure validators ---
+
+    #[test]
+    fn validate_bounded_rejects_out_of_range_and_nonnumeric() {
+        assert!(validate_bounded("0", 1, 10).is_err());
+        assert!(validate_bounded("11", 1, 10).is_err());
+        assert!(validate_bounded("abc", 1, 10).is_err());
+    }
+
+    #[test]
+    fn validate_bounded_accepts_in_range() {
+        assert_eq!(validate_bounded("1", 1, 10).unwrap(), 1);
+        assert_eq!(validate_bounded("10", 1, 10).unwrap(), 10);
+        assert_eq!(validate_bounded("5", 1, 10).unwrap(), 5);
+    }
+
+    #[test]
+    fn parse_duration_rejects_bad_and_accepts_good() {
+        assert!(crate::engine::lease::parse_duration("abc").is_err());
+        assert!(crate::engine::lease::parse_duration("30").is_err());
+        assert!(crate::engine::lease::parse_duration("60m").is_ok());
+    }
+
+    // --- AC1 Text ---
+
+    #[test]
+    fn ac1_text_edit_writes_to_buffer_and_dirties() {
+        let mut app = settings_app(config_one_type(), 0, 0); // naming.pattern
+        app.settings_start_edit();
+        assert!(app.settings_editing);
+        // Replace seeded input with a fresh value.
+        app.settings_edit_input.clear();
+        type_chars(&mut app, "{type}-{title}.md");
+        app.settings_confirm_edit();
+
+        assert_eq!(
+            app.settings_buffer.documents.naming.pattern,
+            "{type}-{title}.md"
+        );
+        assert!(app.settings_dirty);
+        assert!(!app.settings_editing);
+    }
+
+    // --- AC2 Toggle ---
+
+    #[test]
+    fn ac2_toggle_statusbar_enabled_flips_and_dirties() {
+        let mut config = config_one_type();
+        config.ui.statusbar.enabled = true;
+        let mut app = settings_app(config, 9, 1); // Interface > statusbar.enabled
+
+        app.settings_space();
+        assert!(!app.settings_buffer.ui.statusbar.enabled);
+        assert!(app.settings_dirty);
+
+        app.settings_space();
+        assert!(
+            app.settings_buffer.ui.statusbar.enabled,
+            "second Space flips back"
+        );
+    }
+
+    #[test]
+    fn ac2_toggle_drilled_type_subdirectory_flips() {
+        let config = config_one_type();
+        let mut app = settings_app(config, 1, 6); // Document Types, subdirectory
+        app.settings_drill = Some(0);
+
+        let before = app.settings_buffer.documents.types[0].subdirectory;
+        app.settings_space();
+        assert_eq!(app.settings_buffer.documents.types[0].subdirectory, !before);
+        assert!(app.settings_dirty);
+    }
+
+    // --- AC3 BoundedNum (app-state) ---
+
+    #[test]
+    fn ac3_bounded_num_rejects_keeps_buffer_then_accepts() {
+        let mut config = config_one_type();
+        config.documents.sqids = Some(SqidsConfig {
+            salt: "seed".to_string(),
+            min_length: 3,
+        });
+        let mut app = settings_app(config, 4, 1); // Numbering > sqids.min_length
+
+        // Reject "0".
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        type_chars(&mut app, "0");
+        app.settings_confirm_edit();
+        assert_eq!(
+            app.settings_buffer
+                .documents
+                .sqids
+                .as_ref()
+                .unwrap()
+                .min_length,
+            3
+        );
+        assert!(!app.settings_dirty);
+        assert!(app.settings_edit_error.is_some());
+        assert!(app.settings_editing, "rejected edit stays in edit mode");
+
+        // Accept "7".
+        app.settings_edit_input.clear();
+        type_chars(&mut app, "7");
+        app.settings_confirm_edit();
+        assert_eq!(
+            app.settings_buffer
+                .documents
+                .sqids
+                .as_ref()
+                .unwrap()
+                .min_length,
+            7
+        );
+        assert!(app.settings_dirty);
+        assert!(!app.settings_editing);
+    }
+
+    // --- AC4 Nullable ---
+
+    #[test]
+    fn ac4_nullable_empty_is_none_value_is_some() {
+        let mut config = config_one_type();
+        config.documents.github = Some(GithubConfig {
+            repo: Some("old/repo".to_string()),
+            cache_ttl: 60,
+        });
+        let mut app = settings_app(config, 5, 0); // GitHub > repo
+
+        // Empty => None (not Some("")).
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        app.settings_confirm_edit();
+        assert_eq!(
+            app.settings_buffer.documents.github.as_ref().unwrap().repo,
+            None
+        );
+        assert!(app.settings_dirty);
+
+        // Non-empty => Some.
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        type_chars(&mut app, "owner/repo");
+        app.settings_confirm_edit();
+        assert_eq!(
+            app.settings_buffer
+                .documents
+                .github
+                .as_ref()
+                .unwrap()
+                .repo
+                .as_deref(),
+            Some("owner/repo")
+        );
+    }
+
+    // --- AC5 Duration (app-state) ---
+
+    #[test]
+    fn ac5_duration_rejects_keeps_buffer_then_accepts() {
+        let mut config = config_one_type();
+        config.coordination = Some(CoordinationConfig {
+            remote: "origin".to_string(),
+            lease_duration: "60m".to_string(),
+            grace_period: "2m".to_string(),
+            max_push_retries: 5,
+            max_clock_skew: "5m".to_string(),
+        });
+        let mut app = settings_app(config, 6, 1); // Coordination > lease_duration
+
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        type_chars(&mut app, "abc");
+        app.settings_confirm_edit();
+        assert_eq!(
+            app.settings_buffer
+                .coordination
+                .as_ref()
+                .unwrap()
+                .lease_duration,
+            "60m"
+        );
+        assert!(app.settings_edit_error.is_some());
+        assert!(!app.settings_dirty);
+        assert!(app.settings_editing);
+
+        app.settings_edit_input.clear();
+        type_chars(&mut app, "30m");
+        app.settings_confirm_edit();
+        assert_eq!(
+            app.settings_buffer
+                .coordination
+                .as_ref()
+                .unwrap()
+                .lease_duration,
+            "30m"
+        );
+        assert!(app.settings_dirty);
+        assert!(!app.settings_editing);
+    }
+
+    // --- AC6 List ---
+
+    #[test]
+    fn ac6_list_splits_trims_drops_empties() {
+        let config = config_one_type();
+        let mut app = settings_app(config, 1, 10); // Document Types, agents
+        app.settings_drill = Some(0);
+
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        type_chars(&mut app, "expand, create-children");
+        app.settings_confirm_edit();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].agents,
+            vec!["expand".to_string(), "create-children".to_string()]
+        );
+
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        app.settings_confirm_edit();
+        assert!(app.settings_buffer.documents.types[0].agents.is_empty());
+
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        type_chars(&mut app, " a , b ,");
+        app.settings_confirm_edit();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].agents,
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    // --- AC7 EnumCycle ---
+
+    #[test]
+    fn ac7_numbering_cycles_and_wraps() {
+        let config = config_one_type();
+        let mut app = settings_app(config, 1, 5); // Document Types, numbering
+        app.settings_drill = Some(0);
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering,
+            NumberingStrategy::Incremental
+        );
+
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering,
+            NumberingStrategy::Sqids
+        );
+        assert!(app.settings_dirty);
+
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering,
+            NumberingStrategy::Reserved
+        );
+
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering,
+            NumberingStrategy::Incremental,
+            "wraps back to first after last"
+        );
+    }
+
+    #[test]
+    fn ac7_store_cycles_through_three_variants() {
+        let config = config_one_type();
+        let mut app = settings_app(config, 1, 7); // Document Types, store
+        app.settings_drill = Some(0);
+        assert_eq!(
+            app.settings_buffer.documents.types[0].store,
+            StoreBackend::Filesystem
+        );
+
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].store,
+            StoreBackend::GithubIssues
+        );
+        assert!(app.settings_dirty);
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].store,
+            StoreBackend::GitRef
+        );
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].store,
+            StoreBackend::Filesystem
+        );
+    }
+
+    #[test]
+    fn ac7_rule_severity_cycles() {
+        let mut config = config_one_type();
+        config.rules = vec![ValidationRule::ParentChild {
+            name: "r".to_string(),
+            child: "story".to_string(),
+            parent: "rfc".to_string(),
+            link: "implements".to_string(),
+            severity: Severity::Error,
+        }];
+        let mut app = settings_app(config, 3, 5); // Validation Rules, severity (ParentChild)
+        app.settings_drill = Some(0);
+
+        app.settings_space();
+        match &app.settings_buffer.rules[0] {
+            ValidationRule::ParentChild { severity, .. } => {
+                assert_eq!(*severity, Severity::Warning)
+            }
+            _ => panic!("variant changed unexpectedly"),
+        }
+        assert!(app.settings_dirty);
+
+        app.settings_space();
+        match &app.settings_buffer.rules[0] {
+            ValidationRule::ParentChild { severity, .. } => {
+                assert_eq!(*severity, Severity::Error, "wraps")
+            }
+            _ => panic!("variant changed unexpectedly"),
+        }
+    }
+
+    #[test]
+    fn ac7_rule_shape_converts_variant_preserving_name_and_severity() {
+        let mut config = config_one_type();
+        config.rules = vec![ValidationRule::ParentChild {
+            name: "my-rule".to_string(),
+            child: "story".to_string(),
+            parent: "rfc".to_string(),
+            link: "implements".to_string(),
+            severity: Severity::Warning,
+        }];
+        let mut app = settings_app(config, 3, 1); // Validation Rules, shape
+        app.settings_drill = Some(0);
+
+        app.settings_space();
+        match &app.settings_buffer.rules[0] {
+            ValidationRule::RelationExistence {
+                name,
+                doc_type,
+                require,
+                severity,
+            } => {
+                assert_eq!(name, "my-rule", "name preserved");
+                assert_eq!(*severity, Severity::Warning, "severity preserved");
+                assert_eq!(doc_type, "", "new body seeded empty");
+                assert_eq!(require, "", "new body seeded empty");
+            }
+            _ => panic!("shape cycle must convert to relation-existence"),
+        }
+        assert!(app.settings_dirty);
+
+        // Cycling shape again converts back to parent-child.
+        app.settings_space();
+        match &app.settings_buffer.rules[0] {
+            ValidationRule::ParentChild {
+                name,
+                child,
+                parent,
+                link,
+                severity,
+            } => {
+                assert_eq!(name, "my-rule");
+                assert_eq!(*severity, Severity::Warning);
+                assert_eq!(child, "");
+                assert_eq!(parent, "");
+                assert_eq!(link, "");
+            }
+            _ => panic!("shape cycle must convert back to parent-child"),
+        }
+    }
+
+    #[test]
+    fn ac7_reserved_format_cycles() {
+        let mut config = config_one_type();
+        config.documents.reserved = Some(crate::engine::config::ReservedConfig {
+            remote: "origin".to_string(),
+            format: ReservedFormat::Incremental,
+            max_retries: 5,
+        });
+        // Numbering view: sqids absent => 2 ReadOnly fields, then reserved.remote(2),
+        // reserved.format(3), reserved.max_retries(4).
+        let mut app = settings_app(config, 4, 3);
+
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer
+                .documents
+                .reserved
+                .as_ref()
+                .unwrap()
+                .format,
+            ReservedFormat::Sqids
+        );
+        assert!(app.settings_dirty);
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer
+                .documents
+                .reserved
+                .as_ref()
+                .unwrap()
+                .format,
+            ReservedFormat::Incremental,
+            "wraps"
+        );
+    }
+
+    // --- ITERATION-189 config dependency auto-scaffolding (Tasks 2/3) ---
+
+    /// A drilled-type app focused on the type's `numbering` EnumCycle, clean and
+    /// not editing. cat 1 (Document Types), drilled into type 0, field 5.
+    fn numbering_app(config: Config) -> App {
+        let mut app = settings_app(config, 1, 5);
+        app.settings_drill = Some(0);
+        app
+    }
+
+    // AC1: cycling numbering to `sqids` (section absent) auto-inserts the
+    // [numbering.sqids] section with an empty salt + min_length 3, dirties the
+    // buffer, and raises a scaffold offer pointing at the salt.
+    #[test]
+    fn ac1_numbering_to_sqids_scaffolds_section_and_offers_salt() {
+        let mut app = numbering_app(config_one_type());
+        assert!(app.settings_buffer.documents.sqids.is_none());
+
+        app.settings_space();
+
+        let sqids = app
+            .settings_buffer
+            .documents
+            .sqids
+            .as_ref()
+            .expect("sqids section scaffolded");
+        assert_eq!(sqids.salt, "", "salt scaffolded empty");
+        assert_eq!(
+            sqids.min_length, 3,
+            "min_length scaffolded to parser default"
+        );
+        assert!(app.settings_dirty);
+        assert_eq!(
+            app.settings_scaffold_offer,
+            Some(ScaffoldResult {
+                inserted: ConfigDep::NumberingSqids,
+                required_empty_field: Some(FieldPath::SqidsSalt),
+            })
+        );
+    }
+
+    // AC4: cycling numbering to `reserved` (section absent) scaffolds the
+    // [numbering.reserved] section with defaults, dirties the buffer, and sets NO
+    // required-empty offer (the section scaffolds complete).
+    #[test]
+    fn ac4_numbering_to_reserved_scaffolds_complete_section_no_offer() {
+        // sqids is the first numbering variant after incremental, so cycle twice to
+        // reach reserved; the first hop scaffolds sqids, so clear the offer between.
+        let mut config = config_one_type();
+        config.documents.sqids = Some(SqidsConfig {
+            salt: "seed".to_string(),
+            min_length: 3,
+        });
+        let mut app = numbering_app(config);
+
+        app.settings_space(); // -> sqids (section present, no scaffold)
+        assert!(app.settings_scaffold_offer.is_none());
+        app.settings_space(); // -> reserved
+
+        let reserved = app
+            .settings_buffer
+            .documents
+            .reserved
+            .as_ref()
+            .expect("reserved section scaffolded");
+        assert_eq!(reserved.remote, "origin");
+        assert_eq!(reserved.format, ReservedFormat::Incremental);
+        assert_eq!(reserved.max_retries, 5);
+        assert!(app.settings_dirty);
+        assert!(
+            app.settings_scaffold_offer.is_none(),
+            "reserved has no required-empty field, so no offer is raised"
+        );
+    }
+
+    // AC5: cycling store to `github-issues` (section absent) scaffolds the [github]
+    // section with repo None / cache_ttl 60, dirties the buffer, and sets no
+    // required-empty offer.
+    #[test]
+    fn ac5_store_to_github_issues_scaffolds_section_no_offer() {
+        let mut app = settings_app(config_one_type(), 1, 7); // store field
+        app.settings_drill = Some(0);
+        assert!(app.settings_buffer.documents.github.is_none());
+
+        app.settings_space(); // filesystem -> github-issues
+
+        let github = app
+            .settings_buffer
+            .documents
+            .github
+            .as_ref()
+            .expect("github section scaffolded");
+        assert_eq!(github.repo, None);
+        assert_eq!(github.cache_ttl, 60);
+        assert!(app.settings_dirty);
+        assert!(
+            app.settings_scaffold_offer.is_none(),
+            "github has no required-empty field, so no offer is raised"
+        );
+    }
+
+    // AC6: cycling numbering to `sqids` when the section already exists leaves it
+    // untouched and raises no offer.
+    #[test]
+    fn ac6_numbering_to_sqids_with_existing_section_is_skip() {
+        let mut config = config_one_type();
+        config.documents.sqids = Some(SqidsConfig {
+            salt: "x".to_string(),
+            min_length: 7,
+        });
+        let mut app = numbering_app(config);
+
+        app.settings_space(); // incremental -> sqids
+
+        let sqids = app.settings_buffer.documents.sqids.as_ref().unwrap();
+        assert_eq!(sqids.salt, "x", "existing salt untouched");
+        assert_eq!(sqids.min_length, 7, "existing min_length untouched");
+        assert!(
+            app.settings_scaffold_offer.is_none(),
+            "an already-present section raises no offer (AC6)"
+        );
+    }
+
+    // AC3 (accept): with a pending sqids offer, `g` jumps focus to the sqids salt
+    // field and clears the offer.
+    #[test]
+    fn ac3_accept_key_jumps_to_salt_and_clears_offer() {
+        let mut app = numbering_app(config_one_type());
+        app.settings_space(); // scaffold sqids, raise offer
+        assert!(app.settings_scaffold_offer.is_some());
+        let config = Config::default();
+
+        app.handle_settings_key(
+            KeyCode::Char('g'),
+            KeyModifiers::NONE,
+            Path::new("."),
+            &config,
+        );
+
+        assert_eq!(app.settings_category, 4, "landed on the Numbering category");
+        assert_eq!(app.settings_drill, None);
+        let fields = crate::tui::views::panels::settings_fields(
+            app.settings_category,
+            app.settings_entry,
+            app.settings_drill,
+            &app.settings_buffer,
+        );
+        assert_eq!(
+            fields[app.settings_field].path,
+            FieldPath::SqidsSalt,
+            "cursor resolves to the sqids salt field"
+        );
+        assert!(
+            app.settings_scaffold_offer.is_none(),
+            "offer cleared on accept"
+        );
+    }
+
+    // AC3 (decline): with a pending sqids offer, a non-accept key (`j`) clears the
+    // offer without jumping to the salt.
+    #[test]
+    fn ac3_non_accept_key_declines_offer_without_jumping() {
+        let mut app = numbering_app(config_one_type());
+        app.settings_space(); // scaffold sqids, raise offer
+        assert!(app.settings_scaffold_offer.is_some());
+        let config = Config::default();
+        let before_category = app.settings_category;
+
+        app.handle_settings_key(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+            Path::new("."),
+            &config,
+        );
+
+        assert!(
+            app.settings_scaffold_offer.is_none(),
+            "any non-accept key dismisses the offer"
+        );
+        assert_eq!(
+            app.settings_category, before_category,
+            "decline does not jump to the Numbering category"
+        );
+    }
+
+    // --- RFC-023 STORY-144: Enter dispatch + variant picker (Task 5) ---
+
+    // AC3: Enter on a bool field flips the buffer value and marks it dirty.
+    #[test]
+    fn ac3_enter_on_bool_flips_buffer_and_dirties() {
+        let mut config = config_one_type();
+        config.ui.statusbar.enabled = true;
+        let mut app = settings_app(config, 9, 1); // Interface > statusbar.enabled
+        let config = Config::default();
+
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+
+        assert!(
+            !app.settings_buffer.ui.statusbar.enabled,
+            "Enter flips the bool"
+        );
+        assert!(app.settings_dirty, "the flip marks the buffer dirty");
+    }
+
+    // AC4: Enter on an enum field opens the variant picker, carrying the numbering
+    // variant set and pre-selecting the current value's index.
+    #[test]
+    fn ac4_enter_on_enum_opens_picker_with_current_selected() {
+        let mut app = numbering_app(config_one_type()); // type numbering, value incremental
+        let config = Config::default();
+
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+
+        let picker = app
+            .settings_variant_picker
+            .as_ref()
+            .expect("Enter on an enum opens the picker");
+        assert_eq!(
+            picker.variants,
+            &["incremental", "sqids", "reserved"],
+            "picker carries the numbering variant set"
+        );
+        assert_eq!(
+            picker.selected, 0,
+            "picker pre-selects the current value (incremental)"
+        );
+    }
+
+    // AC2: Enter on a text field begins inline editing.
+    #[test]
+    fn ac2_enter_on_text_starts_editing() {
+        let mut app = settings_app(config_one_type(), 0, 0); // naming.pattern (Text)
+        let config = Config::default();
+
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+
+        assert!(app.settings_editing, "Enter on a text field starts editing");
+    }
+
+    // AC7: Enter on a ReadOnly field changes nothing -- no edit, no picker, clean.
+    #[test]
+    fn ac7_enter_on_readonly_is_noop() {
+        // Numbering view with no sqids section: field 0 is ReadOnly.
+        let mut app = settings_app(config_one_type(), 4, 0);
+        let config = Config::default();
+
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+
+        assert!(!app.settings_editing, "ReadOnly does not start editing");
+        assert!(
+            app.settings_variant_picker.is_none(),
+            "ReadOnly does not open a picker"
+        );
+        assert!(!app.settings_dirty, "ReadOnly leaves the buffer clean");
+    }
+
+    // AC8: Space is dropped -- it makes no state change on any field.
+    #[test]
+    fn ac8_space_is_inert_on_enum_field() {
+        let mut app = numbering_app(config_one_type());
+        let before = app.settings_buffer.documents.types[0].numbering.clone();
+        let config = Config::default();
+
+        app.handle_settings_key(
+            KeyCode::Char(' '),
+            KeyModifiers::NONE,
+            Path::new("."),
+            &config,
+        );
+
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering, before,
+            "Space does not cycle the enum"
+        );
+        assert!(
+            app.settings_variant_picker.is_none(),
+            "Space does not open a picker"
+        );
+        assert!(!app.settings_editing, "Space does not start editing");
+        assert!(!app.settings_dirty, "Space leaves the buffer clean");
+    }
+
+    // AC9: Enter on an entry in a collection list drills into that entry.
+    #[test]
+    fn ac9_enter_on_entry_list_drills_into_entry() {
+        let config = config_with_types(&["rfc", "story"]);
+        let mut app = settings_app(config, 1, 0); // Document Types collection, not drilled
+        app.settings_entry = 1;
+        let config = Config::default();
+
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+
+        assert_eq!(
+            app.settings_drill,
+            Some(1),
+            "Enter drills into the selected entry"
+        );
+    }
+
+    // AC5: committing `sqids` through the picker path produces the same scaffold
+    // post-conditions as the cycle path (mirrors
+    // `ac1_numbering_to_sqids_scaffolds_section_and_offers_salt`).
+    #[test]
+    fn ac5_picker_commit_sqids_scaffolds_section_like_cycle() {
+        let mut app = numbering_app(config_one_type());
+        assert!(app.settings_buffer.documents.sqids.is_none());
+        let config = Config::default();
+
+        // Open the picker, move incremental -> sqids, commit.
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+        app.handle_settings_key(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+            Path::new("."),
+            &config,
+        );
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering,
+            NumberingStrategy::Sqids,
+            "the chosen variant is written"
+        );
+        let sqids = app
+            .settings_buffer
+            .documents
+            .sqids
+            .as_ref()
+            .expect("sqids section scaffolded via the picker path");
+        assert_eq!(sqids.salt, "", "salt scaffolded empty (cycle parity)");
+        assert_eq!(
+            sqids.min_length, 3,
+            "min_length scaffolded to parser default (cycle parity)"
+        );
+        assert!(app.settings_dirty);
+        assert_eq!(
+            app.settings_scaffold_offer,
+            Some(ScaffoldResult {
+                inserted: ConfigDep::NumberingSqids,
+                required_empty_field: Some(FieldPath::SqidsSalt),
+            }),
+            "the same scaffold offer the cycle path raises"
+        );
+        assert!(
+            app.settings_variant_picker.is_none(),
+            "the picker closes on commit"
+        );
+    }
+
+    // AC4: Esc closes the picker and leaves the buffer untouched.
+    #[test]
+    fn ac4_picker_esc_closes_without_writing() {
+        let mut app = numbering_app(config_one_type());
+        let before = app.settings_buffer.documents.types[0].numbering.clone();
+        let config = Config::default();
+
+        // Open the picker, move selection, then cancel.
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+        app.handle_settings_key(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+            Path::new("."),
+            &config,
+        );
+        app.handle_settings_key(KeyCode::Esc, KeyModifiers::NONE, Path::new("."), &config);
+
+        assert!(
+            app.settings_variant_picker.is_none(),
+            "Esc closes the picker"
+        );
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering, before,
+            "Esc leaves the numbering value unchanged"
+        );
+    }
+
+    // Re-picking the variant already in force is a no-op: the picker commit must
+    // not dirty the buffer, so quitting afterward raises no save prompt.
+    #[test]
+    fn repicking_current_variant_does_not_dirty() {
+        let mut app = numbering_app(config_one_type()); // numbering = incremental
+        let config = Config::default();
+
+        // Open the picker (pre-selects the current value) and commit without moving.
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+        app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
+
+        assert!(
+            !app.settings_dirty,
+            "re-picking the current variant leaves the buffer clean"
+        );
+        assert!(
+            app.settings_variant_picker.is_none(),
+            "the picker closes on commit"
+        );
+    }
+
+    // Re-selecting the current variant directly is a no-op on the buffer, while a
+    // genuinely different variant still writes + dirties.
+    #[test]
+    fn set_enum_variant_noop_on_current_writes_on_change() {
+        let mut app = numbering_app(config_one_type()); // numbering = incremental
+        let path = FieldPath::Type {
+            index: 0,
+            key: TypeKey::Numbering,
+        };
+
+        app.settings_set_enum_variant(&path, "incremental");
+        assert!(!app.settings_dirty, "same variant does not dirty");
+
+        app.settings_set_enum_variant(&path, "sqids");
+        assert!(app.settings_dirty, "a different variant dirties");
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering,
+            NumberingStrategy::Sqids
+        );
+    }
+
+    // --- start_edit / space no-op on ReadOnly ---
+
+    #[test]
+    fn readonly_field_start_edit_and_space_are_noops() {
+        // Numbering view with no sqids section: sqids.salt is ReadOnly/Unset.
+        let mut app = settings_app(config_one_type(), 4, 0);
+        app.settings_start_edit();
+        assert!(!app.settings_editing, "start_edit no-op on ReadOnly");
+        app.settings_space();
+        assert!(!app.settings_dirty, "space no-op on ReadOnly");
+    }
+
+    #[test]
+    fn start_edit_noop_on_toggle_and_enumcycle() {
+        let config = config_one_type();
+        // Toggle field (Interface > ascii_diagrams at index 0).
+        let mut app = settings_app(config.clone(), 9, 0);
+        app.settings_start_edit();
+        assert!(!app.settings_editing, "Toggle does not use edit mode");
+
+        // EnumCycle field (drilled type numbering).
+        let mut app = settings_app(config, 1, 5);
+        app.settings_drill = Some(0);
+        app.settings_start_edit();
+        assert!(!app.settings_editing, "EnumCycle does not use edit mode");
+    }
+
+    // --- Settings save (ITERATION-188 Tasks 6/8) ---
+
+    /// A valid `.lazyspec.toml` carrying a standalone comment, an inline trailing
+    /// comment, `[[types]]`, and `[[relationships]]` -- the comment-survival and
+    /// single-edit assertions key off these distinctive lines.
+    const SAVE_SRC: &str = r#"# lazyspec save fixture
+[naming]
+pattern = "{type}-{n:03}-{title}.md"  # filename template
+
+[templates]
+dir = ".lazyspec/templates"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+"#;
+
+    /// Write `SAVE_SRC` (or `src`) into a fresh TempDir's `.lazyspec.toml`, build
+    /// an app whose buffer is the parsed config, and return both. The TempDir is
+    /// returned so it outlives the app/file.
+    fn save_app(src: &str) -> (tempfile::TempDir, App) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".lazyspec.toml"), src).unwrap();
+        let mut app = make_test_app(0);
+        app.settings_buffer = Config::parse(src).unwrap();
+        app.settings_dirty = false;
+        (tmp, app)
+    }
+
+    fn read_config_file(tmp: &tempfile::TempDir) -> String {
+        std::fs::read_to_string(tmp.path().join(".lazyspec.toml")).unwrap()
+    }
+
+    // AC8: a valid save writes once atomically, preserves comments, changes only
+    // the edited value, clears dirty + footer, and raises the reload flag.
+    #[test]
+    fn ac8_save_writes_atomically_preserves_comments_and_triggers_reload() {
+        let (tmp, mut app) = save_app(SAVE_SRC);
+        app.settings_buffer.documents.naming.pattern = "{type}-{title}.md".to_string();
+        app.settings_dirty = true;
+
+        app.settings_save(tmp.path(), &Config::default());
+
+        let out = read_config_file(&tmp);
+        // Re-parses OK -- the file on disk is a valid config.
+        Config::parse(&out).unwrap();
+        // The standalone and inline trailing comments survive.
+        assert!(out.contains("# lazyspec save fixture"));
+        assert!(out.contains("# filename template"));
+        // Only the edited value changed: the new pattern is present, the old gone,
+        // and every other distinctive line is byte-identical to the source.
+        assert!(out.contains("{type}-{title}.md"));
+        assert!(!out.contains("{type}-{n:03}-{title}.md"));
+        for line in [
+            r#"dir = ".lazyspec/templates""#,
+            r#"name = "rfc""#,
+            r#"prefix = "RFC""#,
+            r#"name = "implements""#,
+            r#"inverse = "implemented-by""#,
+        ] {
+            assert!(out.contains(line), "unchanged line vanished: {line}");
+        }
+        assert_eq!(
+            out.lines().count(),
+            SAVE_SRC.lines().count(),
+            "an in-place scalar edit must not change the line count"
+        );
+
+        assert!(!app.settings_dirty, "dirty clears on success");
+        assert_eq!(app.settings_footer_error, None, "footer clears on success");
+        assert!(app.config_reload_request, "reload is triggered on success");
+    }
+
+    // AC9: a save that would violate a cross-field constraint shows the footer,
+    // jumps to the offending field, leaves the buffer dirty, and writes NOTHING.
+    #[test]
+    fn ac9_failed_save_shows_footer_jumps_and_does_not_write() {
+        // github-issues store with no [github] section is a parse-time violation.
+        let (tmp, mut app) = save_app(SAVE_SRC);
+        app.settings_buffer.documents.types[0].store = StoreBackend::GithubIssues;
+        app.settings_dirty = true;
+        let before = read_config_file(&tmp);
+
+        app.settings_save(tmp.path(), &Config::default());
+
+        // No write happened -- the file is byte-for-byte unchanged.
+        assert_eq!(read_config_file(&tmp), before, "no write on failed save");
+
+        let msg = app
+            .settings_footer_error
+            .as_deref()
+            .expect("footer error set on failed save");
+        assert!(
+            msg.contains("github") || msg.contains("[github]"),
+            "footer should name the github constraint, got: {msg}"
+        );
+
+        // Focus jumped to the offending type's `store` field: cat 1, drilled into
+        // type 0, cursor on the Store field.
+        assert_eq!(app.settings_category, 1);
+        assert_eq!(app.settings_drill, Some(0));
+        let fields =
+            crate::tui::views::panels::settings_fields(1, 0, Some(0), &app.settings_buffer);
+        assert!(
+            matches!(
+                fields[app.settings_field].path,
+                FieldPath::Type {
+                    key: TypeKey::Store,
+                    ..
+                }
+            ),
+            "cursor should land on the store field"
+        );
+
+        assert!(app.settings_dirty, "buffer stays dirty after a failed save");
+        assert!(
+            !app.config_reload_request,
+            "no reload is triggered on a failed save"
+        );
+    }
+
+    // AC9 (sqids variant): a Sqids type with no sqids section jumps to that type's
+    // numbering field and writes nothing.
+    #[test]
+    fn ac9_failed_save_sqids_missing_section_jumps_to_numbering() {
+        let (tmp, mut app) = save_app(SAVE_SRC);
+        app.settings_buffer.documents.types[0].numbering = NumberingStrategy::Sqids;
+        app.settings_buffer.documents.sqids = None;
+        app.settings_dirty = true;
+        let before = read_config_file(&tmp);
+
+        app.settings_save(tmp.path(), &Config::default());
+
+        assert_eq!(read_config_file(&tmp), before, "no write on failed save");
+        let msg = app
+            .settings_footer_error
+            .as_deref()
+            .expect("footer error set");
+        assert!(
+            msg.contains("sqids") || msg.contains("salt"),
+            "footer should name the sqids constraint, got: {msg}"
+        );
+
+        // Section absent => salt isn't focusable, so we land on the type's
+        // numbering field (cat 1, drill 0).
+        assert_eq!(app.settings_category, 1);
+        assert_eq!(app.settings_drill, Some(0));
+        let fields =
+            crate::tui::views::panels::settings_fields(1, 0, Some(0), &app.settings_buffer);
+        assert!(
+            matches!(
+                fields[app.settings_field].path,
+                FieldPath::Type {
+                    key: TypeKey::Numbering,
+                    ..
+                }
+            ),
+            "cursor should land on the numbering field"
+        );
+        assert!(app.settings_dirty);
+    }
+
+    // AC7 (ITERATION-189): auto-scaffolding does NOT weaken the salt requirement.
+    // A buffer mirroring the AC1 end-state (type numbering = sqids, scaffolded
+    // [numbering.sqids] with an empty salt) is rejected by save: the file is not
+    // written, the footer error names the salt, and the buffer stays dirty.
+    #[test]
+    fn ac7_save_still_rejects_scaffolded_empty_salt() {
+        const SQIDS_SRC: &str = r#"[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[templates]
+dir = ".lazyspec/templates"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+numbering = "sqids"
+
+[numbering.sqids]
+salt = "seed"
+min_length = 3
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+"#;
+        let (tmp, mut app) = save_app(SQIDS_SRC);
+        // Mirror the scaffold end-state: the salt is blank.
+        app.settings_buffer.documents.sqids.as_mut().unwrap().salt = String::new();
+        app.settings_dirty = true;
+        let before = read_config_file(&tmp);
+
+        app.settings_save(tmp.path(), &Config::default());
+
+        assert_eq!(
+            read_config_file(&tmp),
+            before,
+            "no write on a save rejected for an empty salt"
+        );
+        let msg = app
+            .settings_footer_error
+            .as_deref()
+            .expect("footer error set on rejected save");
+        assert!(
+            msg.contains("salt"),
+            "footer should name the salt constraint, got: {msg}"
+        );
+        assert!(
+            app.settings_dirty,
+            "buffer stays dirty after a rejected save"
+        );
+        assert!(
+            !app.config_reload_request,
+            "no reload triggered on a rejected save"
+        );
+    }
+
+    // ITERATION-189: cycling a type's store to `github-issues` (no [github] in
+    // source) scaffolds the section into the buffer; the save writer must now
+    // fabricate the absent [github] section so the rendered TOML re-parses.
+    #[test]
+    fn save_fabricates_github_section_after_store_cycled_to_github_issues() {
+        let (tmp, mut app) = save_app(SAVE_SRC);
+        // Cycle the rfc type's store via the editor path: cat 1, drill 0, field 7.
+        app.settings_category = 1;
+        app.settings_drill = Some(0);
+        app.settings_field = 7;
+        app.settings_space(); // filesystem -> github-issues, scaffolds github buffer
+
+        assert_eq!(
+            app.settings_buffer.documents.types[0].store,
+            StoreBackend::GithubIssues
+        );
+        assert!(app.settings_buffer.documents.github.is_some());
+
+        app.settings_save(tmp.path(), &Config::default());
+
+        let out = read_config_file(&tmp);
+        assert!(
+            out.contains("[github]"),
+            "writer must fabricate the absent [github] section, got:\n{out}"
+        );
+        let reparsed = Config::parse(&out).expect("fabricated config re-parses");
+        let gh = reparsed
+            .documents
+            .github
+            .expect("re-parsed config carries the github section");
+        assert_eq!(gh.cache_ttl, 60, "scaffolded cache_ttl round-trips");
+        assert_eq!(gh.repo, None, "no repo key fabricated when None");
+        assert!(!app.settings_dirty, "dirty clears on a successful save");
+        assert_eq!(app.settings_footer_error, None, "footer clears on success");
+    }
+
+    // ITERATION-189: cycling a type's numbering to `reserved` (no
+    // [numbering.reserved] in source) scaffolds the section; the writer must
+    // fabricate it (as a sub-table of [numbering]) so the save re-parses.
+    #[test]
+    fn save_fabricates_reserved_section_after_numbering_cycled_to_reserved() {
+        let (tmp, mut app) = save_app(SAVE_SRC);
+        // Numbering EnumCycle is cat 1, drill 0, field 5. Two hops reach reserved
+        // (incremental -> sqids -> reserved); the first hop scaffolds sqids.
+        app.settings_category = 1;
+        app.settings_drill = Some(0);
+        app.settings_field = 5;
+        app.settings_space(); // -> sqids (scaffolds sqids buffer)
+        app.settings_space(); // -> reserved (scaffolds reserved buffer)
+
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering,
+            NumberingStrategy::Reserved
+        );
+        // The dangling sqids scaffold (empty salt) would otherwise reject the save;
+        // drop it so we isolate the reserved-fabrication behaviour.
+        app.settings_buffer.documents.sqids = None;
+        let reserved = app
+            .settings_buffer
+            .documents
+            .reserved
+            .as_ref()
+            .expect("reserved scaffolded");
+        assert_eq!(reserved.remote, "origin");
+
+        app.settings_save(tmp.path(), &Config::default());
+
+        let out = read_config_file(&tmp);
+        assert!(
+            out.contains("[numbering.reserved]"),
+            "writer must fabricate the absent [numbering.reserved] section, got:\n{out}"
+        );
+        let reparsed = Config::parse(&out).expect("fabricated config re-parses");
+        let r = reparsed
+            .documents
+            .reserved
+            .expect("re-parsed config carries the reserved section");
+        assert_eq!(r.remote, "origin");
+        assert_eq!(r.format, ReservedFormat::Incremental);
+        assert_eq!(r.max_retries, 5);
+        assert!(!app.settings_dirty, "dirty clears on a successful save");
+        assert_eq!(app.settings_footer_error, None, "footer clears on success");
+    }
+
+    // ITERATION-189: cycling numbering to `sqids` then filling the scaffolded salt
+    // produces a buffer whose [numbering.sqids] section is absent from source; the
+    // writer must fabricate it (sub-table of [numbering]) so the save re-parses.
+    #[test]
+    fn save_fabricates_sqids_section_after_salt_filled() {
+        let (tmp, mut app) = save_app(SAVE_SRC);
+        app.settings_category = 1;
+        app.settings_drill = Some(0);
+        app.settings_field = 5;
+        app.settings_space(); // incremental -> sqids, scaffolds empty-salt sqids buffer
+
+        assert_eq!(
+            app.settings_buffer.documents.types[0].numbering,
+            NumberingStrategy::Sqids
+        );
+        // Fill the scaffolded salt so the save is not rejected for an empty salt.
+        app.settings_buffer.documents.sqids.as_mut().unwrap().salt = "filled-seed".to_string();
+
+        app.settings_save(tmp.path(), &Config::default());
+
+        let out = read_config_file(&tmp);
+        assert!(
+            out.contains("[numbering.sqids]"),
+            "writer must fabricate the absent [numbering.sqids] section, got:\n{out}"
+        );
+        let reparsed = Config::parse(&out).expect("fabricated config re-parses");
+        let s = reparsed
+            .documents
+            .sqids
+            .expect("re-parsed config carries the sqids section");
+        assert_eq!(s.salt, "filled-seed");
+        assert_eq!(s.min_length, 3);
+        assert!(!app.settings_dirty, "dirty clears on a successful save");
+        assert_eq!(app.settings_footer_error, None, "footer clears on success");
+    }
+
+    // --- Document-impact save guard (RFC-023 slice 6 / ITERATION-191) ---
+
+    fn impact_doc_md(title: &str, ty: &str) -> String {
+        format!(
+            concat!(
+                "---\n",
+                "title: \"{title}\"\n",
+                "type: {ty}\n",
+                "status: draft\n",
+                "author: \"test\"\n",
+                "date: 2026-01-01\n",
+                "tags: []\n",
+                "---\n",
+                "Body.\n",
+            ),
+            title = title,
+            ty = ty,
+        )
+    }
+
+    /// Build an `App` whose store has `count` docs of `ty` written on disk under a
+    /// fresh TempDir, with `.lazyspec.toml` rendered from `Config::default()`. The
+    /// buffer is seeded from the on-disk config (clean). Returns the TempDir (so it
+    /// outlives the app), the app, and a clone of the on-disk config to pass to
+    /// `settings_save` as the session config.
+    fn impact_app(docs: &[(&str, usize)]) -> (tempfile::TempDir, App, Config) {
+        let on_disk = Config::default();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".lazyspec.toml"), on_disk.to_toml().unwrap()).unwrap();
+        for (ty_name, count) in docs {
+            let td = on_disk
+                .documents
+                .types
+                .iter()
+                .find(|t| &t.name == ty_name)
+                .expect("type in config");
+            let dir = root.join(&td.dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            for i in 1..=*count {
+                let file = dir.join(format!("{}-{:03}-doc.md", td.prefix, i));
+                std::fs::write(&file, impact_doc_md(&format!("{ty_name} {i}"), ty_name)).unwrap();
+            }
+        }
+        let store = Store::load(root, &on_disk).unwrap();
+        let mut app = make_test_app(0);
+        app.store = store;
+        app.settings_buffer = on_disk.clone();
+        app.settings_dirty = false;
+        (tmp, app, on_disk)
+    }
+
+    fn buffer_type_dir<'a>(app: &'a mut App, name: &str) -> &'a mut String {
+        &mut app
+            .settings_buffer
+            .documents
+            .types
+            .iter_mut()
+            .find(|t| t.name == name)
+            .unwrap()
+            .dir
+    }
+
+    /// AC1: a load-bearing dir change on a type WITH docs pauses the save -- the
+    /// guard activates and `.lazyspec.toml` is left byte-unchanged.
+    #[test]
+    fn ac1_load_bearing_change_with_docs_pauses_save_without_writing() {
+        let (tmp, mut app, on_disk) = impact_app(&[("rfc", 3)]);
+        let before = read_config_file(&tmp);
+        *buffer_type_dir(&mut app, "rfc") = "docs/proposals".to_string();
+        app.settings_dirty = true;
+
+        app.settings_save(tmp.path(), &on_disk);
+
+        assert!(
+            app.settings_impact_confirm.active,
+            "guard must be flagged for a load-bearing change on a type with docs"
+        );
+        assert_eq!(
+            read_config_file(&tmp),
+            before,
+            "no write may happen while the impact guard is pending"
+        );
+        assert!(app.settings_dirty, "pending edit is retained");
+    }
+
+    /// AC3: confirming the guard commits the buffer atomically (new dir on disk),
+    /// clears the guard + dirty flag, and moves/renames NO document files.
+    #[test]
+    fn ac3_confirm_commits_buffer_and_leaves_docs_in_place() {
+        let (tmp, mut app, on_disk) = impact_app(&[("rfc", 3)]);
+        let root = tmp.path();
+        let original_files: Vec<PathBuf> = (1..=3)
+            .map(|i| root.join("docs/rfcs").join(format!("RFC-{:03}-doc.md", i)))
+            .collect();
+        for f in &original_files {
+            assert!(f.exists(), "fixture doc must exist before save: {f:?}");
+        }
+
+        *buffer_type_dir(&mut app, "rfc") = "docs/proposals".to_string();
+        app.settings_dirty = true;
+        app.settings_save(root, &on_disk);
+        assert!(app.settings_impact_confirm.active);
+
+        app.confirm_settings_impact(root);
+
+        let out = read_config_file(&tmp);
+        Config::parse(&out).unwrap();
+        assert!(
+            out.contains("docs/proposals"),
+            "confirmed save must persist the new dir, got:\n{out}"
+        );
+        assert!(
+            !app.settings_impact_confirm.active,
+            "guard clears after confirm"
+        );
+        assert!(!app.settings_dirty, "dirty clears after a confirmed commit");
+        assert!(app.config_reload_request, "reload raised on commit");
+
+        // No document file was moved/renamed/renumbered: every original path still
+        // exists, and the (new) dir holds no migrated docs.
+        for f in &original_files {
+            assert!(
+                f.exists(),
+                "document files must NOT be moved on confirm: {f:?}"
+            );
+        }
+        assert!(
+            !root.join("docs/proposals").exists(),
+            "confirm must not create or populate the new dir"
+        );
+    }
+
+    /// AC4: cancelling the guard writes nothing -- `.lazyspec.toml` is byte-identical
+    /// to its pre-save snapshot, the buffer keeps the pending value, and the buffer
+    /// stays dirty.
+    #[test]
+    fn ac4_cancel_writes_nothing_and_retains_pending_edit() {
+        let (tmp, mut app, on_disk) = impact_app(&[("rfc", 3)]);
+        *buffer_type_dir(&mut app, "rfc") = "docs/proposals".to_string();
+        app.settings_dirty = true;
+        app.settings_save(tmp.path(), &on_disk);
+        assert!(app.settings_impact_confirm.active);
+        let snapshot = read_config_file(&tmp);
+
+        app.cancel_settings_impact();
+
+        assert!(
+            !app.settings_impact_confirm.active,
+            "guard clears after cancel"
+        );
+        assert_eq!(
+            read_config_file(&tmp),
+            snapshot,
+            "cancel must not write .lazyspec.toml"
+        );
+        assert_eq!(
+            app.settings_buffer
+                .documents
+                .types
+                .iter()
+                .find(|t| t.name == "rfc")
+                .unwrap()
+                .dir,
+            "docs/proposals",
+            "buffer retains the pending dir after cancel"
+        );
+        assert!(app.settings_dirty, "buffer stays dirty after cancel");
+    }
+
+    /// AC5a: a change to only non-load-bearing fields (icon/plural) commits with no
+    /// guard, identical to a guard-free save.
+    #[test]
+    fn ac5a_non_load_bearing_change_commits_without_guard() {
+        let (tmp, mut app, on_disk) = impact_app(&[("rfc", 3)]);
+        let rfc = app
+            .settings_buffer
+            .documents
+            .types
+            .iter_mut()
+            .find(|t| t.name == "rfc")
+            .unwrap();
+        rfc.icon = Some("★".to_string());
+        rfc.plural = "requests".to_string();
+        app.settings_dirty = true;
+
+        app.settings_save(tmp.path(), &on_disk);
+
+        assert!(
+            !app.settings_impact_confirm.active,
+            "non-load-bearing edits must not raise the guard"
+        );
+        let out = read_config_file(&tmp);
+        assert!(
+            out.contains("requests"),
+            "non-load-bearing edit must be written, got:\n{out}"
+        );
+        assert!(!app.settings_dirty, "dirty clears on the committed save");
+    }
+
+    /// AC5b: a load-bearing change on a type with ZERO docs commits with no guard.
+    #[test]
+    fn ac5b_load_bearing_change_on_zero_doc_type_commits_without_guard() {
+        // Only rfc docs on disk; story has zero docs.
+        let (tmp, mut app, on_disk) = impact_app(&[("rfc", 3)]);
+        *buffer_type_dir(&mut app, "story") = "docs/tickets".to_string();
+        app.settings_dirty = true;
+
+        app.settings_save(tmp.path(), &on_disk);
+
+        assert!(
+            !app.settings_impact_confirm.active,
+            "a load-bearing change on a zero-doc type must not raise the guard"
+        );
+        let out = read_config_file(&tmp);
+        assert!(
+            out.contains("docs/tickets"),
+            "zero-doc load-bearing edit must be written, got:\n{out}"
+        );
+        assert!(!app.settings_dirty, "dirty clears on the committed save");
+    }
+
+    // --- AC3/AC4 impact-guard key routing (ITERATION-191 Task 4) ---
+
+    /// Arm the document-impact guard via a real `settings_save`: a load-bearing dir
+    /// change on a type with docs. Returns the app parked with the guard active and
+    /// a pending dirty buffer, ready for the key path.
+    fn armed_impact_app() -> (tempfile::TempDir, App, Config) {
+        let (tmp, mut app, on_disk) = impact_app(&[("rfc", 3)]);
+        *buffer_type_dir(&mut app, "rfc") = "docs/proposals".to_string();
+        app.settings_dirty = true;
+        app.settings_save(tmp.path(), &on_disk);
+        assert!(
+            app.settings_impact_confirm.active,
+            "fixture must arm the impact guard"
+        );
+        (tmp, app, on_disk)
+    }
+
+    /// AC3 via keys: Enter while the guard is active routes to confirm -- the buffer
+    /// is written and the guard clears.
+    #[test]
+    fn impact_guard_enter_routes_to_confirm() {
+        let (tmp, mut app, config) = armed_impact_app();
+
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(
+            !app.settings_impact_confirm.active,
+            "Enter must clear the guard via confirm"
+        );
+        assert!(
+            read_config_file(&tmp).contains("docs/proposals"),
+            "Enter must commit the pending buffer"
+        );
+        assert!(!app.settings_dirty, "confirmed commit clears dirty");
+    }
+
+    /// AC3 via keys: 'y' while the guard is active routes to confirm.
+    #[test]
+    fn impact_guard_y_routes_to_confirm() {
+        let (tmp, mut app, config) = armed_impact_app();
+
+        app.handle_key(KeyCode::Char('y'), KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(
+            !app.settings_impact_confirm.active,
+            "'y' must clear the guard via confirm"
+        );
+        assert!(
+            read_config_file(&tmp).contains("docs/proposals"),
+            "'y' must commit the pending buffer"
+        );
+    }
+
+    /// AC4 via keys: Esc while the guard is active routes to cancel -- nothing is
+    /// written, the guard clears, and the buffer keeps its pending edit.
+    #[test]
+    fn impact_guard_esc_routes_to_cancel() {
+        let (tmp, mut app, config) = armed_impact_app();
+        let snapshot = read_config_file(&tmp);
+
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(
+            !app.settings_impact_confirm.active,
+            "Esc must clear the guard via cancel"
+        );
+        assert_eq!(
+            read_config_file(&tmp),
+            snapshot,
+            "Esc (cancel) must not write .lazyspec.toml"
+        );
+        assert_eq!(
+            buffer_type_dir(&mut app, "rfc"),
+            "docs/proposals",
+            "buffer retains the pending edit after cancel"
+        );
+        assert!(app.settings_dirty, "buffer stays dirty after cancel");
+    }
+
+    /// AC4 via keys: 'n' while the guard is active routes to cancel.
+    #[test]
+    fn impact_guard_n_routes_to_cancel() {
+        let (tmp, mut app, config) = armed_impact_app();
+        let snapshot = read_config_file(&tmp);
+
+        app.handle_key(KeyCode::Char('n'), KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(
+            !app.settings_impact_confirm.active,
+            "'n' must clear the guard via cancel"
+        );
+        assert_eq!(
+            read_config_file(&tmp),
+            snapshot,
+            "'n' (cancel) must not write .lazyspec.toml"
+        );
+        assert!(app.settings_dirty, "buffer stays dirty after cancel");
+    }
+
+    /// A non-handled key while the guard is active is swallowed: the gate keeps the
+    /// guard up and nothing is written (no fall-through to normal nav / save).
+    #[test]
+    fn impact_guard_swallows_unhandled_key() {
+        let (tmp, mut app, config) = armed_impact_app();
+        let snapshot = read_config_file(&tmp);
+
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(
+            app.settings_impact_confirm.active,
+            "an unhandled key must leave the guard active"
+        );
+        assert_eq!(
+            read_config_file(&tmp),
+            snapshot,
+            "an unhandled key must not write .lazyspec.toml"
+        );
+        assert!(app.settings_dirty, "buffer stays dirty");
+    }
+
+    // --- AC10 save/discard quit prompt (ITERATION-188 Task 7) ---
+
+    /// A settings app parked in the Settings view, not editing, not drilled, with
+    /// its buffer set to the parsed `src` (clean). The TempDir holds the
+    /// `.lazyspec.toml` so it outlives the app/file.
+    fn quit_prompt_app(src: &str) -> (tempfile::TempDir, App) {
+        let (tmp, mut app) = save_app(src);
+        app.view_mode = ViewMode::Settings;
+        app.settings_editing = false;
+        app.settings_drill = None;
+        (tmp, app)
+    }
+
+    #[test]
+    fn ac10_quit_with_dirty_buffer_activates_prompt() {
+        let (tmp, mut app) = quit_prompt_app(SAVE_SRC);
+        app.settings_dirty = true;
+        let config = Config::parse(SAVE_SRC).unwrap();
+
+        app.handle_settings_key(KeyCode::Char('q'), KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(
+            app.settings_quit_prompt.active,
+            "q with dirty buffer opens the prompt"
+        );
+        assert!(
+            !app.should_quit,
+            "the quit is deferred until the prompt is answered"
+        );
+        assert_eq!(
+            app.view_mode,
+            ViewMode::Settings,
+            "still in settings, not exited"
+        );
+    }
+
+    #[test]
+    fn ac10_esc_with_dirty_buffer_activates_prompt() {
+        let (tmp, mut app) = quit_prompt_app(SAVE_SRC);
+        app.settings_dirty = true;
+        let config = Config::parse(SAVE_SRC).unwrap();
+
+        app.handle_settings_key(KeyCode::Esc, KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(
+            app.settings_quit_prompt.active,
+            "Esc with dirty buffer opens the prompt"
+        );
+        assert!(!app.should_quit);
+        assert_eq!(app.view_mode, ViewMode::Settings);
+    }
+
+    #[test]
+    fn ac10_esc_undrills_before_prompting_even_when_dirty() {
+        let (tmp, mut app) = quit_prompt_app(SAVE_SRC);
+        app.settings_dirty = true;
+        app.settings_drill = Some(0);
+        let config = Config::parse(SAVE_SRC).unwrap();
+
+        app.handle_settings_key(KeyCode::Esc, KeyModifiers::NONE, tmp.path(), &config);
+
+        assert_eq!(app.settings_drill, None, "Esc undrills first");
+        assert!(
+            !app.settings_quit_prompt.active,
+            "no prompt while a drill is open"
+        );
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn ac10_discard_drops_buffer_edits_quits_and_leaves_file_untouched() {
+        let (tmp, mut app) = quit_prompt_app(SAVE_SRC);
+        let config = Config::parse(SAVE_SRC).unwrap();
+        // A dirty buffer that differs from the session config.
+        app.settings_buffer.documents.naming.pattern = "edited-{title}.md".to_string();
+        app.settings_dirty = true;
+        app.settings_quit_prompt.active = true;
+        let before = read_config_file(&tmp);
+
+        app.handle_settings_key(KeyCode::Char('d'), KeyModifiers::NONE, tmp.path(), &config);
+
+        // Buffer re-seeded to the session config (edit dropped).
+        assert_eq!(
+            app.settings_buffer.documents.naming.pattern, config.documents.naming.pattern,
+            "discard re-seeds the buffer from the session config"
+        );
+        assert!(!app.settings_dirty, "dirty clears on discard");
+        assert!(!app.settings_quit_prompt.active, "prompt closes on discard");
+        assert!(app.should_quit, "discard honours the quit");
+        assert_eq!(app.settings_footer_error, None);
+        assert_eq!(
+            read_config_file(&tmp),
+            before,
+            "discard performs no write -- the file is untouched"
+        );
+    }
+
+    #[test]
+    fn ac10_save_valid_writes_clears_dirty_quits_and_reloads() {
+        let (tmp, mut app) = quit_prompt_app(SAVE_SRC);
+        let config = Config::parse(SAVE_SRC).unwrap();
+        app.settings_buffer.documents.naming.pattern = "{type}-{title}.md".to_string();
+        app.settings_dirty = true;
+        app.settings_quit_prompt.active = true;
+
+        app.handle_settings_key(KeyCode::Char('s'), KeyModifiers::NONE, tmp.path(), &config);
+
+        let out = read_config_file(&tmp);
+        Config::parse(&out).unwrap();
+        assert!(
+            out.contains("{type}-{title}.md"),
+            "the valid edit was written"
+        );
+        assert!(!app.settings_dirty, "dirty clears on a valid save");
+        assert!(
+            !app.settings_quit_prompt.active,
+            "prompt closes on a valid save"
+        );
+        assert!(app.should_quit, "a successful save honours the quit");
+        assert!(
+            app.config_reload_request,
+            "save runs the same reload-raising path as w"
+        );
+    }
+
+    #[test]
+    fn ac10_save_invalid_keeps_dirty_stays_in_settings_with_footer() {
+        let (tmp, mut app) = quit_prompt_app(SAVE_SRC);
+        let config = Config::parse(SAVE_SRC).unwrap();
+        // github-issues store with no [github] section is a parse-time violation.
+        app.settings_buffer.documents.types[0].store = StoreBackend::GithubIssues;
+        app.settings_dirty = true;
+        app.settings_quit_prompt.active = true;
+        let before = read_config_file(&tmp);
+
+        app.handle_settings_key(KeyCode::Char('s'), KeyModifiers::NONE, tmp.path(), &config);
+
+        assert_eq!(read_config_file(&tmp), before, "no write on a failed save");
+        assert!(
+            app.settings_footer_error.is_some(),
+            "the failed save sets the footer error"
+        );
+        assert!(app.settings_dirty, "buffer stays dirty after a failed save");
+        assert!(
+            !app.settings_quit_prompt.active,
+            "prompt closes after a failed save"
+        );
+        assert!(!app.should_quit, "a failed save cancels the quit");
+        assert_eq!(
+            app.view_mode,
+            ViewMode::Settings,
+            "stays in settings to fix and retry"
+        );
+    }
+
+    #[test]
+    fn ac10_cancel_closes_prompt_keeps_buffer_and_stays() {
+        let (tmp, mut app) = quit_prompt_app(SAVE_SRC);
+        let config = Config::parse(SAVE_SRC).unwrap();
+        app.settings_buffer.documents.naming.pattern = "edited-{title}.md".to_string();
+        app.settings_dirty = true;
+        app.settings_quit_prompt.active = true;
+
+        app.handle_settings_key(KeyCode::Esc, KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(!app.settings_quit_prompt.active, "Esc cancels the prompt");
+        assert!(!app.should_quit, "cancel keeps the app running");
+        assert!(app.settings_dirty, "cancel leaves the buffer dirty");
+        assert_eq!(
+            app.settings_buffer.documents.naming.pattern, "edited-{title}.md",
+            "cancel leaves the buffer untouched"
+        );
+    }
+
+    #[test]
+    fn ac10_quit_when_clean_quits_without_prompting() {
+        let (tmp, mut app) = quit_prompt_app(SAVE_SRC);
+        app.settings_dirty = false;
+        let config = Config::parse(SAVE_SRC).unwrap();
+
+        app.handle_settings_key(KeyCode::Char('q'), KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(app.should_quit, "a clean quit exits immediately");
+        assert!(
+            !app.settings_quit_prompt.active,
+            "no prompt when the buffer is clean"
+        );
+    }
+
+    // AC1: scaffolding NumberingSqids into a buffer with no [numbering.sqids]
+    // inserts the section with parser defaults and points at the empty salt.
+    #[test]
+    fn scaffold_sqids_inserts_defaults_and_targets_salt() {
+        let mut buffer = Config::default();
+        assert!(buffer.documents.sqids.is_none());
+
+        let result = scaffold_dependency(&mut buffer, ConfigDep::NumberingSqids);
+
+        assert_eq!(
+            result,
+            Some(ScaffoldResult {
+                inserted: ConfigDep::NumberingSqids,
+                required_empty_field: Some(FieldPath::SqidsSalt),
+            })
+        );
+        assert_eq!(
+            buffer.documents.sqids,
+            Some(SqidsConfig {
+                salt: String::new(),
+                min_length: 3,
+            })
+        );
+    }
+
+    // AC4: scaffolding NumberingReserved into a buffer with no
+    // [numbering.reserved] inserts parser defaults; no required-empty field.
+    #[test]
+    fn scaffold_reserved_inserts_defaults_no_empty_field() {
+        let mut buffer = Config::default();
+        assert!(buffer.documents.reserved.is_none());
+
+        let result = scaffold_dependency(&mut buffer, ConfigDep::NumberingReserved);
+
+        assert_eq!(
+            result,
+            Some(ScaffoldResult {
+                inserted: ConfigDep::NumberingReserved,
+                required_empty_field: None,
+            })
+        );
+        assert_eq!(
+            buffer.documents.reserved,
+            Some(ReservedConfig {
+                remote: "origin".to_string(),
+                format: ReservedFormat::Incremental,
+                max_retries: 5,
+            })
+        );
+    }
+
+    // AC5: scaffolding Github into a buffer with no [github] inserts parser
+    // defaults (repo None, cache_ttl 60); no required-empty field.
+    #[test]
+    fn scaffold_github_inserts_defaults_no_empty_field() {
+        let mut buffer = Config::default();
+        assert!(buffer.documents.github.is_none());
+
+        let result = scaffold_dependency(&mut buffer, ConfigDep::Github);
+
+        assert_eq!(
+            result,
+            Some(ScaffoldResult {
+                inserted: ConfigDep::Github,
+                required_empty_field: None,
+            })
+        );
+        assert_eq!(
+            buffer.documents.github,
+            Some(GithubConfig {
+                repo: None,
+                cache_ttl: 60,
+            })
+        );
+    }
+
+    // AC6: an already-present section is left untouched and scaffolding returns
+    // None, for each of the three dependencies.
+    #[test]
+    fn scaffold_skips_and_does_not_mutate_when_present() {
+        let mut buffer = Config::default();
+
+        let existing_sqids = SqidsConfig {
+            salt: "user-salt".to_string(),
+            min_length: 7,
+        };
+        buffer.documents.sqids = Some(existing_sqids.clone());
+        assert_eq!(
+            scaffold_dependency(&mut buffer, ConfigDep::NumberingSqids),
+            None
+        );
+        assert_eq!(buffer.documents.sqids, Some(existing_sqids));
+
+        let existing_reserved = ReservedConfig {
+            remote: "upstream".to_string(),
+            format: ReservedFormat::Sqids,
+            max_retries: 9,
+        };
+        buffer.documents.reserved = Some(existing_reserved.clone());
+        assert_eq!(
+            scaffold_dependency(&mut buffer, ConfigDep::NumberingReserved),
+            None
+        );
+        assert_eq!(buffer.documents.reserved, Some(existing_reserved));
+
+        let existing_github = GithubConfig {
+            repo: Some("owner/repo".to_string()),
+            cache_ttl: 120,
+        };
+        buffer.documents.github = Some(existing_github.clone());
+        assert_eq!(scaffold_dependency(&mut buffer, ConfigDep::Github), None);
+        assert_eq!(buffer.documents.github, Some(existing_github));
+    }
+
+    // --- ITERATION-190: settings collection management (AC1-AC7) ---
+
+    // AC1: seeding a Document Type appends a default TypeDef and drills in.
+    #[test]
+    fn ac1_seed_document_type_appends_default_and_drills() {
+        let mut app = settings_app(Config::default(), 1, 0);
+        let before = app.settings_buffer.documents.types.len();
+
+        app.settings_seed_entry();
+
+        assert_eq!(app.settings_buffer.documents.types.len(), before + 1);
+        let last = app.settings_buffer.documents.types.last().unwrap();
+        assert_eq!(last.numbering, NumberingStrategy::Incremental);
+        assert_eq!(last.store, StoreBackend::Filesystem);
+        assert!(last.agents.is_empty());
+        assert!(last.icon.is_none());
+        assert!(last.parent_type.is_none());
+        assert!(!last.name.is_empty());
+        assert_eq!(app.settings_entry, before);
+        assert_eq!(app.settings_drill, Some(before));
+        assert!(app.settings_dirty);
+    }
+
+    // AC2: seeding a Validation Rule appends a ParentChild rule and drills in.
+    #[test]
+    fn ac2_seed_validation_rule_appends_parent_child_and_drills() {
+        let mut app = settings_app(Config::default(), 3, 0);
+        let before = app.settings_buffer.rules.len();
+
+        app.settings_seed_entry();
+
+        assert_eq!(app.settings_buffer.rules.len(), before + 1);
+        assert!(matches!(
+            app.settings_buffer.rules.last().unwrap(),
+            ValidationRule::ParentChild { .. }
+        ));
+        assert_eq!(app.settings_entry, before);
+        assert_eq!(app.settings_drill, Some(before));
+        assert!(app.settings_dirty);
+    }
+
+    // AC3: seeding an override opens the key prompt without inserting; confirming
+    // a non-empty key inserts the override (default normalize) and drills in.
+    #[test]
+    fn ac3_seed_override_prompts_then_inserts_on_confirm() {
+        let mut app = settings_app(Config::default(), 7, 0);
+        let before = app.settings_buffer.certification.overrides.len();
+
+        app.settings_seed_override();
+        assert!(app.override_key_prompt.active);
+        assert_eq!(
+            app.settings_buffer.certification.overrides.len(),
+            before,
+            "no insert before confirm"
+        );
+        assert!(!app.settings_dirty);
+
+        for c in "docs/specs/SPEC-007".chars() {
+            app.settings_override_type_char(c);
+        }
+        app.settings_confirm_override();
+
+        let ov = app
+            .settings_buffer
+            .certification
+            .overrides
+            .get("docs/specs/SPEC-007")
+            .expect("override inserted");
+        assert!(ov.normalize, "default normalize is true");
+        assert!(!app.override_key_prompt.active);
+        assert!(app.settings_dirty);
+
+        let mut keys: Vec<&String> = app.settings_buffer.certification.overrides.keys().collect();
+        keys.sort();
+        let expected = keys
+            .iter()
+            .position(|k| **k == "docs/specs/SPEC-007")
+            .unwrap();
+        assert_eq!(app.settings_entry, expected);
+        assert_eq!(app.settings_drill, Some(expected));
+    }
+
+    // AC3 edge: an empty key on confirm inserts nothing.
+    #[test]
+    fn ac3_empty_override_key_inserts_nothing() {
+        let mut app = settings_app(Config::default(), 7, 0);
+        app.settings_seed_override();
+        app.settings_confirm_override();
+        assert!(app.settings_buffer.certification.overrides.is_empty());
+    }
+
+    // AC4: opening the delete confirm targets the selected entry without mutating
+    // the buffer; confirming removes it and dirties.
+    #[test]
+    fn ac4_delete_confirm_targets_then_removes_on_confirm() {
+        let mut app = settings_app(Config::default(), 1, 0);
+        app.settings_entry = 0;
+        let target_name = app.settings_buffer.documents.types[0].name.clone();
+        let before = app.settings_buffer.documents.types.len();
+
+        app.settings_open_delete_confirm();
+        assert!(app.settings_delete_confirm.active);
+        assert_eq!(app.settings_delete_confirm.entry_label, target_name);
+        assert_eq!(
+            app.settings_delete_confirm.target,
+            SettingsDeleteTarget::Index(0)
+        );
+        assert_eq!(
+            app.settings_buffer.documents.types.len(),
+            before,
+            "buffer unchanged until confirm"
+        );
+
+        app.settings_confirm_delete();
+        assert_eq!(app.settings_buffer.documents.types.len(), before - 1);
+        assert!(!app
+            .settings_buffer
+            .documents
+            .types
+            .iter()
+            .any(|t| t.name == target_name));
+        assert!(app.settings_dirty);
+        assert!(!app.settings_delete_confirm.active);
+    }
+
+    // AC5: cancelling the delete confirm leaves the buffer intact.
+    #[test]
+    fn ac5_delete_confirm_cancel_leaves_buffer_intact() {
+        let mut app = settings_app(Config::default(), 1, 0);
+        let before = app.settings_buffer.documents.types.clone();
+
+        app.settings_open_delete_confirm();
+        assert!(app.settings_delete_confirm.active);
+
+        app.settings_close_delete_confirm();
+        assert_eq!(app.settings_buffer.documents.types, before);
+        assert!(!app.settings_delete_confirm.active);
+        assert_eq!(app.settings_drill, None);
+    }
+
+    // AC6: ADR-011 guard refuses to delete the last relationship, with no confirm.
+    #[test]
+    fn ac6_delete_last_relationship_is_refused() {
+        let config = Config {
+            relationships: vec![RelationshipDef {
+                name: "related-to".to_string(),
+                inverse: None,
+            }],
+            ..Config::default()
+        };
+        let mut app = settings_app(config, 2, 0);
+        app.settings_entry = 0;
+
+        app.settings_open_delete_confirm();
+
+        assert!(
+            !app.settings_delete_confirm.active,
+            "no confirm shown for last relationship"
+        );
+        assert_eq!(app.settings_buffer.relationships.len(), 1);
+    }
+
+    // AC7: with >=2 relationships, delete is allowed and removes one on confirm.
+    #[test]
+    fn ac7_delete_relationship_allowed_when_more_than_one() {
+        let config = Config {
+            relationships: vec![
+                RelationshipDef {
+                    name: "implements".to_string(),
+                    inverse: Some("implemented-by".to_string()),
+                },
+                RelationshipDef {
+                    name: "related-to".to_string(),
+                    inverse: None,
+                },
+            ],
+            ..Config::default()
+        };
+        let mut app = settings_app(config, 2, 0);
+        app.settings_entry = 0;
+        let removed = app.settings_buffer.relationships[0].name.clone();
+
+        app.settings_open_delete_confirm();
+        assert!(app.settings_delete_confirm.active);
+
+        app.settings_confirm_delete();
+        assert_eq!(app.settings_buffer.relationships.len(), 1);
+        assert!(!app
+            .settings_buffer
+            .relationships
+            .iter()
+            .any(|r| r.name == removed));
+    }
+
+    // A save fixture with two relationships so a non-last delete is legal under the
+    // ADR-011 guard.
+    const COLLECTION_SAVE_SRC: &str = r#"# lazyspec collection fixture
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[templates]
+dir = ".lazyspec/templates"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "related-to"
+"#;
+
+    // AC8 (STORY-141): a save persists buffer-only collection add/remove. Seed a
+    // Document Type, give it save-valid non-colliding fields, delete a non-last
+    // relationship, then save -- the written file re-parses, holds the new type,
+    // drops the deleted relationship (>=1 remaining), and dirty clears.
+    #[test]
+    fn ac8_save_persists_collection_add_and_remove() {
+        let (tmp, mut app) = save_app(COLLECTION_SAVE_SRC);
+
+        // Seed a Document Type (cat 1) and make its placeholder fields save-valid
+        // and non-colliding with the existing `rfc`.
+        app.settings_category = 1;
+        app.settings_seed_entry();
+        let seeded = app.settings_buffer.documents.types.last_mut().unwrap();
+        seeded.name = "adr".to_string();
+        seeded.plural = "adrs".to_string();
+        seeded.dir = "docs/adrs".to_string();
+        seeded.prefix = "ADR".to_string();
+
+        // Delete the FIRST (non-last) relationship via the confirm flow (cat 2).
+        app.settings_category = 2;
+        app.settings_entry = 0;
+        let removed = app.settings_buffer.relationships[0].name.clone();
+        app.settings_open_delete_confirm();
+        assert!(app.settings_delete_confirm.active);
+        app.settings_confirm_delete();
+
+        app.settings_save(tmp.path(), &Config::default());
+
+        // The written file is a valid config.
+        let out = read_config_file(&tmp);
+        let reparsed = Config::parse(&out).unwrap();
+
+        // The added type survived the round-trip.
+        assert!(
+            reparsed.type_by_name("adr").is_some(),
+            "added type should be persisted"
+        );
+        // The deleted relationship is gone, but at least one remains.
+        assert!(
+            reparsed.relationship_by_name(&removed).is_none(),
+            "deleted relationship should be absent"
+        );
+        assert!(
+            !reparsed.relationships.is_empty(),
+            "at least one relationship remains"
+        );
+
+        assert!(!app.settings_dirty, "dirty clears on a successful save");
+        assert_eq!(app.settings_footer_error, None);
+    }
+
+    // --- RFC-023 slice 7 / ITERATION-192: Interface category + zone ordering ---
+
+    // AC2: the ascii_diagrams boolean toggles through the slice-3 Space path and
+    // dirties the buffer. (statusbar.enabled is covered by
+    // ac2_toggle_statusbar_enabled_flips_and_dirties.)
+    #[test]
+    fn iter192_ac2_ascii_diagrams_toggle_flips_and_dirties() {
+        let mut config = config_one_type();
+        config.ui.ascii_diagrams = false;
+        let mut app = settings_app(config, 9, 0); // Interface > ascii_diagrams
+
+        app.settings_space();
+        assert!(app.settings_buffer.ui.ascii_diagrams);
+        assert!(app.settings_dirty);
+
+        app.settings_space();
+        assert!(!app.settings_buffer.ui.ascii_diagrams, "Space flips back");
+    }
+
+    // AC3: max_expanded_height bounded-numeric edit rejects out-of-range (keeping
+    // the prior value) and accepts a valid value.
+    #[test]
+    fn iter192_ac3_max_expanded_height_rejects_then_accepts() {
+        let config = config_one_type(); // [tui.multiline] absent -> default 5
+        let mut app = settings_app(config, 9, 5); // Interface > multiline.max_expanded_height
+        assert_eq!(app.settings_buffer.ui.multiline.max_expanded_height, 5);
+
+        // Reject "0" (below min 1): prior value retained, error set, still editing.
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        type_chars(&mut app, "0");
+        app.settings_confirm_edit();
+        assert_eq!(app.settings_buffer.ui.multiline.max_expanded_height, 5);
+        assert!(app.settings_edit_error.is_some());
+        assert!(app.settings_editing);
+
+        // Accept "8".
+        app.settings_edit_input.clear();
+        type_chars(&mut app, "8");
+        app.settings_confirm_edit();
+        assert_eq!(app.settings_buffer.ui.multiline.max_expanded_height, 8);
+        assert!(app.settings_dirty);
+        assert!(!app.settings_editing);
+    }
+
+    // AC4: opening a zone editor on an unset zone seeds it from the RFC-022 default
+    // names; add/remove/reorder then commit writes the chosen order into the buffer
+    // and dirties it.
+    #[test]
+    fn iter192_ac4_zone_ordering_round_trip_into_buffer() {
+        use crate::tui::state::forms::ZonePane;
+        use crate::tui::views::status_bar::STATUS_BAR_DEFAULT_LEFT;
+
+        let config = config_one_type(); // statusbar.left is None
+        let mut app = settings_app(config, 9, 2); // Interface > statusbar.left
+
+        // Enter opens the zone editor (routed via start_edit).
+        app.settings_start_edit();
+        let editor = app
+            .settings_zone_editor
+            .as_ref()
+            .expect("zone editor opens for a ZoneOrdering field");
+        let defaults: Vec<String> = STATUS_BAR_DEFAULT_LEFT
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            editor.selected, defaults,
+            "unset zone seeds from RFC-022 defaults"
+        );
+
+        // Remove the first selected name (default left = [mode, type_filter, doc_count]).
+        let z = app.settings_zone_editor.as_mut().unwrap();
+        z.pane = ZonePane::Selected;
+        z.cursor = 0;
+        let removed = z.selected[0].clone();
+        z.remove();
+        assert!(!z.selected.contains(&removed));
+        assert!(z.available.contains(&removed));
+
+        // Add git_branch from Available, then move it up one.
+        let z = app.settings_zone_editor.as_mut().unwrap();
+        z.pane = ZonePane::Available;
+        z.cursor = z
+            .available
+            .iter()
+            .position(|n| n == "git_branch")
+            .expect("git_branch available");
+        z.add();
+        z.pane = ZonePane::Selected;
+        z.cursor = z.selected.len() - 1; // git_branch landed at the end
+        z.move_up();
+        let expected = z.selected.clone();
+
+        app.settings_commit_zone();
+        assert!(
+            app.settings_zone_editor.is_none(),
+            "commit closes the editor"
+        );
+        assert_eq!(
+            app.settings_buffer.ui.statusbar.left,
+            Some(expected),
+            "committed order is written to the buffer"
+        );
+        assert!(app.settings_dirty);
+    }
+
+    // AC4: a zone the user never opens stays None; an explicitly cleared zone
+    // persists as Some(vec![]); both survive an atomic save round-trip.
+    #[test]
+    fn iter192_ac4_untouched_vs_cleared_zone_persist() {
+        use crate::tui::state::forms::ZonePane;
+
+        const SRC: &str = r#"[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+
+[tui.statusbar]
+enabled = true
+left = ["mode"]
+center = ["warnings"]
+"#;
+        let (tmp, mut app) = save_app(SRC);
+        app.settings_category = 9;
+
+        // Clear `center`: open its editor, remove all, commit -> Some(vec![]).
+        app.settings_field = 3; // statusbar.center
+        app.settings_start_edit();
+        let z = app.settings_zone_editor.as_mut().expect("center editor");
+        z.pane = ZonePane::Selected;
+        while !z.selected.is_empty() {
+            z.cursor = 0;
+            z.remove();
+        }
+        app.settings_commit_zone();
+        assert_eq!(
+            app.settings_buffer.ui.statusbar.center,
+            Some(vec![]),
+            "cleared zone is an explicit empty list"
+        );
+
+        // `right` is never opened -> stays None (untouched).
+        assert_eq!(app.settings_buffer.ui.statusbar.right, None);
+
+        app.settings_dirty = true;
+        app.settings_save(tmp.path(), &Config::parse(SRC).unwrap());
+        assert_eq!(app.settings_footer_error, None, "save succeeds");
+
+        let out = read_config_file(&tmp);
+        let reparsed = Config::parse(&out).unwrap();
+        // left untouched in this test -> preserved as written.
+        assert_eq!(
+            reparsed.ui.statusbar.left,
+            Some(vec!["mode".to_string()]),
+            "untouched left preserved"
+        );
+        // right never set -> remains absent (None).
+        assert_eq!(
+            reparsed.ui.statusbar.right, None,
+            "untouched right stays unset"
+        );
+        // cleared center -> absent array per slice-3 list semantics (empty == absent).
+        assert!(
+            reparsed.ui.statusbar.center.unwrap_or_default().is_empty(),
+            "cleared center round-trips as empty/absent"
+        );
+    }
+
+    // AC5: the ordering editor only ever surfaces RFC-022 vocabulary -- both the
+    // seeded selected set and the available set are subsets of STATUS_BAR_COMPONENTS,
+    // and adding can only ever move a const name into selected.
+    #[test]
+    fn iter192_ac5_editor_offers_only_vocabulary() {
+        use crate::tui::state::forms::{FieldPath, ZoneOrderingEditor, ZonePane};
+        use crate::tui::views::status_bar::{STATUS_BAR_COMPONENTS, STATUS_BAR_DEFAULT_RIGHT};
+
+        let vocab: std::collections::HashSet<&str> =
+            STATUS_BAR_COMPONENTS.iter().copied().collect();
+        let mut editor =
+            ZoneOrderingEditor::new(FieldPath::StatusbarRight, None, STATUS_BAR_DEFAULT_RIGHT);
+
+        for name in editor.selected.iter().chain(editor.available.iter()) {
+            assert!(
+                vocab.contains(name.as_str()),
+                "{name} is offered but not in the RFC-022 vocabulary"
+            );
+        }
+
+        // Exhaustively add everything available; selected must remain within vocab
+        // and never exceed the full vocabulary.
+        editor.pane = ZonePane::Available;
+        while !editor.available.is_empty() {
+            editor.cursor = 0;
+            editor.add();
+        }
+        assert!(editor.available.is_empty());
+        assert_eq!(editor.selected.len(), STATUS_BAR_COMPONENTS.len());
+        for name in &editor.selected {
+            assert!(vocab.contains(name.as_str()));
+        }
+    }
+
+    fn dummy_variant_picker() -> SettingsVariantPicker {
+        SettingsVariantPicker::new(FieldPath::Naming, &["sqids", "reserved"], 0)
+    }
+
+    fn dummy_zone_editor() -> ZoneOrderingEditor {
+        ZoneOrderingEditor::new(FieldPath::Naming, None, &["branch"])
+    }
+
+    fn dummy_scaffold_offer() -> ScaffoldResult {
+        ScaffoldResult {
+            inserted: ConfigDep::Github,
+            required_empty_field: None,
+        }
+    }
+
+    #[test]
+    fn active_key_context_defaults_to_types() {
+        let app = make_test_app(1);
+        assert_eq!(app.active_key_context(), KeyContext::Types);
+    }
+
+    #[test]
+    fn active_key_context_view_modes() {
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Filters;
+        assert_eq!(app.active_key_context(), KeyContext::Filters);
+        app.view_mode = ViewMode::Graph;
+        assert_eq!(app.active_key_context(), KeyContext::Graph);
+        app.view_mode = ViewMode::Settings;
+        assert_eq!(app.active_key_context(), KeyContext::Settings);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn active_key_context_metrics_mode_falls_through_to_types() {
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Metrics;
+        assert_eq!(app.active_key_context(), KeyContext::Types);
+    }
+
+    #[test]
+    fn active_key_context_overlay_bools() {
+        let mut app = make_test_app(1);
+        app.show_warnings = true;
+        assert_eq!(app.active_key_context(), KeyContext::Warnings);
+
+        let mut app = make_test_app(1);
+        app.create_form.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::CreateForm);
+
+        let mut app = make_test_app(1);
+        app.delete_confirm.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::DeleteConfirm);
+
+        let mut app = make_test_app(1);
+        app.override_key_prompt.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::OverrideKeyPrompt);
+
+        let mut app = make_test_app(1);
+        app.settings_delete_confirm.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::SettingsDeleteConfirm);
+
+        let mut app = make_test_app(1);
+        app.settings_impact_confirm.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::SettingsImpact);
+
+        let mut app = make_test_app(1);
+        app.status_picker.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::StatusPicker);
+
+        let mut app = make_test_app(1);
+        app.link_editor.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::LinkEditor);
+
+        let mut app = make_test_app(1);
+        app.provenance_editor.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::ProvenanceEditor);
+    }
+
+    #[test]
+    fn active_key_context_gh_conflict() {
+        let mut app = make_test_app(1);
+        app.gh_conflict_message = Some("boom".to_string());
+        assert_eq!(app.active_key_context(), KeyContext::GhConflict);
+    }
+
+    #[test]
+    fn active_key_context_search_and_fullscreen() {
+        let mut app = make_test_app(1);
+        app.search_mode = true;
+        assert_eq!(app.active_key_context(), KeyContext::Search);
+
+        let mut app = make_test_app(1);
+        app.fullscreen_doc = true;
+        assert_eq!(app.active_key_context(), KeyContext::Fullscreen);
+    }
+
+    #[test]
+    fn active_key_context_gh_conflict_outranks_lower_overlays() {
+        // GhConflict sits at the top of the ladder, so it wins even when a lower
+        // overlay is also active.
+        let mut app = make_test_app(1);
+        app.gh_conflict_message = Some("boom".to_string());
+        app.create_form.active = true;
+        app.search_mode = true;
+        assert_eq!(app.active_key_context(), KeyContext::GhConflict);
+    }
+
+    #[test]
+    fn active_key_context_show_help_is_transparent() {
+        // Help is an overlay drawn on top of a context; it must not change which
+        // context is reported (matches the skipped show_help short-circuit).
+        let mut app = make_test_app(1);
+        app.show_help = true;
+        assert_eq!(app.active_key_context(), KeyContext::Types);
+
+        app.view_mode = ViewMode::Settings;
+        assert_eq!(app.active_key_context(), KeyContext::Settings);
+
+        app.view_mode = ViewMode::Types;
+        app.search_mode = true;
+        assert_eq!(app.active_key_context(), KeyContext::Search);
+    }
+
+    #[test]
+    fn active_key_context_settings_substate_precedence() {
+        // Each settings sub-state in isolation.
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Settings;
+        app.settings_quit_prompt.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::SettingsQuitPrompt);
+
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Settings;
+        app.settings_editing = true;
+        assert_eq!(app.active_key_context(), KeyContext::SettingsEditing);
+
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Settings;
+        app.settings_zone_editor = Some(dummy_zone_editor());
+        assert_eq!(app.active_key_context(), KeyContext::SettingsZoneEditor);
+
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Settings;
+        app.settings_variant_picker = Some(dummy_variant_picker());
+        assert_eq!(app.active_key_context(), KeyContext::SettingsVariantPicker);
+
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Settings;
+        app.settings_scaffold_offer = Some(dummy_scaffold_offer());
+        assert_eq!(app.active_key_context(), KeyContext::SettingsScaffoldOffer);
+    }
+
+    #[test]
+    fn active_key_context_settings_substate_higher_precedence_wins() {
+        // quit-prompt outranks editing (keys.rs checks quit_prompt first).
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Settings;
+        app.settings_quit_prompt.active = true;
+        app.settings_editing = true;
+        assert_eq!(app.active_key_context(), KeyContext::SettingsQuitPrompt);
+
+        // editing outranks the zone editor.
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Settings;
+        app.settings_editing = true;
+        app.settings_zone_editor = Some(dummy_zone_editor());
+        assert_eq!(app.active_key_context(), KeyContext::SettingsEditing);
+
+        // zone editor outranks the variant picker.
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Settings;
+        app.settings_zone_editor = Some(dummy_zone_editor());
+        app.settings_variant_picker = Some(dummy_variant_picker());
+        assert_eq!(app.active_key_context(), KeyContext::SettingsZoneEditor);
+
+        // variant picker outranks the scaffold offer.
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Settings;
+        app.settings_variant_picker = Some(dummy_variant_picker());
+        app.settings_scaffold_offer = Some(dummy_scaffold_offer());
+        assert_eq!(app.active_key_context(), KeyContext::SettingsVariantPicker);
+    }
+
+    #[cfg(feature = "agent")]
+    #[test]
+    fn active_key_context_agent_dialog_vs_text_input() {
+        let mut app = make_test_app(1);
+        app.agent_dialog.active = true;
+        assert_eq!(app.active_key_context(), KeyContext::AgentDialog);
+
+        app.agent_dialog.text_input = Some(String::new());
+        assert_eq!(app.active_key_context(), KeyContext::AgentTextInput);
+    }
+
+    #[cfg(feature = "agent")]
+    #[test]
+    fn active_key_context_agents_view_mode() {
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Agents;
+        assert_eq!(app.active_key_context(), KeyContext::Agents);
+    }
+
+    /// Render the help overlay for `app` into a fresh TestBackend and return the
+    /// whole buffer flattened to a single string.
+    fn render_help_to_string(app: &mut App, w: u16, h: u16) -> String {
+        use crate::tui::views::overlays::draw_help_overlay;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| draw_help_overlay(f, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .flat_map(|y| {
+                (0..buffer.area.width)
+                    .map(move |x| (x, y))
+                    .chain(std::iter::once((u16::MAX, y)))
+            })
+            .map(|(x, y)| {
+                if x == u16::MAX {
+                    "\n".to_string()
+                } else {
+                    buffer.cell((x, y)).unwrap().symbol().to_string()
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn help_overlay_renders_only_active_context() {
+        // Default mode is Types: its keybinds (e.g. the `x` wrap toggle and the
+        // help toggle) must show; a Settings-only action (Save) must not.
+        let mut app = make_test_app(1);
+        app.show_help = true;
+        assert_eq!(app.active_key_context(), KeyContext::Types);
+
+        // A tall viewport so all Types groups fit unscrolled and the assertions
+        // test mode-awareness, not scroll position.
+        let content = render_help_to_string(&mut app, 60, 50);
+        assert!(
+            content.contains("Toggle wrap"),
+            "Types help should show the wrap toggle, got:\n{content}"
+        );
+        assert!(
+            content.contains("Toggle help"),
+            "Types help should show the help toggle, got:\n{content}"
+        );
+        assert!(
+            content.contains("Types"),
+            "title should label the Types context, got:\n{content}"
+        );
+        assert!(
+            !content.contains("Save"),
+            "Types help must not show Settings-only Save, got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn help_overlay_is_mode_aware_for_graph() {
+        // Graph mode: its title label appears, and the Types-only `x` wrap toggle
+        // does not.
+        let mut app = make_test_app(1);
+        app.view_mode = ViewMode::Graph;
+        app.show_help = true;
+        assert_eq!(app.active_key_context(), KeyContext::Graph);
+
+        let content = render_help_to_string(&mut app, 60, 30);
+        let graph_label = crate::tui::views::keybinds::context_label(KeyContext::Graph);
+        assert!(
+            content.contains(graph_label),
+            "Graph help title should appear, got:\n{content}"
+        );
+        assert!(
+            !content.contains("Toggle wrap"),
+            "Graph help must not show the Types-only wrap toggle, got:\n{content}"
+        );
+    }
+
+    // ---- T4: `?` opens help in the four non-text contexts ----
+
+    #[test]
+    fn help_opens_in_graph_context() {
+        let mut app = make_test_app(1);
+        let root = PathBuf::from(".");
+        let config = Config::default();
+        app.view_mode = ViewMode::Graph;
+        app.help_scroll = 7;
+
+        app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE, &root, &config);
+
+        assert!(app.show_help);
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    #[test]
+    fn help_opens_in_fullscreen_context() {
+        let mut app = make_test_app(1);
+        let root = PathBuf::from(".");
+        let config = Config::default();
+        app.fullscreen_doc = true;
+        app.help_scroll = 7;
+
+        app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE, &root, &config);
+
+        assert!(app.show_help);
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    #[test]
+    fn help_opens_in_settings_nav_context() {
+        let mut app = make_test_app(1);
+        let root = PathBuf::from(".");
+        let config = Config::default();
+        app.view_mode = ViewMode::Settings;
+        // Plain nav: no sub-state active.
+        app.help_scroll = 7;
+
+        app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE, &root, &config);
+
+        assert!(app.show_help);
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    #[cfg(feature = "agent")]
+    #[test]
+    fn help_opens_in_agents_context() {
+        let mut app = make_test_app(1);
+        let root = PathBuf::from(".");
+        let config = Config::default();
+        app.view_mode = ViewMode::Agents;
+        app.help_scroll = 7;
+
+        app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE, &root, &config);
+
+        assert!(app.show_help);
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    #[test]
+    fn question_mark_does_not_open_help_in_settings_edit() {
+        let mut app = make_test_app(1);
+        let root = PathBuf::from(".");
+        let config = Config::default();
+        app.view_mode = ViewMode::Settings;
+        app.settings_editing = true;
+        app.settings_edit_input.clear();
+
+        app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE, &root, &config);
+
+        assert!(!app.show_help, "edit sub-state must not open help");
+        assert!(
+            app.settings_edit_input.contains('?'),
+            "`?` should be a literal char in the edit buffer, got: {:?}",
+            app.settings_edit_input
+        );
+    }
+
+    // ---- T4: overflow-aware dismiss/scroll while help is open ----
+
+    #[test]
+    fn help_any_key_dismisses_when_content_fits() {
+        let mut app = make_test_app(1);
+        let root = PathBuf::from(".");
+        let config = Config::default();
+        app.show_help = true;
+        app.help_max_scroll = 0;
+
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, &root, &config);
+
+        assert!(!app.show_help, "j must dismiss when content fits");
+    }
+
+    #[test]
+    fn help_scrolls_and_clamps_when_content_overflows() {
+        let mut app = make_test_app(1);
+        let root = PathBuf::from(".");
+        let config = Config::default();
+        app.show_help = true;
+        app.help_max_scroll = 5;
+        app.help_scroll = 0;
+
+        // `j` scrolls down without dismissing.
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, &root, &config);
+        assert!(app.show_help);
+        assert_eq!(app.help_scroll, 1);
+
+        // Four more `j` reach the max.
+        for _ in 0..4 {
+            app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, &root, &config);
+        }
+        assert_eq!(app.help_scroll, 5);
+
+        // A sixth `j` clamps at max.
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, &root, &config);
+        assert_eq!(app.help_scroll, 5);
+
+        // `k` scrolls back up.
+        app.handle_key(KeyCode::Char('k'), KeyModifiers::NONE, &root, &config);
+        assert_eq!(app.help_scroll, 4);
+
+        // Any other key dismisses.
+        app.handle_key(KeyCode::Char('x'), KeyModifiers::NONE, &root, &config);
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn help_render_writes_overflow_for_small_viewport_only() {
+        // A small viewport: the Types help content is taller than the inner
+        // area, so the render must publish a positive max scroll.
+        let mut app = make_test_app(1);
+        app.show_help = true;
+        assert_eq!(app.active_key_context(), KeyContext::Types);
+
+        let _ = render_help_to_string(&mut app, 40, 8);
+        assert!(
+            app.help_max_scroll > 0,
+            "small viewport should overflow, got {}",
+            app.help_max_scroll
+        );
+
+        // A tall viewport: everything fits, so max scroll is 0.
+        let _ = render_help_to_string(&mut app, 40, 60);
+        assert_eq!(app.help_max_scroll, 0);
     }
 }

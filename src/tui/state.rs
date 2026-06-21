@@ -1,13 +1,21 @@
 mod expansion;
 pub mod forms;
 mod graph;
+pub mod settings_guard;
 
 mod app;
 
+/// Per-context App seeding for the keybind-registry parity test (keybinds.rs).
+#[cfg(test)]
+pub(crate) use app::parity_seed;
 pub use app::{
-    resolve_editor, resolve_editor_from, App, AppEvent, CreateResult, DocListNode, FilterField,
-    GraphNode, PreviewTab, SearchEntry, ViewMode,
+    resolve_editor, resolve_editor_from, App, AppEvent, ConfigDep, CreateResult, DocListNode,
+    FilterField, GraphNode, PreviewTab, ScaffoldResult, SearchEntry, ViewMode,
 };
 #[cfg(feature = "agent")]
 pub use forms::AgentDialog;
-pub use forms::{CreateForm, DeleteConfirm, FormField, LinkEditor, ProvenanceEditor, StatusPicker};
+pub use forms::{
+    CreateForm, DeleteConfirm, EditableField, FieldEditor, FieldPath, FormField, LinkEditor,
+    OverrideKeyPrompt, ProvenanceEditor, RelKey, RuleKey, SettingsDeleteConfirm,
+    SettingsDeleteTarget, StatusPicker, TypeKey,
+};

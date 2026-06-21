@@ -42,7 +42,7 @@ fn setup_agents_mode(fixture: &TestFixture, records: Vec<AgentRecord>) -> App {
     app
 }
 
-// 1. Cycle through all modes with backtick, assert Agents appears after Graph
+// 1. Cycle through all modes with backtick, assert Settings then Agents follow Graph
 #[test]
 fn test_agents_view_mode_in_cycle() {
     assert_eq!(ViewMode::Types.next(), ViewMode::Filters);
@@ -53,7 +53,8 @@ fn test_agents_view_mode_in_cycle() {
     }
     #[cfg(not(feature = "metrics"))]
     assert_eq!(ViewMode::Filters.next(), ViewMode::Graph);
-    assert_eq!(ViewMode::Graph.next(), ViewMode::Agents);
+    assert_eq!(ViewMode::Graph.next(), ViewMode::Settings);
+    assert_eq!(ViewMode::Settings.next(), ViewMode::Agents);
     assert_eq!(ViewMode::Agents.next(), ViewMode::Types);
 }
 
