@@ -24,6 +24,7 @@ pub mod prompt;
 pub mod provenance;
 pub mod refs;
 pub mod reservation;
+pub mod skills;
 pub mod store;
 pub mod store_dispatch;
 pub mod symbols;

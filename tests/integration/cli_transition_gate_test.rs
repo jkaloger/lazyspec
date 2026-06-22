@@ -154,6 +154,7 @@ fn config_with_parent_status_gate() -> Config {
         certification: Default::default(),
         coordination: None,
         agents: Default::default(),
+        skills: Default::default(),
     }
 }
 

@@ -33,6 +33,7 @@ pub fn starter_config() -> Config {
         certification: CertificationConfig::default(),
         coordination: None,
         agents: Default::default(),
+        skills: Default::default(),
     }
 }
 

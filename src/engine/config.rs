@@ -376,6 +376,8 @@ pub struct Config {
     pub coordination: Option<CoordinationConfig>,
     #[serde(default)]
     pub agents: AgentsConfig,
+    #[serde(default)]
+    pub skills: SkillsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -449,6 +451,27 @@ pub struct AgentsConfig {
     pub interactive: Option<String>,
 }
 
+pub fn default_skills_entry() -> String {
+    "lazy".to_string()
+}
+
+/// The global `[skills]` block. `entry` names the router skill that `skills
+/// install` renames the embedded router directory to. Zero-defaults (ADR-015):
+/// absent -> `entry = "lazy"`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SkillsConfig {
+    #[serde(default = "default_skills_entry")]
+    pub entry: String,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        SkillsConfig {
+            entry: default_skills_entry(),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct RawConfig {
     types: Option<Vec<TypeDef>>,
@@ -467,6 +490,8 @@ struct RawConfig {
     coordination: Option<CoordinationConfig>,
     #[serde(default)]
     agents: Option<AgentsConfig>,
+    #[serde(default)]
+    skills: Option<SkillsConfig>,
 }
 
 /// The canonical starter document types. The engine carries no built-in types in
@@ -590,6 +615,7 @@ impl Default for Config {
             certification: CertificationConfig::default(),
             coordination: None,
             agents: AgentsConfig::default(),
+            skills: SkillsConfig::default(),
         }
     }
 }
@@ -721,6 +747,7 @@ impl Config {
             certification: raw.certification.unwrap_or_default(),
             coordination: raw.coordination,
             agents: raw.agents.unwrap_or_default(),
+            skills: raw.skills.unwrap_or_default(),
         })
     }
 
@@ -1331,6 +1358,19 @@ prefix = "RFC"
         let config = Config::parse(TYPES).unwrap();
         assert!(config.relationship_by_name("implements").is_some());
         assert!(config.relationship_by_name("related-to").is_some());
+    }
+
+    #[test]
+    fn parse_skills_entry_round_trips() {
+        let src = format!("{TYPES}\n[skills]\nentry = \"go\"\n");
+        let config = Config::parse(&src).unwrap();
+        assert_eq!(config.skills.entry, "go");
+    }
+
+    #[test]
+    fn parse_without_skills_section_defaults_to_lazy() {
+        let config = Config::parse(TYPES).unwrap();
+        assert_eq!(config.skills.entry, "lazy");
     }
 
     // AC1: a [[types]] entry with no `agents` key loads and resolves to an empty

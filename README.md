@@ -78,18 +78,37 @@ Add the appropriate line to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.) t
 
 ## Skills
 
-Lazyspec includes a set of agent skills that enforce its workflow:
+Lazyspec ships a set of config-driven generic verb skills that enforce its
+workflow against whatever document types your `.lazyspec.toml` defines. The
+`lazy` router is the entry point: it reads the configured lifecycle DAG and the
+user's position, then dispatches the right verb.
 
-| Skill              | Purpose                                                                |
-| ------------------ | ---------------------------------------------------------------------- |
-| `plan-work`        | Detect existing artifacts and determine the right entry point          |
-| `write-rfc`        | Propose a design with intent, interface sketches, and identify stories |
-| `create-story`     | Create stories with acceptance criteria linked to an RFC               |
-| `resolve-context`  | Gather full document chain (RFC -> Story -> Iteration) before work     |
-| `create-iteration` | Plan an iteration with task breakdown and test plan                    |
-| `build`            | Implement tasks from an iteration with subagent dispatch               |
-| `review-iteration` | Two-stage review -- AC compliance first, then code quality             |
-| `create-audit`     | Criteria-based review (health check, security, accessibility, etc.)    |
+| Skill      | Purpose                                                                            |
+| ---------- | ---------------------------------------------------------------------------------- |
+| `lazy`     | Entry-point router -- reads the DAG and position, dispatches the right verb        |
+| `scaffold` | Create a new document's file and frontmatter, hand the body back to the human      |
+| `co-write` | Collaboratively draft a document body -- AI proposes, human edits, iterate         |
+| `generate` | Author a full document body from context (only when the type's ceiling allows it)  |
+| `advance`  | Move a document to its next status along the type's lifecycle DAG, checking gates  |
+| `execute`  | Carry out the work a delivery document describes against its tasks and ACs         |
+| `review`   | Critique a document against its intent and acceptance criteria before advancing    |
+
+### Installing skills
+
+`skills install` places the embedded skill set into the project. It works with
+or without a `.lazyspec.toml` (and never creates one):
+
+```sh
+lazyspec skills install                  # both runtimes (default)
+lazyspec skills install --runtime claude     # .claude/skills/ only
+lazyspec skills install --runtime agents-md  # ./AGENTS.md only
+```
+
+For Claude, each skill is written under `.claude/skills/<verb>/SKILL.md`; the
+router is installed under the configured `[skills] entry` name (default `lazy`).
+For other agents, the same prose is concatenated into `./AGENTS.md`. Re-running
+is idempotent. Configure the router name via `[skills] entry` in
+`.lazyspec.toml`.
 
 ## Usage
 

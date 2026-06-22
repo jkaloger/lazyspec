@@ -434,6 +434,7 @@ mod tests {
                 max_clock_skew: "5m".to_string(),
             }),
             agents: Default::default(),
+            skills: Default::default(),
         }
     }
 

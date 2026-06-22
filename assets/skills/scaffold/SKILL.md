@@ -1,0 +1,57 @@
+---
+name: scaffold
+description: Use when creating a new document of a configured type at the most manual authorship level -- AI creates the file and frontmatter, surfaces intent and section guidance, then hands the body back to the human.
+---
+
+```
+CREATE THE SHELL, HAND THE BODY BACK
+```
+
+Scaffold is the floor of the authorship order: AI makes the file and links it, then the human writes the body.
+
+<HARD-GATE>
+Do NOT write the document body. Scaffold creates the file, frontmatter, and links, then surfaces the type's intent and section guidance for the human to fill in.
+Read the target type's config from `lazyspec config --json` before creating anything; the type is a parameter, never assumed.
+</HARD-GATE>
+
+<NEVER>
+- Do NOT write document files directly. Use `lazyspec create` and `lazyspec link`.
+- Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
+- Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
+</NEVER>
+
+<GITHUB-ISSUES-DOCUMENTS>
+Documents stored in GitHub Issues (store = "github-issues") are managed through the GitHub API. The `.lazyspec/cache/` directory contains read-only mirrors.
+- Never edit files under `.lazyspec/cache/`. Use `lazyspec update <ID> --body` to modify content.
+- Always use shorthand IDs (e.g. STORY-095) not cache file paths when referencing documents in `lazyspec link`, `lazyspec update`, `lazyspec show`, etc.
+- To set body content at creation: `lazyspec create <type> <title> --body "content"` or `--body-file <path>`.
+- To modify after creation: `lazyspec update <ID> --body "new content"` or `--body-file <path>`.
+</GITHUB-ISSUES-DOCUMENTS>
+
+Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. On failure, check `--help` before retrying.
+
+## Authorship Ceiling
+
+The authorship order is `scaffold < co-write < generate`. A type's `authorship` value in config (`human`, `assisted`, `generated`) is the *ceiling* -- the highest verb permitted for that type.
+
+Scaffold is the floor of that order, so it is permitted on **every** `authorship` value. **Scaffold never refuses on ceiling grounds.** Even a type whose ceiling is `human` can be scaffolded; that is exactly the manual case scaffold exists for.
+
+## Preflight
+
+1. `lazyspec config --json` -- read the target `<type>` entry: its `intent` (what the doc is for), its `authorship` ceiling (for confirmation only -- scaffold proceeds regardless), its `parent_type`, and the section guidance available from its template.
+2. `lazyspec status --json` -- see what already exists and locate the parent document to link to.
+3. `lazyspec context --json` -- understand the chain around the user's current position so the new document lands in the right place.
+
+## Workflow
+
+1. **Create the shell:** `lazyspec create <type> "<title>" --author <name>`, where `<type>` is the parameter read from config (e.g. in the shipped default config a type named `rfc`, but never assume that name -- read it).
+2. **Link to the parent:** if config gives the type a `parent_type` and a parent exists, `lazyspec link <new-id> implements <parent-id>` -- using the configured relation name from `relationships` (the default config uses `implements`; read it, don't bake it).
+3. **Surface intent + guidance:** show the human the type's `intent` from config and the per-section `<!-- guidance -->` comments from the scaffolded body. Tell the human these are the sections to fill in.
+4. **Hand back:** stop. The human writes the body. Scaffold does not draft prose.
+
+## Rules
+
+- The `<type>` is always a parameter read from `config --json`. No type name is load-bearing in this prose.
+- Scaffold never refuses on ceiling grounds -- it is the floor of `scaffold < co-write < generate`.
+- Create and link only; never write the body.
+- Read parent/relation/gate facts from config, never from `.lazyspec/` graph files directly.

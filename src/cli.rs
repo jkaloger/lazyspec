@@ -19,6 +19,7 @@ pub mod resolve;
 pub mod search;
 pub mod setup;
 pub mod show;
+pub mod skills;
 pub mod status;
 pub mod style;
 pub mod update;
@@ -27,6 +28,7 @@ pub mod validate;
 use crate::cli::config::ConfigCommand;
 use crate::cli::provenance::ProvenanceCommand;
 use crate::cli::reservations::ReservationsCommand;
+use crate::cli::skills::SkillsCommand;
 use clap::{Parser, Subcommand, ValueEnum};
 
 pub fn resolve_body(
@@ -287,6 +289,11 @@ pub enum Commands {
     Provenance {
         #[command(subcommand)]
         command: ProvenanceCommand,
+    },
+    /// Install and manage agent skills
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommand,
     },
     /// Inspect and edit .lazyspec.toml
     Config {

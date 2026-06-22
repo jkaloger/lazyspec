@@ -1705,6 +1705,7 @@ mod tests {
             certification: Default::default(),
             coordination: None,
             agents: Default::default(),
+            skills: Default::default(),
         };
 
         let store = Store::load(&root, &config).unwrap();

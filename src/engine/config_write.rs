@@ -2,8 +2,8 @@ use anyhow::Result;
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::engine::config::{
-    default_normalize, Authorship, Config, Edge, Lifecycle, NumberingStrategy, RelationshipDef,
-    ReservedFormat, Severity, TypeDef, ValidationRule,
+    default_normalize, default_skills_entry, Authorship, Config, Edge, Lifecycle,
+    NumberingStrategy, RelationshipDef, ReservedFormat, Severity, TypeDef, ValidationRule,
 };
 
 pub fn write_config_in_place(existing_src: &str, buffer: &Config) -> Result<String> {
@@ -20,6 +20,7 @@ pub fn write_config_in_place(existing_src: &str, buffer: &Config) -> Result<Stri
     write_coordination(&mut doc, buffer);
     write_certification(&mut doc, buffer);
     write_agents(&mut doc, buffer);
+    write_skills(&mut doc, buffer);
     write_rules(&mut doc, buffer);
 
     Ok(doc.to_string())
@@ -385,6 +386,24 @@ fn write_agents(doc: &mut DocumentMut, buffer: &Config) {
         return;
     };
     set_opt_str(agents, "interactive", buffer.agents.interactive.as_deref());
+}
+
+fn write_skills(doc: &mut DocumentMut, buffer: &Config) {
+    if !doc.contains_key("skills") {
+        if buffer.skills.entry == default_skills_entry() {
+            return;
+        }
+        doc.insert("skills", Item::Table(Table::new()));
+    }
+    let Some(skills) = doc.get_mut("skills").and_then(Item::as_table_like_mut) else {
+        return;
+    };
+    set_str_defaulted(
+        skills,
+        "entry",
+        &buffer.skills.entry,
+        &default_skills_entry(),
+    );
 }
 
 fn write_rules(doc: &mut DocumentMut, buffer: &Config) {
