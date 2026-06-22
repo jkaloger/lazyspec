@@ -1,3 +1,4 @@
+use crate::engine::document::Status;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -130,6 +131,29 @@ impl fmt::Display for StoreBackend {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Authorship {
+    Human,
+    #[default]
+    Assisted,
+    Generated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Edge {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct Lifecycle {
+    #[serde(default)]
+    pub states: Vec<String>,
+    #[serde(default)]
+    pub edges: Vec<Edge>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TypeDef {
     pub name: String,
@@ -149,6 +173,12 @@ pub struct TypeDef {
     pub parent_type: Option<String>,
     #[serde(default)]
     pub agents: Vec<String>,
+    #[serde(default)]
+    pub intent: Option<String>,
+    #[serde(default)]
+    pub authorship: Authorship,
+    #[serde(default)]
+    pub lifecycle: Lifecycle,
 }
 
 /// One entry in the `[[relationships]]` block: a relationship name and its
@@ -180,6 +210,48 @@ pub fn starter_relationships() -> Vec<RelationshipDef> {
             inverse: None,
         },
     ]
+}
+
+pub(crate) fn default_lifecycle() -> Lifecycle {
+    let edge = |from: &str, to: &str| Edge {
+        from: from.into(),
+        to: to.into(),
+    };
+    Lifecycle {
+        states: [
+            "draft",
+            "review",
+            "accepted",
+            "in-progress",
+            "complete",
+            "rejected",
+            "superseded",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
+        edges: vec![
+            edge("draft", "review"),
+            edge("review", "accepted"),
+            edge("review", "rejected"),
+            edge("accepted", "in-progress"),
+            edge("in-progress", "complete"),
+            edge("*", "superseded"),
+        ],
+    }
+}
+
+/// True iff `status` names one of `type_def`'s declared lifecycle states.
+pub fn validate_status(type_def: &TypeDef, status: &Status) -> Result<()> {
+    if type_def.accepts_status(status) {
+        return Ok(());
+    }
+    bail!(
+        "status \"{}\" is not a valid state for type \"{}\" (allowed: {})",
+        status,
+        type_def.name,
+        type_def.lifecycle.states.join(", ")
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -390,6 +462,9 @@ pub fn starter_types() -> Vec<TypeDef> {
         singleton: false,
         parent_type: None,
         agents: Vec::new(),
+        intent: None,
+        authorship: Authorship::default(),
+        lifecycle: default_lifecycle(),
     };
     vec![
         simple("rfc", "rfcs", "docs/rfcs", "RFC", "●"),
@@ -415,6 +490,9 @@ pub fn starter_types() -> Vec<TypeDef> {
             singleton: true,
             parent_type: None,
             agents: Vec::new(),
+            intent: None,
+            authorship: Authorship::default(),
+            lifecycle: default_lifecycle(),
         },
         TypeDef {
             name: "dictum".to_string(),
@@ -428,6 +506,9 @@ pub fn starter_types() -> Vec<TypeDef> {
             singleton: false,
             parent_type: Some("convention".to_string()),
             agents: Vec::new(),
+            intent: None,
+            authorship: Authorship::default(),
+            lifecycle: default_lifecycle(),
         },
     ]
 }
@@ -709,6 +790,11 @@ impl TypeDef {
     pub fn make_id(&self, suffix: impl std::fmt::Display) -> String {
         format!("{}-{}", self.prefix, suffix)
     }
+
+    /// True iff `status` names one of this type's declared lifecycle states.
+    pub fn accepts_status(&self, status: &Status) -> bool {
+        self.lifecycle.states.iter().any(|s| s == status.as_str())
+    }
 }
 
 #[cfg(test)]
@@ -726,6 +812,9 @@ impl TypeDef {
             singleton: false,
             parent_type: None,
             agents: Vec::new(),
+            intent: None,
+            authorship: Authorship::default(),
+            lifecycle: Lifecycle::default(),
         }
     }
 }

@@ -319,7 +319,7 @@ mod tests {
         let cells = panels::doc_row_cells_for_test(
             "RFC-001",
             "Test Title",
-            &Status::Draft,
+            &Status::new("draft"),
             &tags,
             &[],
             false,
@@ -375,7 +375,7 @@ mod tests {
         let cells = panels::doc_row_cells_for_test(
             "RFC-002",
             "Virtual Doc",
-            &Status::Draft,
+            &Status::new("draft"),
             &[],
             &[],
             true,
@@ -406,7 +406,7 @@ mod tests {
         let cells = panels::doc_row_cells_for_test(
             "RFC-003",
             "Tags",
-            &Status::Draft,
+            &Status::new("draft"),
             &tags,
             &[],
             false,
@@ -441,7 +441,7 @@ mod tests {
         let cells = panels::doc_row_cells_gh_for_test(
             "ISSUE-001",
             "GH Doc",
-            &Status::Draft,
+            &Status::new("draft"),
             &[],
             &[],
             false,
@@ -468,7 +468,7 @@ mod tests {
         let cells = panels::doc_row_cells_gh_for_test(
             "RFC-005",
             "FS Doc",
-            &Status::Draft,
+            &Status::new("draft"),
             &[],
             &[],
             false,
@@ -489,7 +489,7 @@ mod tests {
         let cells = panels::doc_row_cells_gh_for_test(
             "ISSUE-002",
             "Dim GH",
-            &Status::Draft,
+            &Status::new("draft"),
             &[],
             &[],
             false,
@@ -517,7 +517,7 @@ mod tests {
         let cells = panels::doc_row_cells_for_test(
             "RFC-004",
             "Dim",
-            &Status::Accepted,
+            &Status::new("accepted"),
             &tags,
             &[],
             false,

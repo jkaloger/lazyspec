@@ -505,13 +505,13 @@ pub fn draw_status_picker(f: &mut Frame, app: &App) {
     f.render_widget(Clear, popup_area);
 
     let statuses = [
-        Status::Draft,
-        Status::Review,
-        Status::Accepted,
-        Status::InProgress,
-        Status::Complete,
-        Status::Rejected,
-        Status::Superseded,
+        Status::new("draft"),
+        Status::new("review"),
+        Status::new("accepted"),
+        Status::new("in-progress"),
+        Status::new("complete"),
+        Status::new("rejected"),
+        Status::new("superseded"),
     ];
 
     let mut lines: Vec<Line> = statuses

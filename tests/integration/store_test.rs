@@ -70,7 +70,7 @@ fn store_filters_by_status() {
     let store = fixture.store();
 
     let filter = Filter {
-        status: Some(Status::Draft),
+        status: Some(Status::new("draft")),
         ..Default::default()
     };
     let results = store.list(&filter);
@@ -489,7 +489,7 @@ fn store_synthesises_virtual_parent() {
         .find(|d| d.virtual_doc)
         .unwrap();
     assert_eq!(virtual_parent.title, "Virtual");
-    assert_eq!(virtual_parent.status, Status::Draft);
+    assert_eq!(virtual_parent.status, Status::new("draft"));
 }
 
 #[test]
@@ -512,7 +512,7 @@ fn store_virtual_parent_accepted_when_all_children_accepted() {
         .into_iter()
         .find(|d| d.virtual_doc)
         .unwrap();
-    assert_eq!(virtual_parent.status, Status::Accepted);
+    assert_eq!(virtual_parent.status, Status::new("accepted"));
 }
 
 #[test]

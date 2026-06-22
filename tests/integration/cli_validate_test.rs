@@ -295,6 +295,9 @@ fn singleton_type(name: &str, dir: &str, prefix: &str) -> TypeDef {
         singleton: true,
         parent_type: None,
         agents: Vec::new(),
+        intent: None,
+        authorship: Default::default(),
+        lifecycle: Default::default(),
     }
 }
 
@@ -311,6 +314,9 @@ fn child_type(name: &str, dir: &str, prefix: &str, parent: &str) -> TypeDef {
         singleton: false,
         parent_type: Some(parent.to_string()),
         agents: Vec::new(),
+        intent: None,
+        authorship: Default::default(),
+        lifecycle: Default::default(),
     }
 }
 
@@ -464,6 +470,9 @@ fn parent_type_references_non_singleton_error() {
         singleton: false,
         parent_type: None,
         agents: Vec::new(),
+        intent: None,
+        authorship: Default::default(),
+        lifecycle: Default::default(),
     };
     let config = config_with_extra_types(vec![
         non_singleton_parent,

@@ -336,7 +336,7 @@ impl Checker for BrokenLinkRule {
                     continue;
                 };
 
-                if parent_doc.status == Status::Rejected {
+                if parent_doc.status == Status::new("rejected") {
                     issues.push((
                         Severity::Error,
                         ValidationIssue::RejectedParent {
@@ -344,7 +344,8 @@ impl Checker for BrokenLinkRule {
                             parent: target.clone(),
                         },
                     ));
-                } else if parent_doc.status == Status::Superseded && meta.status == Status::Accepted
+                } else if parent_doc.status == Status::new("superseded")
+                    && meta.status == Status::new("accepted")
                 {
                     issues.push((
                         Severity::Warning,
@@ -361,8 +362,8 @@ impl Checker for BrokenLinkRule {
                         && rel.rel_type.to_string() == *link
                 });
                 if is_child_in_hierarchy
-                    && meta.status == Status::Accepted
-                    && parent_doc.status != Status::Accepted
+                    && meta.status == Status::new("accepted")
+                    && parent_doc.status != Status::new("accepted")
                 {
                     issues.push((
                         Severity::Warning,
@@ -504,7 +505,7 @@ impl Checker for StatusConsistencyRule {
                 }
 
                 let parent_is_draft_or_review =
-                    meta.status == Status::Draft || meta.status == Status::Review;
+                    meta.status == Status::new("draft") || meta.status == Status::new("review");
 
                 if !parent_is_draft_or_review {
                     continue;
@@ -514,7 +515,7 @@ impl Checker for StatusConsistencyRule {
                     store
                         .docs
                         .get(cp)
-                        .map(|d| d.status == Status::Accepted)
+                        .map(|d| d.status == Status::new("accepted"))
                         .unwrap_or(false)
                 });
 
@@ -533,7 +534,7 @@ impl Checker for StatusConsistencyRule {
                     let Some(child) = store.docs.get(child_path) else {
                         continue;
                     };
-                    if child.status == Status::Accepted
+                    if child.status == Status::new("accepted")
                         && child.doc_type == DocType::new(child_type)
                     {
                         issues.push((

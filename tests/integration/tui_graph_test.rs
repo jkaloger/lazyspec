@@ -400,6 +400,9 @@ fn custom_types_populate_doc_types_and_icons() {
             singleton: false,
             parent_type: None,
             agents: Vec::new(),
+            intent: None,
+            authorship: Default::default(),
+            lifecycle: Default::default(),
         },
         TypeDef {
             name: "task".into(),
@@ -413,6 +416,9 @@ fn custom_types_populate_doc_types_and_icons() {
             singleton: false,
             parent_type: None,
             agents: Vec::new(),
+            intent: None,
+            authorship: Default::default(),
+            lifecycle: Default::default(),
         },
     ];
     let store = Store::load(fixture.root(), &config).unwrap();

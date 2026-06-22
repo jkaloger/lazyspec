@@ -120,7 +120,7 @@ fn test_confirm_status_change_updates_frontmatter() {
         .store
         .get(std::path::Path::new("docs/rfcs/RFC-001-test.md"))
         .expect("doc should still exist in store");
-    assert_eq!(doc.status, Status::Accepted);
+    assert_eq!(doc.status, Status::new("accepted"));
 
     // Picker should be closed
     assert!(!app.status_picker.active);

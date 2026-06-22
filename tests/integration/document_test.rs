@@ -23,7 +23,7 @@ Some body content here.
 
     assert_eq!(meta.title, "Adopt Event Sourcing");
     assert_eq!(meta.doc_type, DocType::new("adr"));
-    assert_eq!(meta.status, Status::Draft);
+    assert_eq!(meta.status, Status::new("draft"));
     assert_eq!(meta.author, "jkaloger");
     assert_eq!(meta.date, NaiveDate::from_ymd_opt(2026, 3, 4).unwrap());
     assert_eq!(meta.tags, vec!["architecture", "events"]);

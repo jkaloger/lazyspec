@@ -372,6 +372,9 @@ mod tests {
                         singleton: false,
                         parent_type: None,
                         agents: Vec::new(),
+                        intent: None,
+                        authorship: Default::default(),
+                        lifecycle: Default::default(),
                     },
                     TypeDef {
                         name: "story".to_string(),
@@ -385,6 +388,9 @@ mod tests {
                         singleton: false,
                         parent_type: None,
                         agents: Vec::new(),
+                        intent: None,
+                        authorship: Default::default(),
+                        lifecycle: Default::default(),
                     },
                     TypeDef {
                         name: "bug".to_string(),
@@ -398,6 +404,9 @@ mod tests {
                         singleton: false,
                         parent_type: None,
                         agents: Vec::new(),
+                        intent: None,
+                        authorship: Default::default(),
+                        lifecycle: Default::default(),
                     },
                 ],
                 naming: Naming {

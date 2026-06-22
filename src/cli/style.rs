@@ -6,14 +6,15 @@ use crate::engine::document::{DocType, Status};
 
 pub fn status_style(status: &Status) -> Style {
     let style = Style::new();
-    match status {
-        Status::Accepted => style.green(),
-        Status::Draft => style.yellow(),
-        Status::Review => style.blue(),
-        Status::InProgress => style.cyan(),
-        Status::Complete => style.green(),
-        Status::Rejected => style.red(),
-        Status::Superseded => style.color256(8),
+    match status.as_str() {
+        "accepted" => style.green(),
+        "draft" => style.yellow(),
+        "review" => style.blue(),
+        "in-progress" => style.cyan(),
+        "complete" => style.green(),
+        "rejected" => style.red(),
+        "superseded" => style.color256(8),
+        _ => style,
     }
 }
 

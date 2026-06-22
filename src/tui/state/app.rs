@@ -1810,15 +1810,15 @@ impl App {
     pub fn cycle_filter_value_next(&mut self) {
         match self.filter_focused {
             FilterField::Status => {
-                self.filter_status = match &self.filter_status {
-                    None => Some(Status::Draft),
-                    Some(Status::Draft) => Some(Status::Review),
-                    Some(Status::Review) => Some(Status::Accepted),
-                    Some(Status::Accepted) => Some(Status::InProgress),
-                    Some(Status::InProgress) => Some(Status::Complete),
-                    Some(Status::Complete) => Some(Status::Rejected),
-                    Some(Status::Rejected) => Some(Status::Superseded),
-                    Some(Status::Superseded) => None,
+                self.filter_status = match self.filter_status.as_ref().map(Status::as_str) {
+                    None => Some(Status::new("draft")),
+                    Some("draft") => Some(Status::new("review")),
+                    Some("review") => Some(Status::new("accepted")),
+                    Some("accepted") => Some(Status::new("in-progress")),
+                    Some("in-progress") => Some(Status::new("complete")),
+                    Some("complete") => Some(Status::new("rejected")),
+                    Some("rejected") => Some(Status::new("superseded")),
+                    _ => None,
                 };
             }
             FilterField::Tag => {
@@ -1843,15 +1843,15 @@ impl App {
     pub fn cycle_filter_value_prev(&mut self) {
         match self.filter_focused {
             FilterField::Status => {
-                self.filter_status = match &self.filter_status {
-                    None => Some(Status::Superseded),
-                    Some(Status::Superseded) => Some(Status::Rejected),
-                    Some(Status::Rejected) => Some(Status::Complete),
-                    Some(Status::Complete) => Some(Status::InProgress),
-                    Some(Status::InProgress) => Some(Status::Accepted),
-                    Some(Status::Accepted) => Some(Status::Review),
-                    Some(Status::Review) => Some(Status::Draft),
-                    Some(Status::Draft) => None,
+                self.filter_status = match self.filter_status.as_ref().map(Status::as_str) {
+                    None => Some(Status::new("superseded")),
+                    Some("superseded") => Some(Status::new("rejected")),
+                    Some("rejected") => Some(Status::new("complete")),
+                    Some("complete") => Some(Status::new("in-progress")),
+                    Some("in-progress") => Some(Status::new("accepted")),
+                    Some("accepted") => Some(Status::new("review")),
+                    Some("review") => Some(Status::new("draft")),
+                    _ => None,
                 };
             }
             FilterField::Tag => {
@@ -2430,6 +2430,9 @@ impl App {
                     singleton: false,
                     parent_type: None,
                     agents: Vec::new(),
+                    intent: None,
+                    authorship: Default::default(),
+                    lifecycle: crate::engine::config::default_lifecycle(),
                 });
                 self.settings_entry = self.settings_buffer.documents.types.len() - 1;
             }
@@ -2634,14 +2637,15 @@ impl App {
             }
         };
 
-        let index = match &doc.status {
-            Status::Draft => 0,
-            Status::Review => 1,
-            Status::Accepted => 2,
-            Status::InProgress => 3,
-            Status::Complete => 4,
-            Status::Rejected => 5,
-            Status::Superseded => 6,
+        let index = match doc.status.as_str() {
+            "draft" => 0,
+            "review" => 1,
+            "accepted" => 2,
+            "in-progress" => 3,
+            "complete" => 4,
+            "rejected" => 5,
+            "superseded" => 6,
+            _ => 0,
         };
         let path = doc.path.clone();
 
@@ -2658,13 +2662,13 @@ impl App {
 
     pub fn confirm_status_change(&mut self, root: &Path, config: &Config) -> Result<()> {
         let status = match self.status_picker.selected {
-            0 => Status::Draft,
-            1 => Status::Review,
-            2 => Status::Accepted,
-            3 => Status::InProgress,
-            4 => Status::Complete,
-            5 => Status::Rejected,
-            6 => Status::Superseded,
+            0 => Status::new("draft"),
+            1 => Status::new("review"),
+            2 => Status::new("accepted"),
+            3 => Status::new("in-progress"),
+            4 => Status::new("complete"),
+            5 => Status::new("rejected"),
+            6 => Status::new("superseded"),
             _ => return Err(anyhow!("invalid status index")),
         };
         let doc_path = self.status_picker.doc_path.clone();
@@ -3536,7 +3540,7 @@ mod tests {
             id: format!("RFC-{:03}", index),
             title: format!("Doc {}", index),
             doc_type: DocType::new("rfc"),
-            status: Status::Draft,
+            status: Status::new("draft"),
             depth: 0,
             is_parent: false,
             is_virtual: false,
@@ -3881,7 +3885,7 @@ mod tests {
             path: PathBuf::from("docs/rfcs/RFC-001.md"),
             title: "First".to_string(),
             doc_type: DocType::new("rfc"),
-            status: Status::Draft,
+            status: Status::new("draft"),
             author: "test".to_string(),
             date: Utc::now().date_naive(),
             tags: vec![],
@@ -3895,7 +3899,7 @@ mod tests {
             path: PathBuf::from("docs/rfcs/RFC-001-dup.md"),
             title: "Duplicate".to_string(),
             doc_type: DocType::new("rfc"),
-            status: Status::Draft,
+            status: Status::new("draft"),
             author: "test".to_string(),
             date: Utc::now().date_naive(),
             tags: vec![],
@@ -4027,13 +4031,13 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
 
         let statuses = [
-            (Status::Draft, 0),
-            (Status::Review, 1),
-            (Status::Accepted, 2),
-            (Status::InProgress, 3),
-            (Status::Complete, 4),
-            (Status::Rejected, 5),
-            (Status::Superseded, 6),
+            (Status::new("draft"), 0),
+            (Status::new("review"), 1),
+            (Status::new("accepted"), 2),
+            (Status::new("in-progress"), 3),
+            (Status::new("complete"), 4),
+            (Status::new("rejected"), 5),
+            (Status::new("superseded"), 6),
         ];
 
         for (status, expected_index) in &statuses {

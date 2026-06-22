@@ -801,6 +801,9 @@ severity = "error"
                 singleton: false,
                 parent_type: None,
                 agents: Vec::new(),
+                intent: None,
+                authorship: Default::default(),
+                lifecycle: Default::default(),
             });
             c
         };
@@ -884,6 +887,9 @@ name = "related-to"
                 singleton: false,
                 parent_type: None,
                 agents: Vec::new(),
+                intent: None,
+                authorship: Default::default(),
+                lifecycle: Default::default(),
             });
             c.rules.clear();
             c

@@ -230,7 +230,7 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
             path: PathBuf::new(),
             title: title.to_string(),
             doc_type: DocType::new(&type_def.name),
-            status: Status::Draft,
+            status: Status::new("draft"),
             author: author.to_string(),
             date,
             tags: vec![],
@@ -328,8 +328,8 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
 
         if let Some(status) = new_status {
             let should_be_open = matches!(
-                status,
-                Status::Draft | Status::Review | Status::Accepted | Status::InProgress
+                status.as_str(),
+                "draft" | "review" | "accepted" | "in-progress"
             );
             let is_open = remote_issue.state == "OPEN";
             if should_be_open && !is_open {
@@ -522,6 +522,9 @@ mod tests {
             singleton: false,
             parent_type: None,
             agents: Vec::new(),
+            intent: None,
+            authorship: Default::default(),
+            lifecycle: Default::default(),
         }
     }
 
@@ -730,6 +733,9 @@ mod tests {
             singleton: false,
             parent_type: None,
             agents: Vec::new(),
+            intent: None,
+            authorship: Default::default(),
+            lifecycle: Default::default(),
         };
 
         let result = gh_store.create(&td, "test prefix", "author", "").unwrap();
@@ -1429,7 +1435,7 @@ mod tests {
             path: PathBuf::new(),
             title: "Title with \"quotes\" and: colons".to_string(),
             doc_type: DocType::new("rfc"),
-            status: Status::Draft,
+            status: Status::new("draft"),
             author: "O'Brien".to_string(),
             date: NaiveDate::from_ymd_opt(2026, 3, 28).unwrap(),
             tags: vec!["tag:with:colons".to_string(), "tag \"quoted\"".to_string()],
@@ -1664,7 +1670,7 @@ mod tests {
             path: PathBuf::new(),
             title: "Title".to_string(),
             doc_type: DocType::new("rfc"),
-            status: Status::Draft,
+            status: Status::new("draft"),
             author: "alice".to_string(),
             date: NaiveDate::from_ymd_opt(2026, 3, 28).unwrap(),
             tags: vec![],

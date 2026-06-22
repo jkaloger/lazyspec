@@ -1,6 +1,8 @@
 use lazyspec::engine::config::{
-    Config, NumberingStrategy, ReservedFormat, Severity, ValidationRule,
+    validate_status, Authorship, Config, NumberingStrategy, ReservedFormat, Severity, TypeDef,
+    ValidationRule,
 };
+use lazyspec::engine::document::Status;
 use lazyspec::engine::fs::RealFileSystem;
 use tempfile::TempDir;
 
@@ -759,4 +761,134 @@ prefix = "STORY"
         msg.contains("plural"),
         "error should name the missing plural field, got: {msg}"
     );
+}
+
+// AC1: intent / authorship / lifecycle all parse together and are readable,
+// including a `*` edge source carried verbatim.
+#[test]
+fn type_with_all_three_axes_parses() {
+    let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+intent = "why this type exists"
+authorship = "human"
+
+[types.lifecycle]
+states = ["draft", "review", "superseded"]
+
+[[types.lifecycle.edges]]
+from = "draft"
+to = "review"
+
+[[types.lifecycle.edges]]
+from = "*"
+to = "superseded"
+"#;
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+    let rfc = config.type_by_name("rfc").unwrap();
+    assert_eq!(rfc.intent.as_deref(), Some("why this type exists"));
+    assert_eq!(rfc.authorship, Authorship::Human);
+    assert_eq!(rfc.lifecycle.states, vec!["draft", "review", "superseded"]);
+    assert_eq!(rfc.lifecycle.edges.len(), 2);
+    assert_eq!(rfc.lifecycle.edges[0].from, "draft");
+    assert_eq!(rfc.lifecycle.edges[0].to, "review");
+    assert_eq!(rfc.lifecycle.edges[1].from, "*");
+    assert_eq!(rfc.lifecycle.edges[1].to, "superseded");
+}
+
+// AC1: the starter default lifecycle survives a to_toml -> parse round-trip.
+#[test]
+fn to_toml_round_trips_lifecycle() {
+    let config = Config::default();
+    let toml = config.to_toml().unwrap();
+    let reparsed = Config::parse(&toml).unwrap();
+
+    let original = config.type_by_name("rfc").unwrap();
+    let round_tripped = reparsed.type_by_name("rfc").unwrap();
+    assert_eq!(round_tripped.lifecycle.states, original.lifecycle.states);
+    assert_eq!(round_tripped.lifecycle.edges, original.lifecycle.edges);
+}
+
+// AC2: an absent `authorship` key resolves to Assisted.
+#[test]
+fn authorship_defaults_to_assisted_when_absent() {
+    let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+"#;
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+    let rfc = config.type_by_name("rfc").unwrap();
+    assert_eq!(rfc.authorship, Authorship::Assisted);
+}
+
+// AC2: each authorship variant parses via rename_all = "lowercase".
+#[test]
+fn authorship_parses_each_variant() {
+    for (literal, expected) in [
+        ("human", Authorship::Human),
+        ("assisted", Authorship::Assisted),
+        ("generated", Authorship::Generated),
+    ] {
+        let toml_str = format!(
+            r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+authorship = "{literal}"
+"#
+        );
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+        assert_eq!(config.type_by_name("rfc").unwrap().authorship, expected);
+    }
+}
+
+fn type_def_with_states(states: &[&str]) -> TypeDef {
+    let toml_str = format!(
+        r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[types.lifecycle]
+states = [{}]
+"#,
+        states
+            .iter()
+            .map(|s| format!("\"{s}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+    config.type_by_name("rfc").unwrap().clone()
+}
+
+// AC3: a status naming one of the type's lifecycle states is accepted.
+#[test]
+fn status_in_lifecycle_states_is_accepted() {
+    let type_def = type_def_with_states(&["draft", "review", "accepted"]);
+    assert!(validate_status(&type_def, &Status::new("review")).is_ok());
+}
+
+// AC3: a status outside the type's lifecycle states is rejected, naming both
+// the offending status and the type.
+#[test]
+fn status_outside_lifecycle_states_is_rejected() {
+    let type_def = type_def_with_states(&["draft", "review", "accepted"]);
+    let err = validate_status(&type_def, &Status::new("frozen")).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("frozen"),
+        "error should name the status: {msg}"
+    );
+    assert!(msg.contains("rfc"), "error should name the type: {msg}");
 }

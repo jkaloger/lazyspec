@@ -15,6 +15,9 @@ fn singleton_type(name: &str, dir: &str, prefix: &str) -> TypeDef {
         singleton: true,
         parent_type: None,
         agents: Vec::new(),
+        intent: None,
+        authorship: Default::default(),
+        lifecycle: Default::default(),
     }
 }
 

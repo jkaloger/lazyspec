@@ -51,7 +51,7 @@ fn created_spec_has_correct_frontmatter() {
 
     assert_eq!(meta.title, "Payment Gateway");
     assert_eq!(meta.doc_type.as_str(), "spec");
-    assert_eq!(meta.status, Status::Draft);
+    assert_eq!(meta.status, Status::new("draft"));
     assert_eq!(meta.author, "alice");
 }
 
