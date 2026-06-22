@@ -2,32 +2,38 @@
 
 These skills can complement AI driven workflows using lazyspec. They guide an AI agent through a structured documentation lifecycle: propose a design, slice it into stories, plan iterations, build, and review.
 
-### Workflow
+### The generic verb set
 
-`plan-work` is the entry point. It inspects existing documents and routes to the right skill.
+The verbs are **DAG-agnostic**: each one acts on a document *type* passed as a parameter and read from `lazyspec config --json` at runtime. None of them bake in a specific type name. The same prose works for any configured DAG -- the shipped default (a chain among types named `rfc`, `story`, `iteration`) is just one config among many.
 
-A typical flow looks like:
+`/lazy` is the entry router. It reads the configured DAG (`config --json`), what exists (`status --json`), and the chain around your position (`context --json`), then dispatches the right verb. It advances within the current document automatically, but **stops at type boundaries** -- it never auto-creates a child of a different type, even when a gate has cleared. Crossing a type boundary is always human-initiated.
 
-```
-plan-work → write-rfc → create-story → create-iteration → build → review-iteration
-```
+From there `/lazy` dispatches:
 
-`/resolve-context` can be used at any point to gather the full document chain (iteration → story → RFC) before starting work. When continuing in the same session (e.g. after `/create-story`), you already have context and can skip directly to `/create-iteration`.
+- **Authoring** (ceiling-ordered `scaffold < co-write < generate`): a type's `authorship` value is the ceiling -- the highest authoring verb permitted.
+  - `/scaffold` -- AI creates the file, frontmatter, and links; the human writes the body. Never refuses on ceiling grounds (it is the floor).
+  - `/co-write` -- AI proposes a draft body, the human edits, iterate. Refuses when the type's ceiling is `human`.
+  - `/generate` -- AI writes the full body from context, then asks for review. Permitted only when the type's ceiling is `generated`.
+- **`/advance`** -- move a document to its next status along the type's `lifecycle` edges, checking gates. Status only; never spawns children.
+- **`/execute`** -- carry out the work a delivery document describes, against its task breakdown and ACs. (No authorship ceiling -- this is work, not authoring.)
+- **`/review`** -- two-stage critique (conformance to intent + ACs first, quality second) before advancing.
 
-`create-audit` runs independently of the main pipeline. It produces findings that the user can triage into iterations.
+`resolve-context` folds into `context --json`: `/lazy` reads the chain from the CLI rather than calling a separate skill.
+
+`create-audit` runs independently of the main pipeline. It produces findings that the user can triage.
 
 ### Reference
 
-| Skill              | Description                                                                         |
-| ------------------ | ----------------------------------------------------------------------------------- |
-| `plan-work`        | Detect existing RFCs, Stories, and Iterations to determine the right starting point |
-| `write-rfc`        | Create an RFC with design intent, interface sketches, and derived Stories           |
-| `create-story`     | Create a Story with given/when/then acceptance criteria linked to an RFC            |
-| `create-iteration` | Create an Iteration with task breakdown and test plan against a Story               |
-| `build`            | Execute an Iteration's task breakdown, dispatching per-task with review gates       |
-| `review-iteration` | Two-stage review: AC compliance first, code quality second                          |
-| `resolve-context`  | Gather the full document chain for an agent before it begins work                   |
-| `create-audit`     | Run a criteria-based review and document findings for user triage                   |
+| Skill         | Description                                                                                       |
+| ------------- | ------------------------------------------------------------------------------------------------- |
+| `lazy`        | Entry router. Reads the DAG and your position from config/status/context, dispatches the right verb, stops at type boundaries |
+| `scaffold`    | Create a document's file, frontmatter, and links; hand the body back to the human (authorship floor) |
+| `co-write`    | Propose a draft body, the human edits, iterate; refuses for `human`-ceiling types                 |
+| `generate`    | Write the full body from context, then request review; permitted only for `generated`-ceiling types |
+| `advance`     | Move a document to its next lifecycle status, checking gates; status only, no child spawning      |
+| `execute`     | Carry out the work a delivery document describes against its task breakdown                        |
+| `review`      | Two-stage critique: conformance to intent + ACs first, quality second                             |
+| `create-audit`| Run a criteria-based review and document findings for user triage                                 |
 
 ### Usage
 
