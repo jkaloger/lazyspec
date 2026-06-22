@@ -367,6 +367,53 @@ fn main() -> anyhow::Result<()> {
                 )?;
             }
         },
+        Some(Commands::Config { command, json: _ }) => {
+            use lazyspec::cli::config::ConfigCommand;
+            match command {
+                None | Some(ConfigCommand::Show { .. }) => {
+                    println!("{}", lazyspec::cli::config::run_show_json(&config)?);
+                }
+                Some(ConfigCommand::AddType {
+                    name,
+                    plural,
+                    dir,
+                    prefix,
+                    icon,
+                    parent_type,
+                    singleton,
+                    store,
+                    numbering,
+                    intent,
+                    authorship,
+                }) => {
+                    lazyspec::cli::config::run_add_type(
+                        &cwd,
+                        &fs,
+                        &name,
+                        &plural,
+                        &dir,
+                        &prefix,
+                        icon.as_deref(),
+                        parent_type.as_deref(),
+                        singleton,
+                        store.as_deref(),
+                        numbering.as_deref(),
+                        intent.as_deref(),
+                        authorship.as_deref(),
+                    )?;
+                }
+                Some(ConfigCommand::SetLifecycle {
+                    name,
+                    states,
+                    edges,
+                }) => {
+                    lazyspec::cli::config::run_set_lifecycle(&cwd, &fs, &name, &states, &edges)?;
+                }
+                Some(ConfigCommand::AddGate { name, status }) => {
+                    lazyspec::cli::config::run_add_gate(&cwd, &fs, &name, &status)?;
+                }
+            }
+        }
         Some(Commands::Provenance { command }) => {
             let store = Store::load(&cwd, &config)?;
             let mut stdout = std::io::stdout();

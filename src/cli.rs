@@ -1,4 +1,5 @@
 pub mod completions;
+pub mod config;
 pub mod context;
 pub mod convention;
 pub mod create;
@@ -23,6 +24,7 @@ pub mod style;
 pub mod update;
 pub mod validate;
 
+use crate::cli::config::ConfigCommand;
 use crate::cli::provenance::ProvenanceCommand;
 use crate::cli::reservations::ReservationsCommand;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -285,6 +287,14 @@ pub enum Commands {
     Provenance {
         #[command(subcommand)]
         command: ProvenanceCommand,
+    },
+    /// Inspect and edit .lazyspec.toml
+    Config {
+        #[command(subcommand)]
+        command: Option<ConfigCommand>,
+        /// Print the resolved configuration as JSON (the default when no subcommand is given)
+        #[arg(long)]
+        json: bool,
     },
     /// Acquire a lease on a document
     Claim {

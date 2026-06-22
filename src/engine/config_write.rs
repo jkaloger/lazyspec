@@ -2,8 +2,8 @@ use anyhow::Result;
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::engine::config::{
-    default_normalize, Config, Lifecycle, NumberingStrategy, RelationshipDef, ReservedFormat,
-    Severity, TypeDef, ValidationRule,
+    default_normalize, Authorship, Config, Edge, Lifecycle, NumberingStrategy, RelationshipDef,
+    ReservedFormat, Severity, TypeDef, ValidationRule,
 };
 
 pub fn write_config_in_place(existing_src: &str, buffer: &Config) -> Result<String> {
@@ -85,20 +85,70 @@ fn update_type_table(entry: &mut Table, def: &TypeDef) {
     set_bool_defaulted(entry, "singleton", def.singleton, false);
     set_opt_str(entry, "parent_type", def.parent_type.as_deref());
     set_str_array_defaulted(entry, "agents", &def.agents);
-    set_lifecycle_if_absent(entry, &def.lifecycle);
+    set_opt_str(entry, "intent", def.intent.as_deref());
+    set_str_defaulted(
+        entry,
+        "authorship",
+        authorship_str(&def.authorship),
+        "assisted",
+    );
+    set_lifecycle(entry, &def.lifecycle);
 }
 
-// Inject a `lifecycle` inline table only when the entry has no `lifecycle` key
-// and the buffer carries a non-empty one (the migration path). A type that
-// already declares a lifecycle keeps its existing representation untouched.
-fn set_lifecycle_if_absent(entry: &mut Table, lifecycle: &Lifecycle) {
-    if entry.contains_key("lifecycle") || lifecycle.states.is_empty() {
+fn authorship_str(a: &Authorship) -> &'static str {
+    match a {
+        Authorship::Human => "human",
+        Authorship::Assisted => "assisted",
+        Authorship::Generated => "generated",
+    }
+}
+
+// Reconcile the `lifecycle` inline table to the buffer. When the entry has no
+// `lifecycle` key it is injected from a non-empty buffer (the migration path); a
+// present `lifecycle` is rewritten only when the buffer differs from what the
+// source declares, so an unchanged type keeps its existing representation
+// (decor/formatting) untouched.
+fn set_lifecycle(entry: &mut Table, lifecycle: &Lifecycle) {
+    if !entry.contains_key("lifecycle") {
+        if lifecycle.states.is_empty() {
+            return;
+        }
+        entry.insert(
+            "lifecycle",
+            Item::Value(Value::InlineTable(lifecycle_inline(lifecycle))),
+        );
+        return;
+    }
+    if entry.get("lifecycle").and_then(parse_lifecycle).as_ref() == Some(lifecycle) {
         return;
     }
     entry.insert(
         "lifecycle",
         Item::Value(Value::InlineTable(lifecycle_inline(lifecycle))),
     );
+}
+
+fn parse_lifecycle(item: &Item) -> Option<Lifecycle> {
+    let table = item.as_inline_table()?;
+    let states = table
+        .get("states")?
+        .as_array()?
+        .iter()
+        .map(|v| v.as_str().map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    let edges = table
+        .get("edges")?
+        .as_array()?
+        .iter()
+        .map(|v| {
+            let e = v.as_inline_table()?;
+            Some(Edge {
+                from: e.get("from")?.as_str()?.to_string(),
+                to: e.get("to")?.as_str()?.to_string(),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(Lifecycle { states, edges })
 }
 
 fn lifecycle_inline(lifecycle: &Lifecycle) -> InlineTable {

@@ -1,7 +1,7 @@
 ---
 title: Config introspection and mutation CLI
 type: iteration
-status: draft
+status: complete
 author: agent
 date: 2026-06-21
 tags: []

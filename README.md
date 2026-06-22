@@ -377,6 +377,38 @@ and it is idempotent -- running it on an up-to-date config makes no change. The
 flag is config-only: no documents are touched (use plain `lazyspec fix` for
 frontmatter).
 
+### Inspecting and Editing the Config
+
+`lazyspec config` reads and edits `.lazyspec.toml` without you opening the file.
+The read is plain JSON; the three mutators reconcile the TOML in place, preserving
+comments, formatting, and block order exactly as `fix --config` and the TUI
+settings screen do.
+
+```sh
+lazyspec config --json                      # print the resolved config as JSON
+
+# Append a new document type (name, plural, dir, prefix are positional)
+lazyspec config add-type spike spikes docs/spikes SPIKE \
+  --icon "◆" --parent-type rfc --intent "throwaway exploration" \
+  --authorship generated
+# also accepts --singleton, --store <filesystem|github-issues|git-ref>,
+# --numbering <incremental|sqids|reserved>
+
+# Replace a type's lifecycle (states + edges; `*` matches any source state)
+lazyspec config set-lifecycle iteration \
+  --state draft --state in-progress --state done \
+  --edge draft:in-progress --edge in-progress:done --edge "*:rejected"
+
+# Gate child creation on a parent status (parent-child rules only)
+lazyspec config add-gate stories-need-rfcs --status accepted
+```
+
+`add-type` rejects a duplicate name; `set-lifecycle` replaces the whole lifecycle
+(it is a set, not a merge) and rejects an unknown type; `add-gate` rejects an
+unknown rule and refuses a `relation-existence` rule (the gate applies only to
+`parent-child` rules). The mutators require an already-valid config; run
+`lazyspec fix --config` first to migrate a legacy one.
+
 ### Custom Types
 
 Each document type is declared with a `[[types]]` block. This lets you rename the
