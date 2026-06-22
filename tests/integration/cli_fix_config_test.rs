@@ -303,6 +303,149 @@ fn fix_config_idempotent_dry_run() {
     assert_eq!(fixture.config_bytes(), after_migrate);
 }
 
+// AC6 — default-lifecycle injection on a lifecycle-less config: every type ends
+// with a non-empty lifecycle and the result re-parses under strict load.
+#[test]
+fn fix_config_injects_default_lifecycle() {
+    let fixture = ConfigFixture::pre_migration();
+
+    let code = lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
+    assert_eq!(code, 0);
+
+    let config = Config::load(fixture.root(), &RealFileSystem).expect("strict load must succeed");
+    for t in &config.documents.types {
+        assert!(
+            !t.lifecycle.states.is_empty(),
+            "type {} should have a lifecycle after migration",
+            t.name
+        );
+    }
+    // The default lifecycle carries the seven prior statuses.
+    let rfc = config.type_by_name("rfc").unwrap();
+    for state in [
+        "draft",
+        "review",
+        "accepted",
+        "in-progress",
+        "complete",
+        "rejected",
+        "superseded",
+    ] {
+        assert!(
+            rfc.lifecycle.states.iter().any(|s| s == state),
+            "missing state {state}"
+        );
+    }
+    assert!(!rfc.lifecycle.edges.is_empty());
+}
+
+// AC6 — the JSON result lists each migrated type in `lifecycles_added`.
+#[test]
+fn fix_config_reports_lifecycles_added() {
+    let fixture = ConfigFixture::pre_migration();
+
+    let json = lazyspec::cli::fix::run_config_json(fixture.root(), true, &RealFileSystem);
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let added: Vec<&str> = parsed["lifecycles_added"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    for name in ["rfc", "story", "iteration", "adr"] {
+        assert!(
+            added.contains(&name),
+            "lifecycles_added missing {name}: {json}"
+        );
+    }
+}
+
+// AC6 — idempotent: re-running adds no lifecycles and does not rewrite the file.
+#[test]
+fn fix_config_lifecycle_injection_idempotent() {
+    let fixture = ConfigFixture::pre_migration();
+    lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
+    let after_first = fixture.config_bytes();
+
+    let json = lazyspec::cli::fix::run_config_json(fixture.root(), false, &RealFileSystem);
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert!(
+        parsed["lifecycles_added"].as_array().unwrap().is_empty(),
+        "second run should add no lifecycles: {json}"
+    );
+    assert!(!parsed["written"].as_bool().unwrap());
+    assert_eq!(fixture.config_bytes(), after_first);
+}
+
+// AC6 — comments and unrelated sections survive the migration.
+#[test]
+fn fix_config_migration_preserves_user_content() {
+    let config_with_comment = r#"# my project config
+[github]
+repo = "owner/repo"
+
+# the rfc type
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+"#;
+    let fixture = ConfigFixture::new(config_with_comment);
+
+    lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
+
+    let text = fixture.config_text();
+    assert!(text.contains("# my project config"));
+    assert!(text.contains("# the rfc type"));
+    assert!(text.contains("[github]"));
+    assert!(text.contains("repo = \"owner/repo\""));
+    Config::load(fixture.root(), &RealFileSystem).expect("strict load must succeed");
+}
+
+// AC6 — a type that already declares a lifecycle is left untouched.
+#[test]
+fn fix_config_leaves_existing_lifecycle_untouched() {
+    let config_with_lifecycle = r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+lifecycle = { states = ["open", "closed"], edges = [{ from = "open", to = "closed" }] }
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "supersedes"
+inverse = "superseded-by"
+
+[[relationships]]
+name = "blocks"
+inverse = "blocked-by"
+
+[[relationships]]
+name = "related-to"
+"#;
+    let fixture = ConfigFixture::new(config_with_lifecycle);
+
+    let json = lazyspec::cli::fix::run_config_json(fixture.root(), true, &RealFileSystem);
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert!(
+        parsed["lifecycles_added"].as_array().unwrap().is_empty(),
+        "a type with a lifecycle must not be migrated: {json}"
+    );
+
+    lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
+    let config = Config::load(fixture.root(), &RealFileSystem).unwrap();
+    let rfc = config.type_by_name("rfc").unwrap();
+    assert_eq!(rfc.lifecycle.states, vec!["open", "closed"]);
+}
+
 // Preserves user-defined extra relationships/rules (dedupe by name, append-only).
 #[test]
 fn fix_config_preserves_user_defined_extras() {

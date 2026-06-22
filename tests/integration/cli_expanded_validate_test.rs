@@ -241,6 +241,7 @@ fn custom_parent_child_rule_fires_when_story_lacks_rfc_link() {
         parent: "rfc".to_string(),
         link: "implements".to_string(),
         severity: Severity::Error,
+        require_parent_status: None,
     }]);
 
     let store = fixture.store();
@@ -297,6 +298,7 @@ fn custom_rule_with_warning_severity_produces_warning_not_error() {
         parent: "rfc".to_string(),
         link: "implements".to_string(),
         severity: Severity::Warning,
+        require_parent_status: None,
     }]);
 
     let store = fixture.store();
@@ -381,6 +383,7 @@ fn status_based_checks_work_with_custom_hierarchy() {
         parent: "rfc".to_string(),
         link: "implements".to_string(),
         severity: Severity::Warning,
+        require_parent_status: None,
     }]);
 
     let store = fixture.store();
@@ -419,6 +422,7 @@ fn all_children_accepted_fires_with_custom_hierarchy() {
         parent: "rfc".to_string(),
         link: "implements".to_string(),
         severity: Severity::Warning,
+        require_parent_status: None,
     }]);
 
     let store = fixture.store();

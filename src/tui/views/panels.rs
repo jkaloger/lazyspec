@@ -1811,6 +1811,7 @@ pub fn settings_fields(
                             parent,
                             link,
                             severity,
+                            ..
                         } => {
                             fields.push(field(
                                 "name",

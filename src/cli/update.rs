@@ -8,7 +8,7 @@ use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use std::path::Path;
 
 pub fn run(root: &Path, store: &Store, doc_path: &str, updates: &[(&str, &str)]) -> Result<()> {
@@ -26,6 +26,24 @@ pub fn run_with_config(
         let doc = resolve_shorthand_or_path(store, doc_path)?;
         let type_name = doc.doc_type.as_str();
         if let Some(type_def) = config.type_by_name(type_name) {
+            if let Some((_, target)) = updates.iter().find(|(k, _)| *k == "status") {
+                let current = doc.status.as_str();
+                if current != *target && !type_def.lifecycle.has_edge(current, target) {
+                    let allowed = type_def.lifecycle.targets_from(current);
+                    let allowed = if allowed.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        allowed.join(", ")
+                    };
+                    bail!(
+                        "invalid transition for type \"{}\": no edge from \"{}\" to \"{}\" (allowed targets: {})",
+                        type_name,
+                        current,
+                        target,
+                        allowed
+                    );
+                }
+            }
             if type_def.store == StoreBackend::GithubIssues {
                 let gh_config = config.documents.github.as_ref().ok_or_else(|| {
                     anyhow!(

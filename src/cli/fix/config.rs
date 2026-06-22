@@ -3,8 +3,10 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::engine::config::{
-    default_rules, starter_relationships, Config, RelationshipDef, ValidationRule,
+    default_lifecycle, default_rules, starter_relationships, Config, RelationshipDef,
+    ValidationRule,
 };
+use crate::engine::config_write::write_config_in_place;
 use crate::engine::fs::FileSystem;
 
 use super::ConfigFixResult;
@@ -72,19 +74,40 @@ pub(super) fn collect_config_fixes(
         .map(|r| rule_name(r).to_string())
         .collect();
 
-    let nothing_missing = missing_relationships.is_empty() && missing_rules.is_empty();
+    let lifecycles_added: Vec<String> = config
+        .documents
+        .types
+        .iter()
+        .filter(|t| t.lifecycle.states.is_empty())
+        .map(|t| t.name.clone())
+        .collect();
+
+    let nothing_missing =
+        missing_relationships.is_empty() && missing_rules.is_empty() && lifecycles_added.is_empty();
 
     let written = if dry_run || nothing_missing {
         false
     } else {
         let appended = append_blocks(&existing, &missing_relationships, &missing_rules)?;
-        fs.write(&path, &appended)?;
+        let migrated = if lifecycles_added.is_empty() {
+            appended
+        } else {
+            let mut buffer = Config::parse_lenient(&appended)?;
+            for type_def in &mut buffer.documents.types {
+                if type_def.lifecycle.states.is_empty() {
+                    type_def.lifecycle = default_lifecycle();
+                }
+            }
+            write_config_in_place(&appended, &buffer)?
+        };
+        fs.write(&path, &migrated)?;
         true
     };
 
     Ok(ConfigFixResult {
         relationships_added,
         rules_added,
+        lifecycles_added,
         written,
     })
 }

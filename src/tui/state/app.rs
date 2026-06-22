@@ -215,6 +215,7 @@ fn rule_write(rule: &mut ValidationRule, key: &RuleKey, value: SettingsValue) {
             parent,
             link,
             severity,
+            ..
         } => match (key, value) {
             (RuleKey::Name, SettingsValue::Text(s)) => *name = s,
             (RuleKey::Child, SettingsValue::Text(s)) => *child = s,
@@ -1484,6 +1485,7 @@ impl App {
                     parent: String::new(),
                     link: String::new(),
                     severity: severity.clone(),
+                    require_parent_status: None,
                 }
             }
         };
@@ -2452,6 +2454,7 @@ impl App {
                         parent: String::new(),
                         link: String::new(),
                         severity: Severity::Error,
+                        require_parent_status: None,
                     });
                 self.settings_entry = self.settings_buffer.rules.len() - 1;
             }
@@ -3304,10 +3307,12 @@ pub(crate) mod parity_seed {
             }
             KeyContext::StatusPicker => {
                 // A real doc behind the picker so Enter (confirm_status_change)
-                // writes a status and reloads (changing the fingerprint).
+                // writes a status and reloads (changing the fingerprint). The
+                // seeded doc is at `draft`; select `review` (index 1) so the move
+                // is a valid lifecycle edge and the gate admits it.
                 populate_docs(&mut app);
                 app.status_picker.active = true;
-                app.status_picker.selected = 3; // middle of 0..6
+                app.status_picker.selected = 1; // draft -> review (a declared edge)
                 app.status_picker.doc_path = PathBuf::from("docs/rfcs/RFC-001-a.md");
             }
             KeyContext::LinkEditor => {
@@ -4775,6 +4780,7 @@ mod tests {
             parent: "rfc".to_string(),
             link: "implements".to_string(),
             severity: Severity::Error,
+            require_parent_status: None,
         }];
         let mut app = settings_app(config, 3, 5); // Validation Rules, severity (ParentChild)
         app.settings_drill = Some(0);
@@ -4806,6 +4812,7 @@ mod tests {
             parent: "rfc".to_string(),
             link: "implements".to_string(),
             severity: Severity::Warning,
+            require_parent_status: None,
         }];
         let mut app = settings_app(config, 3, 1); // Validation Rules, shape
         app.settings_drill = Some(0);
@@ -4836,6 +4843,7 @@ mod tests {
                 parent,
                 link,
                 severity,
+                ..
             } => {
                 assert_eq!(name, "my-rule");
                 assert_eq!(*severity, Severity::Warning);

@@ -25,6 +25,7 @@ mod cli_mutate_test;
 mod cli_no_config_test;
 mod cli_query_test;
 mod cli_status_test;
+mod cli_transition_gate_test;
 mod cli_validate_test;
 mod config_test;
 mod create_spec_test;

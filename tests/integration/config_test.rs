@@ -145,6 +145,7 @@ severity = "warning"
             parent: "theme".to_string(),
             link: "belongs-to".to_string(),
             severity: Severity::Warning,
+            require_parent_status: None,
         }
     );
 }

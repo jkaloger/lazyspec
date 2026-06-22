@@ -362,17 +362,20 @@ Projects created before relationships and rules became config-driven have a
 now rejects such a config on every command, pointing you at the migration:
 
 ```sh
-lazyspec fix --config            # inject the missing standard relationships/rules
+lazyspec fix --config            # inject missing standard relationships/rules and default lifecycles
 lazyspec fix --config --dry-run  # preview the additions without writing
 ```
 
 `fix --config` reads the config leniently (the one place strict load is
 bypassed), then appends only the standard `[[relationships]]` / `[[rules]]` that
 are missing -- comparing by name, so user-added relationships and rules are kept
-and nothing is duplicated. It is append-only: every existing section (`[github]`,
-`[coordination]`, comments, ordering) is preserved byte-for-byte, and it is
-idempotent -- running it on an up-to-date config makes no change. The flag is
-config-only: no documents are touched (use plain `lazyspec fix` for frontmatter).
+and nothing is duplicated. It also injects the default `lifecycle` into any
+`[[types]]` entry that lacks one (a type that already declares a lifecycle is
+left untouched); migrated types are reported under `lifecycles_added`. Every
+existing section (`[github]`, `[coordination]`, comments, ordering) is preserved,
+and it is idempotent -- running it on an up-to-date config makes no change. The
+flag is config-only: no documents are touched (use plain `lazyspec fix` for
+frontmatter).
 
 ### Custom Types
 
@@ -396,6 +399,26 @@ dir = "docs/specs"
 prefix = "SPEC"
 icon = "◆"
 ```
+
+### Lifecycle
+
+Each type declares a `lifecycle`: the set of valid statuses (`states`) and the
+permitted status transitions (`edges`). `update --status` is gated by this
+lifecycle -- a move is allowed only when an edge from the current status to the
+target is declared. An edge with a `*` source matches any current status (e.g.
+`* -> superseded` lets any document be superseded). Setting a status to its
+current value is always a no-op (idempotent, never rejected). When a move has no
+matching edge, `update` exits non-zero and the frontmatter is left unchanged.
+
+```toml
+[[types]]
+name = "rfc"
+prefix = "RFC"
+lifecycle = { states = ["draft", "review", "accepted", "in-progress", "complete", "rejected", "superseded"], edges = [{ from = "draft", to = "review" }, { from = "review", to = "accepted" }, { from = "accepted", to = "in-progress" }, { from = "in-progress", to = "complete" }, { from = "*", to = "rejected" }, { from = "*", to = "superseded" }] }
+```
+
+Projects whose `[[types]]` predate the lifecycle axis can backfill the default
+lifecycle with `lazyspec fix --config` (see *Migrating an Existing Config*).
 
 ### Relationships
 
@@ -428,6 +451,12 @@ Validation rules define structural constraints between document types. Two shape
 - `parent-child` -- the child type must link to a parent type via a given relationship.
 - `relation-existence` -- documents of a given type must have at least one relationship.
 
+A `parent-child` rule may also carry `require_parent_status`: when set, `create`
+of the child type is refused unless at least one parent document of the rule's
+`parent` type has reached that status. The required status must be a valid state
+of the parent type's lifecycle. Rules without `require_parent_status` impose no
+creation gate.
+
 ```toml
 [[rules]]
 shape = "parent-child"
@@ -436,6 +465,7 @@ child = "story"
 parent = "rfc"
 link = "implements"
 severity = "warning"
+require_parent_status = "accepted"  # optional: a story cannot be created until an rfc is accepted
 
 [[rules]]
 shape = "relation-existence"

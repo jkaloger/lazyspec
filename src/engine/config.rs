@@ -21,6 +21,8 @@ pub enum ValidationRule {
         parent: String,
         link: String,
         severity: Severity,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        require_parent_status: Option<String>,
     },
     #[serde(rename = "relation-existence")]
     RelationExistence {
@@ -152,6 +154,27 @@ pub struct Lifecycle {
     pub states: Vec<String>,
     #[serde(default)]
     pub edges: Vec<Edge>,
+}
+
+impl Lifecycle {
+    /// True iff a `from -> to` transition is declared. A `*` edge source matches
+    /// any `from`, so `* -> rejected` permits the move from any state.
+    pub fn has_edge(&self, from: &str, to: &str) -> bool {
+        self.edges
+            .iter()
+            .any(|e| (e.from == from || e.from == "*") && e.to == to)
+    }
+
+    /// The set of states reachable from `from` in a single declared edge,
+    /// including wildcard targets. Used to report the allowed moves when a
+    /// transition is rejected.
+    pub fn targets_from(&self, from: &str) -> Vec<&str> {
+        self.edges
+            .iter()
+            .filter(|e| e.from == from || e.from == "*")
+            .map(|e| e.to.as_str())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -523,6 +546,7 @@ pub fn default_rules() -> Vec<ValidationRule> {
             parent: "rfc".to_string(),
             link: "implements".to_string(),
             severity: Severity::Warning,
+            require_parent_status: None,
         },
         ValidationRule::ParentChild {
             name: "iterations-need-stories".to_string(),
@@ -530,6 +554,7 @@ pub fn default_rules() -> Vec<ValidationRule> {
             parent: "story".to_string(),
             link: "implements".to_string(),
             severity: Severity::Error,
+            require_parent_status: None,
         },
         ValidationRule::RelationExistence {
             name: "adrs-need-relations".to_string(),
@@ -1399,6 +1424,95 @@ interactive = 'claude "$LAZYSPEC_PROMPT"'
     fn agents_config_none_when_absent() {
         let config = Config::parse(TYPES).unwrap();
         assert!(config.agents.interactive.is_none());
+    }
+
+    // AC4: edge lookup honours declared edges and the `*` wildcard source.
+    #[test]
+    fn lifecycle_has_edge_honours_declared_edges_and_wildcard() {
+        let lc = default_lifecycle();
+        assert!(lc.has_edge("draft", "review"));
+        assert!(lc.has_edge("review", "accepted"));
+        assert!(!lc.has_edge("draft", "accepted"));
+        // `* -> superseded` matches any source.
+        assert!(lc.has_edge("draft", "superseded"));
+        assert!(lc.has_edge("complete", "superseded"));
+        // No reverse edge unless declared.
+        assert!(!lc.has_edge("review", "draft"));
+    }
+
+    #[test]
+    fn lifecycle_targets_from_includes_wildcard() {
+        let lc = default_lifecycle();
+        let from_draft = lc.targets_from("draft");
+        assert!(from_draft.contains(&"review"));
+        assert!(from_draft.contains(&"superseded"));
+        assert!(!from_draft.contains(&"accepted"));
+    }
+
+    // AC5 (data): a parent-child rule with `require_parent_status` parses and the
+    // field is readable.
+    #[test]
+    fn parent_child_rule_parses_require_parent_status() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[rules]]
+name = "stories-need-accepted-rfcs"
+shape = "parent-child"
+child = "story"
+parent = "rfc"
+link = "implements"
+severity = "error"
+require_parent_status = "accepted"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        match &config.rules[0] {
+            ValidationRule::ParentChild {
+                require_parent_status,
+                ..
+            } => assert_eq!(require_parent_status.as_deref(), Some("accepted")),
+            other => panic!("unexpected rule: {other:?}"),
+        }
+    }
+
+    // AC5 (data): a parent-child rule WITHOUT the key parses with the field None.
+    #[test]
+    fn parent_child_rule_without_require_parent_status_is_none() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[rules]]
+name = "stories-need-rfcs"
+shape = "parent-child"
+child = "story"
+parent = "rfc"
+link = "implements"
+severity = "warning"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        match &config.rules[0] {
+            ValidationRule::ParentChild {
+                require_parent_status,
+                ..
+            } => assert!(require_parent_status.is_none()),
+            other => panic!("unexpected rule: {other:?}"),
+        }
     }
 
     #[test]

@@ -409,6 +409,7 @@ impl Checker for ParentLinkRule {
                         parent,
                         link,
                         severity,
+                        ..
                     } => {
                         if meta.doc_type != DocType::new(child) {
                             continue;

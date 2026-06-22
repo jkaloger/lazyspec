@@ -103,15 +103,15 @@ fn test_confirm_status_change_updates_frontmatter() {
     app.selected_doc = 0;
     app.open_status_picker();
 
-    // Select "accepted" (index 2)
-    app.status_picker.selected = 2;
+    // Select "review" (index 1) -- a valid draft -> review lifecycle edge.
+    app.status_picker.selected = 1;
     app.confirm_status_change(root, &config).unwrap();
 
     // Verify file on disk
     let content = std::fs::read_to_string(root.join("docs/rfcs/RFC-001-test.md")).unwrap();
     assert!(
-        content.contains("status: accepted"),
-        "frontmatter should contain 'status: accepted', got:\n{}",
+        content.contains("status: review"),
+        "frontmatter should contain 'status: review', got:\n{}",
         content
     );
 
@@ -120,7 +120,7 @@ fn test_confirm_status_change_updates_frontmatter() {
         .store
         .get(std::path::Path::new("docs/rfcs/RFC-001-test.md"))
         .expect("doc should still exist in store");
-    assert_eq!(doc.status, Status::new("accepted"));
+    assert_eq!(doc.status, Status::new("review"));
 
     // Picker should be closed
     assert!(!app.status_picker.active);
