@@ -22,6 +22,8 @@ From there `/lazy` dispatches:
 
 `create-audit` runs independently of the main pipeline. It produces findings that the user can triage.
 
+`configure-type` also runs independently of the main pipeline -- it is a setup/meta action, not a lifecycle step. It interviews the user to co-author one custom document type's methodology, writes its enriched template, and records the `[[types]]` config via the config-write CLI. One type per run.
+
 ### Reference
 
 | Skill         | Description                                                                                       |
@@ -34,6 +36,7 @@ From there `/lazy` dispatches:
 | `execute`     | Carry out the work a delivery document describes against its task breakdown                        |
 | `review`      | Two-stage critique: conformance to intent + ACs first, quality second                             |
 | `create-audit`| Run a criteria-based review and document findings for user triage                                 |
+| `configure-type`| Interview the user to co-author one custom document type; write its template and `[[types]]` config via the config-write CLI (runs independently of the pipeline) |
 
 ### Usage
 
