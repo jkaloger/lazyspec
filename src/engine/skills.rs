@@ -51,6 +51,7 @@ pub fn embedded_skill_set() -> impl Iterator<Item = (PathBuf, &'static str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn embedded_skill_set_is_non_empty() {
@@ -59,7 +60,7 @@ mod tests {
 
     #[test]
     fn embedded_skill_set_contains_router() {
-        let has_router = embedded_skill_set().any(|(path, _)| path == PathBuf::from(ROUTER_KEY));
+        let has_router = embedded_skill_set().any(|(path, _)| path == Path::new(ROUTER_KEY));
         assert!(
             has_router,
             "embedded set must contain the router at {ROUTER_KEY}"
