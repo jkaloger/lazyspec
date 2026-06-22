@@ -2,6 +2,7 @@ use crate::engine::config::{
     default_rules, starter_relationships, starter_types, CertificationConfig, Config,
     DocumentConfig, FilesystemConfig, Naming, Templates, UiConfig,
 };
+use crate::engine::fs_ops::default_template;
 use crate::engine::gh::{deterministic_color, type_label, GhCli, GhError, GhIssueWriter};
 use crate::engine::github::resolve_repo;
 use anyhow::{bail, Result};
@@ -48,7 +49,12 @@ pub fn run(root: &Path) -> Result<()> {
     for type_def in &config.documents.types {
         fs::create_dir_all(root.join(&type_def.dir))?;
     }
-    fs::create_dir_all(root.join(&config.filesystem.templates.dir))?;
+    let templates_dir = root.join(&config.filesystem.templates.dir);
+    fs::create_dir_all(&templates_dir)?;
+    for type_def in &config.documents.types {
+        let template_path = templates_dir.join(format!("{}.md", type_def.name.to_lowercase()));
+        write_if_absent(&template_path, &default_template(&type_def.name))?;
+    }
 
     scaffold_skeleton_files(root, &config)?;
 

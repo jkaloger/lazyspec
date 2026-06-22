@@ -1,7 +1,7 @@
 ---
 title: Enriched templates and init materialization
 type: iteration
-status: draft
+status: complete
 author: agent
 date: 2026-06-21
 tags: []

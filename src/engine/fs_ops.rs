@@ -33,8 +33,10 @@ date: {{date}}
 tags: []
 related: []
 ---
+<!-- intent: capture the testable behaviour this slice must deliver, as criteria -->
 
 ## Acceptance Criteria
+<!-- guidance: one given/when/then per criterion; each must be independently verifiable -->
 
 ### AC: example-criterion
 
@@ -46,7 +48,7 @@ Then an expected outcome occurs
     )
 }
 
-fn default_template(doc_type: &str) -> String {
+pub(crate) fn default_template(doc_type: &str) -> String {
     match doc_type.to_lowercase().as_str() {
         "story" => r#"---
 title: "{title}"
@@ -57,12 +59,13 @@ date: {date}
 tags: []
 related: []
 ---
+<!-- intent: define a vertical slice of value with testable acceptance criteria -->
 
 ## Context
-
-TODO: Describe the background and motivation.
+<!-- guidance: the background and motivation; why this slice matters now -->
 
 ## Acceptance Criteria
+<!-- guidance: one given/when/then per criterion; each independently verifiable -->
 
 - **Given** a precondition
   **When** an action is taken
@@ -71,12 +74,10 @@ TODO: Describe the background and motivation.
 ## Scope
 
 ### In Scope
-
-- TODO
+<!-- guidance: what this slice will deliver; keep it to one shippable increment -->
 
 ### Out of Scope
-
-- TODO
+<!-- guidance: what is deliberately deferred, so reviewers know the boundary -->
 "#
         .to_string(),
 
@@ -89,18 +90,16 @@ date: {date}
 tags: []
 related: []
 ---
+<!-- intent: plan the concrete changes that satisfy a story's acceptance criteria -->
 
 ## Changes
-
-- TODO
+<!-- guidance: the task breakdown; exact files, functions, and edits to make -->
 
 ## Test Plan
-
-- TODO
+<!-- guidance: the checks the build phase must pass; one per acceptance criterion -->
 
 ## Notes
-
-TODO
+<!-- guidance: constraints, gotchas, and decisions that bound the implementation -->
 "#
         .to_string(),
 
@@ -113,10 +112,10 @@ date: {date}
 tags: []
 related: []
 ---
+<!-- intent: describe a system or feature precisely enough to build and verify it -->
 
 ## Summary
-
-TODO
+<!-- guidance: what this spec covers and the behaviour it pins down -->
 "#
         .to_string(),
 
@@ -129,10 +128,10 @@ author: "{{author}}"
 date: {{date}}
 tags: []
 ---
+<!-- intent: record this document's purpose before drafting its body -->
 
 ## Summary
-
-TODO
+<!-- guidance: what this document covers and why it exists -->
 "#,
             doc_type.to_lowercase()
         ),
