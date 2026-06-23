@@ -238,6 +238,7 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            attributes: Default::default(),
             id: String::new(),
         };
 
@@ -525,6 +526,7 @@ mod tests {
             intent: None,
             authorship: Default::default(),
             lifecycle: Default::default(),
+            attributes: Default::default(),
         }
     }
 
@@ -736,6 +738,7 @@ mod tests {
             intent: None,
             authorship: Default::default(),
             lifecycle: Default::default(),
+            attributes: Default::default(),
         };
 
         let result = gh_store.create(&td, "test prefix", "author", "").unwrap();
@@ -1457,6 +1460,7 @@ mod tests {
             }],
             validate_ignore: false,
             virtual_doc: false,
+            attributes: Default::default(),
             id: "RFC-099".to_string(),
         };
 
@@ -1689,6 +1693,7 @@ mod tests {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            attributes: Default::default(),
             id: "RFC-099".to_string(),
         };
 

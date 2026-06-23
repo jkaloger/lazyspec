@@ -203,7 +203,7 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
         ViewMode::Filters => render_filter_panel(f, app, outer[1], config),
         #[cfg(feature = "metrics")]
         ViewMode::Metrics => draw_metrics_skeleton(f, outer[1]),
-        ViewMode::Graph => draw_graph(f, app, outer[1]),
+        ViewMode::Graph => draw_graph(f, app, outer[1], config),
         ViewMode::Settings => draw_settings(f, app, outer[1], &app.settings_buffer),
         #[cfg(feature = "agent")]
         ViewMode::Agents => draw_agents_screen(f, app, outer[1]),

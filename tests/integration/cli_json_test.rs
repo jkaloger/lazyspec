@@ -259,6 +259,98 @@ fn doc_to_json_link_command_produces_id_targets() {
     assert_eq!(json["related"][0]["target"], "RFC-001");
 }
 
+// ITERATION-207 AC1: show --json exposes typed attributes (int -> number,
+// enum/string -> string, date -> "YYYY-MM-DD" string).
+#[test]
+fn show_json_exposes_typed_attributes() {
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    let config = r#"
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[types.attributes]]
+name = "estimate"
+kind = "int"
+
+[[types.attributes]]
+name = "priority"
+kind = "enum"
+values = ["low", "high"]
+
+[[types.attributes]]
+name = "due"
+kind = "date"
+
+[[relationships]]
+name = "related-to"
+
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[templates]
+dir = ".lazyspec/templates"
+"#;
+    std::fs::write(root.join(".lazyspec.toml"), config).unwrap();
+    std::fs::create_dir_all(root.join("docs/stories")).unwrap();
+    std::fs::write(
+        root.join("docs/stories/STORY-001-a.md"),
+        "---\ntitle: \"A\"\ntype: story\nstatus: draft\nauthor: t\ndate: 2026-01-01\ntags: []\nestimate: 5\npriority: high\ndue: 2026-03-15\n---\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lazyspec"))
+        .args(["show", "STORY-001", "--json"])
+        .current_dir(root)
+        .output()
+        .expect("failed to run lazyspec show");
+    assert!(
+        output.status.success(),
+        "show should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+    let attrs = &parsed["attributes"];
+    assert!(attrs.is_object(), "attributes must be an object");
+    assert_eq!(attrs["estimate"], serde_json::json!(5));
+    assert_eq!(attrs["priority"], serde_json::json!("high"));
+    assert_eq!(attrs["due"], serde_json::json!("2026-03-15"));
+}
+
+// ITERATION-207 AC3: a doc with no attributes still has a stable `{}` shape.
+#[test]
+fn show_json_attributes_empty_object_when_none() {
+    let (_fixture, store) = setup();
+    let output = lazyspec::cli::show::run_json(
+        &store,
+        "RFC-001",
+        false,
+        25,
+        &lazyspec::engine::fs::RealFileSystem,
+    )
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert!(
+        parsed["attributes"].is_object(),
+        "attributes must be present as an object"
+    );
+    assert_eq!(
+        parsed["attributes"].as_object().unwrap().len(),
+        0,
+        "attributes must be an empty object when no attrs"
+    );
+}
+
 // AC7: --json serializes a relationship under its configured name, end-to-end.
 #[test]
 fn json_output_serializes_relationship_by_configured_name() {

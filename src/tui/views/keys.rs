@@ -659,7 +659,13 @@ impl App {
         }
     }
 
-    fn handle_graph_key(&mut self, code: KeyCode, _modifiers: KeyModifiers, root: &Path) {
+    fn handle_graph_key(
+        &mut self,
+        code: KeyCode,
+        _modifiers: KeyModifiers,
+        root: &Path,
+        config: &Config,
+    ) {
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
                 self.graph_selected =
@@ -667,6 +673,12 @@ impl App {
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.graph_selected = self.graph_selected.saturating_sub(1);
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.move_graph_anchor_prev();
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.move_graph_anchor_next();
             }
             KeyCode::Enter => {
                 if let Some(node) = self.graph_nodes.get(self.graph_selected) {
@@ -684,6 +696,12 @@ impl App {
                     }
                     self.view_mode = ViewMode::Types;
                 }
+            }
+            KeyCode::Char('o') => {
+                self.cycle_graph_sort(config);
+            }
+            KeyCode::Char('O') => {
+                self.reverse_graph_sort();
             }
             KeyCode::Char('g') => {
                 self.graph_selected = 0;
@@ -1039,7 +1057,7 @@ impl App {
     ) {
         match self.view_mode {
             ViewMode::Filters => return self.handle_filters_key(code, modifiers, root, config),
-            ViewMode::Graph => return self.handle_graph_key(code, modifiers, root),
+            ViewMode::Graph => return self.handle_graph_key(code, modifiers, root, config),
             ViewMode::Settings => return self.handle_settings_key(code, modifiers, root, config),
             #[cfg(feature = "agent")]
             ViewMode::Agents => return self.handle_agents_key(code, modifiers),

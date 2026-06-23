@@ -1,9 +1,128 @@
 use crate::engine::context::ContextNode;
+use crate::engine::document::{AttrValue, DocMeta};
 use crate::engine::store::{extract_id_from_name, Store};
+use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::GraphNode;
+
+/// The active sibling sort: the column id (`path`, `status`, or an attribute
+/// name) and whether it is reversed. Presentation-only (ITERATION-209): the
+/// engine emits a stable topo order; this reorders SIBLINGS within each subtree,
+/// never across parent groups. `path` is the identity sort that matches the
+/// pre-sort topo tiebreak.
+#[derive(Debug, Clone)]
+pub struct GraphSort {
+    pub col: String,
+    pub rev: bool,
+}
+
+impl Default for GraphSort {
+    fn default() -> Self {
+        GraphSort {
+            col: "path".to_string(),
+            rev: false,
+        }
+    }
+}
+
+/// A comparable sort key for one doc under the active column. Missing/absent
+/// values sort LAST regardless of direction, so the comparator is a total order
+/// with a deterministic place for blanks. Variants order before `Missing`; the
+/// `path` tiebreak (applied separately) keeps the order total even for equal
+/// keys.
+#[derive(Debug, Clone, PartialEq)]
+enum SortKey {
+    Int(i64),
+    Float(f64),
+    Text(String),
+    Bool(bool),
+    Missing,
+}
+
+impl SortKey {
+    /// The key for `doc` under sort column `col`. `path` keys on the file path so
+    /// the comparator's tiebreak alone orders it; `status` on the status string;
+    /// any other id reads the matching attribute, coercing to a typed key, and is
+    /// `Missing` when the attribute is absent (or unrepresentable).
+    fn extract(doc: &DocMeta, col: &str) -> SortKey {
+        match col {
+            "path" => SortKey::Text(doc.path.to_string_lossy().to_string()),
+            "status" => SortKey::Text(doc.status.to_string()),
+            attr => match doc.attributes.get(attr) {
+                Some(AttrValue::Int(i)) => SortKey::Int(*i),
+                Some(AttrValue::Float(f)) => SortKey::Float(*f),
+                Some(AttrValue::Str(s)) => SortKey::Text(s.clone()),
+                Some(AttrValue::Bool(b)) => SortKey::Bool(*b),
+                Some(AttrValue::Date(d)) => SortKey::Text(d.format("%Y-%m-%d").to_string()),
+                Some(AttrValue::Raw(_)) | None => SortKey::Missing,
+            },
+        }
+    }
+
+    /// Rank of the value-carrying variants for cross-variant ordering. Within a
+    /// rank the held values compare; `Missing` ranks highest so blanks sort last.
+    fn rank(&self) -> u8 {
+        match self {
+            SortKey::Int(_) | SortKey::Float(_) => 0,
+            SortKey::Text(_) => 1,
+            SortKey::Bool(_) => 2,
+            SortKey::Missing => 3,
+        }
+    }
+
+    /// Total order over keys. Mixed numeric variants (Int/Float) compare as
+    /// floats; like variants compare naturally; `Missing` is greatest. NaN floats
+    /// are treated as equal to keep the order total (they cannot arise from a
+    /// parsed config but the comparator must still be total).
+    fn cmp_key(&self, other: &SortKey) -> Ordering {
+        use SortKey::*;
+        match (self, other) {
+            (Int(a), Int(b)) => a.cmp(b),
+            (Float(a), Float(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
+            (Int(a), Float(b)) => (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal),
+            (Float(a), Int(b)) => a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal),
+            (Text(a), Text(b)) => a.cmp(b),
+            (Bool(a), Bool(b)) => a.cmp(b),
+            (Missing, Missing) => Ordering::Equal,
+            _ => self.rank().cmp(&other.rank()),
+        }
+    }
+}
+
+/// Compare two siblings under the active sort: by the column key, then `rev`
+/// flips that comparison, then `path` is the stable tiebreak (NOT reversed, so
+/// the order stays total and deterministic even when `rev` is set). A `Missing`
+/// value sorts LAST in both directions because the `rev` flip is applied only to
+/// the value comparison while `Missing` keys compare equal among themselves and
+/// greatest against any present value — reversing equal-or-greatest still lands
+/// them after present values once the path tiebreak settles ties. To guarantee
+/// "missing last" under `rev`, missing-vs-present is decided before the flip.
+fn compare_siblings(a: &DocMeta, b: &DocMeta, sort: &GraphSort) -> Ordering {
+    let ka = SortKey::extract(a, &sort.col);
+    let kb = SortKey::extract(b, &sort.col);
+
+    let a_missing = matches!(ka, SortKey::Missing);
+    let b_missing = matches!(kb, SortKey::Missing);
+
+    let primary = match (a_missing, b_missing) {
+        (true, true) => Ordering::Equal,
+        // Missing always sorts last, regardless of `rev`.
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => {
+            let base = ka.cmp_key(&kb);
+            if sort.rev {
+                base.reverse()
+            } else {
+                base
+            }
+        }
+    };
+
+    primary.then_with(|| a.path.cmp(&b.path))
+}
 
 /// Flatten the engine's whole-store context forest into the flat
 /// `Vec<GraphNode>` the graph view renders. Walks the forest roots-first,
@@ -40,8 +159,8 @@ use super::GraphNode;
 /// is strictly the node's OWN depth-1 cross-cutting set.
 ///
 /// Back-reference nodes carry no annotation: the set belongs on the full node line.
-pub fn flatten_forest(forest: &[ContextNode], store: &Store) -> Vec<GraphNode> {
-    // child adjacency: parent path -> child paths, sorted by path.
+pub fn flatten_forest(forest: &[ContextNode], store: &Store, sort: &GraphSort) -> Vec<GraphNode> {
+    // child adjacency: parent path -> child paths.
     let mut children: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
     for node in forest {
         for parent in &node.parents {
@@ -51,12 +170,23 @@ pub fn flatten_forest(forest: &[ContextNode], store: &Store) -> Vec<GraphNode> {
                 .push(node.doc.path.clone());
         }
     }
-    for kids in children.values_mut() {
-        kids.sort();
-    }
 
     let by_path: HashMap<&PathBuf, &ContextNode> =
         forest.iter().map(|n| (&n.doc.path, n)).collect();
+
+    // Sibling sort (ITERATION-209): reorder each parent's children by the active
+    // column with a `path` tiebreak. Sibling-scoped — parent grouping and the
+    // engine's topo order are preserved; only the order WITHIN a sibling set
+    // changes. A path with no node in `by_path` falls back to a path compare.
+    let sort_siblings = |paths: &mut [PathBuf]| {
+        paths.sort_by(|a, b| match (by_path.get(a), by_path.get(b)) {
+            (Some(na), Some(nb)) => compare_siblings(na.doc, nb.doc, sort),
+            _ => a.cmp(b),
+        });
+    };
+    for kids in children.values_mut() {
+        sort_siblings(kids);
+    }
 
     // Per-node `implements` lineage: the node's own transitive ancestors AND
     // descendants. A related-to neighbour on this set is already drawn as a tree
@@ -77,7 +207,7 @@ pub fn flatten_forest(forest: &[ContextNode], store: &Store) -> Vec<GraphNode> {
         .collect();
 
     let mut roots: Vec<&ContextNode> = forest.iter().filter(|n| n.parents.is_empty()).collect();
-    roots.sort_by(|a, b| a.doc.path.cmp(&b.doc.path));
+    roots.sort_by(|a, b| compare_siblings(a.doc, b.doc, sort));
 
     let mut out: Vec<GraphNode> = Vec::with_capacity(forest.len());
     let mut drawn: HashSet<PathBuf> = HashSet::new();
@@ -209,6 +339,7 @@ fn walk(
             depth,
             reference: true,
             related: Vec::new(),
+            attributes: std::collections::BTreeMap::new(),
         });
         return;
     }
@@ -224,6 +355,7 @@ fn walk(
         depth,
         reference: false,
         related: related_annotations(&doc.path, node_lineage.unwrap_or(&empty), store),
+        attributes: doc.attributes.clone(),
     });
 
     if let Some(kids) = children.get(&doc.path) {
@@ -308,7 +440,7 @@ mod tests {
             ),
         ]);
 
-        let nodes = flatten_forest(&resolve_forest(&store), &store);
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
 
         assert_eq!(
             triples(&nodes),
@@ -345,7 +477,7 @@ mod tests {
             ),
         ]);
 
-        let nodes = flatten_forest(&resolve_forest(&store), &store);
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
 
         assert_eq!(
             triples(&nodes),
@@ -375,7 +507,7 @@ mod tests {
             ),
         ]);
 
-        let nodes = flatten_forest(&resolve_forest(&store), &store);
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
 
         assert_eq!(
             triples(&nodes),
@@ -406,7 +538,7 @@ mod tests {
             ),
         ]);
 
-        let nodes = flatten_forest(&resolve_forest(&store), &store);
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
 
         assert_eq!(
             triples(&nodes),
@@ -433,7 +565,7 @@ mod tests {
             ),
         ]);
 
-        let nodes = flatten_forest(&resolve_forest(&store), &store);
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
 
         // Cycle has no root, so the leftover pass draws RFC-001 full at depth 0,
         // recurses into child RFC-002 full at depth 1, then re-encounters RFC-001
@@ -483,7 +615,7 @@ mod tests {
             ),
         ]);
 
-        let nodes = flatten_forest(&resolve_forest(&store), &store);
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
 
         assert_eq!(
             related_of(&nodes, "ITERATION-001"),
@@ -510,7 +642,7 @@ mod tests {
             ),
         ]);
 
-        let nodes = flatten_forest(&resolve_forest(&store), &store);
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
 
         assert!(
             related_of(&nodes, "ITERATION-001").is_empty(),
@@ -544,7 +676,7 @@ mod tests {
             ),
         ]);
 
-        let nodes = flatten_forest(&resolve_forest(&store), &store);
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
 
         assert!(
             related_of(&nodes, "ITERATION-001").is_empty(),
@@ -565,7 +697,7 @@ mod tests {
             ("docs/rfcs/RFC-002-b.md", &doc_md("B", "rfc", "[]")),
         ]);
 
-        let nodes = flatten_forest(&resolve_forest(&store), &store);
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
 
         assert_eq!(
             related_of(&nodes, "RFC-001"),
@@ -605,7 +737,7 @@ mod tests {
             ),
         ]);
 
-        let nodes = flatten_forest(&resolve_forest(&store), &store);
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
 
         assert_eq!(
             related_of(&nodes, "STORY-001"),
@@ -629,7 +761,7 @@ mod tests {
             ),
         ]);
 
-        let nodes = flatten_forest(&resolve_forest(&store), &store);
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
 
         assert!(related_of(&nodes, "RFC-001").is_empty());
         assert!(related_of(&nodes, "STORY-001").is_empty());
@@ -649,7 +781,7 @@ mod tests {
             ),
         ]);
 
-        let nodes = flatten_forest(&resolve_forest(&store), &store);
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
 
         assert_eq!(
             related_of(&nodes, "RFC-001"),
@@ -681,7 +813,7 @@ mod tests {
             ),
         ]);
 
-        let nodes = flatten_forest(&resolve_forest(&store), &store);
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
 
         let back_ref = nodes
             .iter()
@@ -725,7 +857,7 @@ mod tests {
             ),
         ]);
 
-        let nodes = flatten_forest(&resolve_forest(&store), &store);
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
 
         // resolve_chain(ITERATION-001, 1) excludes its chain_paths
         // ({ITERATION-001, RFC-001}) from `related`, leaving the cross-cutting
@@ -778,7 +910,7 @@ mod tests {
             ),
         ]);
 
-        let nodes = flatten_forest(&resolve_forest(&store), &store);
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
 
         assert_eq!(
             related_of(&nodes, "STORY-001"),
@@ -794,5 +926,147 @@ mod tests {
             context_related.contains("RFC-009"),
             "resolve_chain surfaces the ancestor's related-to link, so the sets differ"
         );
+    }
+
+    // --- ITERATION-209 sibling sort ---------------------------------------
+
+    use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
+    use chrono::NaiveDate;
+    use std::collections::BTreeMap;
+
+    /// A bare `DocMeta` keyed by path and id with the given attribute map. Only
+    /// the fields the comparator reads (`path`, `status`, `attributes`) matter.
+    fn doc_meta(path: &str, status: &str, attrs: BTreeMap<String, AttrValue>) -> DocMeta {
+        DocMeta {
+            path: PathBuf::from(path),
+            title: path.to_string(),
+            doc_type: DocType::new("story"),
+            status: Status::new(status),
+            author: "t".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            tags: Vec::new(),
+            provenance: Vec::new(),
+            related: Vec::new(),
+            validate_ignore: false,
+            virtual_doc: false,
+            id: path.to_string(),
+            attributes: attrs,
+        }
+    }
+
+    fn with_int(name: &str, v: i64) -> BTreeMap<String, AttrValue> {
+        let mut m = BTreeMap::new();
+        m.insert(name.to_string(), AttrValue::Int(v));
+        m
+    }
+
+    fn sort_on(col: &str, rev: bool) -> GraphSort {
+        GraphSort {
+            col: col.to_string(),
+            rev,
+        }
+    }
+
+    // AC4: siblings where some lack the sort attribute -> the present values sort
+    // by the column, the absent ones sort LAST, deterministically (path tiebreak),
+    // in BOTH directions.
+    #[test]
+    fn comparator_sorts_missing_attribute_last_both_directions() {
+        let a = doc_meta("docs/a.md", "draft", with_int("estimate", 5));
+        let b = doc_meta("docs/b.md", "draft", with_int("estimate", 1));
+        let m1 = doc_meta("docs/m1.md", "draft", BTreeMap::new());
+        let m2 = doc_meta("docs/m2.md", "draft", BTreeMap::new());
+
+        let asc = sort_on("estimate", false);
+        // ascending: 1 (b), 5 (a), then missing by path (m1, m2).
+        assert_eq!(compare_siblings(&b, &a, &asc), Ordering::Less);
+        assert_eq!(compare_siblings(&a, &m1, &asc), Ordering::Less);
+        assert_eq!(
+            compare_siblings(&m1, &m2, &asc),
+            Ordering::Less,
+            "path tiebreak"
+        );
+
+        let desc = sort_on("estimate", true);
+        // descending flips present values (5 before 1) but missing STILL last.
+        assert_eq!(compare_siblings(&a, &b, &desc), Ordering::Less);
+        assert_eq!(
+            compare_siblings(&a, &m1, &desc),
+            Ordering::Less,
+            "present value precedes missing even when reversed"
+        );
+        assert_eq!(
+            compare_siblings(&m1, &m2, &desc),
+            Ordering::Less,
+            "missing pair still ordered by path, not reversed"
+        );
+    }
+
+    // AC4 (total order): the comparator is a total order over a mixed set; sorting
+    // is stable and idempotent. Sort twice, same result.
+    #[test]
+    fn comparator_is_total_and_idempotent() {
+        let mut docs = [
+            doc_meta("docs/c.md", "draft", with_int("e", 3)),
+            doc_meta("docs/a.md", "draft", BTreeMap::new()),
+            doc_meta("docs/b.md", "draft", with_int("e", 3)),
+            doc_meta("docs/d.md", "draft", with_int("e", 1)),
+        ];
+        let s = sort_on("e", false);
+        docs.sort_by(|x, y| compare_siblings(x, y, &s));
+        let order1: Vec<_> = docs.iter().map(|d| d.id.clone()).collect();
+        // 1 (d), then 3 tie broken by path (b before c), then missing (a).
+        assert_eq!(
+            order1,
+            vec!["docs/d.md", "docs/b.md", "docs/c.md", "docs/a.md"]
+        );
+        docs.sort_by(|x, y| compare_siblings(x, y, &s));
+        let order2: Vec<_> = docs.iter().map(|d| d.id.clone()).collect();
+        assert_eq!(order1, order2, "sort is idempotent");
+    }
+
+    // AC3 (sibling-scoped): siblings reorder within a parent's children by the
+    // active column, but the parent grouping / topo order is preserved.
+    #[test]
+    fn sibling_sort_reorders_children_within_parent_only() {
+        // RFC-001 parents STORY-001 (status review) and STORY-002 (status draft).
+        // By path STORY-001 precedes STORY-002; sorting by status reverses them
+        // (draft < review) WITHOUT detaching either from RFC-001.
+        let (_tmp, store) = store_from(&[
+            ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
+            (
+                "docs/stories/STORY-001-a.md",
+                &doc_md_status("A", "story", "- implements: RFC-001", "review"),
+            ),
+            (
+                "docs/stories/STORY-002-b.md",
+                &doc_md_status("B", "story", "- implements: RFC-001", "draft"),
+            ),
+        ]);
+
+        let forest = resolve_forest(&store, None);
+        let by_status = flatten_forest(&forest, &store, &sort_on("status", false));
+        let ids: Vec<(String, usize)> = by_status.iter().map(|n| (id_of(n), n.depth)).collect();
+        assert_eq!(
+            ids,
+            vec![
+                ("RFC-001".to_string(), 0),
+                ("STORY-002".to_string(), 1),
+                ("STORY-001".to_string(), 1),
+            ],
+            "draft sibling (STORY-002) sorts before review sibling under the same parent"
+        );
+    }
+
+    /// `doc_md` with an explicit status (the base helper hardcodes `draft`).
+    fn doc_md_status(title: &str, doc_type: &str, related: &str, status: &str) -> String {
+        let related_block = if related == "[]" {
+            "related: []".to_string()
+        } else {
+            format!("related:\n{related}")
+        };
+        format!(
+            "---\ntitle: \"{title}\"\ntype: {doc_type}\nstatus: {status}\nauthor: t\ndate: 2026-04-01\ntags: []\n{related_block}\n---\n\n{title} body\n"
+        )
     }
 }

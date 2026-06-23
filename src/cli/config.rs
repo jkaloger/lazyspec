@@ -117,6 +117,7 @@ pub fn run_add_type(
             .transpose()?
             .unwrap_or_default(),
         lifecycle: Lifecycle::default(),
+        attributes: Vec::new(),
     });
 
     let out = write_config_in_place(&src, &config)?;

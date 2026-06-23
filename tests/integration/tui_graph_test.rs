@@ -403,6 +403,7 @@ fn custom_types_populate_doc_types_and_icons() {
             intent: None,
             authorship: Default::default(),
             lifecycle: Default::default(),
+            attributes: Default::default(),
         },
         TypeDef {
             name: "task".into(),
@@ -419,6 +420,7 @@ fn custom_types_populate_doc_types_and_icons() {
             intent: None,
             authorship: Default::default(),
             lifecycle: Default::default(),
+            attributes: Default::default(),
         },
     ];
     let store = Store::load(fixture.root(), &config).unwrap();

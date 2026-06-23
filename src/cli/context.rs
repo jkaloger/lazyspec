@@ -7,7 +7,9 @@ use console::colors_enabled;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-pub use crate::engine::context::{resolve_chain, ContextNode, RelatedRef, ResolvedContext};
+pub use crate::engine::context::{
+    resolve_chain, resolve_forest, ContextNode, RelatedRef, ResolvedContext,
+};
 
 pub fn run_json(store: &Store, id: &str, depth: usize) -> Result<String> {
     let resolved = resolve_chain(store, id, depth)?;
@@ -50,6 +52,31 @@ pub fn run_json(store: &Store, id: &str, depth: usize) -> Result<String> {
         "related": related,
         "target": resolved.target.path.to_string_lossy(),
     });
+    Ok(serde_json::to_string_pretty(&output)?)
+}
+
+/// Emit the context forest as JSON. `anchor` re-roots on a document type; `None`
+/// yields the whole-store forest. Each node carries its in-context parent edges
+/// under `implements_in_context`, matching the chain JSON shape.
+pub fn run_forest_json(store: &Store, anchor: Option<&str>) -> Result<String> {
+    let forest = resolve_forest(store, anchor);
+    let nodes: Vec<_> = forest
+        .iter()
+        .map(|n| {
+            let mut value = doc_to_json_with_family(n.doc, store);
+            let edges: Vec<_> = n
+                .parents
+                .iter()
+                .map(|p| serde_json::Value::String(p.to_string_lossy().to_string()))
+                .collect();
+            value.as_object_mut().unwrap().insert(
+                "implements_in_context".to_string(),
+                serde_json::Value::Array(edges),
+            );
+            value
+        })
+        .collect();
+    let output = serde_json::json!({ "forest": nodes });
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
@@ -244,6 +271,33 @@ fn push_card_children(store: &Store, path: &Path, indent: &str, output: &mut Str
             indent, connector, shorthand, title, status_display
         ));
     }
+}
+
+/// Render the context forest as an indented tree, anchor/root-first. Reuses the
+/// same tree renderer as the chain view (no "you are here" marker since the
+/// forest has no single target).
+pub fn run_forest_human(store: &Store, anchor: Option<&str>) -> Result<String> {
+    let forest = resolve_forest(store, anchor);
+    if forest.is_empty() {
+        return Ok(String::new());
+    }
+    // The forest has no single "you are here" target. `render_tree` stamps the
+    // marker on the node whose path equals `target.path`, so point `target` at a
+    // sentinel doc with an empty path that matches no node, suppressing the
+    // marker entirely.
+    let sentinel = DocMeta {
+        path: PathBuf::new(),
+        ..forest[0].doc.clone()
+    };
+    let resolved = ResolvedContext {
+        target: &sentinel,
+        nodes: forest,
+        forward: Vec::new(),
+        related: Vec::new(),
+    };
+    let mut output = String::new();
+    render_tree(&resolved, store, &mut output);
+    Ok(output)
 }
 
 pub fn run_human(store: &Store, id: &str, depth: usize) -> Result<String> {

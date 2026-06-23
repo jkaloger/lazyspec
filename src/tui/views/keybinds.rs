@@ -486,6 +486,18 @@ pub fn keybinds_for(ctx: KeyContext) -> Vec<KeybindGroup> {
                         k(KeyCode::Up)
                     ]
                 ),
+                bind!(
+                    "h/l",
+                    "Pivot anchor",
+                    [
+                        k(KeyCode::Char('h')),
+                        k(KeyCode::Left),
+                        k(KeyCode::Char('l')),
+                        k(KeyCode::Right)
+                    ]
+                ),
+                bind!("o", "Cycle sort column", [k(KeyCode::Char('o'))]),
+                bind!("O", "Reverse sort", [k(KeyCode::Char('O'))]),
                 bind!("g", "Top", [k(KeyCode::Char('g'))]),
                 bind!("G", "Bottom", [k(KeyCode::Char('G'))]),
                 bind!("Enter", "Open", [k(KeyCode::Enter)]),

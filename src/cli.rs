@@ -189,10 +189,17 @@ pub enum Commands {
         json: bool,
     },
     /// Show the full document chain (RFC -> Story -> Iteration)
+    ///
+    /// With an ID, shows that document's chain. With no ID, emits the
+    /// whole-store context forest; pass `--anchor <type>` to re-root the forest
+    /// on documents of that type, emitting each anchor plus its descendants.
     Context {
-        /// Document path or shorthand ID (e.g. ITERATION-001)
+        /// Document path or shorthand ID (e.g. ITERATION-001). Omit to emit the context forest.
         #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
-        id: String,
+        id: Option<String>,
+        /// Re-root the forest on documents of this type (forest mode only; ignored when an ID is given)
+        #[arg(long, conflicts_with = "id")]
+        anchor: Option<String>,
         /// Maximum hops to follow `related-to` links when collecting related records
         #[arg(long, default_value_t = 1)]
         depth: usize,

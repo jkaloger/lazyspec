@@ -353,6 +353,11 @@ pub struct GraphNode {
     /// node's ancestors). Back-reference nodes carry an empty set: the annotation
     /// belongs on the full first-encounter node line.
     pub related: Vec<String>,
+    /// The doc's custom frontmatter attributes (ITERATION-209), copied so the
+    /// nested-table renderer and the sibling-sort comparator can read attribute
+    /// cells without re-fetching from the store. Back-reference nodes carry an
+    /// empty map (their cells render blank, matching the back-ref line).
+    pub attributes: std::collections::BTreeMap<String, crate::engine::document::AttrValue>,
 }
 
 #[derive(Debug, Clone)]
@@ -441,6 +446,17 @@ pub struct App {
     pub selected_type: usize,
     pub selected_doc: usize,
     pub doc_types: Vec<DocType>,
+    /// Graph-view pivot anchor: an index into `doc_types`, or `None` for the
+    /// whole-store forest. The TUI only selects the anchor type; the re-rooting
+    /// lives in `resolve_forest` (engine).
+    pub graph_anchor: Option<usize>,
+    /// Active graph-view sibling sort column id (ITERATION-209): `path` (topo
+    /// identity), `status`, or a declared attribute name. Seeded from
+    /// `tui.graph.sort`. Cycled by `o`; presentation-only and sibling-scoped.
+    pub graph_sort_col: String,
+    /// Whether the active graph sort is reversed (toggled by `O`). Missing
+    /// attribute values still sort last regardless.
+    pub graph_sort_rev: bool,
     pub should_quit: bool,
     pub fullscreen_doc: bool,
     pub scroll_offset: u16,
@@ -615,6 +631,9 @@ impl App {
             selected_type: 0,
             selected_doc: 0,
             doc_types: Vec::new(),
+            graph_anchor: None,
+            graph_sort_col: config.ui.graph.sort.clone(),
+            graph_sort_rev: false,
             should_quit: false,
             fullscreen_doc: false,
             scroll_offset: 0,
@@ -1895,9 +1914,81 @@ impl App {
     }
 
     pub fn rebuild_graph(&mut self) {
-        let forest = crate::engine::context::resolve_forest(&self.store);
-        self.graph_nodes = flatten_forest(&forest, &self.store);
+        let anchor = self
+            .graph_anchor
+            .and_then(|idx| self.doc_types.get(idx))
+            .map(|dt| dt.as_str());
+        let forest = crate::engine::context::resolve_forest(&self.store, anchor);
+        let sort = super::graph::GraphSort {
+            col: self.graph_sort_col.clone(),
+            rev: self.graph_sort_rev,
+        };
+        self.graph_nodes = flatten_forest(&forest, &self.store, &sort);
         self.graph_selected = 0;
+    }
+
+    /// The ordered sort-column cycle for `o`: `path`, then `status`, then every
+    /// declared attribute name across the configured types (first-seen order,
+    /// de-duplicated). `related` is a display-only column and is NOT a sort key.
+    /// Built from config so the cycle tracks the project's attribute schema.
+    pub fn graph_sort_cycle(&self, config: &Config) -> Vec<String> {
+        let mut cols = vec!["path".to_string(), "status".to_string()];
+        for ty in &config.documents.types {
+            for attr in &ty.attributes {
+                if !cols.contains(&attr.name) {
+                    cols.push(attr.name.clone());
+                }
+            }
+        }
+        cols
+    }
+
+    /// Advance the graph sort column one step through `graph_sort_cycle`,
+    /// wrapping at the end. An unknown current column (e.g. a config `sort`
+    /// naming a since-removed attribute) restarts the cycle at `path`. Rebuilds
+    /// the graph so the display reorders.
+    pub fn cycle_graph_sort(&mut self, config: &Config) {
+        let cycle = self.graph_sort_cycle(config);
+        if cycle.is_empty() {
+            return;
+        }
+        let next = match cycle.iter().position(|c| *c == self.graph_sort_col) {
+            Some(idx) => (idx + 1) % cycle.len(),
+            None => 0,
+        };
+        self.graph_sort_col = cycle[next].clone();
+        self.rebuild_graph();
+    }
+
+    /// Toggle the graph sort direction (`O`) and rebuild so siblings reorder.
+    pub fn reverse_graph_sort(&mut self) {
+        self.graph_sort_rev = !self.graph_sort_rev;
+        self.rebuild_graph();
+    }
+
+    /// Advance the graph pivot anchor one step: `None` -> `Some(0)` ->
+    /// `Some(1)` -> ... clamped at the last type. Mirrors `move_type_next`
+    /// (no wraparound). Rebuilds the graph after moving.
+    pub fn move_graph_anchor_next(&mut self) {
+        if self.doc_types.is_empty() {
+            return;
+        }
+        self.graph_anchor = match self.graph_anchor {
+            None => Some(0),
+            Some(idx) => Some((idx + 1).min(self.doc_types.len() - 1)),
+        };
+        self.rebuild_graph();
+    }
+
+    /// Retreat the graph pivot anchor one step: `Some(n)` -> `Some(n-1)`,
+    /// `Some(0)` -> `None` (whole-store forest), `None` stays `None`. Mirrors
+    /// `move_type_prev` (no wraparound). Rebuilds the graph after moving.
+    pub fn move_graph_anchor_prev(&mut self) {
+        self.graph_anchor = match self.graph_anchor {
+            None | Some(0) => None,
+            Some(idx) => Some(idx - 1),
+        };
+        self.rebuild_graph();
     }
 
     pub fn current_type(&self) -> &DocType {
@@ -2456,6 +2547,7 @@ impl App {
                     intent: None,
                     authorship: Default::default(),
                     lifecycle: crate::engine::config::default_lifecycle(),
+                    attributes: Vec::new(),
                 });
                 self.settings_entry = self.settings_buffer.documents.types.len() - 1;
             }
@@ -3026,7 +3118,8 @@ impl App {
                 "settings_editing={} settings_edit_input_len={} settings_dirty={} ",
                 "settings_category={} settings_field={} settings_entry={} settings_drill={:?} ",
                 "settings_quit_prompt.active={} zone={:?} variant={:?} ",
-                "scaffold_offer={} settings_footer_error={} settings_edit_error={} {}",
+                "scaffold_offer={} settings_footer_error={} settings_edit_error={} ",
+                "graph_sort_col={} graph_sort_rev={} {}",
             ),
             self.view_mode,
             self.selected_type,
@@ -3088,6 +3181,8 @@ impl App {
             self.settings_scaffold_offer.is_some(),
             self.settings_footer_error.is_some(),
             self.settings_edit_error.is_some(),
+            self.graph_sort_col,
+            self.graph_sort_rev,
             agent,
         )
     }
@@ -3132,6 +3227,9 @@ pub(crate) mod parity_seed {
             selected_type: 0,
             selected_doc: 0,
             doc_types: Vec::new(),
+            graph_anchor: None,
+            graph_sort_col: config.ui.graph.sort.clone(),
+            graph_sort_rev: false,
             should_quit: false,
             fullscreen_doc: false,
             scroll_offset: 0,
@@ -3582,9 +3680,11 @@ mod tests {
             children: HashMap::new(),
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
+            chain_relationships: vec!["implements".to_string()],
         };
 
         let (tx, _rx) = crossbeam_channel::unbounded();
+        let config = Config::default();
 
         #[cfg(feature = "agent")]
         let agent_spawner = AgentSpawner::new(store.root());
@@ -3595,6 +3695,9 @@ mod tests {
             selected_type: 0,
             selected_doc: 0,
             doc_types: vec![DocType::new("rfc")],
+            graph_anchor: None,
+            graph_sort_col: config.ui.graph.sort.clone(),
+            graph_sort_rev: false,
             should_quit: false,
             fullscreen_doc: false,
             scroll_offset: 0,
@@ -3905,6 +4008,7 @@ mod tests {
             children: HashMap::new(),
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
+            chain_relationships: vec!["implements".to_string()],
         };
 
         let meta_a = DocMeta {
@@ -3919,6 +4023,7 @@ mod tests {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            attributes: Default::default(),
             id: "RFC-001".to_string(),
         };
         let meta_b = DocMeta {
@@ -3933,6 +4038,7 @@ mod tests {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            attributes: Default::default(),
             id: "RFC-001".to_string(),
         };
 
@@ -4128,6 +4234,7 @@ mod tests {
                     related: Vec::new(),
                     validate_ignore: false,
                     virtual_doc: false,
+                    attributes: Default::default(),
                 },
             );
             app.doc_tree[0].path = path.clone();
@@ -7303,5 +7410,396 @@ center = ["warnings"]
         // A tall viewport: everything fits, so max scroll is 0.
         let _ = render_help_to_string(&mut app, 40, 60);
         assert_eq!(app.help_max_scroll, 0);
+    }
+
+    // --- ITERATION-208 graph pivot sidebar ---------------------------------
+
+    /// Render the graph view into a fresh TestBackend and flatten the buffer to
+    /// a single string.
+    fn render_graph_to_string(app: &App, w: u16, h: u16, config: &Config) -> String {
+        use crate::tui::views::panels::draw_graph;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| draw_graph(f, app, f.area(), config))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .flat_map(|y| {
+                (0..buffer.area.width)
+                    .map(move |x| (x, y))
+                    .chain(std::iter::once((u16::MAX, y)))
+            })
+            .map(|(x, y)| {
+                if x == u16::MAX {
+                    "\n".to_string()
+                } else {
+                    buffer.cell((x, y)).unwrap().symbol().to_string()
+                }
+            })
+            .collect()
+    }
+
+    /// An app loaded from `files` with `doc_types`/plurals populated from the
+    /// default config, in Graph mode with the forest built.
+    fn graph_app(files: &[(&str, &str)]) -> (tempfile::TempDir, App) {
+        let (tmp, mut app) = app_with_store(files);
+        app.apply_config(&Config::default());
+        app.view_mode = ViewMode::Graph;
+        app.rebuild_graph();
+        (tmp, app)
+    }
+
+    fn type_index(app: &App, name: &str) -> usize {
+        app.doc_types
+            .iter()
+            .position(|t| t.as_str() == name)
+            .unwrap_or_else(|| panic!("type {name} not in doc_types"))
+    }
+
+    fn forest_files() -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "docs/rfcs/RFC-001-base.md",
+                relations_doc_md("Base", "rfc", "[]"),
+            ),
+            (
+                "docs/stories/STORY-001-mid.md",
+                relations_doc_md("Mid", "story", "- implements: RFC-001"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-leaf.md",
+                relations_doc_md("Leaf", "iteration", "- implements: STORY-001"),
+            ),
+        ]
+    }
+
+    /// AC1: graph view left column renders the type list (the pivot picker), not
+    /// the empty " Graph " block.
+    #[test]
+    fn graph_left_column_renders_pivot_type_list() {
+        let files = forest_files();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(p, c)| (*p, c.as_str())).collect();
+        let (_tmp, app) = graph_app(&refs);
+
+        let rendered = render_graph_to_string(&app, 100, 30, &Config::default());
+
+        assert!(
+            rendered.contains("Pivot"),
+            "left column should be the pivot picker, got:\n{rendered}"
+        );
+        // The whole-store ("All") row and the type plurals are listed.
+        assert!(rendered.contains("All"), "pivot lists the All row");
+        let rfc_plural = app.type_plurals.get("rfc").unwrap();
+        assert!(
+            rendered.contains(rfc_plural.as_str()),
+            "pivot lists the rfc plural '{rfc_plural}', got:\n{rendered}"
+        );
+    }
+
+    // --- ITERATION-209 nested table + sibling sort -------------------------
+
+    /// A config whose `story` type declares an `estimate` int attribute and whose
+    /// `tui.graph` renders DOC + status + estimate columns, sorting by estimate.
+    fn graph_attr_config() -> Config {
+        Config::parse(
+            r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[types.attributes]]
+name = "estimate"
+kind = "int"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "related-to"
+
+[tui.graph]
+columns = ["status", "estimate"]
+sort = "estimate"
+"#,
+        )
+        .unwrap()
+    }
+
+    /// `relations_doc_md` with an extra frontmatter line (e.g. an `estimate`).
+    fn doc_md_with_line(title: &str, doc_type: &str, related: &str, extra: &str) -> String {
+        let related_block = if related == "[]" {
+            "related: []".to_string()
+        } else {
+            format!("related:\n{related}")
+        };
+        format!(
+            "---\ntitle: \"{title}\"\ntype: {doc_type}\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\n{extra}\n{related_block}\n---\n\n{title} body\n"
+        )
+    }
+
+    /// Build a graph `App` with the store loaded under `config` (so attributes
+    /// coerce to typed values) and the graph rebuilt.
+    fn graph_app_with_config(files: &[(&str, &str)], config: &Config) -> (tempfile::TempDir, App) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        for (rel_path, contents) in files {
+            let full = tmp.path().join(rel_path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, contents).unwrap();
+        }
+        let store = Store::load(tmp.path(), config).unwrap();
+        let mut app = make_test_app(0);
+        app.store = store;
+        app.apply_config(config);
+        app.graph_sort_col = config.ui.graph.sort.clone();
+        app.view_mode = ViewMode::Graph;
+        app.rebuild_graph();
+        (tmp, app)
+    }
+
+    // AC1: the table renders a DOC header column plus each configured column,
+    // and the DOC column still carries the tree connectors.
+    #[test]
+    fn graph_table_renders_doc_and_configured_columns_with_tree_art() {
+        let files = forest_files();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(p, c)| (*p, c.as_str())).collect();
+        let (_tmp, app) = graph_app(&refs); // default columns: status, related
+
+        let rendered = render_graph_to_string(&app, 120, 30, &Config::default());
+
+        assert!(rendered.contains("DOC"), "DOC header column present");
+        assert!(rendered.contains("STATUS"), "status column header present");
+        assert!(
+            rendered.contains("RELATED"),
+            "related column header present"
+        );
+        assert!(
+            rendered.contains("─▶"),
+            "tree connectors survive in the DOC column, got:\n{rendered}"
+        );
+    }
+
+    // AC2: a column naming an attribute undeclared/absent on a row's type renders
+    // an empty cell for those rows and never panics. The RFC row has no estimate;
+    // the story rows do.
+    #[test]
+    fn graph_table_attribute_column_blank_for_rows_without_it() {
+        let config = graph_attr_config();
+        let files = [
+            (
+                "docs/rfcs/RFC-001-base.md",
+                relations_doc_md("Base", "rfc", "[]"),
+            ),
+            (
+                "docs/stories/STORY-001-a.md",
+                doc_md_with_line("A", "story", "- implements: RFC-001", "estimate: 8"),
+            ),
+            (
+                "docs/stories/STORY-002-b.md",
+                doc_md_with_line("B", "story", "- implements: RFC-001", "estimate: 3"),
+            ),
+        ];
+        let refs: Vec<(&str, &str)> = files.iter().map(|(p, c)| (*p, c.as_str())).collect();
+        let (_tmp, app) = graph_app_with_config(&refs, &config);
+
+        let rendered = render_graph_to_string(&app, 120, 30, &config);
+
+        assert!(
+            rendered.contains("ESTIMATE"),
+            "estimate column header present"
+        );
+        // The story estimates render; the RFC (no estimate attr) has no value
+        // — its row carries a blank cell, which simply means neither 8 nor 3
+        // appears beside it. We assert the present values render and nothing
+        // panicked (the render completed).
+        assert!(rendered.contains('8'), "story A estimate renders");
+        assert!(rendered.contains('3'), "story B estimate renders");
+    }
+
+    // AC3: `o` cycles the sort column, `O` reverses; the header shows the active
+    // column with a direction arrow, and siblings reorder by the active column.
+    #[test]
+    fn graph_o_cycles_sort_and_capital_o_reverses() {
+        let config = graph_attr_config();
+        let files = [
+            (
+                "docs/rfcs/RFC-001-base.md",
+                relations_doc_md("Base", "rfc", "[]"),
+            ),
+            (
+                "docs/stories/STORY-001-a.md",
+                doc_md_with_line("A", "story", "- implements: RFC-001", "estimate: 8"),
+            ),
+            (
+                "docs/stories/STORY-002-b.md",
+                doc_md_with_line("B", "story", "- implements: RFC-001", "estimate: 3"),
+            ),
+        ];
+        let refs: Vec<(&str, &str)> = files.iter().map(|(p, c)| (*p, c.as_str())).collect();
+        let (tmp, mut app) = graph_app_with_config(&refs, &config);
+        let root = tmp.path().to_path_buf();
+
+        // Seeded sort col is `estimate` (from config). Ascending: 3 (B) before 8 (A).
+        let ids = |a: &App| -> Vec<String> {
+            a.graph_nodes
+                .iter()
+                .filter(|n| !n.reference)
+                .map(|n| a.store.get(&n.path).unwrap().id.clone())
+                .collect()
+        };
+        assert_eq!(app.graph_sort_col, "estimate");
+        assert_eq!(
+            ids(&app),
+            vec!["RFC-001", "STORY-002", "STORY-001"],
+            "ascending estimate: 3 before 8"
+        );
+
+        // `O` reverses: 8 (A) before 3 (B).
+        app.handle_key(KeyCode::Char('O'), KeyModifiers::NONE, &root, &config);
+        assert!(app.graph_sort_rev, "O toggled reverse");
+        assert_eq!(
+            ids(&app),
+            vec!["RFC-001", "STORY-001", "STORY-002"],
+            "descending estimate: 8 before 3"
+        );
+        let rendered = render_graph_to_string(&app, 120, 30, &config);
+        assert!(
+            rendered.contains("ESTIMATE ▼"),
+            "header shows active col + descending arrow, got:\n{rendered}"
+        );
+
+        // `o` cycles the column. Cycle is path, status, estimate; from estimate it
+        // wraps to path.
+        app.handle_key(KeyCode::Char('o'), KeyModifiers::NONE, &root, &config);
+        assert_eq!(app.graph_sort_col, "path", "o wraps estimate -> path");
+        let rendered = render_graph_to_string(&app, 120, 30, &config);
+        assert!(
+            rendered.contains("DOC ▼"),
+            "DOC (path) header carries the active arrow, got:\n{rendered}"
+        );
+
+        // `o` again -> status, then estimate.
+        app.handle_key(KeyCode::Char('o'), KeyModifiers::NONE, &root, &config);
+        assert_eq!(app.graph_sort_col, "status");
+        app.handle_key(KeyCode::Char('o'), KeyModifiers::NONE, &root, &config);
+        assert_eq!(app.graph_sort_col, "estimate");
+    }
+
+    /// AC2: `h`/`l` move `graph_anchor` over the types with the chosen cycle
+    /// semantics (None -> Some(0) -> ... clamped; Some(0) -> None on prev).
+    #[test]
+    fn graph_hl_moves_anchor_over_types() {
+        let files = forest_files();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(p, c)| (*p, c.as_str())).collect();
+        let (tmp, mut app) = graph_app(&refs);
+        let root = tmp.path().to_path_buf();
+        let config = Config::default();
+
+        assert_eq!(app.graph_anchor, None, "default anchor is whole-store");
+
+        // l: None -> Some(0)
+        app.handle_key(KeyCode::Char('l'), KeyModifiers::NONE, &root, &config);
+        assert_eq!(app.graph_anchor, Some(0));
+
+        // l: Some(0) -> Some(1)
+        app.handle_key(KeyCode::Char('l'), KeyModifiers::NONE, &root, &config);
+        assert_eq!(app.graph_anchor, Some(1));
+
+        // h: Some(1) -> Some(0)
+        app.handle_key(KeyCode::Char('h'), KeyModifiers::NONE, &root, &config);
+        assert_eq!(app.graph_anchor, Some(0));
+
+        // h: Some(0) -> None
+        app.handle_key(KeyCode::Char('h'), KeyModifiers::NONE, &root, &config);
+        assert_eq!(app.graph_anchor, None);
+
+        // h at None: stays None (no wraparound).
+        app.handle_key(KeyCode::Char('h'), KeyModifiers::NONE, &root, &config);
+        assert_eq!(app.graph_anchor, None);
+
+        // l clamps at the last type.
+        let last = app.doc_types.len() - 1;
+        for _ in 0..app.doc_types.len() + 3 {
+            app.handle_key(KeyCode::Char('l'), KeyModifiers::NONE, &root, &config);
+        }
+        assert_eq!(app.graph_anchor, Some(last), "l clamps at the last type");
+    }
+
+    /// AC3: when an anchor is set, `rebuild_graph` re-roots the forest on that
+    /// type -- every emitted root node is of the anchor type.
+    #[test]
+    fn graph_anchor_reroots_forest_on_type() {
+        let files = forest_files();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(p, c)| (*p, c.as_str())).collect();
+        let (_tmp, mut app) = graph_app(&refs);
+
+        app.graph_anchor = Some(type_index(&app, "story"));
+        app.rebuild_graph();
+
+        // The parent RFC is pruned above the story anchor.
+        let ids: Vec<String> = app
+            .graph_nodes
+            .iter()
+            .filter_map(|n| app.store.get(&n.path).map(|d| d.id.clone()))
+            .collect();
+        assert!(
+            !ids.iter().any(|id| id == "RFC-001"),
+            "anchored forest prunes the ancestor RFC, got {ids:?}"
+        );
+        // Every depth-0 (root) node is of the anchor type 'story'.
+        for node in app
+            .graph_nodes
+            .iter()
+            .filter(|n| n.depth == 0 && !n.reference)
+        {
+            assert_eq!(
+                node.doc_type.as_str(),
+                "story",
+                "every root of the anchored forest must be the anchor type"
+            );
+        }
+        assert!(
+            app.graph_nodes
+                .iter()
+                .any(|n| n.doc_type.as_str() == "story"),
+            "anchored forest still contains the story root"
+        );
+    }
+
+    /// AC4: no anchor -> whole-store forest, identical to the engine's
+    /// `resolve_forest(store, None)` output (the prior behaviour).
+    #[test]
+    fn graph_no_anchor_is_whole_store_forest() {
+        let files = forest_files();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(p, c)| (*p, c.as_str())).collect();
+        let (_tmp, mut app) = graph_app(&refs);
+
+        app.graph_anchor = None;
+        app.rebuild_graph();
+
+        let ids: std::collections::BTreeSet<String> = app
+            .graph_nodes
+            .iter()
+            .filter_map(|n| app.store.get(&n.path).map(|d| d.id.clone()))
+            .collect();
+        assert_eq!(
+            ids,
+            std::collections::BTreeSet::from([
+                "RFC-001".to_string(),
+                "STORY-001".to_string(),
+                "ITERATION-001".to_string(),
+            ]),
+            "whole-store forest includes every doc, ancestor RFC included"
+        );
     }
 }

@@ -982,6 +982,7 @@ require_parent_status = "accepted"
                 intent: None,
                 authorship: Default::default(),
                 lifecycle: Default::default(),
+                attributes: Default::default(),
             });
             c
         };
@@ -1068,6 +1069,7 @@ name = "related-to"
                 intent: None,
                 authorship: Default::default(),
                 lifecycle: Default::default(),
+                attributes: Default::default(),
             });
             c.rules.clear();
             c

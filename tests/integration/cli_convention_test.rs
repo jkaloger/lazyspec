@@ -23,6 +23,7 @@ fn convention_config(fixture: &TestFixture) -> Config {
         intent: None,
         authorship: Default::default(),
         lifecycle: Default::default(),
+        attributes: Default::default(),
     });
     config.documents.types.push(TypeDef {
         name: "dictum".to_string(),
@@ -39,6 +40,7 @@ fn convention_config(fixture: &TestFixture) -> Config {
         intent: None,
         authorship: Default::default(),
         lifecycle: Default::default(),
+        attributes: Default::default(),
     });
     config
 }

@@ -754,6 +754,45 @@ pub fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
+/// Graph-view pivot picker. Reuses the types-view sidebar grammar: a list of
+/// document types plus a leading "All" row for the whole-store forest
+/// (`graph_anchor == None`). Highlights the current `graph_anchor`. The TUI only
+/// selects the anchor here; re-rooting lives in `resolve_forest` (engine).
+pub fn draw_graph_pivot_panel(f: &mut Frame, app: &App, area: Rect) {
+    let mut items: Vec<ListItem> = Vec::with_capacity(app.doc_types.len() + 1);
+    items.push(ListItem::new("  All".to_string()));
+    for dt in &app.doc_types {
+        let plural = app
+            .type_plurals
+            .get(&dt.to_string())
+            .map(|s| s.as_str())
+            .unwrap_or("unknown");
+        items.push(ListItem::new(format!("  {}", plural)));
+    }
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title(" Pivot "),
+        )
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    // Row 0 is the "All" (None) row; type idx N maps to row N + 1.
+    let selected = match app.graph_anchor {
+        None => 0,
+        Some(idx) => idx + 1,
+    };
+    let mut state = ListState::default().with_selected(Some(selected));
+    f.render_stateful_widget(list, area, &mut state);
+}
+
 pub fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect, config: &Config) {
     app.doc_list_height = area.height.saturating_sub(2) as usize;
     let relations_focused = app.preview_tab == PreviewTab::Relations;
@@ -1498,7 +1537,47 @@ pub fn draw_metrics_skeleton(f: &mut Frame, area: Rect) {
 /// `type_icon`, `is_last`, and `id` are passed in so the helper has no
 /// dependency on `App` (DICTUM-003). `id` is the already-uppercased doc id,
 /// used only by the back-reference branch.
+/// The legacy single-line graph row: the DOC-cell tree art plus the inline
+/// status and related annotations. Superseded by the nested table in
+/// `draw_graph` (ITERATION-209), but retained as the unit-test fixture for the
+/// tree-connector / back-reference / annotation rendering contracts.
+#[cfg(test)]
 pub(super) fn graph_node_spans(
+    node: &GraphNode,
+    type_icon: &str,
+    is_last: bool,
+    id: &str,
+) -> Vec<Span<'static>> {
+    let mut spans = graph_doc_cell_spans(node, type_icon, is_last, id);
+
+    // The legacy single-line form (still used by the unit tests) appends the
+    // status and related annotations after the tree art. In the nested-table
+    // render these are their own columns; the doc cell carries only tree+title.
+    if node.reference {
+        return spans;
+    }
+
+    spans.push(Span::styled(
+        format!(" {}", node.status),
+        Style::default().fg(status_color(&node.status)),
+    ));
+
+    for related_id in &node.related {
+        spans.push(Span::styled(
+            format!(" \u{2504}\u{25B7} {}", related_id),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    spans
+}
+
+/// The DOC-column spans for one graph row: the tree indent/connectors (the
+/// tree art preserved from the original render), then either the back-reference
+/// marker or the type icon + title. Status and related/attribute columns are
+/// rendered as separate table cells (ITERATION-209), so they are NOT included
+/// here.
+pub(super) fn graph_doc_cell_spans(
     node: &GraphNode,
     type_icon: &str,
     is_last: bool,
@@ -1533,39 +1612,83 @@ pub(super) fn graph_node_spans(
     ));
 
     spans.push(Span::styled(
-        format!("{} ", node.title),
+        node.title.clone(),
         Style::default().fg(Color::White),
     ));
-
-    spans.push(Span::styled(
-        format!("{}", node.status),
-        Style::default().fg(status_color(&node.status)),
-    ));
-
-    for related_id in &node.related {
-        spans.push(Span::styled(
-            format!(" \u{2504}\u{25B7} {}", related_id),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
 
     spans
 }
 
-pub fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
+/// The rendered text of one configured graph column for a row. `status` and
+/// `related` are built-ins (`related` joins the row's cross-cutting neighbour
+/// ids with commas); any other id is read as an attribute and rendered via its
+/// typed value, or an empty string when the attribute is absent/undeclared on
+/// the row's type (AC2). Back-reference rows carry no status/attrs, so every
+/// cell except an explicit blank renders empty.
+fn graph_column_cell(node: &GraphNode, col: &str) -> String {
+    if node.reference {
+        return String::new();
+    }
+    match col {
+        "status" => node.status.to_string(),
+        "related" => node.related.join(", "),
+        attr => node
+            .attributes
+            .get(attr)
+            .map(attr_value_display)
+            .unwrap_or_default(),
+    }
+}
+
+/// Render an [`AttrValue`] as a compact cell string.
+fn attr_value_display(v: &crate::engine::document::AttrValue) -> String {
+    use crate::engine::document::AttrValue;
+    match v {
+        AttrValue::Int(i) => i.to_string(),
+        AttrValue::Float(f) => f.to_string(),
+        AttrValue::Str(s) => s.clone(),
+        AttrValue::Bool(b) => b.to_string(),
+        AttrValue::Date(d) => d.format("%Y-%m-%d").to_string(),
+        AttrValue::Raw(raw) => raw.as_str().map(str::to_string).unwrap_or_default(),
+    }
+}
+
+pub fn draw_graph(f: &mut Frame, app: &App, area: Rect, config: &Config) {
     let layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
         .split(area);
 
-    let left = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Graph ");
-    f.render_widget(left, layout[0]);
+    draw_graph_pivot_panel(f, app, layout[0]);
 
-    let items: Vec<ListItem> = app
+    let columns = &config.ui.graph.columns;
+
+    // Header: the DOC column, then each configured column. The active sort column
+    // (if it is one of the rendered columns, or the special DOC/path case) carries
+    // a direction arrow.
+    let arrow = if app.graph_sort_rev { " ▼" } else { " ▲" };
+    let header_cell = |label: &str, sort_id: &str| {
+        let marked = app.graph_sort_col == sort_id;
+        let text = if marked {
+            format!("{label}{arrow}")
+        } else {
+            label.to_string()
+        };
+        Cell::from(text).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+
+    let mut header_cells = vec![header_cell("DOC", "path")];
+    for col in columns {
+        let label = col.to_uppercase();
+        header_cells.push(header_cell(&label, col));
+    }
+    let header = Row::new(header_cells);
+
+    let rows: Vec<Row> = app
         .graph_nodes
         .iter()
         .enumerate()
@@ -1584,11 +1707,34 @@ pub fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
                 .get(&node.path)
                 .map(|d| d.id.to_uppercase())
                 .unwrap_or_default();
-            ListItem::new(Line::from(graph_node_spans(node, type_icon, is_last, &id)))
+
+            let mut cells = vec![Cell::from(Line::from(graph_doc_cell_spans(
+                node, type_icon, is_last, &id,
+            )))];
+            for col in columns {
+                let text = graph_column_cell(node, col);
+                let cell = if col == "status" && !node.reference {
+                    Cell::from(text).style(Style::default().fg(status_color(&node.status)))
+                } else {
+                    Cell::from(text).style(Style::default().fg(Color::DarkGray))
+                };
+                cells.push(cell);
+            }
+            Row::new(cells)
         })
         .collect();
 
-    let list = List::new(items)
+    // DOC takes half the width; the remaining columns split the rest evenly.
+    let mut widths = vec![Constraint::Percentage(50)];
+    if !columns.is_empty() {
+        let each = (50 / columns.len() as u16).max(1);
+        for _ in columns {
+            widths.push(Constraint::Percentage(each));
+        }
+    }
+
+    let table = Table::new(rows, widths)
+        .header(header)
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -1596,14 +1742,14 @@ pub fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
                 .border_style(Style::default().fg(Color::Cyan))
                 .title(" Dependency Graph "),
         )
-        .highlight_style(
+        .row_highlight_style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         );
 
-    let mut state = ListState::default().with_selected(Some(app.graph_selected));
-    f.render_stateful_widget(list, layout[1], &mut state);
+    let mut state = TableState::default().with_selected(Some(app.graph_selected));
+    f.render_stateful_widget(table, layout[1], &mut state);
 }
 
 fn severity_str(s: &Severity) -> &'static str {
@@ -2647,6 +2793,7 @@ mod tests {
             validate_ignore: false,
             path: PathBuf::from("docs/rfcs/RFC-001.md"),
             virtual_doc: false,
+            attributes: Default::default(),
         }
     }
 
@@ -2966,6 +3113,7 @@ mod tests {
             depth,
             reference,
             related,
+            attributes: std::collections::BTreeMap::new(),
         }
     }
 

@@ -37,8 +37,9 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
             }
         })?;
 
-    // BFS upward over `implements` edges. The seen-set both dedups shared
-    // ancestors (diamonds) and guards against cycles (re-entering a node).
+    // BFS upward over the configured parent-child relationships. The
+    // seen-set both dedups shared ancestors (diamonds) and guards against
+    // cycles (re-entering a node).
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut queue: VecDeque<&DocMeta> = VecDeque::new();
     let mut discovered: HashMap<PathBuf, &DocMeta> = HashMap::new();
@@ -51,7 +52,11 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
     while let Some(current) = queue.pop_front() {
         let mut parents: Vec<PathBuf> = Vec::new();
         for rel in &current.related {
-            if rel.rel_type.as_str() != "implements" {
+            if !store
+                .chain_relationships
+                .iter()
+                .any(|r| r.as_str() == rel.rel_type.as_str())
+            {
                 continue;
             }
             let Some(parent) = store.resolve_relation_target(&rel.target) else {
@@ -70,8 +75,9 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
 
     let nodes = topo_order(&discovered, &node_parents);
 
-    // Forward context: docs whose `implements` points at the target. Each is
-    // one hop out, reached through the target it implements.
+    // Forward context: docs that link to the target via any configured
+    // parent-child relationship. Each is one hop out, reached through the
+    // target.
     let target_path = doc.path.clone();
     let forward: Vec<RelatedRef> = store
         .reverse_links
@@ -79,11 +85,16 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
         .map(|links| {
             links
                 .iter()
-                .filter(|(rel_type, _)| rel_type.as_str() == "implements")
-                .filter_map(|(_, source_path)| store.get(source_path))
-                .map(|d| RelatedRef {
+                .filter(|(rel_type, _)| {
+                    store
+                        .chain_relationships
+                        .iter()
+                        .any(|r| r.as_str() == rel_type.as_str())
+                })
+                .filter_map(|(rel_type, source_path)| store.get(source_path).map(|d| (rel_type, d)))
+                .map(|(rel_type, d)| RelatedRef {
                     doc: d,
-                    relation: RelationType::new("implements"),
+                    relation: rel_type.clone(),
                     distance: 1,
                     via: target_path.clone(),
                 })
@@ -156,45 +167,121 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
     })
 }
 
-/// Whole-store context forest, roots-first. Discovers every document and, for
-/// each, its in-graph `implements` parents (resolved via
-/// [`Store::resolve_relation_target`]), then orders the full DAG with
-/// [`topo_order`] so each multi-parent node appears after all its parents and
-/// exactly once. Roots (docs with no resolvable in-graph `implements` parent)
-/// come first.
+/// Context forest, roots-first. When `anchor` is `None`, discovers every
+/// document and, for each, its in-graph parents (resolved via
+/// [`Store::resolve_relation_target`] over the configured parent-child
+/// relationships), then orders the full DAG with [`topo_order`] so each
+/// multi-parent node appears after all its parents and exactly once. Roots
+/// (docs with no resolvable in-graph parent) come first.
+///
+/// When `anchor` is `Some(type)`, the forest is re-rooted on documents whose
+/// `doc_type` matches `type`: roots become the anchor-type docs and only their
+/// chain-descendant subtrees are emitted. Ancestors above an anchor (and any
+/// doc not reachable downward from an anchor) are pruned. A descendant reachable
+/// from two anchor-type docs is retained once with both anchor-side parents, so
+/// it appears under each anchor in a tree render without looping.
 ///
 /// Parents are sourced from each doc's own declared `related`, NOT from
 /// `forward_links`: `propagate_parent_links` copies a parent's forward links
 /// onto nested child docs, so reading `forward_links` would over-collect
-/// inherited `implements` edges (the same trap `resolve_chain` avoids). Every
+/// inherited parent-child edges (the same trap `resolve_chain` avoids). Every
 /// in-graph parent is retained on the node so multi-parent edges survive.
-pub fn resolve_forest(store: &Store) -> Vec<ContextNode<'_>> {
-    let mut discovered: HashMap<PathBuf, &DocMeta> = HashMap::new();
-    let mut node_parents: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-
-    for doc in store.docs.values() {
-        discovered.insert(doc.path.clone(), doc);
-
-        let mut parents: Vec<PathBuf> = Vec::new();
-        for rel in &doc.related {
-            if rel.rel_type.as_str() != "implements" {
-                continue;
+pub fn resolve_forest<'a>(store: &'a Store, anchor: Option<&str>) -> Vec<ContextNode<'a>> {
+    // Each doc's in-graph parents over the configured chain relationships.
+    let all_parents: HashMap<PathBuf, Vec<PathBuf>> = store
+        .docs
+        .values()
+        .map(|doc| {
+            let mut parents: Vec<PathBuf> = Vec::new();
+            for rel in &doc.related {
+                if !store
+                    .chain_relationships
+                    .iter()
+                    .any(|r| r.as_str() == rel.rel_type.as_str())
+                {
+                    continue;
+                }
+                let Some(parent) = store.resolve_relation_target(&rel.target) else {
+                    continue;
+                };
+                if !parents.contains(&parent.path) {
+                    parents.push(parent.path.clone());
+                }
             }
-            let Some(parent) = store.resolve_relation_target(&rel.target) else {
-                continue;
-            };
-            if !parents.contains(&parent.path) {
-                parents.push(parent.path.clone());
+            (doc.path.clone(), parents)
+        })
+        .collect();
+
+    let Some(anchor_type) = anchor else {
+        let discovered: HashMap<PathBuf, &DocMeta> =
+            store.docs.values().map(|d| (d.path.clone(), d)).collect();
+        return topo_order(&discovered, &all_parents);
+    };
+
+    // Child adjacency (parent -> children) over the chain edges, so we can walk
+    // downward from each anchor-type doc.
+    let mut children: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    for (child, parents) in &all_parents {
+        for parent in parents {
+            children
+                .entry(parent.clone())
+                .or_default()
+                .push(child.clone());
+        }
+    }
+
+    // BFS down from every anchor-type doc, collecting the union of descendant
+    // subtrees. The seen-set dedups diamonds and guards against cycles.
+    let mut subtree: HashSet<PathBuf> = HashSet::new();
+    let mut queue: VecDeque<PathBuf> = store
+        .docs
+        .values()
+        .filter(|d| d.doc_type.as_str() == anchor_type)
+        .map(|d| d.path.clone())
+        .collect();
+    for path in &queue {
+        subtree.insert(path.clone());
+    }
+    while let Some(current) = queue.pop_front() {
+        if let Some(kids) = children.get(&current) {
+            for kid in kids {
+                if subtree.insert(kid.clone()) {
+                    queue.push_back(kid.clone());
+                }
             }
         }
-        node_parents.insert(doc.path.clone(), parents);
     }
+
+    let discovered: HashMap<PathBuf, &DocMeta> = store
+        .docs
+        .values()
+        .filter(|d| subtree.contains(&d.path))
+        .map(|d| (d.path.clone(), d))
+        .collect();
+
+    // Keep only parent edges that stay within the pruned subtree, so anchors
+    // surface as roots and pruned ancestors do not reattach.
+    let node_parents: HashMap<PathBuf, Vec<PathBuf>> = discovered
+        .keys()
+        .map(|path| {
+            let parents = all_parents
+                .get(path)
+                .map(|ps| {
+                    ps.iter()
+                        .filter(|p| subtree.contains(*p))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            (path.clone(), parents)
+        })
+        .collect();
 
     topo_order(&discovered, &node_parents)
 }
 
 /// Deterministic topological ordering of the discovered DAG, root-first.
-/// `node_parents` holds the `implements` edges (child -> parents). A node is
+/// `node_parents` holds the parent-child edges (child -> parents). A node is
 /// emitted only once all its parents have been emitted; ready nodes are
 /// broken by path for determinism. For a single-parent chain this yields the
 /// old `chain` order (root first, target last). Cyclic input has no valid
@@ -533,7 +620,7 @@ mod tests {
             ),
         ]);
 
-        let forest = resolve_forest(&store);
+        let forest = resolve_forest(&store, None);
         let ids: Vec<&str> = forest.iter().map(|n| n.doc.id.as_str()).collect();
 
         assert_eq!(ids, vec!["RFC-001", "STORY-001", "ITERATION-001"]);
@@ -554,7 +641,7 @@ mod tests {
             ),
         ]);
 
-        let forest = resolve_forest(&store);
+        let forest = resolve_forest(&store, None);
         let ids: Vec<&str> = forest.iter().map(|n| n.doc.id.as_str()).collect();
 
         // All four docs present.
@@ -597,7 +684,7 @@ mod tests {
             ),
         ]);
 
-        let forest = resolve_forest(&store);
+        let forest = resolve_forest(&store, None);
 
         // Shared ancestor present exactly once.
         let base_count = forest.iter().filter(|n| n.doc.id == "RFC-001").count();
@@ -624,12 +711,140 @@ mod tests {
             ),
         ]);
 
-        let forest = resolve_forest(&store);
+        let forest = resolve_forest(&store, None);
 
         assert_eq!(
             node_ids(&forest),
             BTreeSet::from(["RFC-001".to_string(), "RFC-002".to_string()])
         );
         assert_eq!(forest.len(), 2, "cycle must not duplicate nodes");
+    }
+
+    // --- resolve_forest anchored -------------------------------------------
+
+    #[test]
+    fn forest_anchor_roots_on_type_and_prunes_ancestors() {
+        // AC1: anchor=story -> roots are all stories with their iteration
+        // descendants, no parent rfc above.
+        let (_tmp, store) = store_from(&[
+            ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
+            (
+                "docs/stories/STORY-001-a.md",
+                &doc_md("A", "story", "- implements: RFC-001"),
+            ),
+            (
+                "docs/stories/STORY-002-b.md",
+                &doc_md("B", "story", "- implements: RFC-001"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-leaf.md",
+                &doc_md("Leaf", "iteration", "- implements: STORY-001"),
+            ),
+        ]);
+
+        let forest = resolve_forest(&store, Some("story"));
+
+        assert_eq!(
+            node_ids(&forest),
+            BTreeSet::from([
+                "STORY-001".to_string(),
+                "STORY-002".to_string(),
+                "ITERATION-001".to_string(),
+            ]),
+            "anchored forest excludes the parent RFC and includes the iteration descendant"
+        );
+        // Stories are roots (no in-graph parents after pruning).
+        assert!(forest
+            .iter()
+            .find(|n| n.doc.id == "STORY-001")
+            .unwrap()
+            .parents
+            .is_empty());
+        // The iteration retains its story parent within the subtree.
+        assert_eq!(
+            parents_of(&forest, "ITERATION-001"),
+            BTreeSet::from(["STORY-001".to_string()])
+        );
+    }
+
+    #[test]
+    fn forest_none_matches_whole_store() {
+        // AC2: resolve_forest(store, None) == today's whole-store output.
+        let (_tmp, store) = store_from(&[
+            ("docs/rfcs/RFC-001-a.md", &doc_md("A", "rfc", "[]")),
+            ("docs/rfcs/RFC-002-b.md", &doc_md("B", "rfc", "[]")),
+            (
+                "docs/stories/STORY-001-childa.md",
+                &doc_md("ChildA", "story", "- implements: RFC-001"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-leaf.md",
+                &doc_md("Leaf", "iteration", "- implements: STORY-001"),
+            ),
+        ]);
+
+        let forest = resolve_forest(&store, None);
+        let ids: Vec<&str> = forest.iter().map(|n| n.doc.id.as_str()).collect();
+
+        // Whole store, every doc once, root-first topological order.
+        assert_eq!(
+            node_ids(&forest),
+            BTreeSet::from([
+                "RFC-001".to_string(),
+                "RFC-002".to_string(),
+                "STORY-001".to_string(),
+                "ITERATION-001".to_string(),
+            ])
+        );
+        assert!(
+            ids.iter().position(|i| *i == "RFC-001").unwrap()
+                < ids.iter().position(|i| *i == "STORY-001").unwrap()
+        );
+        assert!(
+            ids.iter().position(|i| *i == "STORY-001").unwrap()
+                < ids.iter().position(|i| *i == "ITERATION-001").unwrap()
+        );
+    }
+
+    #[test]
+    fn forest_anchor_diamond_descendant_under_each_anchor_no_loop() {
+        // AC4: a doc with two anchor-type ancestors appears once, retaining both
+        // anchor parents, no infinite loop.
+        let (_tmp, store) = store_from(&[
+            ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
+            (
+                "docs/stories/STORY-001-left.md",
+                &doc_md("Left", "story", "- implements: RFC-001"),
+            ),
+            (
+                "docs/stories/STORY-002-right.md",
+                &doc_md("Right", "story", "- implements: RFC-001"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-leaf.md",
+                &doc_md(
+                    "Leaf",
+                    "iteration",
+                    "- implements: STORY-001\n- implements: STORY-002",
+                ),
+            ),
+        ]);
+
+        let forest = resolve_forest(&store, Some("story"));
+
+        let leaf_count = forest
+            .iter()
+            .filter(|n| n.doc.id == "ITERATION-001")
+            .count();
+        assert_eq!(leaf_count, 1, "diamond descendant appears exactly once");
+        assert_eq!(
+            parents_of(&forest, "ITERATION-001"),
+            BTreeSet::from(["STORY-001".to_string(), "STORY-002".to_string()]),
+            "descendant retains both anchor-type parents"
+        );
+        assert!(
+            !forest.iter().any(|n| n.doc.id == "RFC-001"),
+            "ancestor RFC pruned"
+        );
     }
 }

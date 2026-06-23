@@ -287,15 +287,35 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Some(Commands::Context { id, depth, json }) => {
+        Some(Commands::Context {
+            id,
+            anchor,
+            depth,
+            json,
+        }) => {
             refresh_github_cache(&cwd, &config);
             let store = Store::load(&cwd, &config)?;
-            if json {
-                let output = lazyspec::cli::context::run_json(&store, &id, depth)?;
-                println!("{}", output);
-            } else {
-                let output = lazyspec::cli::context::run_human(&store, &id, depth)?;
-                print!("{}", output);
+            match id {
+                Some(id) => {
+                    if json {
+                        let output = lazyspec::cli::context::run_json(&store, &id, depth)?;
+                        println!("{}", output);
+                    } else {
+                        let output = lazyspec::cli::context::run_human(&store, &id, depth)?;
+                        print!("{}", output);
+                    }
+                }
+                None => {
+                    if json {
+                        let output =
+                            lazyspec::cli::context::run_forest_json(&store, anchor.as_deref())?;
+                        println!("{}", output);
+                    } else {
+                        let output =
+                            lazyspec::cli::context::run_forest_human(&store, anchor.as_deref())?;
+                        print!("{}", output);
+                    }
+                }
             }
         }
         Some(Commands::Convention {
