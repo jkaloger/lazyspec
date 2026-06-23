@@ -7,8 +7,6 @@ description: Use when critiquing a document against its intent and acceptance cr
 CONFORMANCE FIRST, QUALITY SECOND
 ```
 
-Review critiques a document against its declared intent and acceptance criteria, then its quality -- blocking on conformance failure before advancing.
-
 <HARD-GATE>
 Do NOT review quality before conformance. The document's acceptance criteria and declared intent come first; block on any conformance failure before looking at quality.
 Do NOT approve without fresh verification evidence gathered in this session.
@@ -28,7 +26,7 @@ Documents stored in GitHub Issues (store = "github-issues") are managed through 
 - To modify after creation: `lazyspec update <ID> --body "new content"` or `--body-file <path>`.
 </GITHUB-ISSUES-DOCUMENTS>
 
-Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. On failure, check `--help` before retrying.
+Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. Read type/lifecycle facts from the CLI, never from `.lazyspec/` graph files directly. On failure, check `--help` before retrying.
 
 ## Preflight
 
@@ -50,11 +48,3 @@ Express targets generically: "the document's acceptance criteria", "its declared
 
 - **On pass:** route to /advance to move status along the lifecycle edge that review precedes.
 - **On fail:** route back to the appropriate authoring verb (one at or below the type's ceiling: /scaffold, /co-write, or /generate) for a document, or to /execute for work.
-
-## Rules
-
-- The type and its intent/lifecycle are read from `config --json`. No type name is load-bearing in this prose.
-- Conformance (intent + ACs) before quality, always. Block on conformance failure.
-- Approve only on fresh, in-session verification evidence.
-- Route to /advance on pass; route back to the authoring verb or /execute on fail.
-- Read type/lifecycle facts from config, never from `.lazyspec/` graph files directly.

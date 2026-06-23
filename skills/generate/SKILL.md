@@ -7,8 +7,6 @@ description: Use when authoring a full document body of a configured type from c
 WRITE THE WHOLE BODY, THEN ASK FOR REVIEW
 ```
 
-Generate is the top rung: AI assembles context and writes the complete body, permitted only when the type's authorship ceiling is `generated`.
-
 <HARD-GATE>
 Do NOT proceed unless the target type's `authorship` ceiling is `generated`. For `human` and `assisted` types, refuse and name the permitted verb. Read the ceiling from `lazyspec config --json`.
 Generate writes the full body, then routes to /review -- it does not self-approve.
@@ -25,7 +23,7 @@ Set body at creation: `lazyspec create <type> "<title>" --body "content"` or `--
 GitHub-issues docs additionally: never edit `.lazyspec/cache/` mirrors (read-only); always reference docs by shorthand ID (e.g. STORY-095), not cache paths.
 </BODY-CONTENT>
 
-Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. On failure, check `--help` before retrying.
+Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. Read parent/relation/gate facts from the CLI, never from `.lazyspec/` graph files directly. On failure, check `--help` before retrying.
 
 ## Authorship Ceiling
 
@@ -55,11 +53,3 @@ where `<type>` and the ceiling are the actual values read from config for that r
 3. **Write the full body** from gathered context and resolved gaps toward the type's `intent` and section guidance. Write to a file.
 4. **Apply:** `lazyspec update <id> --body-file <path>`.
 5. **Request review:** route to /review. Generate never approves its own output.
-
-## Rules
-
-- The `<type>` is always a parameter read from `config --json`. No type name is load-bearing in this prose.
-- Permitted only when `authorship` is `generated`; refuse for `human` and `assisted`, reporting the config-read ceiling and permitted verb -- never a baked table.
-- Resolve from context first; ask the human only the decisions context cannot settle (lighter capture than /co-write). Never interrogate the whole design when the context already answers it.
-- Always route to /review on completion.
-- Read parent/relation/gate facts from config, never from `.lazyspec/` graph files directly.

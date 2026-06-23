@@ -57,10 +57,3 @@ Use /lazy skill.shape: double_circle
    - **Recommendation:** what should be done
 7. **Validate:** `lazyspec validate --json`
 8. **Present** findings to user grouped by severity. Do NOT create iterations.
-
-## Rules
-
-- Audits document findings, they don't fix them
-- Each finding must have a severity rating
-- Link to stories/RFCs being audited when they exist
-- Group findings by severity when presenting

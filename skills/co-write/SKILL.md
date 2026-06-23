@@ -7,8 +7,6 @@ description: Use when drafting a document of a configured type collaboratively -
 PROPOSE A DRAFT, THE HUMAN EDITS, ITERATE
 ```
 
-Co-write is the middle rung: AI scaffolds, then proposes a body toward the type's intent; the human revises and the loop repeats.
-
 <HARD-GATE>
 Do NOT proceed when the target type's `authorship` ceiling is `human` -- that type tops out at scaffold. Read the ceiling from `lazyspec config --json` and refuse, naming the ceiling.
 Co-write proposes a draft for human editing; it does not finalise a body unilaterally.
@@ -25,7 +23,7 @@ Set body at creation: `lazyspec create <type> "<title>" --body "content"` or `--
 GitHub-issues docs additionally: never edit `.lazyspec/cache/` mirrors (read-only); always reference docs by shorthand ID (e.g. STORY-095), not cache paths.
 </BODY-CONTENT>
 
-Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. On failure, check `--help` before retrying.
+Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. Read parent/relation/gate facts from the CLI, never from `.lazyspec/` graph files directly. On failure, check `--help` before retrying.
 
 ## Authorship Ceiling
 
@@ -54,11 +52,3 @@ Scaffold, interview, then propose:
 3. **Propose a draft body** toward the type's `intent` and section guidance from config, incorporating the interview answers. Write the proposal to a file.
 4. **Present for human edits.** The human revises; iterate the proposal with them.
 5. **Apply the accepted draft:** `lazyspec update <id> --body-file <path>`.
-
-## Rules
-
-- The `<type>` is always a parameter read from `config --json`. No type name is load-bearing in this prose.
-- Refuse when `authorship` is `human`; the refusal reports the config-read ceiling, not a baked table.
-- Interview before drafting: resolve every open design decision with the human (one question at a time, recommended answer each, explore rather than ask when you can) before proposing the body.
-- Always propose-for-edit; never finalise a body without the human in the loop.
-- Read parent/relation/gate facts from config, never from `.lazyspec/` graph files directly.

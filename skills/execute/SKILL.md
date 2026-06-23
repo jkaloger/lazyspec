@@ -34,12 +34,13 @@ STOP and dispatch a subagent if you catch yourself thinking:
 
 All of these mean: write the task text, dispatch the implementer, run the review loop. The orchestrator's hands stay off the files. Violating the letter of this gate is violating its spirit.
 
-| Rationalization | Reality |
-|---|---|
-| "Change is tiny, ~N lines" | Tiny changes break things too, and the review loop is cheap. Size is not a dispatch criterion. |
-| "I already have the diff in mind" | Then the task text is trivial to write. Dispatch it. |
-| "Momentum -- just do it" | Momentum is the pressure this gate exists to resist. Dispatch. |
-| "I'll dispatch the non-trivial ones only" | Every task is dispatched. Selective dispatch is no dispatch discipline at all. |
+| Rationalization                           | Reality                                                                                        |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| "Change is tiny, ~N lines"                | Tiny changes break things too, and the review loop is cheap. Size is not a dispatch criterion. |
+| "I already have the diff in mind"         | Then the task text is trivial to write. Dispatch it.                                           |
+| "Momentum -- just do it"                  | Momentum is the pressure this gate exists to resist. Dispatch.                                 |
+| "I'll dispatch the non-trivial ones only" | Every task is dispatched. Selective dispatch is no dispatch discipline at all.                 |
+
 </RED-FLAGS>
 
 <GITHUB-ISSUES-DOCUMENTS>
@@ -50,7 +51,7 @@ Documents stored in GitHub Issues (store = "github-issues") are managed through 
 - To modify after creation: `lazyspec update <ID> --body "new content"` or `--body-file <path>`.
 </GITHUB-ISSUES-DOCUMENTS>
 
-Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. On failure, check `--help` before retrying.
+Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. Read type/chain facts from the CLI, never from `.lazyspec/` graph files directly. On failure, check `--help` before retrying.
 
 ## No Ceiling
 
@@ -66,12 +67,12 @@ Execute is **work, not authoring.** The `scaffold < co-write < generate` ceiling
 
 ## Subagent Dispatch
 
-| Operation | Agent type | Model tier | Context to provide |
-|-----------|-----------|-----------|--------------------|
-| Implement task | general-purpose | most capable | Full task text, parent intent, acceptance criteria, prior task results, convention context |
-| Review task (AC compliance) | general-purpose | most capable | Task text, acceptance criteria, implementer report |
-| Review task (code quality) | general-purpose | lighter | Changed files, scoped test output, quality criteria |
-| Final review | general-purpose | most capable | All acceptance criteria, full implementation summary |
+| Operation                   | Agent type      | Model tier   | Context to provide                                                                         |
+| --------------------------- | --------------- | ------------ | ------------------------------------------------------------------------------------------ |
+| Implement task              | general-purpose | most capable | Full task text, parent intent, acceptance criteria, prior task results, convention context |
+| Review task (AC compliance) | general-purpose | most capable | Task text, acceptance criteria, implementer report                                         |
+| Review task (code quality)  | general-purpose | lighter      | Changed files, scoped test output, quality criteria                                        |
+| Final review                | general-purpose | most capable | All acceptance criteria, full implementation summary                                       |
 
 Model tier is by capability, not product name: "most capable" for implementation and the correctness-bearing reviews, a "lighter" model for the code-quality pass. The orchestrator picks the concrete model.
 
@@ -110,15 +111,3 @@ The orchestrator runs this gate itself after all tasks complete. Subagents only 
 3. Run `lazyspec validate --json`.
 4. Dispatch a final reviewer (most capable model) with all acceptance criteria and the implementation summary.
 5. On pass, route to /review for critique, then to /advance for the status move. **/advance owns the status transition** -- execute does not move statuses itself.
-
-## Rules
-
-- The delivery `<type>` is read from `config --json`. No type name is load-bearing in this prose.
-- No ceiling concept -- execute is work, not authoring.
-- Fresh subagent per task (no context pollution). The reviewer is always a separate subagent from the implementer.
-- Stage 1 (AC compliance) MUST pass before Stage 2 (code quality).
-- Subagents receive full task text, not file references.
-- One task, one review cycle. No batching. Sequential dispatch only -- no parallel implementers.
-- Subagents run scoped checks only. The full check runs once, by the orchestrator, at Final Review.
-- Route to /review then /advance on completion; advance owns the status move.
-- Read type/chain facts from config and the CLI, never from `.lazyspec/` graph files directly.

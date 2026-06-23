@@ -7,8 +7,6 @@ description: Use when creating a new document of a configured type at the most m
 CREATE THE SHELL, HAND THE BODY BACK
 ```
 
-Scaffold is the floor of the authorship order: AI makes the file and links it, then the human writes the body.
-
 <HARD-GATE>
 Do NOT write the document body. Scaffold creates the file, frontmatter, and links, then surfaces the type's intent and section guidance for the human to fill in.
 Read the target type's config from `lazyspec config --json` before creating anything; the type is a parameter, never assumed.
@@ -25,7 +23,7 @@ Set body at creation: `lazyspec create <type> "<title>" --body "content"` or `--
 GitHub-issues docs additionally: never edit `.lazyspec/cache/` mirrors (read-only); always reference docs by shorthand ID (e.g. STORY-095), not cache paths.
 </BODY-CONTENT>
 
-Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. On failure, check `--help` before retrying.
+Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. Read parent/relation/gate facts from the CLI, never from `.lazyspec/` graph files directly. On failure, check `--help` before retrying.
 
 ## Authorship Ceiling
 
@@ -45,10 +43,3 @@ Scaffold is the floor of that order, so it is permitted on **every** `authorship
 2. **Link to the parent:** if config gives the type a `parent_type` and a parent exists, `lazyspec link <new-id> implements <parent-id>` -- using the configured relation name from `relationships` (the default config uses `implements`; read it, don't bake it).
 3. **Surface intent + guidance:** show the human the type's `intent` from config and the per-section `<!-- guidance -->` comments from the scaffolded body. Tell the human these are the sections to fill in.
 4. **Hand back:** stop. The human writes the body. Scaffold does not draft prose.
-
-## Rules
-
-- The `<type>` is always a parameter read from `config --json`. No type name is load-bearing in this prose.
-- Scaffold never refuses on ceiling grounds -- it is the floor of `scaffold < co-write < generate`.
-- Create and link only; never write the body.
-- Read parent/relation/gate facts from config, never from `.lazyspec/` graph files directly.

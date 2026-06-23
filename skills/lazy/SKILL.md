@@ -92,12 +92,7 @@ After every graph-mutating dispatch (/advance and the authoring verbs), run `laz
 </NEVER>
 
 <RED-FLAGS>
-STOP and present the plan for approval if you catch yourself thinking:
-- "The user already said 'do it' / 'use /lazy', so I'll create + link now"
-- "They named the fix, the plan is obvious, just build it"
-- "The boundary gate / require_parent_status is satisfied, so I can proceed"
-- "I'm the orchestrator running inline -- the stop only applies to the dispatched verb"
-- "Confirming is a formality, I'll show them after it's done"
+STOP and present the plan for approval if you catch yourself rationalizing past the gate:
 
 | Rationalization | Reality |
 |---|---|
@@ -106,16 +101,6 @@ STOP and present the plan for approval if you catch yourself thinking:
 | "The fix is named, the plan is obvious" | Obvious to you is not confirmed by them. The parent link and scope are decisions -- surface them. |
 | "Gate is satisfied, so it's automatic" | Gate-clear makes the next step eligible, not approved. Eligibility is not consent. |
 | "Inline orchestration is exempt" | The gate binds the actor, not the invocation path. Inline does not skip it. |
-
-## Confirm the plan before mutating
-
-Before the first mutation or `/execute` in a turn, run this checklist. If any answer is "no", STOP and complete the missing step:
-
-- [ ] Ran preflight (`config`/`status`/`context`) and located the position in the DAG
-- [ ] Presented the planned commands + direction to the user (doc, type, parent link, what the fix/feature is)
-- [ ] User approved THIS direction in THIS turn (not a prior general go-ahead)
-- [ ] Dispatching the correct verb for the work and the type's authorship ceiling
-- [ ] Not skipping to `/execute` without a delivery doc that carries a task breakdown
 </RED-FLAGS>
 
 <BODY-CONTENT>
@@ -123,7 +108,7 @@ Set body at creation: `lazyspec create <type> "<title>" --body "content"` or `--
 GitHub-issues docs additionally: never edit `.lazyspec/cache/` mirrors (read-only); always reference docs by shorthand ID (e.g. STORY-095), not cache paths.
 </BODY-CONTENT>
 
-Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. On failure, check `--help` before retrying.
+Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. Read DAG/gate/status facts from the CLI, never from `.lazyspec/` graph files directly. On failure, check `--help` before retrying.
 
 ## Preflight (the routing read)
 
@@ -180,14 +165,3 @@ with every value read from config + status for that run.
 - **Scope to the doc just touched.** `validate` is a whole-repo check and will report pre-existing findings across unrelated documents. Filter its output to findings naming the document this mutation created, linked, or advanced. Fix only the broken or dangling relation **this mutation introduced** before continuing. Do not block on pre-existing repo-wide findings.
 - `/execute` and `/review` are not graph mutators in this loop, so they need no validate step here (`/execute` runs its own `validate` at Final Review).
 - **Known limitation:** invoking a mutating verb standalone -- outside `/lazy` -- skips this check. `/lazy` is the canonical entry router; that is where graph integrity is enforced.
-
-## Rules
-
-- All routing reads from `config --json` / `status --json` / `context --json` at runtime. No type name and no chain are load-bearing in this prose.
-- Type boundaries are the UNION of `parent_type` edges and parent-child `rules`. A config with every `parent_type` null still has boundaries -- read them from the rules.
-- Within-document progression is automatic; crossing a type boundary is never automatic. If the parent type the human must cross into is itself empty, report the full chain of crossings, not just the nearest.
-- `/execute` is never auto-dispatched. Bring the delivery doc to a reviewed, ready-to-execute plan and STOP; the human runs `/execute`. No work without a reviewed plan.
-- Dispatch only verbs at or below the type's authorship ceiling.
-- A reported bug/defect goes through root cause (systematic-debugging) before any fix doc is authored; the fix-doc type and its links are read from config and must satisfy the type's relation rules -- never create a standalone doc that bypasses a rule.
-- After each mutating dispatch (`/advance`, `/scaffold`, `/co-write`, `/generate`), validate the touched doc and fix only the relation breakage this mutation introduced; standalone verb invocation outside `/lazy` skips this.
-- Read DAG/gate/status facts from the CLI, never from `.lazyspec/` graph files directly.

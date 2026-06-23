@@ -173,12 +173,3 @@ Write ALL config through these subcommands, in this order. Never touch the TOML 
 
 3. **Reiterate:** to add another type, run `/configure-type` again. This skill does
    one type per run.
-
-## Rules
-
-- One type per run. Configuring more types means re-running the skill.
-- All config writes go through `config add-type` / `set-lifecycle` / `add-gate`;
-  never hand-edit `.lazyspec.toml`.
-- Explore `config --json` before asking; recommend an answer for every question.
-- Each type carries its own inline lifecycle DAG (ADR-021).
-- The user owns the methodology; this skill only records it (ADR-011, ADR-019).

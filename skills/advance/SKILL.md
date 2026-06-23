@@ -28,7 +28,7 @@ Documents stored in GitHub Issues (store = "github-issues") are managed through 
 - To modify after creation: `lazyspec update <ID> --body "new content"` or `--body-file <path>`.
 </GITHUB-ISSUES-DOCUMENTS>
 
-Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. On failure, check `--help` before retrying.
+Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. Read lifecycle and gate facts from the CLI, never from `.lazyspec/` graph files directly. On failure, check `--help` before retrying.
 
 ## Preflight
 
@@ -48,11 +48,3 @@ Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always
 A gate can make a child of another type creatable once the parent reaches a status. When that happens, advance writes the status move and stops. It does not create the child.
 
 Two conditions separate a move within the lifecycle from crossing into a child type. The gate makes the child creatable; starting it is a second, human step, handled by /lazy's stop-at-boundary rule. Satisfying the gate is necessary, not sufficient.
-
-## Rules
-
-- The successor comes from `lifecycle.edges`. This skill names no status; config does.
-- Write the move with `lazyspec update <id> --status <next>`; never go around the binary's edge check.
-- Test the gate before moving; do not cross an unsatisfied gate.
-- Never create a child document. Status only.
-- Read lifecycle and gate facts from config, not from the `.lazyspec/` graph files.
