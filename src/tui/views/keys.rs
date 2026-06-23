@@ -662,17 +662,24 @@ impl App {
     fn handle_graph_key(
         &mut self,
         code: KeyCode,
-        _modifiers: KeyModifiers,
+        modifiers: KeyModifiers,
         root: &Path,
         config: &Config,
     ) {
+        if modifiers.contains(KeyModifiers::CONTROL) {
+            match code {
+                KeyCode::Char('d') => self.graph_half_page_down(),
+                KeyCode::Char('u') => self.graph_half_page_up(),
+                _ => {}
+            }
+            return;
+        }
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
-                self.graph_selected =
-                    (self.graph_selected + 1).min(self.graph_nodes.len().saturating_sub(1));
+                self.graph_move_down();
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.graph_selected = self.graph_selected.saturating_sub(1);
+                self.graph_move_up();
             }
             KeyCode::Char('h') | KeyCode::Left => {
                 self.move_graph_anchor_prev();
@@ -704,10 +711,10 @@ impl App {
                 self.reverse_graph_sort();
             }
             KeyCode::Char('g') => {
-                self.graph_selected = 0;
+                self.graph_move_to_top();
             }
             KeyCode::Char('G') => {
-                self.graph_selected = self.graph_nodes.len().saturating_sub(1);
+                self.graph_move_to_bottom();
             }
             KeyCode::Char('e') => {
                 if let Some(node) = self.graph_nodes.get(self.graph_selected) {

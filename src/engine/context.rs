@@ -187,8 +187,42 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
 /// inherited parent-child edges (the same trap `resolve_chain` avoids). Every
 /// in-graph parent is retained on the node so multi-parent edges survive.
 pub fn resolve_forest<'a>(store: &'a Store, anchor: Option<&str>) -> Vec<ContextNode<'a>> {
-    // Each doc's in-graph parents over the configured chain relationships.
-    let all_parents: HashMap<PathBuf, Vec<PathBuf>> = store
+    let all_parents = chain_parents(store);
+
+    let Some(anchor_type) = anchor else {
+        let discovered: HashMap<PathBuf, &DocMeta> =
+            store.docs.values().map(|d| (d.path.clone(), d)).collect();
+        return topo_order(&discovered, &all_parents);
+    };
+
+    let anchor_roots: Vec<PathBuf> = store
+        .docs
+        .values()
+        .filter(|d| d.doc_type.as_str() == anchor_type)
+        .map(|d| d.path.clone())
+        .collect();
+    resolve_forest_anchored(store, &all_parents, anchor_roots)
+}
+
+/// Context forest re-rooted on documents carrying `tag`: roots become the
+/// tag-bearing docs and only their chain-descendant subtrees are emitted, just
+/// like [`resolve_forest`]'s type anchor but with a tag predicate. Used by the
+/// graph view's tag pivots.
+pub fn resolve_forest_by_tag<'a>(store: &'a Store, tag: &str) -> Vec<ContextNode<'a>> {
+    let all_parents = chain_parents(store);
+    let anchor_roots: Vec<PathBuf> = store
+        .docs
+        .values()
+        .filter(|d| d.tags.iter().any(|t| t == tag))
+        .map(|d| d.path.clone())
+        .collect();
+    resolve_forest_anchored(store, &all_parents, anchor_roots)
+}
+
+/// Each doc's in-graph parents over the configured chain relationships. Shared
+/// by the whole-store and anchored forest builders.
+fn chain_parents(store: &Store) -> HashMap<PathBuf, Vec<PathBuf>> {
+    store
         .docs
         .values()
         .map(|doc| {
@@ -210,18 +244,23 @@ pub fn resolve_forest<'a>(store: &'a Store, anchor: Option<&str>) -> Vec<Context
             }
             (doc.path.clone(), parents)
         })
-        .collect();
+        .collect()
+}
 
-    let Some(anchor_type) = anchor else {
-        let discovered: HashMap<PathBuf, &DocMeta> =
-            store.docs.values().map(|d| (d.path.clone(), d)).collect();
-        return topo_order(&discovered, &all_parents);
-    };
-
+/// Re-root the forest on `anchor_roots`: BFS down the chain edges from each
+/// anchor doc, keep the union of descendant subtrees, and retain only the parent
+/// edges that stay inside that subtree so the anchors surface as roots and pruned
+/// ancestors do not reattach. A descendant reachable from two anchors is kept
+/// once with both anchor-side parents.
+fn resolve_forest_anchored<'a>(
+    store: &'a Store,
+    all_parents: &HashMap<PathBuf, Vec<PathBuf>>,
+    anchor_roots: Vec<PathBuf>,
+) -> Vec<ContextNode<'a>> {
     // Child adjacency (parent -> children) over the chain edges, so we can walk
-    // downward from each anchor-type doc.
+    // downward from each anchor doc.
     let mut children: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-    for (child, parents) in &all_parents {
+    for (child, parents) in all_parents {
         for parent in parents {
             children
                 .entry(parent.clone())
@@ -230,15 +269,10 @@ pub fn resolve_forest<'a>(store: &'a Store, anchor: Option<&str>) -> Vec<Context
         }
     }
 
-    // BFS down from every anchor-type doc, collecting the union of descendant
+    // BFS down from every anchor doc, collecting the union of descendant
     // subtrees. The seen-set dedups diamonds and guards against cycles.
     let mut subtree: HashSet<PathBuf> = HashSet::new();
-    let mut queue: VecDeque<PathBuf> = store
-        .docs
-        .values()
-        .filter(|d| d.doc_type.as_str() == anchor_type)
-        .map(|d| d.path.clone())
-        .collect();
+    let mut queue: VecDeque<PathBuf> = anchor_roots.into_iter().collect();
     for path in &queue {
         subtree.insert(path.clone());
     }
@@ -846,5 +880,55 @@ mod tests {
             !forest.iter().any(|n| n.doc.id == "RFC-001"),
             "ancestor RFC pruned"
         );
+    }
+
+    #[test]
+    fn forest_by_tag_reroots_on_tagged_docs() {
+        // A tagged story becomes a root and pulls in its descendant subtree; the
+        // untagged ancestor RFC and an unrelated untagged story are pruned.
+        let tagged_story = "---\ntitle: \"Tagged\"\ntype: story\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags:\n- alpha\nrelated:\n- implements: RFC-001\n---\n\nbody\n";
+        let (_tmp, store) = store_from(&[
+            ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
+            ("docs/stories/STORY-001-tagged.md", tagged_story),
+            (
+                "docs/stories/STORY-002-other.md",
+                &doc_md("Other", "story", "- implements: RFC-001"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-leaf.md",
+                &doc_md("Leaf", "iteration", "- implements: STORY-001"),
+            ),
+        ]);
+
+        let forest = resolve_forest_by_tag(&store, "alpha");
+
+        assert_eq!(
+            node_ids(&forest),
+            BTreeSet::from(["STORY-001".to_string(), "ITERATION-001".to_string()]),
+            "tag anchor keeps the tagged story and its descendant, prunes the rest"
+        );
+        assert!(
+            forest
+                .iter()
+                .find(|n| n.doc.id == "STORY-001")
+                .unwrap()
+                .parents
+                .is_empty(),
+            "the tagged story is a root (its untagged RFC parent is pruned)"
+        );
+    }
+
+    #[test]
+    fn forest_by_tag_empty_when_no_doc_carries_tag() {
+        let (_tmp, store) = store_from(&[
+            ("docs/rfcs/RFC-001-a.md", &doc_md("A", "rfc", "[]")),
+            (
+                "docs/stories/STORY-001-b.md",
+                &doc_md("B", "story", "- implements: RFC-001"),
+            ),
+        ]);
+
+        let forest = resolve_forest_by_tag(&store, "nonexistent");
+        assert!(forest.is_empty(), "no roots -> empty forest");
     }
 }

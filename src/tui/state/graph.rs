@@ -131,10 +131,13 @@ fn compare_siblings(a: &DocMeta, b: &DocMeta, sort: &GraphSort) -> Ordering {
 /// `depth` assigned by tree level.
 ///
 /// A node reachable by more than one parent (a diamond) is drawn in full on
-/// first encounter and emitted as a one-line back-reference (`reference: true`)
-/// on subsequent encounters without recursing, so every reachable doc appears
-/// exactly once as a full node. Cyclic SCCs with no root are emitted as depth-0
-/// subtrees after the root pass, so the render is complete and terminates.
+/// first encounter, and on subsequent encounters is re-emitted as the plain doc
+/// row (full title/status/attrs, never a "see above" back-reference) WITHOUT
+/// recursing — its subtree was already drawn under the first parent. A
+/// re-encounter that closes a cycle (the node is still on the current DFS path)
+/// is dropped entirely: cycles never render a back-edge row. Cyclic SCCs with no
+/// root are emitted as depth-0 subtrees after the root pass, so the render is
+/// complete and terminates.
 ///
 /// Each full node also carries its depth-1 `related-to` neighbours as a
 /// display-only annotation set (RFC-006 Graph mode Phase 1), sourced from the
@@ -157,8 +160,6 @@ fn compare_siblings(a: &DocMeta, b: &DocMeta, sort: &GraphSort) -> Ordering {
 /// general to `resolve_chain(id, 1).related`: `resolve_chain` also surfaces the
 /// related-to links of the node's `implements` ancestors, whereas this annotation
 /// is strictly the node's OWN depth-1 cross-cutting set.
-///
-/// Back-reference nodes carry no annotation: the set belongs on the full node line.
 pub fn flatten_forest(forest: &[ContextNode], store: &Store, sort: &GraphSort) -> Vec<GraphNode> {
     // child adjacency: parent path -> child paths.
     let mut children: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
@@ -211,10 +212,19 @@ pub fn flatten_forest(forest: &[ContextNode], store: &Store, sort: &GraphSort) -
 
     let mut out: Vec<GraphNode> = Vec::with_capacity(forest.len());
     let mut drawn: HashSet<PathBuf> = HashSet::new();
+    let mut on_stack: HashSet<PathBuf> = HashSet::new();
 
     for root in roots {
         walk(
-            root, 0, &children, &by_path, &lineage, store, &mut drawn, &mut out,
+            root,
+            0,
+            &children,
+            &by_path,
+            &lineage,
+            store,
+            &mut drawn,
+            &mut on_stack,
+            &mut out,
         );
     }
 
@@ -225,7 +235,15 @@ pub fn flatten_forest(forest: &[ContextNode], store: &Store, sort: &GraphSort) -
     for node in forest {
         if !drawn.contains(&node.doc.path) {
             walk(
-                node, 0, &children, &by_path, &lineage, store, &mut drawn, &mut out,
+                node,
+                0,
+                &children,
+                &by_path,
+                &lineage,
+                store,
+                &mut drawn,
+                &mut on_stack,
+                &mut out,
             );
         }
     }
@@ -326,34 +344,41 @@ fn walk(
     lineage: &HashMap<&PathBuf, HashSet<PathBuf>>,
     store: &Store,
     drawn: &mut HashSet<PathBuf>,
+    on_stack: &mut HashSet<PathBuf>,
     out: &mut Vec<GraphNode>,
 ) {
     let doc = node.doc;
+    let node_lineage = lineage.get(&doc.path);
+    let empty = HashSet::new();
 
     if drawn.contains(&doc.path) {
-        out.push(GraphNode {
-            path: doc.path.clone(),
-            title: doc.title.clone(),
-            doc_type: doc.doc_type.clone(),
-            status: doc.status.clone(),
-            depth,
-            reference: true,
-            related: Vec::new(),
-            attributes: std::collections::BTreeMap::new(),
-        });
+        // Re-encounter. If the node is on the current DFS path it closes a
+        // cycle: drop it entirely (no back-edge row). Otherwise it is a
+        // diamond/multi-parent re-encounter, drawn earlier on a different
+        // branch — render it again as the plain doc (full row, no "see above"),
+        // but do NOT recurse, since its subtree was emitted at first encounter.
+        if !on_stack.contains(&doc.path) {
+            out.push(GraphNode {
+                path: doc.path.clone(),
+                title: doc.title.clone(),
+                doc_type: doc.doc_type.clone(),
+                status: doc.status.clone(),
+                depth,
+                related: related_annotations(&doc.path, node_lineage.unwrap_or(&empty), store),
+                attributes: doc.attributes.clone(),
+            });
+        }
         return;
     }
     drawn.insert(doc.path.clone());
+    on_stack.insert(doc.path.clone());
 
-    let node_lineage = lineage.get(&doc.path);
-    let empty = HashSet::new();
     out.push(GraphNode {
         path: doc.path.clone(),
         title: doc.title.clone(),
         doc_type: doc.doc_type.clone(),
         status: doc.status.clone(),
         depth,
-        reference: false,
         related: related_annotations(&doc.path, node_lineage.unwrap_or(&empty), store),
         attributes: doc.attributes.clone(),
     });
@@ -369,11 +394,14 @@ fn walk(
                     lineage,
                     store,
                     drawn,
+                    on_stack,
                     out,
                 );
             }
         }
     }
+
+    on_stack.remove(&doc.path);
 }
 
 #[cfg(test)]
@@ -417,13 +445,10 @@ mod tests {
         extract_id_from_name(&stem)
     }
 
-    /// Collapse a flattened node list to `(id, depth, reference)` triples for
-    /// exact-sequence assertions.
-    fn triples(nodes: &[GraphNode]) -> Vec<(String, usize, bool)> {
-        nodes
-            .iter()
-            .map(|n| (id_of(n), n.depth, n.reference))
-            .collect()
+    /// Collapse a flattened node list to `(id, depth)` pairs for exact-sequence
+    /// assertions.
+    fn triples(nodes: &[GraphNode]) -> Vec<(String, usize)> {
+        nodes.iter().map(|n| (id_of(n), n.depth)).collect()
     }
 
     #[test]
@@ -445,18 +470,18 @@ mod tests {
         assert_eq!(
             triples(&nodes),
             vec![
-                ("RFC-001".to_string(), 0, false),
-                ("STORY-001".to_string(), 1, false),
-                ("ITERATION-001".to_string(), 2, false),
+                ("RFC-001".to_string(), 0),
+                ("STORY-001".to_string(), 1),
+                ("ITERATION-001".to_string(), 2),
             ]
         );
     }
 
     #[test]
-    fn flatten_diamond_draws_shared_node_once_then_back_reference() {
+    fn flatten_diamond_draws_shared_node_then_repeats_as_plain_doc() {
         // RFC-001 is the root; STORY-001 and STORY-002 both implement it;
-        // ITERATION-001 implements both stories (the diamond). On the second
-        // story's subtree the leaf is a back-reference.
+        // ITERATION-001 implements both stories (the diamond). Under the second
+        // story the leaf re-appears as the plain doc (full row, no back-ref).
         let (_tmp, store) = store_from(&[
             ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
             (
@@ -482,13 +507,13 @@ mod tests {
         assert_eq!(
             triples(&nodes),
             vec![
-                ("RFC-001".to_string(), 0, false),
-                ("STORY-001".to_string(), 1, false),
-                ("ITERATION-001".to_string(), 2, false),
-                ("STORY-002".to_string(), 1, false),
-                ("ITERATION-001".to_string(), 2, true),
+                ("RFC-001".to_string(), 0),
+                ("STORY-001".to_string(), 1),
+                ("ITERATION-001".to_string(), 2),
+                ("STORY-002".to_string(), 1),
+                ("ITERATION-001".to_string(), 2),
             ],
-            "shared leaf is full under STORY-001, a back-reference under STORY-002"
+            "shared leaf is full under STORY-001, repeated as a plain doc under STORY-002"
         );
     }
 
@@ -512,10 +537,10 @@ mod tests {
         assert_eq!(
             triples(&nodes),
             vec![
-                ("RFC-001".to_string(), 0, false),
-                ("STORY-001".to_string(), 1, false),
-                ("RFC-002".to_string(), 0, false),
-                ("STORY-002".to_string(), 1, false),
+                ("RFC-001".to_string(), 0),
+                ("STORY-001".to_string(), 1),
+                ("RFC-002".to_string(), 0),
+                ("STORY-002".to_string(), 1),
             ],
             "roots are emitted path-sorted, each followed by its subtree"
         );
@@ -524,7 +549,7 @@ mod tests {
     #[test]
     fn flatten_multi_parent_node_retains_both_edges() {
         // ITERATION-001 implements two roots; both edges must surface, so the
-        // leaf appears under each parent (full once, then a back-reference).
+        // leaf appears under each parent (full once, then again as a plain doc).
         let (_tmp, store) = store_from(&[
             ("docs/rfcs/RFC-001-a.md", &doc_md("A", "rfc", "[]")),
             ("docs/rfcs/RFC-002-b.md", &doc_md("B", "rfc", "[]")),
@@ -543,12 +568,12 @@ mod tests {
         assert_eq!(
             triples(&nodes),
             vec![
-                ("RFC-001".to_string(), 0, false),
-                ("ITERATION-001".to_string(), 1, false),
-                ("RFC-002".to_string(), 0, false),
-                ("ITERATION-001".to_string(), 1, true),
+                ("RFC-001".to_string(), 0),
+                ("ITERATION-001".to_string(), 1),
+                ("RFC-002".to_string(), 0),
+                ("ITERATION-001".to_string(), 1),
             ],
-            "both implements edges render: full under RFC-001, reference under RFC-002"
+            "both implements edges render: full under RFC-001, plain doc under RFC-002"
         );
     }
 
@@ -569,15 +594,11 @@ mod tests {
 
         // Cycle has no root, so the leftover pass draws RFC-001 full at depth 0,
         // recurses into child RFC-002 full at depth 1, then re-encounters RFC-001
-        // as a depth-2 back-reference. No infinite recursion.
+        // which is on the current DFS path — a cycle back-edge, dropped entirely.
         assert_eq!(
             triples(&nodes),
-            vec![
-                ("RFC-001".to_string(), 0, false),
-                ("RFC-002".to_string(), 1, false),
-                ("RFC-001".to_string(), 2, true),
-            ],
-            "cycle terminates: each node full once, back-edge as a reference"
+            vec![("RFC-001".to_string(), 0), ("RFC-002".to_string(), 1),],
+            "cycle terminates: each node full once, the back-edge is hidden"
         );
     }
 
@@ -587,7 +608,7 @@ mod tests {
     fn related_of(nodes: &[GraphNode], id: &str) -> Vec<String> {
         nodes
             .iter()
-            .find(|n| !n.reference && id_of(n) == id)
+            .find(|n| id_of(n) == id)
             .unwrap_or_else(|| panic!("full node {id} not in flattened forest"))
             .related
             .clone()
@@ -792,10 +813,11 @@ mod tests {
     }
 
     #[test]
-    fn back_reference_node_carries_no_annotation() {
-        // ITERATION-001 implements two roots (rendered full then as a
-        // back-reference) and is related-to a side STORY. The annotation lives
-        // on the full node; the back-reference re-encounter carries none.
+    fn diamond_repeat_renders_as_plain_doc_never_a_back_reference() {
+        // ITERATION-001 implements two roots, so it appears twice. Neither
+        // occurrence is a back-reference ("see above" is never shown); both are
+        // plain doc rows. It is related-to a side STORY, so both carry that
+        // annotation.
         let (_tmp, store) = store_from(&[
             ("docs/rfcs/RFC-001-a.md", &doc_md("A", "rfc", "[]")),
             ("docs/rfcs/RFC-002-b.md", &doc_md("B", "rfc", "[]")),
@@ -815,18 +837,15 @@ mod tests {
 
         let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
 
-        let back_ref = nodes
-            .iter()
-            .find(|n| n.reference && id_of(n) == "ITERATION-001")
-            .expect("iteration back-reference present");
-        assert!(
-            back_ref.related.is_empty(),
-            "back-reference re-encounters carry no annotation"
+        let occurrences = nodes.iter().filter(|n| id_of(n) == "ITERATION-001").count();
+        assert_eq!(
+            occurrences, 2,
+            "the multi-parent doc appears under each parent"
         );
         assert_eq!(
             related_of(&nodes, "ITERATION-001"),
             vec!["STORY-009".to_string()],
-            "full node still carries the annotation"
+            "the doc carries its annotation"
         );
     }
 

@@ -166,16 +166,18 @@ Press `5` (or cycle to it with `` ` ``) to open the Settings view, which edits `
 
 #### Graph View
 
-Cycle to the Graph view with `` ` ``. The left panel is a pivot picker (`h` / `l` to re-root the forest on a document type, or `All` for the whole store); the right panel renders the dependency forest as a nested table. The first column (`DOC`) is the document tree, with the indentation and connector art showing the `implements` lineage; each configured column follows. Siblings under a shared parent can be sorted by any column while the parent grouping and topological order are preserved.
+Cycle to the Graph view with `` ` ``. The left panel is a pivot picker (`h` / `l` to re-root the forest on a document type or a tag, or `All` for the whole store); the right panel renders the dependency forest as a nested table sharing the documents table's styling (git-status gutter, slim `ID` column, selection bar, scrolling). The `DOC` column is the document tree, with indentation and connector art showing the `implements` lineage; each configured column follows. A document reachable from more than one parent (a diamond) is drawn once under each parent; cyclic edges are hidden. Siblings under a shared parent can be sorted by any column while the parent grouping and topological order are preserved.
 
-| Key       | Action                                                       |
-| --------- | ------------------------------------------------------------ |
-| `j` / `k` | Navigate up/down                                             |
-| `h` / `l` | Pivot the anchor type (re-root the forest)                   |
-| `o`       | Cycle the sibling sort column (`path` → `status` → declared attributes → wrap) |
-| `O`       | Reverse the sort direction                                   |
-| `Enter`   | Open the selected document                                   |
-| `e`       | Edit document in `$EDITOR`                                   |
+| Key            | Action                                                       |
+| -------------- | ------------------------------------------------------------ |
+| `j` / `k`      | Navigate up/down                                            |
+| `Ctrl-d` / `Ctrl-u` | Half page down/up                                      |
+| `h` / `l`      | Pivot the anchor (whole store → types → tags)              |
+| `o`            | Cycle the sibling sort column (`path` → `status` → declared attributes → wrap) |
+| `O`            | Reverse the sort direction                                  |
+| `g` / `G`      | Jump to top/bottom                                          |
+| `Enter`        | Open the selected document                                  |
+| `e`            | Edit document in `$EDITOR`                                  |
 
 The columns and default sort are configured under `[tui.graph]` in `.lazyspec.toml`:
 
