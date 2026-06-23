@@ -75,6 +75,7 @@ boundary -> execute: "human runs /execute" {style.stroke-dash: 3}
 ```
 
 <HARD-GATE>
+CONFIRM THE PLAN BEFORE MUTATING. Before the FIRST graph-mutating dispatch of a turn (`create`, `link`, `/advance`, or any authoring verb) AND before `/execute`, present the planned commands and the direction (which doc, which type, which parent link, what the fix/feature is), then STOP for explicit user approval. A prior "do it", "go ahead", "use /lazy", or the user naming the fix is approval of the WORK -- never of THIS specific plan (the parent link, the scope, the type choice are decisions to surface). General go-ahead is not step approval. This binds the actor: it holds whether `/lazy` is the entry router OR you are acting inline as the orchestrator -- running a verb directly does not exempt you. Violating the letter of this gate is violating its spirit.
 A **type-boundary edge** is any edge to a different type, declared EITHER via `parent_type` OR via a parent-child `rule` (`shape: parent-child`, carrying `child`/`parent`/`link`). Both express the DAG; a config may use one, the other, or both. Derive boundaries from the UNION. Never assume `parent_type` is populated -- many configs encode the entire DAG in `rules` with every `parent_type` null. Null `parent_type` everywhere does NOT mean "no boundaries"; read the boundaries from the rules.
 Do NOT auto-run `create <child-type>` across a type-boundary edge. Crossing into a different type is always human-initiated -- even when a `require_parent_status` gate is already satisfied. Within-document progression is automatic; crossing a type boundary is not.
 **No work without a plan -- the PLAN->EXECUTE wall.** Authoring and advancing a delivery document's plan (task breakdown, AC) is automatic within that document; *executing* that plan is a separate, human-initiated step. `/lazy` NEVER auto-runs `/execute`. It authors and reviews the delivery doc, then STOPS and reports that the plan is ready to execute. It does not start implementing.
@@ -87,7 +88,35 @@ After every graph-mutating dispatch (/advance and the authoring verbs), run `laz
 - Do NOT hand-edit document files. The CLI is the only writer: `lazyspec create` (seed with `--body`/`--body-file`), `lazyspec link`, and `lazyspec update <id> --body`/`--body-file` to change body content. This holds for EVERY store, filesystem included.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
 - Do NOT skip the workflow pipeline. Respect the configured DAG -- type boundaries come from `parent_type` edges AND parent-child `rules` (the union); honor every `rule`.
+- Do NOT author, link, advance, or execute before the user approves the direction for THIS step -- even when they already authorized the work, named the fix, or said "use /lazy".
 </NEVER>
+
+<RED-FLAGS>
+STOP and present the plan for approval if you catch yourself thinking:
+- "The user already said 'do it' / 'use /lazy', so I'll create + link now"
+- "They named the fix, the plan is obvious, just build it"
+- "The boundary gate / require_parent_status is satisfied, so I can proceed"
+- "I'm the orchestrator running inline -- the stop only applies to the dispatched verb"
+- "Confirming is a formality, I'll show them after it's done"
+
+| Rationalization | Reality |
+|---|---|
+| "User pre-authorized the work" | Authorizing the work is not approving this create+link+parent choice. Present it, get the nod. |
+| "They said use /lazy, so route and go" | Using /lazy includes its stops. Going through a boundary without approval is not using /lazy. |
+| "The fix is named, the plan is obvious" | Obvious to you is not confirmed by them. The parent link and scope are decisions -- surface them. |
+| "Gate is satisfied, so it's automatic" | Gate-clear makes the next step eligible, not approved. Eligibility is not consent. |
+| "Inline orchestration is exempt" | The gate binds the actor, not the invocation path. Inline does not skip it. |
+
+## Confirm the plan before mutating
+
+Before the first mutation or `/execute` in a turn, run this checklist. If any answer is "no", STOP and complete the missing step:
+
+- [ ] Ran preflight (`config`/`status`/`context`) and located the position in the DAG
+- [ ] Presented the planned commands + direction to the user (doc, type, parent link, what the fix/feature is)
+- [ ] User approved THIS direction in THIS turn (not a prior general go-ahead)
+- [ ] Dispatching the correct verb for the work and the type's authorship ceiling
+- [ ] Not skipping to `/execute` without a delivery doc that carries a task breakdown
+</RED-FLAGS>
 
 <BODY-CONTENT>
 Set body at creation: `lazyspec create <type> "<title>" --body "content"` or `--body-file <path>` (`-` reads stdin). Change it later: `lazyspec update <ID> --body "content"` or `--body-file <path>`. Prefer `--body`/`--body-file` over any direct file edit, for ALL stores (filesystem and github-issues alike).

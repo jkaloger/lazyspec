@@ -13,6 +13,7 @@ Execute is the build loop: it orchestrates the task breakdown of a delivery docu
 Do NOT begin execution without a delivery document that carries a task breakdown. If the document lacks one, author it first (route to the appropriate authoring verb).
 Confirm from `lazyspec config --json` that the document's type is a delivery type in this DAG before starting.
 ALWAYS use subagents for the work. The orchestrator dispatches; it does not implement.
+NO SIZE EXCEPTION. A one-line change, a typo, a single-function edit, a "trivial" fix -- all dispatched to a subagent. The orchestrator NEVER edits implementation, test, or documentation files itself, no matter how small the task looks or how fast it would be to do inline. "Too small to dispatch" is not a carve-out; it is the most common way this gate is broken.
 Each task must carry enough detail for a zero-context subagent. If it does not, fix the breakdown first.
 </HARD-GATE>
 
@@ -20,8 +21,26 @@ Each task must carry enough detail for a zero-context subagent. If it does not, 
 - Do NOT write document files directly. Use `lazyspec create` and `lazyspec link`.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
 - Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
-- Do NOT implement tasks yourself. Dispatch a subagent per task. Do NOT dispatch parallel implementers.
+- Do NOT implement tasks yourself, regardless of size. Dispatch a subagent per task. Do NOT dispatch parallel implementers.
 </NEVER>
+
+<RED-FLAGS>
+STOP and dispatch a subagent if you catch yourself thinking:
+- "This is only ~N lines, dispatching is overkill"
+- "Faster to just edit it inline, then I'll dispatch the rest"
+- "It's a trivial / mechanical / obvious change"
+- "I already know the exact diff, no need for a subagent"
+- "I'll implement it and have a subagent review afterwards"
+
+All of these mean: write the task text, dispatch the implementer, run the review loop. The orchestrator's hands stay off the files. Violating the letter of this gate is violating its spirit.
+
+| Rationalization | Reality |
+|---|---|
+| "Change is tiny, ~N lines" | Tiny changes break things too, and the review loop is cheap. Size is not a dispatch criterion. |
+| "I already have the diff in mind" | Then the task text is trivial to write. Dispatch it. |
+| "Momentum -- just do it" | Momentum is the pressure this gate exists to resist. Dispatch. |
+| "I'll dispatch the non-trivial ones only" | Every task is dispatched. Selective dispatch is no dispatch discipline at all. |
+</RED-FLAGS>
 
 <GITHUB-ISSUES-DOCUMENTS>
 Documents stored in GitHub Issues (store = "github-issues") are managed through the GitHub API. The `.lazyspec/cache/` directory contains read-only mirrors.

@@ -266,6 +266,7 @@ Execute is the build loop: it orchestrates the task breakdown of a delivery docu
 Do NOT begin execution without a delivery document that carries a task breakdown. If the document lacks one, author it first (route to the appropriate authoring verb).
 Confirm from `lazyspec config --json` that the document's type is a delivery type in this DAG before starting.
 ALWAYS use subagents for the work. The orchestrator dispatches; it does not implement.
+NO SIZE EXCEPTION. A one-line change, a typo, a single-function edit, a "trivial" fix -- all dispatched to a subagent. The orchestrator NEVER edits implementation, test, or documentation files itself, no matter how small the task looks or how fast it would be to do inline. "Too small to dispatch" is not a carve-out; it is the most common way this gate is broken.
 Each task must carry enough detail for a zero-context subagent. If it does not, fix the breakdown first.
 </HARD-GATE>
 
@@ -273,8 +274,26 @@ Each task must carry enough detail for a zero-context subagent. If it does not, 
 - Do NOT write document files directly. Use `lazyspec create` and `lazyspec link`.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
 - Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
-- Do NOT implement tasks yourself. Dispatch a subagent per task. Do NOT dispatch parallel implementers.
+- Do NOT implement tasks yourself, regardless of size. Dispatch a subagent per task. Do NOT dispatch parallel implementers.
 </NEVER>
+
+<RED-FLAGS>
+STOP and dispatch a subagent if you catch yourself thinking:
+- "This is only ~N lines, dispatching is overkill"
+- "Faster to just edit it inline, then I'll dispatch the rest"
+- "It's a trivial / mechanical / obvious change"
+- "I already know the exact diff, no need for a subagent"
+- "I'll implement it and have a subagent review afterwards"
+
+All of these mean: write the task text, dispatch the implementer, run the review loop. The orchestrator's hands stay off the files. Violating the letter of this gate is violating its spirit.
+
+| Rationalization | Reality |
+|---|---|
+| "Change is tiny, ~N lines" | Tiny changes break things too, and the review loop is cheap. Size is not a dispatch criterion. |
+| "I already have the diff in mind" | Then the task text is trivial to write. Dispatch it. |
+| "Momentum -- just do it" | Momentum is the pressure this gate exists to resist. Dispatch. |
+| "I'll dispatch the non-trivial ones only" | Every task is dispatched. Selective dispatch is no dispatch discipline at all. |
+</RED-FLAGS>
 
 <GITHUB-ISSUES-DOCUMENTS>
 Documents stored in GitHub Issues (store = "github-issues") are managed through the GitHub API. The `.lazyspec/cache/` directory contains read-only mirrors.
@@ -758,7 +777,7 @@ advance: /advance {tooltip: "status move, no authoring"}
 author: authoring verb at ceiling {
   tooltip: "human -> /scaffold, assisted -> /co-write, generated -> /generate"
 }
-execute: /execute {tooltip: "work the document describes"}
+execute: /execute {tooltip: "work the document describes -- HUMAN-INITIATED, never auto-dispatched"}
 review: /review {tooltip: "critique before next status"}
 
 validate: validate touched doc {
@@ -780,19 +799,22 @@ locate -> dispatch
 
 dispatch -> advance: "eligible status edge"
 dispatch -> author: "authoring step due"
-dispatch -> execute: "work pending"
 dispatch -> review: "critique due"
-dispatch -> boundary: "only next step crosses parent_type edge"
+dispatch -> boundary: "next step crosses a type boundary (parent_type or parent-child rule), or only work remains"
 
 advance -> validate: "graph mutated"
 author -> validate: "graph mutated"
 validate -> locate: "loop within document"
-execute -> locate
 review -> locate
+
+boundary -> execute: "human runs /execute" {style.stroke-dash: 3}
 ```
 
 <HARD-GATE>
-Do NOT auto-run `create <child-type>` across a `parent_type` edge. Crossing into a different type is always human-initiated -- even when a `require_parent_status` gate is already satisfied. Within-document progression is automatic; crossing a type boundary is not.
+CONFIRM THE PLAN BEFORE MUTATING. Before the FIRST graph-mutating dispatch of a turn (`create`, `link`, `/advance`, or any authoring verb) AND before `/execute`, present the planned commands and the direction (which doc, which type, which parent link, what the fix/feature is), then STOP for explicit user approval. A prior "do it", "go ahead", "use /lazy", or the user naming the fix is approval of the WORK -- never of THIS specific plan (the parent link, the scope, the type choice are decisions to surface). General go-ahead is not step approval. This binds the actor: it holds whether `/lazy` is the entry router OR you are acting inline as the orchestrator -- running a verb directly does not exempt you. Violating the letter of this gate is violating its spirit.
+A **type-boundary edge** is any edge to a different type, declared EITHER via `parent_type` OR via a parent-child `rule` (`shape: parent-child`, carrying `child`/`parent`/`link`). Both express the DAG; a config may use one, the other, or both. Derive boundaries from the UNION. Never assume `parent_type` is populated -- many configs encode the entire DAG in `rules` with every `parent_type` null. Null `parent_type` everywhere does NOT mean "no boundaries"; read the boundaries from the rules.
+Do NOT auto-run `create <child-type>` across a type-boundary edge. Crossing into a different type is always human-initiated -- even when a `require_parent_status` gate is already satisfied. Within-document progression is automatic; crossing a type boundary is not.
+**No work without a plan -- the PLAN->EXECUTE wall.** Authoring and advancing a delivery document's plan (task breakdown, AC) is automatic within that document; *executing* that plan is a separate, human-initiated step. `/lazy` NEVER auto-runs `/execute`. It authors and reviews the delivery doc, then STOPS and reports that the plan is ready to execute. It does not start implementing.
 Compute the dispatch table from `lazyspec config --json` at runtime. There is no fixed chain in this prose.
 A reported bug, defect, or unexpected behaviour is investigated to root cause FIRST -- via systematic-debugging -- before any fix document is authored. No fix doc before root cause.
 After every graph-mutating dispatch (/advance and the authoring verbs), run `lazyspec validate --json` scoped to the touched document before looping.
@@ -801,8 +823,36 @@ After every graph-mutating dispatch (/advance and the authoring verbs), run `laz
 <NEVER>
 - Do NOT hand-edit document files. The CLI is the only writer: `lazyspec create` (seed with `--body`/`--body-file`), `lazyspec link`, and `lazyspec update <id> --body`/`--body-file` to change body content. This holds for EVERY store, filesystem included.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
-- Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
+- Do NOT skip the workflow pipeline. Respect the configured DAG -- type boundaries come from `parent_type` edges AND parent-child `rules` (the union); honor every `rule`.
+- Do NOT author, link, advance, or execute before the user approves the direction for THIS step -- even when they already authorized the work, named the fix, or said "use /lazy".
 </NEVER>
+
+<RED-FLAGS>
+STOP and present the plan for approval if you catch yourself thinking:
+- "The user already said 'do it' / 'use /lazy', so I'll create + link now"
+- "They named the fix, the plan is obvious, just build it"
+- "The boundary gate / require_parent_status is satisfied, so I can proceed"
+- "I'm the orchestrator running inline -- the stop only applies to the dispatched verb"
+- "Confirming is a formality, I'll show them after it's done"
+
+| Rationalization | Reality |
+|---|---|
+| "User pre-authorized the work" | Authorizing the work is not approving this create+link+parent choice. Present it, get the nod. |
+| "They said use /lazy, so route and go" | Using /lazy includes its stops. Going through a boundary without approval is not using /lazy. |
+| "The fix is named, the plan is obvious" | Obvious to you is not confirmed by them. The parent link and scope are decisions -- surface them. |
+| "Gate is satisfied, so it's automatic" | Gate-clear makes the next step eligible, not approved. Eligibility is not consent. |
+| "Inline orchestration is exempt" | The gate binds the actor, not the invocation path. Inline does not skip it. |
+
+## Confirm the plan before mutating
+
+Before the first mutation or `/execute` in a turn, run this checklist. If any answer is "no", STOP and complete the missing step:
+
+- [ ] Ran preflight (`config`/`status`/`context`) and located the position in the DAG
+- [ ] Presented the planned commands + direction to the user (doc, type, parent link, what the fix/feature is)
+- [ ] User approved THIS direction in THIS turn (not a prior general go-ahead)
+- [ ] Dispatching the correct verb for the work and the type's authorship ceiling
+- [ ] Not skipping to `/execute` without a delivery doc that carries a task breakdown
+</RED-FLAGS>
 
 <BODY-CONTENT>
 Set body at creation: `lazyspec create <type> "<title>" --body "content"` or `--body-file <path>` (`-` reads stdin). Change it later: `lazyspec update <ID> --body "content"` or `--body-file <path>`. Prefer `--body`/`--body-file` over any direct file edit, for ALL stores (filesystem and github-issues alike).
@@ -841,18 +891,21 @@ Build the dispatch table at runtime from config. No `parent_type` chain is hardc
 
 - a status move with no authoring/work needed -> /advance
 - an authoring step appropriate to the type's `authorship` and current status -> the authoring verb at the type's ceiling (/scaffold, /co-write, or /generate)
-- work described by the document -> /execute
 - a critique step before the next status -> /review
+
+**`/execute` is never automatic.** Work described by a delivery document is implementation -- the EXECUTE band. `/lazy` does NOT dispatch `/execute` on its own. It brings the delivery doc to a reviewed, ready-to-execute plan and STOPS (treat this like a type boundary: human-initiated). Report that the plan is ready and the human runs `/execute` to begin work. No work without a reviewed plan.
 
 **Authorship-aware dispatch.** When routing to an authoring action, pick the verb at or below the type's `authorship` ceiling. Default to the ceiling verb (`human` -> /scaffold, `assisted` -> /co-write, `generated` -> /generate) and allow the human to drop lower. Never dispatch an above-ceiling verb.
 
 ## Stop-at-Type-Boundary
 
-When the only remaining next step would create a child of a **different type** -- crossing a `parent_type` edge -- `/lazy` **STOPS.** It reports the boundary and what the human can do next; it never auto-runs `create <child-type>`.
+When the only remaining next step would create a child of a **different type** -- crossing a type-boundary edge (a `parent_type` edge OR a parent-child `rule`, per the HARD-GATE union) -- `/lazy` **STOPS.** It reports the boundary and what the human can do next; it never auto-runs `create <child-type>`.
 
-This holds **even when a `require_parent_status` gate is already satisfied.** Gate-clear makes the child _eligible_, not _automatic_. Crossing a type boundary is always human-initiated. Report it like:
+This holds **even when a `require_parent_status` gate is already satisfied.** Gate-clear makes the child _eligible_, not _automatic_. Crossing a type boundary is always human-initiated. Report it with the ceiling verb for the child type (per Authorship-aware dispatch: `human` -> /scaffold, `assisted` -> /co-write, `generated` -> /generate), like:
 
-> `<doc>` (type `<type>`) is at status `<status>`; its child type `<child-type>` is now eligible to create. Crossing types is human-initiated -- run /scaffold (or the ceiling verb for `<child-type>`) to start one.
+> `<doc>` (type `<type>`) is at status `<status>`; its child type `<child-type>` is now eligible to create. Crossing types is human-initiated -- run <ceiling-verb> to start one.
+
+**Multi-hop:** if the required parent type is itself empty (e.g. an iteration needs a story, but no story exists), report the FULL chain the human must author in order -- each hop is a separate human-initiated crossing -- not just the nearest one.
 
 with every value read from config + status for that run.
 
@@ -867,7 +920,9 @@ with every value read from config + status for that run.
 ## Rules
 
 - All routing reads from `config --json` / `status --json` / `context --json` at runtime. No type name and no chain are load-bearing in this prose.
-- Within-document progression is automatic; crossing a type boundary is never automatic.
+- Type boundaries are the UNION of `parent_type` edges and parent-child `rules`. A config with every `parent_type` null still has boundaries -- read them from the rules.
+- Within-document progression is automatic; crossing a type boundary is never automatic. If the parent type the human must cross into is itself empty, report the full chain of crossings, not just the nearest.
+- `/execute` is never auto-dispatched. Bring the delivery doc to a reviewed, ready-to-execute plan and STOP; the human runs `/execute`. No work without a reviewed plan.
 - Dispatch only verbs at or below the type's authorship ceiling.
 - A reported bug/defect goes through root cause (systematic-debugging) before any fix doc is authored; the fix-doc type and its links are read from config and must satisfy the type's relation rules -- never create a standalone doc that bypasses a rule.
 - After each mutating dispatch (`/advance`, `/scaffold`, `/co-write`, `/generate`), validate the touched doc and fix only the relation breakage this mutation introduced; standalone verb invocation outside `/lazy` skips this.
