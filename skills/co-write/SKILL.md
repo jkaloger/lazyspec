@@ -13,13 +13,13 @@ Co-write proposes a draft for human editing; it does not finalise a body unilate
 </HARD-GATE>
 
 <NEVER>
-- Do NOT hand-edit document files. The CLI is the only writer: `lazyspec create` (seed with `--body`/`--body-file`), `lazyspec link`, and `lazyspec update <id> --body`/`--body-file` to change body content. This holds for EVERY store, filesystem included.
+- Do NOT hand-edit document files. The CLI is the only writer: `lazyspec create` (seed with `--body`), `lazyspec link`, and `lazyspec update <id> --body` to change body content. This holds for EVERY store, filesystem included.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
 - Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
 </NEVER>
 
 <BODY-CONTENT>
-Set body at creation: `lazyspec create <type> "<title>" --body "content"` or `--body-file <path>` (`-` reads stdin). Change it later: `lazyspec update <ID> --body "content"` or `--body-file <path>`. Prefer `--body`/`--body-file` over any direct file edit, for ALL stores (filesystem and github-issues alike).
+Set body at creation: `lazyspec create <type> "<title>" --body "content"`. Change it later: `lazyspec update <ID> --body "content"`. Prefer `--body` over any direct file edit, for ALL stores (filesystem and github-issues alike).
 GitHub-issues docs additionally: never edit `.lazyspec/cache/` mirrors (read-only); always reference docs by shorthand ID (e.g. STORY-095), not cache paths.
 </BODY-CONTENT>
 
@@ -49,6 +49,7 @@ Scaffold, interview, then propose:
 
 1. **Create + link** as in /scaffold: `lazyspec create <type> "<title>" --author <name>`, then `lazyspec link <new-id> <relation> <parent-id>` using the configured relation when a parent exists.
 2. **Interview the human before drafting.** Co-write captures intent from the human, so grill before you write. Interview them relentlessly about every decision this document must resolve, walking each branch of the design tree and resolving dependencies between decisions one at a time. Ask ONE question at a time. For each question, give your recommended answer. If a question can be answered by exploring the codebase or reading `config --json` / parent docs / `@ref` targets, explore and answer it yourself instead of asking. Continue until every open branch the type's `intent` and section guidance imply is resolved -- do not start the draft with unresolved decisions.
-3. **Propose a draft body** toward the type's `intent` and section guidance from config, incorporating the interview answers. Write the proposal to a file.
-4. **Present for human edits.** The human revises; iterate the proposal with them.
-5. **Apply the accepted draft:** `lazyspec update <id> --body-file <path>`.
+   2.1 **Propose 2-3 designs per unknown** Never propose only one option, always provide a range of design iterations/options to choose.
+3. **Propose a draft body** toward the type's `intent` and section guidance from config, incorporating the interview answers. Do not write verbose prose, only outline a summary of the key design/decisions made during the interview into the document.
+4. **Present for human edits.** After writing the document, the human revises; iterate the proposal with them.
+5. **Apply the accepted draft:** `lazyspec update <id>`.

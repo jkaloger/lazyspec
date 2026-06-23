@@ -13,13 +13,13 @@ Read the target type's config from `lazyspec config --json` before creating anyt
 </HARD-GATE>
 
 <NEVER>
-- Do NOT hand-edit document files to create or link them. Use `lazyspec create` (seed with `--body`/`--body-file`) and `lazyspec link`. To change body content, use `lazyspec update <id> --body`/`--body-file` -- for EVERY store, filesystem included. (Scaffold itself writes no body; it hands that back to the human.)
+- Do NOT hand-edit document files to create or link them. Use `lazyspec create` (seed with `--body`) and `lazyspec link`. To change body content, use `lazyspec update <id> --body` -- for EVERY store, filesystem included. (Scaffold itself writes no body; it hands that back to the human.)
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
 - Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
 </NEVER>
 
 <BODY-CONTENT>
-Set body at creation: `lazyspec create <type> "<title>" --body "content"` or `--body-file <path>` (`-` reads stdin). Change it later: `lazyspec update <ID> --body "content"` or `--body-file <path>`. Prefer `--body`/`--body-file` over any direct file edit, for ALL stores (filesystem and github-issues alike).
+Set body at creation: `lazyspec create <type> "<title>" --body "content"`. Change it later: `lazyspec update <ID> --body "content"`. Prefer `--body` over any direct file edit, for ALL stores (filesystem and github-issues alike).
 GitHub-issues docs additionally: never edit `.lazyspec/cache/` mirrors (read-only); always reference docs by shorthand ID (e.g. STORY-095), not cache paths.
 </BODY-CONTENT>
 

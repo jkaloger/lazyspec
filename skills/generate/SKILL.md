@@ -13,13 +13,13 @@ Generate writes the full body, then routes to /review -- it does not self-approv
 </HARD-GATE>
 
 <NEVER>
-- Do NOT hand-edit document files. The CLI is the only writer: `lazyspec create` (seed with `--body`/`--body-file`), `lazyspec link`, and `lazyspec update <id> --body`/`--body-file` to change body content. This holds for EVERY store, filesystem included.
+- Do NOT hand-edit document files. The CLI is the only writer: `lazyspec create` (seed with `--body`), `lazyspec link`, and `lazyspec update <id> --body` to change body content. This holds for EVERY store, filesystem included.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
 - Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
 </NEVER>
 
 <BODY-CONTENT>
-Set body at creation: `lazyspec create <type> "<title>" --body "content"` or `--body-file <path>` (`-` reads stdin). Change it later: `lazyspec update <ID> --body "content"` or `--body-file <path>`. Prefer `--body`/`--body-file` over any direct file edit, for ALL stores (filesystem and github-issues alike).
+Set body at creation: `lazyspec create <type> "<title>" --body "content"`. Change it later: `lazyspec update <ID> --body "content"`. Prefer `--body` over any direct file edit, for ALL stores (filesystem and github-issues alike).
 GitHub-issues docs additionally: never edit `.lazyspec/cache/` mirrors (read-only); always reference docs by shorthand ID (e.g. STORY-095), not cache paths.
 </BODY-CONTENT>
 
@@ -50,6 +50,15 @@ where `<type>` and the ceiling are the actual values read from config for that r
 
 1. **Create + link:** `lazyspec create <type> "<title>" --author <name>`, then `lazyspec link <new-id> <relation> <parent-id>` with the configured relation when a parent exists.
 2. **Resolve residual gaps before writing.** Generate is context-first: it leans on parent docs, related docs, `@ref` targets, and the codebase, not on the human. So capture lightly -- resolve every decision you can from gathered context yourself, then surface ONLY the decisions the context cannot settle. Ask those as a short batch (one at a time, each with your recommended answer); skip the question entirely when the context already answers it. This is a lighter touch than /co-write's full interview -- you are filling gaps, not eliciting the whole design.
-3. **Write the full body** from gathered context and resolved gaps toward the type's `intent` and section guidance. Write to a file.
-4. **Apply:** `lazyspec update <id> --body-file <path>`.
-5. **Request review:** route to /review. Generate never approves its own output.
+3. **Interview about any remaining gaps** Interview the user (as below)
+4. **Write the full body** from gathered context and resolved gaps toward the type's `intent` and section guidance. Write to a file.
+5. **Apply:** `lazyspec update <id> --body "content"`.
+6. **Request review:** route to /review. Generate never approves its own output.
+
+## Interview
+
+When interviewing, grill me relentlessly about every aspect of this plan until we reach a shared understanding. Walk down each branch of the design tree, resolving dependencies between decisions one-by-one. For each question, provide your recommended answer.
+
+Ask the questions one at a time.
+
+If a question can be answered by exploring the codebase, explore the codebase instead.
