@@ -119,7 +119,7 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
             path: PathBuf::new(),
             title: title.to_string(),
             doc_type: DocType::new(&type_def.name),
-            status: Status::Draft,
+            status: Status::new("draft"),
             author: author.to_string(),
             date: Local::now().date_naive(),
             tags: vec![],
@@ -355,6 +355,9 @@ mod tests {
             singleton: false,
             parent_type: None,
             agents: Vec::new(),
+            intent: None,
+            authorship: Default::default(),
+            lifecycle: Default::default(),
         }
     }
 
@@ -381,6 +384,7 @@ mod tests {
             certification: Default::default(),
             coordination: None,
             agents: Default::default(),
+            skills: Default::default(),
         }
     }
 

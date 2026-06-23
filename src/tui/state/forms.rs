@@ -219,6 +219,9 @@ pub struct StatusPicker {
     pub active: bool,
     pub selected: usize,
     pub doc_path: PathBuf,
+    /// The selected document's type lifecycle states, in declared order. The
+    /// picker lists and writes back from this rather than a hardcoded set.
+    pub states: Vec<String>,
 }
 
 impl Default for StatusPicker {
@@ -233,6 +236,7 @@ impl StatusPicker {
             active: false,
             selected: 0,
             doc_path: PathBuf::new(),
+            states: Vec::new(),
         }
     }
 }

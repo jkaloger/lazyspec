@@ -99,7 +99,7 @@ pub fn deserialize(issue_body: &str, ctx: &IssueContext) -> Result<(DocMeta, Str
 }
 
 fn needs_frontmatter_status(status: &Status) -> bool {
-    !matches!(status, Status::Draft | Status::Complete)
+    !matches!(status.as_str(), "draft" | "complete")
 }
 
 /// Reconstruct status from GitHub open/closed state and optional frontmatter
@@ -113,9 +113,9 @@ fn reconstruct_status(is_open: bool, frontmatter_status: Option<&str>) -> Status
     }
 
     if is_open {
-        Status::Draft
+        Status::new("draft")
     } else {
-        Status::Complete
+        Status::new("complete")
     }
 }
 
@@ -191,7 +191,7 @@ mod tests {
             path: PathBuf::new(),
             title: "Add caching layer".to_string(),
             doc_type: DocType::new("rfc"),
-            status: Status::Draft,
+            status: Status::new("draft"),
             author: "agent-7".to_string(),
             date: NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
             tags: vec!["performance".to_string()],
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn serialize_includes_non_lifecycle_status() {
         let mut doc = sample_doc();
-        doc.status = Status::Rejected;
+        doc.status = Status::new("rejected");
         let result = serialize(&doc, "");
         assert!(result.contains("status: rejected"));
     }
@@ -307,23 +307,23 @@ mod tests {
 
     #[test]
     fn status_from_open_issue_without_frontmatter() {
-        assert_eq!(reconstruct_status(true, None), Status::Draft);
+        assert_eq!(reconstruct_status(true, None), Status::new("draft"));
     }
 
     #[test]
     fn status_from_closed_issue_without_frontmatter() {
-        assert_eq!(reconstruct_status(false, None), Status::Complete);
+        assert_eq!(reconstruct_status(false, None), Status::new("complete"));
     }
 
     #[test]
     fn status_from_frontmatter_overrides_open_closed() {
         assert_eq!(
             reconstruct_status(false, Some("rejected")),
-            Status::Rejected
+            Status::new("rejected")
         );
         assert_eq!(
             reconstruct_status(false, Some("superseded")),
-            Status::Superseded
+            Status::new("superseded")
         );
     }
 
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn round_trip_with_non_lifecycle_status() {
         let mut doc = sample_doc();
-        doc.status = Status::Superseded;
+        doc.status = Status::new("superseded");
         let serialized = serialize(&doc, "body");
 
         let ctx = IssueContext {
@@ -362,7 +362,7 @@ mod tests {
         };
 
         let (meta, _) = deserialize(&serialized, &ctx).unwrap();
-        assert_eq!(meta.status, Status::Superseded);
+        assert_eq!(meta.status, Status::new("superseded"));
     }
 
     #[test]
@@ -402,43 +402,43 @@ mod tests {
     #[test]
     fn round_trip_review_status() {
         let mut doc = sample_doc();
-        doc.status = Status::Review;
+        doc.status = Status::new("review");
         let serialized = serialize(&doc, "body");
         assert!(serialized.contains("status: review"));
 
         let ctx = sample_context();
         let (meta, _) = deserialize(&serialized, &ctx).unwrap();
-        assert_eq!(meta.status, Status::Review);
+        assert_eq!(meta.status, Status::new("review"));
     }
 
     #[test]
     fn round_trip_accepted_status() {
         let mut doc = sample_doc();
-        doc.status = Status::Accepted;
+        doc.status = Status::new("accepted");
         let serialized = serialize(&doc, "body");
         assert!(serialized.contains("status: accepted"));
 
         let ctx = sample_context();
         let (meta, _) = deserialize(&serialized, &ctx).unwrap();
-        assert_eq!(meta.status, Status::Accepted);
+        assert_eq!(meta.status, Status::new("accepted"));
     }
 
     #[test]
     fn round_trip_in_progress_status() {
         let mut doc = sample_doc();
-        doc.status = Status::InProgress;
+        doc.status = Status::new("in-progress");
         let serialized = serialize(&doc, "body");
         assert!(serialized.contains("status: in-progress"));
 
         let ctx = sample_context();
         let (meta, _) = deserialize(&serialized, &ctx).unwrap();
-        assert_eq!(meta.status, Status::InProgress);
+        assert_eq!(meta.status, Status::new("in-progress"));
     }
 
     #[test]
     fn serialize_omits_complete_status() {
         let mut doc = sample_doc();
-        doc.status = Status::Complete;
+        doc.status = Status::new("complete");
         let result = serialize(&doc, "");
         assert!(!result.contains("status:"));
     }

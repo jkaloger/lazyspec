@@ -3,14 +3,15 @@ use ratatui::style::Color;
 use crate::engine::document::Status;
 
 pub fn status_color(status: &Status) -> Color {
-    match status {
-        Status::Draft => Color::Yellow,
-        Status::Review => Color::Blue,
-        Status::Accepted => Color::Green,
-        Status::InProgress => Color::Cyan,
-        Status::Complete => Color::Green,
-        Status::Rejected => Color::Red,
-        Status::Superseded => Color::DarkGray,
+    match status.as_str() {
+        "draft" => Color::Yellow,
+        "review" => Color::Blue,
+        "accepted" => Color::Green,
+        "in-progress" => Color::Cyan,
+        "complete" => Color::Green,
+        "rejected" => Color::Red,
+        "superseded" => Color::DarkGray,
+        _ => Color::Reset,
     }
 }
 

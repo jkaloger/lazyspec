@@ -78,18 +78,37 @@ Add the appropriate line to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.) t
 
 ## Skills
 
-Lazyspec includes a set of agent skills that enforce its workflow:
+Lazyspec ships a set of config-driven generic verb skills that enforce its
+workflow against whatever document types your `.lazyspec.toml` defines. The
+`lazy` router is the entry point: it reads the configured lifecycle DAG and the
+user's position, then dispatches the right verb.
 
-| Skill              | Purpose                                                                |
-| ------------------ | ---------------------------------------------------------------------- |
-| `plan-work`        | Detect existing artifacts and determine the right entry point          |
-| `write-rfc`        | Propose a design with intent, interface sketches, and identify stories |
-| `create-story`     | Create stories with acceptance criteria linked to an RFC               |
-| `resolve-context`  | Gather full document chain (RFC -> Story -> Iteration) before work     |
-| `create-iteration` | Plan an iteration with task breakdown and test plan                    |
-| `build`            | Implement tasks from an iteration with subagent dispatch               |
-| `review-iteration` | Two-stage review -- AC compliance first, then code quality             |
-| `create-audit`     | Criteria-based review (health check, security, accessibility, etc.)    |
+| Skill      | Purpose                                                                            |
+| ---------- | ---------------------------------------------------------------------------------- |
+| `lazy`     | Entry-point router -- reads the DAG and position, dispatches the right verb        |
+| `scaffold` | Create a new document's file and frontmatter, hand the body back to the human      |
+| `co-write` | Collaboratively draft a document body -- AI proposes, human edits, iterate         |
+| `generate` | Author a full document body from context (only when the type's ceiling allows it)  |
+| `advance`  | Move a document to its next status along the type's lifecycle DAG, checking gates  |
+| `execute`  | Carry out the work a delivery document describes against its tasks and ACs         |
+| `review`   | Critique a document against its intent and acceptance criteria before advancing    |
+
+### Installing skills
+
+`skills install` places the embedded skill set into the project. It works with
+or without a `.lazyspec.toml` (and never creates one):
+
+```sh
+lazyspec skills install                  # both runtimes (default)
+lazyspec skills install --runtime claude     # .claude/skills/ only
+lazyspec skills install --runtime agents-md  # ./AGENTS.md only
+```
+
+For Claude, each skill is written under `.claude/skills/<verb>/SKILL.md`; the
+router is installed under the configured `[skills] entry` name (default `lazy`).
+For other agents, the same prose is concatenated into `./AGENTS.md`. Re-running
+is idempotent. Configure the router name via `[skills] entry` in
+`.lazyspec.toml`.
 
 ## Usage
 
@@ -153,10 +172,10 @@ All document management is available as subcommands. Most accept `--json` for ma
 | Command                              | Description                                                           |
 | ------------------------------------ | --------------------------------------------------------------------- |
 | `init`                               | Initialise lazyspec in the current project                            |
-| `create <type> <title> [--author X]` | Create a document (rfc, adr, story, iteration)                        |
+| `create <type> <title> [--author X] [--body / --body-file]` | Create a document (rfc, adr, story, iteration); seed body inline, from a file, or `-` for stdin |
 | `list [type] [--status X]`           | List documents with optional filters                                  |
 | `show <id> [-e]`                     | Display a document by path or shorthand ID (e.g. `RFC-001`)           |
-| `update <path> --status X --title X` | Update document frontmatter                                           |
+| `update <path> [--status X] [--title X] [--body / --body-file]` | Update frontmatter and/or body content (`--body-file -` reads stdin); works for all stores |
 | `delete <path>`                      | Delete a document                                                     |
 | `link <from> <rel> <to>`             | Add a typed relationship (canonical or inverse keyword)               |
 | `unlink <from> <rel> <to>`           | Remove a relationship (canonical or inverse keyword)                  |
@@ -362,17 +381,52 @@ Projects created before relationships and rules became config-driven have a
 now rejects such a config on every command, pointing you at the migration:
 
 ```sh
-lazyspec fix --config            # inject the missing standard relationships/rules
+lazyspec fix --config            # inject missing standard relationships/rules and default lifecycles
 lazyspec fix --config --dry-run  # preview the additions without writing
 ```
 
 `fix --config` reads the config leniently (the one place strict load is
 bypassed), then appends only the standard `[[relationships]]` / `[[rules]]` that
 are missing -- comparing by name, so user-added relationships and rules are kept
-and nothing is duplicated. It is append-only: every existing section (`[github]`,
-`[coordination]`, comments, ordering) is preserved byte-for-byte, and it is
-idempotent -- running it on an up-to-date config makes no change. The flag is
-config-only: no documents are touched (use plain `lazyspec fix` for frontmatter).
+and nothing is duplicated. It also injects the default `lifecycle` into any
+`[[types]]` entry that lacks one (a type that already declares a lifecycle is
+left untouched); migrated types are reported under `lifecycles_added`. Every
+existing section (`[github]`, `[coordination]`, comments, ordering) is preserved,
+and it is idempotent -- running it on an up-to-date config makes no change. The
+flag is config-only: no documents are touched (use plain `lazyspec fix` for
+frontmatter).
+
+### Inspecting and Editing the Config
+
+`lazyspec config` reads and edits `.lazyspec.toml` without you opening the file.
+The read is plain JSON; the three mutators reconcile the TOML in place, preserving
+comments, formatting, and block order exactly as `fix --config` and the TUI
+settings screen do.
+
+```sh
+lazyspec config --json                      # print the resolved config as JSON
+
+# Append a new document type (name, plural, dir, prefix are positional)
+lazyspec config add-type spike spikes docs/spikes SPIKE \
+  --icon "◆" --parent-type rfc --intent "throwaway exploration" \
+  --authorship generated
+# also accepts --singleton, --store <filesystem|github-issues|git-ref>,
+# --numbering <incremental|sqids|reserved>
+
+# Replace a type's lifecycle (states + edges; `*` matches any source state)
+lazyspec config set-lifecycle iteration \
+  --state draft --state in-progress --state done \
+  --edge draft:in-progress --edge in-progress:done --edge "*:rejected"
+
+# Gate child creation on a parent status (parent-child rules only)
+lazyspec config add-gate stories-need-rfcs --status accepted
+```
+
+`add-type` rejects a duplicate name; `set-lifecycle` replaces the whole lifecycle
+(it is a set, not a merge) and rejects an unknown type; `add-gate` rejects an
+unknown rule and refuses a `relation-existence` rule (the gate applies only to
+`parent-child` rules). The mutators require an already-valid config; run
+`lazyspec fix --config` first to migrate a legacy one.
 
 ### Custom Types
 
@@ -396,6 +450,31 @@ dir = "docs/specs"
 prefix = "SPEC"
 icon = "◆"
 ```
+
+### Lifecycle
+
+Each type declares a `lifecycle`: the set of valid statuses (`states`) and,
+optionally, the permitted status transitions (`edges`). `update --status` is
+gated by this lifecycle -- a move is allowed only when an edge from the current
+status to the target is declared. An edge with a `*` source matches any current
+status (e.g. `* -> superseded` lets any document be superseded). Setting a status
+to its current value is always a no-op (idempotent, never rejected). When a move
+has no matching edge, `update` exits non-zero and the frontmatter is left
+unchanged.
+
+`edges` is optional. A lifecycle that declares `states` but omits `edges` (or
+sets `edges = []`) is unconstrained: any move between declared states is allowed.
+Declare `edges` only when you want to constrain the order of transitions.
+
+```toml
+[[types]]
+name = "rfc"
+prefix = "RFC"
+lifecycle = { states = ["draft", "review", "accepted", "in-progress", "complete", "rejected", "superseded"], edges = [{ from = "draft", to = "review" }, { from = "review", to = "accepted" }, { from = "accepted", to = "in-progress" }, { from = "in-progress", to = "complete" }, { from = "*", to = "rejected" }, { from = "*", to = "superseded" }] }
+```
+
+Projects whose `[[types]]` predate the lifecycle axis can backfill the default
+lifecycle with `lazyspec fix --config` (see *Migrating an Existing Config*).
 
 ### Relationships
 
@@ -428,6 +507,12 @@ Validation rules define structural constraints between document types. Two shape
 - `parent-child` -- the child type must link to a parent type via a given relationship.
 - `relation-existence` -- documents of a given type must have at least one relationship.
 
+A `parent-child` rule may also carry `require_parent_status`: when set, `create`
+of the child type is refused unless at least one parent document of the rule's
+`parent` type has reached that status. The required status must be a valid state
+of the parent type's lifecycle. Rules without `require_parent_status` impose no
+creation gate.
+
 ```toml
 [[rules]]
 shape = "parent-child"
@@ -436,6 +521,7 @@ child = "story"
 parent = "rfc"
 link = "implements"
 severity = "warning"
+require_parent_status = "accepted"  # optional: a story cannot be created until an rfc is accepted
 
 [[rules]]
 shape = "relation-existence"
@@ -473,7 +559,9 @@ If the remote is unreachable, `create` fails rather than silently falling back. 
 
 ### Templates
 
-Place markdown templates in the templates directory (`.lazyspec/templates/` by default). When creating a document, lazyspec uses the template matching the document type name (e.g. `rfc.md`, `story.md`).
+Markdown templates live in the templates directory (`.lazyspec/templates/` by default). `init` materializes a single `template.md` carrying general authoring guidance; because the tool is config-driven, no per-type templates are shipped. `{title}`, `{author}`, `{date}`, and `{type}` are substituted when a document is created, so one template serves every type.
+
+When creating a document, lazyspec resolves the template in this order: a per-type override `{type}.md` (e.g. `rfc.md`, `story.md`), then the shared `template.md`, then a built-in default. Add a `{type}.md` to override a single type while leaving the rest on the shared template.
 
 ### Agents
 

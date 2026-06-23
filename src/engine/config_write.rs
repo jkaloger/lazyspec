@@ -1,9 +1,9 @@
 use anyhow::Result;
-use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value};
+use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::engine::config::{
-    default_normalize, Config, NumberingStrategy, RelationshipDef, ReservedFormat, Severity,
-    TypeDef, ValidationRule,
+    default_normalize, default_skills_entry, Authorship, Config, Edge, Lifecycle,
+    NumberingStrategy, RelationshipDef, ReservedFormat, Severity, TypeDef, ValidationRule,
 };
 
 pub fn write_config_in_place(existing_src: &str, buffer: &Config) -> Result<String> {
@@ -20,6 +20,7 @@ pub fn write_config_in_place(existing_src: &str, buffer: &Config) -> Result<Stri
     write_coordination(&mut doc, buffer);
     write_certification(&mut doc, buffer);
     write_agents(&mut doc, buffer);
+    write_skills(&mut doc, buffer);
     write_rules(&mut doc, buffer);
 
     Ok(doc.to_string())
@@ -85,6 +86,85 @@ fn update_type_table(entry: &mut Table, def: &TypeDef) {
     set_bool_defaulted(entry, "singleton", def.singleton, false);
     set_opt_str(entry, "parent_type", def.parent_type.as_deref());
     set_str_array_defaulted(entry, "agents", &def.agents);
+    set_opt_str(entry, "intent", def.intent.as_deref());
+    set_str_defaulted(
+        entry,
+        "authorship",
+        authorship_str(&def.authorship),
+        "assisted",
+    );
+    set_lifecycle(entry, &def.lifecycle);
+}
+
+fn authorship_str(a: &Authorship) -> &'static str {
+    match a {
+        Authorship::Human => "human",
+        Authorship::Assisted => "assisted",
+        Authorship::Generated => "generated",
+    }
+}
+
+// Reconcile the `lifecycle` inline table to the buffer. When the entry has no
+// `lifecycle` key it is injected from a non-empty buffer (the migration path); a
+// present `lifecycle` is rewritten only when the buffer differs from what the
+// source declares, so an unchanged type keeps its existing representation
+// (decor/formatting) untouched.
+fn set_lifecycle(entry: &mut Table, lifecycle: &Lifecycle) {
+    if !entry.contains_key("lifecycle") {
+        if lifecycle.states.is_empty() {
+            return;
+        }
+        entry.insert(
+            "lifecycle",
+            Item::Value(Value::InlineTable(lifecycle_inline(lifecycle))),
+        );
+        return;
+    }
+    if entry.get("lifecycle").and_then(parse_lifecycle).as_ref() == Some(lifecycle) {
+        return;
+    }
+    entry.insert(
+        "lifecycle",
+        Item::Value(Value::InlineTable(lifecycle_inline(lifecycle))),
+    );
+}
+
+fn parse_lifecycle(item: &Item) -> Option<Lifecycle> {
+    let table = item.as_inline_table()?;
+    let states = table
+        .get("states")?
+        .as_array()?
+        .iter()
+        .map(|v| v.as_str().map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    let edges = table
+        .get("edges")?
+        .as_array()?
+        .iter()
+        .map(|v| {
+            let e = v.as_inline_table()?;
+            Some(Edge {
+                from: e.get("from")?.as_str()?.to_string(),
+                to: e.get("to")?.as_str()?.to_string(),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(Lifecycle { states, edges })
+}
+
+fn lifecycle_inline(lifecycle: &Lifecycle) -> InlineTable {
+    let mut table = InlineTable::new();
+    let states: Array = lifecycle.states.iter().map(|s| s.as_str()).collect();
+    table.insert("states", Value::Array(states));
+    let mut edges = Array::new();
+    for edge in &lifecycle.edges {
+        let mut e = InlineTable::new();
+        e.insert("from", edge.from.as_str().into());
+        e.insert("to", edge.to.as_str().into());
+        edges.push(Value::InlineTable(e));
+    }
+    table.insert("edges", Value::Array(edges));
+    table
 }
 
 fn write_relationships(doc: &mut DocumentMut, buffer: &Config) {
@@ -308,6 +388,24 @@ fn write_agents(doc: &mut DocumentMut, buffer: &Config) {
     set_opt_str(agents, "interactive", buffer.agents.interactive.as_deref());
 }
 
+fn write_skills(doc: &mut DocumentMut, buffer: &Config) {
+    if !doc.contains_key("skills") {
+        if buffer.skills.entry == default_skills_entry() {
+            return;
+        }
+        doc.insert("skills", Item::Table(Table::new()));
+    }
+    let Some(skills) = doc.get_mut("skills").and_then(Item::as_table_like_mut) else {
+        return;
+    };
+    set_str_defaulted(
+        skills,
+        "entry",
+        &buffer.skills.entry,
+        &default_skills_entry(),
+    );
+}
+
 fn write_rules(doc: &mut DocumentMut, buffer: &Config) {
     if !doc.contains_key("rules") {
         if buffer.rules.is_empty() {
@@ -334,7 +432,14 @@ fn update_rule_table(entry: &mut Table, rule: &ValidationRule) {
     // body keys are no longer valid and must be cleared before the new variant is
     // written. `name`/`severity` are common to both variants.
     if shape_changed {
-        for key in ["child", "parent", "link", "type", "require"] {
+        for key in [
+            "child",
+            "parent",
+            "link",
+            "type",
+            "require",
+            "require_parent_status",
+        ] {
             entry.remove(key);
         }
     }
@@ -345,6 +450,7 @@ fn update_rule_table(entry: &mut Table, rule: &ValidationRule) {
             parent,
             link,
             severity,
+            require_parent_status,
         } => {
             set_str(entry, "name", name);
             set_str(entry, "shape", "parent-child");
@@ -352,6 +458,11 @@ fn update_rule_table(entry: &mut Table, rule: &ValidationRule) {
             set_str(entry, "parent", parent);
             set_str(entry, "link", link);
             set_str(entry, "severity", severity_str(severity));
+            set_opt_str(
+                entry,
+                "require_parent_status",
+                require_parent_status.as_deref(),
+            );
         }
         ValidationRule::RelationExistence {
             name,
@@ -759,6 +870,73 @@ link = "implements"
 severity = "error"
 "#;
 
+    // AC5 (writer): a parent-child rule with `require_parent_status` round-trips.
+    #[test]
+    fn require_parent_status_round_trips() {
+        let buffer = {
+            let mut c = Config::parse(RULES_SRC).unwrap();
+            c.rules[0] = ValidationRule::ParentChild {
+                name: "story-has-rfc".to_string(),
+                child: "story".to_string(),
+                parent: "rfc".to_string(),
+                link: "implements".to_string(),
+                severity: Severity::Error,
+                require_parent_status: Some("accepted".to_string()),
+            };
+            c
+        };
+
+        let out = write_config_in_place(RULES_SRC, &buffer).unwrap();
+        assert!(out.contains(r#"require_parent_status = "accepted""#));
+        let reparsed = Config::parse(&out).unwrap();
+        match &reparsed.rules[0] {
+            ValidationRule::ParentChild {
+                require_parent_status,
+                ..
+            } => assert_eq!(require_parent_status.as_deref(), Some("accepted")),
+            other => panic!("unexpected rule: {other:?}"),
+        }
+    }
+
+    // AC5 (writer): a shape change (parent-child -> relation-existence) drops the
+    // require_parent_status key.
+    #[test]
+    fn shape_change_drops_require_parent_status() {
+        const SRC_WITH_REQ: &str = r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[rules]]
+name = "story-has-rfc"
+shape = "parent-child"
+child = "story"
+parent = "rfc"
+link = "implements"
+severity = "error"
+require_parent_status = "accepted"
+"#;
+        let buffer = {
+            let mut c = Config::parse(SRC_WITH_REQ).unwrap();
+            c.rules[0] = ValidationRule::RelationExistence {
+                name: "story-has-rfc".to_string(),
+                doc_type: "story".to_string(),
+                require: "implements".to_string(),
+                severity: Severity::Error,
+            };
+            c
+        };
+
+        let out = write_config_in_place(SRC_WITH_REQ, &buffer).unwrap();
+        assert!(!out.contains("require_parent_status"));
+        Config::parse(&out).unwrap();
+    }
+
     #[test]
     fn shape_change_clears_stale_variant_keys() {
         let buffer = {
@@ -801,6 +979,9 @@ severity = "error"
                 singleton: false,
                 parent_type: None,
                 agents: Vec::new(),
+                intent: None,
+                authorship: Default::default(),
+                lifecycle: Default::default(),
             });
             c
         };
@@ -884,6 +1065,9 @@ name = "related-to"
                 singleton: false,
                 parent_type: None,
                 agents: Vec::new(),
+                intent: None,
+                authorship: Default::default(),
+                lifecycle: Default::default(),
             });
             c.rules.clear();
             c

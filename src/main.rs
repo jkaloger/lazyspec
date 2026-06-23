@@ -2,6 +2,7 @@ use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 use lazyspec::cli::provenance::ProvenanceCommand;
 use lazyspec::cli::reservations::ReservationsCommand;
+use lazyspec::cli::skills::SkillsCommand;
 use lazyspec::cli::{Cli, Commands};
 use lazyspec::engine::config::{Config, StoreBackend};
 use lazyspec::engine::fs::RealFileSystem;
@@ -76,10 +77,25 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(exit_code);
     }
 
+    // `skills install` must work in a project with no `.lazyspec.toml` (it
+    // never creates one), so it dispatches before `Config::load` like Init and
+    // `fix --config`.
+    if let Some(Commands::Skills {
+        command: SkillsCommand::Install { runtime },
+    }) = &cli.command
+    {
+        lazyspec::cli::skills::run_install(&cwd, *runtime)?;
+        return Ok(());
+    }
+
     let config = Config::load(&cwd, &fs)?;
 
     match cli.command {
-        Some(Commands::Init) | Some(Commands::Completions { .. }) => unreachable!(),
+        Some(Commands::Init)
+        | Some(Commands::Completions { .. })
+        | Some(Commands::Skills { .. }) => {
+            unreachable!()
+        }
         Some(Commands::Fetch { json, doc_type }) => {
             let gh = GhCli::new();
             let git_ref_ops = GitCli;
@@ -367,6 +383,53 @@ fn main() -> anyhow::Result<()> {
                 )?;
             }
         },
+        Some(Commands::Config { command, json: _ }) => {
+            use lazyspec::cli::config::ConfigCommand;
+            match command {
+                None | Some(ConfigCommand::Show { .. }) => {
+                    println!("{}", lazyspec::cli::config::run_show_json(&config)?);
+                }
+                Some(ConfigCommand::AddType {
+                    name,
+                    plural,
+                    dir,
+                    prefix,
+                    icon,
+                    parent_type,
+                    singleton,
+                    store,
+                    numbering,
+                    intent,
+                    authorship,
+                }) => {
+                    lazyspec::cli::config::run_add_type(
+                        &cwd,
+                        &fs,
+                        &name,
+                        &plural,
+                        &dir,
+                        &prefix,
+                        icon.as_deref(),
+                        parent_type.as_deref(),
+                        singleton,
+                        store.as_deref(),
+                        numbering.as_deref(),
+                        intent.as_deref(),
+                        authorship.as_deref(),
+                    )?;
+                }
+                Some(ConfigCommand::SetLifecycle {
+                    name,
+                    states,
+                    edges,
+                }) => {
+                    lazyspec::cli::config::run_set_lifecycle(&cwd, &fs, &name, &states, &edges)?;
+                }
+                Some(ConfigCommand::AddGate { name, status }) => {
+                    lazyspec::cli::config::run_add_gate(&cwd, &fs, &name, &status)?;
+                }
+            }
+        }
         Some(Commands::Provenance { command }) => {
             let store = Store::load(&cwd, &config)?;
             let mut stdout = std::io::stdout();

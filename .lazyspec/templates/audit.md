@@ -7,16 +7,16 @@ date: {date}
 tags: []
 related: []
 ---
+<!-- intent: check work against named criteria and record findings for triage -->
 
 ## Scope
-
-What is being audited and why. Include the audit type (e.g. health check, security, accessibility, spec compliance, bug bash).
+<!-- guidance: what is being audited and the audit type (health check, security, accessibility, spec compliance, bug bash) -->
 
 ## Criteria
-
-The standards or checklist being audited against.
+<!-- guidance: the standards or checklist audited against; each finding maps to one -->
 
 ## Findings
+<!-- guidance: one subsection per finding; severity, location, what was found, what to do -->
 
 ### Finding 1: [title]
 
@@ -26,5 +26,4 @@ The standards or checklist being audited against.
 **Recommendation:** What should be done.
 
 ## Summary
-
-Overall assessment and prioritised recommendations.
+<!-- guidance: overall assessment and findings ranked by severity -->

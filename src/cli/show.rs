@@ -6,6 +6,26 @@ use crate::engine::store::{ResolveError, Store};
 use anyhow::Result;
 use console::colors_enabled;
 
+/// Remove HTML comments (`<!-- ... -->`) from a body before plaintext display.
+/// The TUI renderer drops HTML events on its own; `show` prints raw, so it strips here.
+/// Machine paths (`--json`, `get_body_raw`/`expanded`) keep comments verbatim.
+fn strip_html_comments(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("-->") {
+            Some(end) => rest = &rest[start + end + 3..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn title_box(title: &str) -> String {
     if !colors_enabled() {
         return format!("# {}", title);
@@ -71,7 +91,7 @@ pub fn run(
     } else {
         store.get_body_raw(&doc.path, fs)?
     };
-    println!("{}", body);
+    println!("{}", strip_html_comments(&body));
 
     let child_paths = store.children_of(&doc.path);
     if !child_paths.is_empty() {
@@ -129,4 +149,32 @@ pub fn run_json(
     json["body"] = serde_json::Value::String(body);
 
     Ok(serde_json::to_string_pretty(&json)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_html_comments;
+
+    #[test]
+    fn strips_intent_and_guidance_comments() {
+        let body = "<!-- intent: do a thing -->\n\n## Context\n<!-- guidance: the why -->\n\nReal prose.\n";
+        let out = strip_html_comments(body);
+        assert!(!out.contains("<!--"));
+        assert!(!out.contains("intent:"));
+        assert!(!out.contains("guidance:"));
+        assert!(out.contains("## Context"));
+        assert!(out.contains("Real prose."));
+    }
+
+    #[test]
+    fn leaves_comment_free_body_untouched() {
+        let body = "## Summary\n\nNo comments here.\n";
+        assert_eq!(strip_html_comments(body), body);
+    }
+
+    #[test]
+    fn tolerates_unterminated_comment() {
+        let body = "before <!-- never closed";
+        assert_eq!(strip_html_comments(body), "before ");
+    }
 }

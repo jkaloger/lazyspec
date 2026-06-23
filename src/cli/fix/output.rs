@@ -19,6 +19,14 @@ pub(super) fn format_config_human(result: &ConfigFixResult, dry_run: bool) -> St
         }
     }
 
+    for name in &result.lifecycles_added {
+        if dry_run {
+            out.push_str(&format!("Would add default lifecycle to type {}\n", name));
+        } else {
+            out.push_str(&format!("Added default lifecycle to type {}\n", name));
+        }
+    }
+
     if out.is_empty() {
         out.push_str("Config already up to date; nothing to add\n");
     }

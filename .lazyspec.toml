@@ -11,6 +11,7 @@ dir = "docs/convention"
 prefix = "CONVENTION"
 icon = "📜"
 singleton = true
+lifecycle = { states = ["draft", "review", "accepted", "in-progress", "complete", "rejected", "superseded"], edges = [{ from = "draft", to = "review" }, { from = "review", to = "accepted" }, { from = "review", to = "rejected" }, { from = "accepted", to = "in-progress" }, { from = "in-progress", to = "complete" }, { from = "*", to = "superseded" }] }
 
 [[types]]
 name = "dictum"
@@ -19,6 +20,7 @@ dir = "docs/convention"
 prefix = "DICTUM"
 icon = "⚖"
 parent_type = "convention"
+lifecycle = { states = ["draft", "review", "accepted"], edges = [{ from = "draft", to = "review" }, { from = "review", to = "accepted" }] }
 
 [[types]]
 name = "spec"
@@ -26,6 +28,7 @@ plural = "specs"
 dir = "docs/specs"
 prefix = "SPEC"
 icon = "📋"
+lifecycle = { states = ["draft", "review", "accepted", "in-progress", "complete", "rejected", "superseded"], edges = [{ from = "draft", to = "review" }, { from = "review", to = "accepted" }, { from = "review", to = "rejected" }, { from = "accepted", to = "in-progress" }, { from = "in-progress", to = "complete" }, { from = "*", to = "superseded" }] }
 
 [[types]]
 name = "rfc"
@@ -33,6 +36,7 @@ plural = "rfcs"
 dir = "docs/rfcs"
 prefix = "RFC"
 icon = "●"
+lifecycle = { states = ["draft", "review", "accepted", "in-progress", "complete", "rejected", "superseded"], edges = [{ from = "draft", to = "review" }, { from = "review", to = "accepted" }, { from = "review", to = "rejected" }, { from = "accepted", to = "in-progress" }, { from = "in-progress", to = "complete" }, { from = "*", to = "superseded" }] }
 
 [[types]]
 name = "story"
@@ -40,6 +44,7 @@ plural = "stories"
 dir = "docs/stories"
 prefix = "STORY"
 icon = "▲"
+lifecycle = { states = ["draft", "review", "accepted", "in-progress", "complete", "rejected", "superseded"], edges = [{ from = "draft", to = "review" }, { from = "review", to = "accepted" }, { from = "review", to = "rejected" }, { from = "accepted", to = "in-progress" }, { from = "in-progress", to = "complete" }, { from = "*", to = "superseded" }] }
 
 [[types]]
 name = "iteration"
@@ -48,6 +53,7 @@ dir = "docs/iterations"
 prefix = "ITERATION"
 icon = "◆"
 agents = ["build"]
+lifecycle = { states = ["draft", "review", "accepted", "in-progress", "complete", "rejected", "superseded"], edges = [{ from = "draft", to = "review" }, { from = "review", to = "accepted" }, { from = "review", to = "rejected" }, { from = "accepted", to = "in-progress" }, { from = "in-progress", to = "complete" }, { from = "*", to = "superseded" }] }
 
 [[types]]
 name = "adr"
@@ -55,6 +61,7 @@ plural = "adrs"
 dir = "docs/adrs"
 prefix = "ADR"
 icon = "■"
+lifecycle = { states = ["draft", "review", "accepted", "in-progress", "complete", "rejected", "superseded"], edges = [{ from = "draft", to = "review" }, { from = "review", to = "accepted" }, { from = "review", to = "rejected" }, { from = "accepted", to = "in-progress" }, { from = "in-progress", to = "complete" }, { from = "*", to = "superseded" }] }
 
 [[types]]
 name = "audit"
@@ -62,6 +69,7 @@ plural = "audits"
 dir = "docs/audits"
 prefix = "AUDIT"
 icon = "🔍"
+lifecycle = { states = ["draft", "review", "accepted", "in-progress", "complete", "rejected", "superseded"], edges = [{ from = "draft", to = "review" }, { from = "review", to = "accepted" }, { from = "review", to = "rejected" }, { from = "accepted", to = "in-progress" }, { from = "in-progress", to = "complete" }, { from = "*", to = "superseded" }] }
 
 [[relationships]]
 name = "implements"

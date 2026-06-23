@@ -320,9 +320,9 @@ fn parse_issue(issue: &GhIssue, type_name: &str, known_types: &[String]) -> (Doc
     }
 
     let status = if issue.state.eq_ignore_ascii_case("open") {
-        Status::Draft
+        Status::new("draft")
     } else {
-        Status::Complete
+        Status::new("complete")
     };
 
     let meta = DocMeta {
@@ -414,6 +414,9 @@ mod tests {
             singleton: false,
             parent_type: None,
             agents: Vec::new(),
+            intent: None,
+            authorship: Default::default(),
+            lifecycle: Default::default(),
         }
     }
 

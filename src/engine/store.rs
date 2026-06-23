@@ -676,6 +676,9 @@ mod tests {
             singleton: false,
             parent_type: None,
             agents: Vec::new(),
+            intent: None,
+            authorship: Default::default(),
+            lifecycle: Default::default(),
         };
 
         let mut config = Config::default();
@@ -766,6 +769,9 @@ mod tests {
             singleton: false,
             parent_type: None,
             agents: Vec::new(),
+            intent: None,
+            authorship: Default::default(),
+            lifecycle: Default::default(),
         };
 
         let mut config = Config::default();

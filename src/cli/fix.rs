@@ -74,6 +74,7 @@ struct FieldFixResult {
 pub struct ConfigFixResult {
     relationships_added: Vec<String>,
     rules_added: Vec<String>,
+    lifecycles_added: Vec<String>,
     written: bool,
 }
 

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use chrono::Local;
 
 use crate::engine::config::{Config, NumberingStrategy, ReservedFormat};
@@ -10,133 +10,56 @@ use crate::engine::reservation;
 use crate::engine::store::Store;
 use crate::engine::template;
 
-/// Load a template from the configured templates directory, falling back to a built-in default.
+/// Load the template for `doc_type` from the configured templates directory.
+/// Resolution order: a per-type `{type}.md` override, then the shared
+/// `template.md`, then the embedded generic default. The tool is config-driven,
+/// so it ships no per-type templates; `{type}` in the body is substituted at
+/// creation time, letting one template serve every type.
 fn load_template(root: &Path, config: &Config, doc_type: &str) -> String {
-    let template_path = root
-        .join(&config.filesystem.templates.dir)
-        .join(format!("{}.md", doc_type.to_lowercase()));
-    if template_path.exists() {
-        fs::read_to_string(&template_path).unwrap_or_else(|_| default_template(doc_type))
-    } else {
-        default_template(doc_type)
+    let dir = root.join(&config.filesystem.templates.dir);
+
+    let per_type = dir.join(format!("{}.md", doc_type.to_lowercase()));
+    if per_type.exists() {
+        return fs::read_to_string(&per_type).unwrap_or_else(|_| default_template().to_string());
     }
+
+    let shared = dir.join("template.md");
+    if shared.exists() {
+        return fs::read_to_string(&shared).unwrap_or_else(|_| default_template().to_string());
+    }
+
+    default_template().to_string()
 }
 
-fn story_template(doc_type: &str) -> String {
-    format!(
-        r#"---
-title: "{{title}}"
-type: {}
-status: draft
-author: "{{author}}"
-date: {{date}}
-tags: []
-related: []
----
-
-## Acceptance Criteria
-
-### AC: example-criterion
-
-Given a precondition
-When an action is taken
-Then an expected outcome occurs
-"#,
-        doc_type.to_lowercase()
-    )
-}
-
-fn default_template(doc_type: &str) -> String {
-    match doc_type.to_lowercase().as_str() {
-        "story" => r#"---
+/// The single generic template `init` materializes to `template.md`. It carries
+/// the authoring conventions (intent/guidance comments, `{key}` substitution)
+/// rather than any type-specific sections; `{type}` is filled in per document.
+pub(crate) fn default_template() -> &'static str {
+    r#"---
 title: "{title}"
-type: story
+type: {type}
 status: draft
 author: "{author}"
 date: {date}
 tags: []
 related: []
 ---
-
-## Context
-
-TODO: Describe the background and motivation.
-
-## Acceptance Criteria
-
-- **Given** a precondition
-  **When** an action is taken
-  **Then** an expected outcome occurs
-
-## Scope
-
-### In Scope
-
-- TODO
-
-### Out of Scope
-
-- TODO
-"#
-        .to_string(),
-
-        "iteration" => r#"---
-title: "{title}"
-type: iteration
-status: draft
-author: "{author}"
-date: {date}
-tags: []
-related: []
----
-
-## Changes
-
-- TODO
-
-## Test Plan
-
-- TODO
-
-## Notes
-
-TODO
-"#
-        .to_string(),
-
-        "spec" => r#"---
-title: "{title}"
-type: spec
-status: draft
-author: "{author}"
-date: {date}
-tags: []
-related: []
----
+<!-- intent: state in one line what this document is for, then delete this comment -->
 
 ## Summary
+<!-- guidance: what this document covers and why it exists. Rename or replace these
+     sections to suit the type; the headings below are only a starting point. -->
 
-TODO
+## Detail
+<!-- guidance: the substance of the document. Add as many sections as the type needs. -->
+
+<!-- Authoring conventions this tool relies on:
+       - an intent comment at the top of the body states the document's purpose; agents read it.
+       - a guidance comment under a heading describes what belongs in that section.
+       - {title}, {author}, {date}, and {type} are substituted when a document is created.
+     Edit this file (template.md) to change the default for every new document, or add
+     a {type}.md alongside it to override a single type. HTML comments render invisibly. -->
 "#
-        .to_string(),
-
-        _ => format!(
-            r#"---
-title: "{{title}}"
-type: {}
-status: draft
-author: "{{author}}"
-date: {{date}}
-tags: []
----
-
-## Summary
-
-TODO
-"#,
-            doc_type.to_lowercase()
-        ),
-    }
 }
 
 /// Create a document on the filesystem. Handles numbering, template resolution, and file writing.
@@ -230,9 +153,6 @@ pub fn create_document(
         let index_path = spec_dir.join("index.md");
         fs::write(&index_path, index_content)?;
 
-        let story_content = template::render_template(&story_template(doc_type), &vars);
-        fs::write(spec_dir.join("story.md"), story_content)?;
-
         return Ok(index_path);
     }
 
@@ -267,10 +187,6 @@ pub fn update_document(
     doc_id: &str,
     updates: &[(&str, &str)],
 ) -> Result<()> {
-    if updates.iter().any(|(k, _)| *k == "body") {
-        bail!("--body and --body-file are not supported for filesystem documents; edit the file directly");
-    }
-
     let doc = store
         .get(Path::new(doc_id))
         .or_else(|| store.resolve_shorthand(doc_id).ok())
@@ -281,8 +197,13 @@ pub fn update_document(
 
     let (yaml, body) = split_frontmatter(&content)?;
 
+    let mut new_body = body;
     let mut lines: Vec<String> = yaml.lines().map(|l| l.to_string()).collect();
     for (key, value) in updates {
+        if *key == "body" {
+            new_body = value.to_string();
+            continue;
+        }
         let prefix = format!("{}:", key);
         if let Some(line) = lines
             .iter_mut()
@@ -293,7 +214,7 @@ pub fn update_document(
     }
 
     let new_yaml = lines.join("\n");
-    let new_content = compose_frontmatter(&new_yaml, &body);
+    let new_content = compose_frontmatter(&new_yaml, &new_body);
     fs::write(&full_path, new_content)?;
     Ok(())
 }

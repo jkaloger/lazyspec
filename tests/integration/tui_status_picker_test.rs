@@ -27,34 +27,54 @@ fn enter_filters_mode(app: &mut App, fixture: &TestFixture) {
     }
 }
 
-// AC1: opening the picker populates fields from the selected doc
+// AC1: opening the picker populates fields from the selected doc. The options
+// are the current status (index 0) plus the lifecycle edges out of it.
 #[test]
 fn test_open_status_picker_populates_from_selected_doc() {
     let (_fixture, mut app) = setup_app_with_rfc("Draft RFC", "draft");
 
     app.selected_type = 0;
     app.selected_doc = 0;
-    app.open_status_picker();
+    app.open_status_picker(&_fixture.config());
 
     assert!(app.status_picker.active);
-    assert_eq!(app.status_picker.selected, 0); // draft index
+    assert_eq!(app.status_picker.selected, 0); // current status first
+    assert_eq!(
+        app.status_picker.states.first().map(String::as_str),
+        Some("draft")
+    );
+    // draft -> review and the `* -> superseded` wildcard are the only valid moves.
+    assert_eq!(
+        app.status_picker.states,
+        vec!["draft", "review", "superseded"]
+    );
     assert_eq!(
         app.status_picker.doc_path,
         std::path::PathBuf::from("docs/rfcs/RFC-001-test.md")
     );
 }
 
-// AC1: picker pre-selects the current status
+// AC1: picker pre-selects the current status (always index 0) and offers only
+// the moves reachable from it.
 #[test]
 fn test_open_status_picker_preselects_current_status() {
     let (_fixture, mut app) = setup_app_with_rfc("Accepted RFC", "accepted");
 
     app.selected_type = 0;
     app.selected_doc = 0;
-    app.open_status_picker();
+    app.open_status_picker(&_fixture.config());
 
     assert!(app.status_picker.active);
-    assert_eq!(app.status_picker.selected, 2); // accepted index
+    assert_eq!(app.status_picker.selected, 0);
+    assert_eq!(
+        app.status_picker.states.first().map(String::as_str),
+        Some("accepted")
+    );
+    // accepted -> in-progress and the wildcard superseded.
+    assert_eq!(
+        app.status_picker.states,
+        vec!["accepted", "in-progress", "superseded"]
+    );
 }
 
 // AC2: j/k navigates, clamped at boundaries
@@ -66,7 +86,7 @@ fn test_status_picker_navigation() {
 
     app.selected_type = 0;
     app.selected_doc = 0;
-    app.open_status_picker();
+    app.open_status_picker(&fixture.config());
     assert_eq!(app.status_picker.selected, 0);
 
     // j moves down
@@ -81,15 +101,16 @@ fn test_status_picker_navigation() {
     app.handle_key(KeyCode::Char('k'), KeyModifiers::NONE, root, &config);
     assert_eq!(app.status_picker.selected, 0);
 
-    // navigate to max (6 = superseded)
+    // navigate to max -- draft offers [draft, review, superseded], so index 2.
+    let max = app.status_picker.states.len() - 1;
     for _ in 0..10 {
         app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, root, &config);
     }
-    assert_eq!(app.status_picker.selected, 6);
+    assert_eq!(app.status_picker.selected, max);
 
-    // j at 6 stays clamped
+    // j at the end stays clamped
     app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, root, &config);
-    assert_eq!(app.status_picker.selected, 6);
+    assert_eq!(app.status_picker.selected, max);
 }
 
 // AC4: confirming writes new status to frontmatter and reloads store
@@ -101,17 +122,17 @@ fn test_confirm_status_change_updates_frontmatter() {
 
     app.selected_type = 0;
     app.selected_doc = 0;
-    app.open_status_picker();
+    app.open_status_picker(&fixture.config());
 
-    // Select "accepted" (index 2)
-    app.status_picker.selected = 2;
+    // Select "review" (index 1) -- a valid draft -> review lifecycle edge.
+    app.status_picker.selected = 1;
     app.confirm_status_change(root, &config).unwrap();
 
     // Verify file on disk
     let content = std::fs::read_to_string(root.join("docs/rfcs/RFC-001-test.md")).unwrap();
     assert!(
-        content.contains("status: accepted"),
-        "frontmatter should contain 'status: accepted', got:\n{}",
+        content.contains("status: review"),
+        "frontmatter should contain 'status: review', got:\n{}",
         content
     );
 
@@ -120,7 +141,7 @@ fn test_confirm_status_change_updates_frontmatter() {
         .store
         .get(std::path::Path::new("docs/rfcs/RFC-001-test.md"))
         .expect("doc should still exist in store");
-    assert_eq!(doc.status, Status::Accepted);
+    assert_eq!(doc.status, Status::new("review"));
 
     // Picker should be closed
     assert!(!app.status_picker.active);
@@ -134,7 +155,7 @@ fn test_cancel_status_picker_no_changes() {
 
     app.selected_type = 0;
     app.selected_doc = 0;
-    app.open_status_picker();
+    app.open_status_picker(&fixture.config());
     app.close_status_picker();
 
     assert!(!app.status_picker.active);
@@ -159,7 +180,7 @@ fn test_status_picker_on_empty_list_noop() {
     );
 
     app.selected_type = 0;
-    app.open_status_picker();
+    app.open_status_picker(&fixture.config());
 
     assert!(!app.status_picker.active);
 }
@@ -181,10 +202,14 @@ fn test_status_picker_in_filters_mode() {
     assert_eq!(app.view_mode, ViewMode::Filters);
 
     app.selected_doc = 0;
-    app.open_status_picker();
+    app.open_status_picker(&fixture.config());
 
     assert!(app.status_picker.active);
-    assert_eq!(app.status_picker.selected, 1); // review index
+    assert_eq!(app.status_picker.selected, 0); // current status first
+    assert_eq!(
+        app.status_picker.states.first().map(String::as_str),
+        Some("review")
+    );
     assert_eq!(
         app.status_picker.doc_path,
         std::path::PathBuf::from("docs/rfcs/RFC-001-filtered.md")

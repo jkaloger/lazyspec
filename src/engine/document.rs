@@ -85,30 +85,36 @@ impl<'de> Deserialize<'de> for DocType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Status {
-    Draft,
-    Review,
-    Accepted,
-    #[serde(rename = "in-progress")]
-    InProgress,
-    Complete,
-    Rejected,
-    Superseded,
+/// A document status (e.g. `draft`, `in-progress`). Mirrors [`RelationType`]:
+/// an open string newtype validated against the owning type's lifecycle states
+/// rather than by the type system. `FromStr`/`Deserialize` are pure (any string
+/// is a valid value); membership is checked separately by `TypeDef::accepts_status`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct Status(String);
+
+impl Status {
+    pub fn new(s: &str) -> Self {
+        Status(s.to_lowercase())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl fmt::Display for Status {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Status::Draft => write!(f, "draft"),
-            Status::Review => write!(f, "review"),
-            Status::Accepted => write!(f, "accepted"),
-            Status::InProgress => write!(f, "in-progress"),
-            Status::Complete => write!(f, "complete"),
-            Status::Rejected => write!(f, "rejected"),
-            Status::Superseded => write!(f, "superseded"),
-        }
+        write!(f, "{}", self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Status {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(Status(s.to_lowercase()))
     }
 }
 
@@ -162,16 +168,7 @@ impl std::str::FromStr for DocType {
 impl std::str::FromStr for Status {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "draft" => Ok(Status::Draft),
-            "review" => Ok(Status::Review),
-            "accepted" => Ok(Status::Accepted),
-            "in-progress" => Ok(Status::InProgress),
-            "complete" => Ok(Status::Complete),
-            "rejected" => Ok(Status::Rejected),
-            "superseded" => Ok(Status::Superseded),
-            _ => Err(anyhow!("unknown status: {}", s)),
-        }
+        Ok(Status::new(s))
     }
 }
 
@@ -344,7 +341,7 @@ mod tests {
             path: PathBuf::from(path),
             title: String::new(),
             doc_type: DocType::new("rfc"),
-            status: Status::Draft,
+            status: Status::new("draft"),
             author: String::new(),
             date: NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
             tags: vec![],
@@ -558,5 +555,13 @@ Body.
         let rt: RelationType = "anything-goes".parse().unwrap();
         assert_eq!(rt.to_string(), "anything-goes");
         assert_eq!(rt, RelationType::new("anything-goes"));
+    }
+
+    #[test]
+    fn status_newtype_fromstr_is_pure_and_lowercases() {
+        let s: Status = "In-Progress".parse().unwrap();
+        assert_eq!(s.to_string(), "in-progress");
+        let arbitrary: Status = "frozen".parse().unwrap();
+        assert_eq!(arbitrary, Status::new("frozen"));
     }
 }

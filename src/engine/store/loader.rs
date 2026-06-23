@@ -134,7 +134,7 @@ fn load_subdirectory(
 
     let all_accepted = child_paths.iter().all(|cp| {
         docs.get(cp)
-            .map(|d| d.status == Status::Accepted)
+            .map(|d| d.status == Status::new("accepted"))
             .unwrap_or(false)
     });
 
@@ -143,9 +143,9 @@ fn load_subdirectory(
         title: title_from_folder_name(folder_name),
         doc_type: DocType::new(&type_def.name),
         status: if all_accepted {
-            Status::Accepted
+            Status::new("accepted")
         } else {
-            Status::Draft
+            Status::new("draft")
         },
         author: "".to_string(),
         date: Utc::now().date_naive(),

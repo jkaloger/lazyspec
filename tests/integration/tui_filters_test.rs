@@ -126,7 +126,7 @@ fn test_cycle_status_filter() {
         fixture.root(),
         &fixture.config(),
     );
-    assert_eq!(app.filter_status, Some(Status::Draft));
+    assert_eq!(app.filter_status, Some(Status::new("draft")));
 
     app.handle_key(
         KeyCode::Char('l'),
@@ -134,7 +134,7 @@ fn test_cycle_status_filter() {
         fixture.root(),
         &fixture.config(),
     );
-    assert_eq!(app.filter_status, Some(Status::Review));
+    assert_eq!(app.filter_status, Some(Status::new("review")));
 
     app.handle_key(
         KeyCode::Char('l'),
@@ -142,7 +142,7 @@ fn test_cycle_status_filter() {
         fixture.root(),
         &fixture.config(),
     );
-    assert_eq!(app.filter_status, Some(Status::Accepted));
+    assert_eq!(app.filter_status, Some(Status::new("accepted")));
 
     app.handle_key(
         KeyCode::Char('l'),
@@ -150,7 +150,7 @@ fn test_cycle_status_filter() {
         fixture.root(),
         &fixture.config(),
     );
-    assert_eq!(app.filter_status, Some(Status::InProgress));
+    assert_eq!(app.filter_status, Some(Status::new("in-progress")));
 
     app.handle_key(
         KeyCode::Char('l'),
@@ -158,7 +158,7 @@ fn test_cycle_status_filter() {
         fixture.root(),
         &fixture.config(),
     );
-    assert_eq!(app.filter_status, Some(Status::Complete));
+    assert_eq!(app.filter_status, Some(Status::new("complete")));
 
     app.handle_key(
         KeyCode::Char('l'),
@@ -166,7 +166,7 @@ fn test_cycle_status_filter() {
         fixture.root(),
         &fixture.config(),
     );
-    assert_eq!(app.filter_status, Some(Status::Rejected));
+    assert_eq!(app.filter_status, Some(Status::new("rejected")));
 
     app.handle_key(
         KeyCode::Char('l'),
@@ -174,7 +174,7 @@ fn test_cycle_status_filter() {
         fixture.root(),
         &fixture.config(),
     );
-    assert_eq!(app.filter_status, Some(Status::Superseded));
+    assert_eq!(app.filter_status, Some(Status::new("superseded")));
 
     app.handle_key(
         KeyCode::Char('l'),
@@ -246,12 +246,12 @@ fn test_filtered_docs_returns_matching() {
         fixture.root(),
         &fixture.config(),
     );
-    assert_eq!(app.filter_status, Some(Status::Draft));
+    assert_eq!(app.filter_status, Some(Status::new("draft")));
 
     let docs = app.filtered_docs();
     assert_eq!(docs.len(), 2, "should have 2 draft docs");
     for doc in &docs {
-        assert_eq!(doc.status, Status::Draft);
+        assert_eq!(doc.status, Status::new("draft"));
     }
 }
 
@@ -267,7 +267,7 @@ fn test_combined_filters() {
         fixture.root(),
         &fixture.config(),
     );
-    assert_eq!(app.filter_status, Some(Status::Draft));
+    assert_eq!(app.filter_status, Some(Status::new("draft")));
 
     // Tab to Tag, set to "security"
     app.handle_key(
@@ -304,7 +304,7 @@ fn test_combined_filters() {
         "should have 2 draft+security docs (Auth RFC and Login Story)"
     );
     for doc in &docs {
-        assert_eq!(doc.status, Status::Draft);
+        assert_eq!(doc.status, Status::new("draft"));
         assert!(doc.tags.contains(&"security".to_string()));
     }
 }
@@ -321,7 +321,7 @@ fn test_clear_filters() {
         fixture.root(),
         &fixture.config(),
     );
-    assert_eq!(app.filter_status, Some(Status::Draft));
+    assert_eq!(app.filter_status, Some(Status::new("draft")));
 
     // Tab to Tag, set a tag filter
     app.handle_key(
@@ -434,7 +434,7 @@ fn test_filters_reset_on_mode_switch() {
         fixture.root(),
         &fixture.config(),
     );
-    assert_eq!(app.filter_status, Some(Status::Draft));
+    assert_eq!(app.filter_status, Some(Status::new("draft")));
 
     // Leave Filters mode (backtick)
     app.handle_key(

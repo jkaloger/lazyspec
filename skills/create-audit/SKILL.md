@@ -12,7 +12,7 @@ Present findings to the user. Let them decide what to act on.
 <HARD-GATE>
 Do NOT create iterations from findings. The audit produces a findings report
 that the user triages. Only after the user selects findings to act on should
-`/create-iteration` be used, and that is a separate skill invocation.
+`/lazy` be used to author a delivery document for them, and that is a separate skill invocation.
 </HARD-GATE>
 
 <NEVER>
@@ -26,8 +26,8 @@ that the user triages. Only after the user selects findings to act on should
 Documents stored in GitHub Issues (store = "github-issues") are managed through the GitHub API. The `.lazyspec/cache/` directory contains read-only mirrors.
 - Never edit files under `.lazyspec/cache/`. Use `lazyspec update <ID> --body` to modify content.
 - Always use shorthand IDs (e.g. STORY-095) not cache file paths when referencing documents in `lazyspec link`, `lazyspec update`, `lazyspec show`, etc.
-- To set body content at creation: `lazyspec create <type> <title> --body "content"` or `--body-file <path>`.
-- To modify after creation: `lazyspec update <ID> --body "new content"` or `--body-file <path>`.
+- To set body content at creation: `lazyspec create <type> <title> --body "content"`.
+- To modify after creation: `lazyspec update <ID> --body "new content"`.
 </GITHUB-ISSUES-DOCUMENTS>
 
 Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. On failure, check `--help` before retrying.
@@ -37,10 +37,10 @@ Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always
 ```d2
 Define scope and criteria -> Create audit doc -> Review codebase -> Document findings -> Validate -> Present to user
 
-Present to user -> User triages findings -> Use /create-iteration skill: for selected findings
+Present to user -> User triages findings -> Use /lazy skill: for selected findings
 
 Present to user.shape: diamond
-Use /create-iteration skill.shape: double_circle
+Use /lazy skill.shape: double_circle
 ```
 
 ## Steps
@@ -57,10 +57,3 @@ Use /create-iteration skill.shape: double_circle
    - **Recommendation:** what should be done
 7. **Validate:** `lazyspec validate --json`
 8. **Present** findings to user grouped by severity. Do NOT create iterations.
-
-## Rules
-
-- Audits document findings, they don't fix them
-- Each finding must have a severity rating
-- Link to stories/RFCs being audited when they exist
-- Group findings by severity when presenting

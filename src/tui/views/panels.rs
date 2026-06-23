@@ -1811,6 +1811,7 @@ pub fn settings_fields(
                             parent,
                             link,
                             severity,
+                            ..
                         } => {
                             fields.push(field(
                                 "name",
@@ -2570,7 +2571,7 @@ mod tests {
         let cells = doc_row_cells_for_test(
             "RFC-001",
             "Title",
-            &Status::Draft,
+            &Status::new("draft"),
             &[],
             &provenance,
             false,
@@ -2587,8 +2588,15 @@ mod tests {
 
     #[test]
     fn doc_row_cells_provenance_empty_when_list_empty() {
-        let cells =
-            doc_row_cells_for_test("RFC-001", "Title", &Status::Draft, &[], &[], false, false);
+        let cells = doc_row_cells_for_test(
+            "RFC-001",
+            "Title",
+            &Status::new("draft"),
+            &[],
+            &[],
+            false,
+            false,
+        );
         let dbg = cell_text(&cells[4]);
         assert!(
             !dbg.contains("Alice") && !dbg.contains('…'),
@@ -2630,7 +2638,7 @@ mod tests {
             id: "RFC-001".to_string(),
             doc_type: DocType::new("rfc"),
             title: "Test".to_string(),
-            status: Status::Draft,
+            status: Status::new("draft"),
             author: "jkaloger".to_string(),
             date: NaiveDate::from_ymd_opt(2026, 4, 29).unwrap(),
             tags: vec![],
@@ -2824,7 +2832,7 @@ mod tests {
         let cells = doc_row_cells_expanded(
             "RFC-001",
             "Title",
-            &Status::Draft,
+            &Status::new("draft"),
             &tags,
             &[],
             false,
@@ -2954,7 +2962,7 @@ mod tests {
             path: PathBuf::from("docs/iterations/ITERATION-001.md"),
             title: "Design".to_string(),
             doc_type: DocType::new("iteration"),
-            status: Status::Draft,
+            status: Status::new("draft"),
             depth,
             reference,
             related,

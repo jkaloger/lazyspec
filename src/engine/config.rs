@@ -1,3 +1,4 @@
+use crate::engine::document::Status;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -20,6 +21,8 @@ pub enum ValidationRule {
         parent: String,
         link: String,
         severity: Severity,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        require_parent_status: Option<String>,
     },
     #[serde(rename = "relation-existence")]
     RelationExistence {
@@ -130,6 +133,65 @@ impl fmt::Display for StoreBackend {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Authorship {
+    Human,
+    #[default]
+    Assisted,
+    Generated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Edge {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct Lifecycle {
+    #[serde(default)]
+    pub states: Vec<String>,
+    #[serde(default)]
+    pub edges: Vec<Edge>,
+}
+
+impl Lifecycle {
+    /// True iff a `from -> to` transition is permitted. With no declared edges
+    /// the lifecycle is unconstrained: any move between declared states is
+    /// allowed. Otherwise the transition must match a declared edge; a `*` edge
+    /// source matches any `from`, so `* -> rejected` permits the move from any
+    /// state.
+    pub fn has_edge(&self, from: &str, to: &str) -> bool {
+        if self.edges.is_empty() {
+            return self.states.iter().any(|s| s == to);
+        }
+        self.edges
+            .iter()
+            .any(|e| (e.from == from || e.from == "*") && e.to == to)
+    }
+
+    /// The set of states reachable from `from`. With no declared edges every
+    /// other declared state is reachable. Otherwise it is the declared edge
+    /// targets (including wildcard targets). Used to report the allowed moves
+    /// when a transition is rejected.
+    pub fn targets_from(&self, from: &str) -> Vec<&str> {
+        if self.edges.is_empty() {
+            return self
+                .states
+                .iter()
+                .map(String::as_str)
+                .filter(|s| *s != from)
+                .collect();
+        }
+        self.edges
+            .iter()
+            .filter(|e| e.from == from || e.from == "*")
+            .map(|e| e.to.as_str())
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TypeDef {
     pub name: String,
@@ -149,6 +211,12 @@ pub struct TypeDef {
     pub parent_type: Option<String>,
     #[serde(default)]
     pub agents: Vec<String>,
+    #[serde(default)]
+    pub intent: Option<String>,
+    #[serde(default)]
+    pub authorship: Authorship,
+    #[serde(default)]
+    pub lifecycle: Lifecycle,
 }
 
 /// One entry in the `[[relationships]]` block: a relationship name and its
@@ -180,6 +248,48 @@ pub fn starter_relationships() -> Vec<RelationshipDef> {
             inverse: None,
         },
     ]
+}
+
+pub(crate) fn default_lifecycle() -> Lifecycle {
+    let edge = |from: &str, to: &str| Edge {
+        from: from.into(),
+        to: to.into(),
+    };
+    Lifecycle {
+        states: [
+            "draft",
+            "review",
+            "accepted",
+            "in-progress",
+            "complete",
+            "rejected",
+            "superseded",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
+        edges: vec![
+            edge("draft", "review"),
+            edge("review", "accepted"),
+            edge("review", "rejected"),
+            edge("accepted", "in-progress"),
+            edge("in-progress", "complete"),
+            edge("*", "superseded"),
+        ],
+    }
+}
+
+/// True iff `status` names one of `type_def`'s declared lifecycle states.
+pub fn validate_status(type_def: &TypeDef, status: &Status) -> Result<()> {
+    if type_def.accepts_status(status) {
+        return Ok(());
+    }
+    bail!(
+        "status \"{}\" is not a valid state for type \"{}\" (allowed: {})",
+        status,
+        type_def.name,
+        type_def.lifecycle.states.join(", ")
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +391,8 @@ pub struct Config {
     pub coordination: Option<CoordinationConfig>,
     #[serde(default)]
     pub agents: AgentsConfig,
+    #[serde(default)]
+    pub skills: SkillsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -354,6 +466,27 @@ pub struct AgentsConfig {
     pub interactive: Option<String>,
 }
 
+pub fn default_skills_entry() -> String {
+    "lazy".to_string()
+}
+
+/// The global `[skills]` block. `entry` names the router skill that `skills
+/// install` renames the embedded router directory to. Zero-defaults (ADR-015):
+/// absent -> `entry = "lazy"`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SkillsConfig {
+    #[serde(default = "default_skills_entry")]
+    pub entry: String,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        SkillsConfig {
+            entry: default_skills_entry(),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct RawConfig {
     types: Option<Vec<TypeDef>>,
@@ -372,6 +505,8 @@ struct RawConfig {
     coordination: Option<CoordinationConfig>,
     #[serde(default)]
     agents: Option<AgentsConfig>,
+    #[serde(default)]
+    skills: Option<SkillsConfig>,
 }
 
 /// The canonical starter document types. The engine carries no built-in types in
@@ -390,6 +525,9 @@ pub fn starter_types() -> Vec<TypeDef> {
         singleton: false,
         parent_type: None,
         agents: Vec::new(),
+        intent: None,
+        authorship: Authorship::default(),
+        lifecycle: default_lifecycle(),
     };
     vec![
         simple("rfc", "rfcs", "docs/rfcs", "RFC", "●"),
@@ -415,6 +553,9 @@ pub fn starter_types() -> Vec<TypeDef> {
             singleton: true,
             parent_type: None,
             agents: Vec::new(),
+            intent: None,
+            authorship: Authorship::default(),
+            lifecycle: default_lifecycle(),
         },
         TypeDef {
             name: "dictum".to_string(),
@@ -428,6 +569,9 @@ pub fn starter_types() -> Vec<TypeDef> {
             singleton: false,
             parent_type: Some("convention".to_string()),
             agents: Vec::new(),
+            intent: None,
+            authorship: Authorship::default(),
+            lifecycle: default_lifecycle(),
         },
     ]
 }
@@ -442,6 +586,7 @@ pub fn default_rules() -> Vec<ValidationRule> {
             parent: "rfc".to_string(),
             link: "implements".to_string(),
             severity: Severity::Warning,
+            require_parent_status: None,
         },
         ValidationRule::ParentChild {
             name: "iterations-need-stories".to_string(),
@@ -449,6 +594,7 @@ pub fn default_rules() -> Vec<ValidationRule> {
             parent: "story".to_string(),
             link: "implements".to_string(),
             severity: Severity::Error,
+            require_parent_status: None,
         },
         ValidationRule::RelationExistence {
             name: "adrs-need-relations".to_string(),
@@ -484,6 +630,7 @@ impl Default for Config {
             certification: CertificationConfig::default(),
             coordination: None,
             agents: AgentsConfig::default(),
+            skills: SkillsConfig::default(),
         }
     }
 }
@@ -615,6 +762,7 @@ impl Config {
             certification: raw.certification.unwrap_or_default(),
             coordination: raw.coordination,
             agents: raw.agents.unwrap_or_default(),
+            skills: raw.skills.unwrap_or_default(),
         })
     }
 
@@ -709,6 +857,11 @@ impl TypeDef {
     pub fn make_id(&self, suffix: impl std::fmt::Display) -> String {
         format!("{}-{}", self.prefix, suffix)
     }
+
+    /// True iff `status` names one of this type's declared lifecycle states.
+    pub fn accepts_status(&self, status: &Status) -> bool {
+        self.lifecycle.states.iter().any(|s| s == status.as_str())
+    }
 }
 
 #[cfg(test)]
@@ -726,6 +879,9 @@ impl TypeDef {
             singleton: false,
             parent_type: None,
             agents: Vec::new(),
+            intent: None,
+            authorship: Authorship::default(),
+            lifecycle: Lifecycle::default(),
         }
     }
 }
@@ -1219,6 +1375,19 @@ prefix = "RFC"
         assert!(config.relationship_by_name("related-to").is_some());
     }
 
+    #[test]
+    fn parse_skills_entry_round_trips() {
+        let src = format!("{TYPES}\n[skills]\nentry = \"go\"\n");
+        let config = Config::parse(&src).unwrap();
+        assert_eq!(config.skills.entry, "go");
+    }
+
+    #[test]
+    fn parse_without_skills_section_defaults_to_lazy() {
+        let config = Config::parse(TYPES).unwrap();
+        assert_eq!(config.skills.entry, "lazy");
+    }
+
     // AC1: a [[types]] entry with no `agents` key loads and resolves to an empty
     // action set (agent mode off; not an error).
     #[test]
@@ -1310,6 +1479,111 @@ interactive = 'claude "$LAZYSPEC_PROMPT"'
     fn agents_config_none_when_absent() {
         let config = Config::parse(TYPES).unwrap();
         assert!(config.agents.interactive.is_none());
+    }
+
+    // AC4: edge lookup honours declared edges and the `*` wildcard source.
+    #[test]
+    fn lifecycle_has_edge_honours_declared_edges_and_wildcard() {
+        let lc = default_lifecycle();
+        assert!(lc.has_edge("draft", "review"));
+        assert!(lc.has_edge("review", "accepted"));
+        assert!(!lc.has_edge("draft", "accepted"));
+        // `* -> superseded` matches any source.
+        assert!(lc.has_edge("draft", "superseded"));
+        assert!(lc.has_edge("complete", "superseded"));
+        // No reverse edge unless declared.
+        assert!(!lc.has_edge("review", "draft"));
+    }
+
+    #[test]
+    fn lifecycle_targets_from_includes_wildcard() {
+        let lc = default_lifecycle();
+        let from_draft = lc.targets_from("draft");
+        assert!(from_draft.contains(&"review"));
+        assert!(from_draft.contains(&"superseded"));
+        assert!(!from_draft.contains(&"accepted"));
+    }
+
+    // Empty edges = unconstrained lifecycle: any move between declared states.
+    #[test]
+    fn lifecycle_with_no_edges_allows_any_transition() {
+        let lc = Lifecycle {
+            states: vec!["a".into(), "b".into(), "c".into()],
+            edges: vec![],
+        };
+        assert!(lc.has_edge("a", "c"));
+        assert!(lc.has_edge("c", "a"));
+        // a target outside the declared states is still rejected.
+        assert!(!lc.has_edge("a", "bogus"));
+        let from_a = lc.targets_from("a");
+        assert_eq!(from_a, vec!["b", "c"]);
+        assert!(!from_a.contains(&"a"));
+    }
+
+    // AC5 (data): a parent-child rule with `require_parent_status` parses and the
+    // field is readable.
+    #[test]
+    fn parent_child_rule_parses_require_parent_status() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[rules]]
+name = "stories-need-accepted-rfcs"
+shape = "parent-child"
+child = "story"
+parent = "rfc"
+link = "implements"
+severity = "error"
+require_parent_status = "accepted"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        match &config.rules[0] {
+            ValidationRule::ParentChild {
+                require_parent_status,
+                ..
+            } => assert_eq!(require_parent_status.as_deref(), Some("accepted")),
+            other => panic!("unexpected rule: {other:?}"),
+        }
+    }
+
+    // AC5 (data): a parent-child rule WITHOUT the key parses with the field None.
+    #[test]
+    fn parent_child_rule_without_require_parent_status_is_none() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[rules]]
+name = "stories-need-rfcs"
+shape = "parent-child"
+child = "story"
+parent = "rfc"
+link = "implements"
+severity = "warning"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        match &config.rules[0] {
+            ValidationRule::ParentChild {
+                require_parent_status,
+                ..
+            } => assert!(require_parent_status.is_none()),
+            other => panic!("unexpected rule: {other:?}"),
+        }
     }
 
     #[test]
