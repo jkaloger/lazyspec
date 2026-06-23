@@ -27,6 +27,28 @@ use crate::tui::state::{
 use super::colors::{status_color, tag_color};
 use super::layout::{calculate_image_height, wrapped_line_count, wrapped_lines_total};
 
+/// Rounded panel border shared by the doc list, graph, and sidebars. `focused`
+/// paints the border cyan; otherwise dim gray.
+fn panel_block(title: &str, focused: bool) -> Block<'static> {
+    let color = if focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(color))
+        .title(format!(" {title} "))
+}
+
+/// Column-header style shared by the doc list and graph tables.
+fn table_header_style() -> Style {
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD)
+}
+
 fn get_image_dimensions_cached(app: &mut App, path: &std::path::Path) -> Option<(u32, u32)> {
     if let Some(&dims) = app.image_dimensions_cache.get(path) {
         return Some(dims);
@@ -502,7 +524,8 @@ fn doc_row_cells(
     let dim_style = Style::default().fg(Color::DarkGray);
     let normal_style = Style::default();
 
-    let id_style = if dim { dim_style } else { normal_style };
+    // IDs render dim gray to match the graph view's ID column.
+    let id_style = dim_style;
     let id_cell = if is_gh {
         let badge_style = if dim {
             dim_style
@@ -510,11 +533,11 @@ fn doc_row_cells(
             Style::default().fg(Color::Magenta)
         };
         Cell::new(Line::from(vec![
-            Span::styled(format!("{:<18}", id), id_style),
+            Span::styled(id.to_string(), id_style),
             Span::styled(" [gh]", badge_style),
         ]))
     } else {
-        Cell::new(Span::styled(format!("{:<18}", id), id_style))
+        Cell::new(Span::styled(id.to_string(), id_style))
     };
 
     let title_text = if is_virtual {
@@ -745,13 +768,7 @@ pub fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
         .collect();
 
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::DarkGray))
-                .title(" Types "),
-        )
+        .block(panel_block("Types", false))
         .highlight_style(
             Style::default()
                 .fg(Color::Cyan)
@@ -785,13 +802,7 @@ pub fn draw_graph_pivot_panel(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::DarkGray))
-                .title(" Pivot "),
-        )
+        .block(panel_block("Pivot", false))
         .highlight_style(
             Style::default()
                 .fg(Color::Cyan)
@@ -805,7 +816,8 @@ pub fn draw_graph_pivot_panel(f: &mut Frame, app: &App, area: Rect) {
 }
 
 pub fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect, config: &Config) {
-    app.doc_list_height = area.height.saturating_sub(2) as usize;
+    // Reserve 2 rows for the border and 1 for the header (matches draw_graph).
+    app.doc_list_height = area.height.saturating_sub(3) as usize;
     let relations_focused = app.preview_tab == PreviewTab::Relations;
     let dim = relations_focused;
 
@@ -819,12 +831,6 @@ pub fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect, config: &Config) 
 
     let widths = doc_table_widths(area.width);
 
-    let border_style = if relations_focused {
-        Style::default().fg(Color::DarkGray)
-    } else {
-        Style::default().fg(Color::Cyan)
-    };
-
     let highlight_style = if relations_focused {
         Style::default()
             .fg(Color::DarkGray)
@@ -833,14 +839,21 @@ pub fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect, config: &Config) 
         Style::default().add_modifier(Modifier::REVERSED)
     };
 
+    // Header mirrors the graph view: blank gutter + tree columns, then labels.
+    let hs = table_header_style();
+    let header = Row::new(vec![
+        Cell::from(""),
+        Cell::from(""),
+        Cell::from("ID").style(hs),
+        Cell::from("DOC").style(hs),
+        Cell::from("STATUS").style(hs),
+        Cell::from("TAGS").style(hs),
+        Cell::from("PROVENANCE").style(hs),
+    ]);
+
     let table = Table::new(rows, widths)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(border_style)
-                .title(" Documents "),
-        )
+        .header(header)
+        .block(panel_block("Documents", !relations_focused))
         .row_highlight_style(highlight_style);
 
     let mut state = TableState::default()
@@ -1705,9 +1718,7 @@ pub fn draw_graph(f: &mut Frame, app: &mut App, area: Rect, config: &Config) {
     // configured column. The active sort column carries a direction arrow; `path`
     // marks the DOC column.
     let arrow = if app.graph_sort_rev { " ▼" } else { " ▲" };
-    let header_style = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
+    let header_style = table_header_style();
     let header_cell = |label: &str, sort_id: &str| {
         let marked = app.graph_sort_col == sort_id;
         let text = if marked {
@@ -1749,8 +1760,10 @@ pub fn draw_graph(f: &mut Frame, app: &mut App, area: Rect, config: &Config) {
                 .unwrap_or_default();
 
             let gutter_cell = git_gutter_cell(app, &node.path);
-            let id_cell = Cell::from(truncate_with_ellipsis(&id, GRAPH_ID_COLS as usize))
-                .style(Style::default().fg(Color::DarkGray));
+            let id_cell = Cell::new(Span::styled(
+                truncate_with_ellipsis(&id, GRAPH_ID_COLS as usize),
+                Style::default().fg(Color::DarkGray),
+            ));
             let doc_cell = Cell::from(Line::from(graph_doc_cell_spans(
                 node, type_icon, is_last, &stems[i],
             )));
@@ -1758,12 +1771,12 @@ pub fn draw_graph(f: &mut Frame, app: &mut App, area: Rect, config: &Config) {
             let mut cells = vec![gutter_cell, id_cell, doc_cell];
             for col in columns {
                 let text = graph_column_cell(node, col);
-                let cell = if col == "status" {
-                    Cell::from(text).style(Style::default().fg(status_color(&node.status)))
+                let style = if col == "status" {
+                    Style::default().fg(status_color(&node.status))
                 } else {
-                    Cell::from(text).style(Style::default().fg(Color::DarkGray))
+                    Style::default().fg(Color::DarkGray)
                 };
-                cells.push(cell);
+                cells.push(Cell::new(Span::styled(text, style)));
             }
             Row::new(cells)
         })
@@ -1785,13 +1798,7 @@ pub fn draw_graph(f: &mut Frame, app: &mut App, area: Rect, config: &Config) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(" Dependency Graph "),
-        )
+        .block(panel_block("Dependency Graph", true))
         .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
     let mut state = TableState::default()
