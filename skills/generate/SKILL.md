@@ -15,18 +15,15 @@ Generate writes the full body, then routes to /review -- it does not self-approv
 </HARD-GATE>
 
 <NEVER>
-- Do NOT write document files directly. Use `lazyspec create` and `lazyspec link`.
+- Do NOT hand-edit document files. The CLI is the only writer: `lazyspec create` (seed with `--body`/`--body-file`), `lazyspec link`, and `lazyspec update <id> --body`/`--body-file` to change body content. This holds for EVERY store, filesystem included.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
 - Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
 </NEVER>
 
-<GITHUB-ISSUES-DOCUMENTS>
-Documents stored in GitHub Issues (store = "github-issues") are managed through the GitHub API. The `.lazyspec/cache/` directory contains read-only mirrors.
-- Never edit files under `.lazyspec/cache/`. Use `lazyspec update <ID> --body` to modify content.
-- Always use shorthand IDs (e.g. STORY-095) not cache file paths when referencing documents in `lazyspec link`, `lazyspec update`, `lazyspec show`, etc.
-- To set body content at creation: `lazyspec create <type> <title> --body "content"` or `--body-file <path>`.
-- To modify after creation: `lazyspec update <ID> --body "new content"` or `--body-file <path>`.
-</GITHUB-ISSUES-DOCUMENTS>
+<BODY-CONTENT>
+Set body at creation: `lazyspec create <type> "<title>" --body "content"` or `--body-file <path>` (`-` reads stdin). Change it later: `lazyspec update <ID> --body "content"` or `--body-file <path>`. Prefer `--body`/`--body-file` over any direct file edit, for ALL stores (filesystem and github-issues alike).
+GitHub-issues docs additionally: never edit `.lazyspec/cache/` mirrors (read-only); always reference docs by shorthand ID (e.g. STORY-095), not cache paths.
+</BODY-CONTENT>
 
 Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. On failure, check `--help` before retrying.
 
@@ -54,13 +51,15 @@ where `<type>` and the ceiling are the actual values read from config for that r
 ## Workflow
 
 1. **Create + link:** `lazyspec create <type> "<title>" --author <name>`, then `lazyspec link <new-id> <relation> <parent-id>` with the configured relation when a parent exists.
-2. **Write the full body** from gathered context toward the type's `intent` and section guidance. Write to a file.
-3. **Apply:** `lazyspec update <id> --body-file <path>`.
-4. **Request review:** route to /review. Generate never approves its own output.
+2. **Resolve residual gaps before writing.** Generate is context-first: it leans on parent docs, related docs, `@ref` targets, and the codebase, not on the human. So capture lightly -- resolve every decision you can from gathered context yourself, then surface ONLY the decisions the context cannot settle. Ask those as a short batch (one at a time, each with your recommended answer); skip the question entirely when the context already answers it. This is a lighter touch than /co-write's full interview -- you are filling gaps, not eliciting the whole design.
+3. **Write the full body** from gathered context and resolved gaps toward the type's `intent` and section guidance. Write to a file.
+4. **Apply:** `lazyspec update <id> --body-file <path>`.
+5. **Request review:** route to /review. Generate never approves its own output.
 
 ## Rules
 
 - The `<type>` is always a parameter read from `config --json`. No type name is load-bearing in this prose.
 - Permitted only when `authorship` is `generated`; refuse for `human` and `assisted`, reporting the config-read ceiling and permitted verb -- never a baked table.
+- Resolve from context first; ask the human only the decisions context cannot settle (lighter capture than /co-write). Never interrogate the whole design when the context already answers it.
 - Always route to /review on completion.
 - Read parent/relation/gate facts from config, never from `.lazyspec/` graph files directly.

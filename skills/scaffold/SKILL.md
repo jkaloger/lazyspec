@@ -15,18 +15,15 @@ Read the target type's config from `lazyspec config --json` before creating anyt
 </HARD-GATE>
 
 <NEVER>
-- Do NOT write document files directly. Use `lazyspec create` and `lazyspec link`.
+- Do NOT hand-edit document files to create or link them. Use `lazyspec create` (seed with `--body`/`--body-file`) and `lazyspec link`. To change body content, use `lazyspec update <id> --body`/`--body-file` -- for EVERY store, filesystem included. (Scaffold itself writes no body; it hands that back to the human.)
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
 - Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
 </NEVER>
 
-<GITHUB-ISSUES-DOCUMENTS>
-Documents stored in GitHub Issues (store = "github-issues") are managed through the GitHub API. The `.lazyspec/cache/` directory contains read-only mirrors.
-- Never edit files under `.lazyspec/cache/`. Use `lazyspec update <ID> --body` to modify content.
-- Always use shorthand IDs (e.g. STORY-095) not cache file paths when referencing documents in `lazyspec link`, `lazyspec update`, `lazyspec show`, etc.
-- To set body content at creation: `lazyspec create <type> <title> --body "content"` or `--body-file <path>`.
-- To modify after creation: `lazyspec update <ID> --body "new content"` or `--body-file <path>`.
-</GITHUB-ISSUES-DOCUMENTS>
+<BODY-CONTENT>
+Set body at creation: `lazyspec create <type> "<title>" --body "content"` or `--body-file <path>` (`-` reads stdin). Change it later: `lazyspec update <ID> --body "content"` or `--body-file <path>`. Prefer `--body`/`--body-file` over any direct file edit, for ALL stores (filesystem and github-issues alike).
+GitHub-issues docs additionally: never edit `.lazyspec/cache/` mirrors (read-only); always reference docs by shorthand ID (e.g. STORY-095), not cache paths.
+</BODY-CONTENT>
 
 Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. On failure, check `--help` before retrying.
 

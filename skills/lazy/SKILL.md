@@ -41,7 +41,7 @@ advance: /advance {tooltip: "status move, no authoring"}
 author: authoring verb at ceiling {
   tooltip: "human -> /scaffold, assisted -> /co-write, generated -> /generate"
 }
-execute: /execute {tooltip: "work the document describes"}
+execute: /execute {tooltip: "work the document describes -- HUMAN-INITIATED, never auto-dispatched"}
 review: /review {tooltip: "critique before next status"}
 
 validate: validate touched doc {
@@ -63,37 +63,36 @@ locate -> dispatch
 
 dispatch -> advance: "eligible status edge"
 dispatch -> author: "authoring step due"
-dispatch -> execute: "work pending"
 dispatch -> review: "critique due"
-dispatch -> boundary: "only next step crosses parent_type edge"
+dispatch -> boundary: "next step crosses a type boundary (parent_type or parent-child rule), or only work remains"
 
 advance -> validate: "graph mutated"
 author -> validate: "graph mutated"
 validate -> locate: "loop within document"
-execute -> locate
 review -> locate
+
+boundary -> execute: "human runs /execute" {style.stroke-dash: 3}
 ```
 
 <HARD-GATE>
-Do NOT auto-run `create <child-type>` across a `parent_type` edge. Crossing into a different type is always human-initiated -- even when a `require_parent_status` gate is already satisfied. Within-document progression is automatic; crossing a type boundary is not.
+A **type-boundary edge** is any edge to a different type, declared EITHER via `parent_type` OR via a parent-child `rule` (`shape: parent-child`, carrying `child`/`parent`/`link`). Both express the DAG; a config may use one, the other, or both. Derive boundaries from the UNION. Never assume `parent_type` is populated -- many configs encode the entire DAG in `rules` with every `parent_type` null. Null `parent_type` everywhere does NOT mean "no boundaries"; read the boundaries from the rules.
+Do NOT auto-run `create <child-type>` across a type-boundary edge. Crossing into a different type is always human-initiated -- even when a `require_parent_status` gate is already satisfied. Within-document progression is automatic; crossing a type boundary is not.
+**No work without a plan -- the PLAN->EXECUTE wall.** Authoring and advancing a delivery document's plan (task breakdown, AC) is automatic within that document; *executing* that plan is a separate, human-initiated step. `/lazy` NEVER auto-runs `/execute`. It authors and reviews the delivery doc, then STOPS and reports that the plan is ready to execute. It does not start implementing.
 Compute the dispatch table from `lazyspec config --json` at runtime. There is no fixed chain in this prose.
 A reported bug, defect, or unexpected behaviour is investigated to root cause FIRST -- via systematic-debugging -- before any fix document is authored. No fix doc before root cause.
 After every graph-mutating dispatch (/advance and the authoring verbs), run `lazyspec validate --json` scoped to the touched document before looping.
 </HARD-GATE>
 
 <NEVER>
-- Do NOT write document files directly. Use `lazyspec create` and `lazyspec link`.
+- Do NOT hand-edit document files. The CLI is the only writer: `lazyspec create` (seed with `--body`/`--body-file`), `lazyspec link`, and `lazyspec update <id> --body`/`--body-file` to change body content. This holds for EVERY store, filesystem included.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
-- Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
+- Do NOT skip the workflow pipeline. Respect the configured DAG -- type boundaries come from `parent_type` edges AND parent-child `rules` (the union); honor every `rule`.
 </NEVER>
 
-<GITHUB-ISSUES-DOCUMENTS>
-Documents stored in GitHub Issues (store = "github-issues") are managed through the GitHub API. The `.lazyspec/cache/` directory contains read-only mirrors.
-- Never edit files under `.lazyspec/cache/`. Use `lazyspec update <ID> --body` to modify content.
-- Always use shorthand IDs (e.g. STORY-095) not cache file paths when referencing documents in `lazyspec link`, `lazyspec update`, `lazyspec show`, etc.
-- To set body content at creation: `lazyspec create <type> <title> --body "content"` or `--body-file <path>`.
-- To modify after creation: `lazyspec update <ID> --body "new content"` or `--body-file <path>`.
-</GITHUB-ISSUES-DOCUMENTS>
+<BODY-CONTENT>
+Set body at creation: `lazyspec create <type> "<title>" --body "content"` or `--body-file <path>` (`-` reads stdin). Change it later: `lazyspec update <ID> --body "content"` or `--body-file <path>`. Prefer `--body`/`--body-file` over any direct file edit, for ALL stores (filesystem and github-issues alike).
+GitHub-issues docs additionally: never edit `.lazyspec/cache/` mirrors (read-only); always reference docs by shorthand ID (e.g. STORY-095), not cache paths.
+</BODY-CONTENT>
 
 Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. On failure, check `--help` before retrying.
 
@@ -127,18 +126,21 @@ Build the dispatch table at runtime from config. No `parent_type` chain is hardc
 
 - a status move with no authoring/work needed -> /advance
 - an authoring step appropriate to the type's `authorship` and current status -> the authoring verb at the type's ceiling (/scaffold, /co-write, or /generate)
-- work described by the document -> /execute
 - a critique step before the next status -> /review
+
+**`/execute` is never automatic.** Work described by a delivery document is implementation -- the EXECUTE band. `/lazy` does NOT dispatch `/execute` on its own. It brings the delivery doc to a reviewed, ready-to-execute plan and STOPS (treat this like a type boundary: human-initiated). Report that the plan is ready and the human runs `/execute` to begin work. No work without a reviewed plan.
 
 **Authorship-aware dispatch.** When routing to an authoring action, pick the verb at or below the type's `authorship` ceiling. Default to the ceiling verb (`human` -> /scaffold, `assisted` -> /co-write, `generated` -> /generate) and allow the human to drop lower. Never dispatch an above-ceiling verb.
 
 ## Stop-at-Type-Boundary
 
-When the only remaining next step would create a child of a **different type** -- crossing a `parent_type` edge -- `/lazy` **STOPS.** It reports the boundary and what the human can do next; it never auto-runs `create <child-type>`.
+When the only remaining next step would create a child of a **different type** -- crossing a type-boundary edge (a `parent_type` edge OR a parent-child `rule`, per the HARD-GATE union) -- `/lazy` **STOPS.** It reports the boundary and what the human can do next; it never auto-runs `create <child-type>`.
 
-This holds **even when a `require_parent_status` gate is already satisfied.** Gate-clear makes the child _eligible_, not _automatic_. Crossing a type boundary is always human-initiated. Report it like:
+This holds **even when a `require_parent_status` gate is already satisfied.** Gate-clear makes the child _eligible_, not _automatic_. Crossing a type boundary is always human-initiated. Report it with the ceiling verb for the child type (per Authorship-aware dispatch: `human` -> /scaffold, `assisted` -> /co-write, `generated` -> /generate), like:
 
-> `<doc>` (type `<type>`) is at status `<status>`; its child type `<child-type>` is now eligible to create. Crossing types is human-initiated -- run /scaffold (or the ceiling verb for `<child-type>`) to start one.
+> `<doc>` (type `<type>`) is at status `<status>`; its child type `<child-type>` is now eligible to create. Crossing types is human-initiated -- run <ceiling-verb> to start one.
+
+**Multi-hop:** if the required parent type is itself empty (e.g. an iteration needs a story, but no story exists), report the FULL chain the human must author in order -- each hop is a separate human-initiated crossing -- not just the nearest one.
 
 with every value read from config + status for that run.
 
@@ -153,7 +155,9 @@ with every value read from config + status for that run.
 ## Rules
 
 - All routing reads from `config --json` / `status --json` / `context --json` at runtime. No type name and no chain are load-bearing in this prose.
-- Within-document progression is automatic; crossing a type boundary is never automatic.
+- Type boundaries are the UNION of `parent_type` edges and parent-child `rules`. A config with every `parent_type` null still has boundaries -- read them from the rules.
+- Within-document progression is automatic; crossing a type boundary is never automatic. If the parent type the human must cross into is itself empty, report the full chain of crossings, not just the nearest.
+- `/execute` is never auto-dispatched. Bring the delivery doc to a reviewed, ready-to-execute plan and STOP; the human runs `/execute`. No work without a reviewed plan.
 - Dispatch only verbs at or below the type's authorship ceiling.
 - A reported bug/defect goes through root cause (systematic-debugging) before any fix doc is authored; the fix-doc type and its links are read from config and must satisfy the type's relation rules -- never create a standalone doc that bypasses a rule.
 - After each mutating dispatch (`/advance`, `/scaffold`, `/co-write`, `/generate`), validate the touched doc and fix only the relation breakage this mutation introduced; standalone verb invocation outside `/lazy` skips this.

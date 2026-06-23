@@ -172,10 +172,10 @@ All document management is available as subcommands. Most accept `--json` for ma
 | Command                              | Description                                                           |
 | ------------------------------------ | --------------------------------------------------------------------- |
 | `init`                               | Initialise lazyspec in the current project                            |
-| `create <type> <title> [--author X]` | Create a document (rfc, adr, story, iteration)                        |
+| `create <type> <title> [--author X] [--body / --body-file]` | Create a document (rfc, adr, story, iteration); seed body inline, from a file, or `-` for stdin |
 | `list [type] [--status X]`           | List documents with optional filters                                  |
 | `show <id> [-e]`                     | Display a document by path or shorthand ID (e.g. `RFC-001`)           |
-| `update <path> --status X --title X` | Update document frontmatter                                           |
+| `update <path> [--status X] [--title X] [--body / --body-file]` | Update frontmatter and/or body content (`--body-file -` reads stdin); works for all stores |
 | `delete <path>`                      | Delete a document                                                     |
 | `link <from> <rel> <to>`             | Add a typed relationship (canonical or inverse keyword)               |
 | `unlink <from> <rel> <to>`           | Remove a relationship (canonical or inverse keyword)                  |

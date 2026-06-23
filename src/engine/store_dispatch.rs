@@ -1290,7 +1290,7 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_update_rejects_body() {
+    fn filesystem_update_sets_body() {
         let root = tmp_root("fs_update_body");
         let config = Config::default();
 
@@ -1302,14 +1302,25 @@ mod tests {
         let td = test_type_def(StoreBackend::Filesystem);
         let created = fs_store.create(&td, "test doc", "author", "").unwrap();
 
-        let err = fs_store
-            .update(&td, &created.id, &[("body", "content")])
-            .unwrap_err();
-        let msg = err.to_string();
+        fs_store
+            .update(
+                &td,
+                &created.id,
+                &[("status", "review"), ("body", "fresh body")],
+            )
+            .unwrap();
+
+        let full = root.join(&created.path);
+        let content = std::fs::read_to_string(&full).unwrap();
         assert!(
-            msg.contains("not supported for filesystem documents"),
-            "got: {}",
-            msg
+            content.contains("fresh body"),
+            "body not written: {}",
+            content
+        );
+        assert!(
+            content.contains("status: review"),
+            "frontmatter lost: {}",
+            content
         );
     }
 

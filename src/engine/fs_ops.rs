@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use chrono::Local;
 
 use crate::engine::config::{Config, NumberingStrategy, ReservedFormat};
@@ -187,10 +187,6 @@ pub fn update_document(
     doc_id: &str,
     updates: &[(&str, &str)],
 ) -> Result<()> {
-    if updates.iter().any(|(k, _)| *k == "body") {
-        bail!("--body and --body-file are not supported for filesystem documents; edit the file directly");
-    }
-
     let doc = store
         .get(Path::new(doc_id))
         .or_else(|| store.resolve_shorthand(doc_id).ok())
@@ -201,8 +197,13 @@ pub fn update_document(
 
     let (yaml, body) = split_frontmatter(&content)?;
 
+    let mut new_body = body;
     let mut lines: Vec<String> = yaml.lines().map(|l| l.to_string()).collect();
     for (key, value) in updates {
+        if *key == "body" {
+            new_body = value.to_string();
+            continue;
+        }
         let prefix = format!("{}:", key);
         if let Some(line) = lines
             .iter_mut()
@@ -213,7 +214,7 @@ pub fn update_document(
     }
 
     let new_yaml = lines.join("\n");
-    let new_content = compose_frontmatter(&new_yaml, &body);
+    let new_content = compose_frontmatter(&new_yaml, &new_body);
     fs::write(&full_path, new_content)?;
     Ok(())
 }

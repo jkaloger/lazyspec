@@ -15,18 +15,15 @@ Co-write proposes a draft for human editing; it does not finalise a body unilate
 </HARD-GATE>
 
 <NEVER>
-- Do NOT write document files directly. Use `lazyspec create` and `lazyspec link`.
+- Do NOT hand-edit document files. The CLI is the only writer: `lazyspec create` (seed with `--body`/`--body-file`), `lazyspec link`, and `lazyspec update <id> --body`/`--body-file` to change body content. This holds for EVERY store, filesystem included.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
 - Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
 </NEVER>
 
-<GITHUB-ISSUES-DOCUMENTS>
-Documents stored in GitHub Issues (store = "github-issues") are managed through the GitHub API. The `.lazyspec/cache/` directory contains read-only mirrors.
-- Never edit files under `.lazyspec/cache/`. Use `lazyspec update <ID> --body` to modify content.
-- Always use shorthand IDs (e.g. STORY-095) not cache file paths when referencing documents in `lazyspec link`, `lazyspec update`, `lazyspec show`, etc.
-- To set body content at creation: `lazyspec create <type> <title> --body "content"` or `--body-file <path>`.
-- To modify after creation: `lazyspec update <ID> --body "new content"` or `--body-file <path>`.
-</GITHUB-ISSUES-DOCUMENTS>
+<BODY-CONTENT>
+Set body at creation: `lazyspec create <type> "<title>" --body "content"` or `--body-file <path>` (`-` reads stdin). Change it later: `lazyspec update <ID> --body "content"` or `--body-file <path>`. Prefer `--body`/`--body-file` over any direct file edit, for ALL stores (filesystem and github-issues alike).
+GitHub-issues docs additionally: never edit `.lazyspec/cache/` mirrors (read-only); always reference docs by shorthand ID (e.g. STORY-095), not cache paths.
+</BODY-CONTENT>
 
 Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. On failure, check `--help` before retrying.
 
@@ -50,16 +47,18 @@ where `<type>` and the ceiling are the actual values read from config for that r
 
 ## Workflow
 
-Scaffold-then-propose:
+Scaffold, interview, then propose:
 
 1. **Create + link** as in /scaffold: `lazyspec create <type> "<title>" --author <name>`, then `lazyspec link <new-id> <relation> <parent-id>` using the configured relation when a parent exists.
-2. **Propose a draft body** toward the type's `intent` and section guidance from config. Write the proposal to a file.
-3. **Present for human edits.** The human revises; iterate the proposal with them.
-4. **Apply the accepted draft:** `lazyspec update <id> --body-file <path>`.
+2. **Interview the human before drafting.** Co-write captures intent from the human, so grill before you write. Interview them relentlessly about every decision this document must resolve, walking each branch of the design tree and resolving dependencies between decisions one at a time. Ask ONE question at a time. For each question, give your recommended answer. If a question can be answered by exploring the codebase or reading `config --json` / parent docs / `@ref` targets, explore and answer it yourself instead of asking. Continue until every open branch the type's `intent` and section guidance imply is resolved -- do not start the draft with unresolved decisions.
+3. **Propose a draft body** toward the type's `intent` and section guidance from config, incorporating the interview answers. Write the proposal to a file.
+4. **Present for human edits.** The human revises; iterate the proposal with them.
+5. **Apply the accepted draft:** `lazyspec update <id> --body-file <path>`.
 
 ## Rules
 
 - The `<type>` is always a parameter read from `config --json`. No type name is load-bearing in this prose.
 - Refuse when `authorship` is `human`; the refusal reports the config-read ceiling, not a baked table.
+- Interview before drafting: resolve every open design decision with the human (one question at a time, recommended answer each, explore rather than ask when you can) before proposing the body.
 - Always propose-for-edit; never finalise a body without the human in the loop.
 - Read parent/relation/gate facts from config, never from `.lazyspec/` graph files directly.
