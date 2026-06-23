@@ -40,7 +40,7 @@ From there `/lazy` dispatches:
 
 ### Usage
 
-Add the skills directory to your Claude Code settings or copy individual skills into your project's `.claude/skills/` directory. The `plan-work` skill will handle routing from there.
+Add the skills directory to your Claude Code settings or copy individual skills into your project's `.claude/skills/` directory. The `/lazy` skill will handle routing from there.
 
 ## License
 

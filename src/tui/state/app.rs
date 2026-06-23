@@ -477,6 +477,9 @@ pub struct App {
     pub filter_status: Option<Status>,
     pub filter_tag: Option<String>,
     pub available_tags: Vec<String>,
+    /// The union of every configured type's lifecycle states, in first-seen
+    /// order. Drives the status filter cycle so custom DAGs are reachable.
+    pub available_statuses: Vec<String>,
     pub type_icons: HashMap<String, String>,
     pub type_plurals: HashMap<String, String>,
     pub expanded_parents: HashSet<PathBuf>,
@@ -643,6 +646,7 @@ impl App {
             filter_status: None,
             filter_tag: None,
             available_tags: Vec::new(),
+            available_statuses: Vec::new(),
             type_icons: HashMap::new(),
             type_plurals: HashMap::new(),
             expanded_parents: HashSet::new(),
@@ -731,6 +735,15 @@ impl App {
             self.type_icons.insert(t.name.clone(), icon);
             self.type_plurals.insert(t.name.clone(), t.plural.clone());
             self.doc_types.push(DocType::new(&t.name));
+        }
+
+        self.available_statuses.clear();
+        for t in &config.documents.types {
+            for state in &t.lifecycle.states {
+                if !self.available_statuses.contains(state) {
+                    self.available_statuses.push(state.clone());
+                }
+            }
         }
 
         let (components, warnings) = StatusBarComponents::from_config(&config.ui.statusbar);
@@ -1812,15 +1825,20 @@ impl App {
     pub fn cycle_filter_value_next(&mut self) {
         match self.filter_focused {
             FilterField::Status => {
-                self.filter_status = match self.filter_status.as_ref().map(Status::as_str) {
-                    None => Some(Status::new("draft")),
-                    Some("draft") => Some(Status::new("review")),
-                    Some("review") => Some(Status::new("accepted")),
-                    Some("accepted") => Some(Status::new("in-progress")),
-                    Some("in-progress") => Some(Status::new("complete")),
-                    Some("complete") => Some(Status::new("rejected")),
-                    Some("rejected") => Some(Status::new("superseded")),
-                    _ => None,
+                self.filter_status = match &self.filter_status {
+                    None => self.available_statuses.first().map(|s| Status::new(s)),
+                    Some(current) => {
+                        let pos = self
+                            .available_statuses
+                            .iter()
+                            .position(|s| s == current.as_str());
+                        match pos {
+                            Some(i) if i + 1 < self.available_statuses.len() => {
+                                Some(Status::new(&self.available_statuses[i + 1]))
+                            }
+                            _ => None,
+                        }
+                    }
                 };
             }
             FilterField::Tag => {
@@ -1845,15 +1863,18 @@ impl App {
     pub fn cycle_filter_value_prev(&mut self) {
         match self.filter_focused {
             FilterField::Status => {
-                self.filter_status = match self.filter_status.as_ref().map(Status::as_str) {
-                    None => Some(Status::new("superseded")),
-                    Some("superseded") => Some(Status::new("rejected")),
-                    Some("rejected") => Some(Status::new("complete")),
-                    Some("complete") => Some(Status::new("in-progress")),
-                    Some("in-progress") => Some(Status::new("accepted")),
-                    Some("accepted") => Some(Status::new("review")),
-                    Some("review") => Some(Status::new("draft")),
-                    _ => None,
+                self.filter_status = match &self.filter_status {
+                    None => self.available_statuses.last().map(|s| Status::new(s)),
+                    Some(current) => {
+                        let pos = self
+                            .available_statuses
+                            .iter()
+                            .position(|s| s == current.as_str());
+                        match pos {
+                            Some(0) | None => None,
+                            Some(i) => Some(Status::new(&self.available_statuses[i - 1])),
+                        }
+                    }
                 };
             }
             FilterField::Tag => {
@@ -2627,7 +2648,7 @@ impl App {
         self.settings_close_delete_confirm();
     }
 
-    pub fn open_status_picker(&mut self) {
+    pub fn open_status_picker(&mut self, config: &Config) {
         let doc = if self.view_mode == ViewMode::Filters {
             match self.selected_filtered_doc() {
                 Some(d) => d,
@@ -2640,19 +2661,22 @@ impl App {
             }
         };
 
-        let index = match doc.status.as_str() {
-            "draft" => 0,
-            "review" => 1,
-            "accepted" => 2,
-            "in-progress" => 3,
-            "complete" => 4,
-            "rejected" => 5,
-            "superseded" => 6,
-            _ => 0,
-        };
+        // Offer only the moves the lifecycle permits: the current status (a
+        // no-op, so the list is never empty and shows where the doc sits) plus
+        // every state reachable from it by a declared edge.
+        let current = doc.status.as_str().to_string();
+        let mut states = vec![current.clone()];
+        if let Some(type_def) = config.type_by_name(doc.doc_type.as_str()) {
+            for target in type_def.lifecycle.targets_from(&current) {
+                if !states.iter().any(|s| s == target) {
+                    states.push(target.to_string());
+                }
+            }
+        }
         let path = doc.path.clone();
 
-        self.status_picker.selected = index;
+        self.status_picker.states = states;
+        self.status_picker.selected = 0;
         self.status_picker.doc_path = path;
         self.status_picker.active = true;
     }
@@ -2664,15 +2688,9 @@ impl App {
     }
 
     pub fn confirm_status_change(&mut self, root: &Path, config: &Config) -> Result<()> {
-        let status = match self.status_picker.selected {
-            0 => Status::new("draft"),
-            1 => Status::new("review"),
-            2 => Status::new("accepted"),
-            3 => Status::new("in-progress"),
-            4 => Status::new("complete"),
-            5 => Status::new("rejected"),
-            6 => Status::new("superseded"),
-            _ => return Err(anyhow!("invalid status index")),
+        let status = match self.status_picker.states.get(self.status_picker.selected) {
+            Some(s) => Status::new(s),
+            None => return Err(anyhow!("invalid status index")),
         };
         let doc_path = self.status_picker.doc_path.clone();
         let doc_path_str = doc_path.to_string_lossy().to_string();
@@ -3145,6 +3163,7 @@ pub(crate) mod parity_seed {
             filter_status: None,
             filter_tag: None,
             available_tags: Vec::new(),
+            available_statuses: Vec::new(),
             type_icons: HashMap::new(),
             type_plurals: HashMap::new(),
             expanded_parents: HashSet::new(),
@@ -3312,6 +3331,7 @@ pub(crate) mod parity_seed {
                 // is a valid lifecycle edge and the gate admits it.
                 populate_docs(&mut app);
                 app.status_picker.active = true;
+                app.status_picker.states = crate::engine::config::default_lifecycle().states;
                 app.status_picker.selected = 1; // draft -> review (a declared edge)
                 app.status_picker.doc_path = PathBuf::from("docs/rfcs/RFC-001-a.md");
             }
@@ -3606,6 +3626,7 @@ mod tests {
             filter_status: None,
             filter_tag: None,
             available_tags: Vec::new(),
+            available_statuses: Vec::new(),
             type_icons: HashMap::new(),
             type_plurals: HashMap::new(),
             expanded_parents: HashSet::new(),
@@ -3984,10 +4005,49 @@ mod tests {
     }
 
     #[test]
+    fn status_filter_cycle_spans_configured_statuses() {
+        let mut app = make_test_app(0);
+        app.available_statuses = vec!["draft".into(), "parked".into(), "done".into()];
+        app.filter_focused = FilterField::Status;
+        app.filter_status = None;
+
+        app.cycle_filter_value_next();
+        assert_eq!(
+            app.filter_status.as_ref().map(Status::as_str),
+            Some("draft")
+        );
+        app.cycle_filter_value_next();
+        assert_eq!(
+            app.filter_status.as_ref().map(Status::as_str),
+            Some("parked")
+        );
+        app.cycle_filter_value_next();
+        assert_eq!(app.filter_status.as_ref().map(Status::as_str), Some("done"));
+        app.cycle_filter_value_next();
+        assert_eq!(app.filter_status, None);
+
+        app.cycle_filter_value_prev();
+        assert_eq!(app.filter_status.as_ref().map(Status::as_str), Some("done"));
+    }
+
+    #[test]
+    fn apply_config_builds_status_union_first_seen_order() {
+        let mut app = make_test_app(0);
+        let config = Config::default();
+        app.apply_config(&config);
+        // default config types all share the default lifecycle states.
+        assert_eq!(
+            app.available_statuses,
+            crate::engine::config::default_lifecycle().states
+        );
+    }
+
+    #[test]
     fn status_picker_navigates_all_seven_statuses() {
         let mut app = make_test_app(5);
         app.status_picker.active = true;
         app.status_picker.selected = 0;
+        app.status_picker.states = crate::engine::config::default_lifecycle().states;
 
         let root = PathBuf::from(".");
         let config = Config::default();
@@ -4027,32 +4087,39 @@ mod tests {
     }
 
     #[test]
-    fn open_status_picker_sets_index_from_doc_status() {
+    fn open_status_picker_offers_only_valid_moves_from_current() {
         use crate::engine::document::DocMeta;
         use chrono::NaiveDate;
 
         let mut app = make_test_app(1);
         let path = PathBuf::from("docs/rfcs/RFC-001.md");
         let date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let config = Config::default();
+        let lifecycle = &config.type_by_name("rfc").unwrap().lifecycle;
 
-        let statuses = [
-            (Status::new("draft"), 0),
-            (Status::new("review"), 1),
-            (Status::new("accepted"), 2),
-            (Status::new("in-progress"), 3),
-            (Status::new("complete"), 4),
-            (Status::new("rejected"), 5),
-            (Status::new("superseded"), 6),
+        // The default lifecycle: each current status maps to itself plus the
+        // edge targets out of it (including the `* -> superseded` wildcard).
+        let cases = [
+            ("draft", vec!["draft", "review", "superseded"]),
+            (
+                "review",
+                vec!["review", "accepted", "rejected", "superseded"],
+            ),
+            ("accepted", vec!["accepted", "in-progress", "superseded"]),
+            ("in-progress", vec!["in-progress", "complete", "superseded"]),
+            ("complete", vec!["complete", "superseded"]),
+            ("rejected", vec!["rejected", "superseded"]),
+            ("superseded", vec!["superseded"]),
         ];
 
-        for (status, expected_index) in &statuses {
+        for (status, expected_states) in &cases {
             app.store.docs.insert(
                 path.clone(),
                 DocMeta {
                     path: path.clone(),
                     title: "Test".to_string(),
                     doc_type: DocType::new("rfc"),
-                    status: status.clone(),
+                    status: Status::new(status),
                     id: "RFC-001".to_string(),
                     tags: Vec::new(),
                     provenance: Vec::new(),
@@ -4066,12 +4133,20 @@ mod tests {
             app.doc_tree[0].path = path.clone();
             app.selected_doc = 0;
 
-            app.open_status_picker();
+            app.open_status_picker(&config);
+            // Current status is always first (a no-op move).
+            assert_eq!(app.status_picker.selected, 0);
             assert_eq!(
-                app.status_picker.selected, *expected_index,
-                "status {:?} should map to index {}",
-                status, expected_index
+                app.status_picker.states, *expected_states,
+                "status {status:?} should offer {expected_states:?}"
             );
+            // Every offered move beyond the current must be a declared edge.
+            for target in app.status_picker.states.iter().skip(1) {
+                assert!(
+                    lifecycle.has_edge(status, target),
+                    "{status} -> {target} should be a valid edge"
+                );
+            }
             app.close_status_picker();
         }
     }

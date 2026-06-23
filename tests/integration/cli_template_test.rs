@@ -7,18 +7,6 @@ use lazyspec::tui::content::gfm::{extract_gfm_segments, render_gfm_segments};
 use std::fs;
 use tempfile::TempDir;
 
-/// The default types `init` materializes, each expected to gain an `## ` section
-/// carrying a `<!-- guidance -->` comment plus a single `<!-- intent -->` header.
-const DEFAULT_TYPES: &[&str] = &[
-    "rfc",
-    "story",
-    "iteration",
-    "adr",
-    "spec",
-    "convention",
-    "dictum",
-];
-
 fn init_root() -> TempDir {
     let dir = TempDir::new().unwrap();
     lazyspec::cli::init::run(dir.path()).unwrap();
@@ -29,15 +17,18 @@ fn templates_dir(root: &std::path::Path) -> std::path::PathBuf {
     root.join(".lazyspec/templates")
 }
 
-// AC1: a doc created from the materialized on-disk template carries its intent
-// header and a guidance comment under each section.
+fn load_config(root: &std::path::Path) -> Config {
+    let content = fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
+    Config::parse(&content).unwrap()
+}
+
+// A doc created from the materialized template carries its intent header and a
+// guidance comment under each section, regardless of type.
 #[test]
-fn ac1_created_doc_contains_comments() {
+fn created_doc_contains_comments() {
     let dir = init_root();
     let root = dir.path();
-
-    let content = fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
-    let config = Config::parse(&content).unwrap();
+    let config = load_config(root);
     let store = Store::load(root, &config).unwrap();
 
     let path =
@@ -47,12 +38,10 @@ fn ac1_created_doc_contains_comments() {
     let body = fs::read_to_string(&path).unwrap();
     assert!(
         body.contains("<!-- intent:"),
-        "created story should carry an intent header, got:\n{body}"
+        "created doc should carry an intent header, got:\n{body}"
     );
-    // Every `## ` section heading must be followed by a guidance comment.
-    let lines: Vec<&str> = body.lines().collect();
-    let section_count = lines.iter().filter(|l| l.starts_with("## ")).count();
-    assert!(section_count > 0, "story template should have sections");
+    let section_count = body.lines().filter(|l| l.starts_with("## ")).count();
+    assert!(section_count > 0, "template should have sections");
     let guidance_count = body.matches("<!-- guidance:").count();
     assert!(
         guidance_count >= section_count,
@@ -60,10 +49,31 @@ fn ac1_created_doc_contains_comments() {
     );
 }
 
-// AC2: comments are invisible on the rendered surfaces (TUI render path + plaintext
-// `show`), but retained on the machine path (`show --json`).
+// `{type}` is substituted per document, so the single template serves every type.
 #[test]
-fn ac2_rendered_output_excludes_comments_tui() {
+fn created_doc_substitutes_type() {
+    let dir = init_root();
+    let root = dir.path();
+    let config = load_config(root);
+    let store = Store::load(root, &config).unwrap();
+
+    let story =
+        lazyspec::cli::create::run(root, &config, &store, "story", "Slice", "agent", |_| {})
+            .unwrap();
+    let iteration =
+        lazyspec::cli::create::run(root, &config, &store, "iteration", "Build", "agent", |_| {})
+            .unwrap();
+
+    assert!(fs::read_to_string(&story).unwrap().contains("type: story"));
+    assert!(fs::read_to_string(&iteration)
+        .unwrap()
+        .contains("type: iteration"));
+}
+
+// Comments are invisible on the rendered surfaces (TUI render path), but retained
+// on the machine path (`show --json`).
+#[test]
+fn rendered_output_excludes_comments_tui() {
     let body = "<!-- intent: do a thing -->\n\n## Context\n<!-- guidance: the why -->\n\nReal prose here.\n";
 
     let segments = extract_gfm_segments(body);
@@ -88,19 +98,16 @@ fn ac2_rendered_output_excludes_comments_tui() {
 }
 
 #[test]
-fn ac2_show_json_retains_comments() {
+fn show_json_retains_comments() {
     let dir = init_root();
     let root = dir.path();
-
-    let content = fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
-    let config = Config::parse(&content).unwrap();
+    let config = load_config(root);
     let store = Store::load(root, &config).unwrap();
 
     let path =
         lazyspec::cli::create::run(root, &config, &store, "story", "Json Body", "agent", |_| {})
             .unwrap();
 
-    // Reload so the store sees the new doc.
     let store = Store::load(root, &config).unwrap();
     let rel = path
         .strip_prefix(root)
@@ -116,18 +123,18 @@ fn ac2_show_json_retains_comments() {
     );
 }
 
-// AC3: substitution resolves placeholders while leaving comments byte-for-byte.
+// Substitution resolves placeholders while leaving comments byte-for-byte.
 #[test]
-fn ac3_substitution_intact() {
+fn substitution_intact() {
     let dir = init_root();
     let root = dir.path();
 
-    let raw = fs::read_to_string(templates_dir(root).join("story.md")).unwrap();
-    let intent_comments: Vec<&str> = raw
+    let raw = fs::read_to_string(templates_dir(root).join("template.md")).unwrap();
+    let comments: Vec<&str> = raw
         .lines()
         .filter(|l| l.trim_start().starts_with("<!--"))
         .collect();
-    assert!(!intent_comments.is_empty(), "fixture should carry comments");
+    assert!(!comments.is_empty(), "template should carry comments");
 
     let vars = vec![
         ("title", "My Title"),
@@ -140,9 +147,10 @@ fn ac3_substitution_intact() {
     assert!(rendered.contains("title: \"My Title\""));
     assert!(rendered.contains("author: \"alice\""));
     assert!(rendered.contains("date: 2026-06-23"));
-    assert!(!rendered.contains("{title}") && !rendered.contains("{author}"));
+    assert!(rendered.contains("type: story"));
+    assert!(!rendered.contains("{title}") && !rendered.contains("{type}"));
 
-    for comment in intent_comments {
+    for comment in comments {
         assert!(
             rendered.contains(comment),
             "comment must survive substitution byte-for-byte: {comment:?}"
@@ -150,80 +158,103 @@ fn ac3_substitution_intact() {
     }
 }
 
-// AC4: init materializes a {type}.md per default type into the templates dir.
+// init materializes a single template.md, not one file per type.
 #[test]
-fn ac4_init_writes_template_files() {
+fn init_writes_single_template() {
     let dir = init_root();
     let root = dir.path();
     let tdir = templates_dir(root);
 
-    for ty in DEFAULT_TYPES {
-        let path = tdir.join(format!("{ty}.md"));
-        assert!(path.exists(), "init should materialize {ty}.md");
-        let body = fs::read_to_string(&path).unwrap();
-        assert!(!body.trim().is_empty(), "{ty}.md should not be empty");
+    let template = tdir.join("template.md");
+    assert!(template.exists(), "init should materialize template.md");
+    assert!(!fs::read_to_string(&template).unwrap().trim().is_empty());
+
+    for ty in ["rfc", "story", "iteration", "spec"] {
+        assert!(
+            !tdir.join(format!("{ty}.md")).exists(),
+            "init should not materialize a per-type {ty}.md"
+        );
     }
 }
 
-// AC5: an edited on-disk template wins over the embedded default.
+// The materialized template.md carries one intent header and a guidance comment
+// per section.
 #[test]
-fn ac5_on_disk_override_wins() {
+fn template_carries_comments() {
     let dir = init_root();
     let root = dir.path();
 
-    let template_path = templates_dir(root).join("story.md");
+    let body = fs::read_to_string(templates_dir(root).join("template.md")).unwrap();
+
+    let intent_count = body.matches("<!-- intent:").count();
+    assert_eq!(
+        intent_count, 1,
+        "template.md should carry exactly one intent header, got {intent_count}:\n{body}"
+    );
+
+    let section_count = body.lines().filter(|l| l.starts_with("## ")).count();
+    let guidance_count = body.matches("<!-- guidance:").count();
+    assert!(section_count > 0, "template.md should have sections");
+    assert!(
+        guidance_count >= section_count,
+        "template.md should carry a guidance comment per section ({section_count}), got {guidance_count}:\n{body}"
+    );
+}
+
+// An edited template.md wins over the embedded default.
+#[test]
+fn shared_template_override_wins() {
+    let dir = init_root();
+    let root = dir.path();
+
+    let template_path = templates_dir(root).join("template.md");
     let mut edited = fs::read_to_string(&template_path).unwrap();
     edited.push_str("\n## Custom Marker\n\nSENTINEL-OVERRIDE\n");
     fs::write(&template_path, &edited).unwrap();
 
-    let content = fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
-    let config = Config::parse(&content).unwrap();
+    let config = load_config(root);
     let store = Store::load(root, &config).unwrap();
 
-    let path = lazyspec::cli::create::run(
-        root,
-        &config,
-        &store,
-        "story",
-        "Override Check",
-        "agent",
-        |_| {},
-    )
-    .unwrap();
+    let path =
+        lazyspec::cli::create::run(root, &config, &store, "story", "Override", "agent", |_| {})
+            .unwrap();
 
     let body = fs::read_to_string(&path).unwrap();
     assert!(
         body.contains("SENTINEL-OVERRIDE") && body.contains("## Custom Marker"),
-        "created doc must reflect the edited on-disk template, got:\n{body}"
+        "created doc must reflect the edited template.md, got:\n{body}"
     );
 }
 
-// AC6: every materialized default template carries one intent header and a
-// guidance comment per section.
+// A per-type {type}.md override takes precedence over the shared template.md.
 #[test]
-fn ac6_defaults_carry_comments() {
+fn per_type_override_beats_shared() {
     let dir = init_root();
     let root = dir.path();
-    let tdir = templates_dir(root);
 
-    for ty in DEFAULT_TYPES {
-        let body = fs::read_to_string(tdir.join(format!("{ty}.md"))).unwrap();
+    fs::write(
+        templates_dir(root).join("story.md"),
+        "---\ntitle: \"{title}\"\ntype: {type}\nstatus: draft\nauthor: \"{author}\"\ndate: {date}\ntags: []\n---\nPER-TYPE-STORY-MARKER\n",
+    )
+    .unwrap();
 
-        let intent_count = body.matches("<!-- intent:").count();
-        assert_eq!(
-            intent_count, 1,
-            "{ty}.md should carry exactly one intent header, got {intent_count}:\n{body}"
-        );
+    let config = load_config(root);
+    let store = Store::load(root, &config).unwrap();
 
-        let section_count = body.lines().filter(|l| l.starts_with("## ")).count();
-        let guidance_count = body.matches("<!-- guidance:").count();
-        assert!(
-            section_count > 0,
-            "{ty}.md should have at least one section"
-        );
-        assert!(
-            guidance_count >= section_count,
-            "{ty}.md should carry a guidance comment per section ({section_count}), got {guidance_count}:\n{body}"
-        );
-    }
+    let story =
+        lazyspec::cli::create::run(root, &config, &store, "story", "Typed", "agent", |_| {})
+            .unwrap();
+    let iteration =
+        lazyspec::cli::create::run(root, &config, &store, "iteration", "Plain", "agent", |_| {})
+            .unwrap();
+
+    assert!(fs::read_to_string(&story)
+        .unwrap()
+        .contains("PER-TYPE-STORY-MARKER"));
+    assert!(
+        !fs::read_to_string(&iteration)
+            .unwrap()
+            .contains("PER-TYPE-STORY-MARKER"),
+        "iteration should fall back to the shared template, not the story override"
+    );
 }

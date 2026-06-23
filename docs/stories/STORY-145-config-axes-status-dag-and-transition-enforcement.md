@@ -1,7 +1,7 @@
 ---
 title: Config axes, status DAG, and transition enforcement
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-06-21
 tags: []

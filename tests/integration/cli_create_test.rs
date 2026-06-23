@@ -148,32 +148,7 @@ fn create_uses_default_template_when_custom_missing() {
 }
 
 #[test]
-fn create_story_uses_default_template_with_ac_sections() {
-    let fixture = crate::common::TestFixture::new();
-
-    let config = fixture.config();
-    let path = lazyspec::cli::create::run(
-        fixture.root(),
-        &config,
-        &fixture.store(),
-        "story",
-        "User Auth",
-        "jkaloger",
-        |_| {},
-    )
-    .unwrap();
-
-    let content = fs::read_to_string(&path).unwrap();
-    assert!(content.contains("type: story"));
-    assert!(content.contains("## Acceptance Criteria"));
-    assert!(content.contains("**Given**"));
-    assert!(content.contains("**When**"));
-    assert!(content.contains("**Then**"));
-    assert!(content.contains("## Scope"));
-}
-
-#[test]
-fn create_iteration_uses_default_template() {
+fn create_uses_generic_default_template() {
     let fixture = crate::common::TestFixture::new();
 
     let config = fixture.config();
@@ -189,9 +164,12 @@ fn create_iteration_uses_default_template() {
     .unwrap();
 
     let content = fs::read_to_string(&path).unwrap();
+    // The embedded fallback is type-agnostic: `{type}` is substituted, and the
+    // generic intent/guidance scaffolding is present regardless of type.
     assert!(content.contains("type: iteration"));
-    assert!(content.contains("## Changes"));
-    assert!(content.contains("## Test Plan"));
+    assert!(content.contains("<!-- intent:"));
+    assert!(content.contains("<!-- guidance:"));
+    assert!(content.contains("## "));
 }
 
 #[test]

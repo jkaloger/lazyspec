@@ -20,7 +20,7 @@ dir = "docs/convention"
 prefix = "DICTUM"
 icon = "⚖"
 parent_type = "convention"
-lifecycle = { states = ["draft", "review", "accepted", "in-progress", "complete", "rejected", "superseded"], edges = [{ from = "draft", to = "review" }, { from = "review", to = "accepted" }, { from = "review", to = "rejected" }, { from = "accepted", to = "in-progress" }, { from = "in-progress", to = "complete" }, { from = "*", to = "superseded" }] }
+lifecycle = { states = ["draft", "review", "accepted"], edges = [{ from = "draft", to = "review" }, { from = "review", to = "accepted" }] }
 
 [[types]]
 name = "spec"

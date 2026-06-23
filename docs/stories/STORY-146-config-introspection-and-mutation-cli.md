@@ -1,7 +1,7 @@
 ---
 title: Config introspection and mutation CLI
 type: story
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-06-21
 tags: []

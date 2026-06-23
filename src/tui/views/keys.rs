@@ -140,7 +140,7 @@ impl App {
     fn handle_status_picker_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.status_picker.selected < 6 {
+                if self.status_picker.selected + 1 < self.status_picker.states.len() {
                     self.status_picker.selected += 1;
                 }
             }
@@ -551,7 +551,13 @@ impl App {
         }
     }
 
-    fn handle_filters_key(&mut self, code: KeyCode, modifiers: KeyModifiers, root: &Path) {
+    fn handle_filters_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        root: &Path,
+        config: &Config,
+    ) {
         if modifiers.contains(KeyModifiers::CONTROL) {
             match code {
                 KeyCode::Char('d') => {
@@ -641,7 +647,7 @@ impl App {
                 self.open_warnings();
             }
             KeyCode::Char('s') => {
-                self.open_status_picker();
+                self.open_status_picker(config);
             }
             KeyCode::Char('r') => {
                 self.open_link_editor();
@@ -1032,7 +1038,7 @@ impl App {
         config: &Config,
     ) {
         match self.view_mode {
-            ViewMode::Filters => return self.handle_filters_key(code, modifiers, root),
+            ViewMode::Filters => return self.handle_filters_key(code, modifiers, root, config),
             ViewMode::Graph => return self.handle_graph_key(code, modifiers, root),
             ViewMode::Settings => return self.handle_settings_key(code, modifiers, root, config),
             #[cfg(feature = "agent")]
@@ -1131,7 +1137,7 @@ impl App {
                 self.enter_settings();
             }
             (KeyCode::Char('w'), _) => self.open_warnings(),
-            (KeyCode::Char('s'), _) => self.open_status_picker(),
+            (KeyCode::Char('s'), _) => self.open_status_picker(config),
             (KeyCode::Char('p'), _) => self.open_provenance_editor(),
             (KeyCode::Char('r'), _) => {
                 self.open_link_editor();

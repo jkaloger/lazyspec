@@ -496,23 +496,22 @@ pub fn draw_settings_variant_picker(f: &mut Frame, app: &App) {
 pub fn draw_status_picker(f: &mut Frame, app: &App) {
     let area = f.area();
 
+    let statuses: Vec<Status> = app
+        .status_picker
+        .states
+        .iter()
+        .map(|s| Status::new(s))
+        .collect();
+
     let popup_width = 25u16.min(area.width.saturating_sub(4));
-    let popup_height = 11u16.min(area.height.saturating_sub(4));
+    // states + blank line + keybind hint + top/bottom border
+    let content_height = statuses.len() as u16 + 4;
+    let popup_height = content_height.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(popup_width)) / 2;
     let y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
 
     f.render_widget(Clear, popup_area);
-
-    let statuses = [
-        Status::new("draft"),
-        Status::new("review"),
-        Status::new("accepted"),
-        Status::new("in-progress"),
-        Status::new("complete"),
-        Status::new("rejected"),
-        Status::new("superseded"),
-    ];
 
     let mut lines: Vec<Line> = statuses
         .iter()

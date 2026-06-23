@@ -157,18 +157,33 @@ pub struct Lifecycle {
 }
 
 impl Lifecycle {
-    /// True iff a `from -> to` transition is declared. A `*` edge source matches
-    /// any `from`, so `* -> rejected` permits the move from any state.
+    /// True iff a `from -> to` transition is permitted. With no declared edges
+    /// the lifecycle is unconstrained: any move between declared states is
+    /// allowed. Otherwise the transition must match a declared edge; a `*` edge
+    /// source matches any `from`, so `* -> rejected` permits the move from any
+    /// state.
     pub fn has_edge(&self, from: &str, to: &str) -> bool {
+        if self.edges.is_empty() {
+            return self.states.iter().any(|s| s == to);
+        }
         self.edges
             .iter()
             .any(|e| (e.from == from || e.from == "*") && e.to == to)
     }
 
-    /// The set of states reachable from `from` in a single declared edge,
-    /// including wildcard targets. Used to report the allowed moves when a
-    /// transition is rejected.
+    /// The set of states reachable from `from`. With no declared edges every
+    /// other declared state is reachable. Otherwise it is the declared edge
+    /// targets (including wildcard targets). Used to report the allowed moves
+    /// when a transition is rejected.
     pub fn targets_from(&self, from: &str) -> Vec<&str> {
+        if self.edges.is_empty() {
+            return self
+                .states
+                .iter()
+                .map(String::as_str)
+                .filter(|s| *s != from)
+                .collect();
+        }
         self.edges
             .iter()
             .filter(|e| e.from == from || e.from == "*")
@@ -1487,6 +1502,22 @@ interactive = 'claude "$LAZYSPEC_PROMPT"'
         assert!(from_draft.contains(&"review"));
         assert!(from_draft.contains(&"superseded"));
         assert!(!from_draft.contains(&"accepted"));
+    }
+
+    // Empty edges = unconstrained lifecycle: any move between declared states.
+    #[test]
+    fn lifecycle_with_no_edges_allows_any_transition() {
+        let lc = Lifecycle {
+            states: vec!["a".into(), "b".into(), "c".into()],
+            edges: vec![],
+        };
+        assert!(lc.has_edge("a", "c"));
+        assert!(lc.has_edge("c", "a"));
+        // a target outside the declared states is still rejected.
+        assert!(!lc.has_edge("a", "bogus"));
+        let from_a = lc.targets_from("a");
+        assert_eq!(from_a, vec!["b", "c"]);
+        assert!(!from_a.contains(&"a"));
     }
 
     // AC5 (data): a parent-child rule with `require_parent_status` parses and the

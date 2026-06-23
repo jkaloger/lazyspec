@@ -51,10 +51,7 @@ pub fn run(root: &Path) -> Result<()> {
     }
     let templates_dir = root.join(&config.filesystem.templates.dir);
     fs::create_dir_all(&templates_dir)?;
-    for type_def in &config.documents.types {
-        let template_path = templates_dir.join(format!("{}.md", type_def.name.to_lowercase()));
-        write_if_absent(&template_path, &default_template(&type_def.name))?;
-    }
+    write_if_absent(&templates_dir.join("template.md"), default_template())?;
 
     scaffold_skeleton_files(root, &config)?;
 

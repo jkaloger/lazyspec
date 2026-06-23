@@ -453,13 +453,18 @@ icon = "◆"
 
 ### Lifecycle
 
-Each type declares a `lifecycle`: the set of valid statuses (`states`) and the
-permitted status transitions (`edges`). `update --status` is gated by this
-lifecycle -- a move is allowed only when an edge from the current status to the
-target is declared. An edge with a `*` source matches any current status (e.g.
-`* -> superseded` lets any document be superseded). Setting a status to its
-current value is always a no-op (idempotent, never rejected). When a move has no
-matching edge, `update` exits non-zero and the frontmatter is left unchanged.
+Each type declares a `lifecycle`: the set of valid statuses (`states`) and,
+optionally, the permitted status transitions (`edges`). `update --status` is
+gated by this lifecycle -- a move is allowed only when an edge from the current
+status to the target is declared. An edge with a `*` source matches any current
+status (e.g. `* -> superseded` lets any document be superseded). Setting a status
+to its current value is always a no-op (idempotent, never rejected). When a move
+has no matching edge, `update` exits non-zero and the frontmatter is left
+unchanged.
+
+`edges` is optional. A lifecycle that declares `states` but omits `edges` (or
+sets `edges = []`) is unconstrained: any move between declared states is allowed.
+Declare `edges` only when you want to constrain the order of transitions.
 
 ```toml
 [[types]]
@@ -554,7 +559,9 @@ If the remote is unreachable, `create` fails rather than silently falling back. 
 
 ### Templates
 
-Place markdown templates in the templates directory (`.lazyspec/templates/` by default). When creating a document, lazyspec uses the template matching the document type name (e.g. `rfc.md`, `story.md`).
+Markdown templates live in the templates directory (`.lazyspec/templates/` by default). `init` materializes a single `template.md` carrying general authoring guidance; because the tool is config-driven, no per-type templates are shipped. `{title}`, `{author}`, `{date}`, and `{type}` are substituted when a document is created, so one template serves every type.
+
+When creating a document, lazyspec resolves the template in this order: a per-type override `{type}.md` (e.g. `rfc.md`, `story.md`), then the shared `template.md`, then a built-in default. Add a `{type}.md` to override a single type while leaving the rest on the shared template.
 
 ### Agents
 

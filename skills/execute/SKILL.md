@@ -7,17 +7,20 @@ description: Use when carrying out the work a delivery document describes -- the
 DO THE WORK THE DOCUMENT DESCRIBES
 ```
 
-Execute is the build loop: it carries out the task breakdown of a delivery document, verifying each task against its acceptance criteria.
+Execute is the build loop: it orchestrates the task breakdown of a delivery document, dispatching a subagent per task and verifying each against its acceptance criteria.
 
 <HARD-GATE>
 Do NOT begin execution without a delivery document that carries a task breakdown. If the document lacks one, author it first (route to the appropriate authoring verb).
 Confirm from `lazyspec config --json` that the document's type is a delivery type in this DAG before starting.
+ALWAYS use subagents for the work. The orchestrator dispatches; it does not implement.
+Each task must carry enough detail for a zero-context subagent. If it does not, fix the breakdown first.
 </HARD-GATE>
 
 <NEVER>
 - Do NOT write document files directly. Use `lazyspec create` and `lazyspec link`.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
 - Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
+- Do NOT implement tasks yourself. Dispatch a subagent per task. Do NOT dispatch parallel implementers.
 </NEVER>
 
 <GITHUB-ISSUES-DOCUMENTS>
@@ -39,24 +42,64 @@ Execute is **work, not authoring.** The `scaffold < co-write < generate` ceiling
 1. `lazyspec config --json` -- confirm the document's `<type>` is a delivery type in this DAG (the type whose breakdown describes implementation work; in the shipped default config that is the `iteration` type, but read it -- do not assume the name).
 2. `lazyspec show <id> --json` -- read the task breakdown and acceptance criteria.
 3. `lazyspec context --json` -- pull the full chain (parent and grandparent docs) for intent and ACs.
-4. `lazyspec convention --json` -- load codebase conventions to inform the work.
+4. `lazyspec convention --json` -- load codebase conventions. Include non-empty results in subagent prompts under `## Convention Context`.
+5. Extract every task from the breakdown before dispatching any subagent.
 
-## Workflow
+## Subagent Dispatch
 
-Iterate the document's tasks:
+| Operation | Agent type | Model tier | Context to provide |
+|-----------|-----------|-----------|--------------------|
+| Implement task | general-purpose | most capable | Full task text, parent intent, acceptance criteria, prior task results, convention context |
+| Review task (AC compliance) | general-purpose | most capable | Task text, acceptance criteria, implementer report |
+| Review task (code quality) | general-purpose | lighter | Changed files, scoped test output, quality criteria |
+| Final review | general-purpose | most capable | All acceptance criteria, full implementation summary |
 
-1. For each task in the breakdown, do the implementation work it describes.
-2. Keep the per-task discipline: run **scoped** verification per task (just the tests/checks the task touches), never the full suite mid-loop.
-3. Self-review each task against its acceptance criteria before moving on.
-4. After all tasks complete, run the **full check once** at the end.
-5. On completion, route to /review for critique, then to /advance for the status move.
+Model tier is by capability, not product name: "most capable" for implementation and the correctness-bearing reviews, a "lighter" model for the code-quality pass. The orchestrator picks the concrete model.
 
-Express the loop over "the delivery document's tasks" and "its acceptance criteria" -- generically, against whatever delivery type config defines.
+## Per-Task Loop
+
+Iterate the breakdown's tasks **sequentially**. For each task, dispatch an implementer subagent (general-purpose, most capable model) with:
+
+- **Full task text** copied from the document (not a file reference).
+- Scene-setting: parent intent (1-2 sentences), relevant acceptance criteria, prior task results.
+- Lazyspec workflow rules: use the `lazyspec` CLI for doc ops, `--json` always, `--help` before unfamiliar commands, `lazyspec show -e <id>` to expand `@ref` directives.
+- "Before you begin: ask questions about unclear requirements. Don't guess."
+- TDD: failing test first, then implementation, then verify.
+- Run **scoped** verification only -- just the tests/checks this task touches, never the full suite mid-loop. The full check runs once, at the orchestrator's Final Review.
+- Self-review: completeness (ACs met?), YAGNI (only what was asked?), test quality (behavioral, isolated, deterministic, readable, specific).
+- Report: what was implemented, verification results, files changed, concerns.
+
+Handle implementer questions before letting them proceed: answer, then re-dispatch.
+
+After the implementer reports, dispatch a **separate** reviewer subagent with task text, acceptance criteria, and the implementer report:
+
+- **Stage 1 (AC compliance):** Run the scoped checks covering this task's ACs, verify each claimed AC has a passing test, check for missing requirements or scope creep. If any AC is unmet, report specifics. Do NOT run the full suite here -- that is the orchestrator's Final Review gate.
+- **Stage 2 (code quality, only if Stage 1 passes):** Correctness, clarity, YAGNI, DRY, security. Evaluate test properties (behavioral, structure-insensitive, isolated, deterministic, readable, specific). Flag unjustified tradeoffs.
+
+On failure: dispatch a fresh implementer with the specific issues, then re-review. Repeat until both stages pass. Mark the task complete.
+
+## Context Refresh
+
+Every 2 completed tasks, re-read the chain (`lazyspec context`, `lazyspec show` for the delivery document and its parent) to prevent drift.
+
+## Final Review
+
+The orchestrator runs this gate itself after all tasks complete. Subagents only ran scoped checks; this is the one place the full check runs.
+
+1. Verify every task in the breakdown is complete, no out-of-scope work.
+2. **Run the full check once.** It must pass -- required gate, no acceptance on failure. On failure, dispatch a targeted fix subagent, then re-run.
+3. Run `lazyspec validate --json`.
+4. Dispatch a final reviewer (most capable model) with all acceptance criteria and the implementation summary.
+5. On pass, route to /review for critique, then to /advance for the status move. **/advance owns the status transition** -- execute does not move statuses itself.
 
 ## Rules
 
 - The delivery `<type>` is read from `config --json`. No type name is load-bearing in this prose.
 - No ceiling concept -- execute is work, not authoring.
-- Scoped verification per task; full check once at the end.
+- Fresh subagent per task (no context pollution). The reviewer is always a separate subagent from the implementer.
+- Stage 1 (AC compliance) MUST pass before Stage 2 (code quality).
+- Subagents receive full task text, not file references.
+- One task, one review cycle. No batching. Sequential dispatch only -- no parallel implementers.
+- Subagents run scoped checks only. The full check runs once, by the orchestrator, at Final Review.
 - Route to /review then /advance on completion; advance owns the status move.
 - Read type/chain facts from config and the CLI, never from `.lazyspec/` graph files directly.

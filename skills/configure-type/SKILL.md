@@ -1,6 +1,6 @@
 ---
 name: configure-type
-description: Use when adding a new custom document type to a lazyspec project. Runs a grill-me-style interview to co-author the type's methodology -- intent, authorship, lifecycle, gates, relations -- then writes its enriched template and `[[types]]` config via the config-write CLI. One type per run.
+description: Use when adding a new custom document type to a lazyspec project. Interviews the user to co-author the type's methodology -- intent, authorship, lifecycle, gates, relations -- then writes its enriched template and `[[types]]` config via the config-write CLI. One type per run.
 ---
 
 ```
@@ -58,61 +58,35 @@ types the new one could relate to, and (c) find the templates dir to write into
 
 ## The interview
 
-Ask the questions ONE AT A TIME. For each, give your recommended answer up front,
-then let the user accept or override. Resolve the axes as a decision tree, in this
-order -- later axes depend on earlier ones. If an answer is discoverable from
-`config --json`, explore instead of asking.
+Interview the user relentlessly about every aspect of the type until you reach a
+shared understanding, walking down each branch of the design tree and resolving
+dependencies between decisions one-by-one. For each question, provide your
+recommended answer up front, then let the user accept or override. Ask the
+questions ONE AT A TIME. If a question can be answered by exploring the codebase
+or `config --json`, explore instead of asking.
 
-1. **Name (and what falls out of it).** What is the type called (singular)?
-   - From the name, propose the `plural`, `dir` (e.g. `docs/<plural>`), and `prefix`
-     (uppercased, e.g. `SPIKE`). Recommend all three; the user confirms or tweaks.
-   - Reject collisions against the names/prefixes/dirs you read in preflight.
-   - Ask whether it is a `--singleton` (one document, not a numbered series) and the
-     `--numbering` (`incremental` / `sqids` / `reserved`; default `incremental`) and
-     `--store` (`filesystem` / `github-issues` / `git-ref`; default `filesystem`).
-     Recommend `incremental` + `filesystem` unless the project pattern says otherwise.
-   - Optional: an `--icon` for the TUI. Recommend one emoji.
+The interview is open-ended, but it is not done until you have resolved every
+field below -- the config-write CLI fails if any required field is missing, and
+the recommended values are the legal value sets, not suggestions you may widen.
+Resolve them roughly in this order; later fields depend on earlier ones.
 
-2. **Intent.** One line: what is this document type FOR? This becomes both the
-   template's `<!-- intent: ... -->` header AND the config `--intent`. Recommend a
-   crisp single sentence in the user's words.
+| Field | Required | Legal values / shape | Notes |
+|---|---|---|---|
+| `name` | yes | singular noun | Reject collisions vs preflight names. |
+| `plural`, `dir`, `prefix` | yes | `dir` e.g. `docs/<plural>`; `prefix` uppercased e.g. `SPIKE` | Derive all three from `name`; reject collisions. |
+| `--singleton` | no | flag | One document, not a numbered series. |
+| `--numbering` | no | `incremental` \| `sqids` \| `reserved` | Default `incremental`. |
+| `--store` | no | `filesystem` \| `github-issues` \| `git-ref` | Default `filesystem`. |
+| `--icon` | no | one emoji | For the TUI. |
+| `--intent` | yes | one sentence | Becomes BOTH the template `<!-- intent: -->` header and config `--intent`. |
+| `--authorship` | yes | `human` \| `assisted` \| `generated` | Highest authoring verb: `human`→`/scaffold`, `assisted`→`/co-write`, `generated`→`/generate`. Decision/judgement docs lean `human`/`assisted`; mechanical/derived can be `generated`. |
+| lifecycle `states` | yes | list of statuses, e.g. `draft`,`review`,`done` | Per-type DAG (ADR-021). Recommend a minimal set. |
+| lifecycle `edges` | yes | `FROM:TO`; `*` as source = "from any state" | Minimal DAG connecting the states, plus a `*` edge to any terminal state (`rejected`/`superseded`). |
+| `--parent-type` | no | an existing type name | Does this live UNDER a parent (e.g. iteration under story)? Creates a parent-child rule. |
+| parent-status gate | no | a parent status (`require_parent_status`) | ONLY ask if `--parent-type` is set. Must the parent sit at a status before a child may be created? Set via `config add-gate`, which targets the parent-child RULE by name -- read the name from `config --json` (`.rules[] \| select(.shape=="parent-child")`) AFTER `add-type` creates it. |
+| relations | no | a verb from `config --json` `.relationships[].name` | Do NOT invent verbs. The parent relation is `--parent-type`; other relations are applied at authoring time, not baked per-type -- note any the user wants so the template guidance mentions them. |
 
-3. **Authorship ceiling.** `human`, `assisted`, or `generated` -- the highest
-   authoring verb permitted for this type.
-   - `human` -> only `/scaffold` (AI sets up the file, human writes the body).
-   - `assisted` -> up to `/co-write` (AI drafts, human edits).
-   - `generated` -> up to `/generate` (AI writes the full body).
-   - Recommend based on intent: decision/judgement docs lean `human` or `assisted`;
-     mechanical/derived docs can be `generated`.
-
-4. **Lifecycle (per-type DAG).** Each type declares its own `states` and `edges`
-   (ADR-021). Elicit:
-   - **states** -- the statuses a document of this type moves through
-     (e.g. `draft`, `review`, `done`). Recommend a minimal set.
-   - **edges** -- permitted transitions as `FROM:TO`. `*` is allowed as the source
-     to mean "from any state" (e.g. `*:superseded`). Recommend the minimal DAG that
-     connects the states, plus a `*` edge to any terminal state like `rejected`/`superseded`.
-
-5. **Parent + status gate.** Does a document of this type live UNDER a parent of an
-   existing type (e.g. an iteration under a story)?
-   - If yes, set `--parent-type <existing-type>` on `add-type`. This creates a
-     parent-child rule.
-   - THEN, and only then, ask the gate question: must the parent sit at a particular
-     status before a child may be created? That is `require_parent_status`, set with
-     `config add-gate`. `config add-gate` targets an existing parent-child RULE by its
-     name -- read the rule name from `config --json` (`.rules[] | select(.shape=="parent-child")`)
-     after `add-type` creates it. Skip this axis entirely if the type has no parent.
-
-6. **Relations to existing types.** Beyond a parent, which existing types does this
-   one link to, and with which relationship verb (e.g. `implements`, `related-to`)?
-   - Enumerate the available relationship vocabulary from `config --json`
-     (`.relationships[].name`) -- do not invent verbs.
-   - The structural parent relation is expressed by `--parent-type`. Other relations
-     are part of the project's relationship vocabulary and are applied to documents
-     at authoring/link time, not baked per-type here; note any the user wants so the
-     template guidance mentions them.
-
-End the interview by reading back a one-screen summary of every axis and getting
+End the interview by reading back a one-screen summary of every field and getting
 explicit confirmation before writing anything.
 
 ## Write the enriched template

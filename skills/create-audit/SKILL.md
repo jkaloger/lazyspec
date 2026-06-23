@@ -12,7 +12,7 @@ Present findings to the user. Let them decide what to act on.
 <HARD-GATE>
 Do NOT create iterations from findings. The audit produces a findings report
 that the user triages. Only after the user selects findings to act on should
-`/create-iteration` be used, and that is a separate skill invocation.
+`/lazy` be used to author a delivery document for them, and that is a separate skill invocation.
 </HARD-GATE>
 
 <NEVER>
@@ -37,10 +37,10 @@ Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always
 ```d2
 Define scope and criteria -> Create audit doc -> Review codebase -> Document findings -> Validate -> Present to user
 
-Present to user -> User triages findings -> Use /create-iteration skill: for selected findings
+Present to user -> User triages findings -> Use /lazy skill: for selected findings
 
 Present to user.shape: diamond
-Use /create-iteration skill.shape: double_circle
+Use /lazy skill.shape: double_circle
 ```
 
 ## Steps
