@@ -15,7 +15,7 @@
   <a href="https://github.com/jkaloger/lazyspec/blob/main/flake.nix"><img src="https://img.shields.io/badge/nix-flake-5277C3?logo=nixos&logoColor=white" alt="Nix Flake"></a>
 </p>
 
-<img width="1864" height="1147" alt="screenshot of a terminal interface displaying codebase documentation, categorised by type" src="https://github.com/user-attachments/assets/91f308d1-8d03-4815-b2ec-fa445159c563" />
+<img alt="screenshot of a terminal interface displaying codebase documentation, categorised by type" src="https://github.com/user-attachments/assets/91f308d1-8d03-4815-b2ec-fa445159c563" />
 
 > [!WARNING]
 > Lazyspec is experimental. APIs and CLI interfaces will change frequently and without notice.
@@ -83,15 +83,15 @@ workflow against whatever document types your `.lazyspec.toml` defines. The
 `lazy` router is the entry point: it reads the configured lifecycle DAG and the
 user's position, then dispatches the right verb.
 
-| Skill      | Purpose                                                                            |
-| ---------- | ---------------------------------------------------------------------------------- |
-| `lazy`     | Entry-point router -- reads the DAG and position, dispatches the right verb        |
-| `scaffold` | Create a new document's file and frontmatter, hand the body back to the human      |
-| `co-write` | Collaboratively draft a document body -- AI proposes, human edits, iterate         |
-| `generate` | Author a full document body from context (only when the type's ceiling allows it)  |
-| `advance`  | Move a document to its next status along the type's lifecycle DAG, checking gates  |
-| `execute`  | Carry out the work a delivery document describes against its tasks and ACs         |
-| `review`   | Critique a document against its intent and acceptance criteria before advancing    |
+| Skill      | Purpose                                                                           |
+| ---------- | --------------------------------------------------------------------------------- |
+| `lazy`     | Entry-point router -- reads the DAG and position, dispatches the right verb       |
+| `scaffold` | Create a new document's file and frontmatter, hand the body back to the human     |
+| `co-write` | Collaboratively draft a document body -- AI proposes, human edits, iterate        |
+| `generate` | Author a full document body from context (only when the type's ceiling allows it) |
+| `advance`  | Move a document to its next status along the type's lifecycle DAG, checking gates |
+| `execute`  | Carry out the work a delivery document describes against its tasks and ACs        |
+| `review`   | Critique a document against its intent and acceptance criteria before advancing   |
 
 ### Installing skills
 
@@ -129,55 +129,55 @@ lazyspec
 
 Running `lazyspec` with no subcommand opens the interactive dashboard. It provides fuzzy search, markdown preview, document creation, and live file watching -- documents update automatically when changed on disk. An external edit of `.lazyspec.toml` (e.g. a `git pull`) reloads the running session automatically; press `R` to reload it manually. Press `?` for the full keybindings overlay.
 
-| Key       | Action                                  |
-| --------- | --------------------------------------- |
-| `j` / `k` | Navigate up/down                        |
-| `h` / `l` | Switch document type                    |
-| `Enter`   | Open document fullscreen                |
-| `/`       | Fuzzy search                            |
-| `n`       | Create new document                     |
-| `e`       | Edit document in `$EDITOR`              |
-| `d`       | Delete document                         |
-| `r`       | Add relation                            |
-| `R`       | Reload config from `.lazyspec.toml`     |
-| `w`       | Warnings / validation panel             |
-| `5`       | Open the Settings view                   |
+| Key       | Action                                              |
+| --------- | --------------------------------------------------- |
+| `j` / `k` | Navigate up/down                                    |
+| `h` / `l` | Switch document type                                |
+| `Enter`   | Open document fullscreen                            |
+| `/`       | Fuzzy search                                        |
+| `n`       | Create new document                                 |
+| `e`       | Edit document in `$EDITOR`                          |
+| `d`       | Delete document                                     |
+| `r`       | Add relation                                        |
+| `R`       | Reload config from `.lazyspec.toml`                 |
+| `w`       | Warnings / validation panel                         |
+| `5`       | Open the Settings view                              |
 | `` ` ``   | Cycle view (documents / filters / graph / settings) |
-| `q`       | Quit                                    |
-| `?`       | Toggle keybindings help                 |
+| `q`       | Quit                                                |
+| `?`       | Toggle keybindings help                             |
 
 #### Settings View
 
 Press `5` (or cycle to it with `` ` ``) to open the Settings view, which edits `.lazyspec.toml` in place. Categories are listed on the left; the right panel shows the fields (or entries) of the selected category. Saving rewrites `.lazyspec.toml`, preserving its comments and formatting, after validating the whole config; an invalid config is reported and not written.
 
-| Key                | Action                                                        |
-| ------------------ | ------------------------------------------------------------- |
-| `h` / `l`          | Switch category (also `Left` / `Right`)                       |
-| `j` / `k`          | Move between fields / entries (also `Down` / `Up`)            |
-| `Enter`            | Drill into a collection entry, or start editing a field       |
-| `n`                | Add a new entry to a collection (Document Types / Relationships / Validation Rules seed a default and drill in; Certification prompts for a spec-path key) |
-| `d`                | Delete the selected collection entry, behind a confirm (refuses the last relationship) |
-| `Space`            | Toggle a boolean / cycle an enum field                        |
-| `g`                | When a dependency section is auto-scaffolded (e.g. cycling numbering to `sqids`), jump to the required field it needs filled |
-| type + `Enter`     | Confirm a text / number / duration / list edit                |
-| `Esc`              | Cancel an in-progress edit, or undrill from an entry          |
-| `w` / `Ctrl-S`     | Save changes to `.lazyspec.toml` (validates the whole config) |
-| `q` / `Esc`        | Quit; with unsaved changes, prompts `(s)ave / (d)iscard / (Esc) cancel` |
+| Key            | Action                                                                                                                                                     |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `h` / `l`      | Switch category (also `Left` / `Right`)                                                                                                                    |
+| `j` / `k`      | Move between fields / entries (also `Down` / `Up`)                                                                                                         |
+| `Enter`        | Drill into a collection entry, or start editing a field                                                                                                    |
+| `n`            | Add a new entry to a collection (Document Types / Relationships / Validation Rules seed a default and drill in; Certification prompts for a spec-path key) |
+| `d`            | Delete the selected collection entry, behind a confirm (refuses the last relationship)                                                                     |
+| `Space`        | Toggle a boolean / cycle an enum field                                                                                                                     |
+| `g`            | When a dependency section is auto-scaffolded (e.g. cycling numbering to `sqids`), jump to the required field it needs filled                               |
+| type + `Enter` | Confirm a text / number / duration / list edit                                                                                                             |
+| `Esc`          | Cancel an in-progress edit, or undrill from an entry                                                                                                       |
+| `w` / `Ctrl-S` | Save changes to `.lazyspec.toml` (validates the whole config)                                                                                              |
+| `q` / `Esc`    | Quit; with unsaved changes, prompts `(s)ave / (d)iscard / (Esc) cancel`                                                                                    |
 
 #### Graph View
 
 Cycle to the Graph view with `` ` ``. The left panel is a pivot picker (`h` / `l` to re-root the forest on a document type or a tag, or `All` for the whole store); the right panel renders the dependency forest as a nested table sharing the documents table's styling (git-status gutter, slim `ID` column, selection bar, scrolling). The `DOC` column is the document tree, with indentation and connector art showing the `implements` lineage; each configured column follows. A document reachable from more than one parent (a diamond) is drawn once under each parent; cyclic edges are hidden. Siblings under a shared parent can be sorted by any column while the parent grouping and topological order are preserved.
 
-| Key            | Action                                                       |
-| -------------- | ------------------------------------------------------------ |
-| `j` / `k`      | Navigate up/down                                            |
-| `Ctrl-d` / `Ctrl-u` | Half page down/up                                      |
-| `h` / `l`      | Pivot the anchor (whole store → types → tags)              |
-| `o`            | Cycle the sibling sort column (`path` → `status` → declared attributes → wrap) |
-| `O`            | Reverse the sort direction                                  |
-| `g` / `G`      | Jump to top/bottom                                          |
-| `Enter`        | Open the selected document                                  |
-| `e`            | Edit document in `$EDITOR`                                  |
+| Key                 | Action                                                                         |
+| ------------------- | ------------------------------------------------------------------------------ |
+| `j` / `k`           | Navigate up/down                                                               |
+| `Ctrl-d` / `Ctrl-u` | Half page down/up                                                              |
+| `h` / `l`           | Pivot the anchor (whole store → types → tags)                                  |
+| `o`                 | Cycle the sibling sort column (`path` → `status` → declared attributes → wrap) |
+| `O`                 | Reverse the sort direction                                                     |
+| `g` / `G`           | Jump to top/bottom                                                             |
+| `Enter`             | Open the selected document                                                     |
+| `e`                 | Edit document in `$EDITOR`                                                     |
 
 The columns and default sort are configured under `[tui.graph]` in `.lazyspec.toml`:
 
@@ -200,31 +200,31 @@ Both keys carry defaults, so a config without a `[tui.graph]` block still loads.
 
 All document management is available as subcommands. Most accept `--json` for machine-readable output.
 
-| Command                              | Description                                                           |
-| ------------------------------------ | --------------------------------------------------------------------- |
-| `init`                               | Initialise lazyspec in the current project                            |
-| `create <type> <title> [--author X] [--body / --body-file]` | Create a document (rfc, adr, story, iteration); seed body inline, from a file, or `-` for stdin |
-| `list [type] [--status X]`           | List documents with optional filters                                  |
-| `show <id> [-e]`                     | Display a document by path or shorthand ID (e.g. `RFC-001`)           |
-| `update <path> [--status X] [--title X] [--body / --body-file]` | Update frontmatter and/or body content (`--body-file -` reads stdin); works for all stores |
-| `delete <path>`                      | Delete a document                                                     |
-| `link <from> <rel> <to>`             | Add a typed relationship (canonical or inverse keyword)               |
-| `unlink <from> <rel> <to>`           | Remove a relationship (canonical or inverse keyword)                  |
-| `search <query> [--doc-type X]`      | Full-text search across all documents                                 |
-| `context <id> [--depth N]`           | Show the full document chain (RFC -> Story -> Iteration)              |
-| `context [--anchor TYPE]`            | Emit the context forest (omit `<id>`); `--anchor` re-roots on a type   |
-| `status`                             | Show full project status with all documents and validation            |
-| `ignore <path>`                      | Mark a document to skip validation                                    |
-| `unignore <path>`                    | Remove validation skip from a document                                |
-| `validate [--warnings]`              | Check document integrity and link consistency                         |
-| `fix [paths] [--dry-run]`            | Fix documents with broken or incomplete frontmatter                   |
-| `fix --config [--dry-run]`           | Repair `.lazyspec.toml` (inject missing standard relationships/rules) |
-| `pin <id>`                           | Pin blob hashes onto `@ref` directives in a document                  |
-| `provenance add <id> <citation>`     | Append a citation to a document's provenance list                     |
-| `provenance remove <id> <citation>`  | Remove an exact-match citation from a document's provenance list      |
-| `provenance list [id]`               | List citations for a document, or for all documents grouped by id     |
-| `reservations list`                  | Show all reservation refs on the remote                               |
-| `reservations prune [--dry-run]`     | Remove refs for documents that already exist locally                  |
+| Command                                                         | Description                                                                                     |
+| --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `init`                                                          | Initialise lazyspec in the current project                                                      |
+| `create <type> <title> [--author X] [--body / --body-file]`     | Create a document (rfc, adr, story, iteration); seed body inline, from a file, or `-` for stdin |
+| `list [type] [--status X]`                                      | List documents with optional filters                                                            |
+| `show <id> [-e]`                                                | Display a document by path or shorthand ID (e.g. `RFC-001`)                                     |
+| `update <path> [--status X] [--title X] [--body / --body-file]` | Update frontmatter and/or body content (`--body-file -` reads stdin); works for all stores      |
+| `delete <path>`                                                 | Delete a document                                                                               |
+| `link <from> <rel> <to>`                                        | Add a typed relationship (canonical or inverse keyword)                                         |
+| `unlink <from> <rel> <to>`                                      | Remove a relationship (canonical or inverse keyword)                                            |
+| `search <query> [--doc-type X]`                                 | Full-text search across all documents                                                           |
+| `context <id> [--depth N]`                                      | Show the full document chain (RFC -> Story -> Iteration)                                        |
+| `context [--anchor TYPE]`                                       | Emit the context forest (omit `<id>`); `--anchor` re-roots on a type                            |
+| `status`                                                        | Show full project status with all documents and validation                                      |
+| `ignore <path>`                                                 | Mark a document to skip validation                                                              |
+| `unignore <path>`                                               | Remove validation skip from a document                                                          |
+| `validate [--warnings]`                                         | Check document integrity and link consistency                                                   |
+| `fix [paths] [--dry-run]`                                       | Fix documents with broken or incomplete frontmatter                                             |
+| `fix --config [--dry-run]`                                      | Repair `.lazyspec.toml` (inject missing standard relationships/rules)                           |
+| `pin <id>`                                                      | Pin blob hashes onto `@ref` directives in a document                                            |
+| `provenance add <id> <citation>`                                | Append a citation to a document's provenance list                                               |
+| `provenance remove <id> <citation>`                             | Remove an exact-match citation from a document's provenance list                                |
+| `provenance list [id]`                                          | List citations for a document, or for all documents grouped by id                               |
+| `reservations list`                                             | Show all reservation refs on the remote                                                         |
+| `reservations prune [--dry-run]`                                | Remove refs for documents that already exist locally                                            |
 
 #### Relationship Keywords
 
@@ -249,10 +249,10 @@ Each document entry in `show --json` and `status --json` (under `documents[]`) i
 
 #### `context` Flags
 
-| Flag           | Description                                                          |
-| -------------- | ------------------------------------------------------------------- |
-| `--depth N`    | Max hops to follow `related-to` links when collecting related records (default: 1) |
-| `--anchor TYPE`| Forest mode only (omit `<id>`): re-root the forest on documents of `TYPE`, emitting each anchor plus its chain descendants and pruning ancestors above it |
+| Flag            | Description                                                                                                                                               |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--depth N`     | Max hops to follow `related-to` links when collecting related records (default: 1)                                                                        |
+| `--anchor TYPE` | Forest mode only (omit `<id>`): re-root the forest on documents of `TYPE`, emitting each anchor plus its chain descendants and pruning ancestors above it |
 
 With an `<id>`, `context` shows that document's chain. Omit the id to emit the
 whole-store context forest (every document, parents-first); add `--anchor TYPE`
@@ -520,7 +520,7 @@ lifecycle = { states = ["draft", "review", "accepted", "in-progress", "complete"
 ```
 
 Projects whose `[[types]]` predate the lifecycle axis can backfill the default
-lifecycle with `lazyspec fix --config` (see *Migrating an Existing Config*).
+lifecycle with `lazyspec fix --config` (see _Migrating an Existing Config_).
 
 ### Relationships
 
