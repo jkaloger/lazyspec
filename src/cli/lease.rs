@@ -375,6 +375,7 @@ mod tests {
                         intent: None,
                         authorship: Default::default(),
                         lifecycle: Default::default(),
+                        attributes: Default::default(),
                     },
                     TypeDef {
                         name: "story".to_string(),
@@ -391,6 +392,7 @@ mod tests {
                         intent: None,
                         authorship: Default::default(),
                         lifecycle: Default::default(),
+                        attributes: Default::default(),
                     },
                     TypeDef {
                         name: "bug".to_string(),
@@ -407,6 +409,7 @@ mod tests {
                         intent: None,
                         authorship: Default::default(),
                         lifecycle: Default::default(),
+                        attributes: Default::default(),
                     },
                 ],
                 naming: Naming {

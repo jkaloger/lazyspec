@@ -275,6 +275,7 @@ mod tests {
             intent: None,
             authorship: Default::default(),
             lifecycle: Default::default(),
+            attributes: Default::default(),
         };
         let story_type = TypeDef {
             name: "story".to_string(),
@@ -291,6 +292,7 @@ mod tests {
             intent: None,
             authorship: Default::default(),
             lifecycle: Default::default(),
+            attributes: Default::default(),
         };
 
         let mut config = Config::default();
@@ -425,6 +427,7 @@ mod tests {
             intent: None,
             authorship: Default::default(),
             lifecycle: Default::default(),
+            attributes: Default::default(),
         };
         let story_type = TypeDef {
             name: "story".to_string(),
@@ -441,6 +444,7 @@ mod tests {
             intent: None,
             authorship: Default::default(),
             lifecycle: Default::default(),
+            attributes: Default::default(),
         };
 
         let mut config = Config::default();

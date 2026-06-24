@@ -18,6 +18,7 @@ fn singleton_type(name: &str, dir: &str, prefix: &str) -> TypeDef {
         intent: None,
         authorship: Default::default(),
         lifecycle: Default::default(),
+        attributes: Default::default(),
     }
 }
 

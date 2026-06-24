@@ -1,4 +1,4 @@
-use crate::engine::config::TypeDef;
+use crate::engine::config::{AttrDef, TypeDef};
 use crate::engine::document::{DocMeta, DocType, Status};
 use crate::engine::fs::FileSystem;
 use anyhow::Result;
@@ -37,7 +37,7 @@ pub fn load_type_directory(
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
-        parse_document_entry(root, &path, docs, parse_errors, fs)?;
+        parse_document_entry(root, &path, &type_def.attributes, docs, parse_errors, fs)?;
     }
     Ok(())
 }
@@ -45,13 +45,14 @@ pub fn load_type_directory(
 pub fn parse_document_entry(
     root: &Path,
     path: &Path,
+    schema: &[AttrDef],
     docs: &mut HashMap<PathBuf, DocMeta>,
     parse_errors: &mut Vec<ParseError>,
     fs: &dyn FileSystem,
 ) -> Result<Option<PathBuf>> {
     let content = fs.read_to_string(path)?;
     let relative = path.strip_prefix(root).unwrap_or(path).to_path_buf();
-    match DocMeta::parse(&content) {
+    match DocMeta::parse_with_schema(&content, schema) {
         Ok(mut meta) => {
             meta.path = relative.clone();
             meta.id = extract_id(&meta.path);
@@ -68,10 +69,12 @@ pub fn parse_document_entry(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn load_child_markdown_files(
     root: &Path,
     dir: &Path,
     skip_index: bool,
+    schema: &[AttrDef],
     docs: &mut HashMap<PathBuf, DocMeta>,
     parse_errors: &mut Vec<ParseError>,
     fs: &dyn FileSystem,
@@ -87,7 +90,8 @@ fn load_child_markdown_files(
         if child_path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
-        if let Some(rel) = parse_document_entry(root, &child_path, docs, parse_errors, fs)? {
+        if let Some(rel) = parse_document_entry(root, &child_path, schema, docs, parse_errors, fs)?
+        {
             child_paths.push(rel);
         }
     }
@@ -112,8 +116,23 @@ fn load_subdirectory(
             .strip_prefix(root)
             .unwrap_or(&index_path)
             .to_path_buf();
-        parse_document_entry(root, &index_path, docs, parse_errors, fs)?;
-        let child_paths = load_child_markdown_files(root, path, true, docs, parse_errors, fs)?;
+        parse_document_entry(
+            root,
+            &index_path,
+            &type_def.attributes,
+            docs,
+            parse_errors,
+            fs,
+        )?;
+        let child_paths = load_child_markdown_files(
+            root,
+            path,
+            true,
+            &type_def.attributes,
+            docs,
+            parse_errors,
+            fs,
+        )?;
         for cp in &child_paths {
             parent_of.insert(cp.clone(), parent_relative.clone());
         }
@@ -123,7 +142,15 @@ fn load_subdirectory(
         return Ok(());
     }
 
-    let child_paths = load_child_markdown_files(root, path, false, docs, parse_errors, fs)?;
+    let child_paths = load_child_markdown_files(
+        root,
+        path,
+        false,
+        &type_def.attributes,
+        docs,
+        parse_errors,
+        fs,
+    )?;
     if child_paths.is_empty() {
         return Ok(());
     }
@@ -154,6 +181,7 @@ fn load_subdirectory(
         related: vec![],
         validate_ignore: false,
         virtual_doc: true,
+        attributes: Default::default(),
         id: extract_id(&parent_relative),
     };
     docs.insert(parent_relative.clone(), virtual_meta);

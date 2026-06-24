@@ -1,7 +1,9 @@
+use crate::engine::config::{AttrDef, AttrKind};
 use crate::engine::fs::FileSystem;
 use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -178,6 +180,76 @@ pub struct Relation {
     pub target: String,
 }
 
+/// A typed custom frontmatter attribute value. Declared attributes are coerced
+/// to their `kind`; undeclared keys are preserved as [`AttrValue::Raw`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum AttrValue {
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bool(bool),
+    Date(NaiveDate),
+    Raw(serde_yaml::Value),
+}
+
+/// Serialize each variant as its bare JSON value (no enum tag). `Date` is emitted
+/// as a `YYYY-MM-DD` string rather than serde's default tuple, and `Raw` passes
+/// the underlying YAML value through transparently.
+impl Serialize for AttrValue {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            AttrValue::Int(i) => serializer.serialize_i64(*i),
+            AttrValue::Float(f) => serializer.serialize_f64(*f),
+            AttrValue::Str(s) => serializer.serialize_str(s),
+            AttrValue::Bool(b) => serializer.serialize_bool(*b),
+            AttrValue::Date(d) => serializer.serialize_str(&d.format("%Y-%m-%d").to_string()),
+            AttrValue::Raw(v) => v.serialize(serializer),
+        }
+    }
+}
+
+/// Parse a `NaiveDate` out of a YAML value, accepting the same representations
+/// as [`deserialize_naive_date`] (plain string, tagged timestamp, or the
+/// single-key-mapping form serde_yaml 0.9 sometimes produces for bare dates).
+fn naive_date_from_yaml(value: &serde_yaml::Value) -> Option<NaiveDate> {
+    let date_str = match value {
+        serde_yaml::Value::String(s) => s.clone(),
+        serde_yaml::Value::Tagged(tagged) => match &tagged.value {
+            serde_yaml::Value::String(s) => s.clone(),
+            _ => return None,
+        },
+        serde_yaml::Value::Mapping(m) if m.len() == 1 => match m.keys().next() {
+            Some(serde_yaml::Value::String(s)) => s.clone(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").ok()
+}
+
+/// Coerce a raw YAML value against a declared attribute kind. Returns `None`
+/// when the value does not match the kind (a validation error, surfaced by the
+/// attribute-schema checker rather than failing the parse).
+pub(crate) fn coerce_attr(value: &serde_yaml::Value, def: &AttrDef) -> Option<AttrValue> {
+    match def.kind {
+        AttrKind::Int => value.as_i64().map(AttrValue::Int),
+        AttrKind::Float => value.as_f64().map(AttrValue::Float),
+        AttrKind::Str => value.as_str().map(|s| AttrValue::Str(s.to_string())),
+        AttrKind::Enum => value.as_str().and_then(|s| {
+            if def.values.iter().any(|v| v == s) {
+                Some(AttrValue::Str(s.to_string()))
+            } else {
+                None
+            }
+        }),
+        AttrKind::Date => naive_date_from_yaml(value).map(AttrValue::Date),
+        AttrKind::Bool => value.as_bool().map(AttrValue::Bool),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DocMeta {
     pub path: PathBuf,
@@ -192,6 +264,10 @@ pub struct DocMeta {
     pub validate_ignore: bool,
     pub virtual_doc: bool,
     pub id: String,
+    /// Custom frontmatter attributes, keyed by their frontmatter name. Declared
+    /// attributes carry a coerced [`AttrValue`]; undeclared keys are preserved as
+    /// [`AttrValue::Raw`].
+    pub attributes: BTreeMap<String, AttrValue>,
 }
 
 #[derive(Deserialize)]
@@ -210,6 +286,8 @@ struct RawFrontmatter {
     related: Vec<serde_yaml::Value>,
     #[serde(default, rename = "validate-ignore")]
     validate_ignore: bool,
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_yaml::Value>,
 }
 
 pub fn rewrite_frontmatter<F>(path: &Path, fs: &dyn FileSystem, mutate: F) -> Result<()>
@@ -282,7 +360,17 @@ pub(crate) fn parse_relation(value: &serde_yaml::Value) -> Result<Relation> {
 }
 
 impl DocMeta {
+    /// Parse without an attribute schema: every undeclared frontmatter key is
+    /// preserved as [`AttrValue::Raw`].
     pub fn parse(content: &str) -> Result<Self> {
+        Self::parse_with_schema(content, &[])
+    }
+
+    /// Parse against a document type's declared attribute `schema`. Keys naming a
+    /// declared attribute are coerced to the attribute's kind (an unmatched
+    /// coercion preserves the value as [`AttrValue::Raw`] so the schema checker can
+    /// report it); keys not in the schema are kept as [`AttrValue::Raw`].
+    pub fn parse_with_schema(content: &str, schema: &[AttrDef]) -> Result<Self> {
         let (frontmatter, _) = split_frontmatter(content)?;
         let raw: RawFrontmatter = serde_yaml::from_str(&frontmatter)?;
 
@@ -301,6 +389,18 @@ impl DocMeta {
             .map(parse_relation)
             .collect::<Result<Vec<_>>>()?;
 
+        let attributes = raw
+            .extra
+            .into_iter()
+            .map(|(key, value)| {
+                let coerced = match schema.iter().find(|d| d.name == key) {
+                    Some(def) => coerce_attr(&value, def).unwrap_or(AttrValue::Raw(value)),
+                    None => AttrValue::Raw(value),
+                };
+                (key, coerced)
+            })
+            .collect();
+
         Ok(DocMeta {
             path: PathBuf::new(),
             title: raw.title,
@@ -314,6 +414,7 @@ impl DocMeta {
             validate_ignore: raw.validate_ignore,
             virtual_doc: false,
             id: String::new(),
+            attributes,
         })
     }
 
@@ -350,6 +451,7 @@ mod tests {
             validate_ignore: false,
             virtual_doc: false,
             id: String::new(),
+            attributes: BTreeMap::new(),
         }
     }
 
@@ -555,6 +657,108 @@ Body.
         let rt: RelationType = "anything-goes".parse().unwrap();
         assert_eq!(rt.to_string(), "anything-goes");
         assert_eq!(rt, RelationType::new("anything-goes"));
+    }
+
+    // AC2: declared int and date attributes coerce to typed AttrValue.
+    #[test]
+    fn attributes_coerce_against_schema() {
+        use crate::engine::config::{AttrDef, AttrKind};
+        let content = r#"---
+title: "Doc"
+type: story
+status: draft
+author: a
+date: 2026-01-01
+tags: []
+estimate: 5
+due: 2026-03-15
+---
+
+Body.
+"#;
+        let schema = vec![
+            AttrDef {
+                name: "estimate".to_string(),
+                kind: AttrKind::Int,
+                required: false,
+                values: vec![],
+            },
+            AttrDef {
+                name: "due".to_string(),
+                kind: AttrKind::Date,
+                required: false,
+                values: vec![],
+            },
+        ];
+        let meta = DocMeta::parse_with_schema(content, &schema).unwrap();
+        assert_eq!(meta.attributes["estimate"], AttrValue::Int(5));
+        assert_eq!(
+            meta.attributes["due"],
+            AttrValue::Date(NaiveDate::from_ymd_opt(2026, 3, 15).unwrap())
+        );
+    }
+
+    // AC4: an undeclared key parses (does not fail) and is preserved as Raw.
+    #[test]
+    fn undeclared_attribute_preserved_as_raw() {
+        let content = r#"---
+title: "Doc"
+type: story
+status: draft
+author: a
+date: 2026-01-01
+tags: []
+mystery: hello
+---
+
+Body.
+"#;
+        let meta = DocMeta::parse(content).unwrap();
+        match &meta.attributes["mystery"] {
+            AttrValue::Raw(v) => assert_eq!(v.as_str(), Some("hello")),
+            other => panic!("expected Raw, got {other:?}"),
+        }
+    }
+
+    // AC1 support: AttrValue serializes as the bare typed JSON value, not a tagged enum.
+    #[test]
+    fn attr_value_serializes_as_bare_value() {
+        use serde_json::json;
+        assert_eq!(serde_json::to_value(AttrValue::Int(5)).unwrap(), json!(5));
+        assert_eq!(
+            serde_json::to_value(AttrValue::Float(2.5)).unwrap(),
+            json!(2.5)
+        );
+        assert_eq!(
+            serde_json::to_value(AttrValue::Str("hi".to_string())).unwrap(),
+            json!("hi")
+        );
+        assert_eq!(
+            serde_json::to_value(AttrValue::Bool(true)).unwrap(),
+            json!(true)
+        );
+    }
+
+    // Date must serialize as the YYYY-MM-DD string, not serde's default tuple form.
+    #[test]
+    fn attr_value_date_serializes_as_iso_string() {
+        let v = AttrValue::Date(NaiveDate::from_ymd_opt(2026, 3, 15).unwrap());
+        assert_eq!(
+            serde_json::to_value(v).unwrap(),
+            serde_json::json!("2026-03-15")
+        );
+    }
+
+    // Raw passes the underlying YAML value through transparently.
+    #[test]
+    fn attr_value_raw_serializes_inner_value() {
+        let raw = AttrValue::Raw(serde_yaml::Value::String("passthrough".to_string()));
+        assert_eq!(
+            serde_json::to_value(raw).unwrap(),
+            serde_json::json!("passthrough")
+        );
+        let raw_num = AttrValue::Raw(serde_yaml::Value::Number(7.into()));
+        assert_eq!(serde_json::to_value(raw_num).unwrap(), serde_json::json!(7));
     }
 
     #[test]

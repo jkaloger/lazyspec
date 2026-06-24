@@ -1,5 +1,5 @@
-use crate::engine::config::{Config, Severity, ValidationRule as ConfigRule};
-use crate::engine::document::{DocMeta, DocType, Status};
+use crate::engine::config::{AttrKind, Config, Severity, ValidationRule as ConfigRule};
+use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -79,6 +79,24 @@ pub enum ValidationIssue {
     UnknownRelationship {
         path: PathBuf,
         name: String,
+    },
+    AttributeKindMismatch {
+        path: PathBuf,
+        attr: String,
+        expected: String,
+    },
+    AttributeBadEnumValue {
+        path: PathBuf,
+        attr: String,
+        allowed: Vec<String>,
+    },
+    MissingRequiredAttribute {
+        path: PathBuf,
+        attr: String,
+    },
+    UndeclaredAttribute {
+        path: PathBuf,
+        attr: String,
     },
 }
 
@@ -253,6 +271,43 @@ impl std::fmt::Display for ValidationIssue {
                     name,
                     path.display()
                 )
+            }
+            ValidationIssue::AttributeKindMismatch {
+                path,
+                attr,
+                expected,
+            } => {
+                write!(
+                    f,
+                    "attribute \"{}\" in {} is not a valid {}",
+                    attr,
+                    path.display(),
+                    expected
+                )
+            }
+            ValidationIssue::AttributeBadEnumValue {
+                path,
+                attr,
+                allowed,
+            } => {
+                write!(
+                    f,
+                    "attribute \"{}\" in {} is not one of the allowed values: {}",
+                    attr,
+                    path.display(),
+                    allowed.join(", ")
+                )
+            }
+            ValidationIssue::MissingRequiredAttribute { path, attr } => {
+                write!(
+                    f,
+                    "missing required attribute \"{}\": {}",
+                    attr,
+                    path.display()
+                )
+            }
+            ValidationIssue::UndeclaredAttribute { path, attr } => {
+                write!(f, "undeclared attribute \"{}\": {}", attr, path.display())
             }
         }
     }
@@ -909,6 +964,92 @@ impl Checker for UnknownRelationshipRule {
     }
 }
 
+pub struct AttributeSchemaChecker;
+
+impl AttributeSchemaChecker {
+    /// The YAML value backing an attribute, whether it is still a raw
+    /// (un-coerced) capture or has already been coerced to a typed value. Lets
+    /// the checker re-validate regardless of which parse path produced the doc.
+    fn as_yaml(value: &AttrValue) -> serde_yaml::Value {
+        match value {
+            AttrValue::Raw(v) => v.clone(),
+            AttrValue::Int(i) => (*i).into(),
+            AttrValue::Float(f) => (*f).into(),
+            AttrValue::Str(s) => s.clone().into(),
+            AttrValue::Bool(b) => (*b).into(),
+            AttrValue::Date(d) => d.to_string().into(),
+        }
+    }
+}
+
+impl Checker for AttributeSchemaChecker {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        let mut issues = Vec::new();
+
+        for (path, meta) in &store.docs {
+            if meta.validate_ignore {
+                continue;
+            }
+            let Some(type_def) = config.type_by_name(meta.doc_type.as_str()) else {
+                continue;
+            };
+
+            for def in &type_def.attributes {
+                match meta.attributes.get(&def.name) {
+                    None => {
+                        if def.required {
+                            issues.push((
+                                Severity::Error,
+                                ValidationIssue::MissingRequiredAttribute {
+                                    path: path.clone(),
+                                    attr: def.name.clone(),
+                                },
+                            ));
+                        }
+                    }
+                    Some(value) => {
+                        let yaml = Self::as_yaml(value);
+                        if crate::engine::document::coerce_attr(&yaml, def).is_none() {
+                            let issue = if def.kind == AttrKind::Enum {
+                                ValidationIssue::AttributeBadEnumValue {
+                                    path: path.clone(),
+                                    attr: def.name.clone(),
+                                    allowed: def.values.clone(),
+                                }
+                            } else {
+                                ValidationIssue::AttributeKindMismatch {
+                                    path: path.clone(),
+                                    attr: def.name.clone(),
+                                    expected: format!("{:?}", def.kind).to_lowercase(),
+                                }
+                            };
+                            issues.push((Severity::Error, issue));
+                        }
+                    }
+                }
+            }
+
+            for key in meta.attributes.keys() {
+                if !type_def.attributes.iter().any(|d| &d.name == key) {
+                    issues.push((
+                        Severity::Warning,
+                        ValidationIssue::UndeclaredAttribute {
+                            path: path.clone(),
+                            attr: key.clone(),
+                        },
+                    ));
+                }
+            }
+        }
+
+        issues
+    }
+}
+
 fn default_checkers() -> Vec<Box<dyn Checker>> {
     vec![
         Box::new(BrokenLinkRule),
@@ -920,6 +1061,7 @@ fn default_checkers() -> Vec<Box<dyn Checker>> {
         Box::new(OrphanRefRule),
         Box::new(TypeConstraintChecker),
         Box::new(UnknownRelationshipRule),
+        Box::new(AttributeSchemaChecker),
     ]
 }
 
@@ -939,4 +1081,153 @@ pub fn validate_full(store: &super::store::Store, config: &Config) -> Validation
     }
 
     result
+}
+
+#[cfg(test)]
+mod attr_schema_tests {
+    use super::*;
+    use crate::engine::config::{AttrDef, AttrKind};
+    use crate::engine::document::AttrValue;
+    use chrono::NaiveDate;
+    use std::collections::{BTreeMap, HashMap};
+
+    fn config_with_story_attrs(attrs: Vec<AttrDef>) -> Config {
+        let mut config = Config::default();
+        let story = config
+            .documents
+            .types
+            .iter_mut()
+            .find(|t| t.name == "story")
+            .unwrap();
+        story.attributes = attrs;
+        config
+    }
+
+    fn story_doc(attributes: BTreeMap<String, AttrValue>) -> DocMeta {
+        DocMeta {
+            path: PathBuf::from("docs/stories/STORY-001.md"),
+            title: "S".to_string(),
+            doc_type: DocType::new("story"),
+            status: Status::new("draft"),
+            author: "a".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            id: "STORY-001".to_string(),
+            attributes,
+        }
+    }
+
+    fn store_with(doc: DocMeta) -> super::super::store::Store {
+        let mut docs = HashMap::new();
+        docs.insert(doc.path.clone(), doc);
+        super::super::store::Store {
+            root: PathBuf::from("."),
+            docs,
+            forward_links: HashMap::new(),
+            reverse_links: HashMap::new(),
+            children: HashMap::new(),
+            parent_of: HashMap::new(),
+            parse_errors: Vec::new(),
+            chain_relationships: vec!["implements".to_string()],
+        }
+    }
+
+    fn attr(name: &str, kind: AttrKind, required: bool, values: &[&str]) -> AttrDef {
+        AttrDef {
+            name: name.to_string(),
+            kind,
+            required,
+            values: values.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    // AC3: a value of the wrong kind is a validation error.
+    #[test]
+    fn wrong_kind_is_error() {
+        let config = config_with_story_attrs(vec![attr("estimate", AttrKind::Int, false, &[])]);
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "estimate".to_string(),
+            AttrValue::Raw(serde_yaml::Value::String("notanumber".to_string())),
+        );
+        let result = validate_full(&store_with(story_doc(attrs)), &config);
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationIssue::AttributeKindMismatch { .. })));
+    }
+
+    // AC3: an enum value outside the declared set is a validation error.
+    #[test]
+    fn bad_enum_value_is_error() {
+        let config = config_with_story_attrs(vec![attr(
+            "priority",
+            AttrKind::Enum,
+            false,
+            &["low", "high"],
+        )]);
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "priority".to_string(),
+            AttrValue::Raw(serde_yaml::Value::String("urgent".to_string())),
+        );
+        let result = validate_full(&store_with(story_doc(attrs)), &config);
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationIssue::AttributeBadEnumValue { .. })));
+    }
+
+    // AC3: a missing required attribute is a validation error.
+    #[test]
+    fn missing_required_is_error() {
+        let config = config_with_story_attrs(vec![attr("owner", AttrKind::Str, true, &[])]);
+        let result = validate_full(&store_with(story_doc(BTreeMap::new())), &config);
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationIssue::MissingRequiredAttribute { .. })));
+    }
+
+    // AC4: an undeclared key is a validation warning (not an error).
+    #[test]
+    fn undeclared_key_is_warning() {
+        let config = config_with_story_attrs(vec![]);
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "mystery".to_string(),
+            AttrValue::Raw(serde_yaml::Value::String("x".to_string())),
+        );
+        let result = validate_full(&store_with(story_doc(attrs)), &config);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| matches!(w, ValidationIssue::UndeclaredAttribute { .. })));
+        assert!(!result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationIssue::UndeclaredAttribute { .. })));
+    }
+
+    // A correctly-typed declared value produces neither error nor warning.
+    #[test]
+    fn valid_declared_attribute_is_clean() {
+        let config = config_with_story_attrs(vec![attr("estimate", AttrKind::Int, true, &[])]);
+        let mut attrs = BTreeMap::new();
+        attrs.insert("estimate".to_string(), AttrValue::Int(5));
+        let result = validate_full(&store_with(story_doc(attrs)), &config);
+        assert!(!result.errors.iter().any(|e| matches!(
+            e,
+            ValidationIssue::AttributeKindMismatch { .. }
+                | ValidationIssue::MissingRequiredAttribute { .. }
+        )));
+        assert!(!result
+            .warnings
+            .iter()
+            .any(|w| matches!(w, ValidationIssue::UndeclaredAttribute { .. })));
+    }
 }

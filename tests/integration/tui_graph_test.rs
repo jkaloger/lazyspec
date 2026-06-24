@@ -64,7 +64,7 @@ fn test_rebuild_graph_builds_forest() {
 /// Build a fixture deliberately richer than `setup_graph_fixture`: it adds a
 /// multi-parent iteration (implements BOTH stories — a diamond) plus a
 /// cross-cutting `related-to` link between the two stories, so a single rebuild
-/// exercises root ordering, child ordering, diamond back-references, AND
+/// exercises root ordering, child ordering, diamond repeats, AND
 /// `related` annotation ordering all at once. Returns the freshly written
 /// `TestFixture` so a second independent `Store` can be loaded from the same
 /// files.
@@ -87,8 +87,8 @@ fn write_deterministic_forest_fixture() -> TestFixture {
     );
 
     // ITER-001 implements BOTH stories: the diamond. It is drawn in full under
-    // the first story encountered and as a back-reference under the second,
-    // pinning back-reference ordering.
+    // the first story encountered and re-drawn as a plain doc under the second,
+    // pinning repeat ordering.
     fixture.write_doc(
         "docs/iterations/ITER-001-login-impl.md",
         "---\ntitle: \"Login Iteration\"\ntype: iteration\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: docs/stories/STORY-001-login.md\n- implements: docs/stories/STORY-002-signup.md\n---\n",
@@ -113,7 +113,7 @@ fn app_from_fixture(fixture: &TestFixture) -> App {
 /// Determinism is guaranteed by construction in `flatten_forest`/`resolve_forest`
 /// (path sorts for roots and children, `BTreeSet` for the `related` annotation
 /// set). This test self-documents that guarantee. It captures the full ordered
-/// node identity sequence `(path, depth, reference, related)` so it also pins
+/// node identity sequence `(path, depth, related)` so it also pins
 /// annotation determinism, then asserts:
 ///   1. two `rebuild_graph()` calls on the SAME instance produce identical
 ///      sequences, and
@@ -123,11 +123,11 @@ fn app_from_fixture(fixture: &TestFixture) -> App {
 ///      `HashMap` happening to iterate in a stable order within one process).
 #[test]
 fn test_rebuild_graph_is_deterministic_across_rebuilds() {
-    type NodeSeq = Vec<(std::path::PathBuf, usize, bool, Vec<String>)>;
+    type NodeSeq = Vec<(std::path::PathBuf, usize, Vec<String>)>;
     let seq = |app: &App| -> NodeSeq {
         app.graph_nodes
             .iter()
-            .map(|n| (n.path.clone(), n.depth, n.reference, n.related.clone()))
+            .map(|n| (n.path.clone(), n.depth, n.related.clone()))
             .collect()
     };
 
@@ -138,19 +138,25 @@ fn test_rebuild_graph_is_deterministic_across_rebuilds() {
     let first = seq(&app);
 
     // The fixture must actually exercise ordering: multiple roots, a diamond
-    // back-reference, and a related-to annotation. Guard against the fixture
-    // silently degenerating into a trivial chain.
+    // (a doc reachable from two parents, now drawn once per parent as a plain
+    // doc), and a related-to annotation. Guard against the fixture silently
+    // degenerating into a trivial chain.
     assert!(
         first.len() >= 6,
-        "fixture should produce >= 6 nodes (incl. a back-reference), got {}",
+        "fixture should produce >= 6 nodes (incl. a diamond repeat), got {}",
         first.len()
     );
+    let diamond_repeat = {
+        let mut paths: Vec<_> = first.iter().map(|(p, _, _)| p.clone()).collect();
+        paths.sort();
+        paths.windows(2).any(|w| w[0] == w[1])
+    };
     assert!(
-        first.iter().any(|(_, _, reference, _)| *reference),
-        "fixture should contain a diamond back-reference"
+        diamond_repeat,
+        "fixture should contain a diamond: a doc drawn under each of its parents"
     );
     assert!(
-        first.iter().any(|(_, _, _, related)| !related.is_empty()),
+        first.iter().any(|(_, _, related)| !related.is_empty()),
         "fixture should contain a related-to annotation to pin its ordering"
     );
 
@@ -403,6 +409,7 @@ fn custom_types_populate_doc_types_and_icons() {
             intent: None,
             authorship: Default::default(),
             lifecycle: Default::default(),
+            attributes: Default::default(),
         },
         TypeDef {
             name: "task".into(),
@@ -419,6 +426,7 @@ fn custom_types_populate_doc_types_and_icons() {
             intent: None,
             authorship: Default::default(),
             lifecycle: Default::default(),
+            attributes: Default::default(),
         },
     ];
     let store = Store::load(fixture.root(), &config).unwrap();

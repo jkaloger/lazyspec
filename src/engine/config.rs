@@ -192,6 +192,33 @@ impl Lifecycle {
     }
 }
 
+/// The declared kind of a custom frontmatter attribute. `Str` serializes as
+/// `"string"`; the rest map to their lowercase name.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AttrKind {
+    Int,
+    Float,
+    #[serde(rename = "string")]
+    Str,
+    Enum,
+    Date,
+    Bool,
+}
+
+/// One declared custom attribute on a document type: its frontmatter key
+/// (`name`), its `kind`, whether it is `required`, and for `enum` kinds the
+/// permitted `values`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AttrDef {
+    pub name: String,
+    pub kind: AttrKind,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub values: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TypeDef {
     pub name: String,
@@ -217,6 +244,8 @@ pub struct TypeDef {
     pub authorship: Authorship,
     #[serde(default)]
     pub lifecycle: Lifecycle,
+    #[serde(default)]
+    pub attributes: Vec<AttrDef>,
 }
 
 /// One entry in the `[[relationships]]` block: a relationship name and its
@@ -365,6 +394,37 @@ pub struct UiConfig {
     pub statusbar: StatusBarConfig,
     #[serde(default)]
     pub multiline: MultiLineConfig,
+    #[serde(default)]
+    pub graph: GraphConfig,
+}
+
+fn default_graph_columns() -> Vec<String> {
+    vec!["status".to_string(), "related".to_string()]
+}
+
+fn default_graph_sort() -> String {
+    "path".to_string()
+}
+
+/// The `[tui.graph]` block: the nested-table columns and the default sibling
+/// sort column. Column ids are the built-ins `status` / `related` plus any
+/// declared attribute name; `sort` is `path` (the topo tiebreak) or any column
+/// id. Both carry serde defaults so a config without the block still loads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GraphConfig {
+    #[serde(default = "default_graph_columns")]
+    pub columns: Vec<String>,
+    #[serde(default = "default_graph_sort")]
+    pub sort: String,
+}
+
+impl Default for GraphConfig {
+    fn default() -> Self {
+        GraphConfig {
+            columns: default_graph_columns(),
+            sort: default_graph_sort(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -528,6 +588,7 @@ pub fn starter_types() -> Vec<TypeDef> {
         intent: None,
         authorship: Authorship::default(),
         lifecycle: default_lifecycle(),
+        attributes: Vec::new(),
     };
     vec![
         simple("rfc", "rfcs", "docs/rfcs", "RFC", "●"),
@@ -556,6 +617,7 @@ pub fn starter_types() -> Vec<TypeDef> {
             intent: None,
             authorship: Authorship::default(),
             lifecycle: default_lifecycle(),
+            attributes: Vec::new(),
         },
         TypeDef {
             name: "dictum".to_string(),
@@ -572,6 +634,7 @@ pub fn starter_types() -> Vec<TypeDef> {
             intent: None,
             authorship: Authorship::default(),
             lifecycle: default_lifecycle(),
+            attributes: Vec::new(),
         },
     ]
 }
@@ -882,6 +945,7 @@ impl TypeDef {
             intent: None,
             authorship: Authorship::default(),
             lifecycle: Lifecycle::default(),
+            attributes: Vec::new(),
         }
     }
 }
@@ -1584,6 +1648,103 @@ severity = "warning"
             } => assert!(require_parent_status.is_none()),
             other => panic!("unexpected rule: {other:?}"),
         }
+    }
+
+    // AC1: a [[types.attributes]] block deserializes into TypeDef.attributes,
+    // and all six kinds parse (note `string` -> AttrKind::Str).
+    #[test]
+    fn type_attributes_deserialize_all_kinds() {
+        let toml_str = r#"
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[types.attributes]]
+name = "estimate"
+kind = "int"
+
+[[types.attributes]]
+name = "weight"
+kind = "float"
+
+[[types.attributes]]
+name = "owner"
+kind = "string"
+required = true
+
+[[types.attributes]]
+name = "priority"
+kind = "enum"
+values = ["low", "high"]
+
+[[types.attributes]]
+name = "due"
+kind = "date"
+
+[[types.attributes]]
+name = "blocked"
+kind = "bool"
+"#;
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+        let attrs = &config.type_by_name("story").unwrap().attributes;
+        assert_eq!(attrs.len(), 6);
+        assert_eq!(attrs[0].name, "estimate");
+        assert_eq!(attrs[0].kind, AttrKind::Int);
+        assert_eq!(attrs[1].kind, AttrKind::Float);
+        assert_eq!(attrs[2].kind, AttrKind::Str);
+        assert!(attrs[2].required);
+        assert_eq!(attrs[3].kind, AttrKind::Enum);
+        assert_eq!(attrs[3].values, vec!["low".to_string(), "high".to_string()]);
+        assert_eq!(attrs[4].kind, AttrKind::Date);
+        assert_eq!(attrs[5].kind, AttrKind::Bool);
+    }
+
+    #[test]
+    fn graph_config_defaults_when_absent() {
+        let config = Config::parse(TYPES).unwrap();
+        assert_eq!(config.ui.graph.columns, vec!["status", "related"]);
+        assert_eq!(config.ui.graph.sort, "path");
+    }
+
+    #[test]
+    fn graph_config_parses_columns_and_sort() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[tui.graph]
+columns = ["status", "estimate", "related"]
+sort = "estimate"
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        assert_eq!(
+            config.ui.graph.columns,
+            vec!["status", "estimate", "related"]
+        );
+        assert_eq!(config.ui.graph.sort, "estimate");
+    }
+
+    #[test]
+    fn graph_config_partial_block_keeps_other_default() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[tui.graph]
+sort = "owner"
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        // `columns` falls back to its default, `sort` is taken from the block.
+        assert_eq!(config.ui.graph.columns, vec!["status", "related"]);
+        assert_eq!(config.ui.graph.sort, "owner");
+    }
+
+    #[test]
+    fn type_without_attributes_defaults_empty() {
+        let config = Config::parse(TYPES).unwrap();
+        assert!(config.type_by_name("rfc").unwrap().attributes.is_empty());
     }
 
     #[test]

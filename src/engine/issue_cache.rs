@@ -342,6 +342,7 @@ fn parse_issue(issue: &GhIssue, type_name: &str, known_types: &[String]) -> (Doc
         related: vec![],
         validate_ignore: false,
         virtual_doc: false,
+        attributes: Default::default(),
         id: String::new(),
     };
 
@@ -417,6 +418,7 @@ mod tests {
             intent: None,
             authorship: Default::default(),
             lifecycle: Default::default(),
+            attributes: Default::default(),
         }
     }
 

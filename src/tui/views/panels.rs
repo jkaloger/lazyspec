@@ -20,12 +20,34 @@ use crate::engine::git_status::GitFileStatus;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
 use crate::tui::state::{
-    App, ConfigDep, DocListNode, EditableField, FieldEditor, FieldPath, FilterField, GraphNode,
-    PreviewTab, RelKey, RuleKey, TypeKey,
+    anchor_to_flat, App, ConfigDep, DocListNode, EditableField, FieldEditor, FieldPath,
+    FilterField, GraphNode, PreviewTab, RelKey, RuleKey, TypeKey,
 };
 
 use super::colors::{status_color, tag_color};
 use super::layout::{calculate_image_height, wrapped_line_count, wrapped_lines_total};
+
+/// Rounded panel border shared by the doc list, graph, and sidebars. `focused`
+/// paints the border cyan; otherwise dim gray.
+fn panel_block(title: &str, focused: bool) -> Block<'static> {
+    let color = if focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(color))
+        .title(format!(" {title} "))
+}
+
+/// Column-header style shared by the doc list and graph tables.
+fn table_header_style() -> Style {
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD)
+}
 
 fn get_image_dimensions_cached(app: &mut App, path: &std::path::Path) -> Option<(u32, u32)> {
     if let Some(&dims) = app.image_dimensions_cache.get(path) {
@@ -202,6 +224,17 @@ fn render_diagram_overlays(
                 y_offset += 1;
             }
         }
+    }
+}
+
+/// The git-status gutter cell for a document row: a colored bar for new/modified
+/// docs, a blank space otherwise. Shared by the documents table, the filter
+/// table, and the graph table so the left-edge gutter looks identical.
+fn git_gutter_cell(app: &App, path: &std::path::Path) -> Cell<'static> {
+    match app.git_status_cache.get(path) {
+        Some(GitFileStatus::New) => Cell::from("┃").style(Style::default().fg(Color::Green)),
+        Some(GitFileStatus::Modified) => Cell::from("┃").style(Style::default().fg(Color::Yellow)),
+        None => Cell::from(" "),
     }
 }
 
@@ -491,7 +524,8 @@ fn doc_row_cells(
     let dim_style = Style::default().fg(Color::DarkGray);
     let normal_style = Style::default();
 
-    let id_style = if dim { dim_style } else { normal_style };
+    // IDs render dim gray to match the graph view's ID column.
+    let id_style = dim_style;
     let id_cell = if is_gh {
         let badge_style = if dim {
             dim_style
@@ -499,11 +533,11 @@ fn doc_row_cells(
             Style::default().fg(Color::Magenta)
         };
         Cell::new(Line::from(vec![
-            Span::styled(format!("{:<18}", id), id_style),
+            Span::styled(id.to_string(), id_style),
             Span::styled(" [gh]", badge_style),
         ]))
     } else {
-        Cell::new(Span::styled(format!("{:<18}", id), id_style))
+        Cell::new(Span::styled(id.to_string(), id_style))
     };
 
     let title_text = if is_virtual {
@@ -648,11 +682,7 @@ fn doc_row_for_node(
         Style::default().fg(Color::DarkGray),
     ));
 
-    let gutter_cell = match app.git_status_cache.get(&node.path) {
-        Some(GitFileStatus::New) => Cell::from("┃").style(Style::default().fg(Color::Green)),
-        Some(GitFileStatus::Modified) => Cell::from("┃").style(Style::default().fg(Color::Yellow)),
-        None => Cell::from(" "),
-    };
+    let gutter_cell = git_gutter_cell(app, &node.path);
 
     let tags = app
         .store
@@ -738,13 +768,7 @@ pub fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
         .collect();
 
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::DarkGray))
-                .title(" Types "),
-        )
+        .block(panel_block("Types", false))
         .highlight_style(
             Style::default()
                 .fg(Color::Cyan)
@@ -754,8 +778,46 @@ pub fn draw_type_panel(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
+/// Graph-view pivot picker. Reuses the types-view sidebar grammar: a list of
+/// document types plus a leading "All" row for the whole-store forest
+/// (`graph_anchor == None`). Highlights the current `graph_anchor`. The TUI only
+/// selects the anchor here; re-rooting lives in `resolve_forest` (engine).
+pub fn draw_graph_pivot_panel(f: &mut Frame, app: &App, area: Rect) {
+    let mut items: Vec<ListItem> =
+        Vec::with_capacity(app.doc_types.len() + app.available_tags.len() + 1);
+    items.push(ListItem::new("  All".to_string()));
+    for dt in &app.doc_types {
+        let plural = app
+            .type_plurals
+            .get(&dt.to_string())
+            .map(|s| s.as_str())
+            .unwrap_or("unknown");
+        items.push(ListItem::new(format!("  {}", plural)));
+    }
+    for tag in &app.available_tags {
+        items.push(ListItem::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("[{}]", tag), Style::default().fg(tag_color(tag))),
+        ])));
+    }
+
+    let list = List::new(items)
+        .block(panel_block("Pivot", false))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    // Sidebar order is All, types…, tags… (see anchor_to_flat).
+    let selected = anchor_to_flat(app.graph_anchor, app.doc_types.len());
+    let mut state = ListState::default().with_selected(Some(selected));
+    f.render_stateful_widget(list, area, &mut state);
+}
+
 pub fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect, config: &Config) {
-    app.doc_list_height = area.height.saturating_sub(2) as usize;
+    // Reserve 2 rows for the border and 1 for the header (matches draw_graph).
+    app.doc_list_height = area.height.saturating_sub(3) as usize;
     let relations_focused = app.preview_tab == PreviewTab::Relations;
     let dim = relations_focused;
 
@@ -769,12 +831,6 @@ pub fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect, config: &Config) 
 
     let widths = doc_table_widths(area.width);
 
-    let border_style = if relations_focused {
-        Style::default().fg(Color::DarkGray)
-    } else {
-        Style::default().fg(Color::Cyan)
-    };
-
     let highlight_style = if relations_focused {
         Style::default()
             .fg(Color::DarkGray)
@@ -783,14 +839,21 @@ pub fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect, config: &Config) 
         Style::default().add_modifier(Modifier::REVERSED)
     };
 
+    // Header mirrors the graph view: blank gutter + tree columns, then labels.
+    let hs = table_header_style();
+    let header = Row::new(vec![
+        Cell::from(""),
+        Cell::from(""),
+        Cell::from("ID").style(hs),
+        Cell::from("DOC").style(hs),
+        Cell::from("STATUS").style(hs),
+        Cell::from("TAGS").style(hs),
+        Cell::from("PROVENANCE").style(hs),
+    ]);
+
     let table = Table::new(rows, widths)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(border_style)
-                .title(" Documents "),
-        )
+        .header(header)
+        .block(panel_block("Documents", !relations_focused))
         .row_highlight_style(highlight_style);
 
     let mut state = TableState::default()
@@ -1265,15 +1328,7 @@ pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect, config: &Co
         .iter()
         .filter_map(|p| app.store.get(p))
         .map(|doc| {
-            let gutter_cell = match app.git_status_cache.get(&doc.path) {
-                Some(GitFileStatus::New) => {
-                    Cell::from("┃").style(Style::default().fg(Color::Green))
-                }
-                Some(GitFileStatus::Modified) => {
-                    Cell::from("┃").style(Style::default().fg(Color::Yellow))
-                }
-                None => Cell::from(" "),
-            };
+            let gutter_cell = git_gutter_cell(app, &doc.path);
             let tree_cell = Cell::new("");
             let mut cells = vec![gutter_cell, tree_cell];
             let (is_gh, is_stale) = check_doc_stale(&doc.path, doc.doc_type.as_str(), config);
@@ -1498,47 +1553,24 @@ pub fn draw_metrics_skeleton(f: &mut Frame, area: Rect) {
 /// `type_icon`, `is_last`, and `id` are passed in so the helper has no
 /// dependency on `App` (DICTUM-003). `id` is the already-uppercased doc id,
 /// used only by the back-reference branch.
+/// The legacy single-line graph row: the DOC-cell tree art plus the inline
+/// status and related annotations. Superseded by the nested table in
+/// `draw_graph` (ITERATION-209), but retained as the unit-test fixture for the
+/// tree-connector / annotation rendering contracts.
+#[cfg(test)]
 pub(super) fn graph_node_spans(
     node: &GraphNode,
     type_icon: &str,
     is_last: bool,
-    id: &str,
+    stems: &[bool],
 ) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
+    let mut spans = graph_doc_cell_spans(node, type_icon, is_last, stems);
 
-    if node.depth > 0 {
-        let leading = "   ".repeat(node.depth - 1);
-        let connector = if is_last {
-            " └─▶ "
-        } else {
-            " ├─▶ "
-        };
-        spans.push(Span::styled(
-            format!("{}{}", leading, connector),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-
-    if node.reference {
-        spans.push(Span::styled(
-            format!("\u{21B3} {} (see above)", id),
-            Style::default().fg(Color::DarkGray),
-        ));
-        return spans;
-    }
-
+    // The legacy single-line form (still used by the unit tests) appends the
+    // status and related annotations after the tree art. In the nested-table
+    // render these are their own columns; the doc cell carries only tree+title.
     spans.push(Span::styled(
-        format!("{} ", type_icon),
-        Style::default().fg(Color::Gray),
-    ));
-
-    spans.push(Span::styled(
-        format!("{} ", node.title),
-        Style::default().fg(Color::White),
-    ));
-
-    spans.push(Span::styled(
-        format!("{}", node.status),
+        format!(" {}", node.status),
         Style::default().fg(status_color(&node.status)),
     ));
 
@@ -1552,28 +1584,170 @@ pub(super) fn graph_node_spans(
     spans
 }
 
-pub fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
+/// Whether node `i` is the last child at its own depth, i.e. no later node
+/// shares its depth before the tree steps back to a shallower level. Mirrors
+/// the forward-scan in [`compute_stems`] so the `└`/`├` connector agrees with
+/// the `│` spine drawn under it: a node with children is detected as last when
+/// its next sibling at the same depth is absent, not merely when the next row
+/// is shallower.
+fn is_last_child(nodes: &[GraphNode], i: usize) -> bool {
+    let d = nodes[i].depth;
+    let mut j = i + 1;
+    while j < nodes.len() && nodes[j].depth > d {
+        j += 1;
+    }
+    !(j < nodes.len() && nodes[j].depth == d)
+}
+
+/// Precompute vertical-stem visibility for each node's ancestor levels.
+/// `stems[i][k]` is true when the ancestor at tree depth `k+1` still has more
+/// children after node `i`'s subtree — rendering a `│` at that level instead
+/// of blank space.
+fn compute_stems(nodes: &[GraphNode]) -> Vec<Vec<bool>> {
+    let mut all_stems = Vec::with_capacity(nodes.len());
+
+    for (i, node) in nodes.iter().enumerate() {
+        let d = node.depth;
+        let mut stems = Vec::with_capacity(d.saturating_sub(1));
+
+        for k in 1..d {
+            let mut j = i + 1;
+            while j < nodes.len() && nodes[j].depth > k {
+                j += 1;
+            }
+            stems.push(j < nodes.len() && nodes[j].depth == k);
+        }
+
+        all_stems.push(stems);
+    }
+
+    all_stems
+}
+
+/// The DOC-column spans for one graph row: the tree indent/connectors (the
+/// tree art preserved from the original render), then the type icon + title.
+/// Status and related/attribute columns are rendered as separate table cells
+/// (ITERATION-209), so they are NOT included here.
+pub(super) fn graph_doc_cell_spans(
+    node: &GraphNode,
+    type_icon: &str,
+    is_last: bool,
+    stems: &[bool],
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+
+    if node.depth > 0 {
+        let mut stem_str = String::new();
+        for &open in stems {
+            if open {
+                stem_str.push_str("│  ");
+            } else {
+                stem_str.push_str("   ");
+            }
+        }
+        let connector = if is_last { "└─▶ " } else { "├─▶ " };
+        spans.push(Span::styled(
+            format!("{}{}", stem_str, connector),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    spans.push(Span::styled(
+        format!("{} ", type_icon),
+        Style::default().fg(Color::Gray),
+    ));
+
+    spans.push(Span::styled(
+        node.title.clone(),
+        Style::default().fg(Color::White),
+    ));
+
+    spans
+}
+
+/// The rendered text of one configured graph column for a row. `status` and
+/// `related` are built-ins (`related` joins the row's cross-cutting neighbour
+/// ids with commas); any other id is read as an attribute and rendered via its
+/// typed value, or an empty string when the attribute is absent/undeclared on
+/// the row's type (AC2).
+fn graph_column_cell(node: &GraphNode, col: &str) -> String {
+    match col {
+        "status" => node.status.to_string(),
+        "related" => node.related.join(", "),
+        attr => node
+            .attributes
+            .get(attr)
+            .map(attr_value_display)
+            .unwrap_or_default(),
+    }
+}
+
+/// Render an [`AttrValue`] as a compact cell string.
+fn attr_value_display(v: &crate::engine::document::AttrValue) -> String {
+    use crate::engine::document::AttrValue;
+    match v {
+        AttrValue::Int(i) => i.to_string(),
+        AttrValue::Float(f) => f.to_string(),
+        AttrValue::Str(s) => s.clone(),
+        AttrValue::Bool(b) => b.to_string(),
+        AttrValue::Date(d) => d.format("%Y-%m-%d").to_string(),
+        AttrValue::Raw(raw) => raw.as_str().map(str::to_string).unwrap_or_default(),
+    }
+}
+
+/// Graph table ID column width. Slim: holds a doc id like `ITERATION-209`,
+/// truncated past that.
+const GRAPH_ID_COLS: u16 = 16;
+
+pub fn draw_graph(f: &mut Frame, app: &mut App, area: Rect, config: &Config) {
     let layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
         .split(area);
 
-    let left = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Graph ");
-    f.render_widget(left, layout[0]);
+    draw_graph_pivot_panel(f, app, layout[0]);
 
-    let items: Vec<ListItem> = app
+    let table_area = layout[1];
+    // Render-feeds-state: the table reserves 2 rows for the border and 1 for the
+    // header, so the visible data height is height - 3.
+    app.graph_list_height = table_area.height.saturating_sub(3) as usize;
+
+    let columns = &config.ui.graph.columns;
+
+    // Header: a blank gutter, the slim ID column, the DOC column, then each
+    // configured column. The active sort column carries a direction arrow; `path`
+    // marks the DOC column.
+    let arrow = if app.graph_sort_rev { " ▼" } else { " ▲" };
+    let header_style = table_header_style();
+    let header_cell = |label: &str, sort_id: &str| {
+        let marked = app.graph_sort_col == sort_id;
+        let text = if marked {
+            format!("{label}{arrow}")
+        } else {
+            label.to_string()
+        };
+        Cell::from(text).style(header_style)
+    };
+
+    let mut header_cells = vec![
+        Cell::from(""),
+        Cell::from("ID").style(header_style),
+        header_cell("DOC", "path"),
+    ];
+    for col in columns {
+        let label = col.to_uppercase();
+        header_cells.push(header_cell(&label, col));
+    }
+    let header = Row::new(header_cells);
+
+    let stems = compute_stems(&app.graph_nodes);
+
+    let rows: Vec<Row> = app
         .graph_nodes
         .iter()
         .enumerate()
         .map(|(i, node)| {
-            let is_last = match app.graph_nodes.get(i + 1) {
-                Some(next) => next.depth <= node.depth,
-                None => true,
-            };
+            let is_last = is_last_child(&app.graph_nodes, i);
             let type_icon = app
                 .type_icons
                 .get(&node.doc_type.to_string())
@@ -1584,26 +1758,64 @@ pub fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
                 .get(&node.path)
                 .map(|d| d.id.to_uppercase())
                 .unwrap_or_default();
-            ListItem::new(Line::from(graph_node_spans(node, type_icon, is_last, &id)))
+
+            let gutter_cell = git_gutter_cell(app, &node.path);
+            let id_cell = Cell::new(Span::styled(
+                truncate_with_ellipsis(&id, GRAPH_ID_COLS as usize),
+                Style::default().fg(Color::DarkGray),
+            ));
+            let doc_cell = Cell::from(Line::from(graph_doc_cell_spans(
+                node, type_icon, is_last, &stems[i],
+            )));
+
+            let mut cells = vec![gutter_cell, id_cell, doc_cell];
+            for col in columns {
+                let text = graph_column_cell(node, col);
+                let style = if col == "status" {
+                    Style::default().fg(status_color(&node.status))
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                cells.push(Cell::new(Span::styled(text, style)));
+            }
+            Row::new(cells)
         })
         .collect();
 
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(" Dependency Graph "),
-        )
-        .highlight_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
+    // Gutter + slim ID, then DOC takes ~half the remaining width; the configured
+    // columns split the rest evenly.
+    let mut widths = vec![
+        Constraint::Length(GUTTER_COLS),
+        Constraint::Length(GRAPH_ID_COLS),
+        Constraint::Percentage(50),
+    ];
+    if !columns.is_empty() {
+        let each = (50 / columns.len() as u16).max(1);
+        for _ in columns {
+            widths.push(Constraint::Percentage(each));
+        }
+    }
 
-    let mut state = ListState::default().with_selected(Some(app.graph_selected));
-    f.render_stateful_widget(list, layout[1], &mut state);
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(panel_block("Dependency Graph", true))
+        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+    let mut state = TableState::default()
+        .with_selected(Some(app.graph_selected))
+        .with_offset(app.graph_offset);
+    f.render_stateful_widget(table, table_area, &mut state);
+
+    let total = app.graph_nodes.len();
+    if total > app.graph_list_height {
+        render_scrollbar(
+            f,
+            table_area,
+            total,
+            app.graph_list_height,
+            app.graph_selected,
+        );
+    }
 }
 
 fn severity_str(s: &Severity) -> &'static str {
@@ -2647,6 +2859,7 @@ mod tests {
             validate_ignore: false,
             path: PathBuf::from("docs/rfcs/RFC-001.md"),
             virtual_doc: false,
+            attributes: Default::default(),
         }
     }
 
@@ -2956,7 +3169,7 @@ mod tests {
         }
     }
 
-    fn graph_node_fixture(depth: usize, reference: bool, related: Vec<String>) -> GraphNode {
+    fn graph_node_fixture(depth: usize, related: Vec<String>) -> GraphNode {
         use crate::engine::document::DocType;
         GraphNode {
             path: PathBuf::from("docs/iterations/ITERATION-001.md"),
@@ -2964,9 +3177,29 @@ mod tests {
             doc_type: DocType::new("iteration"),
             status: Status::new("draft"),
             depth,
-            reference,
             related,
+            attributes: std::collections::BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn is_last_child_detects_last_sibling_that_has_children() {
+        // RFC(0) -> A(1) [has child], B(1). A is NOT last (B follows at depth 1).
+        // B(1) -> C(2). B IS last at depth 1 even though its next row (C) is deeper.
+        let nodes = vec![
+            graph_node_fixture(0, vec![]),
+            graph_node_fixture(1, vec![]),
+            graph_node_fixture(2, vec![]),
+            graph_node_fixture(1, vec![]),
+            graph_node_fixture(2, vec![]),
+        ];
+        assert!(!is_last_child(&nodes, 1), "A has sibling B at depth 1");
+        assert!(is_last_child(&nodes, 2), "C is the only child of A");
+        assert!(
+            is_last_child(&nodes, 3),
+            "B is the last depth-1 node despite having a deeper child after it"
+        );
+        assert!(is_last_child(&nodes, 4), "C2 is the last node");
     }
 
     fn spans_text(spans: &[Span]) -> String {
@@ -2974,44 +3207,9 @@ mod tests {
     }
 
     #[test]
-    fn graph_node_back_reference_renders_see_above_dimmed_no_icon() {
-        let node = graph_node_fixture(1, true, vec![]);
-        let spans = graph_node_spans(&node, "◆", true, "ITERATION-001");
-        let text = spans_text(&spans);
-
-        assert!(
-            text.contains("\u{21B3} ITERATION-001 (see above)"),
-            "back-ref should render the see-above line, got: {}",
-            text
-        );
-        assert!(
-            !text.contains('\u{25C6}'),
-            "back-ref must not include the type icon, got: {}",
-            text
-        );
-        assert!(
-            !text.contains("Design"),
-            "back-ref must not include the title, got: {}",
-            text
-        );
-        // Connector still present so the tree position reads correctly.
-        assert!(
-            text.contains("\u{2514}\u{2500}\u{25B6}"),
-            "back-ref keeps its depth-1 connector, got: {}",
-            text
-        );
-        // The see-above span is dimmed.
-        let ref_span = spans
-            .iter()
-            .find(|s| s.content.contains("see above"))
-            .expect("see-above span present");
-        assert_eq!(ref_span.style.fg, Some(Color::DarkGray));
-    }
-
-    #[test]
     fn graph_node_full_node_appends_related_annotation() {
-        let node = graph_node_fixture(1, false, vec!["ADR-001".to_string()]);
-        let spans = graph_node_spans(&node, "◆", true, "ITERATION-001");
+        let node = graph_node_fixture(1, vec!["ADR-001".to_string()]);
+        let spans = graph_node_spans(&node, "◆", true, &[]);
         let text = spans_text(&spans);
 
         assert!(
@@ -3036,12 +3234,8 @@ mod tests {
 
     #[test]
     fn graph_node_multiple_related_annotations_each_appended() {
-        let node = graph_node_fixture(
-            1,
-            false,
-            vec!["ADR-001".to_string(), "STORY-005".to_string()],
-        );
-        let text = spans_text(&graph_node_spans(&node, "◆", true, "ITERATION-001"));
+        let node = graph_node_fixture(1, vec!["ADR-001".to_string(), "STORY-005".to_string()]);
+        let text = spans_text(&graph_node_spans(&node, "◆", true, &[]));
         assert!(
             text.contains(" \u{2504}\u{25B7} ADR-001 \u{2504}\u{25B7} STORY-005"),
             "each related id gets its own annotation glyph, got: {}",
@@ -3052,9 +3246,9 @@ mod tests {
     #[test]
     fn graph_node_full_node_no_related_is_backward_compatible() {
         // Pre-Task-3 format: connector + icon + "title " + status, nothing else.
-        let node = graph_node_fixture(1, false, vec![]);
-        let text = spans_text(&graph_node_spans(&node, "◆", true, "ITERATION-001"));
-        assert_eq!(text, " \u{2514}\u{2500}\u{25B6} \u{25C6} Design draft");
+        let node = graph_node_fixture(1, vec![]);
+        let text = spans_text(&graph_node_spans(&node, "◆", true, &[]));
+        assert_eq!(text, "\u{2514}\u{2500}\u{25B6} \u{25C6} Design draft");
         assert!(!text.contains('\u{21B3}'), "no back-ref glyph");
         assert!(!text.contains('\u{2504}'), "no annotation glyph");
     }
@@ -3062,8 +3256,8 @@ mod tests {
     #[test]
     fn graph_node_root_full_node_has_no_connector() {
         // depth 0 keeps the original no-indent shape.
-        let node = graph_node_fixture(0, false, vec![]);
-        let text = spans_text(&graph_node_spans(&node, "◆", true, "ITERATION-001"));
+        let node = graph_node_fixture(0, vec![]);
+        let text = spans_text(&graph_node_spans(&node, "◆", true, &[]));
         assert_eq!(text, "\u{25C6} Design draft");
     }
 

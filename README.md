@@ -164,6 +164,37 @@ Press `5` (or cycle to it with `` ` ``) to open the Settings view, which edits `
 | `w` / `Ctrl-S`     | Save changes to `.lazyspec.toml` (validates the whole config) |
 | `q` / `Esc`        | Quit; with unsaved changes, prompts `(s)ave / (d)iscard / (Esc) cancel` |
 
+#### Graph View
+
+Cycle to the Graph view with `` ` ``. The left panel is a pivot picker (`h` / `l` to re-root the forest on a document type or a tag, or `All` for the whole store); the right panel renders the dependency forest as a nested table sharing the documents table's styling (git-status gutter, slim `ID` column, selection bar, scrolling). The `DOC` column is the document tree, with indentation and connector art showing the `implements` lineage; each configured column follows. A document reachable from more than one parent (a diamond) is drawn once under each parent; cyclic edges are hidden. Siblings under a shared parent can be sorted by any column while the parent grouping and topological order are preserved.
+
+| Key            | Action                                                       |
+| -------------- | ------------------------------------------------------------ |
+| `j` / `k`      | Navigate up/down                                            |
+| `Ctrl-d` / `Ctrl-u` | Half page down/up                                      |
+| `h` / `l`      | Pivot the anchor (whole store → types → tags)              |
+| `o`            | Cycle the sibling sort column (`path` → `status` → declared attributes → wrap) |
+| `O`            | Reverse the sort direction                                  |
+| `g` / `G`      | Jump to top/bottom                                          |
+| `Enter`        | Open the selected document                                  |
+| `e`            | Edit document in `$EDITOR`                                  |
+
+The columns and default sort are configured under `[tui.graph]` in `.lazyspec.toml`:
+
+```toml
+[tui.graph]
+# Columns rendered to the right of the DOC tree column. Each id is either a
+# built-in (`status`, `related`) or a declared attribute name (`[[types.attributes]]`).
+# An attribute not declared/present on a row's type renders as an empty cell.
+columns = ["status", "related"]   # default
+# Default sibling sort column: `path` (the stable topological order), `status`,
+# or any declared attribute name. `o` cycles from here; missing attribute values
+# always sort last.
+sort = "path"                     # default
+```
+
+Both keys carry defaults, so a config without a `[tui.graph]` block still loads.
+
 <details>
 <summary><h3>CLI</h3></summary>
 
@@ -181,6 +212,7 @@ All document management is available as subcommands. Most accept `--json` for ma
 | `unlink <from> <rel> <to>`           | Remove a relationship (canonical or inverse keyword)                  |
 | `search <query> [--doc-type X]`      | Full-text search across all documents                                 |
 | `context <id> [--depth N]`           | Show the full document chain (RFC -> Story -> Iteration)              |
+| `context [--anchor TYPE]`            | Emit the context forest (omit `<id>`); `--anchor` re-roots on a type   |
 | `status`                             | Show full project status with all documents and validation            |
 | `ignore <path>`                      | Mark a document to skip validation                                    |
 | `unignore <path>`                    | Remove validation skip from a document                                |
@@ -213,11 +245,25 @@ A relationship declared without an `inverse` is symmetric (like `related-to`) an
 | `-e`, `--expand-references` | Expand `@ref` directives into fenced code blocks |
 | `--max-ref-lines N`         | Max lines per expanded ref (default: 25)         |
 
+Each document entry in `show --json` and `status --json` (under `documents[]`) includes an `attributes` object holding the document's custom frontmatter attributes (declared via `[[types.attributes]]`). Declared attributes are emitted as their typed JSON value -- `int`/`float` as numbers, `string`/`enum` as strings, `bool` as a boolean, `date` as a `"YYYY-MM-DD"` string -- and undeclared keys pass through with their raw YAML value. The field is always present; a document with no attributes serializes it as `{}`, so consumers needn't null-check.
+
 #### `context` Flags
 
-| Flag        | Description                                                          |
-| ----------- | ------------------------------------------------------------------- |
-| `--depth N` | Max hops to follow `related-to` links when collecting related records (default: 1) |
+| Flag           | Description                                                          |
+| -------------- | ------------------------------------------------------------------- |
+| `--depth N`    | Max hops to follow `related-to` links when collecting related records (default: 1) |
+| `--anchor TYPE`| Forest mode only (omit `<id>`): re-root the forest on documents of `TYPE`, emitting each anchor plus its chain descendants and pruning ancestors above it |
+
+With an `<id>`, `context` shows that document's chain. Omit the id to emit the
+whole-store context forest (every document, parents-first); add `--anchor TYPE`
+(e.g. `--anchor story`) to re-root the forest on a document type, surfacing each
+anchor-type doc with its descendant subtree only.
+
+```sh
+lazyspec context ITERATION-001            # chain for one document
+lazyspec context --json                   # whole-store forest
+lazyspec context --json --anchor story    # forest re-rooted on stories
+```
 
 #### `provenance` Subcommands
 

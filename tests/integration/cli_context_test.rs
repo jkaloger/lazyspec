@@ -18,6 +18,53 @@ fn setup() -> TestFixture {
 }
 
 #[test]
+fn context_forest_anchor_emits_anchored_subtree() {
+    // AC3: --anchor story emits the anchored forest (stories as roots plus
+    // their iteration descendants); no flag emits the whole store.
+    let fixture = setup();
+    let store = fixture.store();
+
+    let has_path = |forest: &[serde_json::Value], needle: &str| {
+        forest.iter().any(|n| {
+            n["path"]
+                .as_str()
+                .map(|p| p.contains(needle))
+                .unwrap_or(false)
+        })
+    };
+
+    let anchored = lazyspec::cli::context::run_forest_json(&store, Some("story")).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&anchored).unwrap();
+    let forest = parsed["forest"].as_array().unwrap();
+    assert!(
+        has_path(forest, "STORY-001"),
+        "anchor root present; got {}",
+        anchored
+    );
+    assert!(
+        has_path(forest, "ITERATION-001"),
+        "story descendant present; got {}",
+        anchored
+    );
+    assert!(
+        !has_path(forest, "RFC-001"),
+        "ancestor RFC pruned under story anchor; got {}",
+        anchored
+    );
+
+    let whole = lazyspec::cli::context::run_forest_json(&store, None).unwrap();
+    let parsed_whole: serde_json::Value = serde_json::from_str(&whole).unwrap();
+    let forest_whole = parsed_whole["forest"].as_array().unwrap();
+    assert!(
+        has_path(forest_whole, "RFC-001")
+            && has_path(forest_whole, "STORY-001")
+            && has_path(forest_whole, "ITERATION-001"),
+        "whole-store forest includes every doc; got {}",
+        whole
+    );
+}
+
+#[test]
 fn context_walks_full_chain() {
     let fixture = setup();
     let store = fixture.store();

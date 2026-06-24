@@ -19,6 +19,7 @@ pub fn doc_to_json(doc: &DocMeta) -> Value {
             })
         }).collect::<Vec<_>>(),
         "validate_ignore": doc.validate_ignore,
+        "attributes": doc.attributes,
     })
 }
 

@@ -127,6 +127,7 @@ impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            attributes: Default::default(),
             id: id.clone(),
         };
 
@@ -358,6 +359,7 @@ mod tests {
             intent: None,
             authorship: Default::default(),
             lifecycle: Default::default(),
+            attributes: Default::default(),
         }
     }
 

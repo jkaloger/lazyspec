@@ -298,6 +298,7 @@ fn singleton_type(name: &str, dir: &str, prefix: &str) -> TypeDef {
         intent: None,
         authorship: Default::default(),
         lifecycle: Default::default(),
+        attributes: Default::default(),
     }
 }
 
@@ -317,6 +318,7 @@ fn child_type(name: &str, dir: &str, prefix: &str, parent: &str) -> TypeDef {
         intent: None,
         authorship: Default::default(),
         lifecycle: Default::default(),
+        attributes: Default::default(),
     }
 }
 
@@ -473,6 +475,7 @@ fn parent_type_references_non_singleton_error() {
         intent: None,
         authorship: Default::default(),
         lifecycle: Default::default(),
+        attributes: Default::default(),
     };
     let config = config_with_extra_types(vec![
         non_singleton_parent,

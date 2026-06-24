@@ -60,6 +60,24 @@ fn status_json_documents_use_full_schema() {
     assert!(doc["related"].is_array());
 }
 
+// ITERATION-207 AC2: each status --json document entry carries `attributes`,
+// stable as `{}` when the doc has none.
+#[test]
+fn status_json_documents_have_attributes() {
+    let (fixture, store) = setup();
+    let output = lazyspec::cli::status::run_json(&store, &fixture.config());
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    let docs = parsed["documents"].as_array().unwrap();
+    assert!(!docs.is_empty());
+    for doc in docs {
+        assert!(
+            doc["attributes"].is_object(),
+            "every doc entry must have an attributes object"
+        );
+    }
+}
+
 #[test]
 fn status_human_grouped_by_type() {
     let (_fixture, store) = setup();
