@@ -563,6 +563,33 @@ mod tests {
             }
             Ok(responses.remove(0))
         }
+
+        fn project_item_fields(
+            &self,
+            _repo: &str,
+            _content_node_id: &str,
+        ) -> Result<Vec<crate::engine::gh::ProjectFieldValue>> {
+            Ok(vec![])
+        }
+
+        fn update_project_v2_item_field_value(
+            &self,
+            _project_id: &str,
+            _item_id: &str,
+            _field_id: &str,
+            _value: &crate::engine::gh::GhFieldValueInput,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear_project_field(
+            &self,
+            _project_id: &str,
+            _item_id: &str,
+            _field_id: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
     }
 
     impl GhIssueReader for MockReader {

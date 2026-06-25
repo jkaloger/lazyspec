@@ -38,6 +38,30 @@ impl GhGraphql for NoopGh {
     fn graphql(&self, _query: &str, _vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
         unreachable!("not used in this test (git-ref types only)")
     }
+    fn project_item_fields(
+        &self,
+        _repo: &str,
+        _content_node_id: &str,
+    ) -> Result<Vec<lazyspec::engine::gh::ProjectFieldValue>> {
+        unreachable!("not used in this test (git-ref types only)")
+    }
+    fn update_project_v2_item_field_value(
+        &self,
+        _project_id: &str,
+        _item_id: &str,
+        _field_id: &str,
+        _value: &lazyspec::engine::gh::GhFieldValueInput,
+    ) -> Result<()> {
+        unreachable!("not used in this test (git-ref types only)")
+    }
+    fn clear_project_field(
+        &self,
+        _project_id: &str,
+        _item_id: &str,
+        _field_id: &str,
+    ) -> Result<()> {
+        unreachable!("not used in this test (git-ref types only)")
+    }
 }
 impl GhIssueWriter for NoopGh {
     fn issue_create(

@@ -381,6 +381,197 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
         Ok((issue.number, issue.id))
     }
 
+    /// Read the per-item project field values for this doc across every board it
+    /// is a member of, and inject them into `meta.attributes` keyed
+    /// `PROJECT-{number}.{field_name}`. The issue's GraphQL node id comes from
+    /// the issue map; a missing node id or zero memberships is a no-op. Values
+    /// are coerced [`AttrValue`]s (never `Raw`); the board number namespaces the
+    /// key so the same field name on two boards cannot collide.
+    pub fn inject_project_fields(&self, meta: &mut DocMeta) -> Result<()> {
+        let boards = self.membership_board_numbers(meta);
+        if boards.is_empty() {
+            return Ok(());
+        }
+        let Some(node_id) = self
+            .issue_map
+            .get(&meta.id)
+            .map(|e| e.node_id.clone())
+            .filter(|n| !n.is_empty())
+        else {
+            return Ok(());
+        };
+
+        let values = self.client.project_item_fields(&self.repo, &node_id)?;
+        for v in &values {
+            if !boards.contains(&v.project_number) {
+                continue;
+            }
+            let key = format!("PROJECT-{}.{}", v.project_number, v.field_name);
+            meta.attributes.insert(key, gh::gh_field_to_attr(&v.value));
+        }
+        Ok(())
+    }
+
+    /// The Projects v2 board numbers this doc is a member of, read from its
+    /// `related` relations whose relationship declares `github_native =
+    /// "membership"`. Targets are board doc ids (`PROJECT-n`).
+    fn membership_board_numbers(&self, meta: &DocMeta) -> Vec<u64> {
+        meta.related
+            .iter()
+            .filter(|r| {
+                self.config
+                    .relationship_by_name(&r.rel_type.to_string())
+                    .and_then(|rel| rel.github_native.as_deref())
+                    == Some("membership")
+            })
+            .filter_map(|r| board_number(&r.target).ok())
+            .collect()
+    }
+
+    /// Write (or clear) one `PROJECT-{number}.{field}` project field for the
+    /// issue. Resolution order, all ids never names:
+    ///   1. field id (+ option/iteration id) FROM the `gh-schema.json` snapshot
+    ///      offline -- an unknown option/iteration rejects here BEFORE any
+    ///      mutation;
+    ///   2. project node id -- reused from the issue map binding for `PROJECT-n`
+    ///      when present, otherwise a fresh org/user lookup;
+    ///   3. project item id for this issue on that board (live);
+    ///   4. `updateProjectV2ItemFieldValue`, or `clearProjectV2ItemFieldValue`
+    ///      for an empty value (a distinct mutation, never an empty-string text).
+    fn set_project_field(
+        &self,
+        content_node_id: &str,
+        project_number: u64,
+        field_name: &str,
+        value: &str,
+    ) -> Result<()> {
+        let snapshot = GhSchemaSnapshot::load(&self.root);
+        let field_id = snapshot
+            .field_id(project_number, field_name)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown project field '{}' on board #{} (refresh the schema snapshot)",
+                    field_name,
+                    project_number
+                )
+            })?
+            .to_string();
+        let data_type = snapshot
+            .project_fields
+            .iter()
+            .find(|f| f.project_number == project_number && f.field_name == field_name)
+            .map(|f| f.data_type.clone())
+            .unwrap_or_default();
+
+        // Empty value clears the field, regardless of kind. Resolve ids and
+        // dispatch the distinct clear mutation.
+        let input: Option<gh::GhFieldValueInput> = if value.is_empty() {
+            None
+        } else {
+            Some(self.resolve_field_value_input(&snapshot, &field_id, &data_type, value)?)
+        };
+
+        let project_id = self.resolve_project_node_id(project_number)?;
+        let item_id = self.resolve_project_item_id(content_node_id, &project_id)?;
+
+        match input {
+            Some(v) => {
+                self.client
+                    .update_project_v2_item_field_value(&project_id, &item_id, &field_id, &v)
+            }
+            None => self
+                .client
+                .clear_project_field(&project_id, &item_id, &field_id),
+        }
+    }
+
+    /// Build the typed [`gh::GhFieldValueInput`] for a field write, resolving
+    /// single-select option / iteration ids FROM the snapshot (offline). An
+    /// unknown option/iteration is an error here, before any mutation.
+    fn resolve_field_value_input(
+        &self,
+        snapshot: &GhSchemaSnapshot,
+        field_id: &str,
+        data_type: &str,
+        value: &str,
+    ) -> Result<gh::GhFieldValueInput> {
+        match data_type {
+            "SINGLE_SELECT" => {
+                let opt = snapshot.option_id(field_id, value).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown option '{}' for project field (not in schema snapshot)",
+                        value
+                    )
+                })?;
+                Ok(gh::GhFieldValueInput::SingleSelect(opt.to_string()))
+            }
+            "ITERATION" => {
+                let iter = snapshot.iteration_id(field_id, value).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown iteration '{}' for project field (not in schema snapshot)",
+                        value
+                    )
+                })?;
+                Ok(gh::GhFieldValueInput::Iteration(iter.to_string()))
+            }
+            "NUMBER" => {
+                let n: f64 = value.parse().map_err(|_| {
+                    anyhow::anyhow!("project number field expects a number: '{}'", value)
+                })?;
+                Ok(gh::GhFieldValueInput::Number(n))
+            }
+            "DATE" => {
+                let d = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
+                    anyhow::anyhow!("project date field expects YYYY-MM-DD: '{}'", value)
+                })?;
+                Ok(gh::GhFieldValueInput::Date(d))
+            }
+            // TEXT and any other text-shaped field.
+            _ => Ok(gh::GhFieldValueInput::Text(value.to_string())),
+        }
+    }
+
+    /// The project node id for `project_number`: reused from the issue map
+    /// binding (`PROJECT-n`) when present, else a fresh org-then-user lookup.
+    fn resolve_project_node_id(&self, project_number: u64) -> Result<String> {
+        let board_doc_id = format!("PROJECT-{}", project_number);
+        if let Some(id) = self
+            .issue_map
+            .get(&board_doc_id)
+            .map(|e| e.node_id.clone())
+            .filter(|n| !n.is_empty())
+        {
+            return Ok(id);
+        }
+        let owner = owner_of(&self.repo)?;
+        resolve_project_id_live(&self.client, owner, project_number)
+    }
+
+    /// The project item id for the issue (`content_node_id`) on the board with
+    /// node id `project_id`, looked up live over GraphQL.
+    fn resolve_project_item_id(&self, content_node_id: &str, project_id: &str) -> Result<String> {
+        if content_node_id.is_empty() {
+            bail!("issue has no GitHub node id; cannot resolve its project item");
+        }
+        let resp = self.client.graphql(
+            PROJECT_ITEM_ID_QUERY,
+            &[("id", GqlVar::Str(content_node_id.to_string()))],
+        )?;
+        resp.pointer("/data/node/projectItems/nodes")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| {
+                arr.iter().find_map(|n| {
+                    let pid = n.pointer("/project/id").and_then(|v| v.as_str())?;
+                    if pid == project_id {
+                        n.get("id").and_then(|v| v.as_str()).map(String::from)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .ok_or_else(|| anyhow::anyhow!("issue is not an item on board {}", project_id))
+    }
+
     /// Materialize a subdir parent + children, then reconcile their native
     /// sub-issue links over GraphQL. The single entry point used by both the
     /// `create` path and cache refresh of subdir types.
@@ -449,6 +640,52 @@ fn split_owner_repo(repo: &str) -> Result<(&str, &str)> {
     repo.split_once('/')
         .filter(|(o, n)| !o.is_empty() && !n.is_empty())
         .ok_or_else(|| anyhow::anyhow!("repo '{}' must be in owner/name form", repo))
+}
+
+/// Parse a `PROJECT-{number}.{field}` attribute key into `(number, field)`.
+/// Returns `None` for any key that does not match the namespaced project-field
+/// shape, so ordinary attributes fall through to the body round-trip.
+pub fn parse_project_field_key(key: &str) -> Option<(u64, &str)> {
+    let rest = key.strip_prefix("PROJECT-")?;
+    let (num_str, field) = rest.split_once('.')?;
+    if field.is_empty() {
+        return None;
+    }
+    let number = num_str.parse::<u64>().ok()?;
+    Some((number, field))
+}
+
+const PROJECT_ITEM_ID_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on Issue { projectItems(first: 100) { nodes { id project { id } } } } } }";
+
+/// Live org-then-user resolve of a Projects v2 board number to its node id.
+/// Used by the issue store's field-write path when the issue map has no cached
+/// board binding.
+fn resolve_project_id_live<G: GhGraphql>(client: &G, owner: &str, number: u64) -> Result<String> {
+    let org_resp = client.graphql(
+        PROJECT_NODE_ID_ORG_QUERY,
+        &[
+            ("owner", GqlVar::Str(owner.to_string())),
+            ("number", GqlVar::Int(number as i64)),
+        ],
+    )?;
+    if let Some(id) = org_resp
+        .pointer("/data/organization/projectV2/id")
+        .and_then(|v| v.as_str())
+    {
+        return Ok(id.to_string());
+    }
+    let user_resp = client.graphql(
+        PROJECT_NODE_ID_USER_QUERY,
+        &[
+            ("owner", GqlVar::Str(owner.to_string())),
+            ("number", GqlVar::Int(number as i64)),
+        ],
+    )?;
+    user_resp
+        .pointer("/data/user/projectV2/id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| anyhow::anyhow!("Projects v2 board #{} not found under '{}'", number, owner))
 }
 
 impl<G: GhIssueReader + GhIssueWriter + GhGraphql> DocumentStore for GithubIssuesStore<G> {
@@ -558,7 +795,15 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> DocumentStore for GithubIssue
         let mut new_status: Option<Status> = None;
         let mut attr_updates: Vec<(&str, &str)> = Vec::new();
         let mut issue_type_update: Option<&str> = None;
+        let mut project_field_updates: Vec<(u64, &str, &str)> = Vec::new();
         for &(key, value) in updates {
+            // `PROJECT-n.<field>` is a per-board project field, not a body
+            // attribute: route it to a GraphQL field mutation, never the HTML
+            // -comment round-trip.
+            if let Some((number, field)) = parse_project_field_key(key) {
+                project_field_updates.push((number, field, value));
+                continue;
+            }
             match key {
                 "status" => {
                     let s: Status = value.parse()?;
@@ -572,6 +817,23 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> DocumentStore for GithubIssue
                 // the issue-body HTML comment, so it is kept out of attr_updates.
                 "issue_type" => issue_type_update = Some(value),
                 _ => attr_updates.push((key, value)),
+            }
+        }
+
+        // Project field writes are independent of the issue-body round-trip:
+        // resolve ids + validate offline first, then mutate, then return without
+        // touching the issue body or optimistic lock.
+        if !project_field_updates.is_empty() {
+            let content_node_id = self.existing_node_id(doc_id);
+            for (number, field, value) in &project_field_updates {
+                self.set_project_field(&content_node_id, *number, field, value)?;
+            }
+            if attr_updates.is_empty()
+                && new_status.is_none()
+                && issue_type_update.is_none()
+                && !updates.iter().any(|(k, _)| matches!(*k, "title" | "body"))
+            {
+                return Ok(());
             }
         }
         if !attr_updates.is_empty() {
@@ -3496,5 +3758,474 @@ mod tests {
             "got: {}",
             err
         );
+    }
+
+    // --- ITERATION-217: per-board project field attributes ---
+
+    use crate::engine::config::RelationshipDef;
+    use crate::engine::document::{Relation, RelationType};
+    use crate::engine::gh::{GhFieldKind, GhFieldValueInput, GhFieldValueRepr, ProjectFieldValue};
+    use crate::engine::gh_schema::{OptionId, ProjectFieldId};
+
+    fn membership_relationship_config() -> Config {
+        let mut config = Config::default();
+        config.relationships = vec![RelationshipDef {
+            name: "member-of".to_string(),
+            inverse: Some("has-member".to_string()),
+            github_native: Some("membership".to_string()),
+        }];
+        config
+    }
+
+    fn member_meta(id: &str, boards: &[u64]) -> DocMeta {
+        let related = boards
+            .iter()
+            .map(|n| Relation {
+                rel_type: RelationType::new("member-of"),
+                target: format!("PROJECT-{}", n),
+            })
+            .collect();
+        DocMeta {
+            path: PathBuf::new(),
+            title: "Story".to_string(),
+            doc_type: DocType::new("story"),
+            status: Status::new("draft"),
+            author: String::new(),
+            date: Local::now().date_naive(),
+            tags: vec![],
+            provenance: vec![],
+            related,
+            validate_ignore: false,
+            virtual_doc: false,
+            attributes: Default::default(),
+            id: id.to_string(),
+        }
+    }
+
+    fn issues_store_with(
+        root: &std::path::Path,
+        client: MockGhClient,
+    ) -> GithubIssuesStore<MockGhClient> {
+        GithubIssuesStore {
+            client,
+            root: root.to_path_buf(),
+            repo: "my-org/repo".to_string(),
+            config: membership_relationship_config(),
+            issue_map: IssueMap::load(root).unwrap(),
+            issue_cache: IssueCache::new(root),
+        }
+    }
+
+    // AC1: each field kind surfaces as the right coerced AttrValue under the
+    // namespaced key.
+    #[test]
+    fn inject_project_fields_surfaces_all_kinds() {
+        let root = tmp_root("iter217_inject_kinds");
+        let values = vec![
+            ProjectFieldValue {
+                project_number: 1,
+                field_name: "Status".into(),
+                kind: GhFieldKind::SingleSelect,
+                value: GhFieldValueRepr::OptionName("In Progress".into()),
+            },
+            ProjectFieldValue {
+                project_number: 1,
+                field_name: "Estimate".into(),
+                kind: GhFieldKind::Number,
+                value: GhFieldValueRepr::Number(3.0),
+            },
+            ProjectFieldValue {
+                project_number: 1,
+                field_name: "Due".into(),
+                kind: GhFieldKind::Date,
+                value: GhFieldValueRepr::Date(
+                    chrono::NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
+                ),
+            },
+            ProjectFieldValue {
+                project_number: 1,
+                field_name: "Notes".into(),
+                kind: GhFieldKind::Text,
+                value: GhFieldValueRepr::Text("freeform".into()),
+            },
+            ProjectFieldValue {
+                project_number: 1,
+                field_name: "Sprint".into(),
+                kind: GhFieldKind::Iteration,
+                value: GhFieldValueRepr::IterationTitle("Sprint 4".into()),
+            },
+        ];
+        let client = MockGhClient::new().with_project_field_values(values);
+        let mut store = issues_store_with(&root, client);
+        store.issue_map.insert("STORY-7", 7, "", "I_issue7");
+
+        let mut meta = member_meta("STORY-7", &[1]);
+        store.inject_project_fields(&mut meta).unwrap();
+
+        assert_eq!(
+            meta.attributes["PROJECT-1.Status"],
+            AttrValue::Str("In Progress".into())
+        );
+        assert_eq!(meta.attributes["PROJECT-1.Estimate"], AttrValue::Int(3));
+        assert_eq!(
+            meta.attributes["PROJECT-1.Due"],
+            AttrValue::Date(chrono::NaiveDate::from_ymd_opt(2026, 6, 25).unwrap())
+        );
+        assert_eq!(
+            meta.attributes["PROJECT-1.Notes"],
+            AttrValue::Str("freeform".into())
+        );
+        assert_eq!(
+            meta.attributes["PROJECT-1.Sprint"],
+            AttrValue::Str("Sprint 4".into())
+        );
+    }
+
+    // AC2: same field name on two boards yields two distinct namespaced keys,
+    // neither overwriting the other.
+    #[test]
+    fn inject_project_fields_namespaces_per_board_no_collision() {
+        let root = tmp_root("iter217_namespace");
+        let values = vec![
+            ProjectFieldValue {
+                project_number: 1,
+                field_name: "Status".into(),
+                kind: GhFieldKind::SingleSelect,
+                value: GhFieldValueRepr::OptionName("Todo".into()),
+            },
+            ProjectFieldValue {
+                project_number: 2,
+                field_name: "Status".into(),
+                kind: GhFieldKind::SingleSelect,
+                value: GhFieldValueRepr::OptionName("Done".into()),
+            },
+        ];
+        let client = MockGhClient::new().with_project_field_values(values);
+        let mut store = issues_store_with(&root, client);
+        store.issue_map.insert("STORY-7", 7, "", "I_issue7");
+
+        let mut meta = member_meta("STORY-7", &[1, 2]);
+        store.inject_project_fields(&mut meta).unwrap();
+
+        assert_eq!(
+            meta.attributes["PROJECT-1.Status"],
+            AttrValue::Str("Todo".into())
+        );
+        assert_eq!(
+            meta.attributes["PROJECT-2.Status"],
+            AttrValue::Str("Done".into())
+        );
+    }
+
+    fn write_status_snapshot(root: &std::path::Path) {
+        let snapshot = GhSchemaSnapshot {
+            project_fields: vec![ProjectFieldId {
+                project_number: 1,
+                field_name: "Status".into(),
+                id: "F_status".into(),
+                data_type: "SINGLE_SELECT".into(),
+            }],
+            single_select_options: vec![OptionId {
+                field_id: "F_status".into(),
+                name: "In Progress".into(),
+                id: "opt_inprog".into(),
+            }],
+            ..Default::default()
+        };
+        snapshot.save(root).unwrap();
+    }
+
+    fn item_id_response(project_id: &str, item_id: &str) -> serde_json::Value {
+        serde_json::json!({"data": {"node": {"projectItems": {"nodes": [
+            {"id": item_id, "project": {"id": project_id}}
+        ]}}}})
+    }
+
+    fn update_doc_with_attr(
+        value: &str,
+        root: &std::path::Path,
+    ) -> GithubIssuesStore<MockGhClient> {
+        write_status_snapshot(root);
+        // Responses: project node-id resolve (org), then item-id lookup.
+        let client = MockGhClient::new().with_graphql_responses(vec![
+            org_board_response("PVT_board1"),
+            item_id_response("PVT_board1", "PVTI_item1"),
+        ]);
+        let issue_body = make_issue_body("agent", "2026-06-25", None, "");
+        let view = GhIssue {
+            number: 7,
+            id: "I_issue7".into(),
+            url: String::new(),
+            title: "Story".into(),
+            body: issue_body,
+            labels: vec![GhLabel {
+                name: "lazyspec:story".into(),
+                color: String::new(),
+            }],
+            state: "OPEN".into(),
+            updated_at: "2026-06-25T00:00:00Z".into(),
+            created_at: "2026-06-25T00:00:00Z".into(),
+            author: None,
+            issue_type: None,
+        };
+        let client = client.with_view_issue(view);
+        let mut store = issues_store_with(root, client);
+        store
+            .issue_map
+            .insert("STORY-7", 7, "2026-06-25T00:00:00Z", "I_issue7");
+        store.issue_map.save(root).unwrap();
+        let td = TypeDef {
+            name: "story".into(),
+            ..test_type_def(StoreBackend::GithubIssues)
+        };
+        store
+            .update(&td, "STORY-7", &[("PROJECT-1.Status", value)])
+            .unwrap();
+        store
+    }
+
+    // AC3: single-select write resolves node-id + field/option ids, then records
+    // an update whose value object is exactly {singleSelectOptionId}.
+    #[test]
+    fn write_single_select_three_ids_one_key() {
+        let root = tmp_root("iter217_write_select");
+        let store = update_doc_with_attr("In Progress", &root);
+
+        let updates = store.client.field_updates.borrow();
+        assert_eq!(updates.len(), 1, "one field update");
+        let (project_id, item_id, field_id, value) = &updates[0];
+        assert_eq!(project_id, "PVT_board1");
+        assert_eq!(item_id, "PVTI_item1");
+        assert_eq!(field_id, "F_status");
+        assert_eq!(*value, GhFieldValueInput::SingleSelect("opt_inprog".into()));
+        let json = serde_json::to_value(value).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"singleSelectOptionId": "opt_inprog"})
+        );
+        assert!(store.client.field_clears.borrow().is_empty());
+    }
+
+    // AC4: iteration write records exactly {iterationId}.
+    #[test]
+    fn write_iteration_one_key() {
+        let root = tmp_root("iter217_write_iter");
+        let snapshot = GhSchemaSnapshot {
+            project_fields: vec![ProjectFieldId {
+                project_number: 1,
+                field_name: "Sprint".into(),
+                id: "F_sprint".into(),
+                data_type: "ITERATION".into(),
+            }],
+            iterations: vec![crate::engine::gh_schema::IterationId {
+                field_id: "F_sprint".into(),
+                title: "Sprint 4".into(),
+                id: "iter_4".into(),
+            }],
+            ..Default::default()
+        };
+        snapshot.save(&root).unwrap();
+
+        let client = MockGhClient::new()
+            .with_graphql_responses(vec![
+                org_board_response("PVT_board1"),
+                item_id_response("PVT_board1", "PVTI_item1"),
+            ])
+            .with_view_issue(GhIssue {
+                number: 7,
+                id: "I_issue7".into(),
+                url: String::new(),
+                title: "Story".into(),
+                body: make_issue_body("agent", "2026-06-25", None, ""),
+                labels: vec![GhLabel {
+                    name: "lazyspec:story".into(),
+                    color: String::new(),
+                }],
+                state: "OPEN".into(),
+                updated_at: "2026-06-25T00:00:00Z".into(),
+                created_at: "2026-06-25T00:00:00Z".into(),
+                author: None,
+                issue_type: None,
+            });
+        let mut store = issues_store_with(&root, client);
+        store
+            .issue_map
+            .insert("STORY-7", 7, "2026-06-25T00:00:00Z", "I_issue7");
+        store.issue_map.save(&root).unwrap();
+        let td = TypeDef {
+            name: "story".into(),
+            ..test_type_def(StoreBackend::GithubIssues)
+        };
+        store
+            .update(&td, "STORY-7", &[("PROJECT-1.Sprint", "Sprint 4")])
+            .unwrap();
+
+        let updates = store.client.field_updates.borrow();
+        assert_eq!(updates.len(), 1);
+        let json = serde_json::to_value(&updates[0].3).unwrap();
+        assert_eq!(json, serde_json::json!({"iterationId": "iter_4"}));
+    }
+
+    // AC5: clearing a set single-select uses clearProjectV2ItemFieldValue, NOT an
+    // empty-string text update.
+    #[test]
+    fn clear_field_uses_distinct_mutation() {
+        let root = tmp_root("iter217_clear");
+        let store = update_doc_with_attr("", &root);
+
+        assert!(
+            store.client.field_updates.borrow().is_empty(),
+            "no update mutation on clear"
+        );
+        let clears = store.client.field_clears.borrow();
+        assert_eq!(clears.len(), 1, "one clear mutation");
+        assert_eq!(
+            clears[0],
+            (
+                "PVT_board1".to_string(),
+                "PVTI_item1".to_string(),
+                "F_status".to_string()
+            )
+        );
+    }
+
+    // AC7: number/date/text writes record exactly {number}/{date}/{text}.
+    #[test]
+    fn write_number_date_text_single_key() {
+        for (data_type, field, id, raw, expected) in [
+            (
+                "NUMBER",
+                "Est",
+                "F_num",
+                "5",
+                serde_json::json!({"number": 5.0}),
+            ),
+            (
+                "DATE",
+                "Due",
+                "F_date",
+                "2026-06-25",
+                serde_json::json!({"date": "2026-06-25"}),
+            ),
+            (
+                "TEXT",
+                "Notes",
+                "F_text",
+                "hello",
+                serde_json::json!({"text": "hello"}),
+            ),
+        ] {
+            let root = tmp_root(&format!("iter217_write_{}", data_type));
+            let snapshot = GhSchemaSnapshot {
+                project_fields: vec![ProjectFieldId {
+                    project_number: 1,
+                    field_name: field.into(),
+                    id: id.into(),
+                    data_type: data_type.into(),
+                }],
+                ..Default::default()
+            };
+            snapshot.save(&root).unwrap();
+
+            let client = MockGhClient::new()
+                .with_graphql_responses(vec![
+                    org_board_response("PVT_board1"),
+                    item_id_response("PVT_board1", "PVTI_item1"),
+                ])
+                .with_view_issue(GhIssue {
+                    number: 7,
+                    id: "I_issue7".into(),
+                    url: String::new(),
+                    title: "Story".into(),
+                    body: make_issue_body("agent", "2026-06-25", None, ""),
+                    labels: vec![GhLabel {
+                        name: "lazyspec:story".into(),
+                        color: String::new(),
+                    }],
+                    state: "OPEN".into(),
+                    updated_at: "2026-06-25T00:00:00Z".into(),
+                    created_at: "2026-06-25T00:00:00Z".into(),
+                    author: None,
+                    issue_type: None,
+                });
+            let mut store = issues_store_with(&root, client);
+            store
+                .issue_map
+                .insert("STORY-7", 7, "2026-06-25T00:00:00Z", "I_issue7");
+            store.issue_map.save(&root).unwrap();
+            let td = TypeDef {
+                name: "story".into(),
+                ..test_type_def(StoreBackend::GithubIssues)
+            };
+            let key = format!("PROJECT-1.{}", field);
+            store.update(&td, "STORY-7", &[(&key, raw)]).unwrap();
+
+            let updates = store.client.field_updates.borrow();
+            assert_eq!(updates.len(), 1, "{}: one update", data_type);
+            let json = serde_json::to_value(&updates[0].3).unwrap();
+            assert_eq!(json, expected, "{} value object", data_type);
+        }
+    }
+
+    // AC6 (write path): an unknown option rejects offline from the snapshot
+    // before ANY mutation or even a project/item id lookup is attempted.
+    #[test]
+    fn write_unknown_option_rejects_zero_mutations() {
+        let root = tmp_root("iter217_unknown_option");
+        write_status_snapshot(&root);
+        let client = MockGhClient::new()
+            .with_graphql_responses(vec![])
+            .with_view_issue(GhIssue {
+                number: 7,
+                id: "I_issue7".into(),
+                url: String::new(),
+                title: "Story".into(),
+                body: make_issue_body("agent", "2026-06-25", None, ""),
+                labels: vec![GhLabel {
+                    name: "lazyspec:story".into(),
+                    color: String::new(),
+                }],
+                state: "OPEN".into(),
+                updated_at: "2026-06-25T00:00:00Z".into(),
+                created_at: "2026-06-25T00:00:00Z".into(),
+                author: None,
+                issue_type: None,
+            });
+        let mut store = issues_store_with(&root, client);
+        store
+            .issue_map
+            .insert("STORY-7", 7, "2026-06-25T00:00:00Z", "I_issue7");
+        store.issue_map.save(&root).unwrap();
+        let td = TypeDef {
+            name: "story".into(),
+            ..test_type_def(StoreBackend::GithubIssues)
+        };
+
+        let err = store
+            .update(&td, "STORY-7", &[("PROJECT-1.Status", "Frozen")])
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown option"), "got: {}", err);
+        assert!(store.client.field_updates.borrow().is_empty());
+        assert!(store.client.field_clears.borrow().is_empty());
+        // Only the check_lock issue_view read happened; no project/item graphql.
+        assert!(
+            store.client.graphql_calls.borrow().is_empty(),
+            "no project/item graphql lookups before offline reject"
+        );
+    }
+
+    #[test]
+    fn parse_project_field_key_matches_and_rejects() {
+        assert_eq!(
+            parse_project_field_key("PROJECT-1.Status"),
+            Some((1, "Status"))
+        );
+        assert_eq!(
+            parse_project_field_key("PROJECT-12.Due Date"),
+            Some((12, "Due Date"))
+        );
+        assert_eq!(parse_project_field_key("owner"), None);
+        assert_eq!(parse_project_field_key("PROJECT-1"), None);
+        assert_eq!(parse_project_field_key("PROJECT-x.Status"), None);
     }
 }

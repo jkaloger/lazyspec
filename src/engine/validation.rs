@@ -98,6 +98,11 @@ pub enum ValidationIssue {
         path: PathBuf,
         attr: String,
     },
+    UnknownProjectFieldOption {
+        path: PathBuf,
+        attr: String,
+        allowed: Vec<String>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -308,6 +313,19 @@ impl std::fmt::Display for ValidationIssue {
             }
             ValidationIssue::UndeclaredAttribute { path, attr } => {
                 write!(f, "undeclared attribute \"{}\": {}", attr, path.display())
+            }
+            ValidationIssue::UnknownProjectFieldOption {
+                path,
+                attr,
+                allowed,
+            } => {
+                write!(
+                    f,
+                    "project field \"{}\" in {} is not one of the board's options: {}",
+                    attr,
+                    path.display(),
+                    allowed.join(", ")
+                )
             }
         }
     }
@@ -1033,7 +1051,20 @@ impl Checker for AttributeSchemaChecker {
                 }
             }
 
-            for key in meta.attributes.keys() {
+            for (key, value) in &meta.attributes {
+                // Dynamic per-board project fields are namespaced
+                // `PROJECT-n.<field>`; they bypass the declared-AttrDef surface
+                // and are validated against the gh-schema snapshot instead.
+                if let Some((number, field)) =
+                    crate::engine::store_dispatch::parse_project_field_key(key)
+                {
+                    if let Some(issue) =
+                        check_project_field(&store.root, path, key, number, field, value)
+                    {
+                        issues.push((Severity::Error, issue));
+                    }
+                    continue;
+                }
                 if !type_def.attributes.iter().any(|d| &d.name == key) {
                     issues.push((
                         Severity::Warning,
@@ -1047,6 +1078,89 @@ impl Checker for AttributeSchemaChecker {
         }
 
         issues
+    }
+}
+
+/// Offline snapshot-backed check for a single `PROJECT-n.<field>` attribute.
+/// SingleSelect/Iteration values must be in the board's option set; Number/Date
+/// fields are shape-checked against the value's kind; Text/unknown always pass.
+/// An unresolvable field or board (snapshot absent) yields no issue: the live
+/// mutation is the backstop.
+fn check_project_field(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    attr: &str,
+    project_number: u64,
+    field_name: &str,
+    value: &AttrValue,
+) -> Option<ValidationIssue> {
+    let snapshot = crate::engine::gh_schema::GhSchemaSnapshot::load(root);
+    let field_id = snapshot.field_id(project_number, field_name)?;
+    let data_type = snapshot
+        .project_fields
+        .iter()
+        .find(|f| f.project_number == project_number && f.field_name == field_name)
+        .map(|f| f.data_type.as_str())?;
+
+    let as_str = || match value {
+        AttrValue::Str(s) => Some(s.clone()),
+        _ => None,
+    };
+
+    match data_type {
+        "SINGLE_SELECT" => {
+            let v = as_str()?;
+            if snapshot.option_id(field_id, &v).is_some() {
+                None
+            } else {
+                let allowed = snapshot
+                    .single_select_options
+                    .iter()
+                    .filter(|o| o.field_id == field_id)
+                    .map(|o| o.name.clone())
+                    .collect();
+                Some(ValidationIssue::UnknownProjectFieldOption {
+                    path: path.to_path_buf(),
+                    attr: attr.to_string(),
+                    allowed,
+                })
+            }
+        }
+        "ITERATION" => {
+            let v = as_str()?;
+            if snapshot.iteration_id(field_id, &v).is_some() {
+                None
+            } else {
+                let allowed = snapshot
+                    .iterations
+                    .iter()
+                    .filter(|i| i.field_id == field_id)
+                    .map(|i| i.title.clone())
+                    .collect();
+                Some(ValidationIssue::UnknownProjectFieldOption {
+                    path: path.to_path_buf(),
+                    attr: attr.to_string(),
+                    allowed,
+                })
+            }
+        }
+        "NUMBER" => match value {
+            AttrValue::Int(_) | AttrValue::Float(_) => None,
+            _ => Some(ValidationIssue::UnknownProjectFieldOption {
+                path: path.to_path_buf(),
+                attr: attr.to_string(),
+                allowed: vec!["<number>".to_string()],
+            }),
+        },
+        "DATE" => match value {
+            AttrValue::Date(_) => None,
+            _ => Some(ValidationIssue::UnknownProjectFieldOption {
+                path: path.to_path_buf(),
+                attr: attr.to_string(),
+                allowed: vec!["<date>".to_string()],
+            }),
+        },
+        _ => None,
     }
 }
 
@@ -1211,6 +1325,105 @@ mod attr_schema_tests {
             .errors
             .iter()
             .any(|e| matches!(e, ValidationIssue::UndeclaredAttribute { .. })));
+    }
+
+    // --- ITERATION-217: PROJECT-n.<field> snapshot-backed validation (AC6) ---
+
+    fn store_with_root(doc: DocMeta, root: PathBuf) -> super::super::store::Store {
+        let mut docs = HashMap::new();
+        docs.insert(doc.path.clone(), doc);
+        super::super::store::Store {
+            root,
+            docs,
+            forward_links: HashMap::new(),
+            reverse_links: HashMap::new(),
+            children: HashMap::new(),
+            parent_of: HashMap::new(),
+            parse_errors: Vec::new(),
+            chain_relationships: vec!["implements".to_string()],
+        }
+    }
+
+    fn write_status_snapshot(root: &std::path::Path) {
+        use crate::engine::gh_schema::{GhSchemaSnapshot, OptionId, ProjectFieldId};
+        let snapshot = GhSchemaSnapshot {
+            project_fields: vec![ProjectFieldId {
+                project_number: 1,
+                field_name: "Status".into(),
+                id: "F_status".into(),
+                data_type: "SINGLE_SELECT".into(),
+            }],
+            single_select_options: vec![OptionId {
+                field_id: "F_status".into(),
+                name: "In Progress".into(),
+                id: "opt_inprog".into(),
+            }],
+            ..Default::default()
+        };
+        snapshot.save(root).unwrap();
+    }
+
+    fn tmp_root(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lazyspec-validation-iter217-{}-{}",
+            std::process::id(),
+            name
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // AC6: an option not in the snapshot is an Error (UnknownProjectFieldOption),
+    // never just an undeclared-key warning.
+    #[test]
+    fn unknown_project_option_is_error() {
+        let root = tmp_root("unknown_option");
+        write_status_snapshot(&root);
+        let config = config_with_story_attrs(vec![]);
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "PROJECT-1.Status".to_string(),
+            AttrValue::Str("Frozen".to_string()),
+        );
+        let result = validate_full(&store_with_root(story_doc(attrs), root), &config);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationIssue::UnknownProjectFieldOption { .. })),
+            "expected UnknownProjectFieldOption error, got: {:?}",
+            result.errors
+        );
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ValidationIssue::UndeclaredAttribute { .. })),
+            "PROJECT-n.<field> must bypass the undeclared-key warning"
+        );
+    }
+
+    // AC6 (positive): a known option produces no error and no undeclared warning.
+    #[test]
+    fn known_project_option_is_clean() {
+        let root = tmp_root("known_option");
+        write_status_snapshot(&root);
+        let config = config_with_story_attrs(vec![]);
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "PROJECT-1.Status".to_string(),
+            AttrValue::Str("In Progress".to_string()),
+        );
+        let result = validate_full(&store_with_root(story_doc(attrs), root), &config);
+        assert!(!result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationIssue::UnknownProjectFieldOption { .. })));
+        assert!(!result
+            .warnings
+            .iter()
+            .any(|w| matches!(w, ValidationIssue::UndeclaredAttribute { .. })));
     }
 
     // A correctly-typed declared value produces neither error nor warning.

@@ -116,6 +116,20 @@ pub fn run(
                 issue_map = gh_store.issue_map;
             }
 
+            // Inject each board's per-item project field values as namespaced
+            // `PROJECT-n.<field>` attributes on member docs. Best-effort: a
+            // GraphQL failure warns and the cached doc keeps its other fields.
+            let gh_store = GithubIssuesStore {
+                client: gh,
+                root: root.to_path_buf(),
+                repo: repo.clone(),
+                config: config.clone(),
+                issue_map,
+                issue_cache: IssueCache::new(root),
+            };
+            inject_project_fields_into_cache(&gh_store, type_def);
+            issue_map = gh_store.issue_map;
+
             summaries.push(TypeSummary {
                 type_name: type_name.to_string(),
                 fetched: result.fetched,
@@ -176,6 +190,47 @@ pub fn run(
     }
 
     Ok(())
+}
+
+/// For every cached doc of `type_def`, read its board memberships and inject the
+/// per-item project field values as `PROJECT-n.<field>` attributes, rewriting the
+/// cache file. Best-effort: a per-doc failure warns and the rest still process.
+fn inject_project_fields_into_cache<G: GhIssueReader + GhIssueWriter + GhGraphql>(
+    gh_store: &GithubIssuesStore<G>,
+    type_def: &TypeDef,
+) {
+    let cache_dir = gh_store.root.join(".lazyspec/cache").join(&type_def.name);
+    let entries = match std::fs::read_dir(&cache_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let (Ok(mut meta), Ok(body)) = (
+            crate::engine::document::DocMeta::parse(&content),
+            crate::engine::document::DocMeta::extract_body(&content),
+        ) else {
+            continue;
+        };
+        if let Err(e) = gh_store.inject_project_fields(&mut meta) {
+            eprintln!(
+                "warning: could not read project fields for {}: {}",
+                meta.id, e
+            );
+            continue;
+        }
+        if let Err(e) =
+            crate::engine::store_dispatch::write_cache_file(&gh_store.root, type_def, &meta, &body)
+        {
+            eprintln!("warning: could not rewrite cache for {}: {}", meta.id, e);
+        }
+    }
 }
 
 /// Reconcile every subdir parent of `type_def` to its native sub-issue set.

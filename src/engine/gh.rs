@@ -1,8 +1,11 @@
 use anyhow::{bail, Result};
-use serde::Deserialize;
+use chrono::NaiveDate;
+use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::process::Command;
+
+use crate::engine::document::AttrValue;
 
 // --- Data types ---
 
@@ -307,8 +310,129 @@ pub enum GqlVar {
     Bool(bool),
 }
 
+/// The typed kind of a Projects v2 board field. Single-select and iteration are
+/// option-backed (validated against the schema snapshot); number/date/text are
+/// shape-checked only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GhFieldKind {
+    SingleSelect,
+    Iteration,
+    Number,
+    Date,
+    Text,
+}
+
+/// The read-side value of a project field item, in its native representation.
+/// `SingleSelect`/`Iteration` carry the human-facing name/title (not the option
+/// id); the id is resolved separately from the schema snapshot on write.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GhFieldValueRepr {
+    /// Single-select option *name*.
+    OptionName(String),
+    /// Iteration *title*.
+    IterationTitle(String),
+    Number(f64),
+    Date(NaiveDate),
+    Text(String),
+}
+
+/// One field value read off a project item for a given board, ready to be
+/// namespaced as `PROJECT-{project_number}.{field_name}`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectFieldValue {
+    pub project_number: u64,
+    pub field_name: String,
+    pub kind: GhFieldKind,
+    pub value: GhFieldValueRepr,
+}
+
+/// Map a read field value to the typed [`AttrValue`] carried in `DocMeta`.
+/// Single-select -> option name string, iteration -> title string, number ->
+/// `Int` when integral else `Float`, date -> `Date`, text -> string. Always a
+/// coerced value, never `AttrValue::Raw`.
+pub fn gh_field_to_attr(value: &GhFieldValueRepr) -> AttrValue {
+    match value {
+        GhFieldValueRepr::OptionName(s) => AttrValue::Str(s.clone()),
+        GhFieldValueRepr::IterationTitle(s) => AttrValue::Str(s.clone()),
+        GhFieldValueRepr::Text(s) => AttrValue::Str(s.clone()),
+        GhFieldValueRepr::Date(d) => AttrValue::Date(*d),
+        GhFieldValueRepr::Number(n) => {
+            if n.fract() == 0.0 {
+                AttrValue::Int(*n as i64)
+            } else {
+                AttrValue::Float(*n)
+            }
+        }
+    }
+}
+
+/// The write-side `value` payload for `updateProjectV2ItemFieldValue`. Each
+/// variant serializes to a `value` object with EXACTLY ONE key (GitHub rejects
+/// null sibling keys). Carries resolved ids, never names.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GhFieldValueInput {
+    SingleSelect(String),
+    Iteration(String),
+    Number(f64),
+    Date(NaiveDate),
+    Text(String),
+}
+
+impl Serialize for GhFieldValueInput {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(1))?;
+        match self {
+            GhFieldValueInput::SingleSelect(id) => {
+                map.serialize_entry("singleSelectOptionId", id)?;
+            }
+            GhFieldValueInput::Iteration(id) => {
+                map.serialize_entry("iterationId", id)?;
+            }
+            GhFieldValueInput::Number(n) => {
+                map.serialize_entry("number", n)?;
+            }
+            GhFieldValueInput::Date(d) => {
+                map.serialize_entry("date", &d.format("%Y-%m-%d").to_string())?;
+            }
+            GhFieldValueInput::Text(s) => {
+                map.serialize_entry("text", s)?;
+            }
+        }
+        map.end()
+    }
+}
+
 pub trait GhGraphql {
     fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value>;
+
+    /// Read every project field value set on the item for issue node
+    /// `content_node_id`, across the boards the issue belongs to. Returns one
+    /// [`ProjectFieldValue`] per set field (unset fields are omitted).
+    fn project_item_fields(
+        &self,
+        repo: &str,
+        content_node_id: &str,
+    ) -> Result<Vec<ProjectFieldValue>>;
+
+    /// Set one project field value on an item (`updateProjectV2ItemFieldValue`).
+    /// All ids must already be resolved (project node id, item id, field id, and
+    /// the single-select option / iteration id inside `value`).
+    fn update_project_v2_item_field_value(
+        &self,
+        project_id: &str,
+        item_id: &str,
+        field_id: &str,
+        value: &GhFieldValueInput,
+    ) -> Result<()>;
+
+    /// Clear one project field value on an item (`clearProjectV2ItemFieldValue`).
+    /// A distinct mutation from the setter: GitHub rejects an empty-string text
+    /// write as a "clear".
+    fn clear_project_field(&self, project_id: &str, item_id: &str, field_id: &str) -> Result<()>;
 }
 
 // Forward the issue/graphql seams through shared references so callers holding a
@@ -378,6 +502,106 @@ impl<T: GhGraphql + ?Sized> GhGraphql for &T {
     fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
         (**self).graphql(query, vars)
     }
+
+    fn project_item_fields(
+        &self,
+        repo: &str,
+        content_node_id: &str,
+    ) -> Result<Vec<ProjectFieldValue>> {
+        (**self).project_item_fields(repo, content_node_id)
+    }
+
+    fn update_project_v2_item_field_value(
+        &self,
+        project_id: &str,
+        item_id: &str,
+        field_id: &str,
+        value: &GhFieldValueInput,
+    ) -> Result<()> {
+        (**self).update_project_v2_item_field_value(project_id, item_id, field_id, value)
+    }
+
+    fn clear_project_field(&self, project_id: &str, item_id: &str, field_id: &str) -> Result<()> {
+        (**self).clear_project_field(project_id, item_id, field_id)
+    }
+}
+
+const PROJECT_ITEM_FIELDS_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on Issue { projectItems(first: 50) { nodes { project { number } fieldValues(first: 50) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldIterationValue { title field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } } } } } } } }";
+
+const UPDATE_PROJECT_FIELD_MUTATION: &str = "mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) { updateProjectV2ItemFieldValue(input: {projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: __VALUE__}) { projectV2Item { id } } }";
+
+const CLEAR_PROJECT_FIELD_MUTATION: &str = "mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) { clearProjectV2ItemFieldValue(input: {projectId: $projectId, itemId: $itemId, fieldId: $fieldId}) { projectV2Item { id } } }";
+
+/// Parse the `projectItems.nodes` of a [`PROJECT_ITEM_FIELDS_QUERY`] response
+/// into one [`ProjectFieldValue`] per set field value. Unset fields and field
+/// values with no resolvable name/typename are skipped.
+pub fn parse_project_item_fields(resp: &serde_json::Value) -> Vec<ProjectFieldValue> {
+    let mut out = Vec::new();
+    let Some(items) = resp
+        .pointer("/data/node/projectItems/nodes")
+        .and_then(|v| v.as_array())
+    else {
+        return out;
+    };
+
+    for item in items {
+        let Some(number) = item.pointer("/project/number").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        let Some(values) = item
+            .pointer("/fieldValues/nodes")
+            .and_then(|v| v.as_array())
+        else {
+            continue;
+        };
+        for fv in values {
+            let Some(field_name) = fv.pointer("/field/name").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let typename = fv.get("__typename").and_then(|v| v.as_str()).unwrap_or("");
+            let parsed = match typename {
+                "ProjectV2ItemFieldSingleSelectValue" => {
+                    fv.get("name").and_then(|v| v.as_str()).map(|s| {
+                        (
+                            GhFieldKind::SingleSelect,
+                            GhFieldValueRepr::OptionName(s.to_string()),
+                        )
+                    })
+                }
+                "ProjectV2ItemFieldIterationValue" => {
+                    fv.get("title").and_then(|v| v.as_str()).map(|s| {
+                        (
+                            GhFieldKind::Iteration,
+                            GhFieldValueRepr::IterationTitle(s.to_string()),
+                        )
+                    })
+                }
+                "ProjectV2ItemFieldNumberValue" => fv
+                    .get("number")
+                    .and_then(|v| v.as_f64())
+                    .map(|n| (GhFieldKind::Number, GhFieldValueRepr::Number(n))),
+                "ProjectV2ItemFieldDateValue" => fv
+                    .get("date")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+                    .map(|d| (GhFieldKind::Date, GhFieldValueRepr::Date(d))),
+                "ProjectV2ItemFieldTextValue" => fv
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .map(|s| (GhFieldKind::Text, GhFieldValueRepr::Text(s.to_string()))),
+                _ => None,
+            };
+            if let Some((kind, value)) = parsed {
+                out.push(ProjectFieldValue {
+                    project_number: number,
+                    field_name: field_name.to_string(),
+                    kind,
+                    value,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// `-f key=value` for GraphQL String vars, `-F key=value` for typed (Int/Boolean).
@@ -766,6 +990,52 @@ impl GhGraphql for GhCli {
         serde_json::from_str(&stdout)
             .map_err(|e| anyhow::anyhow!("failed to parse graphql response: {}", e))
     }
+
+    fn project_item_fields(
+        &self,
+        _repo: &str,
+        content_node_id: &str,
+    ) -> Result<Vec<ProjectFieldValue>> {
+        let resp = self.graphql(
+            PROJECT_ITEM_FIELDS_QUERY,
+            &[("id", GqlVar::Str(content_node_id.to_string()))],
+        )?;
+        Ok(parse_project_item_fields(&resp))
+    }
+
+    fn update_project_v2_item_field_value(
+        &self,
+        project_id: &str,
+        item_id: &str,
+        field_id: &str,
+        value: &GhFieldValueInput,
+    ) -> Result<()> {
+        // `gh` cannot pass a JSON-object GraphQL variable via -f/-F, so the
+        // single-key value object is inlined into the mutation literally.
+        let value_json = serde_json::to_string(value)?;
+        let query = UPDATE_PROJECT_FIELD_MUTATION.replace("__VALUE__", &value_json);
+        self.graphql(
+            &query,
+            &[
+                ("projectId", GqlVar::Str(project_id.to_string())),
+                ("itemId", GqlVar::Str(item_id.to_string())),
+                ("fieldId", GqlVar::Str(field_id.to_string())),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn clear_project_field(&self, project_id: &str, item_id: &str, field_id: &str) -> Result<()> {
+        self.graphql(
+            CLEAR_PROJECT_FIELD_MUTATION,
+            &[
+                ("projectId", GqlVar::Str(project_id.to_string())),
+                ("itemId", GqlVar::Str(item_id.to_string())),
+                ("fieldId", GqlVar::Str(field_id.to_string())),
+            ],
+        )?;
+        Ok(())
+    }
 }
 
 fn classify_gh_error(stderr: &str) -> GhError {
@@ -870,6 +1140,10 @@ pub mod test_support {
         pub graphql_calls: RefCell<Vec<(String, Vec<(String, GqlVar)>)>>,
         pub view_comments: RefCell<Vec<GhComment>>,
         pub comments_call_count: Cell<usize>,
+        pub project_field_values: RefCell<Vec<ProjectFieldValue>>,
+        pub project_field_calls: RefCell<Vec<String>>,
+        pub field_updates: RefCell<Vec<(String, String, String, GhFieldValueInput)>>,
+        pub field_clears: RefCell<Vec<(String, String, String)>>,
     }
 
     impl Default for MockGhClient {
@@ -901,7 +1175,16 @@ pub mod test_support {
                 graphql_calls: RefCell::new(vec![]),
                 view_comments: RefCell::new(vec![]),
                 comments_call_count: Cell::new(0),
+                project_field_values: RefCell::new(vec![]),
+                project_field_calls: RefCell::new(vec![]),
+                field_updates: RefCell::new(vec![]),
+                field_clears: RefCell::new(vec![]),
             }
+        }
+
+        pub fn with_project_field_values(mut self, values: Vec<ProjectFieldValue>) -> Self {
+            self.project_field_values = RefCell::new(values);
+            self
         }
 
         pub fn with_comments(mut self, comments: Vec<GhComment>) -> Self {
@@ -1255,6 +1538,33 @@ pub mod test_support {
         fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
             (**self).graphql(query, vars)
         }
+
+        fn project_item_fields(
+            &self,
+            repo: &str,
+            content_node_id: &str,
+        ) -> Result<Vec<ProjectFieldValue>> {
+            (**self).project_item_fields(repo, content_node_id)
+        }
+
+        fn update_project_v2_item_field_value(
+            &self,
+            project_id: &str,
+            item_id: &str,
+            field_id: &str,
+            value: &GhFieldValueInput,
+        ) -> Result<()> {
+            (**self).update_project_v2_item_field_value(project_id, item_id, field_id, value)
+        }
+
+        fn clear_project_field(
+            &self,
+            project_id: &str,
+            item_id: &str,
+            field_id: &str,
+        ) -> Result<()> {
+            (**self).clear_project_field(project_id, item_id, field_id)
+        }
     }
 
     impl GhGraphql for MockGhClient {
@@ -1272,6 +1582,47 @@ pub mod test_support {
                 bail!("no canned graphql response available");
             }
             Ok(responses.remove(0))
+        }
+
+        fn project_item_fields(
+            &self,
+            _repo: &str,
+            content_node_id: &str,
+        ) -> Result<Vec<ProjectFieldValue>> {
+            self.project_field_calls
+                .borrow_mut()
+                .push(content_node_id.to_string());
+            Ok(self.project_field_values.borrow().clone())
+        }
+
+        fn update_project_v2_item_field_value(
+            &self,
+            project_id: &str,
+            item_id: &str,
+            field_id: &str,
+            value: &GhFieldValueInput,
+        ) -> Result<()> {
+            self.field_updates.borrow_mut().push((
+                project_id.to_string(),
+                item_id.to_string(),
+                field_id.to_string(),
+                value.clone(),
+            ));
+            Ok(())
+        }
+
+        fn clear_project_field(
+            &self,
+            project_id: &str,
+            item_id: &str,
+            field_id: &str,
+        ) -> Result<()> {
+            self.field_clears.borrow_mut().push((
+                project_id.to_string(),
+                item_id.to_string(),
+                field_id.to_string(),
+            ));
+            Ok(())
         }
     }
 }
@@ -1798,6 +2149,151 @@ mod tests {
         assert_eq!(*client.last_set_milestone.borrow(), Some((9, Some(2))));
         client.issue_set_milestone("o/r", 9, None).unwrap();
         assert_eq!(*client.last_set_milestone.borrow(), Some((9, None)));
+    }
+
+    // --- Project field type mapping (AC1) ---
+
+    #[test]
+    fn gh_field_to_attr_single_select_is_str() {
+        let v = GhFieldValueRepr::OptionName("In Progress".to_string());
+        assert_eq!(
+            gh_field_to_attr(&v),
+            AttrValue::Str("In Progress".to_string())
+        );
+    }
+
+    #[test]
+    fn gh_field_to_attr_iteration_is_str_title() {
+        let v = GhFieldValueRepr::IterationTitle("Sprint 4".to_string());
+        assert_eq!(gh_field_to_attr(&v), AttrValue::Str("Sprint 4".to_string()));
+    }
+
+    #[test]
+    fn gh_field_to_attr_text_is_str() {
+        let v = GhFieldValueRepr::Text("freeform".to_string());
+        assert_eq!(gh_field_to_attr(&v), AttrValue::Str("freeform".to_string()));
+    }
+
+    #[test]
+    fn gh_field_to_attr_date_is_date() {
+        let d = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        let v = GhFieldValueRepr::Date(d);
+        assert_eq!(gh_field_to_attr(&v), AttrValue::Date(d));
+    }
+
+    #[test]
+    fn gh_field_to_attr_integral_number_is_int() {
+        let v = GhFieldValueRepr::Number(3.0);
+        assert_eq!(gh_field_to_attr(&v), AttrValue::Int(3));
+    }
+
+    #[test]
+    fn gh_field_to_attr_fractional_number_is_float() {
+        let v = GhFieldValueRepr::Number(2.5);
+        assert_eq!(gh_field_to_attr(&v), AttrValue::Float(2.5));
+    }
+
+    // --- GhFieldValueInput single-key serialization (AC3, AC4, AC7) ---
+
+    #[test]
+    fn field_value_input_single_select_emits_only_option_id_key() {
+        let v = GhFieldValueInput::SingleSelect("opt_abc".to_string());
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json, serde_json::json!({"singleSelectOptionId": "opt_abc"}));
+        assert_eq!(json.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn field_value_input_iteration_emits_only_iteration_id_key() {
+        let v = GhFieldValueInput::Iteration("iter_1".to_string());
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json, serde_json::json!({"iterationId": "iter_1"}));
+        assert_eq!(json.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn field_value_input_number_emits_only_number_key() {
+        let v = GhFieldValueInput::Number(7.0);
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json, serde_json::json!({"number": 7.0}));
+        assert_eq!(json.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn field_value_input_date_emits_only_date_key() {
+        let v = GhFieldValueInput::Date(NaiveDate::from_ymd_opt(2026, 6, 25).unwrap());
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json, serde_json::json!({"date": "2026-06-25"}));
+        assert_eq!(json.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn field_value_input_text_emits_only_text_key() {
+        let v = GhFieldValueInput::Text("hi".to_string());
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json, serde_json::json!({"text": "hi"}));
+        assert_eq!(json.as_object().unwrap().len(), 1);
+    }
+
+    // --- project item fields parse ---
+
+    #[test]
+    fn parse_project_item_fields_all_kinds() {
+        let resp = serde_json::json!({
+            "data": {"node": {"projectItems": {"nodes": [
+                {"project": {"number": 1}, "fieldValues": {"nodes": [
+                    {"__typename": "ProjectV2ItemFieldSingleSelectValue", "name": "In Progress", "field": {"name": "Status"}},
+                    {"__typename": "ProjectV2ItemFieldNumberValue", "number": 5.0, "field": {"name": "Estimate"}},
+                    {"__typename": "ProjectV2ItemFieldDateValue", "date": "2026-06-25", "field": {"name": "Due"}},
+                    {"__typename": "ProjectV2ItemFieldTextValue", "text": "note", "field": {"name": "Notes"}},
+                    {"__typename": "ProjectV2ItemFieldIterationValue", "title": "Sprint 1", "field": {"name": "Sprint"}},
+                    {"__typename": "ProjectV2ItemFieldLabelValue", "field": {"name": "Ignored"}}
+                ]}}
+            ]}}}
+        });
+        let vals = parse_project_item_fields(&resp);
+        assert_eq!(vals.len(), 5, "label value should be skipped: {:?}", vals);
+        let status = vals.iter().find(|v| v.field_name == "Status").unwrap();
+        assert_eq!(status.project_number, 1);
+        assert_eq!(status.kind, GhFieldKind::SingleSelect);
+        assert_eq!(
+            status.value,
+            GhFieldValueRepr::OptionName("In Progress".to_string())
+        );
+    }
+
+    #[test]
+    fn mock_project_item_fields_returns_canned_and_records_node() {
+        let client = MockGhClient::new().with_project_field_values(vec![ProjectFieldValue {
+            project_number: 1,
+            field_name: "Status".to_string(),
+            kind: GhFieldKind::SingleSelect,
+            value: GhFieldValueRepr::OptionName("Todo".to_string()),
+        }]);
+        let got = client.project_item_fields("o/r", "I_node1").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            *client.project_field_calls.borrow(),
+            vec!["I_node1".to_string()]
+        );
+    }
+
+    #[test]
+    fn mock_update_and_clear_record_calls() {
+        let client = MockGhClient::new();
+        client
+            .update_project_v2_item_field_value(
+                "PVT_1",
+                "PVTI_1",
+                "F_1",
+                &GhFieldValueInput::SingleSelect("opt_1".to_string()),
+            )
+            .unwrap();
+        client
+            .clear_project_field("PVT_1", "PVTI_1", "F_1")
+            .unwrap();
+        assert_eq!(client.field_updates.borrow().len(), 1);
+        assert_eq!(client.field_clears.borrow().len(), 1);
     }
 
     #[test]
