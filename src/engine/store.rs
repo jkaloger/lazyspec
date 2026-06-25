@@ -60,6 +60,7 @@ impl Store {
             let full_path = match type_def.store {
                 StoreBackend::GithubIssues
                 | StoreBackend::GithubMilestones
+                | StoreBackend::GithubProjects
                 | StoreBackend::GitRef => root.join(".lazyspec/cache").join(&type_def.name),
                 _ => root.join(&type_def.dir),
             };

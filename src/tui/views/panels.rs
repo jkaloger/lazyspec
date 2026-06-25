@@ -1845,6 +1845,7 @@ const STORE_VARIANTS: &[&str] = &[
     "filesystem",
     "github-issues",
     "github-milestones",
+    "github-projects",
     "git-ref",
 ];
 const RULE_SHAPE_VARIANTS: &[&str] = &["parent-child", "relation-existence"];

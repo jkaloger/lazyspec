@@ -915,6 +915,152 @@ impl<M: gh::GhMilestoneApi> DocumentStore for GithubMilestonesStore<M> {
     }
 }
 
+const PROJECT_NODE_ID_ORG_QUERY: &str = "query($owner: String!, $number: Int!) { organization(login: $owner) { projectV2(number: $number) { id } } }";
+
+const PROJECT_NODE_ID_USER_QUERY: &str = "query($owner: String!, $number: Int!) { user(login: $owner) { projectV2(number: $number) { id } } }";
+
+/// Parse the `owner` half of a `owner/repo` string. The github-projects backend
+/// resolves boards under this owner.
+fn owner_of(repo: &str) -> Result<&str> {
+    repo.split_once('/')
+        .map(|(o, _)| o)
+        .filter(|o| !o.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("repo '{}' must be in owner/name form", repo))
+}
+
+/// Extract the numeric board number from a board doc id (`PROJECT-7` -> 7, or a
+/// bare `7`). Project boards are addressed by their GitHub Projects v2 number.
+pub fn board_number(doc_id: &str) -> Result<u64> {
+    let suffix = doc_id.rsplit('-').next().unwrap_or(doc_id);
+    suffix
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("'{}' does not name a Projects v2 board number", doc_id))
+}
+
+/// A project-board document store backed by GitHub Projects v2 (GraphQL).
+/// READ/ASSOCIATE only: boards are authored on GitHub, never created or deleted
+/// from lazyspec (RFC-050 non-goal). `create`/`delete` bail; `update`/
+/// `set_provenance` resolve the board node id without mutating the board. The
+/// owner type (org vs user) is auto-detected by trying the organization root
+/// first, then falling back to the user root.
+pub struct GithubProjectsStore<G: GhGraphql> {
+    pub client: G,
+    pub root: PathBuf,
+    pub repo: String,
+    pub config: Config,
+    pub issue_map: IssueMap,
+}
+
+impl<G: GhGraphql> GithubProjectsStore<G> {
+    /// Resolve a Projects v2 board number to its GraphQL node id. Tries the
+    /// organization root first, then the user root. A board number that exists
+    /// under neither (both `projectV2` null) is a not-found error. NEVER issues a
+    /// create mutation.
+    pub fn resolve_board(&self, owner: &str, number: u64) -> Result<String> {
+        let org_resp = self.client.graphql(
+            PROJECT_NODE_ID_ORG_QUERY,
+            &[
+                ("owner", GqlVar::Str(owner.to_string())),
+                ("number", GqlVar::Int(number as i64)),
+            ],
+        )?;
+        if let Some(id) = org_resp
+            .pointer("/data/organization/projectV2/id")
+            .and_then(|v| v.as_str())
+        {
+            return Ok(id.to_string());
+        }
+
+        let user_resp = self.client.graphql(
+            PROJECT_NODE_ID_USER_QUERY,
+            &[
+                ("owner", GqlVar::Str(owner.to_string())),
+                ("number", GqlVar::Int(number as i64)),
+            ],
+        )?;
+        if let Some(id) = user_resp
+            .pointer("/data/user/projectV2/id")
+            .and_then(|v| v.as_str())
+        {
+            return Ok(id.to_string());
+        }
+
+        bail!(
+            "Projects v2 board #{} not found under owner '{}'",
+            number,
+            owner
+        )
+    }
+
+    /// Resolve a board doc id to its node id and materialize a cache file holding
+    /// it for offline lookup. Records the number+node id in the issue map.
+    fn bind_board(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<String> {
+        let owner = owner_of(&self.repo)?.to_string();
+        let number = board_number(doc_id)?;
+        let node_id = self.resolve_board(&owner, number)?;
+
+        self.issue_map.insert(doc_id, number, "", node_id.clone());
+        self.issue_map.save(&self.root)?;
+
+        let meta = DocMeta {
+            path: PathBuf::new(),
+            title: doc_id.to_string(),
+            doc_type: DocType::new(&type_def.name),
+            status: Status::new("draft"),
+            author: String::new(),
+            date: Local::now().date_naive(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            attributes: Default::default(),
+            id: doc_id.to_string(),
+        };
+        write_cache_file(&self.root, type_def, &meta, &node_id)?;
+
+        Ok(node_id)
+    }
+}
+
+impl<G: GhGraphql> DocumentStore for GithubProjectsStore<G> {
+    fn create(
+        &mut self,
+        _type_def: &TypeDef,
+        _title: &str,
+        _author: &str,
+        _body: &str,
+    ) -> Result<CreatedDoc> {
+        bail!("github-projects backend does not author boards; bind to existing Projects v2 board number")
+    }
+
+    fn update(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        _updates: &[(&str, &str)],
+    ) -> Result<()> {
+        // Boards are not mutated from lazyspec; resolving the node id is the only
+        // side effect, so an out-of-date binding refreshes.
+        self.bind_board(type_def, doc_id)?;
+        Ok(())
+    }
+
+    fn delete(&mut self, _type_def: &TypeDef, _doc_id: &str) -> Result<()> {
+        bail!("github-projects backend does not delete boards; boards are managed on GitHub")
+    }
+
+    fn set_provenance(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        _provenance: &[String],
+    ) -> Result<()> {
+        self.bind_board(type_def, doc_id)?;
+        Ok(())
+    }
+}
+
 pub fn write_cache_file(
     root: &std::path::Path,
     type_def: &TypeDef,
@@ -971,17 +1117,20 @@ pub(crate) fn find_cache_file(cache_dir: &std::path::Path, doc_id: &str) -> Opti
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_for_type<
     'a,
     G: GhIssueReader + GhIssueWriter + GhGraphql,
     R: GitRefOps,
     M: gh::GhMilestoneApi,
+    P: GhGraphql,
 >(
     type_def: &TypeDef,
     fs_store: &'a mut FilesystemStore,
     gh_store: Option<&'a mut GithubIssuesStore<G>>,
     git_ref_store: Option<&'a mut GitRefStore<R>>,
     milestone_store: Option<&'a mut GithubMilestonesStore<M>>,
+    projects_store: Option<&'a mut GithubProjectsStore<P>>,
 ) -> Result<&'a mut dyn DocumentStore> {
     match type_def.store {
         StoreBackend::Filesystem => Ok(fs_store as &mut dyn DocumentStore),
@@ -997,6 +1146,14 @@ pub fn dispatch_for_type<
             Some(s) => Ok(s as &mut dyn DocumentStore),
             None => bail!(
                 "type '{}' uses {} store but no GitHub milestones backend is configured",
+                type_def.name,
+                type_def.store
+            ),
+        },
+        StoreBackend::GithubProjects => match projects_store {
+            Some(s) => Ok(s as &mut dyn DocumentStore),
+            None => bail!(
+                "type '{}' uses {} store but no GitHub projects backend is configured",
                 type_def.name,
                 type_def.store
             ),
@@ -1773,12 +1930,13 @@ mod tests {
         let mut ms_store = milestone_store(&root, MockGhMilestoneClient::new());
 
         let td = test_type_def(StoreBackend::GithubMilestones);
-        let store = dispatch_for_type::<MockGhClient, MockGitRefClient, _>(
+        let store = dispatch_for_type::<MockGhClient, MockGitRefClient, _, MockGhClient>(
             &td,
             &mut fs_store,
             None,
             None,
             Some(&mut ms_store),
+            None,
         )
         .unwrap();
         let result = store.create(&td, "dispatched", "author", "");
@@ -1793,13 +1951,12 @@ mod tests {
             config: Config::default(),
         };
         let td = test_type_def(StoreBackend::GithubMilestones);
-        let result = dispatch_for_type::<MockGhClient, MockGitRefClient, MockGhMilestoneClient>(
-            &td,
-            &mut fs_store,
-            None,
-            None,
-            None,
-        );
+        let result = dispatch_for_type::<
+            MockGhClient,
+            MockGitRefClient,
+            MockGhMilestoneClient,
+            MockGhClient,
+        >(&td, &mut fs_store, None, None, None, None);
         assert!(result.is_err());
         assert!(result
             .err()
@@ -1819,13 +1976,12 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::Filesystem);
-        let store = dispatch_for_type::<MockGhClient, MockGitRefClient, MockGhMilestoneClient>(
-            &td,
-            &mut fs_store,
-            None,
-            None,
-            None,
-        )
+        let store = dispatch_for_type::<
+            MockGhClient,
+            MockGitRefClient,
+            MockGhMilestoneClient,
+            MockGhClient,
+        >(&td, &mut fs_store, None, None, None, None)
         .unwrap();
 
         // Should succeed (routed to filesystem)
@@ -1853,10 +2009,11 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
-        let store = dispatch_for_type::<_, MockGitRefClient, MockGhMilestoneClient>(
+        let store = dispatch_for_type::<_, MockGitRefClient, MockGhMilestoneClient, MockGhClient>(
             &td,
             &mut fs_store,
             Some(&mut gh_store),
+            None,
             None,
             None,
         )
@@ -2071,13 +2228,12 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
-        let result = dispatch_for_type::<MockGhClient, MockGitRefClient, MockGhMilestoneClient>(
-            &td,
-            &mut fs_store,
-            None,
-            None,
-            None,
-        );
+        let result = dispatch_for_type::<
+            MockGhClient,
+            MockGitRefClient,
+            MockGhMilestoneClient,
+            MockGhClient,
+        >(&td, &mut fs_store, None, None, None, None);
         assert!(result.is_err());
         assert!(result
             .err()
@@ -2107,11 +2263,12 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::GitRef);
-        let store = dispatch_for_type::<MockGhClient, _, MockGhMilestoneClient>(
+        let store = dispatch_for_type::<MockGhClient, _, MockGhMilestoneClient, MockGhClient>(
             &td,
             &mut fs_store,
             None,
             Some(&mut git_ref_store),
+            None,
             None,
         )
         .unwrap();
@@ -2139,11 +2296,12 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::Filesystem);
-        let store = dispatch_for_type::<MockGhClient, _, MockGhMilestoneClient>(
+        let store = dispatch_for_type::<MockGhClient, _, MockGhMilestoneClient, MockGhClient>(
             &td,
             &mut fs_store,
             None,
             Some(&mut git_ref_store),
+            None,
             None,
         )
         .unwrap();
@@ -2167,13 +2325,12 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::GitRef);
-        let result = dispatch_for_type::<MockGhClient, MockGitRefClient, MockGhMilestoneClient>(
-            &td,
-            &mut fs_store,
-            None,
-            None,
-            None,
-        );
+        let result = dispatch_for_type::<
+            MockGhClient,
+            MockGitRefClient,
+            MockGhMilestoneClient,
+            MockGhClient,
+        >(&td, &mut fs_store, None, None, None, None);
         assert!(result.is_err());
         assert!(result
             .err()
@@ -3147,6 +3304,174 @@ mod tests {
             body.contains("implements: RFC-050"),
             "implements must be in the serialized issue body, got: {body}"
         );
+    }
+
+    // --- github-projects board store (ITERATION-216) ---
+
+    fn projects_type_def() -> TypeDef {
+        TypeDef {
+            name: "project".to_string(),
+            plural: "projects".to_string(),
+            dir: "docs/projects".to_string(),
+            prefix: "PROJECT".to_string(),
+            ..test_type_def(StoreBackend::GithubProjects)
+        }
+    }
+
+    fn projects_store(
+        root: &std::path::Path,
+        graphql: Vec<serde_json::Value>,
+    ) -> GithubProjectsStore<MockGhClient> {
+        GithubProjectsStore {
+            client: MockGhClient::new().with_graphql_responses(graphql),
+            root: root.to_path_buf(),
+            repo: "my-org/repo".to_string(),
+            config: Config::default(),
+            issue_map: IssueMap::load(root).unwrap(),
+        }
+    }
+
+    fn org_board_response(id: &str) -> serde_json::Value {
+        serde_json::json!({"data": {"organization": {"projectV2": {"id": id}}}})
+    }
+
+    fn org_board_null() -> serde_json::Value {
+        serde_json::json!({"data": {"organization": {"projectV2": null}}})
+    }
+
+    fn user_board_null() -> serde_json::Value {
+        serde_json::json!({"data": {"user": {"projectV2": null}}})
+    }
+
+    // AC1: an existing org board number resolves via the organization root
+    // projectV2(number) query, the returned node id binds, and ZERO create
+    // mutations are issued.
+    #[test]
+    fn projects_resolve_board_binds_node_id_no_create() {
+        let root = tmp_root("proj_resolve");
+        let mut store = projects_store(&root, vec![org_board_response("PVT_board7")]);
+        let td = projects_type_def();
+
+        store.set_provenance(&td, "PROJECT-7", &[]).unwrap();
+
+        let calls = store.client.graphql_calls.borrow();
+        assert_eq!(calls.len(), 1, "one org query, nothing else");
+        assert!(
+            calls[0].0.contains("organization") && calls[0].0.contains("projectV2"),
+            "must query organization.projectV2, got: {}",
+            calls[0].0
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|(q, _)| q.to_lowercase().contains("create")),
+            "no create mutation may be issued"
+        );
+
+        let entry = store.issue_map.get("PROJECT-7").unwrap();
+        assert_eq!(entry.issue_number, 7);
+        assert_eq!(entry.node_id, "PVT_board7");
+    }
+
+    // AC2: a board number absent under both org and user roots (projectV2 null)
+    // bails not-found; zero create mutations.
+    #[test]
+    fn projects_resolve_board_not_found_no_create() {
+        let root = tmp_root("proj_notfound");
+        let store = projects_store(&root, vec![org_board_null(), user_board_null()]);
+
+        let err = store.resolve_board("my-org", 99).unwrap_err();
+        assert!(err.to_string().contains("not found"), "got: {err}");
+
+        let calls = store.client.graphql_calls.borrow();
+        assert!(
+            !calls
+                .iter()
+                .any(|(q, _)| q.to_lowercase().contains("create")),
+            "no create mutation on not-found"
+        );
+    }
+
+    // AC2 corollary: create() never authors a board.
+    #[test]
+    fn projects_create_does_not_author_boards() {
+        let root = tmp_root("proj_create_bail");
+        let mut store = projects_store(&root, vec![]);
+        let td = projects_type_def();
+
+        let err = store.create(&td, "title", "author", "").unwrap_err();
+        assert!(
+            err.to_string().contains("does not author boards"),
+            "got: {err}"
+        );
+        assert!(
+            store.client.graphql_calls.borrow().is_empty(),
+            "no graphql mutation on create"
+        );
+    }
+
+    #[test]
+    fn projects_delete_bails() {
+        let root = tmp_root("proj_delete_bail");
+        let mut store = projects_store(&root, vec![]);
+        let td = projects_type_def();
+        let err = store.delete(&td, "PROJECT-7").unwrap_err();
+        assert!(
+            err.to_string().contains("does not delete boards"),
+            "got: {err}"
+        );
+    }
+
+    // AC6: dispatch routes a github-projects type to the projects store.
+    #[test]
+    fn dispatch_routes_to_github_projects() {
+        let root = tmp_root("dispatch_proj");
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config: Config::default(),
+        };
+        let mut proj_store = projects_store(&root, vec![org_board_response("PVT_x")]);
+
+        let td = projects_type_def();
+        let store = dispatch_for_type::<MockGhClient, MockGitRefClient, MockGhMilestoneClient, _>(
+            &td,
+            &mut fs_store,
+            None,
+            None,
+            None,
+            Some(&mut proj_store),
+        )
+        .unwrap();
+        assert!(store.update(&td, "PROJECT-1", &[]).is_ok());
+    }
+
+    #[test]
+    fn dispatch_github_projects_without_backend_errors() {
+        let root = tmp_root("dispatch_no_proj");
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config: Config::default(),
+        };
+        let td = projects_type_def();
+        let result = dispatch_for_type::<
+            MockGhClient,
+            MockGitRefClient,
+            MockGhMilestoneClient,
+            MockGhClient,
+        >(&td, &mut fs_store, None, None, None, None);
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("GitHub projects backend"));
+    }
+
+    #[test]
+    fn board_number_parses_prefixed_and_bare() {
+        assert_eq!(board_number("PROJECT-7").unwrap(), 7);
+        assert_eq!(board_number("12").unwrap(), 12);
+        assert!(board_number("PROJECT-abc").is_err());
     }
 
     #[test]

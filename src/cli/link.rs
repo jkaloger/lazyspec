@@ -3,12 +3,12 @@ use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::document::{rewrite_frontmatter, RelationType};
 use crate::engine::fs::FileSystem;
-use crate::engine::gh::{GhCli, GhGraphql, GhIssueReader, GhIssueWriter, GhMilestoneApi};
+use crate::engine::gh::{GhCli, GhGraphql, GhIssueReader, GhIssueWriter, GhMilestoneApi, GqlVar};
 use crate::engine::git_ref::{GitCli, GitRefOps};
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
-use crate::engine::store_dispatch::GithubIssuesStore;
+use crate::engine::store_dispatch::{board_number, GithubIssuesStore, GithubProjectsStore};
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 
@@ -41,11 +41,12 @@ pub fn link_with_config(
         config,
         GhCli::new,
         GhCli::new,
+        GhCli::new,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn link_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi>(
+fn link_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi, P: GhGraphql>(
     root: &Path,
     store: &Store,
     from: &str,
@@ -55,6 +56,7 @@ fn link_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi>(
     config: Option<&Config>,
     client_factory: impl FnOnce() -> G,
     milestone_factory: impl FnOnce() -> M,
+    projects_factory: impl FnOnce() -> P,
 ) -> Result<LinkOutcome> {
     let config = config.ok_or_else(|| {
         anyhow!("link requires a loaded config to resolve relationships from [[relationships]]")
@@ -90,6 +92,15 @@ fn link_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi>(
         &to_id,
         true,
         milestone_factory,
+    )?;
+    apply_native_membership(
+        root,
+        config,
+        &rel_str,
+        &from_id,
+        &to_id,
+        true,
+        projects_factory,
     )?;
     push_if_github_backed(root, &resolved_from, Some(config), client_factory)?;
     push_if_git_ref_backed(root, &resolved_from, Some(config))?;
@@ -144,6 +155,104 @@ fn apply_native_milestone<M: GhMilestoneApi>(
     client.issue_set_milestone(repo, issue_number, value)
 }
 
+const ADD_PROJECT_ITEM_MUTATION: &str = "mutation($projectId: ID!, $contentId: ID!) { addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) { item { id } } }";
+
+const DELETE_PROJECT_ITEM_MUTATION: &str = "mutation($projectId: ID!, $itemId: ID!) { deleteProjectV2Item(input: {projectId: $projectId, itemId: $itemId}) { deletedItemId } }";
+
+const PROJECT_ITEM_FOR_ISSUE_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on Issue { projectItems(first: 100) { nodes { id project { id } } } } } }";
+
+/// If `rel_str` declares `github_native = "membership"`, write the native issue
+/// -> Projects v2 board association over GraphQL. `set` true adds the issue to
+/// the board (`addProjectV2ItemById`), false removes its item
+/// (`deleteProjectV2Item`). `source_id` is the issue doc (its node id comes from
+/// the issue map); `target_id` is the board doc (`PROJECT-n`, resolved to a
+/// project node id). Each membership relation is one board, synced
+/// independently. A no-op for ordinary relationships.
+fn apply_native_membership<P: GhGraphql>(
+    root: &Path,
+    config: &Config,
+    rel_str: &str,
+    source_id: &str,
+    target_id: &str,
+    set: bool,
+    projects_factory: impl FnOnce() -> P,
+) -> Result<()> {
+    let is_membership_rel = config
+        .relationship_by_name(rel_str)
+        .and_then(|r| r.github_native.as_deref())
+        == Some("membership");
+    if !is_membership_rel {
+        return Ok(());
+    }
+
+    let repo = config
+        .documents
+        .github
+        .as_ref()
+        .and_then(|g| g.repo.as_ref())
+        .ok_or_else(|| anyhow!("github_native membership relations require [github].repo"))?;
+    let owner = repo
+        .split_once('/')
+        .map(|(o, _)| o)
+        .filter(|o| !o.is_empty())
+        .ok_or_else(|| anyhow!("repo '{}' must be in owner/name form", repo))?;
+
+    let issue_map = IssueMap::load(root)?;
+    let content_id = issue_map
+        .get(source_id)
+        .map(|e| e.node_id.clone())
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| anyhow!("source '{}' has no GitHub issue node id", source_id))?;
+
+    let client = projects_factory();
+    let store = GithubProjectsStore {
+        client,
+        root: root.to_path_buf(),
+        repo: repo.clone(),
+        config: config.clone(),
+        issue_map: IssueMap::load(root)?,
+    };
+    let board_no = board_number(target_id)?;
+    let project_id = store.resolve_board(owner, board_no)?;
+
+    if set {
+        store.client.graphql(
+            ADD_PROJECT_ITEM_MUTATION,
+            &[
+                ("projectId", GqlVar::Str(project_id)),
+                ("contentId", GqlVar::Str(content_id)),
+            ],
+        )?;
+    } else {
+        let resp = store.client.graphql(
+            PROJECT_ITEM_FOR_ISSUE_QUERY,
+            &[("id", GqlVar::Str(content_id))],
+        )?;
+        let item_id = resp
+            .pointer("/data/node/projectItems/nodes")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| {
+                arr.iter().find_map(|n| {
+                    let pid = n.pointer("/project/id").and_then(|v| v.as_str())?;
+                    if pid == project_id {
+                        n.get("id").and_then(|v| v.as_str()).map(String::from)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .ok_or_else(|| anyhow!("'{}' is not a member of board '{}'", source_id, target_id))?;
+        store.client.graphql(
+            DELETE_PROJECT_ITEM_MUTATION,
+            &[
+                ("projectId", GqlVar::Str(project_id)),
+                ("itemId", GqlVar::Str(item_id)),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 pub fn unlink_with_config(
     root: &Path,
     store: &Store,
@@ -163,11 +272,12 @@ pub fn unlink_with_config(
         config,
         GhCli::new,
         GhCli::new,
+        GhCli::new,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn unlink_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi>(
+fn unlink_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi, P: GhGraphql>(
     root: &Path,
     store: &Store,
     from: &str,
@@ -177,6 +287,7 @@ fn unlink_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi>
     config: Option<&Config>,
     client_factory: impl FnOnce() -> G,
     milestone_factory: impl FnOnce() -> M,
+    projects_factory: impl FnOnce() -> P,
 ) -> Result<LinkOutcome> {
     let config = config.ok_or_else(|| {
         anyhow!("unlink requires a loaded config to resolve relationships from [[relationships]]")
@@ -211,6 +322,15 @@ fn unlink_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi>
         &to_id,
         false,
         milestone_factory,
+    )?;
+    apply_native_membership(
+        root,
+        config,
+        &rel_str,
+        &from_id,
+        &to_id,
+        false,
+        projects_factory,
     )?;
     push_if_github_backed(root, &resolved_from, Some(config), client_factory)?;
     push_if_git_ref_backed(root, &resolved_from, Some(config))?;
@@ -446,6 +566,7 @@ mod tests {
             Some(&config),
             MockGhClient::new,
             || recorder.clone(),
+            MockGhClient::new,
         )
         .unwrap();
 
@@ -472,9 +593,299 @@ mod tests {
             Some(&config),
             MockGhClient::new,
             || recorder2.clone(),
+            MockGhClient::new,
         )
         .unwrap();
         assert_eq!(*recorder2.last_set_milestone.borrow(), Some((7, None)));
+    }
+
+    // --- github_native = "membership" (ITERATION-216) ---
+
+    fn membership_config() -> Config {
+        let issue_type = |name: &str, prefix: &str, store: StoreBackend| TypeDef {
+            name: name.to_string(),
+            plural: format!("{}s", name),
+            dir: format!("docs/{}", name),
+            prefix: prefix.to_string(),
+            icon: None,
+            numbering: NumberingStrategy::Incremental,
+            subdirectory: false,
+            store,
+            singleton: false,
+            parent_type: None,
+            agents: Vec::new(),
+            intent: None,
+            authorship: Default::default(),
+            lifecycle: Default::default(),
+            attributes: Default::default(),
+        };
+        let mut config = Config::default();
+        config.documents.types = vec![
+            issue_type("story", "STORY", StoreBackend::GithubIssues),
+            issue_type("project", "PROJECT", StoreBackend::GithubProjects),
+        ];
+        config.documents.github = Some(GithubConfig {
+            repo: Some("my-org/repo".to_string()),
+            cache_ttl: 60,
+        });
+        config.relationships = vec![crate::engine::config::RelationshipDef {
+            name: "member-of".to_string(),
+            inverse: Some("has-member".to_string()),
+            github_native: Some("membership".to_string()),
+        }];
+        config
+    }
+
+    fn org_board(id: &str) -> serde_json::Value {
+        serde_json::json!({"data": {"organization": {"projectV2": {"id": id}}}})
+    }
+
+    fn add_item_ok() -> serde_json::Value {
+        serde_json::json!({"data": {"addProjectV2ItemById": {"item": {"id": "PVTI_x"}}}})
+    }
+
+    // AC3: link issue-doc --member-of--> PROJECT-n records an addProjectV2ItemById
+    // mutation carrying projectId=<board node id> and contentId=<issue node id>.
+    #[test]
+    fn link_membership_adds_project_item() {
+        let root = tmp_root("link_membership_add");
+        let config = membership_config();
+
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story"),
+            "STORY-7.md",
+            "My Story",
+            "story",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/project"),
+            "PROJECT-3.md",
+            "Board",
+            "project",
+        );
+
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "", "I_issue7");
+        issue_map.insert("PROJECT-3", 3, "", "");
+        issue_map.save(&root).unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+
+        let recorder = std::rc::Rc::new(
+            MockGhClient::new()
+                .with_graphql_responses(vec![org_board("PVT_board3"), add_item_ok()]),
+        );
+
+        link_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "member-of",
+            "PROJECT-3",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            MockGhMilestoneClient::new,
+            || recorder.clone(),
+        )
+        .unwrap();
+
+        let calls = recorder.graphql_calls.borrow();
+        let adds: Vec<_> = calls
+            .iter()
+            .filter(|(q, _)| q.contains("addProjectV2ItemById"))
+            .collect();
+        assert_eq!(adds.len(), 1, "one addProjectV2ItemById, got: {:?}", *calls);
+        let (_, vars) = adds[0];
+        assert!(vars.contains(&(
+            "projectId".to_string(),
+            GqlVar::Str("PVT_board3".to_string())
+        )));
+        assert!(vars.contains(&("contentId".to_string(), GqlVar::Str("I_issue7".to_string()))));
+
+        // The frontmatter relation persists.
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(updated.contains("member-of: PROJECT-3"), "got:\n{updated}");
+    }
+
+    // AC4: an issue already a member of one board, adding membership to a second,
+    // persists both relations and records two independent addProjectV2ItemById
+    // calls (one per board).
+    #[test]
+    fn link_membership_two_boards_two_adds() {
+        let root = tmp_root("link_membership_two");
+        let config = membership_config();
+
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story"),
+            "STORY-7.md",
+            "My Story",
+            "story",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/project"),
+            "PROJECT-3.md",
+            "B3",
+            "project",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/project"),
+            "PROJECT-9.md",
+            "B9",
+            "project",
+        );
+
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "", "I_issue7");
+        issue_map.save(&root).unwrap();
+
+        let fs = RealFileSystem;
+
+        // First board.
+        let rec1 = std::rc::Rc::new(
+            MockGhClient::new().with_graphql_responses(vec![org_board("PVT_b3"), add_item_ok()]),
+        );
+        let store = Store::load(&root, &config).unwrap();
+        link_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "member-of",
+            "PROJECT-3",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            MockGhMilestoneClient::new,
+            || rec1.clone(),
+        )
+        .unwrap();
+
+        // Second board.
+        let rec2 = std::rc::Rc::new(
+            MockGhClient::new().with_graphql_responses(vec![org_board("PVT_b9"), add_item_ok()]),
+        );
+        let store = Store::load(&root, &config).unwrap();
+        link_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "member-of",
+            "PROJECT-9",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            MockGhMilestoneClient::new,
+            || rec2.clone(),
+        )
+        .unwrap();
+
+        let add1 = rec1
+            .graphql_calls
+            .borrow()
+            .iter()
+            .filter(|(q, _)| q.contains("addProjectV2ItemById"))
+            .count();
+        let add2 = rec2
+            .graphql_calls
+            .borrow()
+            .iter()
+            .filter(|(q, _)| q.contains("addProjectV2ItemById"))
+            .count();
+        assert_eq!(add1, 1, "first board add");
+        assert_eq!(add2, 1, "second board add");
+
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(updated.contains("member-of: PROJECT-3"), "got:\n{updated}");
+        assert!(updated.contains("member-of: PROJECT-9"), "got:\n{updated}");
+    }
+
+    // AC5: unlink one membership removes that board's item (deleteProjectV2Item)
+    // while the other membership relation stays in frontmatter and is untouched.
+    #[test]
+    fn unlink_membership_removes_only_that_board() {
+        let root = tmp_root("unlink_membership");
+        let config = membership_config();
+
+        // STORY-7 already a member of PROJECT-3 and PROJECT-9 in frontmatter.
+        std::fs::create_dir_all(root.join(".lazyspec/cache/story")).unwrap();
+        let content = "---\ntitle: My Story\ntype: story\nstatus: draft\nauthor: a\ndate: 2026-03-27\ntags: []\nrelated:\n- member-of: PROJECT-3\n- member-of: PROJECT-9\n---\nbody\n";
+        std::fs::write(root.join(".lazyspec/cache/story/STORY-7.md"), content).unwrap();
+        write_cache_doc(
+            &root.join(".lazyspec/cache/project"),
+            "PROJECT-3.md",
+            "B3",
+            "project",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/project"),
+            "PROJECT-9.md",
+            "B9",
+            "project",
+        );
+
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "", "I_issue7");
+        issue_map.save(&root).unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+
+        // resolve_board(PROJECT-3) -> PVT_b3, then projectItems lookup, then delete.
+        let project_items = serde_json::json!({
+            "data": {"node": {"projectItems": {"nodes": [
+                {"id": "PVTI_3", "project": {"id": "PVT_b3"}},
+                {"id": "PVTI_9", "project": {"id": "PVT_b9"}}
+            ]}}}
+        });
+        let delete_ok =
+            serde_json::json!({"data": {"deleteProjectV2Item": {"deletedItemId": "PVTI_3"}}});
+        let recorder = std::rc::Rc::new(MockGhClient::new().with_graphql_responses(vec![
+            org_board("PVT_b3"),
+            project_items,
+            delete_ok,
+        ]));
+
+        unlink_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "member-of",
+            "PROJECT-3",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            MockGhMilestoneClient::new,
+            || recorder.clone(),
+        )
+        .unwrap();
+
+        let calls = recorder.graphql_calls.borrow();
+        let deletes: Vec<_> = calls
+            .iter()
+            .filter(|(q, _)| q.contains("deleteProjectV2Item"))
+            .collect();
+        assert_eq!(deletes.len(), 1, "one delete, got: {:?}", *calls);
+        assert!(deletes[0]
+            .1
+            .contains(&("itemId".to_string(), GqlVar::Str("PVTI_3".to_string()))));
+        assert!(deletes[0]
+            .1
+            .contains(&("projectId".to_string(), GqlVar::Str("PVT_b3".to_string()))));
+
+        // PROJECT-9 membership untouched in frontmatter; PROJECT-3 removed.
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(
+            !updated.contains("member-of: PROJECT-3"),
+            "PROJECT-3 should be removed, got:\n{updated}"
+        );
+        assert!(
+            updated.contains("member-of: PROJECT-9"),
+            "PROJECT-9 should remain, got:\n{updated}"
+        );
     }
 
     fn gh_config_with_rfc_type() -> Config {
@@ -611,6 +1022,7 @@ mod tests {
             Some(&config),
             || MockGhClient::new().with_view_issue(view_issue),
             MockGhMilestoneClient::new,
+            MockGhClient::new,
         )
         .unwrap();
 
@@ -764,6 +1176,7 @@ mod tests {
             Some(&config),
             MockGhClient::new,
             MockGhMilestoneClient::new,
+            MockGhClient::new,
         )
         .unwrap();
 
@@ -851,6 +1264,7 @@ mod tests {
             Some(&config),
             MockGhClient::new,
             MockGhMilestoneClient::new,
+            MockGhClient::new,
         )
         .unwrap();
 

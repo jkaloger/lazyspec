@@ -121,6 +121,8 @@ pub enum StoreBackend {
     GithubIssues,
     #[serde(rename = "github-milestones")]
     GithubMilestones,
+    #[serde(rename = "github-projects")]
+    GithubProjects,
     #[serde(rename = "git-ref")]
     GitRef,
 }
@@ -131,6 +133,7 @@ impl fmt::Display for StoreBackend {
             StoreBackend::Filesystem => write!(f, "filesystem"),
             StoreBackend::GithubIssues => write!(f, "github-issues"),
             StoreBackend::GithubMilestones => write!(f, "github-milestones"),
+            StoreBackend::GithubProjects => write!(f, "github-projects"),
             StoreBackend::GitRef => write!(f, "git-ref"),
         }
     }
@@ -261,8 +264,9 @@ pub struct RelationshipDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inverse: Option<String>,
     /// Names a GitHub-native edge this relationship maps onto (e.g.
-    /// `"milestone"`), so linking writes the native association instead of (or
-    /// alongside) the frontmatter relation. Absent for ordinary relationships.
+    /// `"milestone"`, `"sub-issue"`, `"membership"`), so linking writes the
+    /// native association instead of (or alongside) the frontmatter relation.
+    /// Absent for ordinary relationships.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_native: Option<String>,
 }
@@ -809,11 +813,13 @@ impl Config {
         let any_github = types.iter().any(|t| {
             matches!(
                 t.store,
-                StoreBackend::GithubIssues | StoreBackend::GithubMilestones
+                StoreBackend::GithubIssues
+                    | StoreBackend::GithubMilestones
+                    | StoreBackend::GithubProjects
             )
         });
         if any_github && raw.github.is_none() {
-            bail!("store = \"github-issues\" or \"github-milestones\" requires a [github] section");
+            bail!("store = \"github-issues\", \"github-milestones\", or \"github-projects\" requires a [github] section");
         }
 
         let ref_count_ceiling = raw.ref_count_ceiling.unwrap_or(15);
@@ -1379,6 +1385,72 @@ store = "github-milestones"
         assert_eq!(
             config.documents.types[0].store,
             StoreBackend::GithubMilestones
+        );
+    }
+
+    #[test]
+    fn test_store_backend_display_github_projects() {
+        assert_eq!(StoreBackend::GithubProjects.to_string(), "github-projects");
+    }
+
+    #[test]
+    fn test_store_backend_parses_github_projects() {
+        let toml_str = r#"
+[github]
+repo = "owner/repo"
+
+[[types]]
+name = "project"
+plural = "projects"
+dir = "docs/projects"
+prefix = "PROJECT"
+store = "github-projects"
+"#;
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+        assert_eq!(
+            config.documents.types[0].store,
+            StoreBackend::GithubProjects
+        );
+    }
+
+    #[test]
+    fn test_github_projects_without_github_section_fails() {
+        let toml_str = r#"
+[[types]]
+name = "project"
+plural = "projects"
+dir = "docs/projects"
+prefix = "PROJECT"
+store = "github-projects"
+"#;
+        let err = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap_err();
+        assert!(err.to_string().contains("[github] section"), "got: {err}");
+    }
+
+    #[test]
+    fn relationship_github_native_membership_round_trips() {
+        let toml_str = r#"
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[relationships]]
+name = "member-of"
+inverse = "has-member"
+github_native = "membership"
+
+[[relationships]]
+name = "related-to"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let rel = config.relationship_by_name("member-of").unwrap();
+        assert_eq!(rel.github_native.as_deref(), Some("membership"));
+        let emitted = config.to_toml().unwrap();
+        assert!(
+            emitted.contains("github_native = \"membership\""),
+            "{emitted}"
         );
     }
 

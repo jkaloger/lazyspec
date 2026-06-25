@@ -1248,6 +1248,15 @@ pub mod test_support {
         }
     }
 
+    /// Delegating impl so a shared `Rc<MockGhClient>` can be moved into an
+    /// `FnOnce` factory while the original handle remains inspectable after
+    /// (mirrors the milestone-client Rc impl).
+    impl GhGraphql for std::rc::Rc<MockGhClient> {
+        fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+            (**self).graphql(query, vars)
+        }
+    }
+
     impl GhGraphql for MockGhClient {
         fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
             let recorded = vars

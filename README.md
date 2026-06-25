@@ -458,7 +458,7 @@ lazyspec config --json                      # print the resolved config as JSON
 lazyspec config add-type spike spikes docs/spikes SPIKE \
   --icon "◆" --parent-type rfc --intent "throwaway exploration" \
   --authorship generated
-# also accepts --singleton, --store <filesystem|github-issues|github-milestones|git-ref>,
+# also accepts --singleton, --store <filesystem|github-issues|github-milestones|github-projects|git-ref>,
 # --numbering <incremental|sqids|reserved>
 
 # Replace a type's lifecycle (states + edges; `*` matches any source state)
@@ -501,6 +501,30 @@ unconditionally, then the milestone is re-read into the cache (no optimistic
 lock). An issue -> milestone association is surfaced as a relation: declare a
 relationship with `github_native = "milestone"`, then `link` an issue-backed
 document to a milestone document to set it (`unlink` clears it).
+
+#### `github-projects` store
+
+Types stored as `--store github-projects` bind each document to an existing
+GitHub Projects v2 board, addressed by its board number (`PROJECT-7` -> board
+#7 under `[github].repo`'s owner). The backend is **read/associate only**:
+lazyspec never creates or deletes boards (they are authored on GitHub), so
+`create` and `delete` are rejected. Resolving a board (`update`/binding) looks it
+up over GraphQL under the organization root first, then the user root, and
+errors if the number exists under neither -- no create mutation is ever issued.
+
+Board membership is a many-to-many relation: declare a relationship with
+`github_native = "membership"`, then `link` an issue-backed document to a board
+document to add the issue to that board (`addProjectV2ItemById`); `unlink`
+removes only that board's item (`deleteProjectV2Item`), leaving memberships of
+other boards untouched. Each membership relation maps to exactly one board and is
+synced independently. Membership mutations are self-contained -- no `--attr` is
+involved (per-board field values are a separate concern).
+
+Projects v2 mutations require the `project` scope on your `gh` token:
+
+```sh
+gh auth refresh -s project
+```
 
 On macOS, a slow keyring lookup can make `gh api` fall back to an unauthenticated
 request (surfacing as a surprise 403 / rate-limit). If you hit that, pass the

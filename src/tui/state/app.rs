@@ -149,6 +149,7 @@ fn store_from_variant(v: &str) -> Option<StoreBackend> {
         "filesystem" => Some(StoreBackend::Filesystem),
         "github-issues" => Some(StoreBackend::GithubIssues),
         "github-milestones" => Some(StoreBackend::GithubMilestones),
+        "github-projects" => Some(StoreBackend::GithubProjects),
         "git-ref" => Some(StoreBackend::GitRef),
         _ => None,
     }
@@ -1542,7 +1543,7 @@ impl App {
                     key: TypeKey::Store,
                     ..
                 },
-                "github-issues" | "github-milestones",
+                "github-issues" | "github-milestones" | "github-projects",
             ) => Some(ConfigDep::Github),
             _ => None,
         };
@@ -5068,6 +5069,11 @@ mod tests {
         assert_eq!(
             app.settings_buffer.documents.types[0].store,
             StoreBackend::GithubMilestones
+        );
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].store,
+            StoreBackend::GithubProjects
         );
         app.settings_space();
         assert_eq!(

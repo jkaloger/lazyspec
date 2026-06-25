@@ -69,6 +69,28 @@ pub fn run_with_config(
                 };
                 return ms_store.delete(type_def, &doc.id);
             }
+            if type_def.store == StoreBackend::GithubProjects {
+                let gh_config = config.documents.github.as_ref().ok_or_else(|| {
+                    anyhow!(
+                        "type '{}' uses github-projects store but no [github] config found",
+                        type_name
+                    )
+                })?;
+                let repo = gh_config.repo.as_ref().ok_or_else(|| {
+                    anyhow!(
+                        "type '{}' uses github-projects store but no github.repo configured",
+                        type_name
+                    )
+                })?;
+                let mut proj_store = crate::engine::store_dispatch::GithubProjectsStore {
+                    client: GhCli::new(),
+                    root: root.to_path_buf(),
+                    repo: repo.clone(),
+                    config: config.clone(),
+                    issue_map: IssueMap::load(root)?,
+                };
+                return proj_store.delete(type_def, &doc.id);
+            }
             if type_def.store == StoreBackend::GitRef {
                 let mut git_store = GitRefStore {
                     git: GitCli,

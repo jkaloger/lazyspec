@@ -153,6 +153,30 @@ pub fn run_with_body(
         return Ok(root.join(&created.path));
     }
 
+    if type_def.store == StoreBackend::GithubProjects {
+        let gh_config = config.documents.github.as_ref().ok_or_else(|| {
+            anyhow!(
+                "type '{}' uses github-projects store but no [github] config found",
+                doc_type
+            )
+        })?;
+        let repo = gh_config.repo.as_ref().ok_or_else(|| {
+            anyhow!(
+                "type '{}' uses github-projects store but no github.repo configured",
+                doc_type
+            )
+        })?;
+        let mut store = crate::engine::store_dispatch::GithubProjectsStore {
+            client: GhCli::new(),
+            root: root.to_path_buf(),
+            repo: repo.clone(),
+            config: config.clone(),
+            issue_map: IssueMap::load(root)?,
+        };
+        let created = store.create(type_def, title, author, body.unwrap_or(""))?;
+        return Ok(root.join(&created.path));
+    }
+
     if type_def.store == StoreBackend::GitRef {
         let reserved_number = if let Some(coord) = &config.coordination {
             let cache_dir = root.join(".lazyspec/cache").join(&type_def.name);
