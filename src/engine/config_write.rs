@@ -1124,6 +1124,7 @@ name = "related-to"
             c.relationships.push(RelationshipDef {
                 name: "blocks".to_string(),
                 inverse: Some("blocked-by".to_string()),
+                github_native: None,
             });
             c
         };

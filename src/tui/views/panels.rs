@@ -1841,7 +1841,12 @@ fn numbering_str(n: &NumberingStrategy) -> &'static str {
 }
 
 const NUMBERING_VARIANTS: &[&str] = &["incremental", "sqids", "reserved"];
-const STORE_VARIANTS: &[&str] = &["filesystem", "github-issues", "git-ref"];
+const STORE_VARIANTS: &[&str] = &[
+    "filesystem",
+    "github-issues",
+    "github-milestones",
+    "git-ref",
+];
 const RULE_SHAPE_VARIANTS: &[&str] = &["parent-child", "relation-existence"];
 const SEVERITY_VARIANTS: &[&str] = &["error", "warning"];
 const RESERVED_FORMAT_VARIANTS: &[&str] = &["incremental", "sqids"];

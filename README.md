@@ -456,7 +456,7 @@ lazyspec config --json                      # print the resolved config as JSON
 lazyspec config add-type spike spikes docs/spikes SPIKE \
   --icon "◆" --parent-type rfc --intent "throwaway exploration" \
   --authorship generated
-# also accepts --singleton, --store <filesystem|github-issues|git-ref>,
+# also accepts --singleton, --store <filesystem|github-issues|github-milestones|git-ref>,
 # --numbering <incremental|sqids|reserved>
 
 # Replace a type's lifecycle (states + edges; `*` matches any source state)
@@ -487,6 +487,18 @@ gh auth refresh -s project
 
 Without it, schema-snapshot refreshes degrade gracefully -- they emit a warning
 and keep serving the last cached snapshot, so offline validation still works.
+
+#### `github-milestones` store
+
+Types stored as `--store github-milestones` map each document to a GitHub
+milestone over the REST API (title -> title, body -> description, `status` ->
+open/closed state, `due_on` passed through verbatim). Progress
+(`percent_complete`) is computed from the milestone's issue counts at read time
+and is never writable. The write policy is last-write-wins: a push happens
+unconditionally, then the milestone is re-read into the cache (no optimistic
+lock). An issue -> milestone association is surfaced as a relation: declare a
+relationship with `github_native = "milestone"`, then `link` an issue-backed
+document to a milestone document to set it (`unlink` clears it).
 
 On macOS, a slow keyring lookup can make `gh api` fall back to an unauthenticated
 request (surfacing as a surprise 403 / rate-limit). If you hit that, pass the

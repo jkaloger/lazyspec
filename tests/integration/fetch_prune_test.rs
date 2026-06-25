@@ -1,7 +1,9 @@
 use anyhow::Result;
 use chrono::Utc;
 use lazyspec::engine::config::{Config, CoordinationConfig, StoreBackend, TypeDef};
-use lazyspec::engine::gh::{GhGraphql, GhIssue, GhIssueReader, GqlVar};
+use lazyspec::engine::gh::{
+    GhGraphql, GhIssue, GhIssueReader, GhMilestone, GhMilestoneApi, GqlVar,
+};
 use lazyspec::engine::git_ref::{GitCli, GitRefOps};
 use lazyspec::engine::git_ref_store::GitRefStore;
 use lazyspec::engine::lease::LeaseEngine;
@@ -28,6 +30,46 @@ impl GhIssueReader for NoopGh {
 impl GhGraphql for NoopGh {
     fn graphql(&self, _query: &str, _vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
         unreachable!("not used in this test (git-ref types only)")
+    }
+}
+impl GhMilestoneApi for NoopGh {
+    fn milestone_list(&self, _repo: &str) -> Result<Vec<GhMilestone>> {
+        Ok(vec![])
+    }
+    fn milestone_view(&self, _repo: &str, _number: u64) -> Result<GhMilestone> {
+        unreachable!("not used in this test")
+    }
+    fn milestone_create(
+        &self,
+        _repo: &str,
+        _title: &str,
+        _description: &str,
+        _due_on: Option<&str>,
+        _state: &str,
+    ) -> Result<GhMilestone> {
+        unreachable!("not used in this test")
+    }
+    fn milestone_edit(
+        &self,
+        _repo: &str,
+        _number: u64,
+        _title: Option<&str>,
+        _description: Option<&str>,
+        _due_on: Option<&str>,
+        _state: Option<&str>,
+    ) -> Result<GhMilestone> {
+        unreachable!("not used in this test")
+    }
+    fn milestone_delete(&self, _repo: &str, _number: u64) -> Result<()> {
+        unreachable!("not used in this test")
+    }
+    fn issue_set_milestone(
+        &self,
+        _repo: &str,
+        _issue_number: u64,
+        _milestone: Option<u64>,
+    ) -> Result<()> {
+        unreachable!("not used in this test")
     }
 }
 

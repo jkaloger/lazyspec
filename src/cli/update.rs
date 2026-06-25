@@ -7,7 +7,7 @@ use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
-use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
+use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore, GithubMilestonesStore};
 use anyhow::{anyhow, bail, Result};
 use std::path::Path;
 
@@ -90,6 +90,28 @@ pub fn run_with_config(
                     issue_cache: IssueCache::new(root),
                 };
                 return gh_store.update(type_def, &doc.id, updates);
+            }
+            if type_def.store == StoreBackend::GithubMilestones {
+                let gh_config = config.documents.github.as_ref().ok_or_else(|| {
+                    anyhow!(
+                        "type '{}' uses github-milestones store but no [github] config found",
+                        type_name
+                    )
+                })?;
+                let repo = gh_config.repo.as_ref().ok_or_else(|| {
+                    anyhow!(
+                        "type '{}' uses github-milestones store but no github.repo configured",
+                        type_name
+                    )
+                })?;
+                let mut ms_store = GithubMilestonesStore {
+                    client: GhCli::new(),
+                    root: root.to_path_buf(),
+                    repo: repo.clone(),
+                    config: config.clone(),
+                    issue_map: IssueMap::load(root)?,
+                };
+                return ms_store.update(type_def, &doc.id, updates);
             }
             if type_def.store == StoreBackend::GitRef {
                 let mut git_store = GitRefStore {

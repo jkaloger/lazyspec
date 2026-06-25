@@ -522,10 +522,12 @@ fn validate_flags_undeclared_relationship_name() {
             lazyspec::engine::config::RelationshipDef {
                 name: "implements".to_string(),
                 inverse: Some("implemented-by".to_string()),
+                github_native: None,
             },
             lazyspec::engine::config::RelationshipDef {
                 name: "related-to".to_string(),
                 inverse: None,
+                github_native: None,
             },
         ],
         ..Config::default()

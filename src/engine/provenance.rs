@@ -77,6 +77,28 @@ pub fn set_provenance(
             };
             gh_store.set_provenance(type_def, doc_id, new_list)
         }
+        StoreBackend::GithubMilestones => {
+            let gh_config = config.documents.github.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "type '{}' uses github-milestones store but no [github] config found",
+                    type_name
+                )
+            })?;
+            let repo = gh_config.repo.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "type '{}' uses github-milestones store but no github.repo configured",
+                    type_name
+                )
+            })?;
+            let mut ms_store = crate::engine::store_dispatch::GithubMilestonesStore {
+                client: GhCli::new(),
+                root: root.to_path_buf(),
+                repo: repo.clone(),
+                config: config.clone(),
+                issue_map: IssueMap::load(root)?,
+            };
+            ms_store.set_provenance(type_def, doc_id, new_list)
+        }
         StoreBackend::GitRef => {
             let mut git_store = GitRefStore {
                 git: GitCli,

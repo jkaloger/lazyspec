@@ -119,6 +119,8 @@ pub enum StoreBackend {
     Filesystem,
     #[serde(rename = "github-issues")]
     GithubIssues,
+    #[serde(rename = "github-milestones")]
+    GithubMilestones,
     #[serde(rename = "git-ref")]
     GitRef,
 }
@@ -128,6 +130,7 @@ impl fmt::Display for StoreBackend {
         match self {
             StoreBackend::Filesystem => write!(f, "filesystem"),
             StoreBackend::GithubIssues => write!(f, "github-issues"),
+            StoreBackend::GithubMilestones => write!(f, "github-milestones"),
             StoreBackend::GitRef => write!(f, "git-ref"),
         }
     }
@@ -257,6 +260,11 @@ pub struct RelationshipDef {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inverse: Option<String>,
+    /// Names a GitHub-native edge this relationship maps onto (e.g.
+    /// `"milestone"`), so linking writes the native association instead of (or
+    /// alongside) the frontmatter relation. Absent for ordinary relationships.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_native: Option<String>,
 }
 
 /// The canonical starter relationship vocabulary, mirroring the closed enum that
@@ -267,6 +275,7 @@ pub fn starter_relationships() -> Vec<RelationshipDef> {
     let directional = |name: &str, inverse: &str| RelationshipDef {
         name: name.to_string(),
         inverse: Some(inverse.to_string()),
+        github_native: None,
     };
     vec![
         directional("implements", "implemented-by"),
@@ -275,6 +284,7 @@ pub fn starter_relationships() -> Vec<RelationshipDef> {
         RelationshipDef {
             name: "related-to".to_string(),
             inverse: None,
+            github_native: None,
         },
     ]
 }
@@ -796,9 +806,14 @@ impl Config {
             }
         }
 
-        let any_github_issues = types.iter().any(|t| t.store == StoreBackend::GithubIssues);
-        if any_github_issues && raw.github.is_none() {
-            bail!("store = \"github-issues\" requires a [github] section");
+        let any_github = types.iter().any(|t| {
+            matches!(
+                t.store,
+                StoreBackend::GithubIssues | StoreBackend::GithubMilestones
+            )
+        });
+        if any_github && raw.github.is_none() {
+            bail!("store = \"github-issues\" or \"github-milestones\" requires a [github] section");
         }
 
         let ref_count_ceiling = raw.ref_count_ceiling.unwrap_or(15);
@@ -1337,6 +1352,82 @@ store = "github-issues"
     #[test]
     fn test_store_backend_display_git_ref() {
         assert_eq!(StoreBackend::GitRef.to_string(), "git-ref");
+    }
+
+    #[test]
+    fn test_store_backend_display_github_milestones() {
+        assert_eq!(
+            StoreBackend::GithubMilestones.to_string(),
+            "github-milestones"
+        );
+    }
+
+    #[test]
+    fn test_store_backend_parses_github_milestones() {
+        let toml_str = r#"
+[github]
+repo = "owner/repo"
+
+[[types]]
+name = "milestone"
+plural = "milestones"
+dir = "docs/milestones"
+prefix = "MILESTONE"
+store = "github-milestones"
+"#;
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+        assert_eq!(
+            config.documents.types[0].store,
+            StoreBackend::GithubMilestones
+        );
+    }
+
+    #[test]
+    fn test_github_milestones_without_github_section_fails() {
+        let toml_str = r#"
+[[types]]
+name = "milestone"
+plural = "milestones"
+dir = "docs/milestones"
+prefix = "MILESTONE"
+store = "github-milestones"
+"#;
+        let err = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap_err();
+        assert!(err.to_string().contains("[github] section"), "got: {err}");
+    }
+
+    #[test]
+    fn relationship_github_native_round_trips() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "targets"
+inverse = "targeted-by"
+github_native = "milestone"
+
+[[relationships]]
+name = "related-to"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let rel = config.relationship_by_name("targets").unwrap();
+        assert_eq!(rel.github_native.as_deref(), Some("milestone"));
+        // A relationship without the key carries None.
+        assert!(config
+            .relationship_by_name("related-to")
+            .unwrap()
+            .github_native
+            .is_none());
+        // The field survives the to_toml writer.
+        let emitted = config.to_toml().unwrap();
+        assert!(
+            emitted.contains("github_native = \"milestone\""),
+            "{emitted}"
+        );
     }
 
     #[test]

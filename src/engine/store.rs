@@ -58,9 +58,9 @@ impl Store {
 
         for type_def in &config.documents.types {
             let full_path = match type_def.store {
-                StoreBackend::GithubIssues | StoreBackend::GitRef => {
-                    root.join(".lazyspec/cache").join(&type_def.name)
-                }
+                StoreBackend::GithubIssues
+                | StoreBackend::GithubMilestones
+                | StoreBackend::GitRef => root.join(".lazyspec/cache").join(&type_def.name),
                 _ => root.join(&type_def.dir),
             };
 

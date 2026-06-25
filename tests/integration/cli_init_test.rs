@@ -109,6 +109,7 @@ fn init_related_to_is_symmetric_no_inverse() {
         RelationshipDef {
             name: "related-to".to_string(),
             inverse: None,
+            github_native: None,
         },
         "related-to must be symmetric (no inverse)"
     );

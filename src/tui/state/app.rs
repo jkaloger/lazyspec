@@ -148,6 +148,7 @@ fn store_from_variant(v: &str) -> Option<StoreBackend> {
     match v {
         "filesystem" => Some(StoreBackend::Filesystem),
         "github-issues" => Some(StoreBackend::GithubIssues),
+        "github-milestones" => Some(StoreBackend::GithubMilestones),
         "git-ref" => Some(StoreBackend::GitRef),
         _ => None,
     }
@@ -1541,7 +1542,7 @@ impl App {
                     key: TypeKey::Store,
                     ..
                 },
-                "github-issues",
+                "github-issues" | "github-milestones",
             ) => Some(ConfigDep::Github),
             _ => None,
         };
@@ -2669,6 +2670,7 @@ impl App {
                 self.settings_buffer.relationships.push(RelationshipDef {
                     name: "relationship".to_string(),
                     inverse: None,
+                    github_native: None,
                 });
                 self.settings_entry = self.settings_buffer.relationships.len() - 1;
             }
@@ -4694,6 +4696,7 @@ mod tests {
         config.relationships = vec![RelationshipDef {
             name: "derives-from".to_string(),
             inverse: Some("derived-by".to_string()),
+            github_native: None,
         }];
 
         app.apply_config(&config);
@@ -5061,6 +5064,11 @@ mod tests {
             StoreBackend::GithubIssues
         );
         assert!(app.settings_dirty);
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].store,
+            StoreBackend::GithubMilestones
+        );
         app.settings_space();
         assert_eq!(
             app.settings_buffer.documents.types[0].store,
@@ -6776,6 +6784,7 @@ inverse = "implemented-by"
             relationships: vec![RelationshipDef {
                 name: "related-to".to_string(),
                 inverse: None,
+                github_native: None,
             }],
             ..Config::default()
         };
@@ -6799,10 +6808,12 @@ inverse = "implemented-by"
                 RelationshipDef {
                     name: "implements".to_string(),
                     inverse: Some("implemented-by".to_string()),
+                    github_native: None,
                 },
                 RelationshipDef {
                     name: "related-to".to_string(),
                     inverse: None,
+                    github_native: None,
                 },
             ],
             ..Config::default()

@@ -10,7 +10,7 @@ use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::reservation;
 use crate::engine::store::{Filter, Store};
-use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
+use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore, GithubMilestonesStore};
 use anyhow::{anyhow, bail, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -124,6 +124,30 @@ pub fn run_with_body(
             config: config.clone(),
             issue_map: IssueMap::load(root)?,
             issue_cache: IssueCache::new(root),
+        };
+        let created = store.create(type_def, title, author, body.unwrap_or(""))?;
+        return Ok(root.join(&created.path));
+    }
+
+    if type_def.store == StoreBackend::GithubMilestones {
+        let gh_config = config.documents.github.as_ref().ok_or_else(|| {
+            anyhow!(
+                "type '{}' uses github-milestones store but no [github] config found",
+                doc_type
+            )
+        })?;
+        let repo = gh_config.repo.as_ref().ok_or_else(|| {
+            anyhow!(
+                "type '{}' uses github-milestones store but no github.repo configured",
+                doc_type
+            )
+        })?;
+        let mut store = GithubMilestonesStore {
+            client: GhCli::new(),
+            root: root.to_path_buf(),
+            repo: repo.clone(),
+            config: config.clone(),
+            issue_map: IssueMap::load(root)?,
         };
         let created = store.create(type_def, title, author, body.unwrap_or(""))?;
         return Ok(root.join(&created.path));

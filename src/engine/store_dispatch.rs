@@ -515,6 +515,219 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> DocumentStore for GithubIssue
     }
 }
 
+/// Map a lifecycle status to a milestone REST `state`. Closed-equivalent
+/// statuses (`complete`, `rejected`, `superseded`) map to `"closed"`; everything
+/// else (draft/review/accepted/in-progress) maps to `"open"`. Mirrors the
+/// open/closed set used for issues.
+pub fn status_to_milestone_state(status: &Status) -> &'static str {
+    match status.as_str() {
+        "complete" | "rejected" | "superseded" => "closed",
+        _ => "open",
+    }
+}
+
+/// Map a milestone REST `state` back to a lifecycle status. `"closed"` -> the
+/// closed-equivalent `complete`; anything else -> the open-equivalent
+/// `in-progress`.
+pub fn milestone_state_to_status(state: &str) -> Status {
+    if state.eq_ignore_ascii_case("closed") {
+        Status::new("complete")
+    } else {
+        Status::new("in-progress")
+    }
+}
+
+/// Progress as a 0..=100 percentage of closed issues over the total, or `None`
+/// when there are no issues. Computed at read time only; never stored or
+/// writable.
+pub fn percent_complete(open: u64, closed: u64) -> Option<u8> {
+    let total = open + closed;
+    if total == 0 {
+        None
+    } else {
+        Some((closed * 100 / total) as u8)
+    }
+}
+
+/// A milestone document store backed by the GitHub milestones REST API. The
+/// milestone number is the document id (`make_id(number)`), mirroring the
+/// github-issues backend. Write policy is last-write-wins + refresh: pushes
+/// happen unconditionally, then the milestone is re-read into the cache; there
+/// is no optimistic lock.
+pub struct GithubMilestonesStore<M: gh::GhMilestoneApi> {
+    pub client: M,
+    pub root: PathBuf,
+    pub repo: String,
+    pub config: Config,
+    pub issue_map: IssueMap,
+}
+
+impl<M: gh::GhMilestoneApi> GithubMilestonesStore<M> {
+    fn resolve_number(&self, doc_id: &str) -> Result<u64> {
+        self.issue_map
+            .get(doc_id)
+            .map(|e| e.issue_number)
+            .ok_or_else(|| anyhow::anyhow!("{} not found in milestone map", doc_id))
+    }
+
+    fn meta_from_milestone(
+        &self,
+        type_def: &TypeDef,
+        id: &str,
+        milestone: &gh::GhMilestone,
+        author: &str,
+    ) -> DocMeta {
+        let mut attributes: std::collections::BTreeMap<String, AttrValue> = Default::default();
+        if let Some(due) = &milestone.due_on {
+            attributes.insert("due_on".to_string(), AttrValue::Str(due.clone()));
+        }
+        attributes.insert(
+            "open_issues".to_string(),
+            AttrValue::Int(milestone.open_issues as i64),
+        );
+        attributes.insert(
+            "closed_issues".to_string(),
+            AttrValue::Int(milestone.closed_issues as i64),
+        );
+        DocMeta {
+            path: PathBuf::new(),
+            title: milestone.title.clone(),
+            doc_type: DocType::new(&type_def.name),
+            status: milestone_state_to_status(&milestone.state),
+            author: author.to_string(),
+            date: Local::now().date_naive(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            attributes,
+            id: id.to_string(),
+        }
+    }
+}
+
+impl<M: gh::GhMilestoneApi> DocumentStore for GithubMilestonesStore<M> {
+    fn create(
+        &mut self,
+        type_def: &TypeDef,
+        title: &str,
+        author: &str,
+        body: &str,
+    ) -> Result<CreatedDoc> {
+        let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
+        std::fs::create_dir_all(&cache_dir)?;
+
+        let milestone = self
+            .client
+            .milestone_create(&self.repo, title, body, None, "open")?;
+
+        let id = type_def.make_id(milestone.number);
+        self.issue_map.insert(&id, milestone.number, "");
+        self.issue_map.save(&self.root)?;
+
+        let meta = self.meta_from_milestone(type_def, &id, &milestone, author);
+        write_cache_file(&self.root, type_def, &meta, body)?;
+
+        let cache_path = cache_dir.join(format!("{}.md", id));
+        let relative = cache_path
+            .strip_prefix(&self.root)
+            .unwrap_or(&cache_path)
+            .to_path_buf();
+        Ok(CreatedDoc { path: relative, id })
+    }
+
+    fn update(&mut self, type_def: &TypeDef, doc_id: &str, updates: &[(&str, &str)]) -> Result<()> {
+        let number = self.resolve_number(doc_id)?;
+
+        let mut title: Option<String> = None;
+        let mut description: Option<String> = None;
+        let mut due_on: Option<String> = None;
+        let mut state: Option<String> = None;
+        for &(key, value) in updates {
+            match key {
+                "title" => title = Some(value.to_string()),
+                "body" | "description" => description = Some(value.to_string()),
+                "due_on" => due_on = Some(value.to_string()),
+                "status" => {
+                    let s: Status = value.parse()?;
+                    state = Some(status_to_milestone_state(&s).to_string());
+                }
+                // `percent_complete` is a computed read-only field; reject writes
+                // so it is never PATCHed to GitHub.
+                "percent_complete" => {
+                    bail!("percent_complete is computed from issue counts and cannot be set")
+                }
+                other => bail!("unknown milestone field '{}'", other),
+            }
+        }
+
+        // Last-write-wins: push the changed fields unconditionally (no lock).
+        self.client.milestone_edit(
+            &self.repo,
+            number,
+            title.as_deref(),
+            description.as_deref(),
+            due_on.as_deref(),
+            state.as_deref(),
+        )?;
+
+        // Refresh: re-read the milestone and rewrite the cache from remote.
+        let milestone = self.client.milestone_view(&self.repo, number)?;
+        let meta = self.meta_from_milestone(type_def, doc_id, &milestone, "");
+        write_cache_file(&self.root, type_def, &meta, &milestone.description)?;
+
+        Ok(())
+    }
+
+    fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()> {
+        let number = self.resolve_number(doc_id)?;
+        self.client.milestone_delete(&self.repo, number)?;
+
+        self.issue_map.remove(doc_id);
+        self.issue_map.save(&self.root)?;
+
+        let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
+        if let Some(path) = find_cache_file(&cache_dir, doc_id) {
+            let _ = std::fs::remove_file(path);
+        }
+        Ok(())
+    }
+
+    fn set_provenance(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        provenance: &[String],
+    ) -> Result<()> {
+        // Milestones have no provenance field on GitHub; keep it in the local
+        // cache frontmatter only.
+        let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
+        let cache_path = find_cache_file(&cache_dir, doc_id)
+            .ok_or_else(|| anyhow::anyhow!("cache file not found for {}", doc_id))?;
+
+        let entries: Vec<serde_yaml::Value> = provenance
+            .iter()
+            .map(|s| serde_yaml::Value::String(s.clone()))
+            .collect();
+
+        crate::engine::document::rewrite_frontmatter(
+            &cache_path,
+            &crate::engine::fs::RealFileSystem,
+            |val| {
+                let map = val
+                    .as_mapping_mut()
+                    .ok_or_else(|| anyhow::anyhow!("frontmatter root must be a mapping"))?;
+                map.insert(
+                    serde_yaml::Value::String("provenance".to_string()),
+                    serde_yaml::Value::Sequence(entries.clone()),
+                );
+                Ok(())
+            },
+        )
+    }
+}
+
 pub fn write_cache_file(
     root: &std::path::Path,
     type_def: &TypeDef,
@@ -571,11 +784,17 @@ pub(crate) fn find_cache_file(cache_dir: &std::path::Path, doc_id: &str) -> Opti
     })
 }
 
-pub fn dispatch_for_type<'a, G: GhIssueReader + GhIssueWriter + GhGraphql, R: GitRefOps>(
+pub fn dispatch_for_type<
+    'a,
+    G: GhIssueReader + GhIssueWriter + GhGraphql,
+    R: GitRefOps,
+    M: gh::GhMilestoneApi,
+>(
     type_def: &TypeDef,
     fs_store: &'a mut FilesystemStore,
     gh_store: Option<&'a mut GithubIssuesStore<G>>,
     git_ref_store: Option<&'a mut GitRefStore<R>>,
+    milestone_store: Option<&'a mut GithubMilestonesStore<M>>,
 ) -> Result<&'a mut dyn DocumentStore> {
     match type_def.store {
         StoreBackend::Filesystem => Ok(fs_store as &mut dyn DocumentStore),
@@ -583,6 +802,14 @@ pub fn dispatch_for_type<'a, G: GhIssueReader + GhIssueWriter + GhGraphql, R: Gi
             Some(s) => Ok(s as &mut dyn DocumentStore),
             None => bail!(
                 "type '{}' uses {} store but no GitHub backend is configured",
+                type_def.name,
+                type_def.store
+            ),
+        },
+        StoreBackend::GithubMilestones => match milestone_store {
+            Some(s) => Ok(s as &mut dyn DocumentStore),
+            None => bail!(
+                "type '{}' uses {} store but no GitHub milestones backend is configured",
                 type_def.name,
                 type_def.store
             ),
@@ -601,7 +828,10 @@ pub fn dispatch_for_type<'a, G: GhIssueReader + GhIssueWriter + GhGraphql, R: Gi
 mod tests {
     use super::*;
     use crate::engine::config::{Config, NumberingStrategy, StoreBackend, TypeDef};
-    use crate::engine::gh::{test_support::MockGhClient, GhIssue, GhLabel};
+    use crate::engine::gh::{
+        test_support::{MockGhClient, MockGhMilestoneClient},
+        GhIssue, GhLabel, GhMilestoneApi,
+    };
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use crate::engine::issue_map::IssueMap;
 
@@ -1193,6 +1423,197 @@ mod tests {
         assert!(!cache_file.exists());
     }
 
+    fn milestone_store(
+        root: &std::path::Path,
+        client: MockGhMilestoneClient,
+    ) -> GithubMilestonesStore<MockGhMilestoneClient> {
+        GithubMilestonesStore {
+            client,
+            root: root.to_path_buf(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: IssueMap::load(root).unwrap(),
+        }
+    }
+
+    // AC1: create calls milestone_create with title/description, id == make_id(number),
+    // issue_map maps doc_id -> number, cache file written.
+    #[test]
+    fn milestone_create_writes_cache_and_maps_number() {
+        let root = tmp_root("ms_create");
+        let mut store = milestone_store(&root, MockGhMilestoneClient::new());
+        let td = test_type_def(StoreBackend::GithubMilestones);
+
+        let created = store
+            .create(&td, "v1.0", "author", "first release")
+            .unwrap();
+
+        assert_eq!(created.id, td.make_id(1));
+        assert_eq!(store.client.create_calls.get(), 1);
+        let ms = &store.client.milestones.borrow()[0];
+        assert_eq!(ms.title, "v1.0");
+        assert_eq!(ms.description, "first release");
+
+        let entry = store.issue_map.get(&created.id).unwrap();
+        assert_eq!(entry.issue_number, 1);
+
+        assert!(root.join(&created.path).exists());
+    }
+
+    // AC2: update [title, body, due_on] -> milestone_edit records changed fields;
+    // re-read via milestone_view returns updates; cache reflects them.
+    #[test]
+    fn milestone_update_round_trips_changed_fields() {
+        let root = tmp_root("ms_update");
+        let mut store = milestone_store(&root, MockGhMilestoneClient::new());
+        let td = test_type_def(StoreBackend::GithubMilestones);
+
+        let created = store.create(&td, "v1.0", "author", "old desc").unwrap();
+        store
+            .update(
+                &td,
+                &created.id,
+                &[
+                    ("title", "v2.0"),
+                    ("body", "new desc"),
+                    ("due_on", "2026-09-01T00:00:00Z"),
+                ],
+            )
+            .unwrap();
+
+        let edit = store.client.last_edit.borrow();
+        let edit = edit.as_ref().unwrap();
+        assert_eq!(edit.title.as_deref(), Some("v2.0"));
+        assert_eq!(edit.description.as_deref(), Some("new desc"));
+        assert_eq!(edit.due_on.as_deref(), Some("2026-09-01T00:00:00Z"));
+
+        let viewed = store.client.milestone_view("owner/repo", 1).unwrap();
+        assert_eq!(viewed.title, "v2.0");
+        assert_eq!(viewed.description, "new desc");
+
+        let cache = std::fs::read_to_string(root.join(&created.path)).unwrap();
+        assert!(cache.contains("v2.0"), "cache title updated: {cache}");
+        assert!(cache.contains("new desc"), "cache body updated: {cache}");
+        assert!(
+            cache.contains("2026-09-01T00:00:00Z"),
+            "cache due_on updated: {cache}"
+        );
+    }
+
+    // AC3: state <-> status mappings, and loading a closed milestone materializes
+    // a closed-equivalent status in the cache.
+    #[test]
+    fn milestone_state_status_mappings() {
+        assert_eq!(milestone_state_to_status("closed").as_str(), "complete");
+        assert_eq!(milestone_state_to_status("open").as_str(), "in-progress");
+        assert_eq!(
+            status_to_milestone_state(&Status::new("complete")),
+            "closed"
+        );
+        assert_eq!(status_to_milestone_state(&Status::new("draft")), "open");
+    }
+
+    #[test]
+    fn milestone_update_status_complete_closes_state_and_cache() {
+        let root = tmp_root("ms_close");
+        let mut store = milestone_store(&root, MockGhMilestoneClient::new());
+        let td = test_type_def(StoreBackend::GithubMilestones);
+
+        let created = store.create(&td, "v1.0", "author", "desc").unwrap();
+        store
+            .update(&td, &created.id, &[("status", "complete")])
+            .unwrap();
+
+        let edit = store.client.last_edit.borrow();
+        assert_eq!(edit.as_ref().unwrap().state.as_deref(), Some("closed"));
+
+        let cache = std::fs::read_to_string(root.join(&created.path)).unwrap();
+        assert!(cache.contains("status: complete"), "cache: {cache}");
+    }
+
+    // AC5: percent_complete is computed, and updating it is rejected (never PATCHed).
+    #[test]
+    fn percent_complete_computed() {
+        assert_eq!(percent_complete(7, 3), Some(30));
+        assert_eq!(percent_complete(0, 0), None);
+        assert_eq!(percent_complete(0, 5), Some(100));
+    }
+
+    #[test]
+    fn milestone_update_percent_complete_is_rejected() {
+        let root = tmp_root("ms_pct_reject");
+        let mut store = milestone_store(&root, MockGhMilestoneClient::new());
+        let td = test_type_def(StoreBackend::GithubMilestones);
+        let created = store.create(&td, "v1.0", "author", "desc").unwrap();
+
+        let err = store
+            .update(&td, &created.id, &[("percent_complete", "50")])
+            .unwrap_err();
+        assert!(err.to_string().contains("percent_complete"), "{err}");
+        // No edit was issued.
+        assert!(store.client.last_edit.borrow().is_none());
+    }
+
+    #[test]
+    fn milestone_delete_removes_milestone_map_and_cache() {
+        let root = tmp_root("ms_delete");
+        let mut store = milestone_store(&root, MockGhMilestoneClient::new());
+        let td = test_type_def(StoreBackend::GithubMilestones);
+        let created = store.create(&td, "v1.0", "author", "desc").unwrap();
+
+        store.delete(&td, &created.id).unwrap();
+
+        assert!(store.client.milestones.borrow().is_empty());
+        assert!(store.issue_map.get(&created.id).is_none());
+        assert!(!root.join(&created.path).exists());
+    }
+
+    // AC6: dispatch routes a github-milestones type to the milestone store.
+    #[test]
+    fn dispatch_routes_to_github_milestones() {
+        let root = tmp_root("dispatch_ms");
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config: Config::default(),
+        };
+        let mut ms_store = milestone_store(&root, MockGhMilestoneClient::new());
+
+        let td = test_type_def(StoreBackend::GithubMilestones);
+        let store = dispatch_for_type::<MockGhClient, MockGitRefClient, _>(
+            &td,
+            &mut fs_store,
+            None,
+            None,
+            Some(&mut ms_store),
+        )
+        .unwrap();
+        let result = store.create(&td, "dispatched", "author", "");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_github_milestones_without_backend_errors() {
+        let root = tmp_root("dispatch_no_ms");
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config: Config::default(),
+        };
+        let td = test_type_def(StoreBackend::GithubMilestones);
+        let result = dispatch_for_type::<MockGhClient, MockGitRefClient, MockGhMilestoneClient>(
+            &td,
+            &mut fs_store,
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("GitHub milestones backend"));
+    }
+
     #[test]
     fn dispatch_routes_to_filesystem() {
         let root = tmp_root("dispatch_fs");
@@ -1204,9 +1625,14 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::Filesystem);
-        let store =
-            dispatch_for_type::<MockGhClient, MockGitRefClient>(&td, &mut fs_store, None, None)
-                .unwrap();
+        let store = dispatch_for_type::<MockGhClient, MockGitRefClient, MockGhMilestoneClient>(
+            &td,
+            &mut fs_store,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Should succeed (routed to filesystem)
         let result = store.create(&td, "dispatched", "author", "");
@@ -1233,9 +1659,14 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
-        let store =
-            dispatch_for_type::<_, MockGitRefClient>(&td, &mut fs_store, Some(&mut gh_store), None)
-                .unwrap();
+        let store = dispatch_for_type::<_, MockGitRefClient, MockGhMilestoneClient>(
+            &td,
+            &mut fs_store,
+            Some(&mut gh_store),
+            None,
+            None,
+        )
+        .unwrap();
 
         let result = store.create(&td, "dispatched", "author", "");
         assert!(result.is_ok());
@@ -1443,8 +1874,13 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
-        let result =
-            dispatch_for_type::<MockGhClient, MockGitRefClient>(&td, &mut fs_store, None, None);
+        let result = dispatch_for_type::<MockGhClient, MockGitRefClient, MockGhMilestoneClient>(
+            &td,
+            &mut fs_store,
+            None,
+            None,
+            None,
+        );
         assert!(result.is_err());
         assert!(result
             .err()
@@ -1474,11 +1910,12 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::GitRef);
-        let store = dispatch_for_type::<MockGhClient, _>(
+        let store = dispatch_for_type::<MockGhClient, _, MockGhMilestoneClient>(
             &td,
             &mut fs_store,
             None,
             Some(&mut git_ref_store),
+            None,
         )
         .unwrap();
 
@@ -1505,11 +1942,12 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::Filesystem);
-        let store = dispatch_for_type::<MockGhClient, _>(
+        let store = dispatch_for_type::<MockGhClient, _, MockGhMilestoneClient>(
             &td,
             &mut fs_store,
             None,
             Some(&mut git_ref_store),
+            None,
         )
         .unwrap();
 
@@ -1532,8 +1970,13 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::GitRef);
-        let result =
-            dispatch_for_type::<MockGhClient, MockGitRefClient>(&td, &mut fs_store, None, None);
+        let result = dispatch_for_type::<MockGhClient, MockGitRefClient, MockGhMilestoneClient>(
+            &td,
+            &mut fs_store,
+            None,
+            None,
+            None,
+        );
         assert!(result.is_err());
         assert!(result
             .err()

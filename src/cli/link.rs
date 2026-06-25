@@ -3,7 +3,7 @@ use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::document::{rewrite_frontmatter, RelationType};
 use crate::engine::fs::FileSystem;
-use crate::engine::gh::{GhCli, GhGraphql, GhIssueReader, GhIssueWriter};
+use crate::engine::gh::{GhCli, GhGraphql, GhIssueReader, GhIssueWriter, GhMilestoneApi};
 use crate::engine::git_ref::{GitCli, GitRefOps};
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
@@ -31,11 +31,21 @@ pub fn link_with_config(
     fs: &dyn FileSystem,
     config: Option<&Config>,
 ) -> Result<LinkOutcome> {
-    link_inner(root, store, from, rel_type, to, fs, config, GhCli::new)
+    link_inner(
+        root,
+        store,
+        from,
+        rel_type,
+        to,
+        fs,
+        config,
+        GhCli::new,
+        GhCli::new,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn link_inner<G: GhIssueReader + GhIssueWriter + GhGraphql>(
+fn link_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi>(
     root: &Path,
     store: &Store,
     from: &str,
@@ -44,6 +54,7 @@ fn link_inner<G: GhIssueReader + GhIssueWriter + GhGraphql>(
     fs: &dyn FileSystem,
     config: Option<&Config>,
     client_factory: impl FnOnce() -> G,
+    milestone_factory: impl FnOnce() -> M,
 ) -> Result<LinkOutcome> {
     let config = config.ok_or_else(|| {
         anyhow!("link requires a loaded config to resolve relationships from [[relationships]]")
@@ -53,6 +64,7 @@ fn link_inner<G: GhIssueReader + GhIssueWriter + GhGraphql>(
 
     let resolved_from = resolve_to_path(store, from)?;
     let to_id = resolve_to_id(store, to)?;
+    let from_id = resolve_to_id(store, from)?;
     let full_path = root.join(&resolved_from);
     rewrite_frontmatter(&full_path, fs, |doc| {
         if doc.get("related").is_none() {
@@ -70,6 +82,15 @@ fn link_inner<G: GhIssueReader + GhIssueWriter + GhGraphql>(
         Ok(())
     })?;
 
+    apply_native_milestone(
+        root,
+        config,
+        &rel_str,
+        &from_id,
+        &to_id,
+        true,
+        milestone_factory,
+    )?;
     push_if_github_backed(root, &resolved_from, Some(config), client_factory)?;
     push_if_git_ref_backed(root, &resolved_from, Some(config))?;
     Ok(LinkOutcome {
@@ -77,6 +98,50 @@ fn link_inner<G: GhIssueReader + GhIssueWriter + GhGraphql>(
         rel_type: RelationType::new(&rel_str),
         target: to_id,
     })
+}
+
+/// If `rel_str` declares `github_native = "milestone"`, write the native issue
+/// -> milestone association on GitHub (`PATCH issues/{n}` -- the edge of
+/// record). `set` true links (milestone number), false unlinks (null).
+/// Source/target numbers come from the shared issue map. A no-op for ordinary
+/// relationships.
+fn apply_native_milestone<M: GhMilestoneApi>(
+    root: &Path,
+    config: &Config,
+    rel_str: &str,
+    source_id: &str,
+    target_id: &str,
+    set: bool,
+    milestone_factory: impl FnOnce() -> M,
+) -> Result<()> {
+    let is_milestone_rel = config
+        .relationship_by_name(rel_str)
+        .and_then(|r| r.github_native.as_deref())
+        == Some("milestone");
+    if !is_milestone_rel {
+        return Ok(());
+    }
+
+    let repo = config
+        .documents
+        .github
+        .as_ref()
+        .and_then(|g| g.repo.as_ref())
+        .ok_or_else(|| anyhow!("github_native milestone relations require [github].repo"))?;
+
+    let issue_map = IssueMap::load(root)?;
+    let issue_number = issue_map
+        .get(source_id)
+        .map(|e| e.issue_number)
+        .ok_or_else(|| anyhow!("source '{}' has no GitHub issue number", source_id))?;
+    let milestone_number = issue_map
+        .get(target_id)
+        .map(|e| e.issue_number)
+        .ok_or_else(|| anyhow!("target '{}' has no GitHub milestone number", target_id))?;
+
+    let client = milestone_factory();
+    let value = if set { Some(milestone_number) } else { None };
+    client.issue_set_milestone(repo, issue_number, value)
 }
 
 pub fn unlink_with_config(
@@ -88,6 +153,31 @@ pub fn unlink_with_config(
     fs: &dyn FileSystem,
     config: Option<&Config>,
 ) -> Result<LinkOutcome> {
+    unlink_inner(
+        root,
+        store,
+        from,
+        rel_type,
+        to,
+        fs,
+        config,
+        GhCli::new,
+        GhCli::new,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn unlink_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi>(
+    root: &Path,
+    store: &Store,
+    from: &str,
+    rel_type: &str,
+    to: &str,
+    fs: &dyn FileSystem,
+    config: Option<&Config>,
+    client_factory: impl FnOnce() -> G,
+    milestone_factory: impl FnOnce() -> M,
+) -> Result<LinkOutcome> {
     let config = config.ok_or_else(|| {
         anyhow!("unlink requires a loaded config to resolve relationships from [[relationships]]")
     })?;
@@ -96,6 +186,7 @@ pub fn unlink_with_config(
 
     let resolved_from = resolve_to_path(store, from)?;
     let to_id = resolve_to_id(store, to)?;
+    let from_id = resolve_to_id(store, from)?;
     let full_path = root.join(&resolved_from);
     rewrite_frontmatter(&full_path, fs, |doc| {
         if let Some(related) = doc.get_mut("related").and_then(|r| r.as_sequence_mut()) {
@@ -112,7 +203,16 @@ pub fn unlink_with_config(
         Ok(())
     })?;
 
-    push_if_github_backed(root, &resolved_from, Some(config), GhCli::new)?;
+    apply_native_milestone(
+        root,
+        config,
+        &rel_str,
+        &from_id,
+        &to_id,
+        false,
+        milestone_factory,
+    )?;
+    push_if_github_backed(root, &resolved_from, Some(config), client_factory)?;
     push_if_git_ref_backed(root, &resolved_from, Some(config))?;
     Ok(LinkOutcome {
         source: resolved_from,
@@ -244,7 +344,10 @@ mod tests {
     use super::*;
     use crate::engine::config::{Config, GithubConfig, NumberingStrategy, StoreBackend, TypeDef};
     use crate::engine::fs::RealFileSystem;
-    use crate::engine::gh::{test_support::MockGhClient, GhIssue, GhLabel};
+    use crate::engine::gh::{
+        test_support::{MockGhClient, MockGhMilestoneClient},
+        GhIssue, GhLabel,
+    };
     use crate::engine::issue_map::IssueMap;
     use crate::engine::store::Store;
 
@@ -257,6 +360,121 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn milestone_assoc_config() -> Config {
+        let issue_type = |name: &str, prefix: &str, store: StoreBackend| TypeDef {
+            name: name.to_string(),
+            plural: format!("{}s", name),
+            dir: format!("docs/{}", name),
+            prefix: prefix.to_string(),
+            icon: None,
+            numbering: NumberingStrategy::Incremental,
+            subdirectory: false,
+            store,
+            singleton: false,
+            parent_type: None,
+            agents: Vec::new(),
+            intent: None,
+            authorship: Default::default(),
+            lifecycle: Default::default(),
+            attributes: Default::default(),
+        };
+        let mut config = Config::default();
+        config.documents.types = vec![
+            issue_type("story", "STORY", StoreBackend::GithubIssues),
+            issue_type("milestone", "MILESTONE", StoreBackend::GithubMilestones),
+        ];
+        config.documents.github = Some(GithubConfig {
+            repo: Some("owner/repo".to_string()),
+            cache_ttl: 60,
+        });
+        config.relationships = vec![crate::engine::config::RelationshipDef {
+            name: "targets".to_string(),
+            inverse: Some("targeted-by".to_string()),
+            github_native: Some("milestone".to_string()),
+        }];
+        config
+    }
+
+    fn write_cache_doc(dir: &std::path::Path, file: &str, title: &str, ty: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        let content = format!(
+            "---\ntitle: {title}\ntype: {ty}\nstatus: draft\nauthor: a\ndate: 2026-03-27\ntags: []\n---\nbody\n"
+        );
+        std::fs::write(dir.join(file), content).unwrap();
+    }
+
+    // AC4: linking a github-issues doc to a github-milestones doc via a
+    // github_native="milestone" relationship records issue_set_milestone with
+    // (issue_num, Some(milestone_num)); unlink records (issue_num, None).
+    #[test]
+    fn link_native_milestone_sets_and_clears_association() {
+        let root = tmp_root("link_native_ms");
+        let config = milestone_assoc_config();
+
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story"),
+            "STORY-7.md",
+            "My Story",
+            "story",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/milestone"),
+            "MILESTONE-3.md",
+            "v1.0",
+            "milestone",
+        );
+
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "");
+        issue_map.insert("MILESTONE-3", 3, "");
+        issue_map.save(&root).unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+
+        let recorder = std::rc::Rc::new(MockGhMilestoneClient::new());
+
+        link_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "targets",
+            "MILESTONE-3",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            || recorder.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(*recorder.last_set_milestone.borrow(), Some((7, Some(3))));
+
+        // The frontmatter relation was recorded too (surfaces via --json related).
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(
+            updated.contains("targets: MILESTONE-3"),
+            "frontmatter should carry the relation, got:\n{updated}"
+        );
+
+        // Unlink clears the native association.
+        let recorder2 = std::rc::Rc::new(MockGhMilestoneClient::new());
+        let store = Store::load(&root, &config).unwrap();
+        unlink_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "targets",
+            "MILESTONE-3",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            || recorder2.clone(),
+        )
+        .unwrap();
+        assert_eq!(*recorder2.last_set_milestone.borrow(), Some((7, None)));
     }
 
     fn gh_config_with_rfc_type() -> Config {
@@ -391,6 +609,7 @@ mod tests {
             &fs,
             Some(&config),
             || MockGhClient::new().with_view_issue(view_issue),
+            MockGhMilestoneClient::new,
         )
         .unwrap();
 
@@ -543,6 +762,7 @@ mod tests {
             &fs,
             Some(&config),
             MockGhClient::new,
+            MockGhMilestoneClient::new,
         )
         .unwrap();
 
@@ -629,6 +849,7 @@ mod tests {
             &fs,
             Some(&config),
             MockGhClient::new,
+            MockGhMilestoneClient::new,
         )
         .unwrap();
 

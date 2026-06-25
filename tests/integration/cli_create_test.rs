@@ -1,6 +1,34 @@
-use lazyspec::engine::config::{NumberingStrategy, TypeDef};
+use lazyspec::engine::config::{Config, NumberingStrategy, StoreBackend, TypeDef};
 use lazyspec::engine::template;
 use std::fs;
+
+/// A config whose only type is a github-milestones-backed type with NO
+/// `[github]` config. Used to prove the real command path routes such a type
+/// into the milestone branch: if it falls through to the filesystem path the
+/// call succeeds; if it enters the milestone branch it errors on the missing
+/// `[github]` config.
+fn milestones_only_config() -> Config {
+    let mut config = Config::default();
+    config.documents.types = vec![TypeDef {
+        name: "milestone".to_string(),
+        plural: "milestones".to_string(),
+        dir: "docs/milestones".to_string(),
+        prefix: "MILESTONE".to_string(),
+        icon: None,
+        numbering: NumberingStrategy::Incremental,
+        subdirectory: false,
+        store: StoreBackend::GithubMilestones,
+        singleton: false,
+        parent_type: None,
+        agents: Vec::new(),
+        intent: None,
+        authorship: Default::default(),
+        lifecycle: Default::default(),
+        attributes: Default::default(),
+    }];
+    config.documents.github = None;
+    config
+}
 
 fn singleton_type(name: &str, dir: &str, prefix: &str) -> TypeDef {
     TypeDef {
@@ -196,6 +224,34 @@ fn create_unknown_type_returns_error_with_valid_types() {
     assert!(
         err.contains("story"),
         "error should list valid types, got: {}",
+        err
+    );
+}
+
+// Regression: a github-milestones type must route through the milestone branch
+// of the real `create` command path, not fall through to the filesystem store.
+// With no [github] config the milestone branch errors; a filesystem fall-through
+// would instead succeed.
+#[test]
+fn create_github_milestones_type_routes_to_milestone_branch() {
+    let fixture = crate::common::TestFixture::new();
+    let config = milestones_only_config();
+    let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
+
+    let result = lazyspec::cli::create::run(
+        fixture.root(),
+        &config,
+        &store,
+        "milestone",
+        "v1.0",
+        "author",
+        |_| {},
+    );
+
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("github-milestones store but no [github] config"),
+        "expected milestone-branch error, got: {}",
         err
     );
 }

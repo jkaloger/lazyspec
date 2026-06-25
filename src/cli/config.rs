@@ -212,6 +212,7 @@ fn parse_store(value: &str) -> Result<StoreBackend> {
     match value {
         "filesystem" => Ok(StoreBackend::Filesystem),
         "github-issues" => Ok(StoreBackend::GithubIssues),
+        "github-milestones" => Ok(StoreBackend::GithubMilestones),
         "git-ref" => Ok(StoreBackend::GitRef),
         other => bail!("unknown store backend \"{}\"", other),
     }

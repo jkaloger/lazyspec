@@ -44,6 +44,28 @@ pub struct GhIssue {
     pub issue_type: Option<String>,
 }
 
+/// A GitHub milestone (REST shape). Field names mirror the REST API so a
+/// `gh api repos/{repo}/milestones` response deserializes directly.
+/// `open_issues`/`closed_issues` are read-only counts used to compute progress.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+pub struct GhMilestone {
+    pub number: u64,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub due_on: Option<String>,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub open_issues: u64,
+    #[serde(default)]
+    pub closed_issues: u64,
+    #[serde(default, rename = "html_url")]
+    pub url: String,
+}
+
 // --- Error types ---
 
 #[derive(Debug)]
@@ -102,6 +124,39 @@ pub fn parse_issue_list_json(stdout: &str) -> Result<Vec<GhIssue>> {
         .map_err(|e| anyhow::anyhow!("failed to parse issue list JSON: {}", e))
 }
 
+pub fn parse_milestone_json(stdout: &str) -> Result<GhMilestone> {
+    serde_json::from_str(stdout)
+        .map_err(|e| anyhow::anyhow!("failed to parse milestone JSON: {}", e))
+}
+
+pub fn parse_milestone_list_json(stdout: &str) -> Result<Vec<GhMilestone>> {
+    serde_json::from_str(stdout)
+        .map_err(|e| anyhow::anyhow!("failed to parse milestone list JSON: {}", e))
+}
+
+/// Pure argv builder for `issue_set_milestone`. `None` clears the milestone and
+/// MUST emit `-F milestone=null` (a JSON null, not the string `"null"`);
+/// `Some(n)` emits `-F milestone=<n>` (a typed int). `-F` (not `-f`) is what
+/// makes `gh` send the value as raw JSON rather than a string.
+pub fn build_set_milestone_args(
+    repo: &str,
+    issue_number: u64,
+    milestone: Option<u64>,
+) -> Vec<String> {
+    let value = match milestone {
+        Some(n) => n.to_string(),
+        None => "null".to_string(),
+    };
+    vec![
+        "api".to_string(),
+        "-X".to_string(),
+        "PATCH".to_string(),
+        format!("repos/{}/issues/{}", repo, issue_number),
+        "-F".to_string(),
+        format!("milestone={}", value),
+    ]
+}
+
 // --- Label helpers ---
 
 pub fn type_label(type_name: &str) -> String {
@@ -155,6 +210,45 @@ pub trait GhIssueWriter {
     fn label_create(&self, repo: &str, name: &str, description: &str, color: &str) -> Result<()>;
 
     fn label_ensure(&self, repo: &str, name: &str, description: &str, color: &str) -> Result<()>;
+}
+
+/// REST seam for GitHub milestones, kept separate from the issue traits so it
+/// can be faked independently. Milestones use the REST API (`gh api
+/// repos/{repo}/milestones`), not GraphQL.
+pub trait GhMilestoneApi {
+    fn milestone_list(&self, repo: &str) -> Result<Vec<GhMilestone>>;
+
+    fn milestone_view(&self, repo: &str, number: u64) -> Result<GhMilestone>;
+
+    fn milestone_create(
+        &self,
+        repo: &str,
+        title: &str,
+        description: &str,
+        due_on: Option<&str>,
+        state: &str,
+    ) -> Result<GhMilestone>;
+
+    fn milestone_edit(
+        &self,
+        repo: &str,
+        number: u64,
+        title: Option<&str>,
+        description: Option<&str>,
+        due_on: Option<&str>,
+        state: Option<&str>,
+    ) -> Result<GhMilestone>;
+
+    fn milestone_delete(&self, repo: &str, number: u64) -> Result<()>;
+
+    /// Set or clear the milestone association on an issue (`PATCH issues/{n}`,
+    /// the GitHub edge of record). `None` clears it.
+    fn issue_set_milestone(
+        &self,
+        repo: &str,
+        issue_number: u64,
+        milestone: Option<u64>,
+    ) -> Result<()>;
 }
 
 pub trait GhAuth {
@@ -412,6 +506,98 @@ impl GhIssueWriter for GhCli {
             color,
             "--force",
         ])?;
+        Ok(())
+    }
+}
+
+impl GhMilestoneApi for GhCli {
+    fn milestone_list(&self, repo: &str) -> Result<Vec<GhMilestone>> {
+        let endpoint = format!("repos/{}/milestones?state=all", repo);
+        let stdout = self.run_gh_checked(&["api", &endpoint])?;
+        parse_milestone_list_json(&stdout)
+    }
+
+    fn milestone_view(&self, repo: &str, number: u64) -> Result<GhMilestone> {
+        let endpoint = format!("repos/{}/milestones/{}", repo, number);
+        let stdout = self.run_gh_checked(&["api", &endpoint])?;
+        parse_milestone_json(&stdout)
+    }
+
+    fn milestone_create(
+        &self,
+        repo: &str,
+        title: &str,
+        description: &str,
+        due_on: Option<&str>,
+        state: &str,
+    ) -> Result<GhMilestone> {
+        let endpoint = format!("repos/{}/milestones", repo);
+        let title_arg = format!("title={}", title);
+        let desc_arg = format!("description={}", description);
+        let state_arg = format!("state={}", state);
+        let mut args = vec![
+            "api", "-X", "POST", &endpoint, "-f", &title_arg, "-f", &desc_arg, "-f", &state_arg,
+        ];
+        let due_arg;
+        if let Some(due) = due_on {
+            due_arg = format!("due_on={}", due);
+            args.push("-f");
+            args.push(&due_arg);
+        }
+        let stdout = self.run_gh_checked(&args)?;
+        parse_milestone_json(&stdout)
+    }
+
+    fn milestone_edit(
+        &self,
+        repo: &str,
+        number: u64,
+        title: Option<&str>,
+        description: Option<&str>,
+        due_on: Option<&str>,
+        state: Option<&str>,
+    ) -> Result<GhMilestone> {
+        let endpoint = format!("repos/{}/milestones/{}", repo, number);
+        let mut args = vec![
+            "api".to_string(),
+            "-X".to_string(),
+            "PATCH".to_string(),
+            endpoint,
+        ];
+        if let Some(t) = title {
+            args.push("-f".to_string());
+            args.push(format!("title={}", t));
+        }
+        if let Some(d) = description {
+            args.push("-f".to_string());
+            args.push(format!("description={}", d));
+        }
+        if let Some(d) = due_on {
+            args.push("-f".to_string());
+            args.push(format!("due_on={}", d));
+        }
+        if let Some(s) = state {
+            args.push("-f".to_string());
+            args.push(format!("state={}", s));
+        }
+        let stdout = self.run_gh_checked(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        parse_milestone_json(&stdout)
+    }
+
+    fn milestone_delete(&self, repo: &str, number: u64) -> Result<()> {
+        let endpoint = format!("repos/{}/milestones/{}", repo, number);
+        self.run_gh_checked(&["api", "-X", "DELETE", &endpoint])?;
+        Ok(())
+    }
+
+    fn issue_set_milestone(
+        &self,
+        repo: &str,
+        issue_number: u64,
+        milestone: Option<u64>,
+    ) -> Result<()> {
+        let args = build_set_milestone_args(repo, issue_number, milestone);
+        self.run_gh_checked(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
         Ok(())
     }
 }
@@ -742,6 +928,186 @@ pub mod test_support {
         }
     }
 
+    /// In-memory fake for [`GhMilestoneApi`]. create/edit mutate the backing vec
+    /// so a subsequent view round-trips the change; `last_set_milestone` records
+    /// the most recent issue->milestone association write. Zero network.
+    pub struct MockGhMilestoneClient {
+        pub milestones: RefCell<Vec<GhMilestone>>,
+        pub next_number: Cell<u64>,
+        pub last_set_milestone: RefCell<Option<(u64, Option<u64>)>>,
+        pub last_edit: RefCell<Option<MilestoneEdit>>,
+        pub create_calls: Cell<usize>,
+    }
+
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct MilestoneEdit {
+        pub number: u64,
+        pub title: Option<String>,
+        pub description: Option<String>,
+        pub due_on: Option<String>,
+        pub state: Option<String>,
+    }
+
+    impl Default for MockGhMilestoneClient {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl MockGhMilestoneClient {
+        pub fn new() -> Self {
+            Self {
+                milestones: RefCell::new(vec![]),
+                next_number: Cell::new(1),
+                last_set_milestone: RefCell::new(None),
+                last_edit: RefCell::new(None),
+                create_calls: Cell::new(0),
+            }
+        }
+
+        pub fn with_milestones(milestones: Vec<GhMilestone>) -> Self {
+            let next = milestones.iter().map(|m| m.number).max().unwrap_or(0) + 1;
+            let me = Self::new();
+            *me.milestones.borrow_mut() = milestones;
+            me.next_number.set(next);
+            me
+        }
+    }
+
+    impl GhMilestoneApi for MockGhMilestoneClient {
+        fn milestone_list(&self, _repo: &str) -> Result<Vec<GhMilestone>> {
+            Ok(self.milestones.borrow().clone())
+        }
+
+        fn milestone_view(&self, _repo: &str, number: u64) -> Result<GhMilestone> {
+            self.milestones
+                .borrow()
+                .iter()
+                .find(|m| m.number == number)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("milestone {} not found", number))
+        }
+
+        fn milestone_create(
+            &self,
+            _repo: &str,
+            title: &str,
+            description: &str,
+            due_on: Option<&str>,
+            state: &str,
+        ) -> Result<GhMilestone> {
+            self.create_calls.set(self.create_calls.get() + 1);
+            let number = self.next_number.get();
+            self.next_number.set(number + 1);
+            let milestone = GhMilestone {
+                number,
+                title: title.to_string(),
+                description: description.to_string(),
+                due_on: due_on.map(|s| s.to_string()),
+                state: state.to_string(),
+                open_issues: 0,
+                closed_issues: 0,
+                url: format!("https://github.com/test/repo/milestone/{}", number),
+            };
+            self.milestones.borrow_mut().push(milestone.clone());
+            Ok(milestone)
+        }
+
+        fn milestone_edit(
+            &self,
+            _repo: &str,
+            number: u64,
+            title: Option<&str>,
+            description: Option<&str>,
+            due_on: Option<&str>,
+            state: Option<&str>,
+        ) -> Result<GhMilestone> {
+            *self.last_edit.borrow_mut() = Some(MilestoneEdit {
+                number,
+                title: title.map(|s| s.to_string()),
+                description: description.map(|s| s.to_string()),
+                due_on: due_on.map(|s| s.to_string()),
+                state: state.map(|s| s.to_string()),
+            });
+            let mut milestones = self.milestones.borrow_mut();
+            let m = milestones
+                .iter_mut()
+                .find(|m| m.number == number)
+                .ok_or_else(|| anyhow::anyhow!("milestone {} not found", number))?;
+            if let Some(t) = title {
+                m.title = t.to_string();
+            }
+            if let Some(d) = description {
+                m.description = d.to_string();
+            }
+            if let Some(d) = due_on {
+                m.due_on = Some(d.to_string());
+            }
+            if let Some(s) = state {
+                m.state = s.to_string();
+            }
+            Ok(m.clone())
+        }
+
+        fn milestone_delete(&self, _repo: &str, number: u64) -> Result<()> {
+            self.milestones.borrow_mut().retain(|m| m.number != number);
+            Ok(())
+        }
+
+        fn issue_set_milestone(
+            &self,
+            _repo: &str,
+            issue_number: u64,
+            milestone: Option<u64>,
+        ) -> Result<()> {
+            *self.last_set_milestone.borrow_mut() = Some((issue_number, milestone));
+            Ok(())
+        }
+    }
+
+    /// Delegating impl so a shared `Rc<MockGhMilestoneClient>` can be moved into
+    /// an `FnOnce` factory while the original handle remains inspectable after.
+    impl GhMilestoneApi for std::rc::Rc<MockGhMilestoneClient> {
+        fn milestone_list(&self, repo: &str) -> Result<Vec<GhMilestone>> {
+            (**self).milestone_list(repo)
+        }
+        fn milestone_view(&self, repo: &str, number: u64) -> Result<GhMilestone> {
+            (**self).milestone_view(repo, number)
+        }
+        fn milestone_create(
+            &self,
+            repo: &str,
+            title: &str,
+            description: &str,
+            due_on: Option<&str>,
+            state: &str,
+        ) -> Result<GhMilestone> {
+            (**self).milestone_create(repo, title, description, due_on, state)
+        }
+        fn milestone_edit(
+            &self,
+            repo: &str,
+            number: u64,
+            title: Option<&str>,
+            description: Option<&str>,
+            due_on: Option<&str>,
+            state: Option<&str>,
+        ) -> Result<GhMilestone> {
+            (**self).milestone_edit(repo, number, title, description, due_on, state)
+        }
+        fn milestone_delete(&self, repo: &str, number: u64) -> Result<()> {
+            (**self).milestone_delete(repo, number)
+        }
+        fn issue_set_milestone(
+            &self,
+            repo: &str,
+            issue_number: u64,
+            milestone: Option<u64>,
+        ) -> Result<()> {
+            (**self).issue_set_milestone(repo, issue_number, milestone)
+        }
+    }
+
     impl GhGraphql for MockGhClient {
         fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
             let recorded = vars
@@ -763,7 +1129,7 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::MockGhClient;
+    use super::test_support::{MockGhClient, MockGhMilestoneClient};
     use super::*;
 
     // --- JSON parsing tests ---
@@ -1146,6 +1512,106 @@ mod tests {
             calls[0].1,
             vec![("owner".to_string(), GqlVar::Str("foo".to_string()))]
         );
+    }
+
+    // --- Milestone parsing + argv tests ---
+
+    #[test]
+    fn parse_single_milestone_rest_fields() {
+        let json = r#"{
+            "number": 3,
+            "title": "v1.0",
+            "description": "first release",
+            "due_on": "2026-09-01T00:00:00Z",
+            "state": "open",
+            "open_issues": 7,
+            "closed_issues": 3,
+            "html_url": "https://github.com/o/r/milestone/3"
+        }"#;
+        let m = parse_milestone_json(json).unwrap();
+        assert_eq!(m.number, 3);
+        assert_eq!(m.title, "v1.0");
+        assert_eq!(m.description, "first release");
+        assert_eq!(m.due_on.as_deref(), Some("2026-09-01T00:00:00Z"));
+        assert_eq!(m.state, "open");
+        assert_eq!(m.open_issues, 7);
+        assert_eq!(m.closed_issues, 3);
+        assert_eq!(m.url, "https://github.com/o/r/milestone/3");
+    }
+
+    #[test]
+    fn parse_milestone_list_and_null_due_on() {
+        let json = r#"[
+            {"number": 1, "title": "a", "due_on": null, "state": "closed"},
+            {"number": 2, "title": "b", "state": "open"}
+        ]"#;
+        let list = parse_milestone_list_json(json).unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list[0].due_on.is_none());
+        assert_eq!(list[0].state, "closed");
+    }
+
+    // AC4 (real-client edge): clearing the milestone emits `-F milestone=null`
+    // (a JSON null), not the string "null"; -F is required so gh sends raw JSON.
+    #[test]
+    fn build_set_milestone_args_none_emits_json_null() {
+        let args = build_set_milestone_args("o/r", 12, None);
+        let pos = args.iter().position(|a| a == "milestone=null").unwrap();
+        assert_eq!(args[pos - 1], "-F", "must use -F so value is raw JSON null");
+        assert!(!args.iter().any(|a| a == "-f"), "must not use -f for null");
+        assert!(args.contains(&"PATCH".to_string()));
+        assert!(args.contains(&"repos/o/r/issues/12".to_string()));
+    }
+
+    #[test]
+    fn build_set_milestone_args_some_emits_typed_int() {
+        let args = build_set_milestone_args("o/r", 12, Some(5));
+        let pos = args.iter().position(|a| a == "milestone=5").unwrap();
+        assert_eq!(args[pos - 1], "-F", "must use -F so value is a typed int");
+    }
+
+    #[test]
+    fn mock_milestone_create_then_view_round_trips() {
+        let client = MockGhMilestoneClient::new();
+        let created = client
+            .milestone_create("o/r", "v1", "desc", Some("2026-09-01T00:00:00Z"), "open")
+            .unwrap();
+        assert_eq!(created.number, 1);
+        let viewed = client.milestone_view("o/r", 1).unwrap();
+        assert_eq!(viewed.title, "v1");
+        assert_eq!(viewed.due_on.as_deref(), Some("2026-09-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn mock_milestone_edit_mutates_backing_vec() {
+        let client = MockGhMilestoneClient::new();
+        client
+            .milestone_create("o/r", "v1", "d", None, "open")
+            .unwrap();
+        client
+            .milestone_edit(
+                "o/r",
+                1,
+                Some("v2"),
+                None,
+                Some("2027-01-01T00:00:00Z"),
+                None,
+            )
+            .unwrap();
+        let viewed = client.milestone_view("o/r", 1).unwrap();
+        assert_eq!(viewed.title, "v2");
+        assert_eq!(viewed.due_on.as_deref(), Some("2027-01-01T00:00:00Z"));
+        let edit = client.last_edit.borrow();
+        assert_eq!(edit.as_ref().unwrap().title.as_deref(), Some("v2"));
+    }
+
+    #[test]
+    fn mock_issue_set_milestone_records_call() {
+        let client = MockGhMilestoneClient::new();
+        client.issue_set_milestone("o/r", 9, Some(2)).unwrap();
+        assert_eq!(*client.last_set_milestone.borrow(), Some((9, Some(2))));
+        client.issue_set_milestone("o/r", 9, None).unwrap();
+        assert_eq!(*client.last_set_milestone.borrow(), Some((9, None)));
     }
 
     #[test]
