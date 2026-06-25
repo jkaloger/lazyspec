@@ -583,6 +583,14 @@ mod tests {
         fn issue_view(&self, _repo: &str, _number: u64) -> Result<GhIssue> {
             unimplemented!()
         }
+
+        fn issue_comments(
+            &self,
+            _repo: &str,
+            _number: u64,
+        ) -> Result<Vec<crate::engine::gh::GhComment>> {
+            unimplemented!()
+        }
     }
 
     #[test]

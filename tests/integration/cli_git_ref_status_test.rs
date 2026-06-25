@@ -33,7 +33,8 @@ fn setup() -> (crate::common::TestFixture, Store, Config) {
 #[test]
 fn status_json_includes_git_ref_documents() {
     let (_fixture, store, config) = setup();
-    let output = lazyspec::cli::status::run_json(&store, &config);
+    let output =
+        lazyspec::cli::status::run_json(&store, &config, _fixture.root(), &crate::common::NoopGh);
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let docs = parsed["documents"].as_array().unwrap();

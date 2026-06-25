@@ -52,6 +52,9 @@ fn show_parent_json_includes_children() {
         false,
         25,
         &lazyspec::engine::fs::RealFileSystem,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
     )
     .unwrap();
     let json: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -82,6 +85,9 @@ fn show_child_json_includes_parent() {
         false,
         25,
         &lazyspec::engine::fs::RealFileSystem,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
     )
     .unwrap();
     let json: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -138,6 +144,9 @@ fn show_parent_json_no_children_field_when_none() {
         false,
         25,
         &lazyspec::engine::fs::RealFileSystem,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
     )
     .unwrap();
     let json: serde_json::Value = serde_json::from_str(&output).unwrap();

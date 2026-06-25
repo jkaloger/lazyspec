@@ -70,6 +70,37 @@ pub struct GhMilestone {
     pub url: String,
 }
 
+/// A single GitHub issue comment, flattened from the REST shape
+/// (`author.login`, `body`, `created_at`). Read-only: comments are fetched on
+/// read and never authored or round-tripped back to GitHub.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(from = "RawComment")]
+pub struct GhComment {
+    pub author: String,
+    pub body: String,
+    pub timestamp: String,
+}
+
+#[derive(Deserialize)]
+struct RawComment {
+    #[serde(default)]
+    user: Option<GhAuthor>,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    created_at: String,
+}
+
+impl From<RawComment> for GhComment {
+    fn from(raw: RawComment) -> Self {
+        GhComment {
+            author: raw.user.map(|u| u.login).unwrap_or_default(),
+            body: raw.body,
+            timestamp: raw.created_at,
+        }
+    }
+}
+
 // --- Error types ---
 
 #[derive(Debug)]
@@ -126,6 +157,11 @@ pub fn parse_issue_json(stdout: &str) -> Result<GhIssue> {
 pub fn parse_issue_list_json(stdout: &str) -> Result<Vec<GhIssue>> {
     serde_json::from_str(stdout)
         .map_err(|e| anyhow::anyhow!("failed to parse issue list JSON: {}", e))
+}
+
+pub fn parse_comments_json(stdout: &str) -> Result<Vec<GhComment>> {
+    serde_json::from_str(stdout)
+        .map_err(|e| anyhow::anyhow!("failed to parse comments JSON: {}", e))
 }
 
 pub fn parse_milestone_json(stdout: &str) -> Result<GhMilestone> {
@@ -186,6 +222,11 @@ pub trait GhIssueReader {
     ) -> Result<Vec<GhIssue>>;
 
     fn issue_view(&self, repo: &str, number: u64) -> Result<GhIssue>;
+
+    /// Read-only fetch of an issue's comment thread (`GET
+    /// repos/{repo}/issues/{number}/comments`). Lives on the reader only:
+    /// comments are never authored, edited, or round-tripped back to GitHub.
+    fn issue_comments(&self, repo: &str, number: u64) -> Result<Vec<GhComment>>;
 }
 
 pub trait GhIssueWriter {
@@ -286,6 +327,10 @@ impl<T: GhIssueReader + ?Sized> GhIssueReader for &T {
 
     fn issue_view(&self, repo: &str, number: u64) -> Result<GhIssue> {
         (**self).issue_view(repo, number)
+    }
+
+    fn issue_comments(&self, repo: &str, number: u64) -> Result<Vec<GhComment>> {
+        (**self).issue_comments(repo, number)
     }
 }
 
@@ -464,6 +509,12 @@ impl GhIssueReader for GhCli {
         issue.issue_type = parse_issue_type_name(&resp);
 
         Ok(issue)
+    }
+
+    fn issue_comments(&self, repo: &str, number: u64) -> Result<Vec<GhComment>> {
+        let endpoint = format!("repos/{}/issues/{}/comments", repo, number);
+        let stdout = self.run_gh_checked(&["api", &endpoint])?;
+        parse_comments_json(&stdout)
     }
 }
 
@@ -817,6 +868,8 @@ pub mod test_support {
         pub next_issue_number: Cell<u64>,
         pub graphql_responses: RefCell<Vec<serde_json::Value>>,
         pub graphql_calls: RefCell<Vec<(String, Vec<(String, GqlVar)>)>>,
+        pub view_comments: RefCell<Vec<GhComment>>,
+        pub comments_call_count: Cell<usize>,
     }
 
     impl Default for MockGhClient {
@@ -846,7 +899,14 @@ pub mod test_support {
                 next_issue_number: Cell::new(1),
                 graphql_responses: RefCell::new(vec![]),
                 graphql_calls: RefCell::new(vec![]),
+                view_comments: RefCell::new(vec![]),
+                comments_call_count: Cell::new(0),
             }
+        }
+
+        pub fn with_comments(mut self, comments: Vec<GhComment>) -> Self {
+            self.view_comments = RefCell::new(comments);
+            self
         }
 
         pub fn with_graphql_responses(mut self, responses: Vec<serde_json::Value>) -> Self {
@@ -908,6 +968,12 @@ pub mod test_support {
                 author: None,
                 issue_type: None,
             })
+        }
+
+        fn issue_comments(&self, _repo: &str, _number: u64) -> Result<Vec<GhComment>> {
+            self.comments_call_count
+                .set(self.comments_call_count.get() + 1);
+            Ok(self.view_comments.borrow().clone())
         }
     }
 
@@ -1280,6 +1346,41 @@ mod tests {
         assert!(issue.labels.is_empty());
         assert_eq!(issue.state, "");
         assert_eq!(issue.updated_at, "");
+    }
+
+    // --- comment parsing tests ---
+
+    #[test]
+    fn parse_comments_rest_shape() {
+        let json = r#"[
+            {"user": {"login": "alice"}, "body": "first", "created_at": "2026-06-01T00:00:00Z"},
+            {"user": {"login": "bob"}, "body": "second", "created_at": "2026-06-02T00:00:00Z"}
+        ]"#;
+        let comments = parse_comments_json(json).unwrap();
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].author, "alice");
+        assert_eq!(comments[0].body, "first");
+        assert_eq!(comments[0].timestamp, "2026-06-01T00:00:00Z");
+        assert_eq!(comments[1].author, "bob");
+    }
+
+    #[test]
+    fn parse_comments_empty_list() {
+        assert!(parse_comments_json("[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn mock_issue_comments_returns_canned_and_counts() {
+        let c = GhComment {
+            author: "alice".to_string(),
+            body: "hi".to_string(),
+            timestamp: "2026-06-01T00:00:00Z".to_string(),
+        };
+        let client = MockGhClient::new().with_comments(vec![c.clone()]);
+        assert_eq!(client.comments_call_count.get(), 0);
+        let got = client.issue_comments("owner/repo", 1).unwrap();
+        assert_eq!(got, vec![c]);
+        assert_eq!(client.comments_call_count.get(), 1);
     }
 
     // --- type_label tests ---

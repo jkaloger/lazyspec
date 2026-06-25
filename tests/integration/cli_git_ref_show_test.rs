@@ -42,7 +42,17 @@ fn resolve_shorthand_finds_git_ref_iteration() {
 #[test]
 fn show_json_displays_git_ref_iteration() {
     let (_fixture, store) = setup();
-    let output = show::run_json(&store, "ITERATION-001", false, 25, &RealFileSystem).unwrap();
+    let output = show::run_json(
+        &store,
+        "ITERATION-001",
+        false,
+        25,
+        &RealFileSystem,
+        &_fixture.config(),
+        _fixture.root(),
+        &crate::common::NoopGh,
+    )
+    .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     assert_eq!(parsed["title"], "Feature Work");
@@ -59,7 +69,16 @@ fn show_json_displays_git_ref_iteration() {
 #[test]
 fn show_json_not_found_for_missing_git_ref_doc() {
     let (_fixture, store) = setup();
-    let result = show::run_json(&store, "ITERATION-999", false, 25, &RealFileSystem);
+    let result = show::run_json(
+        &store,
+        "ITERATION-999",
+        false,
+        25,
+        &RealFileSystem,
+        &_fixture.config(),
+        _fixture.root(),
+        &crate::common::NoopGh,
+    );
     assert!(result.is_err());
     assert!(result
         .unwrap_err()

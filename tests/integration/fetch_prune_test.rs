@@ -26,6 +26,13 @@ impl GhIssueReader for NoopGh {
     fn issue_view(&self, _repo: &str, _number: u64) -> Result<GhIssue> {
         unreachable!("not used in this test")
     }
+    fn issue_comments(
+        &self,
+        _repo: &str,
+        _number: u64,
+    ) -> Result<Vec<lazyspec::engine::gh::GhComment>> {
+        Ok(vec![])
+    }
 }
 impl GhGraphql for NoopGh {
     fn graphql(&self, _query: &str, _vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {

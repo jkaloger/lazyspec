@@ -167,12 +167,16 @@ fn main() -> anyhow::Result<()> {
             refresh_github_cache(&cwd, &config);
             let store = Store::load(&cwd, &config)?;
             if json {
+                let gh = GhCli::new();
                 let output = lazyspec::cli::show::run_json(
                     &store,
                     &id,
                     expand_references,
                     max_ref_lines,
                     &fs,
+                    &config,
+                    &cwd,
+                    &gh,
                 )?;
                 println!("{}", output);
             } else {
@@ -282,7 +286,11 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Status { json }) => {
             let store = Store::load(&cwd, &config)?;
             if json {
-                println!("{}", lazyspec::cli::status::run_json(&store, &config));
+                let gh = GhCli::new();
+                println!(
+                    "{}",
+                    lazyspec::cli::status::run_json(&store, &config, &cwd, &gh)
+                );
             } else {
                 let output = lazyspec::cli::status::run_human(&store);
                 if output.is_empty() {

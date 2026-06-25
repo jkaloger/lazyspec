@@ -114,7 +114,17 @@ fn show_json_retains_comments() {
         .unwrap()
         .to_string_lossy()
         .to_string();
-    let json = show::run_json(&store, &rel, false, 10, &RealFileSystem).unwrap();
+    let json = show::run_json(
+        &store,
+        &rel,
+        false,
+        10,
+        &RealFileSystem,
+        &config,
+        root,
+        &crate::common::NoopGh,
+    )
+    .unwrap();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     let json_body = value["body"].as_str().unwrap();
     assert!(

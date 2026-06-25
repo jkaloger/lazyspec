@@ -63,13 +63,16 @@ fn show_json_includes_body() {
 
 #[test]
 fn show_json_output() {
-    let (_fixture, store) = setup();
+    let (fixture, store) = setup();
     let output = lazyspec::cli::show::run_json(
         &store,
         "RFC-001",
         false,
         25,
         &lazyspec::engine::fs::RealFileSystem,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
     )
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -187,6 +190,9 @@ fn show_json_ambiguous_id_returns_error() {
         false,
         25,
         &lazyspec::engine::fs::RealFileSystem,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
     )
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -215,6 +221,9 @@ fn show_json_full_path_works_when_shorthand_ambiguous() {
         false,
         25,
         &lazyspec::engine::fs::RealFileSystem,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
     )
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -329,13 +338,16 @@ dir = ".lazyspec/templates"
 // ITERATION-207 AC3: a doc with no attributes still has a stable `{}` shape.
 #[test]
 fn show_json_attributes_empty_object_when_none() {
-    let (_fixture, store) = setup();
+    let (fixture, store) = setup();
     let output = lazyspec::cli::show::run_json(
         &store,
         "RFC-001",
         false,
         25,
         &lazyspec::engine::fs::RealFileSystem,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
     )
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
