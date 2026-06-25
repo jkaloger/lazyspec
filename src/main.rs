@@ -185,11 +185,13 @@ fn main() -> anyhow::Result<()> {
             title,
             body,
             body_file,
+            attr,
             json,
         }) => {
             lazyspec::cli::lease::check_lease_gate(&cwd, &config, &path)?;
             let body_content = lazyspec::cli::resolve_body(&body, &body_file)?;
             let store = Store::load(&cwd, &config)?;
+            let attr_pairs = lazyspec::cli::update::parse_attr_pairs(&attr)?;
             let mut updates = Vec::new();
             if let Some(ref s) = status {
                 updates.push(("status", s.as_str()));
@@ -199,6 +201,9 @@ fn main() -> anyhow::Result<()> {
             }
             if let Some(ref b) = body_content {
                 updates.push(("body", b.as_str()));
+            }
+            for (key, value) in &attr_pairs {
+                updates.push((key.as_str(), value.as_str()));
             }
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
             lazyspec::cli::update::run_with_config(&cwd, &store, &path, &updates, Some(&config))?;

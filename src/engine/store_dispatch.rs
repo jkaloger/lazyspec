@@ -6,7 +6,7 @@ use chrono::Local;
 use serde::Serialize;
 
 use crate::engine::config::{Config, StoreBackend, TypeDef};
-use crate::engine::document::{compose_frontmatter, DocMeta, DocType, Status};
+use crate::engine::document::{compose_frontmatter, AttrValue, DocMeta, DocType, Status};
 use crate::engine::gh::{self, GhIssueReader, GhIssueWriter};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::git_ref_store::GitRefStore;
@@ -27,6 +27,11 @@ struct CacheFrontmatter {
     tags: Vec<String>,
     provenance: Vec<String>,
     related: Vec<BTreeMap<String, String>>,
+    /// Custom attributes are flattened to top-level frontmatter keys so the
+    /// cache loader's `parse_with_schema` (which reads undeclared top-level keys)
+    /// coerces them back to typed values on read-back.
+    #[serde(flatten)]
+    attributes: BTreeMap<String, AttrValue>,
 }
 
 #[derive(Debug)]
@@ -90,14 +95,15 @@ impl DocumentStore for FilesystemStore {
         Ok(CreatedDoc { path: relative, id })
     }
 
-    fn update(
-        &mut self,
-        _type_def: &TypeDef,
-        doc_id: &str,
-        updates: &[(&str, &str)],
-    ) -> Result<()> {
+    fn update(&mut self, type_def: &TypeDef, doc_id: &str, updates: &[(&str, &str)]) -> Result<()> {
         let store = Store::load(&self.root, &self.config)?;
-        crate::engine::fs_ops::update_document(&self.root, &store, doc_id, updates)
+        crate::engine::fs_ops::update_document_with_type(
+            &self.root,
+            &store,
+            doc_id,
+            updates,
+            Some(type_def),
+        )
     }
 
     fn delete(&mut self, _type_def: &TypeDef, doc_id: &str) -> Result<()> {
@@ -305,10 +311,12 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
                 .map(|t| t.name.clone())
                 .collect(),
             default_type: type_def.name.clone(),
+            attr_defs: type_def.attributes.clone(),
         };
         let (mut meta, mut body) = issue_body::deserialize(&remote_issue.body, &ctx)?;
 
         let mut new_status: Option<Status> = None;
+        let mut attr_updates: Vec<(&str, &str)> = Vec::new();
         for &(key, value) in updates {
             match key {
                 "status" => {
@@ -319,8 +327,11 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
                 "title" => meta.title = value.to_string(),
                 "author" => meta.author = value.to_string(),
                 "body" => body = value.to_string(),
-                _ => bail!("unknown update field: {}", key),
+                _ => attr_updates.push((key, value)),
             }
+        }
+        if !attr_updates.is_empty() {
+            crate::engine::document::apply_attrs(type_def, &mut meta, &attr_updates)?;
         }
 
         let new_body = issue_body::serialize(&meta, &body);
@@ -375,6 +386,7 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
                 .map(|t| t.name.clone())
                 .collect(),
             default_type: type_def.name.clone(),
+            attr_defs: type_def.attributes.clone(),
         };
         let (mut meta, body) = issue_body::deserialize(&remote_issue.body, &ctx)?;
         meta.provenance = provenance.to_vec();
@@ -449,6 +461,7 @@ pub fn write_cache_file(
                 m
             })
             .collect(),
+        attributes: meta.attributes.clone(),
     };
 
     let yaml = serde_yaml::to_string(&frontmatter)?;
@@ -1729,6 +1742,246 @@ mod tests {
         assert_eq!(
             loaded.provenance,
             vec!["Workshop 2026-04-12".to_string(), "Jane Doe".to_string()]
+        );
+    }
+
+    use crate::engine::config::{AttrDef, AttrKind};
+
+    fn type_def_with_attrs(store: StoreBackend, attrs: Vec<AttrDef>) -> TypeDef {
+        TypeDef {
+            attributes: attrs,
+            ..test_type_def(store)
+        }
+    }
+
+    // AC1: fs --attr owner=jkaloger persists to frontmatter and reads back typed.
+    #[test]
+    fn fs_update_attr_persists_and_reads_back() {
+        let root = tmp_root("fs_attr_persist");
+        let config = Config::default();
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config,
+        };
+
+        let td = type_def_with_attrs(
+            StoreBackend::Filesystem,
+            vec![AttrDef {
+                name: "owner".to_string(),
+                kind: AttrKind::Str,
+                required: false,
+                values: vec![],
+            }],
+        );
+        let created = fs_store.create(&td, "doc", "author", "").unwrap();
+        fs_store
+            .update(&td, &created.id, &[("owner", "jkaloger")])
+            .unwrap();
+
+        let content = std::fs::read_to_string(root.join(&created.path)).unwrap();
+        assert!(content.contains("owner: jkaloger"), "got: {content}");
+
+        let meta = DocMeta::parse_with_schema(&content, &td.attributes).unwrap();
+        assert_eq!(
+            meta.attributes["owner"],
+            AttrValue::Str("jkaloger".to_string())
+        );
+    }
+
+    // AC2: bad enum value rejected; file left byte-identical (no write).
+    #[test]
+    fn fs_update_bad_enum_leaves_file_unchanged() {
+        let root = tmp_root("fs_attr_bad_enum");
+        let config = Config::default();
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config,
+        };
+
+        let td = type_def_with_attrs(
+            StoreBackend::Filesystem,
+            vec![AttrDef {
+                name: "priority".to_string(),
+                kind: AttrKind::Enum,
+                required: false,
+                values: vec!["low".to_string(), "med".to_string(), "high".to_string()],
+            }],
+        );
+        let created = fs_store.create(&td, "doc", "author", "").unwrap();
+        let before = std::fs::read_to_string(root.join(&created.path)).unwrap();
+
+        let err = fs_store
+            .update(&td, &created.id, &[("priority", "urgent")])
+            .unwrap_err();
+        assert!(err.to_string().contains("priority"), "got: {err}");
+
+        let after = std::fs::read_to_string(root.join(&created.path)).unwrap();
+        assert_eq!(
+            before, after,
+            "file must be unchanged on validation failure"
+        );
+    }
+
+    // AC2: int kind mismatch rejected; file unchanged.
+    #[test]
+    fn fs_update_bad_int_leaves_file_unchanged() {
+        let root = tmp_root("fs_attr_bad_int");
+        let config = Config::default();
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config,
+        };
+
+        let td = type_def_with_attrs(
+            StoreBackend::Filesystem,
+            vec![AttrDef {
+                name: "estimate".to_string(),
+                kind: AttrKind::Int,
+                required: false,
+                values: vec![],
+            }],
+        );
+        let created = fs_store.create(&td, "doc", "author", "").unwrap();
+        let before = std::fs::read_to_string(root.join(&created.path)).unwrap();
+
+        let err = fs_store
+            .update(&td, &created.id, &[("estimate", "notanumber")])
+            .unwrap_err();
+        assert!(err.to_string().contains("estimate"), "got: {err}");
+
+        let after = std::fs::read_to_string(root.join(&created.path)).unwrap();
+        assert_eq!(before, after);
+    }
+
+    // AC3 (cache sink) + AC5: github update --attr mirrors typed attrs into the
+    // cache .md, where parse_with_schema reads them back as typed values.
+    #[test]
+    fn github_update_attr_round_trips_through_cache() {
+        let root = tmp_root("gh_attr_cache");
+        let issue_body = make_issue_body("agent-7", "2026-03-27", None, "body");
+        let view_issue = GhIssue {
+            number: 42,
+            url: String::new(),
+            title: "My doc".to_string(),
+            body: issue_body,
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+
+        let mut gh_store = GithubIssuesStore {
+            client,
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let td = type_def_with_attrs(
+            StoreBackend::GithubIssues,
+            vec![
+                AttrDef {
+                    name: "owner".to_string(),
+                    kind: AttrKind::Str,
+                    required: false,
+                    values: vec![],
+                },
+                AttrDef {
+                    name: "estimate".to_string(),
+                    kind: AttrKind::Int,
+                    required: false,
+                    values: vec![],
+                },
+            ],
+        );
+        gh_store
+            .update(&td, "RFC-001", &[("owner", "jkaloger"), ("estimate", "3")])
+            .unwrap();
+
+        // Remote body carries the attributes block (clobber-protection sink).
+        let captured = gh_store.client.last_edit_body.borrow();
+        let body_str = captured.as_deref().expect("issue_edit called");
+        assert!(body_str.contains("attributes:"), "got: {body_str}");
+        assert!(body_str.contains("owner: jkaloger"));
+
+        // Cache .md is the show --json read-back: parse_with_schema -> typed.
+        let cache_path = root.join(".lazyspec/cache/rfc/RFC-001.md");
+        let cache_content = std::fs::read_to_string(&cache_path).unwrap();
+        let meta = DocMeta::parse_with_schema(&cache_content, &td.attributes).unwrap();
+        assert_eq!(
+            meta.attributes["owner"],
+            AttrValue::Str("jkaloger".to_string())
+        );
+        assert_eq!(meta.attributes["estimate"], AttrValue::Int(3));
+
+        // AC5: doc_to_json emits estimate as a JSON number, not a string.
+        let json = crate::engine::document::AttrValue::Int(3);
+        assert_eq!(serde_json::to_value(&json).unwrap(), serde_json::json!(3));
+        assert_eq!(
+            serde_json::to_value(&meta.attributes["estimate"]).unwrap(),
+            serde_json::json!(3)
+        );
+    }
+
+    // AC2 (github atomicity): bad attr bails before any remote issue_edit.
+    #[test]
+    fn github_update_bad_attr_no_remote_write() {
+        let root = tmp_root("gh_attr_bad");
+        let issue_body = make_issue_body("agent-7", "2026-03-27", None, "body");
+        let view_issue = GhIssue {
+            number: 42,
+            url: String::new(),
+            title: "My doc".to_string(),
+            body: issue_body,
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+
+        let mut gh_store = GithubIssuesStore {
+            client,
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let td = type_def_with_attrs(
+            StoreBackend::GithubIssues,
+            vec![AttrDef {
+                name: "estimate".to_string(),
+                kind: AttrKind::Int,
+                required: false,
+                values: vec![],
+            }],
+        );
+        let err = gh_store
+            .update(&td, "RFC-001", &[("estimate", "notanumber")])
+            .unwrap_err();
+        assert!(err.to_string().contains("estimate"), "got: {err}");
+        assert!(
+            gh_store.client.last_edit_body.borrow().is_none(),
+            "no remote issue_edit should have fired"
         );
     }
 

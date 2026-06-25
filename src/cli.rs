@@ -136,6 +136,9 @@ pub enum Commands {
         /// Read body from file (use `-` for stdin)
         #[arg(long)]
         body_file: Option<String>,
+        /// Set a custom attribute (repeatable): --attr key=value
+        #[arg(long = "attr", value_name = "KEY=VALUE")]
+        attr: Vec<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,

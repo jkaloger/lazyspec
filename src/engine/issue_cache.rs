@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::engine::cache_lock::CacheLock;
-use crate::engine::config::TypeDef;
+use crate::engine::config::{AttrDef, TypeDef};
 use crate::engine::document::{DocMeta, DocType, Status};
 use crate::engine::gh::{type_label, GhGraphql, GhIssue, GhIssueReader};
 use crate::engine::gh_schema;
@@ -169,7 +169,8 @@ impl IssueCache {
         let mut lock = self.load_lock();
 
         for issue in &issues {
-            let (meta, body) = parse_issue(issue, &type_def.name, known_types);
+            let (meta, body) =
+                parse_issue(issue, &type_def.name, known_types, &type_def.attributes);
             let id = type_def.make_id(issue.number);
             let meta = DocMeta {
                 id: id.clone(),
@@ -289,7 +290,8 @@ impl IssueCache {
         let mut lock = self.load_lock();
 
         for issue in &issues {
-            let (meta, body) = parse_issue(issue, &type_def.name, known_types);
+            let (meta, body) =
+                parse_issue(issue, &type_def.name, known_types, &type_def.attributes);
             let id = type_def.make_id(issue.number);
             let meta = DocMeta {
                 id: id.clone(),
@@ -338,13 +340,19 @@ fn parse_created_date(created_at: &str) -> chrono::NaiveDate {
         .unwrap_or_else(|_| Utc::now().date_naive())
 }
 
-fn parse_issue(issue: &GhIssue, type_name: &str, known_types: &[String]) -> (DocMeta, String) {
+fn parse_issue(
+    issue: &GhIssue,
+    type_name: &str,
+    known_types: &[String],
+    attr_defs: &[AttrDef],
+) -> (DocMeta, String) {
     let ctx = IssueContext {
         title: issue.title.clone(),
         labels: issue.labels.iter().map(|l| l.name.clone()).collect(),
         is_open: issue.state.eq_ignore_ascii_case("open"),
         known_types: known_types.to_vec(),
         default_type: type_name.to_string(),
+        attr_defs: attr_defs.to_vec(),
     };
 
     let author = issue
@@ -1088,7 +1096,7 @@ mod tests {
             Some("jkaloger"),
         );
         let known_types = vec!["story".to_string()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types);
+        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
         assert_eq!(meta.author, "@jkaloger");
     }
 
@@ -1102,7 +1110,7 @@ mod tests {
             None,
         );
         let known_types = vec!["story".to_string()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types);
+        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
         assert_eq!(meta.author, "unknown");
     }
 
@@ -1117,7 +1125,7 @@ mod tests {
             Some("octocat"),
         );
         let known_types = vec!["story".to_string()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types);
+        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
         assert_eq!(meta.author, "@octocat");
     }
 
@@ -1132,7 +1140,7 @@ mod tests {
             Some("jkaloger"),
         );
         let known_types = vec!["story".to_string()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types);
+        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
         assert_eq!(meta.author, "@jkaloger");
     }
 
@@ -1176,7 +1184,7 @@ mod tests {
         let mut issue = make_gh_issue(1, "Test issue", "Just a plain body", &["lazyspec:story"]);
         issue.created_at = "2025-06-15T09:30:00Z".to_string();
         let known_types = vec!["story".to_string()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types);
+        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
         assert_eq!(
             meta.date,
             chrono::NaiveDate::from_ymd_opt(2025, 6, 15).unwrap()
@@ -1188,7 +1196,7 @@ mod tests {
         let mut issue = make_gh_issue(2, "Test issue", "Just a plain body", &["lazyspec:story"]);
         issue.created_at = "not-a-date".to_string();
         let known_types = vec!["story".to_string()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types);
+        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
         assert_eq!(meta.date, Utc::now().date_naive());
     }
 
@@ -1197,7 +1205,7 @@ mod tests {
         let mut issue = make_gh_issue(3, "Test issue", "Just a plain body", &["lazyspec:story"]);
         issue.created_at = String::new();
         let known_types = vec!["story".to_string()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types);
+        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
         assert_eq!(meta.date, Utc::now().date_naive());
     }
 }

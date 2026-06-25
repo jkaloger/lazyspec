@@ -1,11 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::Local;
 
-use crate::engine::config::{Config, NumberingStrategy, ReservedFormat};
-use crate::engine::document::{compose_frontmatter, split_frontmatter};
+use crate::engine::config::{Config, NumberingStrategy, ReservedFormat, TypeDef};
+use crate::engine::document::{apply_attrs, compose_frontmatter, split_frontmatter, DocMeta};
 use crate::engine::reservation;
 use crate::engine::store::Store;
 use crate::engine::template;
@@ -187,6 +187,24 @@ pub fn update_document(
     doc_id: &str,
     updates: &[(&str, &str)],
 ) -> Result<()> {
+    update_document_with_type(root, store, doc_id, updates, None)
+}
+
+const RESERVED_UPDATE_KEYS: &[&str] = &["status", "title", "body", "author"];
+
+/// Update a filesystem document's frontmatter. Reserved keys (status/title/body/
+/// author) follow the in-place replace path; any other key is a declared custom
+/// attribute, coerced and validated via [`apply_attrs`] against `type_def` and
+/// then written back (replacing an existing line or appending a new one). When
+/// `type_def` is absent, non-reserved keys are treated as plain replacements
+/// (legacy behaviour for callers without type context).
+pub fn update_document_with_type(
+    root: &Path,
+    store: &Store,
+    doc_id: &str,
+    updates: &[(&str, &str)],
+    type_def: Option<&TypeDef>,
+) -> Result<()> {
     let doc = store
         .get(Path::new(doc_id))
         .or_else(|| store.resolve_shorthand(doc_id).ok())
@@ -197,6 +215,35 @@ pub fn update_document(
 
     let (yaml, body) = split_frontmatter(&content)?;
 
+    let attr_updates: Vec<(&str, &str)> = updates
+        .iter()
+        .filter(|(k, _)| !RESERVED_UPDATE_KEYS.contains(k))
+        .copied()
+        .collect();
+
+    let coerced_attrs: Vec<(String, String)> = match type_def {
+        Some(td) if !attr_updates.is_empty() => {
+            let schema = &td.attributes;
+            let mut meta = DocMeta::parse_with_schema(&content, schema)
+                .with_context(|| format!("parsing {}", doc.path.display()))?;
+            apply_attrs(td, &mut meta, &attr_updates)?;
+            attr_updates
+                .iter()
+                .map(|(key, _)| {
+                    let value = meta
+                        .attributes
+                        .get(*key)
+                        .expect("attr inserted by apply_attrs");
+                    let scalar = serde_yaml::to_string(value)
+                        .map(|s| s.trim_end().to_string())
+                        .unwrap_or_default();
+                    ((*key).to_string(), scalar)
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+
     let mut new_body = body;
     let mut lines: Vec<String> = yaml.lines().map(|l| l.to_string()).collect();
     for (key, value) in updates {
@@ -204,12 +251,26 @@ pub fn update_document(
             new_body = value.to_string();
             continue;
         }
+        if RESERVED_UPDATE_KEYS.contains(key) {
+            let prefix = format!("{}:", key);
+            if let Some(line) = lines
+                .iter_mut()
+                .find(|l| l.trim_start().starts_with(&prefix))
+            {
+                *line = format!("{}: {}", key, value);
+            }
+        }
+    }
+
+    for (key, scalar) in &coerced_attrs {
         let prefix = format!("{}:", key);
         if let Some(line) = lines
             .iter_mut()
             .find(|l| l.trim_start().starts_with(&prefix))
         {
-            *line = format!("{}: {}", key, value);
+            *line = format!("{}: {}", key, scalar);
+        } else {
+            lines.push(format!("{}: {}", key, scalar));
         }
     }
 
