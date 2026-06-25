@@ -1122,6 +1122,8 @@ pub mod test_support {
     use super::*;
     use std::cell::{Cell, RefCell};
 
+    type GraphqlCall = (String, Vec<(String, GqlVar)>);
+
     pub struct MockGhClient {
         pub auth: AuthStatus,
         pub list_result: Vec<GhIssue>,
@@ -1137,7 +1139,7 @@ pub mod test_support {
         pub create_titles: RefCell<Vec<String>>,
         pub next_issue_number: Cell<u64>,
         pub graphql_responses: RefCell<Vec<serde_json::Value>>,
-        pub graphql_calls: RefCell<Vec<(String, Vec<(String, GqlVar)>)>>,
+        pub graphql_calls: RefCell<Vec<GraphqlCall>>,
         pub view_comments: RefCell<Vec<GhComment>>,
         pub comments_call_count: Cell<usize>,
         pub project_field_values: RefCell<Vec<ProjectFieldValue>>,

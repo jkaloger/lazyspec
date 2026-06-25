@@ -161,6 +161,7 @@ pub fn run(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_json(
     store: &Store,
     id: &str,

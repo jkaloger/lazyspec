@@ -3768,13 +3768,14 @@ mod tests {
     use crate::engine::gh_schema::{OptionId, ProjectFieldId};
 
     fn membership_relationship_config() -> Config {
-        let mut config = Config::default();
-        config.relationships = vec![RelationshipDef {
-            name: "member-of".to_string(),
-            inverse: Some("has-member".to_string()),
-            github_native: Some("membership".to_string()),
-        }];
-        config
+        Config {
+            relationships: vec![RelationshipDef {
+                name: "member-of".to_string(),
+                inverse: Some("has-member".to_string()),
+                github_native: Some("membership".to_string()),
+            }],
+            ..Default::default()
+        }
     }
 
     fn member_meta(id: &str, boards: &[u64]) -> DocMeta {

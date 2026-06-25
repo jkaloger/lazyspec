@@ -1290,7 +1290,7 @@ mod tests {
         assert!(issue.issue_type.is_none());
         let known_types = vec!["story".to_string()];
         let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
-        assert!(meta.attributes.get("issue_type").is_none());
+        assert!(!meta.attributes.contains_key("issue_type"));
     }
 
     // AC6 (read half): lazyspec:story label and native Bug type coexist.
