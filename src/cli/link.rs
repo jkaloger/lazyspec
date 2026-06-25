@@ -427,8 +427,8 @@ mod tests {
         );
 
         let mut issue_map = IssueMap::load(&root).unwrap();
-        issue_map.insert("STORY-7", 7, "");
-        issue_map.insert("MILESTONE-3", 3, "");
+        issue_map.insert("STORY-7", 7, "", "");
+        issue_map.insert("MILESTONE-3", 3, "", "");
         issue_map.save(&root).unwrap();
 
         let store = Store::load(&root, &config).unwrap();
@@ -575,7 +575,7 @@ mod tests {
 
         // Set up issue map so push_cache can find the issue number
         let mut issue_map = IssueMap::load(&root).unwrap();
-        issue_map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        issue_map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
         issue_map.save(&root).unwrap();
 
         // Load the store so link can resolve doc IDs
@@ -586,6 +586,7 @@ mod tests {
         let remote_body = make_issue_body("agent-7", "2026-03-27", "RFC body text.");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: remote_body,

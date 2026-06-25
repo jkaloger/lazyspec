@@ -96,6 +96,7 @@ mod tests {
     fn make_issue(number: u64, title: &str, body: &str, labels: &[&str]) -> GhIssue {
         GhIssue {
             number,
+            id: String::new(),
             url: format!("https://github.com/owner/repo/issues/{}", number),
             title: title.to_string(),
             body: body.to_string(),
@@ -120,7 +121,7 @@ mod tests {
     fn issue_map_roundtrips_via_issue_map() {
         let dir = tempfile::tempdir().unwrap();
         let mut map = IssueMap::load(dir.path()).unwrap();
-        map.insert("ITERATION-042", 87, "2026-03-27T10:00:00Z");
+        map.insert("ITERATION-042", 87, "2026-03-27T10:00:00Z", "");
         map.save(dir.path()).unwrap();
 
         let loaded = IssueMap::load(dir.path()).unwrap();

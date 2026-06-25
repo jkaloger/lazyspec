@@ -21,6 +21,10 @@ pub struct GhAuthor {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct GhIssue {
     pub number: u64,
+    /// GraphQL node id (`I_*`), fetched via `--json id`. Empty when absent.
+    /// Sub-issue mutations key off this rather than the REST `number`.
+    #[serde(default)]
+    pub id: String,
     #[serde(default)]
     pub url: String,
     #[serde(default)]
@@ -266,6 +270,71 @@ pub trait GhGraphql {
     fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value>;
 }
 
+// Forward the issue/graphql seams through shared references so callers holding a
+// borrowed client (e.g. the fetch loop) can construct a `GithubIssuesStore`
+// over `&G` without owning the client.
+impl<T: GhIssueReader + ?Sized> GhIssueReader for &T {
+    fn issue_list(
+        &self,
+        repo: &str,
+        labels: &[String],
+        json_fields: &[String],
+        limit: Option<u64>,
+    ) -> Result<Vec<GhIssue>> {
+        (**self).issue_list(repo, labels, json_fields, limit)
+    }
+
+    fn issue_view(&self, repo: &str, number: u64) -> Result<GhIssue> {
+        (**self).issue_view(repo, number)
+    }
+}
+
+impl<T: GhIssueWriter + ?Sized> GhIssueWriter for &T {
+    fn issue_create(
+        &self,
+        repo: &str,
+        title: &str,
+        body: &str,
+        labels: &[String],
+    ) -> Result<GhIssue> {
+        (**self).issue_create(repo, title, body, labels)
+    }
+
+    fn issue_edit(
+        &self,
+        repo: &str,
+        number: u64,
+        title: Option<&str>,
+        body: Option<&str>,
+        labels_add: &[String],
+        labels_remove: &[String],
+    ) -> Result<()> {
+        (**self).issue_edit(repo, number, title, body, labels_add, labels_remove)
+    }
+
+    fn issue_close(&self, repo: &str, number: u64) -> Result<()> {
+        (**self).issue_close(repo, number)
+    }
+
+    fn issue_reopen(&self, repo: &str, number: u64) -> Result<()> {
+        (**self).issue_reopen(repo, number)
+    }
+
+    fn label_create(&self, repo: &str, name: &str, description: &str, color: &str) -> Result<()> {
+        (**self).label_create(repo, name, description, color)
+    }
+
+    fn label_ensure(&self, repo: &str, name: &str, description: &str, color: &str) -> Result<()> {
+        (**self).label_ensure(repo, name, description, color)
+    }
+}
+
+impl<T: GhGraphql + ?Sized> GhGraphql for &T {
+    fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+        (**self).graphql(query, vars)
+    }
+}
+
 /// `-f key=value` for GraphQL String vars, `-F key=value` for typed (Int/Boolean).
 fn gql_var_flag(v: &GqlVar) -> (&'static str, String) {
     match v {
@@ -342,7 +411,7 @@ impl GhIssueReader for GhCli {
     ) -> Result<Vec<GhIssue>> {
         let label_filter = labels.join(",");
         let fields = if json_fields.is_empty() {
-            "number,url,title,body,labels,state,updatedAt,createdAt,author".to_string()
+            "id,number,url,title,body,labels,state,updatedAt,createdAt,author".to_string()
         } else {
             json_fields.join(",")
         };
@@ -375,7 +444,7 @@ impl GhIssueReader for GhCli {
             "--repo",
             repo,
             "--json",
-            "number,url,title,body,labels,state,updatedAt,createdAt,author",
+            "id,number,url,title,body,labels,state,updatedAt,createdAt,author",
         ];
 
         let stdout = self.run_gh_checked(&args)?;
@@ -744,6 +813,7 @@ pub mod test_support {
         pub last_edit_body: RefCell<Option<String>>,
         pub last_edit_labels_remove: RefCell<Vec<String>>,
         pub last_create_body: RefCell<Option<String>>,
+        pub create_titles: RefCell<Vec<String>>,
         pub next_issue_number: Cell<u64>,
         pub graphql_responses: RefCell<Vec<serde_json::Value>>,
         pub graphql_calls: RefCell<Vec<(String, Vec<(String, GqlVar)>)>>,
@@ -772,6 +842,7 @@ pub mod test_support {
                 last_edit_body: RefCell::new(None),
                 last_edit_labels_remove: RefCell::new(vec![]),
                 last_create_body: RefCell::new(None),
+                create_titles: RefCell::new(vec![]),
                 next_issue_number: Cell::new(1),
                 graphql_responses: RefCell::new(vec![]),
                 graphql_calls: RefCell::new(vec![]),
@@ -826,6 +897,7 @@ pub mod test_support {
             }
             Ok(GhIssue {
                 number,
+                id: format!("I_node{}", number),
                 url: format!("https://github.com/test/repo/issues/{}", number),
                 title: "Viewed issue".to_string(),
                 body: String::new(),
@@ -848,6 +920,7 @@ pub mod test_support {
             labels: &[String],
         ) -> Result<GhIssue> {
             *self.last_create_body.borrow_mut() = Some(body.to_string());
+            self.create_titles.borrow_mut().push(title.to_string());
             if let Some(ref issue) = self.create_result {
                 return Ok(issue.clone());
             }
@@ -855,6 +928,7 @@ pub mod test_support {
             self.next_issue_number.set(number + 1);
             Ok(GhIssue {
                 number,
+                id: format!("I_node{}", number),
                 url: format!("https://github.com/test/repo/issues/{}", number),
                 title: title.to_string(),
                 body: body.to_string(),
@@ -1260,6 +1334,7 @@ mod tests {
         let client = MockGhClient::new().with_list_result(vec![
             GhIssue {
                 number: 1,
+                id: String::new(),
                 url: String::new(),
                 title: "First".to_string(),
                 body: String::new(),
@@ -1272,6 +1347,7 @@ mod tests {
             },
             GhIssue {
                 number: 2,
+                id: String::new(),
                 url: String::new(),
                 title: "Second".to_string(),
                 body: String::new(),

@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use lazyspec::engine::config::{Config, CoordinationConfig, StoreBackend, TypeDef};
 use lazyspec::engine::gh::{
-    GhGraphql, GhIssue, GhIssueReader, GhMilestone, GhMilestoneApi, GqlVar,
+    GhGraphql, GhIssue, GhIssueReader, GhIssueWriter, GhMilestone, GhMilestoneApi, GqlVar,
 };
 use lazyspec::engine::git_ref::{GitCli, GitRefOps};
 use lazyspec::engine::git_ref_store::GitRefStore;
@@ -30,6 +30,52 @@ impl GhIssueReader for NoopGh {
 impl GhGraphql for NoopGh {
     fn graphql(&self, _query: &str, _vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
         unreachable!("not used in this test (git-ref types only)")
+    }
+}
+impl GhIssueWriter for NoopGh {
+    fn issue_create(
+        &self,
+        _repo: &str,
+        _title: &str,
+        _body: &str,
+        _labels: &[String],
+    ) -> Result<GhIssue> {
+        unreachable!("not used in this test")
+    }
+    fn issue_edit(
+        &self,
+        _repo: &str,
+        _number: u64,
+        _title: Option<&str>,
+        _body: Option<&str>,
+        _labels_add: &[String],
+        _labels_remove: &[String],
+    ) -> Result<()> {
+        unreachable!("not used in this test")
+    }
+    fn issue_close(&self, _repo: &str, _number: u64) -> Result<()> {
+        unreachable!("not used in this test")
+    }
+    fn issue_reopen(&self, _repo: &str, _number: u64) -> Result<()> {
+        unreachable!("not used in this test")
+    }
+    fn label_create(
+        &self,
+        _repo: &str,
+        _name: &str,
+        _description: &str,
+        _color: &str,
+    ) -> Result<()> {
+        unreachable!("not used in this test")
+    }
+    fn label_ensure(
+        &self,
+        _repo: &str,
+        _name: &str,
+        _description: &str,
+        _color: &str,
+    ) -> Result<()> {
+        unreachable!("not used in this test")
     }
 }
 impl GhMilestoneApi for NoopGh {

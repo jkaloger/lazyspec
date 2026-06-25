@@ -139,6 +139,7 @@ impl IssueCache {
         let label = type_label(&type_def.name);
         let labels = vec![label];
         let fields = vec![
+            "id".into(),
             "number".into(),
             "title".into(),
             "body".into(),
@@ -192,7 +193,7 @@ impl IssueCache {
             }
 
             lock.set(&id, &Utc::now().to_rfc3339());
-            issue_map.insert(&id, issue.number, &issue.updated_at);
+            issue_map.insert(&id, issue.number, &issue.updated_at, &issue.id);
         }
 
         let _ = lock.save(&self.root);
@@ -306,7 +307,7 @@ impl IssueCache {
 
             lock.set(&id, &Utc::now().to_rfc3339());
 
-            issue_map.insert(&id, issue.number, &issue.updated_at);
+            issue_map.insert(&id, issue.number, &issue.updated_at, &issue.id);
             fetched_ids.insert(id);
         }
 
@@ -491,6 +492,7 @@ mod tests {
     fn make_gh_issue(number: u64, title: &str, body: &str, labels: &[&str]) -> GhIssue {
         GhIssue {
             number,
+            id: String::new(),
             url: format!("https://github.com/owner/repo/issues/{}", number),
             title: title.to_string(),
             body: body.to_string(),

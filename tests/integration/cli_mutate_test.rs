@@ -41,7 +41,7 @@ fn milestones_fixture() -> (TestFixture, Config) {
     .unwrap();
 
     let mut issue_map = IssueMap::load(fixture.root()).unwrap();
-    issue_map.insert("MILESTONE-1", 1, "");
+    issue_map.insert("MILESTONE-1", 1, "", "");
     issue_map.save(fixture.root()).unwrap();
 
     (fixture, config)

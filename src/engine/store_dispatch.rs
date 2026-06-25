@@ -177,11 +177,22 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
         self.client
             .issue_edit(&self.repo, issue_number, None, Some(&new_body), &[], &[])?;
 
-        self.issue_map.insert(doc_id, issue_number, "");
+        let node_id = self.existing_node_id(doc_id);
+        self.issue_map.insert(doc_id, issue_number, "", node_id);
         self.issue_map.save(&self.root)?;
         self.issue_cache.touch_lock(doc_id);
 
         Ok(())
+    }
+
+    /// The currently-mapped GraphQL node id for `doc_id`, or empty when unknown.
+    /// Used to preserve the node id across re-inserts that only clear
+    /// `updated_at`.
+    fn existing_node_id(&self, doc_id: &str) -> String {
+        self.issue_map
+            .get(doc_id)
+            .map(|e| e.node_id.clone())
+            .unwrap_or_default()
     }
 
     /// Fetch the remote issue and check the optimistic lock.
@@ -201,8 +212,12 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
 
         if local_updated_at.is_empty() {
             // We pushed recently; accept remote state and record timestamp.
-            self.issue_map
-                .insert(doc_id, issue_number, &remote_issue.updated_at);
+            self.issue_map.insert(
+                doc_id,
+                issue_number,
+                &remote_issue.updated_at,
+                &remote_issue.id,
+            );
             self.issue_map.save(&self.root)?;
         } else if remote_issue.updated_at != local_updated_at {
             bail!(
@@ -259,6 +274,168 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
             }
         }
         Ok(())
+    }
+
+    /// Materialize a subdirectory document type (`index.md` parent + sibling
+    /// child `.md` files) into GitHub issues, closing the silent-drop gap where
+    /// only the `index.md` parent reached GitHub.
+    ///
+    /// Loads the filesystem [`Store`] to resolve the parent's `index.md` path
+    /// and its path-sorted children (loader order). For the parent and each
+    /// child not yet in the issue map, runs the create steps
+    /// (label_ensure -> issue_create -> issue_map.insert -> write_cache_file).
+    /// Returns the parent issue number + node id and the ordered children, ready
+    /// to feed a [`crate::engine::gh_subissue::SubIssuePlan`].
+    pub fn materialize_subdir(
+        &mut self,
+        type_def: &TypeDef,
+        parent_doc_id: &str,
+    ) -> Result<MaterializeResult> {
+        let store = self.load_source_store(type_def)?;
+        let parent_meta = store
+            .resolve_shorthand(parent_doc_id)
+            .ok()
+            .or_else(|| store.resolve_relation_target(parent_doc_id))
+            .ok_or_else(|| anyhow::anyhow!("could not resolve subdir parent: {}", parent_doc_id))?;
+        let parent_path = parent_meta.path.clone();
+
+        let (parent_issue, parent_node) =
+            self.materialize_one(type_def, parent_doc_id, parent_meta)?;
+
+        let child_paths: Vec<PathBuf> = store.children_of(&parent_path).to_vec();
+        let mut children = Vec::new();
+        for (order_index, child_path) in child_paths.iter().enumerate() {
+            let child_meta = store
+                .get(child_path)
+                .ok_or_else(|| anyhow::anyhow!("child doc vanished: {}", child_path.display()))?;
+            let child_id = child_meta.id.clone();
+            let (issue_number, node_id) = self.materialize_one(type_def, &child_id, child_meta)?;
+            children.push(MaterializedChild {
+                child_id,
+                issue_number,
+                node_id,
+                order_index,
+            });
+        }
+
+        Ok(MaterializeResult {
+            parent_id: parent_doc_id.to_string(),
+            parent_issue,
+            parent_node,
+            children,
+        })
+    }
+
+    /// Load a [`Store`] over the type's *source* directory (`type_def.dir`).
+    /// `Store::load` routes github-issues types to the cache dir, but subdir
+    /// children are authored on disk in the source dir; this scans there so the
+    /// loader sees the `index.md` parent and its sibling children.
+    fn load_source_store(&self, type_def: &TypeDef) -> Result<Store> {
+        let mut source_config = self.config.clone();
+        for td in &mut source_config.documents.types {
+            if td.name == type_def.name {
+                td.store = StoreBackend::Filesystem;
+            }
+        }
+        Store::load(&self.root, &source_config)
+    }
+
+    /// Ensure a single doc is on GitHub: reuse its existing issue when already
+    /// mapped, otherwise create one (label_ensure -> issue_create ->
+    /// issue_map.insert -> write_cache_file). Returns `(issue_number, node_id)`.
+    fn materialize_one(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        meta: &DocMeta,
+    ) -> Result<(u64, String)> {
+        if let Some(entry) = self.issue_map.get(doc_id) {
+            return Ok((entry.issue_number, entry.node_id.clone()));
+        }
+
+        let body = std::fs::read_to_string(self.root.join(&meta.path))
+            .ok()
+            .and_then(|c| DocMeta::extract_body(&c).ok())
+            .unwrap_or_default();
+
+        let issue_body = issue_body::serialize(meta, &body);
+        let label = gh::type_label(&type_def.name);
+        let color = gh::deterministic_color(&type_def.name);
+        let description = format!("lazyspec document type: {}", type_def.name);
+        self.client
+            .label_ensure(&self.repo, &label, &description, &color)?;
+        let issue = self
+            .client
+            .issue_create(&self.repo, &meta.title, &issue_body, &[label])?;
+
+        let materialized_meta = DocMeta {
+            id: doc_id.to_string(),
+            ..meta.clone()
+        };
+        self.issue_map
+            .insert(doc_id, issue.number, &issue.updated_at, &issue.id);
+        self.issue_map.save(&self.root)?;
+        write_cache_file(&self.root, type_def, &materialized_meta, &body)?;
+        self.issue_cache.touch_lock(doc_id);
+
+        Ok((issue.number, issue.id))
+    }
+
+    /// Materialize a subdir parent + children, then reconcile their native
+    /// sub-issue links over GraphQL. The single entry point used by both the
+    /// `create` path and cache refresh of subdir types.
+    pub fn sync_subissues(
+        &mut self,
+        type_def: &TypeDef,
+        parent_doc_id: &str,
+    ) -> Result<MaterializeResult> {
+        let result = self.materialize_subdir(type_def, parent_doc_id)?;
+        let plan = result.to_plan(type_def);
+        crate::engine::gh_subissue::reconcile_subissues(&self.client, &self.repo, &plan)?;
+        Ok(result)
+    }
+}
+
+/// One structural child materialized by [`GithubIssuesStore::materialize_subdir`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct MaterializedChild {
+    pub child_id: String,
+    pub issue_number: u64,
+    pub node_id: String,
+    pub order_index: usize,
+}
+
+/// Outcome of materializing a subdir parent and its children into GitHub issues.
+#[derive(Debug, Clone)]
+pub struct MaterializeResult {
+    pub parent_id: String,
+    pub parent_issue: u64,
+    pub parent_node: String,
+    pub children: Vec<MaterializedChild>,
+}
+
+impl MaterializeResult {
+    /// Build the sub-issue reconcile plan for this materialization. The parent
+    /// and its structural children all belong to the same subdir `type_def`, so
+    /// they share its [`StoreBackend`]; the same-store guard in
+    /// [`crate::engine::gh_subissue::reconcile_subissues`] enforces that.
+    pub fn to_plan(&self, type_def: &TypeDef) -> crate::engine::gh_subissue::SubIssuePlan {
+        use crate::engine::gh_subissue::{PlannedChild, SubIssuePlan};
+        SubIssuePlan {
+            parent_id: self.parent_id.clone(),
+            parent_node: self.parent_node.clone(),
+            parent_store: type_def.store.clone(),
+            children: self
+                .children
+                .iter()
+                .map(|c| PlannedChild {
+                    doc_id: c.child_id.clone(),
+                    node_id: c.node_id.clone(),
+                    store: type_def.store.clone(),
+                    order_index: c.order_index,
+                })
+                .collect(),
+        }
     }
 }
 
@@ -333,11 +510,19 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> DocumentStore for GithubIssue
             ..placeholder_meta
         };
 
-        self.issue_map.insert(&id, issue.number, &issue.updated_at);
+        self.issue_map
+            .insert(&id, issue.number, &issue.updated_at, &issue.id);
         self.issue_map.save(&self.root)?;
 
         write_cache_file(&self.root, type_def, &doc_meta, body)?;
         self.issue_cache.touch_lock(&id);
+
+        // Subdir types: co-materialize sibling children into issues and bind
+        // them as native sub-issues. Best-effort during create -- children may
+        // not yet be on disk; cache refresh reconciles the settled state.
+        if type_def.subdirectory {
+            let _ = self.sync_subissues(type_def, &id);
+        }
 
         let cache_path = self
             .root
@@ -435,7 +620,8 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> DocumentStore for GithubIssue
 
         // Clear updated_at: we just pushed, so our stored timestamp is stale.
         // The next edit's pre-flight fetch will record the fresh timestamp.
-        self.issue_map.insert(doc_id, issue_number, "");
+        let node_id = self.existing_node_id(doc_id);
+        self.issue_map.insert(doc_id, issue_number, "", node_id);
         self.issue_map.save(&self.root)?;
 
         let meta = DocMeta {
@@ -477,7 +663,8 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> DocumentStore for GithubIssue
         self.client
             .issue_edit(&self.repo, issue_number, None, Some(&new_body), &[], &[])?;
 
-        self.issue_map.insert(doc_id, issue_number, "");
+        let node_id = self.existing_node_id(doc_id);
+        self.issue_map.insert(doc_id, issue_number, "", node_id);
         self.issue_map.save(&self.root)?;
 
         let meta = DocMeta {
@@ -623,7 +810,7 @@ impl<M: gh::GhMilestoneApi> DocumentStore for GithubMilestonesStore<M> {
             .milestone_create(&self.repo, title, body, None, "open")?;
 
         let id = type_def.make_id(milestone.number);
-        self.issue_map.insert(&id, milestone.number, "");
+        self.issue_map.insert(&id, milestone.number, "", "");
         self.issue_map.save(&self.root)?;
 
         let meta = self.meta_from_milestone(type_def, &id, &milestone, author);
@@ -1097,6 +1284,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "original body");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
@@ -1113,7 +1301,7 @@ mod tests {
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -1147,6 +1335,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
@@ -1163,7 +1352,7 @@ mod tests {
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -1191,6 +1380,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
@@ -1207,7 +1397,7 @@ mod tests {
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -1232,6 +1422,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
@@ -1248,7 +1439,7 @@ mod tests {
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -1292,6 +1483,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "some content");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
@@ -1308,7 +1500,7 @@ mod tests {
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -1335,6 +1527,7 @@ mod tests {
         let root = tmp_root("gh_delete_lock");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: String::new(),
@@ -1348,7 +1541,7 @@ mod tests {
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -1388,6 +1581,7 @@ mod tests {
         let root = tmp_root("gh_delete_cache");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: String::new(),
@@ -1401,7 +1595,7 @@ mod tests {
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let cache_dir = root.join(".lazyspec/cache/rfc");
         std::fs::create_dir_all(&cache_dir).unwrap();
@@ -1678,6 +1872,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "original body");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
@@ -1694,7 +1889,7 @@ mod tests {
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -1744,6 +1939,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "old body");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
@@ -1760,7 +1956,7 @@ mod tests {
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -1793,6 +1989,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "some body");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
@@ -1809,7 +2006,7 @@ mod tests {
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -2062,6 +2259,7 @@ mod tests {
         let remote_body = make_issue_body("agent-7", "2026-03-27", None, "Some body text.");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: remote_body,
@@ -2078,7 +2276,7 @@ mod tests {
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -2121,6 +2319,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "body");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
@@ -2137,7 +2336,7 @@ mod tests {
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -2181,6 +2380,7 @@ mod tests {
             "<!-- lazyspec\n---\ndate: 2026-03-27\nprovenance:\n- old\n---\n-->\n\nbody";
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body_str.to_string(),
@@ -2197,7 +2397,7 @@ mod tests {
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -2399,6 +2599,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "body");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My doc".to_string(),
             body: issue_body,
@@ -2415,7 +2616,7 @@ mod tests {
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -2479,6 +2680,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "body");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My doc".to_string(),
             body: issue_body,
@@ -2495,7 +2697,7 @@ mod tests {
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -2547,6 +2749,7 @@ mod tests {
     fn gh_view_issue_with_lazyspec_body(number: u64, labels: Vec<&str>) -> GhIssue {
         GhIssue {
             number,
+            id: format!("I_node{}", number),
             url: String::new(),
             title: "My doc".to_string(),
             body: make_issue_body("agent-7", "2026-03-27", None, "body"),
@@ -2574,7 +2777,7 @@ mod tests {
             .with_view_issue(view_issue)
             .with_graphql_responses(graphql);
         let mut map = IssueMap::load(root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
         GithubIssuesStore {
             client,
             root: root.to_path_buf(),
@@ -2747,11 +2950,210 @@ mod tests {
         assert_eq!(parsed["type"].as_str().unwrap(), "story");
     }
 
+    // --- Subdir sub-issue materialization (ITERATION-214) ---
+
+    fn subdir_type_def() -> TypeDef {
+        TypeDef {
+            subdirectory: true,
+            dir: "docs/stories".to_string(),
+            ..test_type_def(StoreBackend::GithubIssues)
+        }
+    }
+
+    fn subdir_config(td: &TypeDef) -> Config {
+        let mut config = Config::default();
+        config.documents.types = vec![td.clone()];
+        config
+    }
+
+    fn write_doc(path: &std::path::Path, title: &str, extra: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let content = format!(
+            "---\ntitle: {}\ntype: rfc\nstatus: draft\nauthor: a\ndate: 2026-06-25\ntags: []\n{}---\n\nbody for {}\n",
+            title, extra, title
+        );
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn subdir_gh_store(root: &std::path::Path, td: &TypeDef) -> GithubIssuesStore<MockGhClient> {
+        // The subIssues read (empty) followed by enough generic mutation-OK
+        // responses for the add/reprioritize calls the reconcile may issue.
+        let mut responses = vec![serde_json::json!({
+            "data": {"node": {"subIssues": {"nodes": []}}}
+        })];
+        responses.extend(std::iter::repeat_with(|| serde_json::json!({"data": {}})).take(8));
+        GithubIssuesStore {
+            client: MockGhClient::new().with_graphql_responses(responses),
+            root: root.to_path_buf(),
+            repo: "owner/repo".to_string(),
+            config: subdir_config(td),
+            issue_map: IssueMap::load(root).unwrap(),
+            issue_cache: IssueCache::new(root),
+        }
+    }
+
+    // AC1: parent index.md + 2 child .md -> materialize_subdir maps parent +
+    // both children AND records 3 issue_create calls (pre-fix: 1).
+    #[test]
+    fn materialize_subdir_creates_parent_and_children_issues() {
+        let root = tmp_root("subdir_materialize");
+        let td = subdir_type_def();
+        let folder = root.join("docs/stories/STORY-159-shape");
+        write_doc(&folder.join("index.md"), "Parent", "");
+        write_doc(&folder.join("01-first.md"), "First child", "");
+        write_doc(&folder.join("02-second.md"), "Second child", "");
+
+        let mut store = subdir_gh_store(&root, &td);
+        let result = store.materialize_subdir(&td, "STORY-159").unwrap();
+
+        assert_eq!(result.children.len(), 2);
+        assert!(store.issue_map.get("STORY-159").is_some());
+        assert!(store.issue_map.get("01-first").is_some());
+        assert!(store.issue_map.get("02-second").is_some());
+
+        assert_eq!(
+            store.client.create_titles.borrow().len(),
+            3,
+            "parent + 2 children = 3 issue_create calls"
+        );
+    }
+
+    // AC1 (ordering): children come back in loader (path-sorted) order.
+    #[test]
+    fn materialize_subdir_children_in_loader_order() {
+        let root = tmp_root("subdir_order");
+        let td = subdir_type_def();
+        let folder = root.join("docs/stories/STORY-200-x");
+        write_doc(&folder.join("index.md"), "Parent", "");
+        write_doc(&folder.join("02-b.md"), "B", "");
+        write_doc(&folder.join("01-a.md"), "A", "");
+
+        let mut store = subdir_gh_store(&root, &td);
+        let result = store.materialize_subdir(&td, "STORY-200").unwrap();
+
+        let ids: Vec<&str> = result
+            .children
+            .iter()
+            .map(|c| c.child_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["01-a", "02-b"]);
+        for (i, c) in result.children.iter().enumerate() {
+            assert_eq!(c.order_index, i);
+        }
+    }
+
+    // AC2 (via wiring): sync_subissues materializes then issues addSubIssue once
+    // per child with issueId=parent_node, subIssueId=child_node.
+    #[test]
+    fn sync_subissues_adds_each_child_as_native_sub_issue() {
+        let root = tmp_root("subdir_sync_add");
+        let td = subdir_type_def();
+        let folder = root.join("docs/stories/STORY-300-y");
+        write_doc(&folder.join("index.md"), "Parent", "");
+        write_doc(&folder.join("01-a.md"), "A", "");
+        write_doc(&folder.join("02-b.md"), "B", "");
+
+        let mut store = subdir_gh_store(&root, &td);
+        let result = store.sync_subissues(&td, "STORY-300").unwrap();
+
+        let parent_node = result.parent_node.clone();
+        let calls = store.client.graphql_calls.borrow();
+        let adds: Vec<_> = calls
+            .iter()
+            .filter(|(q, _)| q.contains("addSubIssue"))
+            .collect();
+        assert_eq!(adds.len(), 2, "one addSubIssue per child");
+        for (_, vars) in &adds {
+            assert!(vars.contains(&("issueId".to_string(), GqlVar::Str(parent_node.clone()))));
+        }
+        let child_nodes: Vec<String> = result.children.iter().map(|c| c.node_id.clone()).collect();
+        for cn in &child_nodes {
+            assert!(
+                adds.iter()
+                    .any(|(_, vars)| vars
+                        .contains(&("subIssueId".to_string(), GqlVar::Str(cn.clone())))),
+                "child node {cn} must be added as a sub-issue"
+            );
+        }
+    }
+
+    // AC6: a subdir doc with children AND an `implements` relation -> children
+    // route to addSubIssue (GraphQL) while the implements relation stays in the
+    // issue-body HTML comment and is NOT sent to GraphQL.
+    #[test]
+    fn structural_children_native_while_implements_stays_in_body() {
+        let root = tmp_root("subdir_ac6");
+        let td = subdir_type_def();
+        let folder = root.join("docs/stories/STORY-400-z");
+        write_doc(
+            &folder.join("index.md"),
+            "Parent",
+            "related:\n- implements: RFC-050\n",
+        );
+        write_doc(&folder.join("01-a.md"), "A", "");
+
+        let mut store = subdir_gh_store(&root, &td);
+        let result = store.sync_subissues(&td, "STORY-400").unwrap();
+
+        // Child routed to GraphQL addSubIssue.
+        let calls = store.client.graphql_calls.borrow();
+        let adds: Vec<_> = calls
+            .iter()
+            .filter(|(q, _)| q.contains("addSubIssue"))
+            .collect();
+        assert_eq!(adds.len(), 1);
+        let child_node = result.children[0].node_id.clone();
+        assert!(adds[0]
+            .1
+            .contains(&("subIssueId".to_string(), GqlVar::Str(child_node))));
+
+        // implements never appears in any GraphQL call.
+        assert!(
+            !calls.iter().any(|(q, vars)| q.contains("implements")
+                || vars.iter().any(|(_, v)| matches!(
+                    v,
+                    GqlVar::Str(s) if s.contains("implements") || s == "RFC-050"
+                ))),
+            "implements relation must not be sent to GraphQL"
+        );
+
+        // implements lives in the parent issue body produced by issue_body::serialize.
+        let parent_body = store.client.last_create_body.borrow();
+        // last_create_body holds the most recent create (the child). Verify the
+        // parent's body directly via the serializer instead.
+        drop(parent_body);
+        let parent_meta = crate::engine::document::DocMeta {
+            path: PathBuf::new(),
+            title: "Parent".to_string(),
+            doc_type: DocType::new("rfc"),
+            status: Status::new("draft"),
+            author: "a".to_string(),
+            date: chrono::NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![crate::engine::document::Relation {
+                rel_type: crate::engine::document::RelationType::new("implements"),
+                target: "RFC-050".to_string(),
+            }],
+            validate_ignore: false,
+            virtual_doc: false,
+            attributes: Default::default(),
+            id: "STORY-400".to_string(),
+        };
+        let body = issue_body::serialize(&parent_meta, "body");
+        assert!(
+            body.contains("implements: RFC-050"),
+            "implements must be in the serialized issue body, got: {body}"
+        );
+    }
+
     #[test]
     fn push_cache_missing_cache_file_errors() {
         let root = tmp_root("gh_push_cache_missing");
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client: MockGhClient::new(),
