@@ -3,7 +3,7 @@ use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::document::{rewrite_frontmatter, RelationType};
 use crate::engine::fs::FileSystem;
-use crate::engine::gh::{GhCli, GhIssueReader, GhIssueWriter};
+use crate::engine::gh::{GhCli, GhGraphql, GhIssueReader, GhIssueWriter};
 use crate::engine::git_ref::{GitCli, GitRefOps};
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
@@ -35,7 +35,7 @@ pub fn link_with_config(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn link_inner<G: GhIssueReader + GhIssueWriter>(
+fn link_inner<G: GhIssueReader + GhIssueWriter + GhGraphql>(
     root: &Path,
     store: &Store,
     from: &str,
@@ -121,7 +121,7 @@ pub fn unlink_with_config(
     })
 }
 
-fn push_if_github_backed<G: GhIssueReader + GhIssueWriter>(
+fn push_if_github_backed<G: GhIssueReader + GhIssueWriter + GhGraphql>(
     root: &Path,
     doc_path: &Path,
     config: Option<&Config>,
@@ -379,6 +379,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
         };
 
         link_inner(

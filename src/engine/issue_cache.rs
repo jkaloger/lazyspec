@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{AttrDef, TypeDef};
-use crate::engine::document::{DocMeta, DocType, Status};
+use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
 use crate::engine::gh::{type_label, GhGraphql, GhIssue, GhIssueReader};
 use crate::engine::gh_schema;
 use crate::engine::issue_body::{self, IssueContext};
@@ -363,6 +363,7 @@ fn parse_issue(
 
     if let Ok((mut meta, body)) = issue_body::deserialize(&issue.body, &ctx) {
         meta.author = author;
+        insert_issue_type(&mut meta, issue);
         return (meta, body);
     }
 
@@ -372,7 +373,7 @@ fn parse_issue(
         Status::new("complete")
     };
 
-    let meta = DocMeta {
+    let mut meta = DocMeta {
         path: PathBuf::new(),
         title: issue.title.clone(),
         doc_type: DocType::new(type_name),
@@ -392,8 +393,19 @@ fn parse_issue(
         attributes: Default::default(),
         id: String::new(),
     };
+    insert_issue_type(&mut meta, issue);
 
     (meta, issue.body.clone())
+}
+
+/// Surface the native GitHub issue-type as the orthogonal `issue_type`
+/// attribute. Absent (not empty) when the issue has no native type. Sourced
+/// only from the native field, never from labels.
+fn insert_issue_type(meta: &mut DocMeta, issue: &GhIssue) {
+    if let Some(name) = &issue.issue_type {
+        meta.attributes
+            .insert("issue_type".to_string(), AttrValue::Str(name.clone()));
+    }
 }
 
 fn build_cache_content(meta: &DocMeta, body: &str) -> String {
@@ -493,6 +505,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
         }
     }
 
@@ -1207,5 +1220,71 @@ mod tests {
         let known_types = vec!["story".to_string()];
         let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
         assert_eq!(meta.date, Utc::now().date_naive());
+    }
+
+    // AC1: native issue_type surfaces as an `issue_type` string attribute,
+    // orthogonal to the lazyspec:story type label.
+    #[test]
+    fn parse_issue_surfaces_native_issue_type_as_attribute() {
+        let mut issue = make_gh_issue(
+            1,
+            "Test issue",
+            "<!-- lazyspec\n---\ndate: 2026-03-27\n---\n-->\n\nbody",
+            &["lazyspec:story"],
+        );
+        issue.issue_type = Some("Bug".to_string());
+        let known_types = vec!["story".to_string()];
+        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
+        assert_eq!(
+            meta.attributes.get("issue_type"),
+            Some(&AttrValue::Str("Bug".to_string()))
+        );
+    }
+
+    // AC2: no native type -> attribute absent (not empty, not default).
+    #[test]
+    fn parse_issue_omits_issue_type_when_unset() {
+        let issue = make_gh_issue(
+            2,
+            "Test issue",
+            "<!-- lazyspec\n---\ndate: 2026-03-27\n---\n-->\n\nbody",
+            &["lazyspec:story"],
+        );
+        assert!(issue.issue_type.is_none());
+        let known_types = vec!["story".to_string()];
+        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
+        assert!(meta.attributes.get("issue_type").is_none());
+    }
+
+    // AC6 (read half): lazyspec:story label and native Bug type coexist.
+    #[test]
+    fn parse_issue_doc_type_and_issue_type_are_orthogonal() {
+        let mut issue = make_gh_issue(
+            3,
+            "Test issue",
+            "<!-- lazyspec\n---\ndate: 2026-03-27\n---\n-->\n\nbody",
+            &["lazyspec:story"],
+        );
+        issue.issue_type = Some("Bug".to_string());
+        let known_types = vec!["story".to_string()];
+        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
+        assert_eq!(meta.doc_type.as_str(), "story");
+        assert_eq!(
+            meta.attributes.get("issue_type"),
+            Some(&AttrValue::Str("Bug".to_string()))
+        );
+    }
+
+    // AC2 (fallback body branch): a non-lazyspec body also surfaces issue_type.
+    #[test]
+    fn parse_issue_fallback_body_surfaces_issue_type() {
+        let mut issue = make_gh_issue(4, "Plain issue", "Just a plain body", &["lazyspec:story"]);
+        issue.issue_type = Some("Task".to_string());
+        let known_types = vec!["story".to_string()];
+        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
+        assert_eq!(
+            meta.attributes.get("issue_type"),
+            Some(&AttrValue::Str("Task".to_string()))
+        );
     }
 }

@@ -37,6 +37,11 @@ pub struct GhIssue {
     pub created_at: String,
     #[serde(default)]
     pub author: Option<GhAuthor>,
+    /// Native GitHub issue-type name (`issueType.name`). `None` when the issue
+    /// has no native type. Sourced only from the GraphQL `issueType` field,
+    /// never from labels.
+    #[serde(default, skip)]
+    pub issue_type: Option<String>,
 }
 
 // --- Error types ---
@@ -280,8 +285,37 @@ impl GhIssueReader for GhCli {
         ];
 
         let stdout = self.run_gh_checked(&args)?;
-        parse_issue_json(&stdout)
+        let mut issue = parse_issue_json(&stdout)?;
+
+        // `gh issue view` does not expose the native issue type; fetch it over
+        // GraphQL. Native issue-types are GA so no preview Accept header is sent.
+        let (owner, name) = split_owner_repo(repo)?;
+        let resp = self.graphql(
+            ISSUE_TYPE_QUERY,
+            &[
+                ("owner", GqlVar::Str(owner.to_string())),
+                ("name", GqlVar::Str(name.to_string())),
+                ("number", GqlVar::Int(number as i64)),
+            ],
+        )?;
+        issue.issue_type = parse_issue_type_name(&resp);
+
+        Ok(issue)
     }
+}
+
+const ISSUE_TYPE_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { id issueType { id name } } } }";
+
+fn split_owner_repo(repo: &str) -> Result<(&str, &str)> {
+    repo.split_once('/')
+        .filter(|(o, n)| !o.is_empty() && !n.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("repo '{}' must be in owner/name form", repo))
+}
+
+fn parse_issue_type_name(resp: &serde_json::Value) -> Option<String> {
+    resp.pointer("/data/repository/issue/issueType/name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 impl GhIssueWriter for GhCli {
@@ -614,6 +648,7 @@ pub mod test_support {
                 updated_at: String::new(),
                 created_at: String::new(),
                 author: None,
+                issue_type: None,
             })
         }
     }
@@ -648,6 +683,7 @@ pub mod test_support {
                 updated_at: "2026-03-27T00:00:00Z".to_string(),
                 created_at: String::new(),
                 author: None,
+                issue_type: None,
             })
         }
 
@@ -866,6 +902,7 @@ mod tests {
                 updated_at: String::new(),
                 created_at: String::new(),
                 author: None,
+                issue_type: None,
             },
             GhIssue {
                 number: 2,
@@ -877,6 +914,7 @@ mod tests {
                 updated_at: String::new(),
                 created_at: String::new(),
                 author: None,
+                issue_type: None,
             },
         ]);
         let issues = client.issue_list("owner/repo", &[], &[], None).unwrap();

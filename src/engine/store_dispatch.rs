@@ -7,7 +7,8 @@ use serde::Serialize;
 
 use crate::engine::config::{Config, StoreBackend, TypeDef};
 use crate::engine::document::{compose_frontmatter, AttrValue, DocMeta, DocType, Status};
-use crate::engine::gh::{self, GhIssueReader, GhIssueWriter};
+use crate::engine::gh::{self, GhGraphql, GhIssueReader, GhIssueWriter, GqlVar};
+use crate::engine::gh_schema::GhSchemaSnapshot;
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::issue_body;
@@ -146,7 +147,7 @@ impl DocumentStore for FilesystemStore {
     }
 }
 
-pub struct GithubIssuesStore<G: GhIssueReader + GhIssueWriter> {
+pub struct GithubIssuesStore<G: GhIssueReader + GhIssueWriter + GhGraphql> {
     pub client: G,
     pub root: PathBuf,
     pub repo: String,
@@ -155,7 +156,7 @@ pub struct GithubIssuesStore<G: GhIssueReader + GhIssueWriter> {
     pub issue_cache: IssueCache,
 }
 
-impl<G: GhIssueReader + GhIssueWriter> GithubIssuesStore<G> {
+impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
     /// Push the current cache file content to GitHub.
     ///
     /// Reads the cache file for `doc_id`, parses its frontmatter and body,
@@ -217,9 +218,63 @@ impl<G: GhIssueReader + GhIssueWriter> GithubIssuesStore<G> {
 
         Ok((issue_number, remote_issue))
     }
+
+    /// Push the native issue-type to GitHub via a single `updateIssue` mutation.
+    /// `type_id` is `Some(id)` to set the type or `None` to clear it
+    /// (`issueTypeId: null`). The issue node id is resolved over GraphQL.
+    fn push_issue_type(&self, issue_number: u64, type_id: Option<&str>) -> Result<()> {
+        let (owner, name) = split_owner_repo(&self.repo)?;
+        let id_resp = self.client.graphql(
+            ISSUE_NODE_ID_QUERY,
+            &[
+                ("owner", GqlVar::Str(owner.to_string())),
+                ("name", GqlVar::Str(name.to_string())),
+                ("number", GqlVar::Int(issue_number as i64)),
+            ],
+        )?;
+        let issue_id = id_resp
+            .pointer("/data/repository/issue/id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!("could not resolve issue node id for #{}", issue_number)
+            })?
+            .to_string();
+
+        match type_id {
+            Some(id) => {
+                self.client.graphql(
+                    UPDATE_ISSUE_TYPE_MUTATION,
+                    &[
+                        ("issueId", GqlVar::Str(issue_id)),
+                        ("issueTypeId", GqlVar::Str(id.to_string())),
+                    ],
+                )?;
+            }
+            None => {
+                // gh cannot pass a null variable, so the clear value is inlined.
+                self.client.graphql(
+                    CLEAR_ISSUE_TYPE_MUTATION,
+                    &[("issueId", GqlVar::Str(issue_id))],
+                )?;
+            }
+        }
+        Ok(())
+    }
 }
 
-impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
+const ISSUE_NODE_ID_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { id } } }";
+
+const UPDATE_ISSUE_TYPE_MUTATION: &str = "mutation($issueId: ID!, $issueTypeId: ID!) { updateIssue(input: {id: $issueId, issueTypeId: $issueTypeId}) { issue { id } } }";
+
+const CLEAR_ISSUE_TYPE_MUTATION: &str = "mutation($issueId: ID!) { updateIssue(input: {id: $issueId, issueTypeId: null}) { issue { id } } }";
+
+fn split_owner_repo(repo: &str) -> Result<(&str, &str)> {
+    repo.split_once('/')
+        .filter(|(o, n)| !o.is_empty() && !n.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("repo '{}' must be in owner/name form", repo))
+}
+
+impl<G: GhIssueReader + GhIssueWriter + GhGraphql> DocumentStore for GithubIssuesStore<G> {
     fn create(
         &mut self,
         type_def: &TypeDef,
@@ -317,6 +372,7 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
 
         let mut new_status: Option<Status> = None;
         let mut attr_updates: Vec<(&str, &str)> = Vec::new();
+        let mut issue_type_update: Option<&str> = None;
         for &(key, value) in updates {
             match key {
                 "status" => {
@@ -327,12 +383,34 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
                 "title" => meta.title = value.to_string(),
                 "author" => meta.author = value.to_string(),
                 "body" => body = value.to_string(),
+                // The native issue-type lives in GitHub's `issueType` field, not
+                // the issue-body HTML comment, so it is kept out of attr_updates.
+                "issue_type" => issue_type_update = Some(value),
                 _ => attr_updates.push((key, value)),
             }
         }
         if !attr_updates.is_empty() {
             crate::engine::document::apply_attrs(type_def, &mut meta, &attr_updates)?;
         }
+
+        // Resolve (and validate) the native issue-type offline before any remote
+        // write, so an invalid value rejects without an issue_edit or mutation.
+        // `Some(Some(id))` sets the type, `Some(None)` clears it, `None` leaves
+        // it untouched.
+        let issue_type_change: Option<Option<String>> = match issue_type_update {
+            Some("") => Some(None),
+            Some(name) => {
+                let snapshot = GhSchemaSnapshot::load(&self.root);
+                let id = snapshot.issue_type_id(name).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "invalid issue_type '{}': not a known GitHub issue type",
+                        name
+                    )
+                })?;
+                Some(Some(id.to_string()))
+            }
+            None => None,
+        };
 
         let new_body = issue_body::serialize(&meta, &body);
         self.client
@@ -349,6 +427,10 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
             } else if !should_be_open && is_open {
                 self.client.issue_close(&self.repo, issue_number)?;
             }
+        }
+
+        if let Some(type_id) = issue_type_change {
+            self.push_issue_type(issue_number, type_id.as_deref())?;
         }
 
         // Clear updated_at: we just pushed, so our stored timestamp is stale.
@@ -489,7 +571,7 @@ pub(crate) fn find_cache_file(cache_dir: &std::path::Path, doc_id: &str) -> Opti
     })
 }
 
-pub fn dispatch_for_type<'a, G: GhIssueReader + GhIssueWriter, R: GitRefOps>(
+pub fn dispatch_for_type<'a, G: GhIssueReader + GhIssueWriter + GhGraphql, R: GitRefOps>(
     type_def: &TypeDef,
     fs_store: &'a mut FilesystemStore,
     gh_store: Option<&'a mut GithubIssuesStore<G>>,
@@ -796,6 +878,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -845,6 +928,7 @@ mod tests {
             updated_at: "2026-03-27T10:45:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -888,6 +972,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -928,6 +1013,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -987,6 +1073,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1026,6 +1113,7 @@ mod tests {
             updated_at: "2026-03-27T10:45:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1078,6 +1166,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1169,6 +1258,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1234,6 +1324,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1282,6 +1373,7 @@ mod tests {
             updated_at: "2026-03-27T10:45:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1538,6 +1630,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1596,6 +1689,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1655,6 +1749,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1872,6 +1967,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1951,6 +2047,7 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -1983,6 +2080,228 @@ mod tests {
             gh_store.client.last_edit_body.borrow().is_none(),
             "no remote issue_edit should have fired"
         );
+    }
+
+    use crate::engine::gh_schema::{GhSchemaSnapshot, IssueTypeId};
+
+    fn write_bug_snapshot(root: &std::path::Path) {
+        let snapshot = GhSchemaSnapshot {
+            issue_types: vec![IssueTypeId {
+                name: "Bug".to_string(),
+                id: "IT_bug".to_string(),
+            }],
+            ..Default::default()
+        };
+        snapshot.save(root).unwrap();
+    }
+
+    fn issue_node_id_response() -> serde_json::Value {
+        serde_json::json!({
+            "data": { "repository": { "issue": { "id": "I_node1" } } }
+        })
+    }
+
+    fn gh_view_issue_with_lazyspec_body(number: u64, labels: Vec<&str>) -> GhIssue {
+        GhIssue {
+            number,
+            url: String::new(),
+            title: "My doc".to_string(),
+            body: make_issue_body("agent-7", "2026-03-27", None, "body"),
+            labels: labels
+                .into_iter()
+                .map(|l| GhLabel {
+                    name: l.to_string(),
+                    color: String::new(),
+                })
+                .collect(),
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+            issue_type: None,
+        }
+    }
+
+    fn issue_type_store(
+        root: &std::path::Path,
+        graphql: Vec<serde_json::Value>,
+    ) -> GithubIssuesStore<MockGhClient> {
+        let view_issue = gh_view_issue_with_lazyspec_body(42, vec!["lazyspec:story"]);
+        let client = MockGhClient::new()
+            .with_view_issue(view_issue)
+            .with_graphql_responses(graphql);
+        let mut map = IssueMap::load(root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        GithubIssuesStore {
+            client,
+            root: root.to_path_buf(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(root),
+        }
+    }
+
+    fn issue_type_attr_td() -> TypeDef {
+        type_def_with_attrs(
+            StoreBackend::GithubIssues,
+            vec![AttrDef {
+                name: "issue_type".to_string(),
+                kind: AttrKind::Str,
+                required: false,
+                values: vec![],
+            }],
+        )
+    }
+
+    // AC3: set issue_type=Bug -> exactly ONE updateIssue mutation carrying the
+    // resolved id, and NO issue_type in the issue-body HTML comment.
+    #[test]
+    fn github_update_issue_type_sets_native_field_only() {
+        let root = tmp_root("gh_issue_type_set");
+        write_bug_snapshot(&root);
+        // First graphql response resolves the issue node id; the mutation records.
+        let mut gh_store = issue_type_store(
+            &root,
+            vec![
+                issue_node_id_response(),
+                serde_json::json!({"data": {"updateIssue": {"issue": {"id": "I_node1"}}}}),
+            ],
+        );
+
+        let td = issue_type_attr_td();
+        gh_store
+            .update(&td, "RFC-001", &[("issue_type", "Bug")])
+            .unwrap();
+
+        let calls = gh_store.client.graphql_calls.borrow();
+        let mutations: Vec<_> = calls
+            .iter()
+            .filter(|(q, _)| q.contains("updateIssue"))
+            .collect();
+        assert_eq!(mutations.len(), 1, "exactly one updateIssue mutation");
+        let (_, vars) = mutations[0];
+        assert!(
+            vars.contains(&("issueTypeId".to_string(), GqlVar::Str("IT_bug".to_string()))),
+            "mutation must carry resolved issueTypeId=IT_bug, got: {:?}",
+            vars
+        );
+
+        // The issue-body HTML comment must NOT carry issue_type.
+        let body = gh_store.client.last_edit_body.borrow();
+        let body_str = body.as_deref().expect("issue_edit called");
+        assert!(
+            !body_str.contains("issue_type"),
+            "issue_type must not leak into issue body, got: {body_str}"
+        );
+    }
+
+    // AC4: clearing issue_type sends issueTypeId: null.
+    #[test]
+    fn github_update_issue_type_clear_sends_null() {
+        let root = tmp_root("gh_issue_type_clear");
+        write_bug_snapshot(&root);
+        let mut gh_store = issue_type_store(
+            &root,
+            vec![
+                issue_node_id_response(),
+                serde_json::json!({"data": {"updateIssue": {"issue": {"id": "I_node1"}}}}),
+            ],
+        );
+
+        let td = issue_type_attr_td();
+        gh_store
+            .update(&td, "RFC-001", &[("issue_type", "")])
+            .unwrap();
+
+        let calls = gh_store.client.graphql_calls.borrow();
+        let mutation = calls
+            .iter()
+            .find(|(q, _)| q.contains("updateIssue"))
+            .expect("an updateIssue mutation");
+        assert!(
+            mutation.0.contains("issueTypeId: null"),
+            "clear must send issueTypeId: null, got query: {}",
+            mutation.0
+        );
+        // No issueTypeId var on the clear path.
+        assert!(
+            !mutation.1.iter().any(|(k, _)| k == "issueTypeId"),
+            "clear must not pass an issueTypeId value var"
+        );
+    }
+
+    // AC5: invalid value rejects offline; zero mutations, no issue_edit.
+    #[test]
+    fn github_update_issue_type_invalid_rejected_offline() {
+        let root = tmp_root("gh_issue_type_invalid");
+        write_bug_snapshot(&root);
+        // No graphql responses at all -> any graphql call would error anyway.
+        let mut gh_store = issue_type_store(&root, vec![]);
+
+        let td = issue_type_attr_td();
+        let err = gh_store
+            .update(&td, "RFC-001", &[("issue_type", "Nonsense")])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Nonsense"),
+            "error must name the invalid value, got: {err}"
+        );
+        assert!(
+            gh_store.client.graphql_calls.borrow().is_empty(),
+            "zero graphql mutations on invalid issue_type"
+        );
+        assert!(
+            gh_store.client.last_edit_body.borrow().is_none(),
+            "no issue_edit on invalid issue_type"
+        );
+    }
+
+    // AC6 (write half): setting issue_type does not touch labels or doc_type.
+    #[test]
+    fn github_update_issue_type_does_not_touch_labels() {
+        let root = tmp_root("gh_issue_type_labels");
+        write_bug_snapshot(&root);
+        let snapshot = GhSchemaSnapshot {
+            issue_types: vec![
+                IssueTypeId {
+                    name: "Bug".to_string(),
+                    id: "IT_bug".to_string(),
+                },
+                IssueTypeId {
+                    name: "Task".to_string(),
+                    id: "IT_task".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        snapshot.save(&root).unwrap();
+
+        let mut gh_store = issue_type_store(
+            &root,
+            vec![
+                issue_node_id_response(),
+                serde_json::json!({"data": {"updateIssue": {"issue": {"id": "I_node1"}}}}),
+            ],
+        );
+
+        let td = issue_type_attr_td();
+        gh_store
+            .update(&td, "RFC-001", &[("issue_type", "Task")])
+            .unwrap();
+
+        // No label add/remove recorded.
+        assert!(
+            gh_store.client.last_edit_labels_remove.borrow().is_empty(),
+            "issue_type write must not remove labels"
+        );
+
+        // doc_type stays story in the cache file (from the lazyspec:story label).
+        let cache_path = root.join(".lazyspec/cache/rfc/RFC-001.md");
+        let cache_content = std::fs::read_to_string(&cache_path).unwrap();
+        let (yaml, _) = crate::engine::document::split_frontmatter(&cache_content).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed["type"].as_str().unwrap(), "story");
     }
 
     #[test]
