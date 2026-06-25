@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use lazyspec::engine::config::{Config, CoordinationConfig, StoreBackend, TypeDef};
-use lazyspec::engine::gh::{GhIssue, GhIssueReader};
+use lazyspec::engine::gh::{GhGraphql, GhIssue, GhIssueReader, GqlVar};
 use lazyspec::engine::git_ref::{GitCli, GitRefOps};
 use lazyspec::engine::git_ref_store::GitRefStore;
 use lazyspec::engine::lease::LeaseEngine;
@@ -23,6 +23,11 @@ impl GhIssueReader for NoopGh {
     }
     fn issue_view(&self, _repo: &str, _number: u64) -> Result<GhIssue> {
         unreachable!("not used in this test")
+    }
+}
+impl GhGraphql for NoopGh {
+    fn graphql(&self, _query: &str, _vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+        unreachable!("not used in this test (git-ref types only)")
     }
 }
 

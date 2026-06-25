@@ -1,6 +1,6 @@
 use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{Config, StoreBackend};
-use crate::engine::gh::GhIssueReader;
+use crate::engine::gh::{GhGraphql, GhIssueReader};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::github::resolve_repo;
 use crate::engine::issue_cache::IssueCache;
@@ -12,7 +12,7 @@ use std::path::Path;
 pub fn run(
     root: &Path,
     config: &Config,
-    gh: &dyn GhIssueReader,
+    gh: &(impl GhIssueReader + GhGraphql),
     git_ref_ops: &dyn GitRefOps,
     remote: &str,
     type_filter: Option<&str>,
@@ -72,8 +72,15 @@ pub fn run(
                 .type_by_name(type_name)
                 .ok_or_else(|| anyhow::anyhow!("type '{}' not found in config", type_name))?;
 
-            let result =
-                cache.fetch_all(root, type_def, gh, &repo, &mut issue_map, &all_type_names)?;
+            let result = cache.fetch_all(
+                root,
+                type_def,
+                gh,
+                gh,
+                &repo,
+                &mut issue_map,
+                &all_type_names,
+            )?;
 
             summaries.push(TypeSummary {
                 type_name: type_name.to_string(),

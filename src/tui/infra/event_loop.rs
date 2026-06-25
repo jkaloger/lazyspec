@@ -541,6 +541,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                             &poll_root,
                             type_def,
                             &client,
+                            &client,
                             &store.repo,
                             &mut store.issue_map,
                             &all_type_names,

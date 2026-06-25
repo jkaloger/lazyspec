@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::TypeDef;
 use crate::engine::document::{DocMeta, DocType, Status};
-use crate::engine::gh::{type_label, GhIssue, GhIssueReader};
+use crate::engine::gh::{type_label, GhGraphql, GhIssue, GhIssueReader};
+use crate::engine::gh_schema;
 use crate::engine::issue_body::{self, IssueContext};
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store_dispatch;
@@ -111,6 +112,7 @@ impl IssueCache {
         root: &Path,
         type_def: &TypeDef,
         gh: &dyn GhIssueReader,
+        gh_graphql: &dyn GhGraphql,
         repo: &str,
         issue_map: &mut IssueMap,
         ttl: Duration,
@@ -194,10 +196,41 @@ impl IssueCache {
 
         let _ = lock.save(&self.root);
 
+        let warnings = self
+            .refresh_schema_snapshot(gh_graphql, repo)
+            .into_iter()
+            .collect();
+
         RefreshResult {
             refreshed,
             unchanged,
-            warnings: vec![],
+            warnings,
+        }
+    }
+
+    /// Best-effort fetch + persist of the native field schema snapshot.
+    /// On GraphQL failure, the prior snapshot on disk is left untouched and a
+    /// warning is returned; offline validation still works against it.
+    fn refresh_schema_snapshot(
+        &self,
+        gh_graphql: &dyn GhGraphql,
+        repo: &str,
+    ) -> Option<RefreshWarning> {
+        match gh_schema::fetch_snapshot(gh_graphql, repo) {
+            Ok(snapshot) => {
+                if let Err(e) = snapshot.save(&self.root) {
+                    return Some(RefreshWarning {
+                        message: format!("could not persist gh schema snapshot: {}", e),
+                    });
+                }
+                None
+            }
+            Err(e) => Some(RefreshWarning {
+                message: format!(
+                    "could not refresh gh schema snapshot (keeping prior, projects need `gh auth refresh -s project`): {}",
+                    e
+                ),
+            }),
         }
     }
 
@@ -221,11 +254,13 @@ impl IssueCache {
     }
 
     /// Full fetch of all issues for a type, with pagination and cleanup of removed issues.
+    #[allow(clippy::too_many_arguments)]
     pub fn fetch_all(
         &self,
         root: &Path,
         type_def: &TypeDef,
         gh: &dyn GhIssueReader,
+        gh_graphql: &dyn GhGraphql,
         repo: &str,
         issue_map: &mut IssueMap,
         known_types: &[String],
@@ -283,6 +318,10 @@ impl IssueCache {
         for id in &removed {
             self.remove(id, &type_def.name);
             issue_map.remove(id);
+        }
+
+        if let Some(warning) = self.refresh_schema_snapshot(gh_graphql, repo) {
+            eprintln!("warning: {}", warning.message);
         }
 
         Ok(FetchResult {
@@ -391,8 +430,9 @@ fn build_cache_content(meta: &DocMeta, body: &str) -> String {
 mod tests {
     use super::*;
     use crate::engine::config::{NumberingStrategy, StoreBackend};
-    use crate::engine::gh::{GhAuthor, GhIssueReader, GhLabel};
+    use crate::engine::gh::{GhAuthor, GhGraphql, GhIssueReader, GhLabel, GqlVar};
     use anyhow::Result;
+    use std::cell::RefCell;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
@@ -422,6 +462,12 @@ mod tests {
         }
     }
 
+    fn empty_issue_types_response() -> serde_json::Value {
+        serde_json::json!({
+            "data": { "organization": { "issueTypes": { "nodes": [] } } }
+        })
+    }
+
     fn make_gh_issue(number: u64, title: &str, body: &str, labels: &[&str]) -> GhIssue {
         GhIssue {
             number,
@@ -446,6 +492,8 @@ mod tests {
         issues: Vec<GhIssue>,
         fail: bool,
         list_call_count: AtomicUsize,
+        graphql_responses: RefCell<Vec<serde_json::Value>>,
+        graphql_call_count: AtomicUsize,
     }
 
     impl MockReader {
@@ -454,6 +502,8 @@ mod tests {
                 issues,
                 fail: false,
                 list_call_count: AtomicUsize::new(0),
+                graphql_responses: RefCell::new(vec![]),
+                graphql_call_count: AtomicUsize::new(0),
             }
         }
 
@@ -462,11 +512,33 @@ mod tests {
                 issues: vec![],
                 fail: true,
                 list_call_count: AtomicUsize::new(0),
+                graphql_responses: RefCell::new(vec![]),
+                graphql_call_count: AtomicUsize::new(0),
             }
+        }
+
+        fn with_graphql_responses(self, responses: Vec<serde_json::Value>) -> Self {
+            *self.graphql_responses.borrow_mut() = responses;
+            self
         }
 
         fn call_count(&self) -> usize {
             self.list_call_count.load(Ordering::SeqCst)
+        }
+
+        fn graphql_call_count(&self) -> usize {
+            self.graphql_call_count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl GhGraphql for MockReader {
+        fn graphql(&self, _query: &str, _vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+            self.graphql_call_count.fetch_add(1, Ordering::SeqCst);
+            let mut responses = self.graphql_responses.borrow_mut();
+            if responses.is_empty() {
+                anyhow::bail!("graphql unreachable");
+            }
+            Ok(responses.remove(0))
         }
     }
 
@@ -586,13 +658,15 @@ mod tests {
             make_gh_issue(10, "STORY-001 First story", "Body 1", &["lazyspec:story"]),
             make_gh_issue(11, "STORY-002 Second story", "Body 2", &["lazyspec:story"]),
             make_gh_issue(12, "STORY-003 Third story", "Body 3", &["lazyspec:story"]),
-        ]);
+        ])
+        .with_graphql_responses(vec![empty_issue_types_response()]);
 
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
         let known_types = vec!["story".to_string()];
         let result = cache.refresh_stale(
             tmp.path(),
             &type_def,
+            &gh,
             &gh,
             "owner/repo",
             &mut issue_map,
@@ -623,6 +697,53 @@ mod tests {
         assert_eq!(issue_map.get("STORY-12").unwrap().issue_number, 12);
     }
 
+    // AC4: refresh hook fetches + persists schema ids to gh-schema.json
+    #[test]
+    fn test_refresh_stale_persists_schema_snapshot_ids() {
+        let (cache, tmp) = make_cache();
+        let type_def = story_type_def();
+        let ttl = Duration::seconds(60);
+
+        cache.write("STORY-10", "story", "old content 1");
+        backdate_all(&cache, &["STORY-10"]);
+
+        let issue_types_resp = serde_json::json!({
+            "data": { "organization": { "issueTypes": {
+                "nodes": [{"id": "IT_kwBug", "name": "Bug"}]
+            } } }
+        });
+        let gh = MockReader::new(vec![make_gh_issue(
+            10,
+            "STORY-001 First",
+            "Body 1",
+            &["lazyspec:story"],
+        )])
+        .with_graphql_responses(vec![issue_types_resp]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let result = cache.refresh_stale(
+            tmp.path(),
+            &type_def,
+            &gh,
+            &gh,
+            "octo-org/repo",
+            &mut issue_map,
+            ttl,
+            &["story".to_string()],
+        );
+        assert!(
+            result.warnings.is_empty(),
+            "warnings: {:?}",
+            result.warnings
+        );
+
+        let snapshot_file = tmp.path().join(".lazyspec/cache/gh-schema.json");
+        assert!(snapshot_file.exists(), "gh-schema.json should be written");
+
+        let snapshot = gh_schema::GhSchemaSnapshot::load(tmp.path());
+        assert_eq!(snapshot.issue_type_id("Bug"), Some("IT_kwBug"));
+    }
+
     #[test]
     fn test_refresh_stale_skips_api_when_all_fresh() {
         let (cache, tmp) = make_cache();
@@ -641,6 +762,7 @@ mod tests {
             tmp.path(),
             &type_def,
             &gh,
+            &gh,
             "owner/repo",
             &mut issue_map,
             ttl,
@@ -648,6 +770,11 @@ mod tests {
         );
 
         assert_eq!(gh.call_count(), 0, "should not call API when all fresh");
+        assert_eq!(
+            gh.graphql_call_count(),
+            0,
+            "should not call graphql when all fresh"
+        );
         assert_eq!(result.refreshed, 0);
         assert_eq!(result.unchanged, 3);
         assert!(result.warnings.is_empty());
@@ -670,6 +797,7 @@ mod tests {
         let result = cache.refresh_stale(
             tmp.path(),
             &type_def,
+            &gh,
             &gh,
             "owner/repo",
             &mut issue_map,
@@ -711,6 +839,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
+                &gh,
                 &gh,
                 "owner/repo",
                 &mut issue_map,
@@ -791,6 +920,7 @@ mod tests {
                 tmp.path(),
                 &type_def,
                 &initial_gh,
+                &initial_gh,
                 "owner/repo",
                 &mut issue_map,
                 &["story".to_string()],
@@ -811,6 +941,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
+                &updated_gh,
                 &updated_gh,
                 "owner/repo",
                 &mut issue_map,
@@ -858,6 +989,7 @@ mod tests {
                 tmp.path(),
                 &type_def,
                 &gh,
+                &gh,
                 "owner/repo",
                 &mut issue_map,
                 &["story".to_string()],
@@ -902,6 +1034,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
+                &gh,
                 &gh,
                 "owner/repo",
                 &mut issue_map,
@@ -1021,6 +1154,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
+                &gh,
                 &gh,
                 "owner/repo",
                 &mut issue_map,

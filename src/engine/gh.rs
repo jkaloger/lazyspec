@@ -156,6 +156,43 @@ pub trait GhAuth {
     fn auth_status(&self) -> Result<AuthStatus>;
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum GqlVar {
+    Str(String),
+    Int(i64),
+    Bool(bool),
+}
+
+pub trait GhGraphql {
+    fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value>;
+}
+
+/// `-f key=value` for GraphQL String vars, `-F key=value` for typed (Int/Boolean).
+fn gql_var_flag(v: &GqlVar) -> (&'static str, String) {
+    match v {
+        GqlVar::Str(s) => ("-f", s.clone()),
+        GqlVar::Int(n) => ("-F", n.to_string()),
+        GqlVar::Bool(b) => ("-F", b.to_string()),
+    }
+}
+
+/// Pure argv builder for `gh api graphql`. Vars flatten to repeated
+/// `-f`/`-F` flags; never a single `variables=` JSON blob.
+pub fn build_graphql_args(query: &str, vars: &[(&str, GqlVar)]) -> Vec<String> {
+    let mut args = vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        "-f".to_string(),
+        format!("query={}", query),
+    ];
+    for (key, var) in vars {
+        let (flag, value) = gql_var_flag(var);
+        args.push(flag.to_string());
+        args.push(format!("{}={}", key, value));
+    }
+    args
+}
+
 // --- Implementation ---
 
 pub struct GhCli;
@@ -382,6 +419,15 @@ impl GhAuth for GhCli {
     }
 }
 
+impl GhGraphql for GhCli {
+    fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+        let args = build_graphql_args(query, vars);
+        let stdout = self.run_gh_checked(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        serde_json::from_str(&stdout)
+            .map_err(|e| anyhow::anyhow!("failed to parse graphql response: {}", e))
+    }
+}
+
 fn classify_gh_error(stderr: &str) -> GhError {
     let lower = stderr.to_lowercase();
 
@@ -479,6 +525,8 @@ pub mod test_support {
         pub last_edit_labels_remove: RefCell<Vec<String>>,
         pub last_create_body: RefCell<Option<String>>,
         pub next_issue_number: Cell<u64>,
+        pub graphql_responses: RefCell<Vec<serde_json::Value>>,
+        pub graphql_calls: RefCell<Vec<(String, Vec<(String, GqlVar)>)>>,
     }
 
     impl Default for MockGhClient {
@@ -505,7 +553,14 @@ pub mod test_support {
                 last_edit_labels_remove: RefCell::new(vec![]),
                 last_create_body: RefCell::new(None),
                 next_issue_number: Cell::new(1),
+                graphql_responses: RefCell::new(vec![]),
+                graphql_calls: RefCell::new(vec![]),
             }
+        }
+
+        pub fn with_graphql_responses(mut self, responses: Vec<serde_json::Value>) -> Self {
+            self.graphql_responses = RefCell::new(responses);
+            self
         }
 
         pub fn with_auth(mut self, auth: AuthStatus) -> Self {
@@ -648,6 +703,24 @@ pub mod test_support {
     impl GhAuth for MockGhClient {
         fn auth_status(&self) -> Result<AuthStatus> {
             Ok(self.auth.clone())
+        }
+    }
+
+    impl GhGraphql for MockGhClient {
+        fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+            let recorded = vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect();
+            self.graphql_calls
+                .borrow_mut()
+                .push((query.to_string(), recorded));
+
+            let mut responses = self.graphql_responses.borrow_mut();
+            if responses.is_empty() {
+                bail!("no canned graphql response available");
+            }
+            Ok(responses.remove(0))
         }
     }
 }
@@ -968,5 +1041,82 @@ mod tests {
 
         let rate_none = GhError::RateLimited { retry_after: None };
         assert_eq!(format!("{}", rate_none), "gh API rate limited");
+    }
+
+    // --- GraphQL argv builder tests (AC1, AC3) ---
+
+    #[test]
+    fn build_graphql_args_has_api_graphql_query_prefix() {
+        let args = build_graphql_args("query { viewer { login } }", &[]);
+        assert_eq!(&args[0], "api");
+        assert_eq!(&args[1], "graphql");
+        assert_eq!(&args[2], "-f");
+        assert_eq!(&args[3], "query=query { viewer { login } }");
+    }
+
+    #[test]
+    fn build_graphql_args_string_var_uses_dash_f() {
+        let args = build_graphql_args("q", &[("owner", GqlVar::Str("foo".to_string()))]);
+        let pos = args.iter().position(|a| a == "owner=foo").unwrap();
+        assert_eq!(args[pos - 1], "-f");
+    }
+
+    #[test]
+    fn build_graphql_args_typed_vars_use_dash_capital_f() {
+        let args = build_graphql_args(
+            "q",
+            &[("number", GqlVar::Int(5)), ("flag", GqlVar::Bool(true))],
+        );
+        let num_pos = args.iter().position(|a| a == "number=5").unwrap();
+        assert_eq!(args[num_pos - 1], "-F");
+        let flag_pos = args.iter().position(|a| a == "flag=true").unwrap();
+        assert_eq!(args[flag_pos - 1], "-F");
+    }
+
+    #[test]
+    fn build_graphql_args_never_emits_variables_blob() {
+        let args = build_graphql_args(
+            "q",
+            &[
+                ("owner", GqlVar::Str("foo".to_string())),
+                ("number", GqlVar::Int(5)),
+                ("flag", GqlVar::Bool(true)),
+            ],
+        );
+        assert!(
+            !args.iter().any(|a| a.contains("variables=")),
+            "must not serialize a variables JSON blob: {:?}",
+            args
+        );
+    }
+
+    // --- Mock graphql seam tests (AC2) ---
+
+    #[test]
+    fn mock_graphql_returns_canned_response_and_records_call() {
+        let client = MockGhClient::new()
+            .with_graphql_responses(vec![serde_json::json!({"data": {"ok": true}})]);
+        let result = client
+            .graphql("query { x }", &[("owner", GqlVar::Str("foo".to_string()))])
+            .unwrap();
+        assert_eq!(result["data"]["ok"], serde_json::json!(true));
+
+        let calls = client.graphql_calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "query { x }");
+        assert_eq!(
+            calls[0].1,
+            vec![("owner".to_string(), GqlVar::Str("foo".to_string()))]
+        );
+    }
+
+    #[test]
+    fn mock_graphql_pops_responses_fifo() {
+        let client = MockGhClient::new().with_graphql_responses(vec![
+            serde_json::json!({"n": 1}),
+            serde_json::json!({"n": 2}),
+        ]);
+        assert_eq!(client.graphql("q", &[]).unwrap()["n"], 1);
+        assert_eq!(client.graphql("q", &[]).unwrap()["n"], 2);
     }
 }

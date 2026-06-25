@@ -1,12 +1,16 @@
 use crate::engine::config::Config;
-use crate::engine::gh::{AuthStatus, GhAuth, GhIssueReader};
+use crate::engine::gh::{AuthStatus, GhAuth, GhGraphql, GhIssueReader};
 use crate::engine::github::resolve_repo;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
-pub fn run(root: &Path, config: &Config, gh: &(impl GhIssueReader + GhAuth)) -> Result<()> {
+pub fn run(
+    root: &Path,
+    config: &Config,
+    gh: &(impl GhIssueReader + GhAuth + GhGraphql),
+) -> Result<()> {
     let gh_types = config.documents.github_issues_types();
     if gh_types.is_empty() {
         println!("No github-issues types configured; nothing to set up.");
@@ -46,7 +50,15 @@ pub fn run(root: &Path, config: &Config, gh: &(impl GhIssueReader + GhAuth)) -> 
             .iter()
             .map(|t| t.name.clone())
             .collect();
-        let result = cache.fetch_all(root, type_def, gh, &repo, &mut issue_map, &all_type_names)?;
+        let result = cache.fetch_all(
+            root,
+            type_def,
+            gh,
+            gh,
+            &repo,
+            &mut issue_map,
+            &all_type_names,
+        )?;
 
         println!(
             "Fetched {} {} issue{}",

@@ -474,6 +474,28 @@ unknown rule and refuses a `relation-existence` rule (the gate applies only to
 `parent-child` rules). The mutators require an already-valid config; run
 `lazyspec fix --config` first to migrate a legacy one.
 
+#### `github-issues` store auth
+
+Types stored as GitHub issues (`--store github-issues`) shell out to the `gh`
+CLI, so run `gh auth login` first. Beyond plain issue access, lazyspec reads
+native GitHub fields (issue types, Projects v2 fields) over the GraphQL API,
+which needs the `project` scope on your token:
+
+```sh
+gh auth refresh -s project
+```
+
+Without it, schema-snapshot refreshes degrade gracefully -- they emit a warning
+and keep serving the last cached snapshot, so offline validation still works.
+
+On macOS, a slow keyring lookup can make `gh api` fall back to an unauthenticated
+request (surfacing as a surprise 403 / rate-limit). If you hit that, pass the
+token explicitly:
+
+```sh
+GH_TOKEN="$(gh auth token)" lazyspec fetch
+```
+
 ### Custom Types
 
 Each document type is declared with a `[[types]]` block. This lets you rename the
