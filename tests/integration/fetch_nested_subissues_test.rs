@@ -62,6 +62,27 @@ impl GhIssueReader for NestingGh {
 
 impl GhGraphql for NestingGh {
     fn graphql(&self, _query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+        // Batched parentage query: `ids: [parent_node, ...]` -> `data.nodes`,
+        // each `{ id, subIssues: { nodes: [{ id }] } }`.
+        if let Some((_, GqlVar::StrList(ids))) = vars.iter().find(|(k, _)| *k == "ids") {
+            let nodes: Vec<_> = ids
+                .iter()
+                .map(|parent| {
+                    let kids = self
+                        .sub_issues_by_node
+                        .get(parent)
+                        .cloned()
+                        .unwrap_or_default();
+                    let child_nodes: Vec<_> = kids
+                        .iter()
+                        .map(|n| serde_json::json!({ "id": n }))
+                        .collect();
+                    serde_json::json!({ "id": parent, "subIssues": { "nodes": child_nodes } })
+                })
+                .collect();
+            return Ok(serde_json::json!({ "data": { "nodes": nodes } }));
+        }
+
         let id = vars
             .iter()
             .find(|(k, _)| *k == "id")
@@ -199,9 +220,6 @@ impl GhMilestoneApi for NestingGh {
     ) -> Result<()> {
         unreachable!()
     }
-    fn milestone_issues(&self, _repo: &str, _number: u64) -> Result<Vec<u64>> {
-        Ok(vec![])
-    }
 }
 
 /// A non-subdirectory github-issues `story` type. Non-subdirectory so the fetch
@@ -241,6 +259,7 @@ fn gh_issue(number: u64, node: &str, title: &str, body: &str) -> GhIssue {
             login: "octocat".to_string(),
         }),
         issue_type: None,
+        milestone: None,
     }
 }
 

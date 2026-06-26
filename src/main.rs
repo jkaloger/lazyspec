@@ -640,6 +640,7 @@ fn refresh_github_cache(cwd: &std::path::Path, config: &Config) {
             &mut issue_map,
             ttl,
             &all_type_names,
+            config,
         );
         for warning in &result.warnings {
             eprintln!("warning: {}", warning.message);

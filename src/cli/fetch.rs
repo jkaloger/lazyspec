@@ -96,6 +96,7 @@ pub fn run(
                 &repo,
                 &mut issue_map,
                 &all_type_names,
+                config,
             )?;
 
             for w in &result.warnings {

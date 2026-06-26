@@ -148,9 +148,6 @@ impl GhMilestoneApi for NoopGh {
     ) -> Result<()> {
         unreachable!("not used in this test")
     }
-    fn milestone_issues(&self, _repo: &str, _number: u64) -> Result<Vec<u64>> {
-        Ok(vec![])
-    }
 }
 
 fn config_with_git_ref_iteration() -> Config {

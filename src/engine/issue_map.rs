@@ -34,7 +34,7 @@ pub struct IssueMapEntry {
     pub kind: EntryKind,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IssueMap {
     #[serde(flatten)]
     entries: HashMap<String, IssueMapEntry>,
@@ -111,6 +111,19 @@ impl IssueMap {
         self.entries
             .iter()
             .find(|(_, entry)| entry.kind == EntryKind::Issue && entry.issue_number == number)
+            .map(|(id, _)| id.as_str())
+    }
+
+    /// Reverse lookup restricted to milestone-kind entries: the `MILESTONE-n`
+    /// shorthand mapped to a given GitHub milestone number, or `None` when no
+    /// synced milestone owns it. Used at fetch to resolve an issue's native
+    /// milestone into a forward `targets` relation. Milestone numbers are a
+    /// sequence independent of issue numbers, so this must filter by kind to
+    /// avoid matching an unrelated issue that happens to share the number.
+    pub fn milestone_shorthand_for_number(&self, number: u64) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|(_, entry)| entry.kind == EntryKind::Milestone && entry.issue_number == number)
             .map(|(id, _)| id.as_str())
     }
 

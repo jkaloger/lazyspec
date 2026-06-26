@@ -633,6 +633,7 @@ mod tests {
             created_at: "2026-06-26T09:00:00Z".to_string(),
             author: None,
             issue_type: None,
+            milestone: None,
         }
     }
 
@@ -1236,6 +1237,7 @@ mod tests {
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
             issue_type: None,
+            milestone: None,
         };
 
         link_inner(

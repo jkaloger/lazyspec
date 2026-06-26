@@ -547,6 +547,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                             &store.repo,
                             &mut store.issue_map,
                             &all_type_names,
+                            &poll_config,
                         ) {
                             Ok(result) => {
                                 warnings.extend(result.warnings.into_iter().map(|w| w.message));

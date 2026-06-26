@@ -897,6 +897,15 @@ impl Config {
         self.relationships.iter().find(|r| r.name == name)
     }
 
+    /// The relationship whose `github_native` edge equals `native` (e.g.
+    /// `"milestone"`), if one is declared. Lets fetch resolve the rel name to
+    /// surface a native association under rather than hardcoding `targets`.
+    pub fn relationship_by_github_native(&self, native: &str) -> Option<&RelationshipDef> {
+        self.relationships
+            .iter()
+            .find(|r| r.github_native.as_deref() == Some(native))
+    }
+
     /// The declared inverse keyword for a canonical relationship `name`, if it
     /// is directional. Symmetric relationships return `None`.
     pub fn inverse_of(&self, name: &str) -> Option<&str> {

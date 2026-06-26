@@ -5,6 +5,8 @@
 //! GraphQL node ids (`I_*`), never REST numbers. Only structural children of a
 //! subdir parent route here; semantic relations stay in the issue-body comment.
 
+use std::collections::HashMap;
+
 use anyhow::{bail, Context, Result};
 
 use crate::engine::config::StoreBackend;
@@ -34,6 +36,15 @@ pub struct SubIssuePlan {
 
 const SUB_ISSUES_QUERY: &str =
     "query($id: ID!) { node(id: $id) { ... on Issue { subIssues(first: 100) { nodes { id } } } } }";
+
+/// Batched variant: resolve many parents' sub-issues in one request via
+/// `nodes(ids:)`. `id` is selected on each node so results re-key by parent
+/// regardless of array order; non-Issue / inaccessible ids come back `null`.
+const SUB_ISSUES_BATCH_QUERY: &str =
+    "query($ids: [ID!]!) { nodes(ids: $ids) { ... on Issue { id subIssues(first: 100) { nodes { id } } } } }";
+
+/// GitHub caps a single `nodes(ids:)` selection at 100 ids.
+pub const SUB_ISSUE_BATCH_MAX: usize = 100;
 
 const ADD_SUB_ISSUE_MUTATION: &str = "mutation($issueId: ID!, $subIssueId: ID!) { addSubIssue(input: {issueId: $issueId, subIssueId: $subIssueId}) { issue { id } } }";
 
@@ -159,6 +170,42 @@ pub fn fetch_remote_sub_issue_nodes(gql: &dyn GhGraphql, parent_node: &str) -> R
         })
         .unwrap_or_default();
     Ok(nodes)
+}
+
+/// Resolve sub-issue child node ids for up to `SUB_ISSUE_BATCH_MAX` parents in
+/// one query. Returns `parent_node -> ordered child node ids`, including parents
+/// with an empty child list (so callers can distinguish "no children" from "not
+/// queried"). Parents whose id resolves to a non-Issue / inaccessible node are
+/// absent from the map (GitHub returns `null` for them).
+pub fn fetch_sub_issue_nodes_batch(
+    gql: &dyn GhGraphql,
+    parent_nodes: &[String],
+) -> Result<HashMap<String, Vec<String>>> {
+    debug_assert!(parent_nodes.len() <= SUB_ISSUE_BATCH_MAX);
+    let resp = gql.graphql(
+        SUB_ISSUES_BATCH_QUERY,
+        &[("ids", GqlVar::StrList(parent_nodes.to_vec()))],
+    )?;
+    let mut out = HashMap::new();
+    let Some(nodes) = resp.pointer("/data/nodes").and_then(|v| v.as_array()) else {
+        return Ok(out);
+    };
+    for node in nodes {
+        let Some(parent) = node.get("id").and_then(|i| i.as_str()) else {
+            continue;
+        };
+        let children = node
+            .pointer("/subIssues/nodes")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|n| n.get("id").and_then(|i| i.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.insert(parent.to_string(), children);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

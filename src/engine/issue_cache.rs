@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::engine::cache_lock::CacheLock;
-use crate::engine::config::{AttrDef, TypeDef};
-use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
+use crate::engine::config::{AttrDef, Config, TypeDef};
+use crate::engine::document::{AttrValue, DocMeta, DocType, Relation, RelationType, Status};
 use crate::engine::gh::{type_label, GhGraphql, GhIssue, GhIssueReader};
 use crate::engine::gh_schema;
 use crate::engine::gh_subissue;
@@ -138,6 +138,7 @@ impl IssueCache {
         issue_map: &mut IssueMap,
         ttl: Duration,
         known_types: &[String],
+        config: &Config,
     ) -> RefreshResult {
         let cached_ids = self.list_cached(&type_def.name);
         if cached_ids.is_empty() {
@@ -168,7 +169,12 @@ impl IssueCache {
             "state".into(),
             "updatedAt".into(),
             "createdAt".into(),
+            "milestone".into(),
         ];
+
+        let milestone_rel = config
+            .relationship_by_github_native("milestone")
+            .map(|r| r.name.as_str());
 
         let issues = match gh.issue_list(repo, &labels, &fields, None) {
             Ok(issues) => issues,
@@ -192,8 +198,14 @@ impl IssueCache {
         let mut lock = self.load_lock();
 
         for issue in &issues {
-            let (meta, body) =
-                parse_issue(issue, &type_def.name, known_types, &type_def.attributes);
+            let (meta, body) = parse_issue(
+                issue,
+                &type_def.name,
+                known_types,
+                &type_def.attributes,
+                milestone_rel,
+                issue_map,
+            );
             let id = type_def.make_id(issue.number);
             let meta = DocMeta {
                 id: id.clone(),
@@ -296,6 +308,7 @@ impl IssueCache {
         repo: &str,
         issue_map: &mut IssueMap,
         known_types: &[String],
+        config: &Config,
     ) -> anyhow::Result<FetchResult> {
         let label = type_label(&type_def.name);
         let labels = vec![label];
@@ -329,9 +342,21 @@ impl IssueCache {
         let mut parsed: Vec<Parsed> = Vec::with_capacity(issues.len());
         let mut node_to_doc: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        // Rel name for the GitHub-native milestone edge, resolved from config so
+        // the forward `targets` relation is never hardcoded. `None` when no
+        // relationship declares `github_native = "milestone"`.
+        let milestone_rel = config
+            .relationship_by_github_native("milestone")
+            .map(|r| r.name.as_str());
         for issue in &issues {
-            let (meta, body) =
-                parse_issue(issue, &type_def.name, known_types, &type_def.attributes);
+            let (meta, body) = parse_issue(
+                issue,
+                &type_def.name,
+                known_types,
+                &type_def.attributes,
+                milestone_rel,
+                issue_map,
+            );
             let id = type_def.make_id(issue.number);
             let meta = DocMeta {
                 id: id.clone(),
@@ -346,7 +371,8 @@ impl IssueCache {
         // Best-effort: learn remote native sub-issue parentage so we can write
         // the nested cache layout. A GraphQL failure warns and falls back to a
         // flat layout for the affected parent; it never aborts the fetch.
-        let parentage = fetch_subissue_parentage(gh_graphql, &node_to_doc);
+        let (parentage, subissue_warnings) = fetch_subissue_parentage(gh_graphql, &node_to_doc);
+        warnings.extend(subissue_warnings);
 
         // child doc id -> (parent id, order, sibling count) for nested children.
         let mut child_layout: std::collections::HashMap<String, (String, usize, usize)> =
@@ -425,33 +451,48 @@ impl IssueCache {
 /// Query each fetched issue's native sub-issues and resolve the ordered child
 /// node ids back to fetched doc ids. Returns only parents that have at least one
 /// resolvable child; child node ids not present in `node_to_doc` are dropped (no
-/// phantom entries). Best-effort: a per-parent GraphQL failure warns to stderr
-/// and skips that parent rather than aborting.
+/// phantom entries).
+///
+/// Batched: one `nodes(ids:)` GraphQL request per chunk of
+/// `SUB_ISSUE_BATCH_MAX` parents, so the call count is `ceil(N / 100)` rather
+/// than N. Best-effort per chunk: a chunk's GraphQL failure is returned as a
+/// warning and skips that chunk's parents rather than aborting. Engine emits no
+/// stderr.
 fn fetch_subissue_parentage(
     gh_graphql: &dyn GhGraphql,
     node_to_doc: &std::collections::HashMap<String, String>,
-) -> ParentageMap {
+) -> (ParentageMap, Vec<RefreshWarning>) {
     let mut map = ParentageMap::new();
-    for (parent_node, parent_doc) in node_to_doc {
-        let child_nodes = match gh_subissue::fetch_remote_sub_issue_nodes(gh_graphql, parent_node) {
-            Ok(nodes) => nodes,
+    let mut warnings = Vec::new();
+    let parent_nodes: Vec<String> = node_to_doc.keys().cloned().collect();
+    for chunk in parent_nodes.chunks(gh_subissue::SUB_ISSUE_BATCH_MAX) {
+        let by_node = match gh_subissue::fetch_sub_issue_nodes_batch(gh_graphql, chunk) {
+            Ok(m) => m,
             Err(e) => {
-                eprintln!(
-                    "warning: could not fetch sub-issues for {}, skipping nesting: {}",
-                    parent_doc, e
-                );
+                warnings.push(RefreshWarning {
+                    message: format!(
+                        "could not fetch sub-issues for {} parents, skipping nesting: {}",
+                        chunk.len(),
+                        e
+                    ),
+                });
                 continue;
             }
         };
-        let children: Vec<String> = child_nodes
-            .iter()
-            .filter_map(|n| node_to_doc.get(n).cloned())
-            .collect();
-        if !children.is_empty() {
-            map.insert(parent_doc.clone(), children);
+        for (parent_node, child_nodes) in by_node {
+            let Some(parent_doc) = node_to_doc.get(&parent_node) else {
+                continue;
+            };
+            let children: Vec<String> = child_nodes
+                .iter()
+                .filter_map(|n| node_to_doc.get(n).cloned())
+                .collect();
+            if !children.is_empty() {
+                map.insert(parent_doc.clone(), children);
+            }
         }
     }
-    map
+    (map, warnings)
 }
 
 /// Real doc ids of every `NN-<id>.md` child inside a parent folder.
@@ -514,6 +555,8 @@ fn parse_issue(
     type_name: &str,
     known_types: &[String],
     attr_defs: &[AttrDef],
+    milestone_rel: Option<&str>,
+    issue_map: &IssueMap,
 ) -> (DocMeta, String) {
     let ctx = IssueContext {
         title: issue.title.clone(),
@@ -533,6 +576,7 @@ fn parse_issue(
     if let Ok((mut meta, body)) = issue_body::deserialize(&issue.body, &ctx) {
         meta.author = author;
         insert_issue_type(&mut meta, issue);
+        inject_milestone_target(&mut meta, issue, milestone_rel, issue_map);
         return (meta, body);
     }
 
@@ -563,8 +607,32 @@ fn parse_issue(
         id: String::new(),
     };
     insert_issue_type(&mut meta, issue);
+    inject_milestone_target(&mut meta, issue, milestone_rel, issue_map);
 
     (meta, issue.body.clone())
+}
+
+/// Surface an issue's native GitHub milestone as a forward relation (the
+/// `targets` edge by default; whatever rel declares `github_native =
+/// "milestone"`). The milestone number resolves to its `MILESTONE-n` doc via
+/// the issue map; an unmapped milestone is skipped so no dangling target is
+/// written. The inverse `targeted-by` is derived virtually in `build_links`,
+/// never stored here.
+fn inject_milestone_target(
+    meta: &mut DocMeta,
+    issue: &GhIssue,
+    milestone_rel: Option<&str>,
+    issue_map: &IssueMap,
+) {
+    let (Some(rel), Some(ms)) = (milestone_rel, &issue.milestone) else {
+        return;
+    };
+    if let Some(shorthand) = issue_map.milestone_shorthand_for_number(ms.number) {
+        meta.related.push(Relation {
+            rel_type: RelationType::new(rel),
+            target: shorthand.to_string(),
+        });
+    }
 }
 
 /// Surface the native GitHub issue-type as the orthogonal `issue_type`
@@ -676,6 +744,7 @@ mod tests {
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
             issue_type: None,
+            milestone: None,
         }
     }
 
@@ -898,6 +967,7 @@ mod tests {
             &mut issue_map,
             ttl,
             &known_types,
+            &Config::default(),
         );
 
         assert_eq!(
@@ -956,6 +1026,7 @@ mod tests {
             &mut issue_map,
             ttl,
             &["story".to_string()],
+            &Config::default(),
         );
         assert!(
             result.warnings.is_empty(),
@@ -993,6 +1064,7 @@ mod tests {
             &mut issue_map,
             ttl,
             &known_types,
+            &Config::default(),
         );
 
         assert_eq!(gh.call_count(), 0, "should not call API when all fresh");
@@ -1029,6 +1101,7 @@ mod tests {
             &mut issue_map,
             ttl,
             &known_types,
+            &Config::default(),
         );
 
         assert_eq!(result.refreshed, 0);
@@ -1070,6 +1143,7 @@ mod tests {
                 "owner/repo",
                 &mut issue_map,
                 &["story".to_string()],
+                &Config::default(),
             )
             .unwrap();
 
@@ -1153,6 +1227,7 @@ mod tests {
                 "owner/repo",
                 &mut issue_map,
                 &["story".to_string()],
+                &Config::default(),
             )
             .unwrap();
 
@@ -1188,6 +1263,7 @@ mod tests {
                 "owner/repo",
                 &mut issue_map,
                 &["story".to_string()],
+                &Config::default(),
             )
             .unwrap();
 
@@ -1210,6 +1286,7 @@ mod tests {
                 "owner/repo",
                 &mut issue_map,
                 &["story".to_string()],
+                &Config::default(),
             )
             .unwrap();
 
@@ -1257,6 +1334,7 @@ mod tests {
                 "owner/repo",
                 &mut issue_map,
                 &["story".to_string()],
+                &Config::default(),
             )
             .unwrap();
 
@@ -1303,6 +1381,7 @@ mod tests {
                 "owner/repo",
                 &mut issue_map,
                 &["story".to_string()],
+                &Config::default(),
             )
             .unwrap();
 
@@ -1352,7 +1431,14 @@ mod tests {
             Some("jkaloger"),
         );
         let known_types = vec!["story".to_string()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+        );
         assert_eq!(meta.author, "@jkaloger");
     }
 
@@ -1366,7 +1452,14 @@ mod tests {
             None,
         );
         let known_types = vec!["story".to_string()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+        );
         assert_eq!(meta.author, "unknown");
     }
 
@@ -1381,7 +1474,14 @@ mod tests {
             Some("octocat"),
         );
         let known_types = vec!["story".to_string()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+        );
         assert_eq!(meta.author, "@octocat");
     }
 
@@ -1396,7 +1496,14 @@ mod tests {
             Some("jkaloger"),
         );
         let known_types = vec!["story".to_string()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+        );
         assert_eq!(meta.author, "@jkaloger");
     }
 
@@ -1423,6 +1530,7 @@ mod tests {
                 "owner/repo",
                 &mut issue_map,
                 &["story".to_string()],
+                &Config::default(),
             )
             .unwrap();
 
@@ -1440,7 +1548,14 @@ mod tests {
         let mut issue = make_gh_issue(1, "Test issue", "Just a plain body", &["lazyspec:story"]);
         issue.created_at = "2025-06-15T09:30:00Z".to_string();
         let known_types = vec!["story".to_string()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+        );
         assert_eq!(
             meta.date,
             chrono::NaiveDate::from_ymd_opt(2025, 6, 15).unwrap()
@@ -1452,7 +1567,14 @@ mod tests {
         let mut issue = make_gh_issue(2, "Test issue", "Just a plain body", &["lazyspec:story"]);
         issue.created_at = "not-a-date".to_string();
         let known_types = vec!["story".to_string()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+        );
         assert_eq!(meta.date, Utc::now().date_naive());
     }
 
@@ -1461,7 +1583,14 @@ mod tests {
         let mut issue = make_gh_issue(3, "Test issue", "Just a plain body", &["lazyspec:story"]);
         issue.created_at = String::new();
         let known_types = vec!["story".to_string()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+        );
         assert_eq!(meta.date, Utc::now().date_naive());
     }
 
@@ -1477,7 +1606,14 @@ mod tests {
         );
         issue.issue_type = Some("Bug".to_string());
         let known_types = vec!["story".to_string()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+        );
         assert_eq!(
             meta.attributes.get("issue_type"),
             Some(&AttrValue::Str("Bug".to_string()))
@@ -1495,7 +1631,14 @@ mod tests {
         );
         assert!(issue.issue_type.is_none());
         let known_types = vec!["story".to_string()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+        );
         assert!(!meta.attributes.contains_key("issue_type"));
     }
 
@@ -1510,7 +1653,14 @@ mod tests {
         );
         issue.issue_type = Some("Bug".to_string());
         let known_types = vec!["story".to_string()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+        );
         assert_eq!(meta.doc_type.as_str(), "story");
         assert_eq!(
             meta.attributes.get("issue_type"),
@@ -1524,10 +1674,122 @@ mod tests {
         let mut issue = make_gh_issue(4, "Plain issue", "Just a plain body", &["lazyspec:story"]);
         issue.issue_type = Some("Task".to_string());
         let known_types = vec!["story".to_string()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types, &[]);
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+        );
         assert_eq!(
             meta.attributes.get("issue_type"),
             Some(&AttrValue::Str("Task".to_string()))
+        );
+    }
+
+    // ITERATION-225 AC1 (fetch wiring): fetch_all reads the issue's native
+    // milestone (json `milestone` field) and, resolving the rel name from the
+    // config github_native lookup, writes a forward `targets: MILESTONE-n` into
+    // the cached doc.
+    #[test]
+    fn fetch_all_writes_targets_for_mapped_milestone() {
+        use crate::engine::config::RelationshipDef;
+        use crate::engine::gh::GhIssueMilestone;
+        use crate::engine::issue_map::EntryKind;
+
+        let (cache, tmp) = make_cache();
+        let type_def = story_type_def();
+
+        let config = Config {
+            relationships: vec![RelationshipDef {
+                name: "targets".to_string(),
+                inverse: Some("targeted-by".to_string()),
+                github_native: Some("milestone".to_string()),
+            }],
+            ..Config::default()
+        };
+
+        let mut issue = make_gh_issue(10, "STORY-001 First", "Body", &["lazyspec:story"]);
+        issue.milestone = Some(GhIssueMilestone { number: 3 });
+        let gh =
+            MockReader::new(vec![issue]).with_graphql_responses(vec![empty_issue_types_response()]);
+
+        let mut issue_map = IssueMap::default();
+        issue_map.insert_kind("MILESTONE-1", 3, "", "", EntryKind::Milestone);
+
+        cache
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &["story".to_string()],
+                &config,
+            )
+            .unwrap();
+
+        let cached = cache.read_stale("STORY-10", "story").unwrap();
+        assert!(
+            cached.contains("targets: MILESTONE-1"),
+            "cached doc must carry forward targets, got:\n{cached}"
+        );
+    }
+
+    // ITERATION-225 AC1: an issue with a native GitHub milestone gets a forward
+    // `targets: MILESTONE-n` relation, the milestone number resolved to its doc
+    // via a milestone-kind issue-map entry. Rel name comes from the caller (the
+    // config github_native lookup), not a hardcode.
+    #[test]
+    fn parse_issue_injects_targets_for_mapped_milestone() {
+        use crate::engine::gh::GhIssueMilestone;
+        use crate::engine::issue_map::EntryKind;
+
+        let mut issue = make_gh_issue(3, "Test issue", "body", &["lazyspec:story"]);
+        issue.milestone = Some(GhIssueMilestone { number: 7 });
+
+        let mut map = IssueMap::default();
+        map.insert_kind("MILESTONE-2", 7, "", "", EntryKind::Milestone);
+
+        let known_types = vec!["story".to_string()];
+        let (meta, _) = parse_issue(&issue, "story", &known_types, &[], Some("targets"), &map);
+
+        let targets: Vec<(&str, &str)> = meta
+            .related
+            .iter()
+            .map(|r| (r.rel_type.as_str(), r.target.as_str()))
+            .collect();
+        assert_eq!(targets, vec![("targets", "MILESTONE-2")]);
+    }
+
+    // AC3: a milestone number with no synced doc (or no configured milestone rel)
+    // produces no relation -- no dangling target is written.
+    #[test]
+    fn parse_issue_skips_unmapped_or_unconfigured_milestone() {
+        use crate::engine::gh::GhIssueMilestone;
+
+        let mut issue = make_gh_issue(3, "Test issue", "body", &["lazyspec:story"]);
+        issue.milestone = Some(GhIssueMilestone { number: 7 });
+        let known_types = vec!["story".to_string()];
+
+        // Milestone #7 maps to no doc -> skipped even with a configured rel.
+        let empty = IssueMap::default();
+        let (meta, _) = parse_issue(&issue, "story", &known_types, &[], Some("targets"), &empty);
+        assert!(
+            meta.related.is_empty(),
+            "unmapped milestone must be skipped"
+        );
+
+        // No configured milestone rel (None) -> skipped even if mapped.
+        use crate::engine::issue_map::EntryKind;
+        let mut map = IssueMap::default();
+        map.insert_kind("MILESTONE-2", 7, "", "", EntryKind::Milestone);
+        let (meta, _) = parse_issue(&issue, "story", &known_types, &[], None, &map);
+        assert!(
+            meta.related.is_empty(),
+            "no github_native=milestone rel -> no relation"
         );
     }
 
@@ -1644,28 +1906,75 @@ mod tests {
 
     // --- fetch_subissue_parentage tests ---
 
-    /// GhGraphql mock keyed on the `id` var so per-parent responses are stable
-    /// regardless of HashMap iteration order. A node id mapped to None errors
-    /// (simulates a per-parent GraphQL failure).
+    /// GhGraphql mock for the batched `nodes(ids:)` parentage query. Maps each
+    /// parent node id to `Some(child node ids)`, or `None` to emit a `null`
+    /// node (inaccessible / non-Issue). `fail` makes every query error,
+    /// simulating a chunk-level GraphQL failure. `calls` counts graphql
+    /// invocations so tests can assert batching.
     struct ParentGraphql {
-        by_node: std::collections::HashMap<String, Option<serde_json::Value>>,
+        by_node: std::collections::HashMap<String, Option<Vec<String>>>,
+        fail: bool,
+        calls: std::cell::Cell<usize>,
+    }
+
+    impl ParentGraphql {
+        fn new(entries: &[(&str, Option<&[&str]>)]) -> Self {
+            Self {
+                by_node: entries
+                    .iter()
+                    .map(|(n, kids)| {
+                        let kids = kids.map(|k| k.iter().map(|s| s.to_string()).collect());
+                        (n.to_string(), kids)
+                    })
+                    .collect(),
+                fail: false,
+                calls: std::cell::Cell::new(0),
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                by_node: std::collections::HashMap::new(),
+                fail: true,
+                calls: std::cell::Cell::new(0),
+            }
+        }
     }
 
     impl GhGraphql for ParentGraphql {
         fn graphql(&self, _query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
-            let node = vars
+            let ids = vars
                 .iter()
-                .find(|(k, _)| *k == "id")
+                .find(|(k, _)| *k == "ids")
                 .and_then(|(_, v)| match v {
-                    GqlVar::Str(s) => Some(s.clone()),
+                    GqlVar::StrList(l) => Some(l.clone()),
                     _ => None,
-                })
-                .unwrap();
-            match self.by_node.get(&node) {
-                Some(Some(resp)) => Ok(resp.clone()),
-                Some(None) => anyhow::bail!("graphql failed for {}", node),
-                None => Ok(sub_issues(&[])),
+                });
+            // Schema-snapshot refresh has no `ids` var.
+            let Some(ids) = ids else {
+                return Ok(empty_issue_types_response());
+            };
+            self.calls.set(self.calls.get() + 1);
+            if self.fail {
+                anyhow::bail!("graphql failed");
             }
+            let nodes: Vec<serde_json::Value> = ids
+                .iter()
+                .map(|id| match self.by_node.get(id) {
+                    Some(Some(kids)) => serde_json::json!({
+                        "id": id,
+                        "subIssues": {
+                            "nodes": kids
+                                .iter()
+                                .map(|k| serde_json::json!({"id": k}))
+                                .collect::<Vec<_>>()
+                        }
+                    }),
+                    Some(None) => serde_json::Value::Null,
+                    None => serde_json::json!({"id": id, "subIssues": {"nodes": []}}),
+                })
+                .collect();
+            Ok(serde_json::json!({"data": {"nodes": nodes}}))
         }
 
         fn project_item_fields(
@@ -1703,27 +2012,16 @@ mod tests {
             .collect()
     }
 
-    /// Build a `subIssues.nodes` graphql response with the given ordered child
-    /// node ids (mirrors the shape `fetch_remote_sub_issue_nodes` reads).
-    fn sub_issues(nodes: &[&str]) -> serde_json::Value {
-        let nodes: Vec<_> = nodes.iter().map(|n| serde_json::json!({"id": n})).collect();
-        serde_json::json!({"data": {"node": {"subIssues": {"nodes": nodes}}}})
-    }
-
     #[test]
     fn parentage_resolves_children_in_subissue_order() {
-        let gql = ParentGraphql {
-            by_node: [("I_parent".to_string(), Some(sub_issues(&["I_b", "I_a"])))]
-                .into_iter()
-                .collect(),
-        };
+        let gql = ParentGraphql::new(&[("I_parent", Some(&["I_b", "I_a"]))]);
         let map = node_to_doc(&[
             ("I_parent", "STORY-1"),
             ("I_a", "STORY-2"),
             ("I_b", "STORY-3"),
         ]);
 
-        let parentage = fetch_subissue_parentage(&gql, &map);
+        let (parentage, _) = fetch_subissue_parentage(&gql, &map);
 
         // Children preserve GitHub sub-issue order (I_b before I_a).
         assert_eq!(
@@ -1734,53 +2032,83 @@ mod tests {
 
     #[test]
     fn parentage_drops_unresolvable_child_nodes() {
-        let gql = ParentGraphql {
-            by_node: [(
-                "I_parent".to_string(),
-                Some(sub_issues(&["I_a", "I_unknown"])),
-            )]
-            .into_iter()
-            .collect(),
-        };
         // I_unknown is not among the fetched issues.
+        let gql = ParentGraphql::new(&[("I_parent", Some(&["I_a", "I_unknown"]))]);
         let map = node_to_doc(&[("I_parent", "STORY-1"), ("I_a", "STORY-2")]);
 
-        let parentage = fetch_subissue_parentage(&gql, &map);
+        let (parentage, _) = fetch_subissue_parentage(&gql, &map);
 
         assert_eq!(parentage.get("STORY-1"), Some(&vec!["STORY-2".to_string()]));
     }
 
     #[test]
-    fn parentage_skips_parent_on_graphql_failure() {
-        let gql = ParentGraphql {
-            by_node: [
-                ("I_p1".to_string(), None), // fails
-                ("I_p2".to_string(), Some(sub_issues(&["I_c"]))),
-            ]
-            .into_iter()
-            .collect(),
-        };
+    fn parentage_skips_inaccessible_parent_node() {
+        // I_p1 comes back as a `null` node (inaccessible / non-Issue); I_p2 resolves.
+        let gql = ParentGraphql::new(&[("I_p1", None), ("I_p2", Some(&["I_c"]))]);
         let map = node_to_doc(&[("I_p1", "STORY-1"), ("I_p2", "STORY-2"), ("I_c", "STORY-3")]);
 
-        let parentage = fetch_subissue_parentage(&gql, &map);
+        let (parentage, _) = fetch_subissue_parentage(&gql, &map);
 
-        // Failing parent is skipped; the other still resolves.
         assert!(!parentage.contains_key("STORY-1"));
         assert_eq!(parentage.get("STORY-2"), Some(&vec!["STORY-3".to_string()]));
     }
 
     #[test]
-    fn parentage_omits_childless_parents() {
-        let gql = ParentGraphql {
-            by_node: [("I_parent".to_string(), Some(sub_issues(&[])))]
-                .into_iter()
-                .collect(),
-        };
-        let map = node_to_doc(&[("I_parent", "STORY-1")]);
+    fn parentage_warns_and_skips_chunk_on_graphql_failure() {
+        let gql = ParentGraphql::failing();
+        let map = node_to_doc(&[("I_p1", "STORY-1"), ("I_p2", "STORY-2")]);
 
-        let parentage = fetch_subissue_parentage(&gql, &map);
+        let (parentage, warnings) = fetch_subissue_parentage(&gql, &map);
 
         assert!(parentage.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("skipping nesting"));
+    }
+
+    #[test]
+    fn parentage_omits_childless_parents() {
+        let gql = ParentGraphql::new(&[("I_parent", Some(&[]))]);
+        let map = node_to_doc(&[("I_parent", "STORY-1")]);
+
+        let (parentage, _) = fetch_subissue_parentage(&gql, &map);
+
+        assert!(parentage.is_empty());
+    }
+
+    #[test]
+    fn parentage_batches_parents_into_one_query() {
+        let gql = ParentGraphql::new(&[
+            ("I_a", Some(&["I_c"])),
+            ("I_b", Some(&[])),
+            ("I_c", Some(&[])),
+        ]);
+        let map = node_to_doc(&[("I_a", "STORY-1"), ("I_b", "STORY-2"), ("I_c", "STORY-3")]);
+
+        let (parentage, _) = fetch_subissue_parentage(&gql, &map);
+
+        // Three parents, one GraphQL call (no N+1).
+        assert_eq!(gql.calls.get(), 1);
+        assert_eq!(parentage.get("STORY-1"), Some(&vec!["STORY-3".to_string()]));
+    }
+
+    #[test]
+    fn parentage_chunks_above_batch_max() {
+        let n = gh_subissue::SUB_ISSUE_BATCH_MAX + 1;
+        let entries: Vec<(String, String)> = (0..n)
+            .map(|i| (format!("I_{i}"), format!("STORY-{i}")))
+            .collect();
+        let gql = ParentGraphql::new(
+            &entries
+                .iter()
+                .map(|(node, _)| (node.as_str(), Some(&[][..])))
+                .collect::<Vec<_>>(),
+        );
+        let map: std::collections::HashMap<String, String> = entries.into_iter().collect();
+
+        let (_parentage, _) = fetch_subissue_parentage(&gql, &map);
+
+        // N+1 parents span two chunks -> two GraphQL calls (ceil(N/100)).
+        assert_eq!(gql.calls.get(), 2);
     }
 
     #[test]
@@ -1804,6 +2132,7 @@ mod tests {
                 "owner/repo",
                 &mut issue_map,
                 &["story".to_string()],
+                &Config::default(),
             )
             .unwrap();
 
@@ -1825,10 +2154,10 @@ mod tests {
 
     // --- TASK-3: nested materialization on fetch ---
 
-    /// Combined GhIssueReader + GhGraphql mock for nested-fetch tests. Routes
-    /// graphql by the `id` var (per-parent sub-issue queries, keyed on node id so
-    /// HashMap iteration order does not matter); any query without an `id` var is
-    /// the schema-snapshot refresh and returns an empty issue-types response.
+    /// Combined GhIssueReader + GhGraphql mock for nested-fetch tests. Answers
+    /// the batched `nodes(ids:)` parentage query, returning a node per requested
+    /// id with its configured sub-issue children; any query without an `ids` var
+    /// is the schema-snapshot refresh and returns an empty issue-types response.
     struct NestingReader {
         issues: Vec<GhIssue>,
         sub_issues_by_node: std::collections::HashMap<String, Vec<&'static str>>,
@@ -1870,25 +2199,37 @@ mod tests {
 
     impl GhGraphql for NestingReader {
         fn graphql(&self, _query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
-            let id = vars
+            let ids = vars
                 .iter()
-                .find(|(k, _)| *k == "id")
+                .find(|(k, _)| *k == "ids")
                 .and_then(|(_, v)| match v {
-                    GqlVar::Str(s) => Some(s.clone()),
+                    GqlVar::StrList(l) => Some(l.clone()),
                     _ => None,
                 });
-            match id {
-                Some(node) => {
+            // Schema-snapshot refresh: no `ids` var.
+            let Some(ids) = ids else {
+                return Ok(empty_issue_types_response());
+            };
+            let nodes: Vec<serde_json::Value> = ids
+                .iter()
+                .map(|node| {
                     let kids = self
                         .sub_issues_by_node
-                        .get(&node)
+                        .get(node)
                         .cloned()
                         .unwrap_or_default();
-                    Ok(sub_issues(&kids))
-                }
-                // Schema-snapshot refresh: no node id var.
-                None => Ok(empty_issue_types_response()),
-            }
+                    serde_json::json!({
+                        "id": node,
+                        "subIssues": {
+                            "nodes": kids
+                                .iter()
+                                .map(|k| serde_json::json!({"id": k}))
+                                .collect::<Vec<_>>()
+                        }
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({"data": {"nodes": nodes}}))
         }
         fn project_item_fields(
             &self,
@@ -1937,6 +2278,7 @@ mod tests {
                 "owner/repo",
                 issue_map,
                 &["story".to_string()],
+                &Config::default(),
             )
             .unwrap()
     }

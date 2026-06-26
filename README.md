@@ -498,13 +498,15 @@ open/closed state, `due_on` passed through verbatim). Progress
 (`percent_complete`) is computed from the milestone's issue counts at read time
 and is never writable. The write policy is last-write-wins: a push happens
 unconditionally, then the milestone is re-read into the cache (no optimistic
-lock). An issue -> milestone association is surfaced as a relation: declare a
-relationship with `github_native = "milestone"`, then `link` an issue-backed
-document to a milestone document to set it (`unlink` clears it). The inverse is
-read-only: a milestone document's `related` frontmatter surfaces a `targeted-by`
-entry for each assigned issue (open and closed) that maps to a lazyspec
-document, derived at resolve time; issues with no corresponding document are
-skipped.
+lock). An issue -> milestone association is surfaced as a forward relation on
+the issue document: declare a relationship with `github_native = "milestone"`,
+and at fetch each issue's native milestone is read back as that relation (e.g.
+`targets: MILESTONE-1`), resolving the milestone number to its document.
+`link` an issue-backed document to a milestone sets the association on GitHub
+(`unlink` clears it). The inverse is read-only and never stored: a milestone
+document's `targeted-by` entries are derived virtually as the reverse of each
+issue's forward relation; an issue whose milestone maps to no lazyspec document
+is skipped.
 
 #### `github-projects` store
 
