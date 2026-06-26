@@ -339,17 +339,12 @@ pub trait Checker {
     ) -> Vec<(Severity, ValidationIssue)>;
 }
 
-fn hierarchy_from_config(config: &Config) -> Vec<(String, String, String)> {
+fn hierarchy_from_config(config: &Config) -> Vec<(String, String)> {
     config
         .rules
         .iter()
         .filter_map(|rule| match rule {
-            ConfigRule::ParentChild {
-                parent,
-                child,
-                link,
-                ..
-            } => Some((parent.clone(), child.clone(), link.clone())),
+            ConfigRule::ParentChild { parent, child, .. } => Some((parent.clone(), child.clone())),
             _ => None,
         })
         .collect()
@@ -398,9 +393,10 @@ impl Checker for BrokenLinkRule {
                     continue;
                 };
 
-                let is_hierarchy_link = hierarchy
+                let is_hierarchy_link = store
+                    .chain_relationships
                     .iter()
-                    .any(|(_, _, link)| rel.rel_type.to_string() == *link);
+                    .any(|r| r == rel.rel_type.as_str());
                 if !is_hierarchy_link {
                     continue;
                 }
@@ -429,10 +425,13 @@ impl Checker for BrokenLinkRule {
                     ));
                 }
 
-                let is_child_in_hierarchy = hierarchy.iter().any(|(pt, ct, link)| {
+                let is_child_in_hierarchy = hierarchy.iter().any(|(pt, ct)| {
                     meta.doc_type == DocType::new(ct)
                         && parent_doc.doc_type == DocType::new(pt)
-                        && rel.rel_type.to_string() == *link
+                        && store
+                            .chain_relationships
+                            .iter()
+                            .any(|r| r == rel.rel_type.as_str())
                 });
                 if is_child_in_hierarchy
                     && meta.status == Status::new("accepted")
@@ -480,7 +479,6 @@ impl Checker for ParentLinkRule {
                         name,
                         child,
                         parent,
-                        link,
                         severity,
                         ..
                     } => {
@@ -492,7 +490,10 @@ impl Checker for ParentLinkRule {
                                 .get(&r.target)
                                 .cloned()
                                 .unwrap_or_else(|| PathBuf::from(&r.target));
-                            r.rel_type.to_string() == *link
+                            store
+                                .chain_relationships
+                                .iter()
+                                .any(|c| c == r.rel_type.as_str())
                                 && store
                                     .docs
                                     .get(&resolved)
@@ -550,7 +551,7 @@ impl Checker for StatusConsistencyRule {
         let hierarchy = hierarchy_from_config(config);
         let mut issues = Vec::new();
 
-        for (parent_type, child_type, link) in &hierarchy {
+        for (parent_type, child_type) in &hierarchy {
             for (parent_path, meta) in &store.docs {
                 if meta.doc_type != DocType::new(parent_type) {
                     continue;
@@ -562,7 +563,10 @@ impl Checker for StatusConsistencyRule {
                     .into_iter()
                     .flatten()
                     .filter(|(rel_type, child_path)| {
-                        rel_type.to_string() == *link
+                        store
+                            .chain_relationships
+                            .iter()
+                            .any(|c| c == rel_type.as_str())
                             && store
                                 .docs
                                 .get(child_path)
@@ -1254,6 +1258,7 @@ mod attr_schema_tests {
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
+            related_relationships: vec!["related-to".to_string()],
         }
     }
 
@@ -1348,6 +1353,7 @@ mod attr_schema_tests {
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
+            related_relationships: vec!["related-to".to_string()],
         }
     }
 
@@ -1493,6 +1499,7 @@ mod unknown_relationship_tests {
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
+            related_relationships: vec!["related-to".to_string()],
         }
     }
 
@@ -1504,6 +1511,7 @@ mod unknown_relationship_tests {
             name: "targets".to_string(),
             inverse: Some("targeted-by".to_string()),
             github_native: Some("milestone".to_string()),
+            traversal: None,
         });
         config
     }
@@ -1533,6 +1541,107 @@ mod unknown_relationship_tests {
                 .any(|(_, i)| matches!(i, ValidationIssue::UnknownRelationship { .. })),
             "undeclared keyword `bogus-rel` must be flagged, got: {:?}",
             issues
+        );
+    }
+}
+
+// ITERATION-227: validation rules carry no `link`; a parent-child rule resolves
+// the parent via membership in `store.chain_relationships`, not a per-rule link.
+#[cfg(test)]
+mod parent_link_chain_tests {
+    use super::*;
+    use crate::engine::document::{Relation, RelationType};
+    use chrono::NaiveDate;
+    use std::collections::HashMap;
+
+    fn doc(path: &str, doc_type: &str, id: &str, related: Vec<Relation>) -> DocMeta {
+        DocMeta {
+            path: PathBuf::from(path),
+            title: "T".to_string(),
+            doc_type: DocType::new(doc_type),
+            status: Status::new("draft"),
+            author: "a".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related,
+            validate_ignore: false,
+            virtual_doc: false,
+            id: id.to_string(),
+            attributes: Default::default(),
+        }
+    }
+
+    fn store_from(docs: Vec<DocMeta>) -> super::super::store::Store {
+        let mut map = HashMap::new();
+        for d in docs {
+            map.insert(d.path.clone(), d);
+        }
+        super::super::store::Store {
+            root: PathBuf::from("."),
+            docs: map,
+            forward_links: HashMap::new(),
+            reverse_links: HashMap::new(),
+            children: HashMap::new(),
+            parent_of: HashMap::new(),
+            parse_errors: Vec::new(),
+            chain_relationships: vec!["implements".to_string()],
+            related_relationships: vec!["related-to".to_string()],
+        }
+    }
+
+    // AC (Verify 3): a ParentChild rule with NO `link` field passes when the child
+    // has a Chain relation (`implements`, declared chain in Config::default) to a
+    // `parent`-typed doc.
+    #[test]
+    fn parent_child_rule_passes_via_chain_relation() {
+        let config = Config::default();
+        let store = store_from(vec![
+            doc("docs/rfcs/RFC-001.md", "rfc", "RFC-001", vec![]),
+            doc(
+                "docs/stories/STORY-001.md",
+                "story",
+                "STORY-001",
+                vec![Relation {
+                    rel_type: RelationType::new("implements"),
+                    target: "RFC-001".to_string(),
+                }],
+            ),
+        ]);
+        let result = validate_full(&store, &config);
+        assert!(
+            !result.warnings.iter().chain(result.errors.iter()).any(|i| matches!(
+                i,
+                ValidationIssue::MissingParentLink { child_type, .. } if child_type == "story"
+            )),
+            "story with a chain relation to its rfc must not be flagged, got errors {:?} warnings {:?}",
+            result.errors,
+            result.warnings
+        );
+    }
+
+    // AC (Verify 4): the `iterations-need-stories` rule still fires -- an iteration
+    // with no chain relation to a story is flagged MissingParentLink (Error).
+    #[test]
+    fn iterations_need_stories_fires_without_chain_relation() {
+        let config = Config::default();
+        let store = store_from(vec![doc(
+            "docs/iterations/ITERATION-001.md",
+            "iteration",
+            "ITERATION-001",
+            vec![],
+        )]);
+        let result = validate_full(&store, &config);
+        assert!(
+            result.errors.iter().any(|e| matches!(
+                e,
+                ValidationIssue::MissingParentLink { rule_name, child_type, parent_type, .. }
+                    if rule_name == "iterations-need-stories"
+                    && child_type == "iteration"
+                    && parent_type == "story"
+            )),
+            "iteration without a chain relation to a story must be flagged, got: {:?}",
+            result.errors
         );
     }
 }

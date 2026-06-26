@@ -449,7 +449,6 @@ fn update_rule_table(entry: &mut Table, rule: &ValidationRule) {
             name,
             child,
             parent,
-            link,
             severity,
             require_parent_status,
         } => {
@@ -457,7 +456,6 @@ fn update_rule_table(entry: &mut Table, rule: &ValidationRule) {
             set_str(entry, "shape", "parent-child");
             set_str(entry, "child", child);
             set_str(entry, "parent", parent);
-            set_str(entry, "link", link);
             set_str(entry, "severity", severity_str(severity));
             set_opt_str(
                 entry,
@@ -867,7 +865,6 @@ name = "story-has-rfc"
 shape = "parent-child"
 child = "story"
 parent = "rfc"
-link = "implements"
 severity = "error"
 "#;
 
@@ -880,7 +877,6 @@ severity = "error"
                 name: "story-has-rfc".to_string(),
                 child: "story".to_string(),
                 parent: "rfc".to_string(),
-                link: "implements".to_string(),
                 severity: Severity::Error,
                 require_parent_status: Some("accepted".to_string()),
             };
@@ -918,7 +914,6 @@ name = "story-has-rfc"
 shape = "parent-child"
 child = "story"
 parent = "rfc"
-link = "implements"
 severity = "error"
 require_parent_status = "accepted"
 "#;
@@ -1126,6 +1121,7 @@ name = "related-to"
                 name: "blocks".to_string(),
                 inverse: Some("blocked-by".to_string()),
                 github_native: None,
+                traversal: None,
             });
             c
         };
@@ -1145,6 +1141,7 @@ name = "related-to"
                 name: "child".to_string(),
                 inverse: Some("parent".to_string()),
                 github_native: Some("sub-issue".to_string()),
+                traversal: None,
             });
             c
         };

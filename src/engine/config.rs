@@ -11,6 +11,18 @@ pub enum Severity {
     Warning,
 }
 
+/// How a relationship participates in context traversal. `Chain` relationships
+/// form the parent-child DAG walked by `resolve_chain`/`resolve_forest`;
+/// `Related` relationships form the symmetric depth-bounded neighbourhood.
+/// Absence (`None` on `RelationshipDef`) means the relationship participates in
+/// neither walk.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Traversal {
+    Chain,
+    Related,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "shape")]
 pub enum ValidationRule {
@@ -19,7 +31,6 @@ pub enum ValidationRule {
         name: String,
         child: String,
         parent: String,
-        link: String,
         severity: Severity,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         require_parent_status: Option<String>,
@@ -269,6 +280,11 @@ pub struct RelationshipDef {
     /// Absent for ordinary relationships.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_native: Option<String>,
+    /// How this relationship participates in context traversal. `None` (the
+    /// default, absent from TOML) means it drives neither the chain walk nor the
+    /// related neighbourhood.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traversal: Option<Traversal>,
 }
 
 /// The canonical starter relationship vocabulary, mirroring the closed enum that
@@ -276,19 +292,21 @@ pub struct RelationshipDef {
 /// `to_toml` writer, and the test-only `Config::default()`. The load path
 /// carries none (ADR-011): a real config must declare `[[relationships]]`.
 pub fn starter_relationships() -> Vec<RelationshipDef> {
-    let directional = |name: &str, inverse: &str| RelationshipDef {
+    let directional = |name: &str, inverse: &str, traversal: Option<Traversal>| RelationshipDef {
         name: name.to_string(),
         inverse: Some(inverse.to_string()),
         github_native: None,
+        traversal,
     };
     vec![
-        directional("implements", "implemented-by"),
-        directional("supersedes", "superseded-by"),
-        directional("blocks", "blocked-by"),
+        directional("implements", "implemented-by", Some(Traversal::Chain)),
+        directional("supersedes", "superseded-by", None),
+        directional("blocks", "blocked-by", None),
         RelationshipDef {
             name: "related-to".to_string(),
             inverse: None,
             github_native: None,
+            traversal: Some(Traversal::Related),
         },
     ]
 }
@@ -661,7 +679,6 @@ pub fn default_rules() -> Vec<ValidationRule> {
             name: "stories-need-rfcs".to_string(),
             child: "story".to_string(),
             parent: "rfc".to_string(),
-            link: "implements".to_string(),
             severity: Severity::Warning,
             require_parent_status: None,
         },
@@ -669,7 +686,6 @@ pub fn default_rules() -> Vec<ValidationRule> {
             name: "iterations-need-stories".to_string(),
             child: "iteration".to_string(),
             parent: "story".to_string(),
-            link: "implements".to_string(),
             severity: Severity::Error,
             require_parent_status: None,
         },
@@ -1776,7 +1792,6 @@ name = "stories-need-accepted-rfcs"
 shape = "parent-child"
 child = "story"
 parent = "rfc"
-link = "implements"
 severity = "error"
 require_parent_status = "accepted"
 "#;
@@ -1809,7 +1824,6 @@ name = "stories-need-rfcs"
 shape = "parent-child"
 child = "story"
 parent = "rfc"
-link = "implements"
 severity = "warning"
 "#;
         let config = Config::parse(toml_str).unwrap();
@@ -1957,5 +1971,61 @@ name = "related-to"
         // Unknown keyword errors, naming it.
         let err = config.resolve_relationship("frobs").unwrap_err();
         assert!(err.to_string().contains("frobs"));
+    }
+
+    #[test]
+    fn relationship_traversal_round_trips() {
+        assert_eq!(
+            serde_json::to_string(&Traversal::Chain).unwrap(),
+            "\"chain\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Traversal::Related).unwrap(),
+            "\"related\""
+        );
+
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+traversal = "chain"
+
+[[relationships]]
+name = "related-to"
+traversal = "related"
+
+[[relationships]]
+name = "mentions"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert_eq!(
+            config.relationship_by_name("implements").unwrap().traversal,
+            Some(Traversal::Chain)
+        );
+        assert_eq!(
+            config.relationship_by_name("related-to").unwrap().traversal,
+            Some(Traversal::Related)
+        );
+        assert_eq!(
+            config.relationship_by_name("mentions").unwrap().traversal,
+            None
+        );
+
+        let emitted = config.to_toml().unwrap();
+        assert!(emitted.contains("traversal = \"chain\""), "{emitted}");
+        assert!(emitted.contains("traversal = \"related\""), "{emitted}");
+        // Only the two marked relationships emit the key; `mentions` (None) is
+        // skipped, so `skip_serializing_if` genuinely omits absent traversal.
+        assert_eq!(
+            emitted.matches("traversal =").count(),
+            2,
+            "skip_serializing_if must omit absent traversal: {emitted}"
+        );
     }
 }

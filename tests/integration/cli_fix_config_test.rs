@@ -109,13 +109,11 @@ fn fix_config_injects_relationships_and_rules() {
         ValidationRule::ParentChild {
             child,
             parent,
-            link,
             severity,
             ..
         } => {
             assert_eq!(child, "story");
             assert_eq!(parent, "rfc");
-            assert_eq!(link, "implements");
             assert_eq!(*severity, Severity::Warning);
         }
         other => panic!("unexpected shape: {other:?}"),
@@ -124,13 +122,11 @@ fn fix_config_injects_relationships_and_rules() {
         ValidationRule::ParentChild {
             child,
             parent,
-            link,
             severity,
             ..
         } => {
             assert_eq!(child, "iteration");
             assert_eq!(parent, "story");
-            assert_eq!(link, "implements");
             assert_eq!(*severity, Severity::Error);
         }
         other => panic!("unexpected shape: {other:?}"),

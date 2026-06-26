@@ -194,7 +194,6 @@ fn rule_raw(rule: &ValidationRule, key: &RuleKey) -> String {
         }
         (ValidationRule::ParentChild { child, .. }, RuleKey::Child) => child.clone(),
         (ValidationRule::ParentChild { parent, .. }, RuleKey::Parent) => parent.clone(),
-        (ValidationRule::ParentChild { link, .. }, RuleKey::Link) => link.clone(),
         (ValidationRule::RelationExistence { doc_type, .. }, RuleKey::DocType) => doc_type.clone(),
         (ValidationRule::RelationExistence { require, .. }, RuleKey::Require) => require.clone(),
         (ValidationRule::ParentChild { severity, .. }, RuleKey::Severity)
@@ -215,14 +214,12 @@ fn rule_write(rule: &mut ValidationRule, key: &RuleKey, value: SettingsValue) {
             name,
             child,
             parent,
-            link,
             severity,
             ..
         } => match (key, value) {
             (RuleKey::Name, SettingsValue::Text(s)) => *name = s,
             (RuleKey::Child, SettingsValue::Text(s)) => *child = s,
             (RuleKey::Parent, SettingsValue::Text(s)) => *parent = s,
-            (RuleKey::Link, SettingsValue::Text(s)) => *link = s,
             (RuleKey::Severity, SettingsValue::Severity(sev)) => *severity = sev,
             _ => {}
         },
@@ -1583,7 +1580,6 @@ impl App {
                     name: std::mem::take(name),
                     child: String::new(),
                     parent: String::new(),
-                    link: String::new(),
                     severity: severity.clone(),
                     require_parent_status: None,
                 }
@@ -2678,6 +2674,7 @@ impl App {
                     name: "relationship".to_string(),
                     inverse: None,
                     github_native: None,
+                    traversal: None,
                 });
                 self.settings_entry = self.settings_buffer.relationships.len() - 1;
             }
@@ -2688,7 +2685,6 @@ impl App {
                         name: "rule".to_string(),
                         child: String::new(),
                         parent: String::new(),
-                        link: String::new(),
                         severity: Severity::Error,
                         require_parent_status: None,
                     });
@@ -3809,6 +3805,7 @@ mod tests {
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
+            related_relationships: vec!["related-to".to_string()],
         };
 
         let (tx, _rx) = crossbeam_channel::unbounded();
@@ -4140,6 +4137,7 @@ mod tests {
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
+            related_relationships: vec!["related-to".to_string()],
         };
 
         let meta_a = DocMeta {
@@ -4735,6 +4733,7 @@ mod tests {
             name: "derives-from".to_string(),
             inverse: Some("derived-by".to_string()),
             github_native: None,
+            traversal: None,
         }];
 
         app.apply_config(&config);
@@ -5131,11 +5130,10 @@ mod tests {
             name: "r".to_string(),
             child: "story".to_string(),
             parent: "rfc".to_string(),
-            link: "implements".to_string(),
             severity: Severity::Error,
             require_parent_status: None,
         }];
-        let mut app = settings_app(config, 3, 5); // Validation Rules, severity (ParentChild)
+        let mut app = settings_app(config, 3, 4); // Validation Rules, severity (ParentChild)
         app.settings_drill = Some(0);
 
         app.settings_space();
@@ -5163,7 +5161,6 @@ mod tests {
             name: "my-rule".to_string(),
             child: "story".to_string(),
             parent: "rfc".to_string(),
-            link: "implements".to_string(),
             severity: Severity::Warning,
             require_parent_status: None,
         }];
@@ -5194,7 +5191,6 @@ mod tests {
                 name,
                 child,
                 parent,
-                link,
                 severity,
                 ..
             } => {
@@ -5202,7 +5198,6 @@ mod tests {
                 assert_eq!(*severity, Severity::Warning);
                 assert_eq!(child, "");
                 assert_eq!(parent, "");
-                assert_eq!(link, "");
             }
             _ => panic!("shape cycle must convert back to parent-child"),
         }
@@ -6828,6 +6823,7 @@ inverse = "implemented-by"
                 name: "related-to".to_string(),
                 inverse: None,
                 github_native: None,
+                traversal: None,
             }],
             ..Config::default()
         };
@@ -6852,11 +6848,13 @@ inverse = "implemented-by"
                     name: "implements".to_string(),
                     inverse: Some("implemented-by".to_string()),
                     github_native: None,
+                    traversal: None,
                 },
                 RelationshipDef {
                     name: "related-to".to_string(),
                     inverse: None,
                     github_native: None,
+                    traversal: None,
                 },
             ],
             ..Config::default()
@@ -7761,9 +7759,11 @@ kind = "int"
 [[relationships]]
 name = "implements"
 inverse = "implemented-by"
+traversal = "chain"
 
 [[relationships]]
 name = "related-to"
+traversal = "related"
 
 [tui.graph]
 columns = ["status", "estimate"]

@@ -528,6 +528,7 @@ mod tests {
             name: "targets".to_string(),
             inverse: Some("targeted-by".to_string()),
             github_native: Some("milestone".to_string()),
+            traversal: None,
         }];
         config
     }
@@ -789,6 +790,7 @@ mod tests {
             name: "member-of".to_string(),
             inverse: Some("has-member".to_string()),
             github_native: Some("membership".to_string()),
+            traversal: None,
         }];
         config
     }

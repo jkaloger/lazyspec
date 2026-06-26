@@ -2027,7 +2027,6 @@ pub fn settings_fields(
                             name,
                             child,
                             parent,
-                            link,
                             severity,
                             ..
                         } => {
@@ -2056,12 +2055,6 @@ pub fn settings_fields(
                                 parent.clone(),
                                 FieldEditor::Text,
                                 key(RuleKey::Parent),
-                            ));
-                            fields.push(field(
-                                "link",
-                                link.clone(),
-                                FieldEditor::Text,
-                                key(RuleKey::Link),
                             ));
                             fields.push(field(
                                 "severity",
@@ -3507,9 +3500,12 @@ mod tests {
         assert!(lines.contains(&"shape: parent-child".to_string()));
         assert!(lines.contains(&"child: story".to_string()));
         assert!(lines.contains(&"parent: rfc".to_string()));
-        assert!(lines.contains(&"link: implements".to_string()));
         assert!(lines.contains(&"severity: warning".to_string()));
-        assert_eq!(lines.len(), 6);
+        assert!(
+            !lines.iter().any(|l| l.starts_with("link:")),
+            "the link field no longer renders: {lines:?}"
+        );
+        assert_eq!(lines.len(), 5);
     }
 
     #[test]

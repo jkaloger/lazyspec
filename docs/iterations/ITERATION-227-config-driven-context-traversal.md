@@ -1,7 +1,7 @@
 ---
 title: Config-driven context traversal
 type: iteration
-status: accepted
+status: complete
 author: jkaloger
 date: 2026-06-26
 tags: []

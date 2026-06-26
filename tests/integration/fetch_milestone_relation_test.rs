@@ -192,6 +192,7 @@ fn config() -> Config {
         name: "targets".to_string(),
         inverse: Some("targeted-by".to_string()),
         github_native: Some("milestone".to_string()),
+        traversal: None,
     }];
     config
 }

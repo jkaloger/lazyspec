@@ -599,10 +599,17 @@ registry -- a canonical `name` links in the stated direction, while a declared
 `inverse` flips it and stores the canonical relation on the target. `validate`
 flags any document carrying a relationship name not declared here.
 
+A relationship may also declare `traversal`, which governs how it participates in
+context traversal: `chain` relationships form the parent-child hierarchy that
+`parent-child` validation rules and the context chain walk follow, while
+`related` relationships form the symmetric related-context neighbourhood. A
+relationship with no `traversal` participates in neither.
+
 ```toml
 [[relationships]]
 name = "implements"
 inverse = "implemented-by"
+traversal = "chain"
 
 [[relationships]]
 name = "tracks"
@@ -610,13 +617,14 @@ inverse = "tracked-by"
 
 [[relationships]]
 name = "related-to"
+traversal = "related"
 ```
 
 ### Validation Rules
 
 Validation rules define structural constraints between document types. Two shapes are supported:
 
-- `parent-child` -- the child type must link to a parent type via a given relationship.
+- `parent-child` -- the child type must link to a parent type via any chain relationship (a relationship marked `traversal = "chain"` in `[[relationships]]`).
 - `relation-existence` -- documents of a given type must have at least one relationship.
 
 A `parent-child` rule may also carry `require_parent_status`: when set, `create`
@@ -631,7 +639,6 @@ shape = "parent-child"
 name = "stories-need-rfcs"
 child = "story"
 parent = "rfc"
-link = "implements"
 severity = "warning"
 require_parent_status = "accepted"  # optional: a story cannot be created until an rfc is accepted
 

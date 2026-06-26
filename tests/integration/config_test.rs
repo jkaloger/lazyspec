@@ -131,7 +131,6 @@ shape = "parent-child"
 name = "epics-need-themes"
 child = "epic"
 parent = "theme"
-link = "belongs-to"
 severity = "warning"
 "#;
 
@@ -143,7 +142,6 @@ severity = "warning"
             name: "epics-need-themes".to_string(),
             child: "epic".to_string(),
             parent: "theme".to_string(),
-            link: "belongs-to".to_string(),
             severity: Severity::Warning,
             require_parent_status: None,
         }
@@ -218,7 +216,6 @@ shape = "parent-child"
 name = "bad-rule"
 child = "iteration"
 parent = "story"
-link = "implements"
 severity = "fatal"
 "#;
 

@@ -273,7 +273,6 @@ name = "stories-need-rfcs"
 shape = "parent-child"
 child = "story"
 parent = "rfc"
-link = "implements"
 severity = "warning"
 
 [[rules]]
@@ -360,7 +359,6 @@ name = "stories-need-rfcs"
 shape = "parent-child"
 child = "story"
 parent = "rfc"
-link = "implements"
 severity = "warning"
 require_parent_status = "accepted"
 "#;

@@ -2,7 +2,7 @@ mod links;
 mod loader;
 
 use crate::engine::cache_lock::CacheLock;
-use crate::engine::config::{Config, StoreBackend};
+use crate::engine::config::{Config, StoreBackend, Traversal};
 use crate::engine::document::{DocMeta, DocType, RelationType, Status};
 use crate::engine::fs::{FileSystem, RealFileSystem};
 use crate::engine::git_ref::GitRefOps;
@@ -32,11 +32,15 @@ pub struct Store {
     pub(crate) children: HashMap<PathBuf, Vec<PathBuf>>,
     pub(crate) parent_of: HashMap<PathBuf, PathBuf>,
     pub(crate) parse_errors: Vec<ParseError>,
-    /// The set of relationship names that form the parent-child chain
-    /// (extracted from `ParentChild` rules at load time, falling back to
-    /// `["implements"]`). Used by [`resolve_chain`](crate::engine::context::resolve_chain)
-    /// and [`resolve_forest`](crate::engine::context::resolve_forest) to walk the DAG.
+    /// The relationship names whose `traversal == Some(Traversal::Chain)`,
+    /// sourced from `config.relationships`. These form the parent-child DAG
+    /// walked by [`resolve_chain`](crate::engine::context::resolve_chain) and
+    /// [`resolve_forest`](crate::engine::context::resolve_forest).
     pub(crate) chain_relationships: Vec<String>,
+    /// The relationship names whose `traversal == Some(Traversal::Related)`,
+    /// walked by [`resolve_chain`](crate::engine::context::resolve_chain)'s
+    /// related neighbourhood.
+    pub(crate) related_relationships: Vec<String>,
 }
 
 impl Store {
@@ -97,25 +101,18 @@ impl Store {
 
         let (forward_links, reverse_links) = Self::build_links(&docs);
 
-        let chain_relationships = {
-            let mut names: Vec<String> = config
-                .rules
-                .iter()
-                .filter_map(|r| match r {
-                    crate::engine::config::ValidationRule::ParentChild { link, .. } => {
-                        Some(link.clone())
-                    }
-                    _ => None,
-                })
-                .collect();
-            names.sort();
-            names.dedup();
-            if names.is_empty() {
-                vec!["implements".to_string()]
-            } else {
-                names
-            }
-        };
+        let chain_relationships: Vec<String> = config
+            .relationships
+            .iter()
+            .filter(|r| r.traversal == Some(Traversal::Chain))
+            .map(|r| r.name.clone())
+            .collect();
+        let related_relationships: Vec<String> = config
+            .relationships
+            .iter()
+            .filter(|r| r.traversal == Some(Traversal::Related))
+            .map(|r| r.name.clone())
+            .collect();
 
         let mut store = Store {
             root: root.to_path_buf(),
@@ -126,6 +123,7 @@ impl Store {
             parent_of,
             parse_errors,
             chain_relationships,
+            related_relationships,
         };
         store.propagate_parent_links();
 

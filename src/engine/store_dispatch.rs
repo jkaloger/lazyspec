@@ -4670,6 +4670,7 @@ mod tests {
                 name: "member-of".to_string(),
                 inverse: Some("has-member".to_string()),
                 github_native: Some("membership".to_string()),
+                traversal: None,
             }],
             ..Default::default()
         }

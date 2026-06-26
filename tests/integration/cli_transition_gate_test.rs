@@ -146,7 +146,6 @@ fn config_with_parent_status_gate() -> Config {
             name: "stories-need-accepted-rfcs".to_string(),
             child: "story".to_string(),
             parent: "rfc".to_string(),
-            link: "implements".to_string(),
             severity: Severity::Error,
             require_parent_status: Some("accepted".to_string()),
         }],
