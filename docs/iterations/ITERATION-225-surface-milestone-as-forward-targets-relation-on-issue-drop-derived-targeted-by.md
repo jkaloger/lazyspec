@@ -1,7 +1,7 @@
 ---
 title: Surface milestone as forward targets relation on issue; drop derived targeted-by
 type: iteration
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-06-26
 tags: []
