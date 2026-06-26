@@ -7,8 +7,10 @@ use crate::engine::config::{AttrDef, TypeDef};
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
 use crate::engine::gh::{type_label, GhGraphql, GhIssue, GhIssueReader};
 use crate::engine::gh_schema;
+use crate::engine::gh_subissue;
 use crate::engine::issue_body::{self, IssueContext};
 use crate::engine::issue_map::IssueMap;
+use crate::engine::store;
 use crate::engine::store_dispatch;
 
 #[derive(Debug)]
@@ -30,6 +32,11 @@ pub struct RefreshResult {
 pub struct RefreshWarning {
     pub message: String,
 }
+
+/// Remote sub-issue parentage, keyed by parent doc id. Each value is the
+/// parent's children in GitHub sub-issue order (doc ids). TASK-3 consumes this
+/// to write the nested cache layout; built best-effort by `fetch_all`.
+pub type ParentageMap = std::collections::HashMap<String, Vec<String>>;
 
 pub struct IssueCache {
     root: PathBuf,
@@ -95,8 +102,21 @@ impl IssueCache {
     }
 
     pub fn remove(&self, id: &str, doc_type: &str) {
-        let path = self.doc_path(id, doc_type);
-        let _ = fs::remove_file(&path);
+        let type_dir = self.cache_dir().join(doc_type);
+        let flat = self.doc_path(id, doc_type);
+        if flat.is_file() {
+            let _ = fs::remove_file(&flat);
+        } else if let Some(child) = find_nested_child_path(&type_dir, id) {
+            let _ = fs::remove_file(&child);
+            if let Some(folder) = child.parent() {
+                remove_dir_if_empty(folder);
+            }
+        } else {
+            let folder = type_dir.join(id);
+            if folder.is_dir() {
+                let _ = fs::remove_dir_all(&folder);
+            }
+        }
 
         let mut lock = self.load_lock();
         lock.remove(id);
@@ -243,18 +263,26 @@ impl IssueCache {
         let Ok(entries) = fs::read_dir(&dir) else {
             return Vec::new();
         };
-        entries
-            .flatten()
-            .filter_map(|e| {
-                let path = e.path();
-                if path.extension().and_then(|s| s.to_str()) != Some("md") {
-                    return None;
+        let mut ids = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(parent_id) = path.file_name().and_then(|s| s.to_str()) {
+                    if path.join("index.md").is_file() {
+                        ids.push(parent_id.to_string());
+                    }
                 }
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_string())
-            })
-            .collect()
+                ids.extend(list_nested_children(&path));
+                continue;
+            }
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                ids.push(stem.to_string());
+            }
+        }
+        ids
     }
 
     /// Full fetch of all issues for a type, with pagination and cleanup of removed issues.
@@ -287,14 +315,20 @@ impl IssueCache {
 
         let previously_cached: std::collections::HashSet<String> =
             self.list_cached(&type_def.name).into_iter().collect();
-        let mut fetched_ids = std::collections::HashSet::new();
 
         let cache_dir = root.join(".lazyspec/cache").join(&type_def.name);
         fs::create_dir_all(&cache_dir)?;
 
-        let mut new_count = 0usize;
-        let mut lock = self.load_lock();
-
+        // Parse every fetched issue up front so the parentage query can resolve
+        // child node ids back to doc ids before we decide each doc's layout.
+        struct Parsed {
+            id: String,
+            meta: DocMeta,
+            body: String,
+        }
+        let mut parsed: Vec<Parsed> = Vec::with_capacity(issues.len());
+        let mut node_to_doc: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for issue in &issues {
             let (meta, body) =
                 parse_issue(issue, &type_def.name, known_types, &type_def.attributes);
@@ -303,30 +337,79 @@ impl IssueCache {
                 id: id.clone(),
                 ..meta
             };
+            if !issue.id.is_empty() {
+                node_to_doc.insert(issue.id.clone(), id.clone());
+            }
+            parsed.push(Parsed { id, meta, body });
+        }
 
-            if !previously_cached.contains(&id) {
+        // Best-effort: learn remote native sub-issue parentage so we can write
+        // the nested cache layout. A GraphQL failure warns and falls back to a
+        // flat layout for the affected parent; it never aborts the fetch.
+        let parentage = fetch_subissue_parentage(gh_graphql, &node_to_doc);
+
+        // child doc id -> (parent id, order, sibling count) for nested children.
+        let mut child_layout: std::collections::HashMap<String, (String, usize, usize)> =
+            std::collections::HashMap::new();
+        for (parent_id, children) in &parentage {
+            let total = children.len();
+            for (order, child_id) in children.iter().enumerate() {
+                child_layout.insert(child_id.clone(), (parent_id.clone(), order, total));
+            }
+        }
+
+        // A full fetch is authoritative for the whole type directory, and a doc
+        // can move between flat <-> nested layouts (or change order/parent)
+        // across fetches. `write_cache_*` writes by CURRENT layout but never
+        // removes a doc's prior file at a different path, so rebuild the type
+        // dir from scratch to guarantee no stale or duplicated cache entries.
+        for entry in fs::read_dir(&cache_dir)?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                fs::remove_dir_all(&path)?;
+            } else {
+                fs::remove_file(&path)?;
+            }
+        }
+
+        let mut new_count = 0usize;
+        let mut fetched_ids = std::collections::HashSet::new();
+        let mut lock = self.load_lock();
+
+        for (issue, Parsed { id, meta, body }) in issues.iter().zip(parsed.iter()) {
+            if !previously_cached.contains(id) {
                 new_count += 1;
             }
 
-            store_dispatch::write_cache_file(root, type_def, &meta, &body)?;
+            if let Some((parent_id, order, total)) = child_layout.get(id) {
+                store_dispatch::write_cache_child(
+                    root, type_def, parent_id, *order, *total, meta, body,
+                )?;
+            } else if parentage.contains_key(id) {
+                store_dispatch::write_cache_parent(root, type_def, meta, body)?;
+            } else {
+                store_dispatch::write_cache_file(root, type_def, meta, body)?;
+            }
 
-            lock.set(&id, &Utc::now().to_rfc3339());
+            lock.set(id, &Utc::now().to_rfc3339());
 
-            issue_map.insert(&id, issue.number, &issue.updated_at, &issue.id);
-            fetched_ids.insert(id);
+            issue_map.insert(id, issue.number, &issue.updated_at, &issue.id);
+            fetched_ids.insert(id.clone());
         }
-
-        lock.save(&self.root)?;
 
         let removed: Vec<String> = previously_cached
             .difference(&fetched_ids)
             .cloned()
             .collect();
 
+        // Cache files were already wiped during the rebuild above; the removed
+        // set only needs lock + issue-map cleanup for docs gone from the remote.
         for id in &removed {
-            self.remove(id, &type_def.name);
+            lock.remove(id);
             issue_map.remove(id);
         }
+
+        lock.save(&self.root)?;
 
         warnings.extend(self.refresh_schema_snapshot(gh_graphql, repo));
 
@@ -336,6 +419,87 @@ impl IssueCache {
             removed: removed.len(),
             warnings,
         })
+    }
+}
+
+/// Query each fetched issue's native sub-issues and resolve the ordered child
+/// node ids back to fetched doc ids. Returns only parents that have at least one
+/// resolvable child; child node ids not present in `node_to_doc` are dropped (no
+/// phantom entries). Best-effort: a per-parent GraphQL failure warns to stderr
+/// and skips that parent rather than aborting.
+fn fetch_subissue_parentage(
+    gh_graphql: &dyn GhGraphql,
+    node_to_doc: &std::collections::HashMap<String, String>,
+) -> ParentageMap {
+    let mut map = ParentageMap::new();
+    for (parent_node, parent_doc) in node_to_doc {
+        let child_nodes = match gh_subissue::fetch_remote_sub_issue_nodes(gh_graphql, parent_node) {
+            Ok(nodes) => nodes,
+            Err(e) => {
+                eprintln!(
+                    "warning: could not fetch sub-issues for {}, skipping nesting: {}",
+                    parent_doc, e
+                );
+                continue;
+            }
+        };
+        let children: Vec<String> = child_nodes
+            .iter()
+            .filter_map(|n| node_to_doc.get(n).cloned())
+            .collect();
+        if !children.is_empty() {
+            map.insert(parent_doc.clone(), children);
+        }
+    }
+    map
+}
+
+/// Real doc ids of every `NN-<id>.md` child inside a parent folder.
+fn list_nested_children(folder: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                return None;
+            }
+            let stem = path.file_stem().and_then(|s| s.to_str())?;
+            store::strip_order_prefix(stem).map(|s| s.to_string())
+        })
+        .collect()
+}
+
+/// Path to a nested child `NN-<id>.md` anywhere one level under the type dir.
+fn find_nested_child_path(type_dir: &Path, id: &str) -> Option<PathBuf> {
+    let entries = fs::read_dir(type_dir).ok()?;
+    for entry in entries.flatten() {
+        let folder = entry.path();
+        if !folder.is_dir() {
+            continue;
+        }
+        for child in fs::read_dir(&folder).ok().into_iter().flatten().flatten() {
+            let path = child.path();
+            let stem = path.file_stem().and_then(|s| s.to_str());
+            if stem.and_then(store::strip_order_prefix) == Some(id) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn remove_dir_if_empty(dir: &Path) {
+    if dir.join("index.md").is_file() {
+        return;
+    }
+    if fs::read_dir(dir)
+        .map(|mut e| e.next().is_none())
+        .unwrap_or(false)
+    {
+        let _ = fs::remove_dir(dir);
     }
 }
 
@@ -1365,5 +1529,628 @@ mod tests {
             meta.attributes.get("issue_type"),
             Some(&AttrValue::Str("Task".to_string()))
         );
+    }
+
+    fn nested_meta(id: &str) -> DocMeta {
+        DocMeta {
+            path: PathBuf::new(),
+            title: id.to_string(),
+            doc_type: DocType::new("story"),
+            status: Status::new("draft"),
+            author: "a".to_string(),
+            date: chrono::NaiveDate::from_ymd_opt(2026, 6, 26).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            attributes: Default::default(),
+            id: id.to_string(),
+        }
+    }
+
+    #[test]
+    fn list_cached_descends_into_nested_parent_folders() {
+        let (cache, tmp) = make_cache();
+        let td = story_type_def();
+        let root = tmp.path();
+
+        store_dispatch::write_cache_parent(root, &td, &nested_meta("STORY-100"), "p").unwrap();
+        store_dispatch::write_cache_child(
+            root,
+            &td,
+            "STORY-100",
+            0,
+            2,
+            &nested_meta("STORY-12"),
+            "c",
+        )
+        .unwrap();
+        store_dispatch::write_cache_child(
+            root,
+            &td,
+            "STORY-100",
+            1,
+            2,
+            &nested_meta("STORY-13"),
+            "c",
+        )
+        .unwrap();
+        store_dispatch::write_cache_file(root, &td, &nested_meta("STORY-7"), "flat").unwrap();
+
+        let mut ids = cache.list_cached("story");
+        ids.sort();
+        assert_eq!(ids, vec!["STORY-100", "STORY-12", "STORY-13", "STORY-7"]);
+    }
+
+    #[test]
+    fn remove_prunes_nested_child_and_keeps_parent() {
+        let (cache, tmp) = make_cache();
+        let td = story_type_def();
+        let root = tmp.path();
+
+        store_dispatch::write_cache_parent(root, &td, &nested_meta("STORY-100"), "p").unwrap();
+        store_dispatch::write_cache_child(
+            root,
+            &td,
+            "STORY-100",
+            0,
+            2,
+            &nested_meta("STORY-12"),
+            "c",
+        )
+        .unwrap();
+        store_dispatch::write_cache_child(
+            root,
+            &td,
+            "STORY-100",
+            1,
+            2,
+            &nested_meta("STORY-13"),
+            "c",
+        )
+        .unwrap();
+
+        cache.remove("STORY-12", "story");
+
+        let folder = root.join(".lazyspec/cache/story/STORY-100");
+        assert!(!folder.join("00-STORY-12.md").exists());
+        assert!(folder.join("01-STORY-13.md").is_file());
+        assert!(folder.join("index.md").is_file());
+    }
+
+    #[test]
+    fn remove_parent_deletes_folder() {
+        let (cache, tmp) = make_cache();
+        let td = story_type_def();
+        let root = tmp.path();
+
+        store_dispatch::write_cache_parent(root, &td, &nested_meta("STORY-100"), "p").unwrap();
+        store_dispatch::write_cache_child(
+            root,
+            &td,
+            "STORY-100",
+            0,
+            1,
+            &nested_meta("STORY-12"),
+            "c",
+        )
+        .unwrap();
+
+        cache.remove("STORY-100", "story");
+
+        assert!(!root.join(".lazyspec/cache/story/STORY-100").exists());
+    }
+
+    // --- fetch_subissue_parentage tests ---
+
+    /// GhGraphql mock keyed on the `id` var so per-parent responses are stable
+    /// regardless of HashMap iteration order. A node id mapped to None errors
+    /// (simulates a per-parent GraphQL failure).
+    struct ParentGraphql {
+        by_node: std::collections::HashMap<String, Option<serde_json::Value>>,
+    }
+
+    impl GhGraphql for ParentGraphql {
+        fn graphql(&self, _query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+            let node = vars
+                .iter()
+                .find(|(k, _)| *k == "id")
+                .and_then(|(_, v)| match v {
+                    GqlVar::Str(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            match self.by_node.get(&node) {
+                Some(Some(resp)) => Ok(resp.clone()),
+                Some(None) => anyhow::bail!("graphql failed for {}", node),
+                None => Ok(sub_issues(&[])),
+            }
+        }
+
+        fn project_item_fields(
+            &self,
+            _repo: &str,
+            _content_node_id: &str,
+        ) -> Result<Vec<crate::engine::gh::ProjectFieldValue>> {
+            Ok(vec![])
+        }
+
+        fn update_project_v2_item_field_value(
+            &self,
+            _project_id: &str,
+            _item_id: &str,
+            _field_id: &str,
+            _value: &crate::engine::gh::GhFieldValueInput,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear_project_field(
+            &self,
+            _project_id: &str,
+            _item_id: &str,
+            _field_id: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn node_to_doc(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(n, d)| (n.to_string(), d.to_string()))
+            .collect()
+    }
+
+    /// Build a `subIssues.nodes` graphql response with the given ordered child
+    /// node ids (mirrors the shape `fetch_remote_sub_issue_nodes` reads).
+    fn sub_issues(nodes: &[&str]) -> serde_json::Value {
+        let nodes: Vec<_> = nodes.iter().map(|n| serde_json::json!({"id": n})).collect();
+        serde_json::json!({"data": {"node": {"subIssues": {"nodes": nodes}}}})
+    }
+
+    #[test]
+    fn parentage_resolves_children_in_subissue_order() {
+        let gql = ParentGraphql {
+            by_node: [("I_parent".to_string(), Some(sub_issues(&["I_b", "I_a"])))]
+                .into_iter()
+                .collect(),
+        };
+        let map = node_to_doc(&[
+            ("I_parent", "STORY-1"),
+            ("I_a", "STORY-2"),
+            ("I_b", "STORY-3"),
+        ]);
+
+        let parentage = fetch_subissue_parentage(&gql, &map);
+
+        // Children preserve GitHub sub-issue order (I_b before I_a).
+        assert_eq!(
+            parentage.get("STORY-1"),
+            Some(&vec!["STORY-3".to_string(), "STORY-2".to_string()])
+        );
+    }
+
+    #[test]
+    fn parentage_drops_unresolvable_child_nodes() {
+        let gql = ParentGraphql {
+            by_node: [(
+                "I_parent".to_string(),
+                Some(sub_issues(&["I_a", "I_unknown"])),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        // I_unknown is not among the fetched issues.
+        let map = node_to_doc(&[("I_parent", "STORY-1"), ("I_a", "STORY-2")]);
+
+        let parentage = fetch_subissue_parentage(&gql, &map);
+
+        assert_eq!(parentage.get("STORY-1"), Some(&vec!["STORY-2".to_string()]));
+    }
+
+    #[test]
+    fn parentage_skips_parent_on_graphql_failure() {
+        let gql = ParentGraphql {
+            by_node: [
+                ("I_p1".to_string(), None), // fails
+                ("I_p2".to_string(), Some(sub_issues(&["I_c"]))),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let map = node_to_doc(&[("I_p1", "STORY-1"), ("I_p2", "STORY-2"), ("I_c", "STORY-3")]);
+
+        let parentage = fetch_subissue_parentage(&gql, &map);
+
+        // Failing parent is skipped; the other still resolves.
+        assert!(!parentage.contains_key("STORY-1"));
+        assert_eq!(parentage.get("STORY-2"), Some(&vec!["STORY-3".to_string()]));
+    }
+
+    #[test]
+    fn parentage_omits_childless_parents() {
+        let gql = ParentGraphql {
+            by_node: [("I_parent".to_string(), Some(sub_issues(&[])))]
+                .into_iter()
+                .collect(),
+        };
+        let map = node_to_doc(&[("I_parent", "STORY-1")]);
+
+        let parentage = fetch_subissue_parentage(&gql, &map);
+
+        assert!(parentage.is_empty());
+    }
+
+    #[test]
+    fn fetch_all_succeeds_when_parentage_graphql_fails() {
+        let (cache, tmp) = make_cache();
+        let type_def = story_type_def();
+
+        // Issues carry node ids so parentage queries fire, but the mock has an
+        // empty graphql queue -> every query bails. fetch_all must still Ok.
+        let mut issue = make_gh_issue(10, "STORY-001", "Body", &["lazyspec:story"]);
+        issue.id = "I_node10".to_string();
+        let gh = MockReader::new(vec![issue]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let result = cache
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &["story".to_string()],
+            )
+            .unwrap();
+
+        assert_eq!(result.fetched, 1);
+        assert!(cache.doc_path("STORY-10", "story").exists());
+    }
+
+    #[test]
+    fn remove_flat_doc_still_works() {
+        let (cache, tmp) = make_cache();
+        let td = story_type_def();
+        let root = tmp.path();
+
+        store_dispatch::write_cache_file(root, &td, &nested_meta("STORY-7"), "flat").unwrap();
+        cache.remove("STORY-7", "story");
+
+        assert!(!root.join(".lazyspec/cache/story/STORY-7.md").exists());
+    }
+
+    // --- TASK-3: nested materialization on fetch ---
+
+    /// Combined GhIssueReader + GhGraphql mock for nested-fetch tests. Routes
+    /// graphql by the `id` var (per-parent sub-issue queries, keyed on node id so
+    /// HashMap iteration order does not matter); any query without an `id` var is
+    /// the schema-snapshot refresh and returns an empty issue-types response.
+    struct NestingReader {
+        issues: Vec<GhIssue>,
+        sub_issues_by_node: std::collections::HashMap<String, Vec<&'static str>>,
+    }
+
+    impl NestingReader {
+        fn new(issues: Vec<GhIssue>, sub_issues_by_node: &[(&str, &[&'static str])]) -> Self {
+            Self {
+                issues,
+                sub_issues_by_node: sub_issues_by_node
+                    .iter()
+                    .map(|(node, kids)| (node.to_string(), kids.to_vec()))
+                    .collect(),
+            }
+        }
+    }
+
+    impl GhIssueReader for NestingReader {
+        fn issue_list(
+            &self,
+            _repo: &str,
+            _labels: &[String],
+            _json_fields: &[String],
+            _limit: Option<u64>,
+        ) -> Result<Vec<GhIssue>> {
+            Ok(self.issues.clone())
+        }
+        fn issue_view(&self, _repo: &str, _number: u64) -> Result<GhIssue> {
+            unimplemented!()
+        }
+        fn issue_comments(
+            &self,
+            _repo: &str,
+            _number: u64,
+        ) -> Result<Vec<crate::engine::gh::GhComment>> {
+            unimplemented!()
+        }
+    }
+
+    impl GhGraphql for NestingReader {
+        fn graphql(&self, _query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+            let id = vars
+                .iter()
+                .find(|(k, _)| *k == "id")
+                .and_then(|(_, v)| match v {
+                    GqlVar::Str(s) => Some(s.clone()),
+                    _ => None,
+                });
+            match id {
+                Some(node) => {
+                    let kids = self
+                        .sub_issues_by_node
+                        .get(&node)
+                        .cloned()
+                        .unwrap_or_default();
+                    Ok(sub_issues(&kids))
+                }
+                // Schema-snapshot refresh: no node id var.
+                None => Ok(empty_issue_types_response()),
+            }
+        }
+        fn project_item_fields(
+            &self,
+            _repo: &str,
+            _content_node_id: &str,
+        ) -> Result<Vec<crate::engine::gh::ProjectFieldValue>> {
+            Ok(vec![])
+        }
+        fn update_project_v2_item_field_value(
+            &self,
+            _project_id: &str,
+            _item_id: &str,
+            _field_id: &str,
+            _value: &crate::engine::gh::GhFieldValueInput,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn clear_project_field(
+            &self,
+            _project_id: &str,
+            _item_id: &str,
+            _field_id: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn issue_with_node(number: u64, node: &str) -> GhIssue {
+        let mut i = make_gh_issue(number, "title", "body", &["lazyspec:story"]);
+        i.id = node.to_string();
+        i
+    }
+
+    fn fetch_story(
+        cache: &IssueCache,
+        tmp: &TempDir,
+        gh: &NestingReader,
+        issue_map: &mut IssueMap,
+    ) -> FetchResult {
+        cache
+            .fetch_all(
+                tmp.path(),
+                &story_type_def(),
+                gh,
+                gh,
+                "owner/repo",
+                issue_map,
+                &["story".to_string()],
+            )
+            .unwrap()
+    }
+
+    fn load_story_store(tmp: &TempDir) -> crate::engine::store::Store {
+        use crate::engine::config::{Config, GithubConfig};
+        let mut config = Config::default();
+        config.documents.types = vec![story_type_def()];
+        config.documents.github = Some(GithubConfig {
+            repo: Some("owner/repo".to_string()),
+            cache_ttl: 60,
+        });
+        crate::engine::store::Store::load(tmp.path(), &config).unwrap()
+    }
+
+    fn path_of(store: &crate::engine::store::Store, id: &str) -> PathBuf {
+        let filter = crate::engine::store::Filter {
+            doc_type: None,
+            status: None,
+            tag: None,
+        };
+        store
+            .list(&filter)
+            .into_iter()
+            .find(|d| d.id == id)
+            .unwrap_or_else(|| panic!("doc {} not in store", id))
+            .path
+            .clone()
+    }
+
+    // AC1: fetch materializes <PARENT>/index.md + ordered NN-<child>.md.
+    #[test]
+    fn fetch_all_materializes_nested_layout_in_subissue_order() {
+        let (cache, tmp) = make_cache();
+        let gh = NestingReader::new(
+            vec![
+                issue_with_node(100, "I_parent"),
+                issue_with_node(11, "I_a"),
+                issue_with_node(12, "I_b"),
+            ],
+            // GitHub sub-issue order: STORY-12 (I_b) before STORY-11 (I_a).
+            &[("I_parent", &["I_b", "I_a"])],
+        );
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        fetch_story(&cache, &tmp, &gh, &mut issue_map);
+
+        let folder = tmp.path().join(".lazyspec/cache/story/STORY-100");
+        assert!(folder.join("index.md").is_file(), "parent index.md");
+        assert!(
+            folder.join("00-STORY-12.md").is_file(),
+            "first child by GH order"
+        );
+        assert!(
+            folder.join("01-STORY-11.md").is_file(),
+            "second child by GH order"
+        );
+        // The parent is NOT also written flat.
+        assert!(!tmp
+            .path()
+            .join(".lazyspec/cache/story/STORY-100.md")
+            .exists());
+    }
+
+    // AC2: the loader nests the materialized children under the parent.
+    #[test]
+    fn fetch_all_nested_layout_is_loaded_nested() {
+        let (cache, tmp) = make_cache();
+        let gh = NestingReader::new(
+            vec![
+                issue_with_node(100, "I_parent"),
+                issue_with_node(11, "I_a"),
+                issue_with_node(12, "I_b"),
+            ],
+            &[("I_parent", &["I_a", "I_b"])],
+        );
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        fetch_story(&cache, &tmp, &gh, &mut issue_map);
+
+        let store = load_story_store(&tmp);
+        let parent_path = path_of(&store, "STORY-100");
+        let children = store.children_of(&parent_path);
+        assert_eq!(children.len(), 2, "parent should have 2 nested children");
+    }
+
+    // AC3: a childless issue alongside a parent stays flat.
+    #[test]
+    fn fetch_all_childless_issue_stays_flat() {
+        let (cache, tmp) = make_cache();
+        let gh = NestingReader::new(
+            vec![
+                issue_with_node(100, "I_parent"),
+                issue_with_node(11, "I_a"),
+                issue_with_node(50, "I_lone"),
+            ],
+            &[("I_parent", &["I_a"])],
+        );
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        fetch_story(&cache, &tmp, &gh, &mut issue_map);
+
+        assert!(tmp
+            .path()
+            .join(".lazyspec/cache/story/STORY-50.md")
+            .is_file());
+        assert!(!tmp.path().join(".lazyspec/cache/story/STORY-50").exists());
+    }
+
+    // AC4: a sub-issue removed on GitHub un-nests on re-fetch with no duplicates.
+    #[test]
+    fn refetch_unnests_removed_subissue_without_duplicates() {
+        let (cache, tmp) = make_cache();
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+
+        // First fetch: STORY-11 nested under STORY-100.
+        let first = NestingReader::new(
+            vec![issue_with_node(100, "I_parent"), issue_with_node(11, "I_a")],
+            &[("I_parent", &["I_a"])],
+        );
+        fetch_story(&cache, &tmp, &first, &mut issue_map);
+        assert!(tmp
+            .path()
+            .join(".lazyspec/cache/story/STORY-100/00-STORY-11.md")
+            .is_file());
+
+        // Second fetch: parent no longer reports STORY-11 as a sub-issue, so it
+        // becomes a flat, childless doc.
+        let second = NestingReader::new(
+            vec![issue_with_node(100, "I_parent"), issue_with_node(11, "I_a")],
+            &[("I_parent", &[])],
+        );
+        fetch_story(&cache, &tmp, &second, &mut issue_map);
+
+        let story_dir = tmp.path().join(".lazyspec/cache/story");
+        // STORY-11 now flat, no longer nested, and not duplicated.
+        assert!(
+            story_dir.join("STORY-11.md").is_file(),
+            "STORY-11 re-parented flat"
+        );
+        assert!(!story_dir.join("STORY-100/00-STORY-11.md").exists());
+        // STORY-100 has no children now, so it is flat (no folder).
+        assert!(story_dir.join("STORY-100.md").is_file());
+        assert!(!story_dir.join("STORY-100").exists());
+
+        let mut ids = cache.list_cached("story");
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["STORY-100", "STORY-11"],
+            "no duplicate cache entries"
+        );
+    }
+
+    // AC4 (drop case): a removed sub-issue gone from the remote entirely is pruned.
+    #[test]
+    fn refetch_prunes_subissue_removed_from_remote() {
+        let (cache, tmp) = make_cache();
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+
+        let first = NestingReader::new(
+            vec![issue_with_node(100, "I_parent"), issue_with_node(11, "I_a")],
+            &[("I_parent", &["I_a"])],
+        );
+        fetch_story(&cache, &tmp, &first, &mut issue_map);
+
+        // STORY-11 deleted from GitHub: not returned by issue_list at all.
+        let second =
+            NestingReader::new(vec![issue_with_node(100, "I_parent")], &[("I_parent", &[])]);
+        let result = fetch_story(&cache, &tmp, &second, &mut issue_map);
+
+        assert_eq!(result.removed, 1);
+        let story_dir = tmp.path().join(".lazyspec/cache/story");
+        assert!(!story_dir.join("STORY-100/00-STORY-11.md").exists());
+        assert!(!story_dir.join("STORY-11.md").exists());
+        assert!(issue_map.get("STORY-11").is_none());
+        assert_eq!(cache.list_cached("story"), vec!["STORY-100".to_string()]);
+    }
+
+    // Transition flat -> nested: a doc cached flat that becomes a child must move
+    // into the parent folder with no stale flat file left behind.
+    #[test]
+    fn refetch_flat_to_nested_leaves_no_stale_flat_file() {
+        let (cache, tmp) = make_cache();
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+
+        // First fetch: both flat (parent reports no sub-issues).
+        let first = NestingReader::new(
+            vec![issue_with_node(100, "I_parent"), issue_with_node(11, "I_a")],
+            &[("I_parent", &[])],
+        );
+        fetch_story(&cache, &tmp, &first, &mut issue_map);
+        assert!(tmp
+            .path()
+            .join(".lazyspec/cache/story/STORY-11.md")
+            .is_file());
+
+        // Second fetch: STORY-11 is now a sub-issue of STORY-100.
+        let second = NestingReader::new(
+            vec![issue_with_node(100, "I_parent"), issue_with_node(11, "I_a")],
+            &[("I_parent", &["I_a"])],
+        );
+        fetch_story(&cache, &tmp, &second, &mut issue_map);
+
+        let story_dir = tmp.path().join(".lazyspec/cache/story");
+        assert!(story_dir.join("STORY-100/00-STORY-11.md").is_file());
+        assert!(
+            !story_dir.join("STORY-11.md").exists(),
+            "stale flat file removed"
+        );
+        assert!(
+            !story_dir.join("STORY-100.md").exists(),
+            "parent no longer flat"
+        );
+
+        let mut ids = cache.list_cached("story");
+        ids.sort();
+        assert_eq!(ids, vec!["STORY-100", "STORY-11"]);
     }
 }

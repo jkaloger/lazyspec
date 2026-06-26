@@ -456,9 +456,26 @@ fn extract_id(path: &Path) -> String {
         if parent_id != parent_name {
             return stem.to_string();
         }
+        // Materialized cache children live under a clean parent-id folder
+        // (e.g. `STORY-100/01-STORY-12.md`). Their `NN-` order prefix is not part
+        // of the doc id, so strip it before resolving the real child id.
+        if let Some(rest) = strip_order_prefix(stem) {
+            return extract_id_from_name(rest);
+        }
     }
 
     extract_id_from_name(stem)
+}
+
+/// Strip a leading zero-padded numeric order prefix (`NN-`) from a stem, returning
+/// the remainder. Returns `None` when no such prefix is present.
+pub(crate) fn strip_order_prefix(stem: &str) -> Option<&str> {
+    let (head, rest) = stem.split_once('-')?;
+    if !head.is_empty() && head.chars().all(|c| c.is_ascii_digit()) {
+        Some(rest)
+    } else {
+        None
+    }
 }
 
 fn strip_type_prefix_sqids(name: &str) -> &str {
@@ -991,5 +1008,33 @@ mod tests {
             Some("def456"),
             "cache.lock should contain materialized entry"
         );
+    }
+
+    #[test]
+    fn extract_id_nested_cache_child_strips_order_prefix() {
+        // A materialized cache child lives under a clean parent-id folder; its
+        // `NN-` order prefix is not part of the doc id.
+        let path = PathBuf::from(".lazyspec/cache/story/STORY-100/01-STORY-12.md");
+        assert_eq!(extract_id(&path), "STORY-12");
+    }
+
+    #[test]
+    fn extract_id_nested_cache_parent_uses_folder_id() {
+        let path = PathBuf::from(".lazyspec/cache/story/STORY-100/index.md");
+        assert_eq!(extract_id(&path), "STORY-100");
+    }
+
+    #[test]
+    fn extract_id_filesystem_subdir_child_keeps_full_stem() {
+        // Filesystem-authored subdir children sit under a slug folder (title
+        // suffix) and keep their full `NN-name` stem as the id.
+        let path = PathBuf::from("docs/stories/STORY-159-shape/01-first.md");
+        assert_eq!(extract_id(&path), "01-first");
+    }
+
+    #[test]
+    fn extract_id_flat_doc_unaffected_by_order_strip() {
+        let path = PathBuf::from(".lazyspec/cache/story/STORY-12.md");
+        assert_eq!(extract_id(&path), "STORY-12");
     }
 }

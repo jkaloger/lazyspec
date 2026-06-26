@@ -1554,6 +1554,136 @@ pub fn write_cache_file(
     let cache_path = find_cache_file(&cache_dir, &meta.id)
         .unwrap_or_else(|| cache_dir.join(format!("{}.md", meta.id)));
 
+    let cache_content = render_cache_content(meta, body)?;
+    std::fs::write(&cache_path, &cache_content)?;
+    Ok(())
+}
+
+pub(crate) fn find_cache_file(cache_dir: &std::path::Path, doc_id: &str) -> Option<PathBuf> {
+    if let Some(flat) = find_cache_file_flat(cache_dir, doc_id) {
+        return Some(flat);
+    }
+    // Nested layout: a child lives inside a parent-id folder as `NN-<doc_id>.md`,
+    // and a parent-with-children lives at `<doc_id>/index.md`.
+    std::fs::read_dir(cache_dir).ok()?.find_map(|entry| {
+        let entry = entry.ok()?;
+        if !entry.file_type().ok()?.is_dir() {
+            return None;
+        }
+        let folder = entry.path();
+        if entry.file_name().to_string_lossy() == doc_id {
+            let index = folder.join("index.md");
+            if index.exists() {
+                return Some(index);
+            }
+        }
+        find_nested_child(&folder, doc_id)
+    })
+}
+
+fn find_cache_file_flat(cache_dir: &std::path::Path, doc_id: &str) -> Option<PathBuf> {
+    let prefix = format!("{}-", doc_id);
+    let exact = format!("{}.md", doc_id);
+    std::fs::read_dir(cache_dir).ok()?.find_map(|entry| {
+        let entry = entry.ok()?;
+        if entry.file_type().ok()?.is_dir() {
+            return None;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == exact || name.starts_with(&prefix) {
+            Some(entry.path())
+        } else {
+            None
+        }
+    })
+}
+
+/// Find a nested child `NN-<doc_id>.md` inside a parent folder.
+fn find_nested_child(folder: &std::path::Path, doc_id: &str) -> Option<PathBuf> {
+    std::fs::read_dir(folder).ok()?.find_map(|entry| {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            return None;
+        }
+        let stem = path.file_stem().and_then(|s| s.to_str())?;
+        if store::strip_order_prefix(stem) == Some(doc_id) {
+            Some(path)
+        } else {
+            None
+        }
+    })
+}
+
+/// Zero-padded order prefix width: lexicographic sort must equal numeric sort, so
+/// the width grows with the child count (`>=2` digits, `3` when more than 99).
+fn order_width(total: usize) -> usize {
+    if total > 99 {
+        3
+    } else {
+        2
+    }
+}
+
+fn child_cache_filename(order: usize, total: usize, child_id: &str) -> String {
+    format!(
+        "{:0width$}-{}.md",
+        order,
+        child_id,
+        width = order_width(total)
+    )
+}
+
+/// Write a parent that has children to `<type>/<PARENT>/index.md`.
+pub fn write_cache_parent(
+    root: &std::path::Path,
+    type_def: &TypeDef,
+    meta: &DocMeta,
+    body: &str,
+) -> Result<()> {
+    if meta.id.is_empty() {
+        anyhow::bail!("refusing cache write for empty doc id");
+    }
+    let folder = root
+        .join(".lazyspec/cache")
+        .join(&type_def.name)
+        .join(&meta.id);
+    std::fs::create_dir_all(&folder)?;
+    let cache_path = folder.join("index.md");
+    let content = render_cache_content(meta, body)?;
+    std::fs::write(&cache_path, &content)?;
+    Ok(())
+}
+
+/// Write a child to `<type>/<PARENT>/NN-<child-id>.md`, where `order` is the child's
+/// zero-based position and `total` the sibling count (sets the `NN` padding width).
+pub fn write_cache_child(
+    root: &std::path::Path,
+    type_def: &TypeDef,
+    parent_id: &str,
+    order: usize,
+    total: usize,
+    meta: &DocMeta,
+    body: &str,
+) -> Result<()> {
+    if meta.id.is_empty() {
+        anyhow::bail!("refusing cache write for empty doc id");
+    }
+    if parent_id.is_empty() {
+        anyhow::bail!("refusing nested cache write for empty parent id");
+    }
+    let folder = root
+        .join(".lazyspec/cache")
+        .join(&type_def.name)
+        .join(parent_id);
+    std::fs::create_dir_all(&folder)?;
+    let cache_path = folder.join(child_cache_filename(order, total, &meta.id));
+    let content = render_cache_content(meta, body)?;
+    std::fs::write(&cache_path, &content)?;
+    Ok(())
+}
+
+fn render_cache_content(meta: &DocMeta, body: &str) -> Result<String> {
     let frontmatter = CacheFrontmatter {
         title: meta.title.clone(),
         doc_type: meta.doc_type.as_str().to_string(),
@@ -1573,30 +1703,13 @@ pub fn write_cache_file(
             .collect(),
         attributes: meta.attributes.clone(),
     };
-
     let yaml = serde_yaml::to_string(&frontmatter)?;
     let body_section = if body.is_empty() {
         String::new()
     } else {
         format!("\n{}\n", body)
     };
-    let cache_content = compose_frontmatter(&yaml, &body_section);
-    std::fs::write(&cache_path, &cache_content)?;
-    Ok(())
-}
-
-pub(crate) fn find_cache_file(cache_dir: &std::path::Path, doc_id: &str) -> Option<PathBuf> {
-    let prefix = format!("{}-", doc_id);
-    let exact = format!("{}.md", doc_id);
-    std::fs::read_dir(cache_dir).ok()?.find_map(|entry| {
-        let entry = entry.ok()?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name == exact || name.starts_with(&prefix) {
-            Some(entry.path())
-        } else {
-            None
-        }
-    })
+    Ok(compose_frontmatter(&yaml, &body_section))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3148,6 +3261,124 @@ mod tests {
             parsed["related"][0]["implements"].as_str().unwrap(),
             "STORY: special & \"fun\""
         );
+    }
+
+    fn cache_meta(id: &str) -> DocMeta {
+        use chrono::NaiveDate;
+        DocMeta {
+            path: PathBuf::new(),
+            title: format!("Title {id}"),
+            doc_type: DocType::new("story"),
+            status: Status::new("draft"),
+            author: "a".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 6, 26).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            attributes: Default::default(),
+            id: id.to_string(),
+        }
+    }
+
+    fn story_type_def() -> TypeDef {
+        let mut td = test_type_def(StoreBackend::GithubIssues);
+        td.name = "story".to_string();
+        td.subdirectory = true;
+        td
+    }
+
+    #[test]
+    fn nested_parent_writes_index_md() {
+        let root = tmp_root("nested_parent");
+        let td = story_type_def();
+
+        write_cache_parent(&root, &td, &cache_meta("STORY-100"), "parent body").unwrap();
+
+        let index = root.join(".lazyspec/cache/story/STORY-100/index.md");
+        assert!(index.is_file(), "parent should write to <PARENT>/index.md");
+        assert!(std::fs::read_to_string(&index)
+            .unwrap()
+            .contains("parent body"));
+    }
+
+    #[test]
+    fn nested_child_writes_padded_order_filename() {
+        let root = tmp_root("nested_child");
+        let td = story_type_def();
+
+        write_cache_child(&root, &td, "STORY-100", 0, 3, &cache_meta("STORY-12"), "c0").unwrap();
+        write_cache_child(&root, &td, "STORY-100", 1, 3, &cache_meta("STORY-13"), "c1").unwrap();
+
+        let folder = root.join(".lazyspec/cache/story/STORY-100");
+        assert!(folder.join("00-STORY-12.md").is_file());
+        assert!(folder.join("01-STORY-13.md").is_file());
+    }
+
+    #[test]
+    fn nested_child_uses_three_digit_padding_beyond_99() {
+        let root = tmp_root("nested_child_wide");
+        let td = story_type_def();
+
+        write_cache_child(
+            &root,
+            &td,
+            "STORY-100",
+            5,
+            150,
+            &cache_meta("STORY-12"),
+            "c",
+        )
+        .unwrap();
+
+        let folder = root.join(".lazyspec/cache/story/STORY-100");
+        assert!(folder.join("005-STORY-12.md").is_file());
+    }
+
+    #[test]
+    fn find_cache_file_resolves_nested_child() {
+        let root = tmp_root("find_nested_child");
+        let td = story_type_def();
+        write_cache_child(&root, &td, "STORY-100", 2, 3, &cache_meta("STORY-12"), "c").unwrap();
+
+        let cache_dir = root.join(".lazyspec/cache/story");
+        let found = find_cache_file(&cache_dir, "STORY-12").expect("child must be found");
+        assert!(found.ends_with("STORY-100/02-STORY-12.md"));
+    }
+
+    #[test]
+    fn find_cache_file_resolves_nested_parent_index() {
+        let root = tmp_root("find_nested_parent");
+        let td = story_type_def();
+        write_cache_parent(&root, &td, &cache_meta("STORY-100"), "p").unwrap();
+
+        let cache_dir = root.join(".lazyspec/cache/story");
+        let found = find_cache_file(&cache_dir, "STORY-100").expect("parent index must be found");
+        assert!(found.ends_with("STORY-100/index.md"));
+    }
+
+    #[test]
+    fn find_cache_file_still_resolves_flat() {
+        let root = tmp_root("find_flat");
+        let td = story_type_def();
+        write_cache_file(&root, &td, &cache_meta("STORY-7"), "flat").unwrap();
+
+        let cache_dir = root.join(".lazyspec/cache/story");
+        let found = find_cache_file(&cache_dir, "STORY-7").expect("flat doc must be found");
+        assert!(found.ends_with("STORY-7.md"));
+    }
+
+    #[test]
+    fn childless_doc_stays_flat() {
+        let root = tmp_root("childless_flat");
+        let td = story_type_def();
+
+        write_cache_file(&root, &td, &cache_meta("STORY-7"), "body").unwrap();
+
+        let flat = root.join(".lazyspec/cache/story/STORY-7.md");
+        assert!(flat.is_file(), "childless doc must stay flat");
+        assert!(!root.join(".lazyspec/cache/story/STORY-7").exists());
     }
 
     // Regression: write_cache_file refuses an empty doc id rather than writing

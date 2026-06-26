@@ -142,7 +142,9 @@ fn reprioritize_to_match(
     Ok(())
 }
 
-fn fetch_remote_sub_issue_nodes(gql: &dyn GhGraphql, parent_node: &str) -> Result<Vec<String>> {
+/// Ordered child node ids of a parent issue's native sub-issues (`subIssues`
+/// query order). Empty when the issue has no sub-issues.
+pub fn fetch_remote_sub_issue_nodes(gql: &dyn GhGraphql, parent_node: &str) -> Result<Vec<String>> {
     let resp = gql.graphql(
         SUB_ISSUES_QUERY,
         &[("id", GqlVar::Str(parent_node.to_string()))],
