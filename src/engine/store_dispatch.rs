@@ -6,7 +6,9 @@ use chrono::Local;
 use serde::Serialize;
 
 use crate::engine::config::{Config, StoreBackend, TypeDef};
-use crate::engine::document::{compose_frontmatter, AttrValue, DocMeta, DocType, Status};
+use crate::engine::document::{
+    compose_frontmatter, AttrValue, DocMeta, DocType, Relation, RelationType, Status,
+};
 use crate::engine::gh::{self, GhGraphql, GhIssueReader, GhIssueWriter, GqlVar};
 use crate::engine::gh_schema::{try_org_then_user, GhSchemaSnapshot};
 use crate::engine::git_ref::GitRefOps;
@@ -1086,6 +1088,40 @@ impl<M: gh::GhMilestoneApi> GithubMilestonesStore<M> {
             "closed_issues".to_string(),
             AttrValue::Int(milestone.closed_issues as i64),
         );
+
+        // Read-only inverse of an issue's `targets` relation: one `targeted-by`
+        // entry per assigned issue (open+closed) that maps to a synced lazyspec
+        // doc. Issue numbers with no doc in the issue map are dropped. Sorted by
+        // issue number ascending so the cache is deterministic and never churns.
+        //
+        // Best-effort: this derived/read-only field must never block writing the
+        // milestone doc. On `update` the remote PATCH has already landed by the
+        // time we get here, so a transient read failure falls back to no
+        // relations rather than aborting and leaving the cache stale.
+        let related: Vec<Relation> = match self
+            .client
+            .milestone_issues(&self.repo, milestone.number)
+        {
+            Ok(mut issue_numbers) => {
+                issue_numbers.sort_unstable();
+                issue_numbers
+                    .into_iter()
+                    .filter_map(|n| self.issue_map.shorthand_for_number(n))
+                    .map(|shorthand| Relation {
+                        rel_type: RelationType::new("targeted-by"),
+                        target: shorthand.to_string(),
+                    })
+                    .collect()
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: could not list issues for milestone #{}, skipping targeted-by relations: {}",
+                    milestone.number, e
+                );
+                Vec::new()
+            }
+        };
+
         DocMeta {
             path: PathBuf::new(),
             title: milestone.title.clone(),
@@ -1095,7 +1131,7 @@ impl<M: gh::GhMilestoneApi> GithubMilestonesStore<M> {
             date: Local::now().date_naive(),
             tags: vec![],
             provenance: vec![],
-            related: vec![],
+            related,
             validate_ignore: false,
             virtual_doc: false,
             attributes,
@@ -1120,7 +1156,13 @@ impl<M: gh::GhMilestoneApi> DocumentStore for GithubMilestonesStore<M> {
             .milestone_create(&self.repo, title, body, None, "open")?;
 
         let id = type_def.make_id(milestone.number);
-        self.issue_map.insert(&id, milestone.number, "", "");
+        self.issue_map.insert_kind(
+            &id,
+            milestone.number,
+            "",
+            "",
+            crate::engine::issue_map::EntryKind::Milestone,
+        );
         self.issue_map.save(&self.root)?;
 
         let meta = self.meta_from_milestone(type_def, &id, &milestone, author);
@@ -1359,7 +1401,13 @@ impl<G: GhGraphql> GithubProjectsStore<G> {
         let number = board_number(doc_id)?;
         let node_id = self.resolve_board(&owner, number)?;
 
-        self.issue_map.insert(doc_id, number, "", node_id.clone());
+        self.issue_map.insert_kind(
+            doc_id,
+            number,
+            "",
+            node_id.clone(),
+            crate::engine::issue_map::EntryKind::Project,
+        );
         self.issue_map.save(&self.root)?;
 
         let meta = DocMeta {
@@ -1424,7 +1472,13 @@ impl<G: GhGraphql> DocumentStore for GithubProjectsStore<G> {
 
         let doc_id = format!("PROJECT-{}", number);
 
-        self.issue_map.insert(&doc_id, number, "", node_id.clone());
+        self.issue_map.insert_kind(
+            &doc_id,
+            number,
+            "",
+            node_id.clone(),
+            crate::engine::issue_map::EntryKind::Project,
+        );
         self.issue_map.save(&self.root)?;
 
         let meta = DocMeta {
@@ -2311,6 +2365,210 @@ mod tests {
         assert_eq!(entry.issue_number, 1);
 
         assert!(root.join(&created.path).exists());
+    }
+
+    // ITERATION-223 (AC1/AC2/AC3/AC6): meta_from_milestone derives one
+    // `targeted-by` relation per assigned issue that maps to a synced doc,
+    // dropping unmapped issue numbers, ordered by ascending issue number.
+    #[test]
+    fn milestone_targeted_by_skips_unmapped_and_sorts_by_issue_number() {
+        let root = tmp_root("ms_targeted_by");
+        // Issues returned unsorted on purpose to prove the ascending sort.
+        let client = MockGhMilestoneClient::new().with_milestone_issues(7, vec![30, 10, 20]);
+        let mut store = milestone_store(&root, client);
+        let td = test_type_def(StoreBackend::GithubMilestones);
+
+        // Two of the three assigned issues map to synced docs; #20 does not.
+        store.issue_map.insert_kind(
+            "STORY-5",
+            10,
+            "",
+            "",
+            crate::engine::issue_map::EntryKind::Issue,
+        );
+        store.issue_map.insert_kind(
+            "TICKET-9",
+            30,
+            "",
+            "",
+            crate::engine::issue_map::EntryKind::Issue,
+        );
+
+        let milestone = crate::engine::gh::GhMilestone {
+            number: 7,
+            title: "v1.0".to_string(),
+            description: String::new(),
+            due_on: None,
+            state: "open".to_string(),
+            open_issues: 3,
+            closed_issues: 0,
+            url: String::new(),
+        };
+
+        let meta = store.meta_from_milestone(&td, "MILESTONE-7", &milestone, "author");
+
+        assert_eq!(meta.related.len(), 2, "unmapped issue #20 must be dropped");
+        assert!(
+            meta.related
+                .iter()
+                .all(|r| r.rel_type.as_str() == "targeted-by"),
+            "all relations are targeted-by"
+        );
+        let targets: Vec<&str> = meta.related.iter().map(|r| r.target.as_str()).collect();
+        // Ascending issue number: #10 (STORY-5) before #30 (TICKET-9); #20 absent.
+        assert_eq!(targets, vec!["STORY-5", "TICKET-9"]);
+    }
+
+    // ITERATION-223 T6 (AC1/AC3/AC4): the milestone doc materialized through the
+    // store carries `targeted-by` relations into its cache, those relations
+    // resolve to real docs under `validate` (no broken-link/dangling finding),
+    // and an issue with no doc in the map never appears as a target.
+    //
+    // Layer: this lives at the `src/`-level `#[cfg(test)]` (not in
+    // `tests/integration/`) because the milestone derive needs a mocked
+    // `GhMilestoneApi` (issues assigned to milestone #N) and the only such mock,
+    // `MockGhMilestoneClient`, is gated behind `#[cfg(test)] pub mod test_support`
+    // in `gh.rs` -- it is not compiled into the library crate the integration
+    // tests link against, so a github-milestones store cannot be driven with a
+    // fake gh client from the integration layer. `validate` itself runs purely
+    // over a `Store` loaded from the on-disk cache, so once `create` has written
+    // the milestone cache file the full resolve -> validate path is exercised
+    // here without any live gh client.
+    #[test]
+    fn milestone_targeted_by_resolves_under_validate_and_drops_unmapped() {
+        use crate::engine::config::{
+            DocumentConfig, FilesystemConfig, Naming, RelationshipDef, Templates, UiConfig,
+        };
+        use crate::engine::validation::ValidationIssue;
+
+        let root = tmp_root("ms_targeted_by_validate");
+
+        // Milestone type (github-milestones) and a filesystem `story` type whose
+        // docs are the relation targets.
+        let milestone_td = TypeDef {
+            name: "milestone".to_string(),
+            plural: "milestones".to_string(),
+            dir: "docs/milestones".to_string(),
+            prefix: "MILESTONE".to_string(),
+            store: StoreBackend::GithubMilestones,
+            ..test_type_def(StoreBackend::GithubMilestones)
+        };
+        let story_td = TypeDef {
+            name: "story".to_string(),
+            plural: "stories".to_string(),
+            dir: "docs/stories".to_string(),
+            prefix: "STORY".to_string(),
+            store: StoreBackend::Filesystem,
+            ..test_type_def(StoreBackend::Filesystem)
+        };
+
+        // Two of the three assigned issues map to synced story docs; #20 does not.
+        let client = MockGhMilestoneClient::new().with_milestone_issues(1, vec![30, 10, 20]);
+        let mut store = milestone_store(&root, client);
+        store.issue_map.insert_kind(
+            "STORY-5",
+            10,
+            "",
+            "",
+            crate::engine::issue_map::EntryKind::Issue,
+        );
+        store.issue_map.insert_kind(
+            "STORY-9",
+            30,
+            "",
+            "",
+            crate::engine::issue_map::EntryKind::Issue,
+        );
+        store.issue_map.save(&root).unwrap();
+
+        // create() materializes the milestone cache file, embedding the derived
+        // `targeted-by` relations. milestone_create assigns number 1, so the
+        // milestone is MILESTONE-1 and its issues are #30/#10/#20 (above).
+        let created = store
+            .create(&milestone_td, "v1.0", "author", "first release")
+            .unwrap();
+        assert_eq!(created.id, "MILESTONE-1");
+
+        // The mapped story docs must exist on disk so the relation targets
+        // resolve under validate (an absent target would be a broken link).
+        let story_dir = root.join("docs/stories");
+        std::fs::create_dir_all(&story_dir).unwrap();
+        for (id, title) in [("STORY-5", "First story"), ("STORY-9", "Second story")] {
+            std::fs::write(
+                story_dir.join(format!("{}-{}.md", id, "slug")),
+                format!(
+                    "---\ntitle: \"{title}\"\ntype: story\nstatus: draft\nauthor: \"tester\"\ndate: 2026-04-01\ntags: []\n---\nBody.\n",
+                ),
+            )
+            .unwrap();
+        }
+
+        let config = Config {
+            documents: DocumentConfig {
+                types: vec![milestone_td.clone(), story_td],
+                naming: Naming {
+                    pattern: "{type}-{n:03}-{title}.md".to_string(),
+                },
+                sqids: None,
+                reserved: None,
+                github: None,
+            },
+            filesystem: FilesystemConfig {
+                templates: Templates {
+                    dir: ".lazyspec/templates".to_string(),
+                },
+            },
+            // Production-shaped: `targeted-by` is the declared *inverse* of the
+            // `targets` milestone relationship, not a top-level name. The
+            // unknown-relationship rule must accept the stored inverse keyword.
+            relationships: vec![RelationshipDef {
+                name: "targets".to_string(),
+                inverse: Some("targeted-by".to_string()),
+                github_native: Some("milestone".to_string()),
+            }],
+            ui: UiConfig::default(),
+            rules: vec![],
+            ref_count_ceiling: 0,
+            certification: Default::default(),
+            coordination: None,
+            agents: Default::default(),
+            skills: Default::default(),
+        };
+
+        let loaded = Store::load(&root, &config).unwrap();
+
+        // AC1: the resolved milestone doc surfaces the two `targeted-by`
+        // relations, pointing at the mapped issue shorthands (ascending issue
+        // number: #10 -> STORY-5, then #30 -> STORY-9).
+        let milestone = loaded.resolve_shorthand("MILESTONE-1").unwrap();
+        let targets: Vec<(&str, &str)> = milestone
+            .related
+            .iter()
+            .map(|r| (r.rel_type.as_str(), r.target.as_str()))
+            .collect();
+        assert_eq!(
+            targets,
+            vec![("targeted-by", "STORY-5"), ("targeted-by", "STORY-9")],
+        );
+
+        // AC4: the unmapped issue (#20) never produced a relation -- only the two
+        // mapped targets exist, and no relation points at a phantom shorthand.
+        assert_eq!(milestone.related.len(), 2, "unmapped issue #20 is dropped");
+
+        // AC3: validate reports no broken-link/dangling finding for the
+        // `targeted-by` targets, because both resolve to real story docs.
+        let result = loaded.validate_full(&config);
+        let dangling: Vec<String> = result
+            .errors
+            .iter()
+            .filter(|e| matches!(e, ValidationIssue::BrokenLink { .. }))
+            .map(|e| e.to_string())
+            .collect();
+        assert!(
+            dangling.is_empty(),
+            "no dangling targeted-by relation expected, got: {:?}",
+            dangling
+        );
     }
 
     // AC2: update [title, body, due_on] -> milestone_edit records changed fields;

@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
@@ -177,6 +177,23 @@ pub fn parse_milestone_list_json(stdout: &str) -> Result<Vec<GhMilestone>> {
         .map_err(|e| anyhow::anyhow!("failed to parse milestone list JSON: {}", e))
 }
 
+/// Extract issue numbers from the REST `/issues` array, dropping pull requests
+/// (the endpoint reports them as issues but tags them with a `pull_request` key).
+pub fn parse_milestone_issue_numbers_json(stdout: &str) -> Result<Vec<u64>> {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        number: u64,
+        pull_request: Option<serde_json::Value>,
+    }
+    let rows: Vec<Row> = serde_json::from_str(stdout)
+        .map_err(|e| anyhow::anyhow!("failed to parse milestone issues JSON: {}", e))?;
+    Ok(rows
+        .into_iter()
+        .filter(|r| r.pull_request.is_none())
+        .map(|r| r.number)
+        .collect())
+}
+
 /// Pure argv builder for `issue_set_milestone`. `None` clears the milestone and
 /// MUST emit `-F milestone=null` (a JSON null, not the string `"null"`);
 /// `Some(n)` emits `-F milestone=<n>` (a typed int). `-F` (not `-f`) is what
@@ -288,6 +305,10 @@ pub trait GhMilestoneApi {
     ) -> Result<GhMilestone>;
 
     fn milestone_delete(&self, repo: &str, number: u64) -> Result<()>;
+
+    /// Issue numbers (open and closed) assigned to the milestone -- the inverse
+    /// of an issue's milestone association.
+    fn milestone_issues(&self, repo: &str, number: u64) -> Result<Vec<u64>>;
 
     /// Set or clear the milestone association on an issue (`PATCH issues/{n}`,
     /// the GitHub edge of record). `None` clears it.
@@ -934,6 +955,20 @@ impl GhMilestoneApi for GhCli {
         Ok(())
     }
 
+    fn milestone_issues(&self, repo: &str, number: u64) -> Result<Vec<u64>> {
+        // REST issues filter takes the milestone *number* directly (`gh issue
+        // list --milestone` wants the title); `--paginate` walks all pages and
+        // the `pull_request` key lets us drop PRs the issues endpoint mixes in.
+        let endpoint = format!(
+            "repos/{}/issues?milestone={}&state=all&per_page=100",
+            repo, number
+        );
+        let stdout = self
+            .run_gh_checked(&["api", "--paginate", &endpoint])
+            .with_context(|| format!("listing issues for milestone {} in {}", number, repo))?;
+        parse_milestone_issue_numbers_json(&stdout)
+    }
+
     fn issue_set_milestone(
         &self,
         repo: &str,
@@ -1362,6 +1397,7 @@ pub mod test_support {
         pub last_set_milestone: RefCell<Option<(u64, Option<u64>)>>,
         pub last_edit: RefCell<Option<MilestoneEdit>>,
         pub create_calls: Cell<usize>,
+        pub milestone_issues: RefCell<std::collections::HashMap<u64, Vec<u64>>>,
     }
 
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1387,6 +1423,7 @@ pub mod test_support {
                 last_set_milestone: RefCell::new(None),
                 last_edit: RefCell::new(None),
                 create_calls: Cell::new(0),
+                milestone_issues: RefCell::new(std::collections::HashMap::new()),
             }
         }
 
@@ -1396,6 +1433,11 @@ pub mod test_support {
             *me.milestones.borrow_mut() = milestones;
             me.next_number.set(next);
             me
+        }
+
+        pub fn with_milestone_issues(self, number: u64, issues: Vec<u64>) -> Self {
+            self.milestone_issues.borrow_mut().insert(number, issues);
+            self
         }
     }
 
@@ -1488,6 +1530,15 @@ pub mod test_support {
             *self.last_set_milestone.borrow_mut() = Some((issue_number, milestone));
             Ok(())
         }
+
+        fn milestone_issues(&self, _repo: &str, number: u64) -> Result<Vec<u64>> {
+            Ok(self
+                .milestone_issues
+                .borrow()
+                .get(&number)
+                .cloned()
+                .unwrap_or_default())
+        }
     }
 
     /// Delegating impl so a shared `Rc<MockGhMilestoneClient>` can be moved into
@@ -1530,6 +1581,9 @@ pub mod test_support {
             milestone: Option<u64>,
         ) -> Result<()> {
             (**self).issue_set_milestone(repo, issue_number, milestone)
+        }
+        fn milestone_issues(&self, repo: &str, number: u64) -> Result<Vec<u64>> {
+            (**self).milestone_issues(repo, number)
         }
     }
 
@@ -2088,6 +2142,20 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert!(list[0].due_on.is_none());
         assert_eq!(list[0].state, "closed");
+    }
+
+    // AC (ITERATION-223): milestone `targeted-by` must span state=all -- both open
+    // AND closed assigned issues -- while excluding pull requests (the REST
+    // `/issues` endpoint reports PRs as issues, tagged with a `pull_request` key).
+    #[test]
+    fn parse_milestone_issues_includes_closed_excludes_prs() {
+        let json = r#"[
+            {"number": 10, "state": "open", "title": "open issue"},
+            {"number": 11, "state": "closed", "title": "closed issue"},
+            {"number": 12, "state": "open", "title": "a PR", "pull_request": {"url": "https://api.github.com/repos/o/r/pulls/12"}}
+        ]"#;
+        let numbers = parse_milestone_issue_numbers_json(json).unwrap();
+        assert_eq!(numbers, vec![10, 11]);
     }
 
     // AC4 (real-client edge): clearing the milestone emits `-F milestone=null`

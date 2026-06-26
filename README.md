@@ -500,7 +500,11 @@ and is never writable. The write policy is last-write-wins: a push happens
 unconditionally, then the milestone is re-read into the cache (no optimistic
 lock). An issue -> milestone association is surfaced as a relation: declare a
 relationship with `github_native = "milestone"`, then `link` an issue-backed
-document to a milestone document to set it (`unlink` clears it).
+document to a milestone document to set it (`unlink` clears it). The inverse is
+read-only: a milestone document's `related` frontmatter surfaces a `targeted-by`
+entry for each assigned issue (open and closed) that maps to a lazyspec
+document, derived at resolve time; issues with no corresponding document are
+skipped.
 
 #### `github-projects` store
 

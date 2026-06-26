@@ -357,7 +357,13 @@ fn fetch_milestones(
         }
         crate::engine::store_dispatch::write_cache_file(root, type_def, &meta, &m.description)?;
         cache.touch_lock(&id);
-        issue_map.insert(&id, m.number, "", "");
+        issue_map.insert_kind(
+            &id,
+            m.number,
+            "",
+            "",
+            crate::engine::issue_map::EntryKind::Milestone,
+        );
         fetched_ids.insert(id);
     }
 

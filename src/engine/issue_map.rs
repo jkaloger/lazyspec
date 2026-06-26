@@ -6,6 +6,19 @@ use serde::{Deserialize, Serialize};
 
 const MAP_PATH: &str = ".lazyspec/issue-map.json";
 
+/// What kind of GitHub object an entry's `issue_number` refers to. Issues,
+/// milestones, and Projects v2 boards each have independent number sequences,
+/// so the same number can appear under different kinds in one map. Reverse
+/// number lookups must therefore filter by kind to avoid collisions.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryKind {
+    #[default]
+    Issue,
+    Milestone,
+    Project,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IssueMapEntry {
     pub issue_number: u64,
@@ -15,6 +28,10 @@ pub struct IssueMapEntry {
     /// this, not `issue_number`.
     #[serde(default)]
     pub node_id: String,
+    /// The GitHub object kind this entry maps to. Defaults to `Issue` so legacy
+    /// maps (written before kinds were tracked) deserialize as issues.
+    #[serde(default)]
+    pub kind: EntryKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,18 +70,48 @@ impl IssueMap {
         updated_at: impl Into<String>,
         node_id: impl Into<String>,
     ) {
+        self.insert_kind(id, number, updated_at, node_id, EntryKind::Issue);
+    }
+
+    /// Insert an entry of an explicit kind. Milestone and Projects v2 board
+    /// entries must use this so reverse number lookups can exclude them.
+    pub fn insert_kind(
+        &mut self,
+        id: impl Into<String>,
+        number: u64,
+        updated_at: impl Into<String>,
+        node_id: impl Into<String>,
+        kind: EntryKind,
+    ) {
         self.entries.insert(
             id.into(),
             IssueMapEntry {
                 issue_number: number,
                 updated_at: updated_at.into(),
                 node_id: node_id.into(),
+                kind,
             },
         );
     }
 
     pub fn get(&self, id: &str) -> Option<&IssueMapEntry> {
         self.entries.get(id)
+    }
+
+    /// Reverse lookup: the lazyspec shorthand id mapped to a given GitHub issue
+    /// number, or `None` when no synced doc owns that number. Used to derive the
+    /// inverse `targeted-by` relations on milestones.
+    ///
+    /// Only issue-kind entries are considered: milestone and Projects v2 board
+    /// numbers are independent sequences that can collide with issue numbers, so
+    /// matching them here would yield a wrong (often self-referential) target.
+    /// Issue numbers are unique among issue entries, so the result is
+    /// deterministic regardless of map iteration order.
+    pub fn shorthand_for_number(&self, number: u64) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|(_, entry)| entry.kind == EntryKind::Issue && entry.issue_number == number)
+            .map(|(id, _)| id.as_str())
     }
 
     pub fn remove(&mut self, id: &str) {
@@ -150,6 +197,53 @@ mod tests {
             loaded.get("ITERATION-043").unwrap(),
             map.get("ITERATION-043").unwrap()
         );
+    }
+
+    #[test]
+    fn shorthand_for_number_ignores_milestone_collision() {
+        let root = tmp_root("collision");
+        let mut map = IssueMap::load(&root).unwrap();
+        // Milestone #3 and issue #3 are independent number sequences and can
+        // coexist. The reverse lookup must resolve to the ISSUE shorthand.
+        map.insert_kind("MILESTONE-1", 3, "", "", EntryKind::Milestone);
+        map.insert("STORY-5", 3, "", "");
+
+        assert_eq!(map.shorthand_for_number(3), Some("STORY-5"));
+    }
+
+    #[test]
+    fn shorthand_for_number_ignores_project_collision() {
+        let root = tmp_root("collision_project");
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert_kind("PROJECT-2", 9, "", "", EntryKind::Project);
+        map.insert("TICKET-8", 9, "", "");
+
+        assert_eq!(map.shorthand_for_number(9), Some("TICKET-8"));
+    }
+
+    #[test]
+    fn shorthand_for_number_milestone_only_returns_none() {
+        let root = tmp_root("milestone_only");
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert_kind("MILESTONE-1", 3, "", "", EntryKind::Milestone);
+
+        assert_eq!(map.shorthand_for_number(3), None);
+    }
+
+    #[test]
+    fn entry_kind_defaults_to_issue_on_legacy_map() {
+        let root = tmp_root("legacy_kind");
+        let path = root.join(".lazyspec");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("issue-map.json"),
+            r#"{"STORY-5": {"issue_number": 3, "updated_at": "ts"}}"#,
+        )
+        .unwrap();
+
+        let loaded = IssueMap::load(&root).unwrap();
+        assert_eq!(loaded.get("STORY-5").unwrap().kind, EntryKind::Issue);
+        assert_eq!(loaded.shorthand_for_number(3), Some("STORY-5"));
     }
 
     #[test]

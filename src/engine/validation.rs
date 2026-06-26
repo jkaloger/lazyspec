@@ -961,12 +961,19 @@ impl Checker for UnknownRelationshipRule {
     ) -> Vec<(Severity, ValidationIssue)> {
         let mut issues = Vec::new();
 
+        // A relation is known if its keyword matches a declared relationship
+        // `name` or a declared `inverse`; `relationship_keywords` is the
+        // registry's source of truth for both. A stored inverse keyword (e.g.
+        // `targeted-by`, the inverse of `targets`) must validate clean.
+        let known: std::collections::HashSet<String> =
+            config.relationship_keywords().into_iter().collect();
+
         for (path, meta) in &store.docs {
             if meta.validate_ignore {
                 continue;
             }
             for rel in &meta.related {
-                if config.relationship_by_name(rel.rel_type.as_str()).is_none() {
+                if !known.contains(rel.rel_type.as_str()) {
                     issues.push((
                         Severity::Error,
                         ValidationIssue::UnknownRelationship {
@@ -1442,5 +1449,90 @@ mod attr_schema_tests {
             .warnings
             .iter()
             .any(|w| matches!(w, ValidationIssue::UndeclaredAttribute { .. })));
+    }
+}
+
+#[cfg(test)]
+mod unknown_relationship_tests {
+    use super::*;
+    use crate::engine::config::RelationshipDef;
+    use crate::engine::document::{Relation, RelationType};
+    use chrono::NaiveDate;
+    use std::collections::HashMap;
+
+    fn doc_with_relation(rel_type: &str) -> DocMeta {
+        DocMeta {
+            path: PathBuf::from("docs/milestones/MILESTONE-001.md"),
+            title: "M".to_string(),
+            doc_type: DocType::new("milestone"),
+            status: Status::new("draft"),
+            author: "a".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![Relation {
+                rel_type: RelationType::new(rel_type),
+                target: "STORY-1".to_string(),
+            }],
+            validate_ignore: false,
+            virtual_doc: false,
+            id: "MILESTONE-001".to_string(),
+            attributes: Default::default(),
+        }
+    }
+
+    fn store_with(doc: DocMeta) -> super::super::store::Store {
+        let mut docs = HashMap::new();
+        docs.insert(doc.path.clone(), doc);
+        super::super::store::Store {
+            root: PathBuf::from("."),
+            docs,
+            forward_links: HashMap::new(),
+            reverse_links: HashMap::new(),
+            children: HashMap::new(),
+            parent_of: HashMap::new(),
+            parse_errors: Vec::new(),
+            chain_relationships: vec!["implements".to_string()],
+        }
+    }
+
+    // Production-shaped config: `targeted-by` is the declared *inverse* of the
+    // `targets` milestone relationship, never a top-level name.
+    fn config_with_targets() -> Config {
+        let mut config = Config::default();
+        config.relationships.push(RelationshipDef {
+            name: "targets".to_string(),
+            inverse: Some("targeted-by".to_string()),
+            github_native: Some("milestone".to_string()),
+        });
+        config
+    }
+
+    // A stored relation keyed by a declared INVERSE keyword validates clean.
+    #[test]
+    fn unknown_relationship_accepts_declared_inverse_keyword() {
+        let config = config_with_targets();
+        let issues =
+            UnknownRelationshipRule.check(&store_with(doc_with_relation("targeted-by")), &config);
+        assert!(
+            issues.is_empty(),
+            "stored inverse keyword `targeted-by` must validate clean, got: {:?}",
+            issues
+        );
+    }
+
+    // A genuinely undeclared keyword is still flagged as unknown.
+    #[test]
+    fn unknown_relationship_flags_undeclared_keyword() {
+        let config = config_with_targets();
+        let issues =
+            UnknownRelationshipRule.check(&store_with(doc_with_relation("bogus-rel")), &config);
+        assert!(
+            issues
+                .iter()
+                .any(|(_, i)| matches!(i, ValidationIssue::UnknownRelationship { .. })),
+            "undeclared keyword `bogus-rel` must be flagged, got: {:?}",
+            issues
+        );
     }
 }
