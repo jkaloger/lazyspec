@@ -1,7 +1,7 @@
 ---
 title: "github-projects board creation"
 type: iteration
-status: review
+status: complete
 author: jkaloger
 date: 2026-06-26
 tags: []

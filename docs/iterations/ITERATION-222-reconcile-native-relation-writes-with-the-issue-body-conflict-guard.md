@@ -1,7 +1,7 @@
 ---
 title: "Reconcile native-relation writes with the issue-body conflict guard"
 type: iteration
-status: review
+status: complete
 author: jkaloger
 date: 2026-06-26
 tags: []

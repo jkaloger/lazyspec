@@ -1,7 +1,7 @@
 ---
 title: "Route fetch warnings to the TUI warnings panel"
 type: iteration
-status: draft
+status: accepted
 author: "jkaloger"
 date: 2026-06-26
 tags: []
