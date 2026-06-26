@@ -1,7 +1,7 @@
 ---
 title: Surface milestone targeted-by issues in related frontmatter
 type: iteration
-status: accepted
+status: superseded
 author: jkaloger
 date: 2026-06-26
 tags: []
