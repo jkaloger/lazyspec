@@ -633,6 +633,58 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
         crate::engine::gh_subissue::reconcile_subissues(&self.client, &self.repo, &plan)?;
         Ok(result)
     }
+
+    /// Create a child as a real GitHub issue and bind it as a native sub-issue
+    /// of `parent_doc_id` at create time. The parent must already be a github
+    /// issue (it is itself a github-issues doc); an unmapped parent aborts before
+    /// the bind. The add is idempotent via
+    /// [`crate::engine::gh_subissue::reconcile_subissues`], which fetches the
+    /// remote sub-issue set and only issues the missing edge.
+    pub fn create_child_subissue(
+        &mut self,
+        type_def: &TypeDef,
+        parent_doc_id: &str,
+        title: &str,
+        author: &str,
+        body: &str,
+    ) -> Result<CreatedDoc> {
+        let parent_node = self
+            .issue_map
+            .get(parent_doc_id)
+            .map(|e| e.node_id.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "parent {} is not a github issue (no issue-map entry); \
+                     cannot bind a native sub-issue",
+                    parent_doc_id
+                )
+            })?;
+
+        let created = self.create(type_def, title, author, body)?;
+
+        let child_node = self
+            .issue_map
+            .get(&created.id)
+            .map(|e| e.node_id.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!("child {} missing from issue map after create", created.id)
+            })?;
+
+        let plan = crate::engine::gh_subissue::SubIssuePlan {
+            parent_id: parent_doc_id.to_string(),
+            parent_node,
+            parent_store: type_def.store.clone(),
+            children: vec![crate::engine::gh_subissue::PlannedChild {
+                doc_id: created.id.clone(),
+                node_id: child_node,
+                store: type_def.store.clone(),
+                order_index: 0,
+            }],
+        };
+        crate::engine::gh_subissue::reconcile_subissues(&self.client, &self.repo, &plan)?;
+
+        Ok(created)
+    }
 }
 
 /// One structural child materialized by [`GithubIssuesStore::materialize_subdir`].
@@ -4215,6 +4267,61 @@ mod tests {
         assert!(
             body.contains("implements: RFC-050"),
             "implements must be in the serialized issue body, got: {body}"
+        );
+    }
+
+    // --- github-native immediate child sub-issue (ITERATION-226) ---
+
+    // AC: creating a child under a github-issues parent fires exactly one
+    // addSubIssue whose issueId is the parent node and subIssueId is the
+    // newly-created child's node.
+    #[test]
+    fn create_child_subissue_binds_child_to_parent_node() {
+        let root = tmp_root("create_child_subissue");
+        let td = test_type_def(StoreBackend::GithubIssues);
+
+        let mut store = subdir_gh_store(&root, &td);
+        // Parent already a github issue (it is a github-issues doc).
+        store.issue_map.insert("RFC-1", 1, "ts", "I_parent");
+        store.issue_map.save(&root).unwrap();
+
+        let created = store
+            .create_child_subissue(&td, "RFC-1", "Child", "author", "")
+            .unwrap();
+
+        // A real child issue was created.
+        assert_eq!(store.client.create_titles.borrow().len(), 1);
+        let child_node = store.issue_map.get(&created.id).unwrap().node_id.clone();
+        assert!(!child_node.is_empty());
+
+        let calls = store.client.graphql_calls.borrow();
+        let adds: Vec<_> = calls
+            .iter()
+            .filter(|(q, _)| q.contains("addSubIssue"))
+            .collect();
+        assert_eq!(adds.len(), 1, "exactly one addSubIssue edge");
+        assert!(adds[0]
+            .1
+            .contains(&("issueId".to_string(), GqlVar::Str("I_parent".to_string()))));
+        assert!(adds[0]
+            .1
+            .contains(&("subIssueId".to_string(), GqlVar::Str(child_node))));
+    }
+
+    // The parent must already be a github issue; absent from the issue map, the
+    // child create + bind aborts with a clear error.
+    #[test]
+    fn create_child_subissue_errors_when_parent_unmapped() {
+        let root = tmp_root("create_child_no_parent");
+        let td = test_type_def(StoreBackend::GithubIssues);
+        let mut store = subdir_gh_store(&root, &td);
+
+        let err = store
+            .create_child_subissue(&td, "RFC-99", "Child", "author", "")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("RFC-99"),
+            "names the unmapped parent: {err}"
         );
     }
 

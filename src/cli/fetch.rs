@@ -5,7 +5,6 @@ use crate::engine::git_ref::GitRefOps;
 use crate::engine::github::resolve_repo;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
-use crate::engine::store::Store;
 use crate::engine::store_dispatch::{milestone_state_to_status, GithubIssuesStore};
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
@@ -67,6 +66,29 @@ pub fn run(
 
     let mut summaries = Vec::new();
 
+    // Milestones MUST be fetched before issues: an issue's native milestone is
+    // surfaced as a forward `targets: MILESTONE-n` relation by resolving the
+    // milestone number through the issue-map, so the milestone has to be mapped
+    // first or the lookup silently drops the relation on a fresh fetch.
+    let milestones_to_fetch = filter_types(milestone_types, type_filter);
+
+    if !milestones_to_fetch.is_empty() {
+        let repo = resolve_repo(config, root).context(
+            "Could not determine GitHub repo. Set [documents.github].repo in .lazyspec.toml",
+        )?;
+        let mut issue_map = IssueMap::load(root)?;
+
+        for type_name in &milestones_to_fetch {
+            let type_def = config
+                .type_by_name(type_name)
+                .ok_or_else(|| anyhow::anyhow!("type '{}' not found in config", type_name))?;
+            let summary = fetch_milestones(root, type_def, gh, &repo, &mut issue_map)?;
+            summaries.push(summary);
+        }
+
+        issue_map.save(root)?;
+    }
+
     let gh_to_fetch = filter_types(gh_types, type_filter);
 
     if !gh_to_fetch.is_empty() {
@@ -103,24 +125,6 @@ pub fn run(
                 eprintln!("warning: {}", w.message);
             }
 
-            // Subdir types: now that the issues and their child .md files have
-            // settled on disk, reconcile each subdir parent to native
-            // sub-issues (add/remove/reprioritize). Best-effort -- a GraphQL
-            // failure warns and continues, mirroring the schema-snapshot
-            // refresh, rather than aborting the whole fetch.
-            if type_def.subdirectory {
-                let mut gh_store = GithubIssuesStore {
-                    client: gh,
-                    root: root.to_path_buf(),
-                    repo: repo.clone(),
-                    config: config.clone(),
-                    issue_map,
-                    issue_cache: IssueCache::new(root),
-                };
-                reconcile_subdir_subissues(&mut gh_store, type_def);
-                issue_map = gh_store.issue_map;
-            }
-
             // Inject each board's per-item project field values as namespaced
             // `PROJECT-n.<field>` attributes on member docs. Best-effort: a
             // GraphQL failure warns and the cached doc keeps its other fields.
@@ -141,25 +145,6 @@ pub fn run(
                 new: result.new,
                 removed: result.removed,
             });
-        }
-
-        issue_map.save(root)?;
-    }
-
-    let milestones_to_fetch = filter_types(milestone_types, type_filter);
-
-    if !milestones_to_fetch.is_empty() {
-        let repo = resolve_repo(config, root).context(
-            "Could not determine GitHub repo. Set [documents.github].repo in .lazyspec.toml",
-        )?;
-        let mut issue_map = IssueMap::load(root)?;
-
-        for type_name in &milestones_to_fetch {
-            let type_def = config
-                .type_by_name(type_name)
-                .ok_or_else(|| anyhow::anyhow!("type '{}' not found in config", type_name))?;
-            let summary = fetch_milestones(root, type_def, gh, &repo, &mut issue_map)?;
-            summaries.push(summary);
         }
 
         issue_map.save(root)?;
@@ -223,6 +208,14 @@ fn inject_project_fields_into_cache<G: GhIssueReader + GhIssueWriter + GhGraphql
         ) else {
             continue;
         };
+        // github-issues cache files carry no `id:` in their frontmatter, so the
+        // canonical doc id is the filename stem. Derive it when missing so the
+        // issue-map lookup resolves and write_cache_file does not bail on empty id.
+        if meta.id.is_empty() {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                meta.id = crate::engine::store::extract_id_from_name(stem);
+            }
+        }
         if let Err(e) = gh_store.inject_project_fields(&mut meta) {
             eprintln!(
                 "warning: could not read project fields for {}: {}",
@@ -236,63 +229,6 @@ fn inject_project_fields_into_cache<G: GhIssueReader + GhIssueWriter + GhGraphql
             eprintln!("warning: could not rewrite cache for {}: {}", meta.id, e);
         }
     }
-}
-
-/// Reconcile every subdir parent of `type_def` to its native sub-issue set.
-///
-/// Loads the type's source directory (where `index.md` parents and their child
-/// `.md` files are authored) and runs `sync_subissues` per parent so the
-/// settled children bind as native sub-issues. Best-effort: a failure on one
-/// parent warns and the rest still reconcile.
-fn reconcile_subdir_subissues<G: GhIssueReader + GhIssueWriter + GhGraphql>(
-    gh_store: &mut GithubIssuesStore<G>,
-    type_def: &TypeDef,
-) {
-    let parents = match subdir_parent_ids(&gh_store.root, &gh_store.config, type_def) {
-        Ok(parents) => parents,
-        Err(e) => {
-            eprintln!(
-                "warning: could not load subdir parents for type '{}': {}",
-                type_def.name, e
-            );
-            return;
-        }
-    };
-
-    for parent_id in parents {
-        if let Err(e) = gh_store.sync_subissues(type_def, &parent_id) {
-            eprintln!(
-                "warning: could not reconcile sub-issues for {}: {}",
-                parent_id, e
-            );
-        }
-    }
-}
-
-/// The doc ids of every subdir parent (`index.md` with structural children) for
-/// `type_def`, read from the type's source directory.
-fn subdir_parent_ids(root: &Path, config: &Config, type_def: &TypeDef) -> Result<Vec<String>> {
-    let mut source_config = config.clone();
-    for td in &mut source_config.documents.types {
-        if td.name == type_def.name {
-            td.store = StoreBackend::Filesystem;
-        }
-    }
-    let store = Store::load(root, &source_config)?;
-
-    let filter = crate::engine::store::Filter {
-        doc_type: Some(crate::engine::document::DocType::new(&type_def.name)),
-        status: None,
-        tag: None,
-    };
-    let mut ids: Vec<String> = store
-        .list(&filter)
-        .into_iter()
-        .filter(|d| !store.children_of(&d.path).is_empty())
-        .map(|d| d.id.clone())
-        .collect();
-    ids.sort();
-    Ok(ids)
 }
 
 fn filter_types<'a>(all: Vec<&'a str>, filter: Option<&'a str>) -> Vec<&'a str> {
@@ -468,8 +404,8 @@ struct TypeSummary {
 mod tests {
     use super::*;
     use crate::engine::config::{NumberingStrategy, StoreBackend, TypeDef};
-    use crate::engine::gh::test_support::{MockGhClient, MockGhMilestoneClient};
-    use crate::engine::gh::{GhMilestone, GqlVar};
+    use crate::engine::gh::test_support::MockGhMilestoneClient;
+    use crate::engine::gh::GhMilestone;
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use tempfile::TempDir;
 
@@ -539,6 +475,96 @@ mod tests {
 
         assert_eq!(issue_map.get("MILESTONE-3").unwrap().issue_number, 3);
         assert_eq!(issue_map.get("MILESTONE-4").unwrap().issue_number, 4);
+    }
+
+    // ITERATION-226 task 3: github-issues cache files carry no `id:` in their
+    // frontmatter, so DocMeta::parse yields meta.id == "". The fix derives the id
+    // from the filename stem before injection so write_cache_file does not bail on
+    // "refusing cache write for empty doc id" and PROJECT-n fields are injected.
+    #[test]
+    fn inject_project_fields_derives_id_from_filename_when_frontmatter_lacks_id() {
+        use crate::engine::config::{Config, RelationshipDef};
+        use crate::engine::gh::test_support::MockGhClient;
+        use crate::engine::gh::{GhFieldKind, GhFieldValueRepr, ProjectFieldValue};
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        let td = TypeDef {
+            name: "story".to_string(),
+            plural: "stories".to_string(),
+            dir: "docs/stories".to_string(),
+            prefix: "STORY".to_string(),
+            icon: None,
+            numbering: NumberingStrategy::Incremental,
+            subdirectory: false,
+            store: StoreBackend::GithubIssues,
+            singleton: false,
+            parent_type: None,
+            agents: Vec::new(),
+            intent: None,
+            authorship: Default::default(),
+            lifecycle: Default::default(),
+            attributes: Default::default(),
+        };
+
+        // A realistic cache file: no `id:` in frontmatter (mirrors what
+        // render_cache_content emits), with a membership relation to PROJECT-1.
+        let cache_dir = root.join(".lazyspec/cache/story");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache_content = "---\n\
+title: A Story\n\
+type: story\n\
+status: draft\n\
+author: github\n\
+date: 2026-06-26\n\
+tags: []\n\
+provenance: []\n\
+related:\n\
+- member-of: PROJECT-1\n\
+attributes: {}\n\
+---\n\
+body text\n";
+        std::fs::write(cache_dir.join("STORY-7.md"), cache_content).unwrap();
+
+        let config = Config {
+            relationships: vec![RelationshipDef {
+                name: "member-of".to_string(),
+                inverse: Some("has-member".to_string()),
+                github_native: Some("membership".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let client = MockGhClient::new().with_project_field_values(vec![ProjectFieldValue {
+            project_number: 1,
+            field_name: "Status".into(),
+            kind: GhFieldKind::SingleSelect,
+            value: GhFieldValueRepr::OptionName("In Progress".into()),
+        }]);
+
+        let mut issue_map = IssueMap::load(root).unwrap();
+        // The derived id (STORY-7) must map to a node id for the lookup to succeed.
+        issue_map.insert("STORY-7", 7, "", "I_issue7");
+
+        let gh_store = GithubIssuesStore {
+            client,
+            root: root.to_path_buf(),
+            repo: "owner/repo".to_string(),
+            config,
+            issue_map,
+            issue_cache: IssueCache::new(root),
+        };
+
+        inject_project_fields_into_cache(&gh_store, &td);
+
+        // Proves write_cache_file did NOT bail on empty id AND the id was derived
+        // correctly (STORY-7 mapped to the node with the project field).
+        let rewritten = std::fs::read_to_string(cache_dir.join("STORY-7.md")).unwrap();
+        assert!(
+            rewritten.contains("PROJECT-1.Status: In Progress"),
+            "expected injected project field, got:\n{rewritten}"
+        );
     }
 
     #[test]
@@ -700,98 +726,5 @@ mod tests {
 
         let lock = CacheLock::load(root).unwrap();
         assert_eq!(lock.get("iteration/ITERATION-042"), Some("newsha"));
-    }
-
-    // --- Subdir sub-issue reconcile on the fetch/refresh path (ITERATION-214 §4) ---
-
-    fn subdir_story_type_def() -> TypeDef {
-        TypeDef {
-            name: "story".to_string(),
-            plural: "stories".to_string(),
-            dir: "docs/stories".to_string(),
-            prefix: "STORY".to_string(),
-            icon: None,
-            numbering: NumberingStrategy::default(),
-            subdirectory: true,
-            store: StoreBackend::GithubIssues,
-            singleton: false,
-            parent_type: None,
-            agents: Vec::new(),
-            intent: None,
-            authorship: Default::default(),
-            lifecycle: Default::default(),
-            attributes: Default::default(),
-        }
-    }
-
-    fn write_subdir_doc(path: &Path, title: &str) {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        let content = format!(
-            "---\ntitle: {}\ntype: story\nstatus: draft\nauthor: a\ndate: 2026-06-25\ntags: []\n---\n\nbody for {}\n",
-            title, title
-        );
-        std::fs::write(path, content).unwrap();
-    }
-
-    // AC1 + AC2 (through the fetch path): once issues and their child .md files
-    // have settled on disk, reconcile_subdir_subissues materializes the parent
-    // index.md AND each child .md as its own issue, then binds the children as
-    // native sub-issues via addSubIssue.
-    #[test]
-    fn fetch_subdir_reconcile_binds_children_as_sub_issues() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        let td = subdir_story_type_def();
-
-        // Children have settled on disk (the post-fetch state that the create
-        // path could not reach).
-        let folder = root.join("docs/stories/STORY-159-shape");
-        write_subdir_doc(&folder.join("index.md"), "Parent");
-        write_subdir_doc(&folder.join("01-first.md"), "First child");
-        write_subdir_doc(&folder.join("02-second.md"), "Second child");
-
-        let mut config = Config::default();
-        config.documents.types = vec![td.clone()];
-
-        // subIssues read (empty) + generic mutation-OK responses.
-        let mut responses = vec![serde_json::json!({
-            "data": {"node": {"subIssues": {"nodes": []}}}
-        })];
-        responses.extend(std::iter::repeat_with(|| serde_json::json!({"data": {}})).take(8));
-
-        let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new().with_graphql_responses(responses),
-            root: root.to_path_buf(),
-            repo: "owner/repo".to_string(),
-            config,
-            issue_map: IssueMap::load(root).unwrap(),
-            issue_cache: IssueCache::new(root),
-        };
-
-        reconcile_subdir_subissues(&mut gh_store, &td);
-
-        // AC1: parent + both children each materialized as their own issue.
-        assert_eq!(
-            gh_store.client.create_titles.borrow().len(),
-            3,
-            "parent + 2 children = 3 issue_create calls"
-        );
-        assert!(gh_store.issue_map.get("STORY-159").is_some());
-        assert!(gh_store.issue_map.get("01-first").is_some());
-        assert!(gh_store.issue_map.get("02-second").is_some());
-
-        // AC2: each structural child bound via addSubIssue with the parent node.
-        let parent_node = gh_store.issue_map.get("STORY-159").unwrap().node_id.clone();
-        let calls = gh_store.client.graphql_calls.borrow();
-        let adds: Vec<_> = calls
-            .iter()
-            .filter(|(q, _)| q.contains("addSubIssue"))
-            .collect();
-        assert_eq!(adds.len(), 2, "one addSubIssue per settled child");
-        for (_, vars) in &adds {
-            assert!(vars.contains(&("issueId".to_string(), GqlVar::Str(parent_node.clone()))));
-        }
     }
 }

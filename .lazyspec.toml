@@ -111,15 +111,6 @@ icon = "🏁"
 store = "github-milestones"
 intent = "A GitHub milestone authored as structured markdown"
 
-[[types]]
-name = "project"
-plural = "projects"
-dir = "docs/projects"
-prefix = "PROJECT"
-icon = "📊"
-store = "github-projects"
-intent = "A GitHub Projects v2 board bound read-only"
-
 [[relationships]]
 name = "implements"
 inverse = "implemented-by"
