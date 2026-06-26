@@ -1,7 +1,7 @@
 ---
 title: 'Fix github-issues subdir nesting: github-native immediate sub-issues'
 type: iteration
-status: draft
+status: complete
 author: unknown
 date: 2026-06-26
 tags: []
