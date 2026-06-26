@@ -1,7 +1,7 @@
 ---
 title: "Author github sub-issues through the CLI"
 type: story
-status: draft
+status: complete
 author: "jkaloger"
 date: 2026-06-26
 tags: []

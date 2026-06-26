@@ -1,7 +1,7 @@
 ---
 title: "github-projects board creation"
 type: story
-status: draft
+status: complete
 author: "jkaloger"
 date: 2026-06-26
 tags: []
