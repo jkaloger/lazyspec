@@ -270,7 +270,9 @@ pub enum AppEvent {
     CreateComplete {
         result: Result<CreateResult, String>,
     },
-    CacheRefresh,
+    CacheRefresh {
+        warnings: Vec<String>,
+    },
     GhPushResult(Result<(), String>),
     #[cfg(feature = "agent")]
     AgentFinished,
@@ -565,6 +567,7 @@ pub struct App {
     pub validation_errors: Vec<String>,
     pub validation_warnings: Vec<String>,
     pub status_bar_warnings: Vec<String>,
+    pub gh_fetch_warnings: Vec<String>,
     pub fix_request: bool,
     pub config_reload_request: bool,
     pub fix_result: Option<String>,
@@ -737,6 +740,7 @@ impl App {
             validation_errors: Vec::new(),
             validation_warnings: Vec::new(),
             status_bar_warnings: Vec::new(),
+            gh_fetch_warnings: Vec::new(),
             fix_request: false,
             config_reload_request: false,
             fix_result: None,
@@ -851,6 +855,8 @@ impl App {
         self.validation_warnings = result.warnings.iter().map(|e| e.to_string()).collect();
         self.validation_warnings
             .extend(self.status_bar_warnings.iter().cloned());
+        self.validation_warnings
+            .extend(self.gh_fetch_warnings.iter().cloned());
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
     }
@@ -3391,6 +3397,7 @@ pub(crate) mod parity_seed {
             validation_errors: Vec::new(),
             validation_warnings: Vec::new(),
             status_bar_warnings: Vec::new(),
+            gh_fetch_warnings: Vec::new(),
             fix_request: false,
             config_reload_request: false,
             fix_result: None,
@@ -3863,6 +3870,7 @@ mod tests {
             validation_errors: Vec::new(),
             validation_warnings: Vec::new(),
             status_bar_warnings: Vec::new(),
+            gh_fetch_warnings: Vec::new(),
             fix_request: false,
             config_reload_request: false,
             fix_result: None,
@@ -4183,6 +4191,35 @@ mod tests {
                 .any(|e| e.contains("duplicate id")),
             "expected a 'duplicate id' error, got: {:?}",
             app.validation_errors
+        );
+    }
+
+    #[test]
+    fn refresh_validation_folds_in_gh_fetch_warnings() {
+        use crate::engine::config::Config;
+        let config = Config::default();
+        let mut app = make_test_app(0);
+
+        // Warnings carried on the CacheRefresh event survive re-validation
+        // (which otherwise rebuilds validation_warnings from scratch).
+        app.gh_fetch_warnings = vec!["could not refresh gh schema snapshot".to_string()];
+        app.refresh_validation(&config);
+        assert!(
+            app.validation_warnings
+                .iter()
+                .any(|w| w.contains("could not refresh gh schema snapshot")),
+            "gh fetch warnings should appear in the panel after refresh: {:?}",
+            app.validation_warnings
+        );
+
+        // Empty gh warnings add nothing spurious.
+        app.gh_fetch_warnings = vec![];
+        app.refresh_validation(&config);
+        assert!(
+            !app.validation_warnings
+                .iter()
+                .any(|w| w.contains("gh schema snapshot")),
+            "no gh warning should remain once the source is cleared"
         );
     }
 

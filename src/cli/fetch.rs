@@ -98,6 +98,10 @@ pub fn run(
                 &all_type_names,
             )?;
 
+            for w in &result.warnings {
+                eprintln!("warning: {}", w.message);
+            }
+
             // Subdir types: now that the issues and their child .md files have
             // settled on disk, reconcile each subdir parent to native
             // sub-issues (add/remove/reprioritize). Best-effort -- a GraphQL

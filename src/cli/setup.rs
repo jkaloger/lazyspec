@@ -60,6 +60,10 @@ pub fn run(
             &all_type_names,
         )?;
 
+        for w in &result.warnings {
+            eprintln!("warning: {}", w.message);
+        }
+
         println!(
             "Fetched {} {} issue{}",
             result.fetched,

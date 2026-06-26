@@ -164,6 +164,71 @@ pub fn create_document(
     Ok(target_path)
 }
 
+/// Author a single child document as a `.md` directly inside `target_dir`.
+///
+/// Unlike [`create_document`], which decides between a flat file and a
+/// `<dir>/index.md` subdir from the type's `subdirectory` flag, this writes
+/// exactly one `.md` into the explicit `target_dir`. Numbering scans
+/// `target_dir`, so a subdir child's `{n:03}` is local to its parent's
+/// subdirectory rather than the type's flat `dir`. Used by `create --parent`
+/// to place a child alongside a promoted parent's `index.md`.
+pub fn create_child_in_dir(
+    root: &Path,
+    config: &Config,
+    child_type_def: &TypeDef,
+    target_dir: &Path,
+    title: &str,
+    author: &str,
+    body: Option<&str>,
+) -> Result<PathBuf> {
+    fs::create_dir_all(target_dir)?;
+
+    let numbering = match &child_type_def.numbering {
+        NumberingStrategy::Sqids => {
+            let sqids_config = config.documents.sqids.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "type '{}' uses sqids numbering but no [numbering.sqids] config found",
+                    child_type_def.name
+                )
+            })?;
+            Some((&child_type_def.numbering, sqids_config))
+        }
+        _ => None,
+    };
+
+    let filename = template::resolve_filename(
+        &config.documents.naming.pattern,
+        &child_type_def.prefix,
+        title,
+        target_dir,
+        numbering,
+        None,
+    )
+    .map_err(|e| anyhow!("{}", e))?;
+
+    let date = Local::now().format("%Y-%m-%d").to_string();
+    let vars = vec![
+        ("title", title),
+        ("author", author),
+        ("date", date.as_str()),
+        ("type", child_type_def.name.as_str()),
+    ];
+    let template_content = load_template(root, config, &child_type_def.name);
+    let content = template::render_template(&template_content, &vars);
+
+    let target_path = target_dir.join(&filename);
+    fs::write(&target_path, &content)?;
+
+    if let Some(body_text) = body {
+        let written = fs::read_to_string(&target_path)?;
+        let (yaml, _) = split_frontmatter(&written)?;
+        let new_content = format!("---\n{}\n---\n\n{}\n", yaml.trim(), body_text);
+        fs::write(&target_path, new_content)?;
+    }
+
+    Ok(target_path)
+}
+
 /// Delete a filesystem document by ID or shorthand.
 pub fn delete_document(root: &Path, store: &Store, doc_id: &str) -> Result<()> {
     let doc = store

@@ -18,6 +18,7 @@ fn computed_percent_complete(doc: &DocMeta) -> Option<u8> {
 
 pub fn doc_to_json(doc: &DocMeta) -> Value {
     let mut value = serde_json::json!({
+        "id": doc.id,
         "path": doc.path.to_string_lossy(),
         "title": doc.title,
         "type": format!("{}", doc.doc_type).to_lowercase(),
@@ -116,6 +117,17 @@ mod tests {
     fn milestone_json_includes_computed_percent_complete() {
         let json = doc_to_json(&meta_with_counts(7, 3));
         assert_eq!(json["percent_complete"], serde_json::json!(30));
+    }
+
+    // AC4: doc_to_json always carries the doc id, never null.
+    #[test]
+    fn doc_to_json_carries_id() {
+        let mut meta = meta_with_counts(0, 0);
+        meta.attributes.clear();
+        meta.id = "ISSUE-42".to_string();
+        let json = doc_to_json(&meta);
+        assert_eq!(json["id"], serde_json::json!("ISSUE-42"));
+        assert!(!json["id"].is_null());
     }
 
     // A non-milestone document (no counts) has no percent_complete key.

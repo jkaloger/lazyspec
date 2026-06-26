@@ -16,6 +16,7 @@ pub struct FetchResult {
     pub fetched: usize,
     pub new: usize,
     pub removed: usize,
+    pub warnings: Vec<RefreshWarning>,
 }
 
 #[derive(Debug)]
@@ -167,6 +168,7 @@ impl IssueCache {
 
         let mut refreshed = 0usize;
         let mut unchanged = 0usize;
+        let mut write_warnings = Vec::new();
         let mut lock = self.load_lock();
 
         for issue in &issues {
@@ -186,7 +188,9 @@ impl IssueCache {
             } else {
                 if let Err(e) = store_dispatch::write_cache_file(root, type_def, &meta, &body) {
                     // Non-fatal: skip this doc but keep going
-                    eprintln!("warning: failed to write cache for {}: {}", id, e);
+                    write_warnings.push(RefreshWarning {
+                        message: format!("failed to write cache for {}: {}", id, e),
+                    });
                     continue;
                 }
                 refreshed += 1;
@@ -198,10 +202,8 @@ impl IssueCache {
 
         let _ = lock.save(&self.root);
 
-        let warnings = self
-            .refresh_schema_snapshot(gh_graphql, repo)
-            .into_iter()
-            .collect();
+        let mut warnings = write_warnings;
+        warnings.extend(self.refresh_schema_snapshot(gh_graphql, repo));
 
         RefreshResult {
             refreshed,
@@ -273,11 +275,14 @@ impl IssueCache {
 
         let issues = gh.issue_list(repo, &labels, &[], Some(FETCH_LIMIT))?;
 
+        let mut warnings: Vec<RefreshWarning> = Vec::new();
         if issues.len() as u64 == FETCH_LIMIT {
-            eprintln!(
-                "warning: fetched exactly {} issues for type '{}'; there may be more",
-                FETCH_LIMIT, type_def.name
-            );
+            warnings.push(RefreshWarning {
+                message: format!(
+                    "fetched exactly {} issues for type '{}'; there may be more",
+                    FETCH_LIMIT, type_def.name
+                ),
+            });
         }
 
         let previously_cached: std::collections::HashSet<String> =
@@ -323,14 +328,13 @@ impl IssueCache {
             issue_map.remove(id);
         }
 
-        if let Some(warning) = self.refresh_schema_snapshot(gh_graphql, repo) {
-            eprintln!("warning: {}", warning.message);
-        }
+        warnings.extend(self.refresh_schema_snapshot(gh_graphql, repo));
 
         Ok(FetchResult {
             fetched: issues.len(),
             new: new_count,
             removed: removed.len(),
+            warnings,
         })
     }
 }
@@ -959,6 +963,44 @@ mod tests {
         };
         let docs = store.list(&filter);
         assert_eq!(docs.len(), 3);
+    }
+
+    #[test]
+    fn test_fetch_all_collects_schema_snapshot_warning() {
+        let (cache, tmp) = make_cache();
+        let type_def = story_type_def();
+
+        // No graphql_responses -> snapshot refresh fails -> warning is data,
+        // not stderr.
+        let gh = MockReader::new(vec![make_gh_issue(
+            10,
+            "STORY-001 First",
+            "Body",
+            &["lazyspec:story"],
+        )]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let result = cache
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &["story".to_string()],
+            )
+            .unwrap();
+
+        assert_eq!(result.fetched, 1);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("could not refresh gh schema snapshot")),
+            "schema-snapshot failure should surface as a returned warning: {:?}",
+            result.warnings
+        );
     }
 
     #[test]

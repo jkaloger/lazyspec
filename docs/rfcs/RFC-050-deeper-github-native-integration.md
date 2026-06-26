@@ -1,7 +1,7 @@
 ---
 title: "Deeper GitHub-native integration"
 type: rfc
-status: review
+status: accepted
 author: "jkaloger"
 date: 2026-06-25
 tags: []

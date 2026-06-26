@@ -82,6 +82,9 @@ pub enum Commands {
         /// Author name
         #[arg(long, default_value = "unknown")]
         author: String,
+        /// Place the new document under a parent doc, as a subdir child.
+        #[arg(long)]
+        parent: Option<String>,
         /// Set body content inline
         #[arg(long)]
         body: Option<String>,

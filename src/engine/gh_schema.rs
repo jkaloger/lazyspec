@@ -101,9 +101,45 @@ impl GhSchemaSnapshot {
     }
 }
 
-const ISSUE_TYPES_QUERY: &str = "query($owner: String!) { organization(login: $owner) { issueTypes(first: 50) { nodes { id name } } } }";
+const ISSUE_TYPES_ORG_QUERY: &str = "query($owner: String!) { organization(login: $owner) { issueTypes(first: 50) { nodes { id name } } } }";
 
-const PROJECT_FIELDS_QUERY: &str = "query($owner: String!, $number: Int!) { organization(login: $owner) { projectV2(number: $number) { fields(first: 50) { nodes { __typename ... on ProjectV2FieldCommon { id name dataType } ... on ProjectV2SingleSelectField { id name dataType options { id name } } ... on ProjectV2IterationField { id name dataType configuration { iterations { id title } } } } } } } }";
+const PROJECT_FIELDS_ORG_QUERY: &str = "query($owner: String!, $number: Int!) { organization(login: $owner) { projectV2(number: $number) { fields(first: 50) { nodes { __typename ... on ProjectV2FieldCommon { id name dataType } ... on ProjectV2SingleSelectField { id name dataType options { id name } } ... on ProjectV2IterationField { id name dataType configuration { iterations { id title } } } } } } } }";
+
+const PROJECT_FIELDS_USER_QUERY: &str = "query($owner: String!, $number: Int!) { user(login: $owner) { projectV2(number: $number) { fields(first: 50) { nodes { __typename ... on ProjectV2FieldCommon { id name dataType } ... on ProjectV2SingleSelectField { id name dataType options { id name } } ... on ProjectV2IterationField { id name dataType configuration { iterations { id title } } } } } } } }";
+
+/// Which account root resolved an owner login: an organization or a user.
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum OwnerKind {
+    Org,
+    User,
+}
+
+/// Fire the org query and, if its pointer resolves, return the org node subtree;
+/// otherwise fire the user query and return the user node subtree. The owner's
+/// account kind doubles as the discriminator — GitHub returns a top-level
+/// `errors` payload with a null node for the wrong root, so the pointer's
+/// presence (not the `errors` payload) is what we switch on.
+///
+/// Returns an owned node `Value` (cloned from the resolved pointer) so callers
+/// are not tied to a response borrowed inside this function.
+pub fn try_org_then_user(
+    gh: &dyn GhGraphql,
+    org_query: &str,
+    user_query: &str,
+    vars: &[(&str, GqlVar)],
+    org_ptr: &str,
+    user_ptr: &str,
+) -> Result<(OwnerKind, serde_json::Value)> {
+    let org_resp = gh.graphql(org_query, vars)?;
+    if let Some(node) = org_resp.pointer(org_ptr) {
+        return Ok((OwnerKind::Org, node.clone()));
+    }
+    let user_resp = gh.graphql(user_query, vars)?;
+    if let Some(node) = user_resp.pointer(user_ptr) {
+        return Ok((OwnerKind::User, node.clone()));
+    }
+    anyhow::bail!("owner did not resolve as an organization or a user")
+}
 
 /// Best-effort fetch of native field ids for `owner/name`. Currently fetches
 /// org-level issue types; project field queries are keyed off a project number
@@ -117,7 +153,7 @@ pub fn fetch_snapshot(gh: &dyn GhGraphql, repo: &str) -> Result<GhSchemaSnapshot
     };
 
     let issue_types_resp = gh.graphql(
-        ISSUE_TYPES_QUERY,
+        ISSUE_TYPES_ORG_QUERY,
         &[("owner", GqlVar::Str(owner.to_string()))],
     )?;
     snapshot.issue_types = parse_issue_types(&issue_types_resp);
@@ -132,14 +168,18 @@ pub fn fetch_project_fields(
     project_number: u64,
 ) -> Result<(Vec<ProjectFieldId>, Vec<OptionId>, Vec<IterationId>)> {
     let (owner, _name) = split_repo(repo)?;
-    let resp = gh.graphql(
-        PROJECT_FIELDS_QUERY,
+    let (_kind, nodes) = try_org_then_user(
+        gh,
+        PROJECT_FIELDS_ORG_QUERY,
+        PROJECT_FIELDS_USER_QUERY,
         &[
             ("owner", GqlVar::Str(owner.to_string())),
             ("number", GqlVar::Int(project_number as i64)),
         ],
+        "/data/organization/projectV2/fields/nodes",
+        "/data/user/projectV2/fields/nodes",
     )?;
-    Ok(parse_project_fields(&resp, project_number))
+    Ok(parse_project_fields(&nodes, project_number))
 }
 
 fn split_repo(repo: &str) -> Result<(&str, &str)> {
@@ -166,17 +206,14 @@ fn parse_issue_types(resp: &serde_json::Value) -> Vec<IssueTypeId> {
 }
 
 fn parse_project_fields(
-    resp: &serde_json::Value,
+    nodes: &serde_json::Value,
     project_number: u64,
 ) -> (Vec<ProjectFieldId>, Vec<OptionId>, Vec<IterationId>) {
     let mut fields = Vec::new();
     let mut options = Vec::new();
     let mut iterations = Vec::new();
 
-    let Some(nodes) = resp
-        .pointer("/data/organization/projectV2/fields/nodes")
-        .and_then(|n| n.as_array())
-    else {
+    let Some(nodes) = nodes.as_array() else {
         return (fields, options, iterations);
     };
 
@@ -430,6 +467,59 @@ mod tests {
         // number passed as typed Int var
         let calls = gh.graphql_calls.borrow();
         assert!(calls[0].1.contains(&("number".to_string(), GqlVar::Int(7))));
+    }
+
+    fn org_null_response() -> serde_json::Value {
+        serde_json::json!({
+            "data": {"organization": serde_json::Value::Null},
+            "errors": [{"message": "Could not resolve to an Organization with the login of 'jkaloger'."}]
+        })
+    }
+
+    fn reroot_org_to_user(mut v: serde_json::Value) -> serde_json::Value {
+        let org = v["data"]["organization"].take();
+        serde_json::json!({ "data": { "user": org } })
+    }
+
+    // AC1: user-account project fields resolve via the org->user fallback.
+    #[test]
+    fn fetch_project_fields_falls_back_to_user_root() {
+        let user_resp = reroot_org_to_user(project_fields_response());
+        let gh = MockGhClient::new().with_graphql_responses(vec![org_null_response(), user_resp]);
+        let (fields, options, iterations) =
+            fetch_project_fields(&gh, "jkaloger/lazyspec", 7).unwrap();
+
+        assert_eq!(fields.len(), 2);
+        assert!(fields
+            .iter()
+            .any(|f| f.id == "PVTSSF_field1" && f.field_name == "Status" && f.project_number == 7));
+        assert!(options
+            .iter()
+            .any(|o| o.id == "opt_todo" && o.name == "Todo" && o.field_id == "PVTSSF_field1"));
+        assert!(iterations
+            .iter()
+            .any(|i| i.id == "iter_1" && i.title == "Sprint 1" && i.field_id == "PVTIF_field2"));
+
+        // Two round-trips: org (null) then user.
+        assert_eq!(gh.graphql_calls.borrow().len(), 2);
+    }
+
+    // AC2: org account resolves in a single round-trip (regression).
+    #[test]
+    fn fetch_project_fields_org_single_round_trip() {
+        let gh = MockGhClient::new().with_graphql_responses(vec![project_fields_response()]);
+        let (fields, _, _) = fetch_project_fields(&gh, "octo-org/repo", 7).unwrap();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(gh.graphql_calls.borrow().len(), 1);
+    }
+
+    // AC3: user account with no org issue types -> empty set, no error, no warning.
+    #[test]
+    fn fetch_snapshot_user_account_empty_issue_types() {
+        let gh = MockGhClient::new().with_graphql_responses(vec![org_null_response()]);
+        let snapshot = fetch_snapshot(&gh, "jkaloger/lazyspec").unwrap();
+        assert!(snapshot.issue_types.is_empty());
+        assert_eq!(snapshot.issue_type_id("Bug"), None);
     }
 
     #[test]

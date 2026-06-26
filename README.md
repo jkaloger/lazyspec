@@ -203,7 +203,7 @@ All document management is available as subcommands. Most accept `--json` for ma
 | Command                                                         | Description                                                                                     |
 | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `init`                                                          | Initialise lazyspec in the current project                                                      |
-| `create <type> <title> [--author X] [--body / --body-file]`     | Create a document (rfc, adr, story, iteration); seed body inline, from a file, or `-` for stdin |
+| `create <type> <title> [--author X] [--parent ID] [--body / --body-file]` | Create a document (rfc, adr, story, iteration); seed body inline, from a file, or `-` for stdin. `--parent <ID>` places the new doc as a subdir child of an existing doc (promoting a flat parent to `TYPE-n-slug/index.md` on the first child); the child must be the same store as its parent |
 | `list [type] [--status X]`                                      | List documents with optional filters                                                            |
 | `show <id> [-e]`                                                | Display a document by path or shorthand ID (e.g. `RFC-001`)                                     |
 | `update <path> [--status X] [--title X] [--body / --body-file] [--attr key=value]` | Update frontmatter and/or body content (`--body-file -` reads stdin); `--attr` (repeatable) sets a declared custom attribute, coerced and validated against its type; works for all stores |

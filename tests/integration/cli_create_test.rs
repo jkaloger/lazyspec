@@ -356,6 +356,7 @@ fn create_with_body_sets_content() {
         "rfc",
         "Body Test",
         "agent",
+        None,
         Some(body_content),
         |_| {},
     )
@@ -392,6 +393,7 @@ fn create_with_body_file_sets_content() {
         "rfc",
         "Body File Test",
         "agent",
+        None,
         Some(body_content.as_str()),
         |_| {},
     )

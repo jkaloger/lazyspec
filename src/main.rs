@@ -117,6 +117,7 @@ fn main() -> anyhow::Result<()> {
             doc_type,
             title,
             author,
+            parent,
             body,
             body_file,
             json,
@@ -132,6 +133,7 @@ fn main() -> anyhow::Result<()> {
                     &doc_type,
                     &title,
                     &author,
+                    parent.as_deref(),
                     body_content.as_deref(),
                     |_| {},
                 )?;
@@ -144,6 +146,7 @@ fn main() -> anyhow::Result<()> {
                     &doc_type,
                     &title,
                     &author,
+                    parent.as_deref(),
                     body_content.as_deref(),
                     |_| {},
                 )?;

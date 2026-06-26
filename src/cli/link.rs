@@ -84,7 +84,7 @@ fn link_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi, P
         Ok(())
     })?;
 
-    apply_native_milestone(
+    let native = apply_native_milestone(
         root,
         config,
         &rel_str,
@@ -92,8 +92,7 @@ fn link_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi, P
         &to_id,
         true,
         milestone_factory,
-    )?;
-    apply_native_membership(
+    )? || apply_native_membership(
         root,
         config,
         &rel_str,
@@ -102,7 +101,7 @@ fn link_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi, P
         true,
         projects_factory,
     )?;
-    push_if_github_backed(root, &resolved_from, Some(config), client_factory)?;
+    push_if_github_backed(root, &resolved_from, Some(config), client_factory, native)?;
     push_if_git_ref_backed(root, &resolved_from, Some(config))?;
     Ok(LinkOutcome {
         source: resolved_from,
@@ -116,6 +115,10 @@ fn link_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi, P
 /// record). `set` true links (milestone number), false unlinks (null).
 /// Source/target numbers come from the shared issue map. A no-op for ordinary
 /// relationships.
+///
+/// Returns `true` when a native milestone PATCH was actually performed (so the
+/// caller routes the cache mirror through the conflict-free resync), `false` for
+/// the ordinary-relationship no-op.
 fn apply_native_milestone<M: GhMilestoneApi>(
     root: &Path,
     config: &Config,
@@ -124,13 +127,13 @@ fn apply_native_milestone<M: GhMilestoneApi>(
     target_id: &str,
     set: bool,
     milestone_factory: impl FnOnce() -> M,
-) -> Result<()> {
+) -> Result<bool> {
     let is_milestone_rel = config
         .relationship_by_name(rel_str)
         .and_then(|r| r.github_native.as_deref())
         == Some("milestone");
     if !is_milestone_rel {
-        return Ok(());
+        return Ok(false);
     }
 
     let repo = config
@@ -152,7 +155,8 @@ fn apply_native_milestone<M: GhMilestoneApi>(
 
     let client = milestone_factory();
     let value = if set { Some(milestone_number) } else { None };
-    client.issue_set_milestone(repo, issue_number, value)
+    client.issue_set_milestone(repo, issue_number, value)?;
+    Ok(true)
 }
 
 const ADD_PROJECT_ITEM_MUTATION: &str = "mutation($projectId: ID!, $contentId: ID!) { addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) { item { id } } }";
@@ -168,6 +172,10 @@ const PROJECT_ITEM_FOR_ISSUE_QUERY: &str = "query($id: ID!) { node(id: $id) { ..
 /// the issue map); `target_id` is the board doc (`PROJECT-n`, resolved to a
 /// project node id). Each membership relation is one board, synced
 /// independently. A no-op for ordinary relationships.
+///
+/// Returns `true` when a native membership mutation was actually performed (so
+/// the caller routes the cache mirror through the conflict-free resync), `false`
+/// for the ordinary-relationship no-op.
 fn apply_native_membership<P: GhGraphql>(
     root: &Path,
     config: &Config,
@@ -176,13 +184,13 @@ fn apply_native_membership<P: GhGraphql>(
     target_id: &str,
     set: bool,
     projects_factory: impl FnOnce() -> P,
-) -> Result<()> {
+) -> Result<bool> {
     let is_membership_rel = config
         .relationship_by_name(rel_str)
         .and_then(|r| r.github_native.as_deref())
         == Some("membership");
     if !is_membership_rel {
-        return Ok(());
+        return Ok(false);
     }
 
     let repo = config
@@ -250,7 +258,7 @@ fn apply_native_membership<P: GhGraphql>(
             ],
         )?;
     }
-    Ok(())
+    Ok(true)
 }
 
 pub fn unlink_with_config(
@@ -314,7 +322,7 @@ fn unlink_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi,
         Ok(())
     })?;
 
-    apply_native_milestone(
+    let native = apply_native_milestone(
         root,
         config,
         &rel_str,
@@ -322,8 +330,7 @@ fn unlink_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi,
         &to_id,
         false,
         milestone_factory,
-    )?;
-    apply_native_membership(
+    )? || apply_native_membership(
         root,
         config,
         &rel_str,
@@ -332,7 +339,7 @@ fn unlink_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi,
         false,
         projects_factory,
     )?;
-    push_if_github_backed(root, &resolved_from, Some(config), client_factory)?;
+    push_if_github_backed(root, &resolved_from, Some(config), client_factory, native)?;
     push_if_git_ref_backed(root, &resolved_from, Some(config))?;
     Ok(LinkOutcome {
         source: resolved_from,
@@ -346,6 +353,7 @@ fn push_if_github_backed<G: GhIssueReader + GhIssueWriter + GhGraphql>(
     doc_path: &Path,
     config: Option<&Config>,
     client_factory: impl FnOnce() -> G,
+    native_edge: bool,
 ) -> Result<()> {
     let config = match config {
         Some(c) => c,
@@ -403,7 +411,14 @@ fn push_if_github_backed<G: GhIssueReader + GhIssueWriter + GhGraphql>(
         issue_cache: IssueCache::new(root),
     };
 
-    gh_store.push_cache(type_def, &doc_id)
+    if native_edge {
+        // Native relations are last-write-wins; the field PATCH already applied.
+        // Skip the body conflict guard so an unrelated remote `updated_at` bump
+        // cannot leave a half-applied edge (remote linked, cache not mirrored).
+        gh_store.resync_after_native_edge(type_def, &doc_id)
+    } else {
+        gh_store.push_cache(type_def, &doc_id)
+    }
 }
 
 fn push_if_git_ref_backed(root: &Path, doc_path: &Path, config: Option<&Config>) -> Result<()> {
@@ -597,6 +612,147 @@ mod tests {
         )
         .unwrap();
         assert_eq!(*recorder2.last_set_milestone.borrow(), Some((7, None)));
+    }
+
+    // Build a GhIssue stub carrying a given updated_at, used to seed the
+    // source-issue resync after a native edge (simulating an out-of-band remote
+    // bump such as a new comment).
+    fn view_issue_at(number: u64, updated_at: &str) -> GhIssue {
+        GhIssue {
+            number,
+            id: format!("I_node{number}"),
+            url: String::new(),
+            title: "My Story".to_string(),
+            body: make_issue_body("a", "2026-03-27", "body"),
+            labels: vec![GhLabel {
+                name: "lazyspec:story".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: updated_at.to_string(),
+            created_at: "2026-06-26T09:00:00Z".to_string(),
+            author: None,
+            issue_type: None,
+        }
+    }
+
+    // AC1 + AC2: an out-of-band remote comment bumps the source issue's
+    // updated_at AFTER our last fetch. A native milestone link must still
+    // succeed (no "modified on GitHub" abort), record the milestone PATCH, mirror
+    // the relation into the cache, and reconcile the issue-map baseline to the
+    // remote's fresh timestamp (never left stale or empty).
+    #[test]
+    fn link_native_milestone_survives_out_of_band_updated_at() {
+        let root = tmp_root("link_native_ms_oob");
+        let config = milestone_assoc_config();
+
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story"),
+            "STORY-7.md",
+            "My Story",
+            "story",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/milestone"),
+            "MILESTONE-3.md",
+            "v1.0",
+            "milestone",
+        );
+
+        // STORY-7 last fetched at 10:00; remote has since moved to 11:00.
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "2026-06-26T10:00:00Z", "I_node7");
+        issue_map.insert("MILESTONE-3", 3, "", "");
+        issue_map.save(&root).unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+        let recorder = std::rc::Rc::new(MockGhMilestoneClient::new());
+
+        link_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "targets",
+            "MILESTONE-3",
+            &fs,
+            Some(&config),
+            || MockGhClient::new().with_view_issue(view_issue_at(7, "2026-06-26T11:00:00Z")),
+            || recorder.clone(),
+            MockGhClient::new,
+        )
+        .expect("native milestone link must not abort on an out-of-band updated_at bump");
+
+        // AC1: the native PATCH was recorded (remote edge applied).
+        assert_eq!(*recorder.last_set_milestone.borrow(), Some((7, Some(3))));
+
+        // AC2: cache relation mirrored (remote edge + cache agree).
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(
+            updated.contains("targets: MILESTONE-3"),
+            "cache should carry the relation, got:\n{updated}"
+        );
+
+        // AC2: the issue-map baseline reconciled to the remote's fresh timestamp,
+        // not left stale (10:00) or empty.
+        let reloaded = IssueMap::load(&root).unwrap();
+        assert_eq!(
+            reloaded.get("STORY-7").unwrap().updated_at,
+            "2026-06-26T11:00:00Z",
+            "resync should record the remote's current updated_at"
+        );
+    }
+
+    // AC4: unlink is symmetric -- a stale-then-advanced updated_at must not block
+    // clearing a native milestone association nor the cache mirror.
+    #[test]
+    fn unlink_native_milestone_survives_out_of_band_updated_at() {
+        let root = tmp_root("unlink_native_ms_oob");
+        let config = milestone_assoc_config();
+
+        // STORY-7 already targets MILESTONE-3 in the cache.
+        std::fs::create_dir_all(root.join(".lazyspec/cache/story")).unwrap();
+        let content = "---\ntitle: My Story\ntype: story\nstatus: draft\nauthor: a\ndate: 2026-03-27\ntags: []\nrelated:\n- targets: MILESTONE-3\n---\nbody\n";
+        std::fs::write(root.join(".lazyspec/cache/story/STORY-7.md"), content).unwrap();
+        write_cache_doc(
+            &root.join(".lazyspec/cache/milestone"),
+            "MILESTONE-3.md",
+            "v1.0",
+            "milestone",
+        );
+
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "2026-06-26T10:00:00Z", "I_node7");
+        issue_map.insert("MILESTONE-3", 3, "", "");
+        issue_map.save(&root).unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+        let recorder = std::rc::Rc::new(MockGhMilestoneClient::new());
+
+        unlink_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "targets",
+            "MILESTONE-3",
+            &fs,
+            Some(&config),
+            || MockGhClient::new().with_view_issue(view_issue_at(7, "2026-06-26T11:00:00Z")),
+            || recorder.clone(),
+            MockGhClient::new,
+        )
+        .expect("native milestone unlink must not abort on an out-of-band updated_at bump");
+
+        assert_eq!(*recorder.last_set_milestone.borrow(), Some((7, None)));
+
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(
+            !updated.contains("targets: MILESTONE-3"),
+            "cache relation should be removed, got:\n{updated}"
+        );
     }
 
     // --- github_native = "membership" (ITERATION-216) ---
@@ -885,6 +1041,76 @@ mod tests {
         assert!(
             updated.contains("member-of: PROJECT-9"),
             "PROJECT-9 should remain, got:\n{updated}"
+        );
+    }
+
+    // AC2 (membership): an out-of-band updated_at bump on the source issue must
+    // not block a native membership link nor its cache mirror; the issue-map
+    // baseline reconciles to the remote's fresh timestamp.
+    #[test]
+    fn link_membership_survives_out_of_band_updated_at() {
+        let root = tmp_root("link_membership_oob");
+        let config = membership_config();
+
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story"),
+            "STORY-7.md",
+            "My Story",
+            "story",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/project"),
+            "PROJECT-3.md",
+            "Board",
+            "project",
+        );
+
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "2026-06-26T10:00:00Z", "I_issue7");
+        issue_map.insert("PROJECT-3", 3, "", "");
+        issue_map.save(&root).unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+
+        let recorder = std::rc::Rc::new(
+            MockGhClient::new()
+                .with_graphql_responses(vec![org_board("PVT_board3"), add_item_ok()]),
+        );
+
+        link_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "member-of",
+            "PROJECT-3",
+            &fs,
+            Some(&config),
+            || MockGhClient::new().with_view_issue(view_issue_at(7, "2026-06-26T11:00:00Z")),
+            MockGhMilestoneClient::new,
+            || recorder.clone(),
+        )
+        .expect("native membership link must not abort on an out-of-band updated_at bump");
+
+        // The native add mutation ran (remote edge applied).
+        let adds = recorder
+            .graphql_calls
+            .borrow()
+            .iter()
+            .filter(|(q, _)| q.contains("addProjectV2ItemById"))
+            .count();
+        assert_eq!(adds, 1, "one addProjectV2ItemById");
+
+        // Cache relation mirrored.
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(updated.contains("member-of: PROJECT-3"), "got:\n{updated}");
+
+        // Baseline reconciled to the remote's fresh timestamp.
+        let reloaded = IssueMap::load(&root).unwrap();
+        assert_eq!(
+            reloaded.get("STORY-7").unwrap().updated_at,
+            "2026-06-26T11:00:00Z"
         );
     }
 

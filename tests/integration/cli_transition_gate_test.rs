@@ -177,6 +177,7 @@ fn parent_status_gate_blocks_then_allows() {
         "Child",
         "test",
         None,
+        None,
         |_| {},
     )
     .unwrap_err();
@@ -199,6 +200,7 @@ fn parent_status_gate_blocks_then_allows() {
         "story",
         "Child",
         "test",
+        None,
         None,
         |_| {},
     )
@@ -228,6 +230,7 @@ fn no_gate_when_require_parent_status_unset() {
         "story",
         "Child",
         "test",
+        None,
         None,
         |_| {},
     )

@@ -79,6 +79,47 @@ icon = "🔍"
 authorship = "generated"
 lifecycle = { states = ["draft", "review", "accepted", "in-progress", "complete", "rejected", "superseded"], edges = [{ from = "draft", to = "review" }, { from = "review", to = "accepted" }, { from = "review", to = "rejected" }, { from = "accepted", to = "in-progress" }, { from = "in-progress", to = "complete" }, { from = "*", to = "superseded" }] }
 
+[[types]]
+name = "ticket"
+plural = "tickets"
+dir = "docs/tickets"
+prefix = "TICKET"
+icon = "🎫"
+store = "github-issues"
+subdirectory = true
+intent = "A GitHub issue authored as structured markdown"
+
+[[types.attributes]]
+name = "priority"
+kind = "enum"
+values = ["low", "medium", "high"]
+
+[[types.attributes]]
+name = "estimate"
+kind = "int"
+
+[[types.attributes]]
+name = "due"
+kind = "date"
+
+[[types]]
+name = "milestone"
+plural = "milestones"
+dir = "docs/milestones"
+prefix = "MILESTONE"
+icon = "🏁"
+store = "github-milestones"
+intent = "A GitHub milestone authored as structured markdown"
+
+[[types]]
+name = "project"
+plural = "projects"
+dir = "docs/projects"
+prefix = "PROJECT"
+icon = "📊"
+store = "github-projects"
+intent = "A GitHub Projects v2 board bound read-only"
+
 [[relationships]]
 name = "implements"
 inverse = "implemented-by"
@@ -93,6 +134,16 @@ inverse = "blocked-by"
 
 [[relationships]]
 name = "related-to"
+
+[[relationships]]
+name = "targets"
+inverse = "targeted-by"
+github_native = "milestone"
+
+[[relationships]]
+name = "member-of"
+inverse = "has-member"
+github_native = "membership"
 
 [agents]
 interactive = 'opencode run "$LAZYSPEC_PROMPT"'

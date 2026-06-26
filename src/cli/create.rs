@@ -32,6 +32,7 @@ pub fn run(
         title,
         author,
         None,
+        None,
         on_progress,
     )
 }
@@ -44,6 +45,7 @@ pub fn run_with_body(
     doc_type: &str,
     title: &str,
     author: &str,
+    parent: Option<&str>,
     body: Option<&str>,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<PathBuf> {
@@ -102,6 +104,12 @@ pub fn run_with_body(
                 required
             );
         }
+    }
+
+    if let Some(parent_id) = parent {
+        return create_with_parent(
+            root, config, store, type_def, title, author, body, parent_id,
+        );
     }
 
     if type_def.store == StoreBackend::GithubIssues {
@@ -225,6 +233,92 @@ pub fn run_with_body(
     Ok(path)
 }
 
+/// Author a child of `parent_id` as a sibling `.md` inside the parent's
+/// subdirectory, promoting a flat parent to `TYPE-n-slug/index.md` on the first
+/// child. Store-agnostic by construction: it only manipulates the on-disk doc
+/// tree under the type's source `dir`. For github-issues types the child becomes
+/// its own issue + native sub-issue on the next fetch (via
+/// `reconcile_subdir_subissues`); for filesystem types the loader tracks the new
+/// parent/child edges directly.
+#[allow(clippy::too_many_arguments)]
+fn create_with_parent(
+    root: &Path,
+    config: &Config,
+    store: &Store,
+    child_type_def: &crate::engine::config::TypeDef,
+    title: &str,
+    author: &str,
+    body: Option<&str>,
+    parent_id: &str,
+) -> Result<PathBuf> {
+    let parent_meta = store
+        .resolve_shorthand(parent_id)
+        .map_err(|_| anyhow!("could not resolve parent document: {}", parent_id))?;
+
+    let parent_type_def = config
+        .type_by_name(parent_meta.doc_type.as_str())
+        .ok_or_else(|| {
+            anyhow!(
+                "parent {} has unknown type '{}'",
+                parent_id,
+                parent_meta.doc_type
+            )
+        })?;
+
+    if child_type_def.store != parent_type_def.store {
+        bail!(
+            "sub-issue link rejected: parent {} (store {}) and child type {} (store {}) \
+             are in different stores; lazyspec sub-issues are same-store only",
+            parent_id,
+            parent_type_def.store,
+            child_type_def.name,
+            child_type_def.store
+        );
+    }
+
+    let parent_path = root.join(&parent_meta.path);
+    let is_index = parent_path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .map(|f| f == "index.md")
+        .unwrap_or(false);
+
+    let parent_subdir = if is_index {
+        parent_path
+            .parent()
+            .ok_or_else(|| {
+                anyhow!(
+                    "parent index.md has no directory: {}",
+                    parent_path.display()
+                )
+            })?
+            .to_path_buf()
+    } else {
+        let parent_dir = parent_path
+            .parent()
+            .ok_or_else(|| anyhow!("parent doc has no directory: {}", parent_path.display()))?;
+        let stem = parent_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow!("parent doc has no file stem: {}", parent_path.display()))?;
+        let new_dir = parent_dir.join(stem);
+        let new_index = new_dir.join("index.md");
+        fs::create_dir_all(&new_dir)?;
+        fs::rename(&parent_path, &new_index)?;
+        new_dir
+    };
+
+    fs_ops::create_child_in_dir(
+        root,
+        config,
+        child_type_def,
+        &parent_subdir,
+        title,
+        author,
+        body,
+    )
+}
+
 pub fn run_json(
     root: &Path,
     config: &Config,
@@ -242,6 +336,7 @@ pub fn run_json(
         title,
         author,
         None,
+        None,
         on_progress,
     )
 }
@@ -254,6 +349,7 @@ pub fn run_json_with_body(
     doc_type: &str,
     title: &str,
     author: &str,
+    parent: Option<&str>,
     body: Option<&str>,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<String> {
@@ -264,6 +360,7 @@ pub fn run_json_with_body(
         doc_type,
         title,
         author,
+        parent,
         body,
         on_progress,
     )?;
