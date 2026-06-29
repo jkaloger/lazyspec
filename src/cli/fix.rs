@@ -32,6 +32,10 @@ struct FixOutput {
 struct RelationFixResult {
     path: String,
     replacements: Vec<(String, String)>,
+    /// Duplicate `(rel_type, target)` pairs dropped from the doc's `related`
+    /// sequence (defect-C cleanup). Kept distinct from `replacements` so the
+    /// `--json` output surfaces path->id migrations and dedup separately.
+    deduped: Vec<(String, String)>,
     written: bool,
 }
 

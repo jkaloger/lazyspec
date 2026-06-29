@@ -68,22 +68,13 @@ fn link_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi, P
     let to_id = resolve_to_id(store, to)?;
     let from_id = resolve_to_id(store, from)?;
     let full_path = root.join(&resolved_from);
-    rewrite_frontmatter(&full_path, fs, |doc| {
-        if doc.get("related").is_none() {
-            doc["related"] = serde_yaml::Value::Sequence(vec![]);
-        }
-        let mut entry = serde_yaml::Mapping::new();
-        entry.insert(
-            serde_yaml::Value::String(rel_str.clone()),
-            serde_yaml::Value::String(to_id.clone()),
-        );
-        doc["related"]
-            .as_sequence_mut()
-            .unwrap()
-            .push(serde_yaml::Value::Mapping(entry));
-        Ok(())
-    })?;
 
+    // Pre-write store-aware guard: reject an illegal milestone triple before any
+    // native call or cache write (ITER-230).
+    validate_milestone_relation(config, store, &from_id, &to_id, &rel_str)?;
+
+    // Native field PATCH (milestone / membership) is its own authoritative
+    // last-write-wins edge; it runs before the cache mirror (ITER-222).
     let native = apply_native_milestone(
         root,
         config,
@@ -101,7 +92,45 @@ fn link_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi, P
         true,
         projects_factory,
     )?;
-    push_if_github_backed(root, &resolved_from, Some(config), client_factory, native)?;
+
+    // Push-first: the remote merge (or native resync) lands BEFORE the cache is
+    // touched, so a failed push leaves the local cache `related` unchanged.
+    push_if_github_backed(
+        root,
+        &resolved_from,
+        Some(config),
+        client_factory,
+        native,
+        &rel_str,
+        &to_id,
+        true,
+    )?;
+
+    // Only on push success: mirror the edge into the cache frontmatter,
+    // insert-if-absent so a double-link is a no-op on disk.
+    rewrite_frontmatter(&full_path, fs, |doc| {
+        if doc.get("related").is_none() {
+            doc["related"] = serde_yaml::Value::Sequence(vec![]);
+        }
+        let related = doc["related"].as_sequence_mut().unwrap();
+        let already_present = related.iter().any(|entry| {
+            entry
+                .as_mapping()
+                .and_then(|m| m.get(serde_yaml::Value::String(rel_str.clone())))
+                .and_then(|v| v.as_str())
+                == Some(to_id.as_str())
+        });
+        if !already_present {
+            let mut entry = serde_yaml::Mapping::new();
+            entry.insert(
+                serde_yaml::Value::String(rel_str.clone()),
+                serde_yaml::Value::String(to_id.clone()),
+            );
+            related.push(serde_yaml::Value::Mapping(entry));
+        }
+        Ok(())
+    })?;
+
     push_if_git_ref_backed(root, &resolved_from, Some(config))?;
     Ok(LinkOutcome {
         source: resolved_from,
@@ -261,6 +290,67 @@ fn apply_native_membership<P: GhGraphql>(
     Ok(true)
 }
 
+/// The store a document id resolves to, via its type's `[[types]]` declaration.
+/// `None` when the id resolves to no doc or its type is undeclared -- the caller
+/// treats an unresolved store as non-milestone (the guard only fires on the
+/// github-milestones store).
+fn store_of(config: &Config, store: &Store, id: &str) -> Option<StoreBackend> {
+    let path = resolve_to_path(store, id).ok()?;
+    let doc = store.get(&path)?;
+    config
+        .type_by_name(doc.doc_type.as_str())
+        .map(|t| t.store.clone())
+}
+
+/// Enforce the store-aware relation vocabulary for `github-milestones` docs: a
+/// milestone is a REST object with no body and no native edge for arbitrary
+/// relations, so it may only be the *target* of the `targets` relation
+/// (`github_native = "milestone"`) and may never be a relation *source*.
+/// Ordinary docs are unaffected.
+fn validate_milestone_relation(
+    config: &Config,
+    store: &Store,
+    from_id: &str,
+    to_id: &str,
+    rel_str: &str,
+) -> Result<()> {
+    let source_store = store_of(config, store, from_id);
+    if source_store == Some(StoreBackend::GithubMilestones) {
+        return Err(anyhow!(
+            "milestone docs cannot be the source of a relation ('{}' is a github-milestones doc)",
+            from_id
+        ));
+    }
+
+    let target_store = store_of(config, store, to_id);
+    let is_milestone_rel = config
+        .relationship_by_name(rel_str)
+        .and_then(|r| r.github_native.as_deref())
+        == Some("milestone");
+
+    if is_milestone_rel && source_store != Some(StoreBackend::GithubIssues) {
+        return Err(anyhow!(
+            "only github-issues docs can target a milestone ('{}' is not a github-issues doc)",
+            from_id
+        ));
+    }
+
+    match (
+        is_milestone_rel,
+        target_store == Some(StoreBackend::GithubMilestones),
+    ) {
+        (true, false) => Err(anyhow!(
+            "`targets` requires a milestone target ('{}' is not a github-milestones doc)",
+            to_id
+        )),
+        (false, true) => Err(anyhow!(
+            "milestone docs can only be targeted by `targets` ('{}' is a github-milestones doc)",
+            to_id
+        )),
+        (true, true) | (false, false) => Ok(()),
+    }
+}
+
 pub fn unlink_with_config(
     root: &Path,
     store: &Store,
@@ -307,20 +397,10 @@ fn unlink_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi,
     let to_id = resolve_to_id(store, to)?;
     let from_id = resolve_to_id(store, from)?;
     let full_path = root.join(&resolved_from);
-    rewrite_frontmatter(&full_path, fs, |doc| {
-        if let Some(related) = doc.get_mut("related").and_then(|r| r.as_sequence_mut()) {
-            related.retain(|entry| {
-                if let Some(map) = entry.as_mapping() {
-                    let key = serde_yaml::Value::String(rel_str.clone());
-                    if let Some(val) = map.get(&key) {
-                        return val.as_str() != Some(to_id.as_str());
-                    }
-                }
-                true
-            });
-        }
-        Ok(())
-    })?;
+
+    // Pre-retain store-aware guard: reject an illegal milestone triple before any
+    // native call or cache mutation (ITER-230), mirroring link_inner.
+    validate_milestone_relation(config, store, &from_id, &to_id, &rel_str)?;
 
     let native = apply_native_milestone(
         root,
@@ -339,7 +419,36 @@ fn unlink_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi,
         false,
         projects_factory,
     )?;
-    push_if_github_backed(root, &resolved_from, Some(config), client_factory, native)?;
+
+    // Push-first: remote retain-drop (or native resync) lands BEFORE the cache
+    // is touched, so a failed push leaves the local cache `related` unchanged.
+    push_if_github_backed(
+        root,
+        &resolved_from,
+        Some(config),
+        client_factory,
+        native,
+        &rel_str,
+        &to_id,
+        false,
+    )?;
+
+    // Only on push success: retain-drop the edge from the cache frontmatter.
+    rewrite_frontmatter(&full_path, fs, |doc| {
+        if let Some(related) = doc.get_mut("related").and_then(|r| r.as_sequence_mut()) {
+            related.retain(|entry| {
+                if let Some(map) = entry.as_mapping() {
+                    let key = serde_yaml::Value::String(rel_str.clone());
+                    if let Some(val) = map.get(&key) {
+                        return val.as_str() != Some(to_id.as_str());
+                    }
+                }
+                true
+            });
+        }
+        Ok(())
+    })?;
+
     push_if_git_ref_backed(root, &resolved_from, Some(config))?;
     Ok(LinkOutcome {
         source: resolved_from,
@@ -348,12 +457,16 @@ fn unlink_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_if_github_backed<G: GhIssueReader + GhIssueWriter + GhGraphql>(
     root: &Path,
     doc_path: &Path,
     config: Option<&Config>,
     client_factory: impl FnOnce() -> G,
     native_edge: bool,
+    rel_str: &str,
+    target_id: &str,
+    set: bool,
 ) -> Result<()> {
     let config = match config {
         Some(c) => c,
@@ -417,7 +530,9 @@ fn push_if_github_backed<G: GhIssueReader + GhIssueWriter + GhGraphql>(
         // cannot leave a half-applied edge (remote linked, cache not mirrored).
         gh_store.resync_after_native_edge(type_def, &doc_id)
     } else {
-        gh_store.push_cache(type_def, &doc_id)
+        // Ordinary relations round-trip through the issue body: merge just this
+        // edge into the remote body (no whole-cache clobber, no optimistic lock).
+        gh_store.merge_relation_to_remote(type_def, &doc_id, rel_str, target_id, set)
     }
 }
 
@@ -518,18 +633,28 @@ mod tests {
         let mut config = Config::default();
         config.documents.types = vec![
             issue_type("story", "STORY", StoreBackend::GithubIssues),
+            issue_type("story2", "STORY2", StoreBackend::GithubIssues),
             issue_type("milestone", "MILESTONE", StoreBackend::GithubMilestones),
+            issue_type("spec", "SPEC", StoreBackend::Filesystem),
         ];
         config.documents.github = Some(GithubConfig {
             repo: Some("owner/repo".to_string()),
             cache_ttl: 60,
         });
-        config.relationships = vec![crate::engine::config::RelationshipDef {
-            name: "targets".to_string(),
-            inverse: Some("targeted-by".to_string()),
-            github_native: Some("milestone".to_string()),
-            traversal: None,
-        }];
+        config.relationships = vec![
+            crate::engine::config::RelationshipDef {
+                name: "targets".to_string(),
+                inverse: Some("targeted-by".to_string()),
+                github_native: Some("milestone".to_string()),
+                traversal: None,
+            },
+            crate::engine::config::RelationshipDef {
+                name: "implements".to_string(),
+                inverse: Some("implemented-by".to_string()),
+                github_native: None,
+                traversal: None,
+            },
+        ];
         config
     }
 
@@ -613,6 +738,359 @@ mod tests {
         )
         .unwrap();
         assert_eq!(*recorder2.last_set_milestone.borrow(), Some((7, None)));
+    }
+
+    // --- ITERATION-230: store-aware relation vocabulary for github-milestones ---
+
+    // Seed STORY-7 (github-issues), STORY2-9 (github-issues), MILESTONE-3
+    // (github-milestones) in the cache plus their issue-map numbers, so the
+    // guard can resolve each endpoint's store. Returns a loaded store.
+    fn seed_milestone_guard_fixture(root: &std::path::Path) -> Store {
+        let config = milestone_assoc_config();
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story"),
+            "STORY-7.md",
+            "My Story",
+            "story",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story2"),
+            "STORY2-9.md",
+            "Other Story",
+            "story2",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/milestone"),
+            "MILESTONE-3.md",
+            "v1.0",
+            "milestone",
+        );
+
+        let mut issue_map = IssueMap::load(root).unwrap();
+        issue_map.insert("STORY-7", 7, "", "");
+        issue_map.insert("STORY2-9", 9, "", "");
+        issue_map.insert("MILESTONE-3", 3, "", "");
+        issue_map.save(root).unwrap();
+
+        Store::load(root, &config).unwrap()
+    }
+
+    // AC1: link STORY-7 --targets--> MILESTONE-3 is legal -- frontmatter carries
+    // the relation and the native milestone PATCH is recorded.
+    #[test]
+    fn link_milestone_target_via_targets_ok() {
+        let root = tmp_root("guard_targets_ok");
+        let config = milestone_assoc_config();
+        let store = seed_milestone_guard_fixture(&root);
+        let fs = RealFileSystem;
+        let recorder = std::rc::Rc::new(MockGhMilestoneClient::new());
+
+        link_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "targets",
+            "MILESTONE-3",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            || recorder.clone(),
+            MockGhClient::new,
+        )
+        .expect("legal targets link must succeed");
+
+        assert_eq!(*recorder.last_set_milestone.borrow(), Some((7, Some(3))));
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(
+            updated.contains("targets: MILESTONE-3"),
+            "frontmatter should carry the relation, got:\n{updated}"
+        );
+    }
+
+    // Inverse flow: from a milestone doc, `MILESTONE-3 --targeted-by--> STORY-7`
+    // flips to `STORY-7 targets MILESTONE-3` (link.rs:65) -- legal, since the
+    // milestone is the TARGET. The edge lands on the issue's frontmatter, not the
+    // milestone, and the native PATCH is recorded. This is the path the TUI link
+    // editor takes when adding a relation while viewing a milestone.
+    #[test]
+    fn link_milestone_inverse_targeted_by_writes_on_issue() {
+        let root = tmp_root("guard_inverse_targeted_by");
+        let config = milestone_assoc_config();
+        let store = seed_milestone_guard_fixture(&root);
+        let fs = RealFileSystem;
+        let recorder = std::rc::Rc::new(MockGhMilestoneClient::new());
+
+        let outcome = link_inner(
+            &root,
+            &store,
+            "MILESTONE-3",
+            "targeted-by",
+            "STORY-7",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            || recorder.clone(),
+            MockGhClient::new,
+        )
+        .expect("inverse `targeted-by` from a milestone must succeed");
+
+        // Direction flipped: the edge is the canonical `targets` written on the
+        // issue, with the milestone as the target.
+        assert_eq!(outcome.rel_type.to_string(), "targets");
+        assert_eq!(outcome.target, "MILESTONE-3");
+        assert!(outcome.source.ends_with("STORY-7.md"));
+
+        assert_eq!(*recorder.last_set_milestone.borrow(), Some((7, Some(3))));
+        let story = std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(
+            story.contains("targets: MILESTONE-3"),
+            "the edge lands on the issue, got:\n{story}"
+        );
+        let milestone =
+            std::fs::read_to_string(root.join(".lazyspec/cache/milestone/MILESTONE-3.md")).unwrap();
+        assert!(
+            !milestone.contains("related"),
+            "the milestone frontmatter must stay untouched, got:\n{milestone}"
+        );
+    }
+
+    // AC2: link STORY-7 --implements--> MILESTONE-3 is rejected -- a milestone may
+    // only be targeted by `targets`. No frontmatter write.
+    #[test]
+    fn link_milestone_via_ordinary_rel_rejected() {
+        let root = tmp_root("guard_ordinary_rejected");
+        let config = milestone_assoc_config();
+        let store = seed_milestone_guard_fixture(&root);
+        let fs = RealFileSystem;
+        let recorder = std::rc::Rc::new(MockGhMilestoneClient::new());
+
+        let err = link_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "implements",
+            "MILESTONE-3",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            || recorder.clone(),
+            MockGhClient::new,
+        )
+        .expect_err("ordinary relation to a milestone must be rejected");
+        assert!(
+            err.to_string()
+                .contains("milestone docs can only be targeted by `targets`"),
+            "unexpected error: {err}"
+        );
+
+        // No native call and no frontmatter write.
+        assert!(recorder.last_set_milestone.borrow().is_none());
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(
+            !updated.contains("related") && !updated.contains("implements"),
+            "cache must be unchanged after a rejected link, got:\n{updated}"
+        );
+    }
+
+    // AC3: a milestone may never be a relation source -- even via `targets`.
+    // link MILESTONE-3 --targets--> STORY-7 is rejected "cannot be the source".
+    #[test]
+    fn link_from_milestone_rejected() {
+        let root = tmp_root("guard_from_milestone");
+        let config = milestone_assoc_config();
+        let store = seed_milestone_guard_fixture(&root);
+        let fs = RealFileSystem;
+        let recorder = std::rc::Rc::new(MockGhMilestoneClient::new());
+
+        let err = link_inner(
+            &root,
+            &store,
+            "MILESTONE-3",
+            "targets",
+            "STORY-7",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            || recorder.clone(),
+            MockGhClient::new,
+        )
+        .expect_err("a milestone source must be rejected even via targets");
+        assert!(
+            err.to_string()
+                .contains("milestone docs cannot be the source"),
+            "unexpected error: {err}"
+        );
+
+        assert!(recorder.last_set_milestone.borrow().is_none());
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/milestone/MILESTONE-3.md")).unwrap();
+        assert!(
+            !updated.contains("related"),
+            "milestone cache must be unchanged after a rejected link, got:\n{updated}"
+        );
+    }
+
+    // AC4: `targets` to a non-milestone target is rejected.
+    // link STORY-7 --targets--> STORY2-9 (both github-issues) is rejected.
+    #[test]
+    fn targets_to_non_milestone_rejected() {
+        let root = tmp_root("guard_targets_non_ms");
+        let config = milestone_assoc_config();
+        let store = seed_milestone_guard_fixture(&root);
+        let fs = RealFileSystem;
+        let recorder = std::rc::Rc::new(MockGhMilestoneClient::new());
+
+        let err = link_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "targets",
+            "STORY2-9",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            || recorder.clone(),
+            MockGhClient::new,
+        )
+        .expect_err("targets to a non-milestone target must be rejected");
+        assert!(
+            err.to_string()
+                .contains("`targets` requires a milestone target"),
+            "unexpected error: {err}"
+        );
+
+        assert!(recorder.last_set_milestone.borrow().is_none());
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(
+            !updated.contains("related"),
+            "cache must be unchanged after a rejected link, got:\n{updated}"
+        );
+    }
+
+    // A milestone-native relation may only originate from a github-issues doc.
+    // A filesystem doc (here a spec) targeting a milestone is rejected at
+    // validate_milestone_relation, before any native PATCH.
+    #[test]
+    fn targets_from_non_issue_source_rejected() {
+        let root = tmp_root("guard_non_issue_source");
+        let config = milestone_assoc_config();
+        write_cache_doc(
+            &root.join(".lazyspec/cache/spec"),
+            "SPEC-1.md",
+            "A Spec",
+            "spec",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/milestone"),
+            "MILESTONE-3.md",
+            "v1.0",
+            "milestone",
+        );
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("MILESTONE-3", 3, "", "");
+        issue_map.save(&root).unwrap();
+        let store = Store::load(&root, &config).unwrap();
+
+        let err = validate_milestone_relation(&config, &store, "SPEC-1", "MILESTONE-3", "targets")
+            .expect_err("a non-issue source must be rejected for a milestone-native relation");
+        assert!(
+            err.to_string().contains("SPEC-1"),
+            "error should name the source, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("github-issues"),
+            "error should explain only github-issues docs can target a milestone, got: {err}"
+        );
+    }
+
+    // A github-issues source targeting a milestone passes validation.
+    #[test]
+    fn targets_from_issue_source_ok() {
+        let root = tmp_root("guard_issue_source_ok");
+        let config = milestone_assoc_config();
+        let store = seed_milestone_guard_fixture(&root);
+
+        validate_milestone_relation(&config, &store, "STORY-7", "MILESTONE-3", "targets")
+            .expect("a github-issues source targeting a milestone must validate");
+    }
+
+    // AC5: unlink honours the same store guard. An illegal unlink from a
+    // milestone source is rejected pre-retain (no native call); a legal unlink
+    // STORY-7 targets MILESTONE-3 still records the native clear and drops the
+    // cache relation.
+    #[test]
+    fn unlink_honours_store_guard() {
+        let root = tmp_root("guard_unlink");
+        let config = milestone_assoc_config();
+
+        // STORY-7 already targets MILESTONE-3 in the cache.
+        std::fs::create_dir_all(root.join(".lazyspec/cache/story")).unwrap();
+        let content = "---\ntitle: My Story\ntype: story\nstatus: draft\nauthor: a\ndate: 2026-03-27\ntags: []\nrelated:\n- targets: MILESTONE-3\n---\nbody\n";
+        std::fs::write(root.join(".lazyspec/cache/story/STORY-7.md"), content).unwrap();
+        write_cache_doc(
+            &root.join(".lazyspec/cache/milestone"),
+            "MILESTONE-3.md",
+            "v1.0",
+            "milestone",
+        );
+
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "", "");
+        issue_map.insert("MILESTONE-3", 3, "", "");
+        issue_map.save(&root).unwrap();
+
+        let fs = RealFileSystem;
+
+        // Illegal: a milestone source is rejected before any native clear.
+        let bad = std::rc::Rc::new(MockGhMilestoneClient::new());
+        let store = Store::load(&root, &config).unwrap();
+        let err = unlink_inner(
+            &root,
+            &store,
+            "MILESTONE-3",
+            "targets",
+            "STORY-7",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            || bad.clone(),
+            MockGhClient::new,
+        )
+        .expect_err("unlink from a milestone source must be rejected");
+        assert!(
+            err.to_string()
+                .contains("milestone docs cannot be the source"),
+            "unexpected error: {err}"
+        );
+        assert!(bad.last_set_milestone.borrow().is_none());
+
+        // Legal: STORY-7 targets MILESTONE-3 unlink records the native clear and
+        // drops the cache relation.
+        let recorder = std::rc::Rc::new(MockGhMilestoneClient::new());
+        let store = Store::load(&root, &config).unwrap();
+        unlink_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "targets",
+            "MILESTONE-3",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            || recorder.clone(),
+            MockGhClient::new,
+        )
+        .expect("legal unlink must succeed");
+        assert_eq!(*recorder.last_set_milestone.borrow(), Some((7, None)));
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(
+            !updated.contains("targets: MILESTONE-3"),
+            "cache relation should be removed, got:\n{updated}"
+        );
     }
 
     // Build a GhIssue stub carrying a given updated_at, used to seed the
@@ -1264,13 +1742,374 @@ mod tests {
             updated
         );
 
-        // Verify push_cache was triggered by checking the issue map was updated.
-        // push_cache clears updated_at after a successful push.
+        // Verify the ordinary relation push ran by checking the issue map.
+        // merge_relation_to_remote records the remote's current updated_at
+        // (rather than clearing it like the old push_cache path).
         let refreshed_map = IssueMap::load(&root).unwrap();
         let entry = refreshed_map.get("RFC-001").unwrap();
         assert_eq!(
-            entry.updated_at, "",
-            "updated_at should be cleared after push, indicating push_cache ran"
+            entry.updated_at, "2026-03-27T10:00:00Z",
+            "updated_at should record the remote timestamp after the relation merge"
+        );
+    }
+
+    // An RFC-shaped remote issue carrying a given updated_at and body, used to
+    // seed the ordinary-relation merge path (mirrors `view_issue_at` but with
+    // the rfc label so `deserialize` reconstructs the rfc type).
+    fn rfc_view_issue(number: u64, updated_at: &str, body: &str) -> GhIssue {
+        GhIssue {
+            number,
+            id: format!("I_node{number}"),
+            url: String::new(),
+            title: "My RFC".to_string(),
+            body: body.to_string(),
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: updated_at.to_string(),
+            created_at: "2026-06-26T09:00:00Z".to_string(),
+            author: None,
+            issue_type: None,
+            milestone: None,
+        }
+    }
+
+    fn seed_ordinary_cache(root: &std::path::Path, related: Option<&str>) {
+        let rfc_cache = root.join(".lazyspec/cache/rfc");
+        let story_cache = root.join(".lazyspec/cache/story");
+        std::fs::create_dir_all(&rfc_cache).unwrap();
+        std::fs::create_dir_all(&story_cache).unwrap();
+        let related_block = related.unwrap_or("");
+        let rfc_content = format!(
+            "---\ntitle: My RFC\ntype: rfc\nstatus: draft\nauthor: agent-7\ndate: 2026-03-27\ntags: []\n{related_block}---\nRFC body text.\n"
+        );
+        std::fs::write(rfc_cache.join("RFC-001-my-rfc.md"), rfc_content).unwrap();
+        std::fs::write(
+            story_cache.join("STORY-001-my-story.md"),
+            "---\ntitle: My Story\ntype: story\nstatus: draft\nauthor: agent-7\ndate: 2026-03-27\ntags: []\n---\nStory body.\n",
+        )
+        .unwrap();
+    }
+
+    // AC1: an ordinary (non-native) relation link must survive an out-of-band
+    // remote `updated_at` bump -- no "modified on GitHub" abort -- because the
+    // relation merge bypasses the optimistic body lock. The cache records the
+    // relation and the issue-map baseline reconciles to the remote timestamp.
+    #[test]
+    fn link_ordinary_relation_survives_out_of_band_updated_at() {
+        let root = tmp_root("link_ordinary_oob");
+        let config = gh_config_with_rfc_type();
+        seed_ordinary_cache(&root, None);
+
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        // STALE local baseline; remote has since advanced.
+        issue_map.insert("RFC-001", 42, "2026-06-26T10:00:00Z", "I_node42");
+        issue_map.save(&root).unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+        let remote_body = make_issue_body("agent-7", "2026-03-27", "RFC body text.");
+
+        link_inner(
+            &root,
+            &store,
+            "RFC-001",
+            "implements",
+            "STORY-001",
+            &fs,
+            Some(&config),
+            || {
+                MockGhClient::new().with_view_issue(rfc_view_issue(
+                    42,
+                    "2026-06-26T11:00:00Z",
+                    &remote_body,
+                ))
+            },
+            MockGhMilestoneClient::new,
+            MockGhClient::new,
+        )
+        .expect("ordinary relation link must not abort on an out-of-band updated_at bump");
+
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/rfc/RFC-001-my-rfc.md")).unwrap();
+        assert!(
+            updated.contains("implements: STORY-001"),
+            "cache should carry the relation, got:\n{updated}"
+        );
+
+        let reloaded = IssueMap::load(&root).unwrap();
+        assert_eq!(
+            reloaded.get("RFC-001").unwrap().updated_at,
+            "2026-06-26T11:00:00Z",
+            "merge should record the remote's current updated_at"
+        );
+    }
+
+    // AC2: remote prose (and existing remote relations) survive a relation add --
+    // the merge re-serializes the REMOTE body, not the local cache.
+    #[test]
+    fn link_ordinary_relation_preserves_remote_prose() {
+        let root = tmp_root("link_ordinary_prose");
+        let config = gh_config_with_rfc_type();
+        seed_ordinary_cache(&root, None);
+
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
+        issue_map.save(&root).unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+        let remote_body = make_issue_body("agent-7", "2026-03-27", "REMOTE PROSE LINE");
+
+        let recorder = std::rc::Rc::new(MockGhClient::new().with_view_issue(rfc_view_issue(
+            42,
+            "2026-03-27T10:00:00Z",
+            &remote_body,
+        )));
+
+        link_inner(
+            &root,
+            &store,
+            "RFC-001",
+            "implements",
+            "STORY-001",
+            &fs,
+            Some(&config),
+            || recorder.clone(),
+            MockGhMilestoneClient::new,
+            MockGhClient::new,
+        )
+        .unwrap();
+
+        let pushed = recorder.last_edit_body.borrow();
+        let pushed = pushed.as_ref().expect("issue_edit should have been called");
+        assert!(
+            pushed.contains("REMOTE PROSE LINE"),
+            "merged body must preserve remote prose, got:\n{pushed}"
+        );
+        assert!(
+            pushed.contains("- implements: STORY-001"),
+            "merged body must carry the new relation, got:\n{pushed}"
+        );
+    }
+
+    // AC3: double-link is idempotent -- exactly one relation in the cache, and the
+    // second call performs no issue_edit (the relation already exists on remote).
+    #[test]
+    fn link_ordinary_relation_double_link_idempotent() {
+        let root = tmp_root("link_ordinary_double");
+        let config = gh_config_with_rfc_type();
+        seed_ordinary_cache(&root, None);
+
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
+        issue_map.save(&root).unwrap();
+
+        let fs = RealFileSystem;
+        let first_body = make_issue_body("agent-7", "2026-03-27", "RFC body text.");
+
+        let store = Store::load(&root, &config).unwrap();
+        link_inner(
+            &root,
+            &store,
+            "RFC-001",
+            "implements",
+            "STORY-001",
+            &fs,
+            Some(&config),
+            || {
+                MockGhClient::new().with_view_issue(rfc_view_issue(
+                    42,
+                    "2026-03-27T10:00:00Z",
+                    &first_body,
+                ))
+            },
+            MockGhMilestoneClient::new,
+            MockGhClient::new,
+        )
+        .unwrap();
+
+        // Second call: remote already carries the relation, so dedup short-circuits.
+        let second_body = {
+            let doc = crate::engine::document::DocMeta {
+                path: std::path::PathBuf::new(),
+                title: "My RFC".to_string(),
+                doc_type: crate::engine::document::DocType::new("rfc"),
+                status: crate::engine::document::Status::new("draft"),
+                author: "agent-7".to_string(),
+                date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
+                tags: vec![],
+                provenance: vec![],
+                related: vec![crate::engine::document::Relation {
+                    rel_type: RelationType::new("implements"),
+                    target: "STORY-001".to_string(),
+                }],
+                validate_ignore: false,
+                virtual_doc: false,
+                attributes: Default::default(),
+                id: "RFC-001".to_string(),
+            };
+            crate::engine::issue_body::serialize(&doc, "RFC body text.")
+        };
+
+        let recorder = std::rc::Rc::new(MockGhClient::new().with_view_issue(rfc_view_issue(
+            42,
+            "2026-03-27T10:00:00Z",
+            &second_body,
+        )));
+        let store = Store::load(&root, &config).unwrap();
+        link_inner(
+            &root,
+            &store,
+            "RFC-001",
+            "implements",
+            "STORY-001",
+            &fs,
+            Some(&config),
+            || recorder.clone(),
+            MockGhMilestoneClient::new,
+            MockGhClient::new,
+        )
+        .unwrap();
+
+        // No issue_edit recorded on the second call: dedup short-circuited.
+        assert!(
+            recorder.last_edit_body.borrow().is_none(),
+            "second link must record no issue_edit, got: {:?}",
+            recorder.last_edit_body.borrow()
+        );
+
+        // Exactly one relation in the cache.
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/rfc/RFC-001-my-rfc.md")).unwrap();
+        let count = updated.matches("implements: STORY-001").count();
+        assert_eq!(
+            count, 1,
+            "cache must carry exactly one relation, got:\n{updated}"
+        );
+    }
+
+    // AC4: a failed push (issue_edit Err) leaves the cache unchanged -- push-first
+    // ordering means the cache is only touched after a successful remote write.
+    #[test]
+    fn link_ordinary_relation_failed_push_leaves_cache_unchanged() {
+        let root = tmp_root("link_ordinary_fail");
+        let config = gh_config_with_rfc_type();
+        seed_ordinary_cache(&root, None);
+
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
+        issue_map.save(&root).unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+        let remote_body = make_issue_body("agent-7", "2026-03-27", "RFC body text.");
+
+        let result = link_inner(
+            &root,
+            &store,
+            "RFC-001",
+            "implements",
+            "STORY-001",
+            &fs,
+            Some(&config),
+            || {
+                MockGhClient::new()
+                    .with_view_issue(rfc_view_issue(42, "2026-03-27T10:00:00Z", &remote_body))
+                    .with_edit_fail()
+            },
+            MockGhMilestoneClient::new,
+            MockGhClient::new,
+        );
+
+        assert!(result.is_err(), "failed push must propagate an error");
+
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/rfc/RFC-001-my-rfc.md")).unwrap();
+        assert!(
+            !updated.contains("implements: STORY-001"),
+            "cache must be unchanged after a failed push, got:\n{updated}"
+        );
+    }
+
+    // AC6: ordinary unlink is symmetric -- survives an out-of-band updated_at bump,
+    // retain-drops the edge on the remote body while keeping remote prose, and
+    // removes the relation from the cache.
+    #[test]
+    fn unlink_ordinary_relation_survives_out_of_band_updated_at() {
+        let root = tmp_root("unlink_ordinary_oob");
+        let config = gh_config_with_rfc_type();
+        // Cache already carries the relation.
+        seed_ordinary_cache(&root, Some("related:\n- implements: STORY-001\n"));
+
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("RFC-001", 42, "2026-06-26T10:00:00Z", "I_node42");
+        issue_map.save(&root).unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+
+        // Remote body carries the relation AND prose to preserve.
+        let remote_body = {
+            let doc = crate::engine::document::DocMeta {
+                path: std::path::PathBuf::new(),
+                title: "My RFC".to_string(),
+                doc_type: crate::engine::document::DocType::new("rfc"),
+                status: crate::engine::document::Status::new("draft"),
+                author: "agent-7".to_string(),
+                date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
+                tags: vec![],
+                provenance: vec![],
+                related: vec![crate::engine::document::Relation {
+                    rel_type: RelationType::new("implements"),
+                    target: "STORY-001".to_string(),
+                }],
+                validate_ignore: false,
+                virtual_doc: false,
+                attributes: Default::default(),
+                id: "RFC-001".to_string(),
+            };
+            crate::engine::issue_body::serialize(&doc, "REMOTE PROSE LINE")
+        };
+
+        let recorder = std::rc::Rc::new(MockGhClient::new().with_view_issue(rfc_view_issue(
+            42,
+            "2026-06-26T11:00:00Z",
+            &remote_body,
+        )));
+
+        unlink_inner(
+            &root,
+            &store,
+            "RFC-001",
+            "implements",
+            "STORY-001",
+            &fs,
+            Some(&config),
+            || recorder.clone(),
+            MockGhMilestoneClient::new,
+            MockGhClient::new,
+        )
+        .expect("ordinary unlink must not abort on an out-of-band updated_at bump");
+
+        let pushed = recorder.last_edit_body.borrow();
+        let pushed = pushed.as_ref().expect("issue_edit should have been called");
+        assert!(
+            !pushed.contains("- implements: STORY-001"),
+            "merged body must drop the relation, got:\n{pushed}"
+        );
+        assert!(
+            pushed.contains("REMOTE PROSE LINE"),
+            "merged body must preserve remote prose, got:\n{pushed}"
+        );
+
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/rfc/RFC-001-my-rfc.md")).unwrap();
+        assert!(
+            !updated.contains("implements: STORY-001"),
+            "cache relation should be removed, got:\n{updated}"
         );
     }
 

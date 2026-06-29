@@ -136,6 +136,18 @@ fn watch_paths(root: &Path, config: &Config) -> Vec<PathBuf> {
     paths
 }
 
+// Whether the background poll should run for this project: true when any type is
+// backed by a GitHub store the poll refreshes (issues or milestones). Milestone-
+// only projects still need the poll so a milestone created after launch appears
+// live in the list.
+fn has_pollable_gh_types(config: &Config) -> bool {
+    config
+        .documents
+        .types
+        .iter()
+        .any(|t| t.store == StoreBackend::GithubIssues || t.store == StoreBackend::GithubMilestones)
+}
+
 // Rebuild the watcher over the current config's watch set. `notify` has no
 // reliable cross-reload "unwatch all" when the watched dirs change, so we
 // replace the watcher wholesale: a fresh watcher is constructed and the old one
@@ -376,30 +388,25 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     let (tx, rx) = crossbeam_channel::unbounded();
     app.event_tx = tx.clone();
 
-    let has_gh_types = config
-        .documents
-        .types
-        .iter()
-        .any(|t| t.store == StoreBackend::GithubIssues);
-
-    let shared_gh_store: Option<Arc<Mutex<GithubIssuesStore<GhCli>>>> = if has_gh_types {
-        let gh_config = config.documents.github.as_ref();
-        let repo = gh_config.and_then(|g| g.repo.clone());
-        repo.map(|repo| {
-            let root = app.store.root();
-            Arc::new(Mutex::new(GithubIssuesStore {
-                client: GhCli::new(),
-                root: root.to_path_buf(),
-                repo,
-                config: config.clone(),
-                issue_map: IssueMap::load(root)
-                    .unwrap_or_else(|_| serde_json::from_str("{}").unwrap()),
-                issue_cache: IssueCache::new(root),
-            }))
-        })
-    } else {
-        None
-    };
+    let shared_gh_store: Option<Arc<Mutex<GithubIssuesStore<GhCli>>>> =
+        if has_pollable_gh_types(&config) {
+            let gh_config = config.documents.github.as_ref();
+            let repo = gh_config.and_then(|g| g.repo.clone());
+            repo.map(|repo| {
+                let root = app.store.root();
+                Arc::new(Mutex::new(GithubIssuesStore {
+                    client: GhCli::new(),
+                    root: root.to_path_buf(),
+                    repo,
+                    config: config.clone(),
+                    issue_map: IssueMap::load(root)
+                        .unwrap_or_else(|_| serde_json::from_str("{}").unwrap()),
+                    issue_cache: IssueCache::new(root),
+                }))
+            })
+        } else {
+            None
+        };
 
     let cache_ttl = config
         .documents
@@ -528,6 +535,12 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                         .iter()
                         .filter(|t| t.store == StoreBackend::GithubIssues)
                         .collect();
+                    let milestone_types: Vec<_> = poll_config
+                        .documents
+                        .types
+                        .iter()
+                        .filter(|t| t.store == StoreBackend::GithubMilestones)
+                        .collect();
                     let all_type_names: Vec<String> = poll_config
                         .documents
                         .types
@@ -538,6 +551,30 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                     let mut guard = poll_store.lock().unwrap();
                     let store = &mut *guard;
                     let mut warnings: Vec<String> = Vec::new();
+                    // Milestones MUST be fetched before issues: an issue's native
+                    // milestone is surfaced as a forward `targets: MILESTONE-n`
+                    // relation by resolving the milestone number through the
+                    // issue-map, so the milestone has to be mapped first or the
+                    // lookup silently drops the relation on a fresh poll.
+                    for type_def in &milestone_types {
+                        match crate::engine::milestone_cache::fetch_milestones(
+                            &poll_root,
+                            type_def,
+                            &client,
+                            &store.repo,
+                            &mut store.issue_map,
+                        ) {
+                            Ok(result) => {
+                                warnings.extend(result.warnings.into_iter().map(|w| w.message));
+                            }
+                            Err(e) => {
+                                warnings.push(format!(
+                                    "milestone cache refresh failed for {}: {}",
+                                    type_def.name, e
+                                ));
+                            }
+                        }
+                    }
                     for type_def in &gh_types {
                         match store.issue_cache.fetch_all(
                             &poll_root,
@@ -767,6 +804,31 @@ mod tests {
             !paths.contains(&root.join("docs/missing")),
             "expected the missing dir excluded from the watch set, got {paths:?}"
         );
+    }
+
+    // Gate: a project whose only GitHub-backed type is github-milestones must
+    // still poll, so a milestone created after launch appears live in the list.
+    #[test]
+    fn milestone_only_project_is_pollable() {
+        let mut config = Config::default();
+        config.documents.types = vec![TypeDef::test_fixture(
+            "milestone",
+            StoreBackend::GithubMilestones,
+        )];
+
+        assert!(has_pollable_gh_types(&config));
+    }
+
+    // Gate: a project with no GitHub-backed types must not poll.
+    #[test]
+    fn project_without_gh_types_is_not_pollable() {
+        let mut config = Config::default();
+        config.documents.types = vec![
+            TypeDef::test_fixture("doc", StoreBackend::Filesystem),
+            TypeDef::test_fixture("note", StoreBackend::Filesystem),
+        ];
+
+        assert!(!has_pollable_gh_types(&config));
     }
 
     // Build an App over `root` with the given config, using a deterministic

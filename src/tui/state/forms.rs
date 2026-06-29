@@ -222,6 +222,7 @@ pub struct StatusPicker {
     /// The selected document's type lifecycle states, in declared order. The
     /// picker lists and writes back from this rather than a hardcoded set.
     pub states: Vec<String>,
+    pub error: Option<String>,
 }
 
 impl Default for StatusPicker {
@@ -237,6 +238,7 @@ impl StatusPicker {
             selected: 0,
             doc_path: PathBuf::new(),
             states: Vec::new(),
+            error: None,
         }
     }
 }
@@ -286,6 +288,11 @@ pub struct LinkEditor {
     pub query: String,
     pub results: Vec<PathBuf>,
     pub selected: usize,
+    pub error: Option<String>,
+    /// Set when the viewed doc lives in a store that can never be the source of
+    /// a relation (a `github-milestones` doc). The editor offers no relation
+    /// types and the overlay shows an empty-state message instead of candidates.
+    pub source_blocked: bool,
 }
 
 impl Default for LinkEditor {
@@ -303,6 +310,8 @@ impl LinkEditor {
             query: String::new(),
             results: Vec::new(),
             selected: 0,
+            error: None,
+            source_blocked: false,
         }
     }
 }

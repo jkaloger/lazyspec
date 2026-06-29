@@ -2896,6 +2896,7 @@ impl App {
         self.status_picker.active = false;
         self.status_picker.selected = 0;
         self.status_picker.doc_path = PathBuf::new();
+        self.status_picker.error = None;
     }
 
     pub fn confirm_status_change(&mut self, root: &Path, config: &Config) -> Result<()> {
@@ -2906,22 +2907,26 @@ impl App {
         let doc_path = self.status_picker.doc_path.clone();
         let doc_path_str = doc_path.to_string_lossy().to_string();
 
-        crate::cli::update::run_with_config(
+        if let Err(e) = crate::cli::update::run_with_config(
             root,
             &self.store,
             &doc_path_str,
             &[("status", &status.to_string())],
             Some(config),
-        )?;
+        ) {
+            self.status_picker.error = Some(e.to_string());
+            return Err(e);
+        }
         self.store.reload_file(root, &doc_path, &*self.fs)?;
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
         self.build_doc_tree();
+        self.status_picker.error = None;
         self.close_status_picker();
         Ok(())
     }
 
-    pub fn open_link_editor(&mut self) {
+    pub fn open_link_editor(&mut self, config: &Config) {
         let doc = if self.view_mode == ViewMode::Filters {
             match self.selected_filtered_doc() {
                 Some(d) => d,
@@ -2936,12 +2941,63 @@ impl App {
 
         let path = doc.path.clone();
 
+        // A `github-milestones` doc can never be the SOURCE of a relation, but it
+        // can be the TARGET of `targets` (`github_native = "milestone"`). So from
+        // a milestone doc we offer the inverse keyword(s) of every milestone-native
+        // relation (e.g. `targeted-by`): selecting one plus an issue flips
+        // direction in the core (link.rs:65), writing `targets: <milestone>` on the
+        // issue. A milestone whose native relation declares no inverse has no legal
+        // relation and falls back to the empty-state.
+        //
+        // A milestone-native relation may *only* originate on a github-issues doc
+        // (the core guard rejects any other source). So a non-issue, non-milestone
+        // source (e.g. a filesystem spec) is offered the global keyword list with
+        // every milestone-native keyword (both the forward name and its inverse)
+        // removed; a github-issues source keeps the full set.
+        let store = self.store_of_path(&path, config);
+        let is_milestone_doc = store == Some(StoreBackend::GithubMilestones);
+        let is_issue_doc = store == Some(StoreBackend::GithubIssues);
+        self.rel_types = if is_milestone_doc {
+            config
+                .relationships
+                .iter()
+                .filter(|r| r.github_native.as_deref() == Some("milestone"))
+                .filter_map(|r| r.inverse.clone())
+                .collect()
+        } else if is_issue_doc {
+            config.relationship_keywords()
+        } else {
+            let milestone_keywords: Vec<String> = config
+                .relationships
+                .iter()
+                .filter(|r| r.github_native.as_deref() == Some("milestone"))
+                .flat_map(|r| std::iter::once(r.name.clone()).chain(r.inverse.clone()))
+                .collect();
+            config
+                .relationship_keywords()
+                .into_iter()
+                .filter(|kw| !milestone_keywords.contains(kw))
+                .collect()
+        };
+        let source_blocked = !is_issue_doc && self.rel_types.is_empty();
+
         self.link_editor.active = true;
         self.link_editor.doc_path = path;
         self.link_editor.rel_type_index = 0;
         self.link_editor.query = String::new();
         self.link_editor.selected = 0;
-        self.update_link_search();
+        self.link_editor.error = None;
+        self.link_editor.source_blocked = source_blocked;
+        self.update_link_search(config);
+    }
+
+    /// Resolve the store backend of the doc at `path` via its declared type.
+    /// Returns `None` when the doc or its type is unknown.
+    fn store_of_path(&self, path: &Path, config: &Config) -> Option<StoreBackend> {
+        let doc = self.store.get(path)?;
+        config
+            .type_by_name(doc.doc_type.as_str())
+            .map(|t| t.store.clone())
     }
 
     pub fn close_link_editor(&mut self) {
@@ -2951,6 +3007,8 @@ impl App {
         self.link_editor.query = String::new();
         self.link_editor.results = Vec::new();
         self.link_editor.selected = 0;
+        self.link_editor.error = None;
+        self.link_editor.source_blocked = false;
     }
 
     pub fn open_provenance_editor(&mut self) {
@@ -3039,15 +3097,59 @@ impl App {
         Ok(())
     }
 
-    pub fn update_link_search(&mut self) {
+    pub fn update_link_search(&mut self, config: &Config) {
+        // A milestone-store viewed doc can never be a source, so it has no valid
+        // relation and offers no candidates regardless of the query.
+        if self.link_editor.source_blocked {
+            self.link_editor.results = Vec::new();
+            self.link_editor.selected = 0;
+            return;
+        }
+
         let query = self.link_editor.query.to_lowercase();
         let doc_path = self.link_editor.doc_path.clone();
+
+        // The selected relation and the viewed doc's store together fix which
+        // store a candidate may live in. A milestone-native relation (`targets`)
+        // bridges github-issues <-> github-milestones: from an issue source the
+        // candidate must be a milestone, from a milestone source (the
+        // `targeted-by` inverse) it must be an issue. Every ordinary relation
+        // excludes milestone docs (a milestone is only ever the target of
+        // `targets`). The selected keyword may be an inverse, so resolve it to
+        // its canonical relationship before reading `github_native`.
+        let is_milestone_rel = self
+            .rel_types
+            .get(self.link_editor.rel_type_index)
+            .and_then(|kw| config.resolve_relationship(kw).ok())
+            .and_then(|(name, _)| {
+                config
+                    .relationship_by_name(&name)
+                    .and_then(|r| r.github_native.as_deref())
+                    .map(str::to_owned)
+            })
+            == Some("milestone".to_string());
+        let source_is_milestone =
+            self.store_of_path(&doc_path, config) == Some(StoreBackend::GithubMilestones);
+        let required_store = is_milestone_rel.then_some({
+            if source_is_milestone {
+                StoreBackend::GithubIssues
+            } else {
+                StoreBackend::GithubMilestones
+            }
+        });
 
         let mut candidates: Vec<(String, PathBuf)> = self
             .store
             .all_docs()
             .iter()
             .filter(|d| d.path != doc_path)
+            .filter(|d| {
+                let store = config.type_by_name(d.doc_type.as_str()).map(|t| &t.store);
+                match &required_store {
+                    Some(want) => store == Some(want),
+                    None => store != Some(&StoreBackend::GithubMilestones),
+                }
+            })
             .filter(|d| {
                 if query.is_empty() {
                     return true;
@@ -3071,7 +3173,10 @@ impl App {
 
     pub(crate) fn confirm_link(&mut self, root: &Path, config: &Config) -> Result<()> {
         let selected = self.link_editor.selected;
-        let target_path = self.link_editor.results[selected].clone();
+        let target_path = match self.link_editor.results.get(selected) {
+            Some(p) => p.clone(),
+            None => return Ok(()),
+        };
         let from = self.link_editor.doc_path.to_string_lossy().to_string();
         let to = target_path.to_string_lossy().to_string();
         let rel_type = self
@@ -3081,7 +3186,7 @@ impl App {
             .unwrap_or("related-to")
             .to_string();
 
-        let outcome = crate::cli::link::link_with_config(
+        let outcome = match crate::cli::link::link_with_config(
             root,
             &self.store,
             &from,
@@ -3089,13 +3194,20 @@ impl App {
             &to,
             &*self.fs,
             Some(config),
-        )?;
+        ) {
+            Ok(o) => o,
+            Err(e) => {
+                self.link_editor.error = Some(e.to_string());
+                return Err(e);
+            }
+        };
         // Inverse keywords flip direction, so the modified file is the target,
         // not the viewed doc. Reload whichever file actually changed.
         self.store.reload_file(root, &outcome.source, &*self.fs)?;
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
         self.build_doc_tree();
+        self.link_editor.error = None;
         self.close_link_editor();
         Ok(())
     }
@@ -3333,7 +3445,7 @@ pub(crate) mod parity_seed {
     /// A bare `App` over a real, empty `Store` rooted at `tmp`, with the default
     /// config applied (7 doc types). The TempDir is returned so the root outlives
     /// the App (handlers that save touch `<root>/.lazyspec.toml`).
-    fn bare_app() -> (TempDir, App) {
+    pub(crate) fn bare_app() -> (TempDir, App) {
         let tmp = TempDir::new().unwrap();
         let store = Store::load(tmp.path(), &Config::default()).unwrap();
         let (tx, _rx) = crossbeam_channel::unbounded();
@@ -3460,7 +3572,7 @@ pub(crate) mod parity_seed {
     /// plus a child, so the rfc... actually the convention type carries the
     /// parent/child pair (so Space has a real parent to toggle); and a
     /// story+iteration relation chain off RFC-002 (so Relations/Graph can walk).
-    fn populate_docs(app: &mut App) {
+    pub(crate) fn populate_docs(app: &mut App) {
         let root = app.store.root.clone();
         let write = |rel: &str, contents: String| {
             let full = root.join(rel);
@@ -3564,7 +3676,7 @@ pub(crate) mod parity_seed {
                 // still matches >= 2 RFC docs, so j/k/Enter stay live too.
                 app.link_editor.query = "rfc".to_string();
                 app.link_editor.rel_type_index = 0;
-                app.update_link_search(); // results non-empty (other docs exist)
+                app.update_link_search(&config); // results non-empty (other docs exist)
                 app.link_editor.selected = 1; // middle: j and k both move
             }
             KeyContext::ProvenanceEditor => {
@@ -3776,6 +3888,7 @@ pub(crate) mod parity_seed {
 
 #[cfg(test)]
 mod tests {
+    use super::parity_seed::{bare_app, populate_docs};
     use super::*;
     use crate::engine::config::TypeDef;
     use crate::engine::store::Store;
@@ -4350,6 +4463,539 @@ mod tests {
         assert_eq!(app.status_picker.selected, 0);
     }
 
+    // AC7 (ITER-229 / STORY-170): a failing status change keeps the picker OPEN
+    // and records the error on the overlay state. `draft -> accepted` is not a
+    // declared edge in the default lifecycle, so the gate bails.
+    #[test]
+    fn confirm_status_change_failure_keeps_picker_open_with_error() {
+        let (_tmp, mut app) = bare_app();
+        populate_docs(&mut app);
+        let root = app.store.root.clone();
+        let config = Config::default();
+
+        app.status_picker.active = true;
+        app.status_picker.states = crate::engine::config::default_lifecycle().states;
+        app.status_picker.doc_path = PathBuf::from("docs/rfcs/RFC-001-a.md");
+        // index 2 = "accepted": no edge from draft, so the transition gate rejects.
+        app.status_picker.selected = 2;
+
+        let result = app.confirm_status_change(&root, &config);
+        assert!(result.is_err(), "an invalid transition must return Err");
+        assert!(
+            app.status_picker.active,
+            "the picker stays open on a failed status change"
+        );
+        assert!(
+            app.status_picker.error.is_some(),
+            "the failure is surfaced on status_picker.error"
+        );
+    }
+
+    // AC7: a succeeding status change closes the picker and clears any error.
+    // RFC-001 is seeded at `draft`; `draft -> review` (index 1) is a valid edge.
+    #[test]
+    fn confirm_status_change_success_closes_picker_and_clears_error() {
+        let (_tmp, mut app) = bare_app();
+        populate_docs(&mut app);
+        let root = app.store.root.clone();
+        let config = Config::default();
+
+        app.status_picker.active = true;
+        app.status_picker.states = crate::engine::config::default_lifecycle().states;
+        app.status_picker.doc_path = PathBuf::from("docs/rfcs/RFC-001-a.md");
+        app.status_picker.selected = 1; // draft -> review (a declared edge)
+                                        // A stale error must not survive a successful change.
+        app.status_picker.error = Some("stale".to_string());
+
+        let result = app.confirm_status_change(&root, &config);
+        assert!(result.is_ok(), "a valid transition succeeds: {result:?}");
+        assert!(
+            !app.status_picker.active,
+            "the picker closes on a successful status change"
+        );
+        assert!(
+            app.status_picker.error.is_none(),
+            "the error is cleared on success"
+        );
+    }
+
+    // AC7: a failing link keeps the link editor OPEN and records the error.
+    // A doc_path that resolves to no store doc makes `link_with_config` fail in
+    // `resolve_to_path`.
+    #[test]
+    fn confirm_link_failure_keeps_editor_open_with_error() {
+        let (_tmp, mut app) = bare_app();
+        populate_docs(&mut app);
+        let root = app.store.root.clone();
+        let config = Config::default();
+
+        app.link_editor.active = true;
+        // No such doc in the store: resolve_to_path errors before any write.
+        app.link_editor.doc_path = PathBuf::from("docs/rfcs/RFC-999-nope.md");
+        app.link_editor.results = vec![PathBuf::from("docs/rfcs/RFC-002-a.md")];
+        app.link_editor.selected = 0;
+        app.link_editor.rel_type_index = 0;
+
+        let result = app.confirm_link(&root, &config);
+        assert!(result.is_err(), "an unresolvable source must return Err");
+        assert!(
+            app.link_editor.active,
+            "the link editor stays open on a failed link"
+        );
+        assert!(
+            app.link_editor.error.is_some(),
+            "the failure is surfaced on link_editor.error"
+        );
+    }
+
+    // AC7: a succeeding link closes the editor and clears any error. RFC-001
+    // links to RFC-002 via the first relation keyword.
+    #[test]
+    fn confirm_link_success_closes_editor_and_clears_error() {
+        let (_tmp, mut app) = bare_app();
+        populate_docs(&mut app);
+        let root = app.store.root.clone();
+        let config = Config::default();
+
+        app.link_editor.active = true;
+        app.link_editor.doc_path = PathBuf::from("docs/rfcs/RFC-001-a.md");
+        app.link_editor.results = vec![PathBuf::from("docs/rfcs/RFC-002-a.md")];
+        app.link_editor.selected = 0;
+        app.link_editor.rel_type_index = 0;
+        app.link_editor.error = Some("stale".to_string());
+
+        let result = app.confirm_link(&root, &config);
+        assert!(result.is_ok(), "a resolvable link succeeds: {result:?}");
+        assert!(
+            !app.link_editor.active,
+            "the link editor closes on a successful link"
+        );
+        assert!(
+            app.link_editor.error.is_none(),
+            "the error is cleared on success"
+        );
+    }
+
+    /// Config for the store-aware milestone vocabulary tests (ITER-230): an
+    /// `issue` type in the github-issues store, a `milestone` type in the
+    /// github-milestones store, a `targets` rel mapped onto the `milestone`
+    /// native edge, and an ordinary `related-to` rel.
+    fn milestone_vocab_config() -> Config {
+        let mut config = Config::default();
+        let template = config.documents.types[0].clone();
+        config.documents.types = vec![
+            TypeDef {
+                name: "issue".to_string(),
+                plural: "issues".to_string(),
+                dir: "docs/issues".to_string(),
+                prefix: "ISSUE".to_string(),
+                store: StoreBackend::GithubIssues,
+                ..template.clone()
+            },
+            TypeDef {
+                name: "milestone".to_string(),
+                plural: "milestones".to_string(),
+                dir: "docs/milestones".to_string(),
+                prefix: "MILESTONE".to_string(),
+                store: StoreBackend::GithubMilestones,
+                ..template
+            },
+        ];
+        config.relationships = vec![
+            RelationshipDef {
+                name: "targets".to_string(),
+                inverse: None,
+                github_native: Some("milestone".to_string()),
+                traversal: None,
+            },
+            RelationshipDef {
+                name: "related-to".to_string(),
+                inverse: None,
+                github_native: None,
+                traversal: None,
+            },
+        ];
+        config
+    }
+
+    /// Insert a `DocMeta` of `doc_type` at `path` straight into the store, so the
+    /// milestone-vocab tests can stand up a mixed-store doc set without disk I/O.
+    fn insert_doc(app: &mut App, path: &str, id: &str, doc_type: &str) {
+        use chrono::NaiveDate;
+        let path = PathBuf::from(path);
+        app.store.docs.insert(
+            path.clone(),
+            DocMeta {
+                path,
+                title: id.to_string(),
+                doc_type: DocType::new(doc_type),
+                status: Status::new("draft"),
+                id: id.to_string(),
+                tags: Vec::new(),
+                provenance: Vec::new(),
+                author: String::new(),
+                date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+                related: Vec::new(),
+                validate_ignore: false,
+                virtual_doc: false,
+                attributes: Default::default(),
+            },
+        );
+    }
+
+    // AC7: the candidate list is scoped to the selected rel's github_native edge.
+    // A `targets` (github_native="milestone") rel offers ONLY milestone-store
+    // docs; any other rel EXCLUDES every milestone-store doc.
+    #[test]
+    fn update_link_search_scopes_candidates_by_selected_rel_native() {
+        let mut app = make_test_app(0);
+        let config = milestone_vocab_config();
+        app.apply_config(&config);
+
+        insert_doc(&mut app, "docs/issues/ISSUE-001.md", "ISSUE-001", "issue");
+        insert_doc(&mut app, "docs/issues/ISSUE-002.md", "ISSUE-002", "issue");
+        insert_doc(
+            &mut app,
+            "docs/milestones/MILESTONE-001.md",
+            "MILESTONE-001",
+            "milestone",
+        );
+
+        // Viewed doc is ISSUE-001 (a valid source). rel_types is the global list
+        // ["targets", "related-to"].
+        app.link_editor.doc_path = PathBuf::from("docs/issues/ISSUE-001.md");
+
+        // `targets` (index 0, github_native="milestone") -> only milestone docs.
+        let targets_index = app.rel_types.iter().position(|r| r == "targets").unwrap();
+        app.link_editor.rel_type_index = targets_index;
+        app.update_link_search(&config);
+        let ids: Vec<String> = ids_for_paths(&app, &app.link_editor.results);
+        assert_eq!(
+            ids,
+            vec!["MILESTONE-001".to_string()],
+            "a milestone-native rel must offer only github-milestones docs"
+        );
+
+        // `related-to` (ordinary) -> exclude all milestone docs.
+        let related_index = app
+            .rel_types
+            .iter()
+            .position(|r| r == "related-to")
+            .unwrap();
+        app.link_editor.rel_type_index = related_index;
+        app.update_link_search(&config);
+        let ids: Vec<String> = ids_for_paths(&app, &app.link_editor.results);
+        assert_eq!(
+            ids,
+            vec!["ISSUE-002".to_string()],
+            "an ordinary rel must exclude every github-milestones doc"
+        );
+    }
+
+    // From a github-milestones VIEWED doc the only legal relation is the inverse
+    // of the milestone-native rel (`targeted-by`), and its other end must be a
+    // github-issues doc. The candidate list must therefore exclude every
+    // non-issue doc (filesystem specs, other milestones), not merely every
+    // milestone -- this is the inverse-direction counterpart to the forward
+    // issue -> milestone scoping.
+    #[test]
+    fn update_link_search_from_milestone_source_offers_only_issues() {
+        let mut app = make_test_app(0);
+        let mut config = milestone_vocab_config();
+        config.relationships[0].inverse = Some("targeted-by".to_string());
+        let template = config.documents.types[0].clone();
+        config.documents.types.push(TypeDef {
+            name: "spec".to_string(),
+            plural: "specs".to_string(),
+            dir: "docs/specs".to_string(),
+            prefix: "SPEC".to_string(),
+            store: StoreBackend::Filesystem,
+            ..template
+        });
+        app.apply_config(&config);
+
+        insert_doc(&mut app, "docs/issues/ISSUE-001.md", "ISSUE-001", "issue");
+        insert_doc(&mut app, "docs/specs/SPEC-001.md", "SPEC-001", "spec");
+        insert_doc(
+            &mut app,
+            "docs/milestones/MILESTONE-002.md",
+            "MILESTONE-002",
+            "milestone",
+        );
+
+        app.doc_tree = vec![DocListNode {
+            path: PathBuf::from("docs/milestones/MILESTONE-001.md"),
+            id: "MILESTONE-001".to_string(),
+            title: "MILESTONE-001".to_string(),
+            doc_type: DocType::new("milestone"),
+            status: Status::new("draft"),
+            depth: 0,
+            is_parent: false,
+            is_virtual: false,
+            has_duplicate_id: false,
+        }];
+        insert_doc(
+            &mut app,
+            "docs/milestones/MILESTONE-001.md",
+            "MILESTONE-001",
+            "milestone",
+        );
+        app.selected_doc = 0;
+        app.view_mode = ViewMode::Types;
+
+        app.open_link_editor(&config);
+        assert_eq!(
+            app.rel_types,
+            vec!["targeted-by".to_string()],
+            "a milestone source offers only the milestone-native inverse"
+        );
+
+        let ids: Vec<String> = ids_for_paths(&app, &app.link_editor.results);
+        assert_eq!(
+            ids,
+            vec!["ISSUE-001".to_string()],
+            "a milestone source must offer only github-issues candidates"
+        );
+    }
+
+    // A github-milestones VIEWED doc whose native relation declares NO inverse
+    // has no legal relation (a milestone can never be a source, and without an
+    // inverse keyword it cannot host the flip-to-target flow either), so the
+    // editor yields an empty rel-type list and flags the empty-state. The
+    // `milestone_vocab_config` `targets` rel has `inverse: None`.
+    #[test]
+    fn open_link_editor_blocks_milestone_source_without_inverse() {
+        let mut app = make_test_app(0);
+        let config = milestone_vocab_config();
+        app.apply_config(&config);
+
+        insert_doc(
+            &mut app,
+            "docs/milestones/MILESTONE-001.md",
+            "MILESTONE-001",
+            "milestone",
+        );
+        insert_doc(&mut app, "docs/issues/ISSUE-001.md", "ISSUE-001", "issue");
+
+        // Point the viewed doc (doc_tree[selected_doc]) at the milestone.
+        app.doc_tree = vec![DocListNode {
+            path: PathBuf::from("docs/milestones/MILESTONE-001.md"),
+            id: "MILESTONE-001".to_string(),
+            title: "MILESTONE-001".to_string(),
+            doc_type: DocType::new("milestone"),
+            status: Status::new("draft"),
+            depth: 0,
+            is_parent: false,
+            is_virtual: false,
+            has_duplicate_id: false,
+        }];
+        app.selected_doc = 0;
+        app.view_mode = ViewMode::Types;
+
+        app.open_link_editor(&config);
+
+        assert!(
+            app.rel_types.is_empty(),
+            "a milestone viewed doc offers no relation types"
+        );
+        assert!(
+            app.link_editor.source_blocked,
+            "the empty-state flag is set so the overlay shows the message"
+        );
+        assert!(
+            app.link_editor.results.is_empty(),
+            "no candidate is offered when the source is blocked"
+        );
+
+        // Re-opening against a non-milestone doc restores the global list.
+        app.doc_tree = vec![DocListNode {
+            path: PathBuf::from("docs/issues/ISSUE-001.md"),
+            id: "ISSUE-001".to_string(),
+            title: "ISSUE-001".to_string(),
+            doc_type: DocType::new("issue"),
+            status: Status::new("draft"),
+            depth: 0,
+            is_parent: false,
+            is_virtual: false,
+            has_duplicate_id: false,
+        }];
+        app.open_link_editor(&config);
+        assert!(
+            !app.link_editor.source_blocked,
+            "a non-milestone source is not blocked"
+        );
+        assert_eq!(
+            app.rel_types,
+            config.relationship_keywords(),
+            "the global rel-type list is restored for a non-milestone open"
+        );
+    }
+
+    // A non-issue, non-milestone VIEWED doc (a filesystem spec) can never be the
+    // source of the milestone-native `targets` edge (the core guard rejects it),
+    // so the editor must not even offer that keyword. An issue source keeps it.
+    #[test]
+    fn open_link_editor_hides_milestone_keyword_for_non_issue_source() {
+        let mut app = make_test_app(0);
+        let mut config = milestone_vocab_config();
+        // Give the milestone rel an inverse too, to confirm inverse keywords of
+        // milestone-native rels are also withheld from a non-issue source.
+        config.relationships[0].inverse = Some("targeted-by".to_string());
+        let template = config.documents.types[0].clone();
+        config.documents.types.push(TypeDef {
+            name: "spec".to_string(),
+            plural: "specs".to_string(),
+            dir: "docs/specs".to_string(),
+            prefix: "SPEC".to_string(),
+            store: StoreBackend::Filesystem,
+            ..template
+        });
+        app.apply_config(&config);
+
+        insert_doc(&mut app, "docs/specs/SPEC-001.md", "SPEC-001", "spec");
+        insert_doc(&mut app, "docs/issues/ISSUE-001.md", "ISSUE-001", "issue");
+
+        let view = |app: &mut App, path: &str, id: &str, doc_type: &str| {
+            app.doc_tree = vec![DocListNode {
+                path: PathBuf::from(path),
+                id: id.to_string(),
+                title: id.to_string(),
+                doc_type: DocType::new(doc_type),
+                status: Status::new("draft"),
+                depth: 0,
+                is_parent: false,
+                is_virtual: false,
+                has_duplicate_id: false,
+            }];
+            app.selected_doc = 0;
+            app.view_mode = ViewMode::Types;
+        };
+
+        view(&mut app, "docs/specs/SPEC-001.md", "SPEC-001", "spec");
+        app.open_link_editor(&config);
+        assert!(
+            !app.rel_types.iter().any(|r| r == "targets"),
+            "a filesystem source must not be offered the milestone-native keyword"
+        );
+        assert!(
+            !app.rel_types.iter().any(|r| r == "targeted-by"),
+            "a filesystem source must not be offered a milestone-native inverse"
+        );
+        assert!(
+            app.rel_types.iter().any(|r| r == "related-to"),
+            "ordinary keywords are still offered to a filesystem source"
+        );
+        assert!(
+            !app.link_editor.source_blocked,
+            "a filesystem source with usable keywords is not blocked"
+        );
+
+        view(&mut app, "docs/issues/ISSUE-001.md", "ISSUE-001", "issue");
+        app.open_link_editor(&config);
+        assert!(
+            app.rel_types.iter().any(|r| r == "targets"),
+            "a github-issues source keeps the milestone-native keyword"
+        );
+    }
+
+    // From a milestone VIEWED doc whose native `targets` rel declares an inverse,
+    // the editor offers that inverse (`targeted-by`) so the user can link an issue
+    // *to* this milestone; confirm flips direction and writes the edge on the
+    // issue. Candidates are the issues (the milestone can only be a target).
+    #[test]
+    fn open_link_editor_offers_inverse_on_milestone() {
+        let mut app = make_test_app(0);
+        let mut config = milestone_vocab_config();
+        // Declare the milestone rel's inverse, mirroring the real `.lazyspec.toml`.
+        config.relationships[0].inverse = Some("targeted-by".to_string());
+        app.apply_config(&config);
+
+        insert_doc(
+            &mut app,
+            "docs/milestones/MILESTONE-001.md",
+            "MILESTONE-001",
+            "milestone",
+        );
+        insert_doc(&mut app, "docs/issues/ISSUE-001.md", "ISSUE-001", "issue");
+
+        app.doc_tree = vec![DocListNode {
+            path: PathBuf::from("docs/milestones/MILESTONE-001.md"),
+            id: "MILESTONE-001".to_string(),
+            title: "MILESTONE-001".to_string(),
+            doc_type: DocType::new("milestone"),
+            status: Status::new("draft"),
+            depth: 0,
+            is_parent: false,
+            is_virtual: false,
+            has_duplicate_id: false,
+        }];
+        app.selected_doc = 0;
+        app.view_mode = ViewMode::Types;
+
+        app.open_link_editor(&config);
+
+        assert_eq!(
+            app.rel_types,
+            vec!["targeted-by".to_string()],
+            "a milestone doc offers the inverse of its native relation"
+        );
+        assert!(
+            !app.link_editor.source_blocked,
+            "the inverse-relation flow is available, so the editor is not blocked"
+        );
+        assert_eq!(
+            app.link_editor.results,
+            vec![PathBuf::from("docs/issues/ISSUE-001.md")],
+            "candidates are the issues that can target this milestone"
+        );
+    }
+
+    // AC9: a core-guard rejection surfaces on link_editor.error and the editor
+    // stays open with no panic and no partial write. Viewed github-issues doc +
+    // ordinary rel + a milestone target is rejected by validate_milestone_relation.
+    #[test]
+    fn confirm_link_milestone_guard_rejection_surfaces_error() {
+        let mut app = make_test_app(0);
+        let config = milestone_vocab_config();
+        app.apply_config(&config);
+        let root = app.store.root.clone();
+
+        insert_doc(&mut app, "docs/issues/ISSUE-001.md", "ISSUE-001", "issue");
+        insert_doc(
+            &mut app,
+            "docs/milestones/MILESTONE-001.md",
+            "MILESTONE-001",
+            "milestone",
+        );
+
+        app.link_editor.active = true;
+        app.link_editor.doc_path = PathBuf::from("docs/issues/ISSUE-001.md");
+        app.link_editor.results = vec![PathBuf::from("docs/milestones/MILESTONE-001.md")];
+        app.link_editor.selected = 0;
+        // The ordinary `related-to` rel against a milestone target is illegal.
+        app.link_editor.rel_type_index = app
+            .rel_types
+            .iter()
+            .position(|r| r == "related-to")
+            .unwrap();
+
+        let result = app.confirm_link(&root, &config);
+        assert!(result.is_err(), "the guard must reject the illegal triple");
+        assert!(
+            app.link_editor.active,
+            "the editor stays open on a guard rejection"
+        );
+        let err = app
+            .link_editor
+            .error
+            .as_deref()
+            .expect("the guard message is surfaced on link_editor.error");
+        assert!(
+            err.contains("milestone docs can only be targeted by `targets`"),
+            "the surfaced error carries the core guard message, got: {err}"
+        );
+    }
+
     #[test]
     fn open_status_picker_offers_only_valid_moves_from_current() {
         use crate::engine::document::DocMeta;
@@ -4742,6 +5388,47 @@ mod tests {
             app.rel_types,
             vec!["derives-from".to_string(), "derived-by".to_string()],
             "rel_types must reflect the reloaded [[relationships]] (name then inverse)"
+        );
+    }
+
+    #[test]
+    fn link_editor_types_jk_into_query() {
+        let mut app = make_test_app(0);
+        let root = PathBuf::from(".");
+        let config = Config::default();
+        app.link_editor.active = true;
+
+        for c in ['j', 'a', 'c', 'k'] {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::NONE, &root, &config);
+        }
+
+        assert_eq!(
+            app.link_editor.query, "jack",
+            "j/k must type into the search query, not navigate the result list"
+        );
+    }
+
+    #[test]
+    fn link_editor_left_right_cycle_rel_type() {
+        let mut app = make_test_app(0);
+        let root = PathBuf::from(".");
+        let config = Config::default();
+        app.rel_types = vec![
+            "implements".to_string(),
+            "implemented-by".to_string(),
+            "related-to".to_string(),
+        ];
+        app.link_editor.active = true;
+        app.link_editor.rel_type_index = 0;
+
+        app.handle_key(KeyCode::Right, KeyModifiers::NONE, &root, &config);
+        assert_eq!(app.link_editor.rel_type_index, 1, "Right cycles forward");
+
+        app.handle_key(KeyCode::Left, KeyModifiers::NONE, &root, &config);
+        app.handle_key(KeyCode::Left, KeyModifiers::NONE, &root, &config);
+        assert_eq!(
+            app.link_editor.rel_type_index, 2,
+            "Left wraps backward past index 0"
         );
     }
 

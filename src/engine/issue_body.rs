@@ -476,6 +476,38 @@ mod tests {
         assert_eq!(meta.related[1].target, "RFC-010");
     }
 
+    // AC2 (round-trip): deserializing a remote body, pushing a new relation, then
+    // re-serializing keeps the original prose and carries both relations -- the
+    // shape `merge_relation_to_remote` relies on.
+    #[test]
+    fn round_trip_relation_add_preserves_prose() {
+        let doc = sample_doc();
+        let serialized = serialize(&doc, "REMOTE PROSE LINE");
+        let ctx = sample_context();
+
+        let (mut meta, prose) = deserialize(&serialized, &ctx).unwrap();
+        assert_eq!(prose, "REMOTE PROSE LINE");
+
+        meta.related.push(Relation {
+            rel_type: RelationType::new("blocks"),
+            target: "RFC-010".to_string(),
+        });
+
+        let re_serialized = serialize(&meta, &prose);
+        assert!(
+            re_serialized.contains("REMOTE PROSE LINE"),
+            "got: {re_serialized}"
+        );
+        assert!(
+            re_serialized.contains("- implements: STORY-075"),
+            "got: {re_serialized}"
+        );
+        assert!(
+            re_serialized.contains("- blocks: RFC-010"),
+            "got: {re_serialized}"
+        );
+    }
+
     #[test]
     fn round_trip_with_no_relations() {
         let mut doc = sample_doc();

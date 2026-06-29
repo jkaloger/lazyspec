@@ -1155,6 +1155,7 @@ pub mod test_support {
         pub view_issue: RefCell<Option<GhIssue>>,
         pub create_result: Option<GhIssue>,
         pub label_create_fail: bool,
+        pub edit_fail: bool,
         pub closed: Cell<bool>,
         pub reopened: Cell<bool>,
         pub last_edit_title: RefCell<Option<String>>,
@@ -1190,6 +1191,7 @@ pub mod test_support {
                 view_issue: RefCell::new(None),
                 create_result: None,
                 label_create_fail: false,
+                edit_fail: false,
                 closed: Cell::new(false),
                 reopened: Cell::new(false),
                 last_edit_title: RefCell::new(None),
@@ -1246,6 +1248,11 @@ pub mod test_support {
 
         pub fn with_label_create_fail(mut self) -> Self {
             self.label_create_fail = true;
+            self
+        }
+
+        pub fn with_edit_fail(mut self) -> Self {
+            self.edit_fail = true;
             self
         }
     }
@@ -1334,6 +1341,9 @@ pub mod test_support {
             _labels_add: &[String],
             labels_remove: &[String],
         ) -> Result<()> {
+            if self.edit_fail {
+                bail!("simulated issue_edit failure");
+            }
             *self.last_edit_title.borrow_mut() = title.map(|s| s.to_string());
             *self.last_edit_body.borrow_mut() = body.map(|s| s.to_string());
             *self.last_edit_labels_remove.borrow_mut() = labels_remove.to_vec();
@@ -1560,9 +1570,76 @@ pub mod test_support {
         }
     }
 
-    /// Delegating impl so a shared `Rc<MockGhClient>` can be moved into an
+    /// Delegating impls so a shared `Rc<MockGhClient>` can be moved into an
     /// `FnOnce` factory while the original handle remains inspectable after
-    /// (mirrors the milestone-client Rc impl).
+    /// (mirrors the milestone-client Rc impl). The issue reader/writer impls let
+    /// ordinary-relation tests inspect the recorded `issue_edit` body once the
+    /// client has been consumed by `GithubIssuesStore`.
+    impl GhIssueReader for std::rc::Rc<MockGhClient> {
+        fn issue_list(
+            &self,
+            repo: &str,
+            labels: &[String],
+            json_fields: &[String],
+            limit: Option<u64>,
+        ) -> Result<Vec<GhIssue>> {
+            (**self).issue_list(repo, labels, json_fields, limit)
+        }
+        fn issue_view(&self, repo: &str, number: u64) -> Result<GhIssue> {
+            (**self).issue_view(repo, number)
+        }
+        fn issue_comments(&self, repo: &str, number: u64) -> Result<Vec<GhComment>> {
+            (**self).issue_comments(repo, number)
+        }
+    }
+
+    impl GhIssueWriter for std::rc::Rc<MockGhClient> {
+        fn issue_create(
+            &self,
+            repo: &str,
+            title: &str,
+            body: &str,
+            labels: &[String],
+        ) -> Result<GhIssue> {
+            (**self).issue_create(repo, title, body, labels)
+        }
+        fn issue_edit(
+            &self,
+            repo: &str,
+            number: u64,
+            title: Option<&str>,
+            body: Option<&str>,
+            labels_add: &[String],
+            labels_remove: &[String],
+        ) -> Result<()> {
+            (**self).issue_edit(repo, number, title, body, labels_add, labels_remove)
+        }
+        fn issue_close(&self, repo: &str, number: u64) -> Result<()> {
+            (**self).issue_close(repo, number)
+        }
+        fn issue_reopen(&self, repo: &str, number: u64) -> Result<()> {
+            (**self).issue_reopen(repo, number)
+        }
+        fn label_create(
+            &self,
+            repo: &str,
+            name: &str,
+            description: &str,
+            color: &str,
+        ) -> Result<()> {
+            (**self).label_create(repo, name, description, color)
+        }
+        fn label_ensure(
+            &self,
+            repo: &str,
+            name: &str,
+            description: &str,
+            color: &str,
+        ) -> Result<()> {
+            (**self).label_ensure(repo, name, description, color)
+        }
+    }
+
     impl GhGraphql for std::rc::Rc<MockGhClient> {
         fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
             (**self).graphql(query, vars)

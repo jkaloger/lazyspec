@@ -233,6 +233,91 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
         Ok(())
     }
 
+    /// Merge a single ordinary (non-native) issue-to-issue relation delta into
+    /// the remote issue body WITHOUT the optimistic body lock.
+    ///
+    /// Ordinary relations (`implements`, `blocks`, ...) round-trip through the
+    /// GitHub issue body's `related:` block. A whole-cache [`Self::push_cache`]
+    /// would clobber the remote body (prose + any remote-added relations) with
+    /// stale local cache, and its [`Self::check_lock`] rejects on an unrelated
+    /// out-of-band `updated_at` bump (e.g. a remote comment) even though the
+    /// relation edit does not contend the body.
+    ///
+    /// Instead this reads the remote body ONCE, applies just the `(rel, target)`
+    /// delta to its `related` (insert-if-absent on `set`, retain-drop on unset),
+    /// preserves the remote prose, and pushes the merged body. `set == true`
+    /// with the relation already present is a no-op (dedup): no `issue_edit`.
+    /// Like [`Self::resync_after_native_edge`] it records the remote's current
+    /// `updated_at` and never rejects on it.
+    pub fn merge_relation_to_remote(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        rel_str: &str,
+        target_id: &str,
+        set: bool,
+    ) -> Result<()> {
+        let issue_number = self
+            .issue_map
+            .get(doc_id)
+            .map(|e| e.issue_number)
+            .ok_or_else(|| anyhow::anyhow!("{} not found in issue map", doc_id))?;
+
+        let remote_issue = self.client.issue_view(&self.repo, issue_number)?;
+
+        let ctx = issue_body::IssueContext {
+            title: remote_issue.title.clone(),
+            labels: remote_issue.labels.iter().map(|l| l.name.clone()).collect(),
+            is_open: remote_issue.state == "OPEN",
+            known_types: self
+                .config
+                .documents
+                .types
+                .iter()
+                .map(|t| t.name.clone())
+                .collect(),
+            default_type: type_def.name.clone(),
+            attr_defs: type_def.attributes.clone(),
+        };
+        let (mut remote_meta, remote_prose) = issue_body::deserialize(&remote_issue.body, &ctx)?;
+
+        let rel_type = crate::engine::document::RelationType::new(rel_str);
+        let already_present = remote_meta
+            .related
+            .iter()
+            .any(|r| r.rel_type == rel_type && r.target == target_id);
+
+        if set {
+            // Dedup: an already-present relation is a no-op -- no remote write.
+            if already_present {
+                return Ok(());
+            }
+            remote_meta.related.push(crate::engine::document::Relation {
+                rel_type,
+                target: target_id.to_string(),
+            });
+        } else {
+            remote_meta
+                .related
+                .retain(|r| !(r.rel_type == rel_type && r.target == target_id));
+        }
+
+        let new_body = issue_body::serialize(&remote_meta, &remote_prose);
+        self.client
+            .issue_edit(&self.repo, issue_number, None, Some(&new_body), &[], &[])?;
+
+        self.issue_map.insert(
+            doc_id,
+            issue_number,
+            &remote_issue.updated_at,
+            &remote_issue.id,
+        );
+        self.issue_map.save(&self.root)?;
+        self.issue_cache.touch_lock(doc_id);
+
+        Ok(())
+    }
+
     /// The currently-mapped GraphQL node id for `doc_id`, or empty when unknown.
     /// Used to preserve the node id across re-inserts that only clear
     /// `updated_at`.
@@ -2909,6 +2994,131 @@ mod tests {
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("modified on GitHub"), "got: {}", msg);
+    }
+
+    // §1: merge_relation_to_remote merges a single relation into the remote body
+    // WITHOUT the optimistic lock -- a stale-then-advanced updated_at must not
+    // abort, the remote prose is preserved, and the issue map records the
+    // remote's current timestamp (never cleared).
+    #[test]
+    fn merge_relation_to_remote_no_lock_preserves_prose() {
+        let root = tmp_root("merge_rel_no_lock");
+        let body = make_issue_body("agent-7", "2026-03-27", None, "REMOTE PROSE LINE");
+        let view_issue = GhIssue {
+            number: 42,
+            id: "I_node42".to_string(),
+            url: String::new(),
+            title: "My RFC".to_string(),
+            body,
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T11:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+            issue_type: None,
+            milestone: None,
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        // Stale baseline; the merge path must not reject on it.
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
+
+        let mut gh_store = GithubIssuesStore {
+            client,
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        gh_store
+            .merge_relation_to_remote(&td, "RFC-001", "implements", "STORY-001", true)
+            .expect("merge must not reject on a stale updated_at");
+
+        let pushed = gh_store.client.last_edit_body.borrow();
+        let pushed = pushed.as_ref().expect("issue_edit should run");
+        assert!(pushed.contains("REMOTE PROSE LINE"), "got:\n{pushed}");
+        assert!(pushed.contains("- implements: STORY-001"), "got:\n{pushed}");
+
+        // Records the remote's current updated_at (not cleared like push_cache).
+        assert_eq!(
+            gh_store.issue_map.get("RFC-001").unwrap().updated_at,
+            "2026-03-27T11:00:00Z"
+        );
+    }
+
+    // §1 (dedup): merging an already-present relation is a no-op -- no issue_edit.
+    #[test]
+    fn merge_relation_to_remote_dedup_no_edit() {
+        use crate::engine::document::{Relation, RelationType};
+        let root = tmp_root("merge_rel_dedup");
+        let existing = Relation {
+            rel_type: RelationType::new("implements"),
+            target: "STORY-001".to_string(),
+        };
+        let mut meta = DocMeta {
+            path: PathBuf::new(),
+            title: "My RFC".to_string(),
+            doc_type: DocType::new("rfc"),
+            status: Status::new("draft"),
+            author: "agent-7".to_string(),
+            date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![existing],
+            validate_ignore: false,
+            virtual_doc: false,
+            attributes: Default::default(),
+            id: "RFC-001".to_string(),
+        };
+        meta.tags = vec![];
+        let body = issue_body::serialize(&meta, "prose");
+        let view_issue = GhIssue {
+            number: 42,
+            id: "I_node42".to_string(),
+            url: String::new(),
+            title: "My RFC".to_string(),
+            body,
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T11:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+            issue_type: None,
+            milestone: None,
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
+
+        let mut gh_store = GithubIssuesStore {
+            client,
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        gh_store
+            .merge_relation_to_remote(&td, "RFC-001", "implements", "STORY-001", true)
+            .unwrap();
+
+        assert!(
+            gh_store.client.last_edit_body.borrow().is_none(),
+            "already-present relation must not trigger an issue_edit"
+        );
     }
 
     #[test]

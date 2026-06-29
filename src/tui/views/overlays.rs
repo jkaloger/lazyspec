@@ -530,6 +530,13 @@ pub fn draw_status_picker(f: &mut Frame, app: &App) {
         })
         .collect();
 
+    if let Some(ref err) = app.status_picker.error {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", err),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "[j/k] [Enter] [Esc]",
@@ -605,17 +612,31 @@ pub fn draw_link_editor(f: &mut Frame, app: &App) {
         )));
     }
 
-    if editor.results.is_empty() {
+    if editor.source_blocked {
+        lines.push(Line::from(Span::styled(
+            "  milestone docs cannot start a relation",
+            Style::default().fg(Color::Yellow),
+        )));
+    } else if editor.results.is_empty() {
         lines.push(Line::from(Span::styled(
             "  (no matches)",
             Style::default().fg(Color::DarkGray),
         )));
     }
 
+    if let Some(ref err) = editor.error {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", err),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("  Tab", Style::default().fg(Color::DarkGray)),
+        Span::styled("  ←/→", Style::default().fg(Color::DarkGray)),
         Span::raw(" type  "),
+        Span::styled("↑/↓", Style::default().fg(Color::DarkGray)),
+        Span::raw(" pick  "),
         Span::styled("Enter", Style::default().fg(Color::DarkGray)),
         Span::raw(" link  "),
         Span::styled("Esc", Style::default().fg(Color::DarkGray)),

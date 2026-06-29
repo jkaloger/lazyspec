@@ -71,6 +71,19 @@ pub(super) fn format_human(output: &FixOutput, dry_run: bool) -> String {
                 ));
             }
         }
+        for (rel_type, target) in &r.deduped {
+            if dry_run {
+                result.push_str(&format!(
+                    "Would drop duplicate relation in {}: {} {}\n",
+                    r.path, rel_type, target
+                ));
+            } else {
+                result.push_str(&format!(
+                    "Dropped duplicate relation in {}: {} {}\n",
+                    r.path, rel_type, target
+                ));
+            }
+        }
     }
 
     result
