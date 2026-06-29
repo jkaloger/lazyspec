@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>lazyspec graph</title>
+</head>
+<body>
+<a href="/">&larr; all documents</a>
+<h1>lazyspec graph</h1>
+{% if roots.is_empty() %}<p class="graph-empty">No documents.</p>{% else %}
+<ul class="graph-tree">
+{% for node in roots %}{{ node.render().unwrap()|safe }}{% endfor %}
+</ul>
+{% endif %}
+</body>
+</html>

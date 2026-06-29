@@ -6,7 +6,8 @@
 use askama::Template;
 
 use crate::engine::document::DocMeta;
-use crate::engine::store::Store;
+use crate::engine::graph::GraphNode;
+use crate::engine::store::{extract_id_from_name, Store};
 
 /// One row in the document list: id, title, status.
 pub struct DocRow {
@@ -144,6 +145,83 @@ impl DocPage {
 #[template(path = "not_found.html")]
 pub struct NotFoundPage {
     pub id: String,
+}
+
+/// One node in the rendered `/graph` tree: the doc identity plus its nested
+/// children. Built from the engine's flat `Vec<GraphNode>` via [`GraphTreeNode::nest`].
+/// A diamond re-emission is a child row with no children of its own (its subtree
+/// was drawn under the first parent), so the depth-based nesting drops it as a
+/// leaf — matching the TUI's "plain doc row, no subtree" rule.
+#[derive(Template)]
+#[template(path = "graph_node.html")]
+pub struct GraphTreeNode {
+    pub id: String,
+    pub title: String,
+    pub doc_type: String,
+    pub status: String,
+    pub depth: usize,
+    pub related: Vec<String>,
+    pub children: Vec<GraphTreeNode>,
+}
+
+impl GraphTreeNode {
+    /// The doc id for a flattened node, derived from its path file stem (the same
+    /// derivation the engine's graph tests use).
+    fn id_of(node: &GraphNode) -> String {
+        node.path
+            .file_stem()
+            .map(|s| extract_id_from_name(&s.to_string_lossy()))
+            .unwrap_or_default()
+    }
+
+    /// Rebuild the nested tree from the engine's depth-tagged flat order. The flat
+    /// list is a pre-order DFS where `depth` increases by one when descending into
+    /// a child and drops back when a subtree ends; this folds it back into nested
+    /// `children` without re-running any ordering (the engine already fixed the
+    /// order, diamond/cycle handling included).
+    pub fn nest(flat: &[GraphNode]) -> Vec<GraphTreeNode> {
+        let mut roots: Vec<GraphTreeNode> = Vec::new();
+        // Stack of indices into the path from a root down to the last-pushed node,
+        // by depth. `stack[d]` is the most recent node at depth `d` on the current
+        // branch, addressed by the chain of child indices to reach it.
+        let mut path: Vec<usize> = Vec::new();
+
+        for node in flat {
+            let view = GraphTreeNode {
+                id: Self::id_of(node),
+                title: node.title.clone(),
+                doc_type: node.doc_type.to_string(),
+                status: node.status.to_string(),
+                depth: node.depth,
+                related: node.related.clone(),
+                children: Vec::new(),
+            };
+
+            path.truncate(node.depth);
+
+            if node.depth == 0 {
+                roots.push(view);
+                path.push(roots.len() - 1);
+            } else {
+                let mut cur = &mut roots[path[0]];
+                for &idx in &path[1..node.depth] {
+                    cur = &mut cur.children[idx];
+                }
+                cur.children.push(view);
+                path.push(cur.children.len() - 1);
+            }
+        }
+
+        roots
+    }
+}
+
+/// The `/graph` page: the relationship forest rendered as a topologically-sorted
+/// nested `<ul>` tree, ordered by `GraphSort::default()` (RFC-052 / STORY-179).
+#[derive(Template)]
+#[template(path = "graph_page.html")]
+pub struct GraphPage {
+    pub roots: Vec<GraphTreeNode>,
 }
 
 /// Render a markdown `body` to an HTML string via `pulldown-cmark`. Callers must

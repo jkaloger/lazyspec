@@ -322,6 +322,126 @@ async fn list_page_has_search_input_targeting_search_route() {
     );
 }
 
+// --- GET /graph (STORY-179 / ITERATION-237) ----------------------------------
+
+/// The `data-id` values in render (document) order across the whole graph tree.
+fn graph_ids_in_order(body: &str) -> Vec<String> {
+    ids_in_order(body)
+}
+
+#[tokio::test]
+async fn graph_renders_nested_ul_tree_in_default_sort_order() {
+    // A single implements chain: RFC-001 -> STORY-001 -> ITERATION-001 plus a
+    // second root RFC-002 -> STORY-002. GraphSort::default() (path-asc) orders
+    // roots and siblings by path, so RFC-001's subtree precedes RFC-002's.
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-base.md", "Base", "draft");
+    fixture.write_rfc("RFC-002-other.md", "Other", "draft");
+    fixture.write_story("STORY-001-mid.md", "Mid", "draft", Some("RFC-001"));
+    fixture.write_story("STORY-002-side.md", "Side", "draft", Some("RFC-002"));
+    fixture.write_iteration("ITERATION-001-leaf.md", "Leaf", "draft", Some("STORY-001"));
+
+    let (status, body) = get(store(&fixture), "/graph").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<!DOCTYPE html>"), "expected full HTML page");
+    // A nested <ul> tree is rendered (at least the root list and one nested list).
+    assert!(
+        body.matches("<ul").count() >= 2,
+        "expected a nested <ul> tree:\n{body}"
+    );
+    // Topologically-sorted, default (path) order.
+    assert_eq!(
+        graph_ids_in_order(&body),
+        vec![
+            "RFC-001".to_string(),
+            "STORY-001".to_string(),
+            "ITERATION-001".to_string(),
+            "RFC-002".to_string(),
+            "STORY-002".to_string(),
+        ],
+        "graph tree must be ordered by GraphSort::default():\n{body}"
+    );
+    // Nesting: the iteration's depth attribute reflects its tree level.
+    assert!(
+        body.contains("data-id=\"ITERATION-001\" data-depth=\"2\""),
+        "leaf should be nested at depth 2:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn graph_diamond_does_not_re_emit_shared_subtree() {
+    // RFC-001 root; STORY-001 and STORY-002 both implement it; ITERATION-001
+    // implements BOTH stories (the diamond). The shared leaf is drawn in full
+    // under STORY-001, then repeated as a plain row under STORY-002 WITHOUT its
+    // subtree re-emitted. Here the leaf has no children, so "no duplicate-subtree
+    // recursion" shows as: ITERATION-001 appears exactly twice and never spawns a
+    // second nested <ul>.
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-base.md", "Base", "draft");
+    fixture.write_story("STORY-001-left.md", "Left", "draft", Some("RFC-001"));
+    fixture.write_story("STORY-002-right.md", "Right", "draft", Some("RFC-001"));
+    fixture.write_doc(
+        "docs/iterations/ITERATION-001-leaf.md",
+        "---\ntitle: \"Leaf\"\ntype: iteration\nstatus: draft\nauthor: \"t\"\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: STORY-001\n- implements: STORY-002\n---\n",
+    );
+
+    let (status, body) = get(store(&fixture), "/graph").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        graph_ids_in_order(&body),
+        vec![
+            "RFC-001".to_string(),
+            "STORY-001".to_string(),
+            "ITERATION-001".to_string(),
+            "STORY-002".to_string(),
+            "ITERATION-001".to_string(),
+        ],
+        "shared leaf full under STORY-001, repeated as a plain row under STORY-002:\n{body}"
+    );
+    assert_eq!(
+        body.matches("data-id=\"ITERATION-001\"").count(),
+        2,
+        "diamond leaf appears under each parent, exactly twice:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn graph_cycle_terminates_each_node_once() {
+    // RFC-001 -> RFC-002 -> RFC-001 (a cycle with no root). The render must
+    // terminate, draw each node exactly once, and drop the back-edge.
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-a.md",
+        "---\ntitle: \"A\"\ntype: rfc\nstatus: draft\nauthor: \"t\"\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: RFC-002\n---\n",
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-002-b.md",
+        "---\ntitle: \"B\"\ntype: rfc\nstatus: draft\nauthor: \"t\"\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: RFC-001\n---\n",
+    );
+
+    let (status, body) = get(store(&fixture), "/graph").await;
+
+    assert_eq!(status, StatusCode::OK);
+    let ids = graph_ids_in_order(&body);
+    assert_eq!(
+        ids,
+        vec!["RFC-001".to_string(), "RFC-002".to_string()],
+        "cycle terminates: each node exactly once, back-edge dropped:\n{body}"
+    );
+    assert_eq!(
+        body.matches("data-id=\"RFC-001\"").count(),
+        1,
+        "RFC-001 drawn once:\n{body}"
+    );
+    assert_eq!(
+        body.matches("data-id=\"RFC-002\"").count(),
+        1,
+        "RFC-002 drawn once:\n{body}"
+    );
+}
+
 #[test]
 fn default_port_is_8787() {
     assert_eq!(DEFAULT_PORT, 8787);

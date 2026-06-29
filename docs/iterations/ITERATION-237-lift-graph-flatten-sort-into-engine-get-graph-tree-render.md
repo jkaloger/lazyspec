@@ -1,7 +1,7 @@
 ---
 title: Lift graph flatten/sort into engine; GET /graph tree render
 type: iteration
-status: accepted
+status: complete
 author: unknown
 date: 2026-06-30
 tags: []
@@ -11,55 +11,43 @@ related:
 
 ## Objective
 
-Gate the hosted web view behind GitHub OAuth: authenticate the reviewer, admit only repo collaborators with `read`-or-higher permission via a signed-cookie session, and refuse to start on any non-loopback bind unless OAuth is configured.
+Lift the graph ordering logic (`flatten_forest`, `compare_siblings`, and the types they touch -- `GraphNode`, `GraphSort`, `SortKey`) out of `tui/` into `engine::graph` so TUI and web share one ordering implementation, then add `GET /graph` rendering the ordered nodes as a topologically-sorted nested `<ul>` tree.
 
 ## Satisfies
 
-STORY-181, all ACs (bind policy, OAuth handshake + `state`/CSRF, membership admit, 403 unauthorized, 503 fail-closed, signed-cookie verify, TTL caching). The ACs are one tightly coupled auth subsystem and ship as a single slice; see Out of scope for what is explicitly not in this iteration.
+STORY-179, all ACs: the type/function lift with no `tui` dependency, the behavior-preserving TUI re-point, the relocated ordering tests, diamond (no duplicate-subtree re-emission) and cycle (terminates, each node once, back-edge dropped) handling, and `GET /graph` rendering with `GraphSort::default()`.
 
 ## Context
 
-- Story + ACs (the authoritative behavior list): STORY-181.
-- RFC sections: RFC-052 §Authentication (session-establishment check, fail-closed, bind-not-independent), §Interfaces (`serve --bind`, `[web]` table).
-- Repo coordinate resolution to reuse: `src/engine/github.rs` (`resolve_repo`, `infer_github_repo`) — the owner/repo the collaborator check runs against.
-- Existing GitHub access pattern: `src/engine/gh.rs` shells out to the `gh` CLI; there is **no** in-process HTTP client, token store, or OAuth today. This iteration adds the first in-process HTTP/auth path (it cannot reuse the `gh`-CLI shell-out, which authenticates as the operator, not the reviewer).
-- Prior web stories this builds on: STORY-176 (serve skeleton, `Arc<Store>`, `--bind`), STORY-180 (`engine::github_url`, `[web]` coordinates).
-- Touch: `src/web/auth.rs` (new — OAuth handlers, session, membership check), `src/web/server.rs` / `src/web/routes.rs` (mount `/auth/github`, `/auth/callback`; insert the session-guard middleware), the `serve` CLI command (bind-policy gate), `src/engine/config.rs` (`[web]` `session_ttl`, OAuth client id/secret read from env not config file), `Cargo.toml` (`web` feature deps: an HTTP client + cookie/signing crates).
-
-## Auth flow and threat model (slice-specific, not in the linked docs)
-
-Flow: unauthenticated request to a content route under a hosted bind -> 302 to `GET /auth/github`, which mints a random `state`, stores it server-side keyed to the nascent session, and redirects to GitHub's authorize URL (read scope only). GitHub redirects to `GET /auth/callback?code&state`; the handler verifies `state` matches (else 400, no session), exchanges `code` for a user access token, reads the login, then calls `GET /repos/{owner}/{repo}/collaborators/{username}/permission`. Permission `read`+ -> set signed session cookie carrying the admit result and an establishment timestamp; no permission -> 403, no cookie; GitHub API error/unreachable -> 503, no cookie (fail closed). Subsequent requests present the cookie; the guard verifies the signature (bad signature -> treat as unauthenticated, re-enter the flow) and, if the cached result is within `session_ttl`, admits with no GitHub call; the first request past TTL re-runs the collaborator check.
-
-Threat model (what the gate defends and what it does not): `state` defends the OAuth redirect against CSRF/login-fixation; the cookie signature (server-held key) defends against forged/tampered admit claims — the cookie is a bearer credential, so it must be signed, `HttpOnly`, `Secure`, and `SameSite=Lax`. The membership cache means revocation is **eventually consistent**, bounded by `session_ttl` (default 15 min): a collaborator removed mid-session retains access until TTL expiry — accepted per RFC-052. Fail-closed on API error is deliberate: never admit an unverified user. The OAuth client secret and session signing key are secrets read from env, never committed and never logged. Loopback (`127.0.0.1`) bypasses the entire gate (single-user local dev only); the bind-policy check is what prevents that bypass from ever being exposed on a hosted address.
+- Story + ACs (authoritative): STORY-179.
+- RFC sections: RFC-052 §Routes (the `/graph` tree mirrors the TUI), §Layering (web -> engine only, never tui).
+- Convention principle 6: the lift is justified because both TUI and web are concrete consumers of one ordering implementation.
+- Already in engine, reused unchanged: `resolve_forest` / `topo_order` in `src/engine/context.rs`.
+- Source of the moved logic: `flatten_forest` / `compare_siblings` / `GraphSort` / `SortKey` in `src/tui/state/graph.rs`; `GraphNode` in `src/tui/state/app.rs`. The existing graph ordering unit tests move with the functions.
+- Touch: `src/engine/graph.rs` (new, the moved types/functions/tests), `src/engine.rs` (module wiring), `src/tui/state/graph.rs` + `src/tui/state/app.rs` (re-point at the moved code), `src/web/routes.rs` + `src/web/server.rs` (`GET /graph` handler + route), `src/web/render.rs` (tree view model), `templates/` (nested-`<ul>` tree templates).
 
 ## Tasks
 
-1. Add `web`-feature deps to `Cargo.toml` (in-process HTTP client for the token exchange + collaborator call; cookie + HMAC signing) and the config surface: `[web] session_ttl` (default 15 min) in `src/engine/config.rs`, OAuth client id/secret + signing key read from env.
-2. Implement the bind-policy gate in the `serve` command: non-loopback bind with OAuth unconfigured exits non-zero with a "hosted bind requires OAuth" message; loopback without OAuth keeps STORY-176 no-auth mode. Test both branches.
-3. Implement `GET /auth/github` (mint + store `state`, authorize redirect, read scope) and `GET /auth/callback` (verify `state` -> 400 on mismatch; code->token exchange; read login). Test the `state` mismatch rejection.
-4. Implement the collaborator-permission check against the resolved repo coords (reuse `src/engine/github.rs`); admit on `read`+, 403 on none, 503 on API error/unreachable. Cover all three outcomes test-first.
-5. Implement signed-cookie sessions: set on admit with establishment timestamp; a session-guard middleware that verifies the signature (tampered -> unauthenticated, redirect to flow) and enforces the `session_ttl` cache (within TTL -> no API call; past TTL -> re-check). Mount the guard over content routes. Test signature-reject and the within-TTL no-call path.
-6. Update the README `serve` section for the OAuth/bind config and required env vars.
+1. Create `engine::graph` and MOVE `flatten_forest`, `compare_siblings`, `GraphNode`, `GraphSort`, `SortKey` into it with no `tui` dependency; `engine::graph` compiles without the `tui` module.
+2. Relocate the existing graph ordering tests alongside the functions; they run against `engine::graph` and pass unchanged.
+3. Re-point the TUI at the moved types/functions (pure refactor, no change to rendered ordering); keep the TUI graph tests green.
+4. Add `GET /graph`: walk `resolve_forest` -> `flatten_forest(.., &GraphSort::default())` into a nested `<ul>` tree; diamonds draw the shared node once (plain row on the second branch, subtree not re-emitted); cycles terminate via the existing ordering logic.
+5. Test-first the web route (oneshot, no real socket): default-sort nested tree, a diamond fixture, a cycle fixture.
 
 ## Out of scope
 
-- Write scopes / write-back of any kind (RFC non-goal).
-- Per-request membership re-checks — TTL-bounded caching only, per RFC-052.
-- Differentiated in-app permissions: admission is binary (admit/deny).
-- Org-team membership as a distinct admission path: repo collaborator permission only.
-- Multi-repo / multi-project hosting: one instance, one project.
-- Any STORY-176..180 functionality (skeleton, doc page, search, graph, deep-links) — those are already landed and only mounted-behind by this iteration's guard.
+- Any change to graph ordering semantics (Kahn, diamond/cycle handling, sibling comparison stay identical).
+- `resolve_forest` / `topo_order` -- already in engine, reused unchanged.
+- Interactive sort selection on the web `/graph` view (default sort only; interactive sort stays a TUI concern).
+- Mermaid/diagram rendering of the graph (plain nested lists).
 
 ## Principles / conventions
 
-- `lazyspec` conventions: dev binary via `cargo run`; update the README when the CLI surface changes (per project CLAUDE.md).
-- RFC-052 layering principle 3: the web layer depends only on `engine`, never `tui`/`cli`. New code lives under `src/web/` and is gated behind the `web` cargo feature so default builds stay async/HTTP-free.
-- Type-driven-design (skill): model admit/deny and the session outcomes as enums so unverified/unauthorized/admitted states are not confusable; secrets are typed values that never derive `Debug`/`Display` that prints them.
+- RFC-052 layering principle 3: the web graph handler reaches ordering logic through `engine::graph`, never `tui`. New web code stays behind the `web` cargo feature.
+- The lift is behavior-preserving: the TUI's rendered ordering is unchanged, verified by the relocated ordering tests and the existing TUI graph tests.
 
 ## Verification
 
-- Hosted bind (e.g. `0.0.0.0`) with no OAuth env set: `serve` exits non-zero, prints the hosted-bind message; loopback with no OAuth still serves.
-- `state` mismatch on `/auth/callback` returns 400 with no `Set-Cookie`.
-- Collaborator with `read`+ gets a `Set-Cookie`; non-collaborator gets 403; simulated GitHub API error yields 503 — all with no session leaked.
-- A cookie with a flipped signature byte is rejected and redirects into `/auth/github`.
-
+- `grep crate::tui src/engine/graph.rs` is empty; `engine::graph` compiles in a default (non-web) build.
+- The relocated unit tests pass unchanged under `engine::graph`; the TUI graph tests stay green.
+- `GET /graph` renders a nested `<ul>` tree in `GraphSort::default()` order; a diamond's shared node is not re-emitted as a subtree; a cyclic component terminates with each node rendered once.

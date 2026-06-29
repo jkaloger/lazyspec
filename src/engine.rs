@@ -17,6 +17,7 @@ pub mod git_ref;
 pub mod git_ref_store;
 pub mod git_status;
 pub mod github;
+pub mod graph;
 pub mod hashing;
 pub mod issue_body;
 pub mod issue_cache;

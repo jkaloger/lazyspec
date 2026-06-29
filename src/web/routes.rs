@@ -11,12 +11,14 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 
+use crate::engine::context::resolve_forest;
 use crate::engine::document::Status;
 use crate::engine::fs::RealFileSystem;
+use crate::engine::graph::{flatten_forest, GraphSort};
 use crate::engine::store::{Filter, Store};
 use crate::web::render::{
-    markdown_to_html, DocGroup, DocPage, DocRow, FilterOption, ListFragment, ListPage,
-    NotFoundPage, SearchFragment,
+    markdown_to_html, DocGroup, DocPage, DocRow, FilterOption, GraphPage, GraphTreeNode,
+    ListFragment, ListPage, NotFoundPage, SearchFragment,
 };
 
 /// Default lines per expanded `@ref` block, mirroring `show --expand-references`.
@@ -141,6 +143,18 @@ pub async fn search(
         .collect();
 
     Html(SearchFragment { rows }.render().unwrap_or_default())
+}
+
+/// `GET /graph` -- the relationship forest as a topologically-sorted nested
+/// `<ul>` tree, ordered by [`GraphSort::default`] (the static web view has no
+/// interactive sort control). Reuses the engine's `resolve_forest` +
+/// `flatten_forest` ordering, so diamonds (shared node re-emitted without its
+/// subtree) and cycles (back-edge dropped, every node once) match the TUI.
+pub async fn graph(State(store): State<Arc<Store>>) -> Html<String> {
+    let forest = resolve_forest(&store, None);
+    let flat = flatten_forest(&forest, &store, &GraphSort::default());
+    let roots = GraphTreeNode::nest(&flat);
+    Html(GraphPage { roots }.render().unwrap_or_default())
 }
 
 /// `GET /doc/{id}` -- the per-document page: frontmatter header, body rendered

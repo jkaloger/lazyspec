@@ -8,6 +8,7 @@ use super::forms::{
 };
 use super::graph::flatten_forest;
 use super::settings_guard;
+pub use crate::engine::graph::GraphNode;
 
 use crate::engine::cache::DiskCache;
 use crate::engine::config::{
@@ -331,29 +332,6 @@ impl FilterField {
             FilterField::ClearAction => FilterField::Tag,
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct GraphNode {
-    pub path: PathBuf,
-    pub title: String,
-    pub doc_type: DocType,
-    pub status: Status,
-    pub depth: usize,
-    /// Doc ids of this node's OWN depth-1 `related-to` neighbours, minus those on
-    /// its `implements` lineage (its transitive ancestors and descendants, already
-    /// drawn as tree edges through the node). Siblings/cousins reachable only
-    /// through a shared ancestor ARE included — they have no `implements` path to
-    /// the node, so the link is genuinely cross-cutting. Display-only (RFC-006
-    /// Graph mode Phase 1, rendered `┄▷ <id>` by the renderer), sorted for
-    /// determinism. This is the node's own depth-1 set, NOT the `context`
-    /// command's related set (which also surfaces the related-to links of the
-    /// node's ancestors).
-    pub related: Vec<String>,
-    /// The doc's custom frontmatter attributes (ITERATION-209), copied so the
-    /// nested-table renderer and the sibling-sort comparator can read attribute
-    /// cells without re-fetching from the store.
-    pub attributes: std::collections::BTreeMap<String, crate::engine::document::AttrValue>,
 }
 
 /// The graph view's pivot selection: the whole-store forest, a forest re-rooted
