@@ -3,15 +3,23 @@
 //! Imports only from [`crate::engine`] (and `web::render`), never `cli`/`tui`.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use askama::Template;
-use axum::extract::{Query, State};
-use axum::response::Html;
+use axum::extract::{Path as AxumPath, Query, State};
+use axum::http::StatusCode;
+use axum::response::{Html, IntoResponse, Response};
 
 use crate::engine::document::Status;
+use crate::engine::fs::RealFileSystem;
 use crate::engine::store::{Filter, Store};
-use crate::web::render::{DocGroup, DocRow, FilterOption, ListFragment, ListPage};
+use crate::web::render::{
+    markdown_to_html, DocGroup, DocPage, DocRow, FilterOption, ListFragment, ListPage, NotFoundPage,
+};
+
+/// Default lines per expanded `@ref` block, mirroring `show --expand-references`.
+const MAX_REF_LINES: usize = 25;
 
 /// Query parameters for the htmx filter fragment. Empty strings mean "no
 /// filter" (the `all` option), so they are treated as absent.
@@ -98,4 +106,28 @@ pub async fn list_fragment(
     let groups = build_groups(&store, &filter);
     let fragment = ListFragment { groups };
     Html(fragment.render().unwrap_or_default())
+}
+
+/// `GET /doc/{id}` -- the per-document page: frontmatter header, body rendered
+/// to HTML with `@ref` directives expanded inline. Unknown ids yield a handled
+/// 404 with the not-found page, never a 500.
+pub async fn doc_page(State(store): State<Arc<Store>>, AxumPath(id): AxumPath<String>) -> Response {
+    // Resolve id -> document. Try a literal path first, then shorthand,
+    // mirroring the engine resolution that backs `show` without importing cli.
+    let doc = store
+        .get(Path::new(&id))
+        .or_else(|| store.resolve_shorthand(&id).ok());
+
+    let Some(doc) = doc else {
+        let page = NotFoundPage { id }.render().unwrap_or_default();
+        return (StatusCode::NOT_FOUND, Html(page)).into_response();
+    };
+
+    let expanded = store
+        .get_body_expanded(&doc.path, MAX_REF_LINES, &RealFileSystem)
+        .unwrap_or_default();
+    let body_html = markdown_to_html(&expanded);
+
+    let page = DocPage::from_doc(doc, &store, body_html);
+    Html(page.render().unwrap_or_default()).into_response()
 }

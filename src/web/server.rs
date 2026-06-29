@@ -25,6 +25,7 @@ pub fn router(store: Arc<Store>) -> Router {
     Router::new()
         .route("/", get(routes::list_page))
         .route("/fragment/list", get(routes::list_fragment))
+        .route("/doc/{id}", get(routes::doc_page))
         .with_state(store)
 }
 

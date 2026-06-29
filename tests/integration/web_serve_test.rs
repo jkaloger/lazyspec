@@ -98,6 +98,111 @@ async fn empty_filter_returns_all_documents() {
     assert!(body.contains("RFC-002"));
 }
 
+#[tokio::test]
+async fn doc_page_renders_frontmatter_header_and_body_html() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-042-page.md",
+        "---\ntitle: \"Page RFC\"\ntype: rfc\nstatus: accepted\nauthor: \"alice\"\ndate: 2026-02-03\ntags: [web, render]\n---\n\n## Heading\n\nSome **bold** prose in the body.\n",
+    );
+
+    let (status, body) = get(store(&fixture), "/doc/RFC-042").await;
+
+    assert_eq!(status, StatusCode::OK);
+    // Frontmatter header fields present.
+    assert!(body.contains("Page RFC"), "title missing:\n{body}");
+    assert!(body.contains("rfc"), "type missing:\n{body}");
+    assert!(body.contains("accepted"), "status missing:\n{body}");
+    assert!(body.contains("alice"), "author missing:\n{body}");
+    assert!(body.contains("2026-02-03"), "date missing:\n{body}");
+    assert!(body.contains("web"), "tag missing:\n{body}");
+    // Markdown body rendered to HTML, not raw markdown.
+    assert!(
+        body.contains("<h2>Heading</h2>"),
+        "expected rendered <h2>:\n{body}"
+    );
+    assert!(
+        body.contains("<strong>bold</strong>"),
+        "expected rendered <strong>:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn doc_page_expands_refs_inline() {
+    use std::process::Command;
+
+    let fixture = TestFixture::new();
+    let root = fixture.root();
+    for args in [
+        &["init"][..],
+        &["config", "user.email", "test@test.com"][..],
+        &["config", "user.name", "Test"][..],
+    ] {
+        Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+    }
+    std::fs::write(root.join("snippet.txt"), "REF_EXPANDED_MARKER\n").unwrap();
+    Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "snippet"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    fixture.write_doc(
+        "docs/rfcs/RFC-043-ref.md",
+        "---\ntitle: \"Ref RFC\"\ntype: rfc\nstatus: draft\nauthor: \"bob\"\ndate: 2026-02-04\ntags: []\n---\n\nSee:\n\n@ref snippet.txt\n",
+    );
+
+    let (status, body) = get(store(&fixture), "/doc/RFC-043").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("REF_EXPANDED_MARKER"),
+        "ref content not expanded inline:\n{body}"
+    );
+    assert!(
+        !body.contains("@ref snippet.txt"),
+        "literal @ref directive should not survive:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn doc_page_unknown_id_returns_404_not_found_page() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    let (status, body) = get(store(&fixture), "/doc/UNKNOWN-999").await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        body.to_lowercase().contains("not found"),
+        "expected a rendered not-found page:\n{body}"
+    );
+    assert!(body.contains("UNKNOWN-999"), "should echo the id:\n{body}");
+}
+
+#[tokio::test]
+async fn list_rows_link_to_doc_pages() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    let (status, body) = get(store(&fixture), "/").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("/doc/RFC-001"),
+        "list row should link to /doc/RFC-001:\n{body}"
+    );
+}
+
 #[test]
 fn default_port_is_8787() {
     assert_eq!(DEFAULT_PORT, 8787);

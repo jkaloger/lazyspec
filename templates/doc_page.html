@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ id }} - {{ title }}</title>
+</head>
+<body>
+<a href="/">&larr; all documents</a>
+<header class="doc-frontmatter" data-id="{{ id }}">
+<h1>{{ title }}</h1>
+<dl>
+<dt>id</dt><dd class="doc-id">{{ id }}</dd>
+<dt>type</dt><dd class="doc-type">{{ doc_type }}</dd>
+<dt>status</dt><dd class="doc-status">{{ status }}</dd>
+<dt>author</dt><dd class="doc-author">{{ author }}</dd>
+<dt>date</dt><dd class="doc-date">{{ date }}</dd>
+{% if !tags.is_empty() %}<dt>tags</dt><dd class="doc-tags">{% for tag in tags %}<span class="tag">{{ tag }}</span>{% if !loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
+{% if !relations.is_empty() %}<dt>relations</dt><dd class="doc-relations">{% for rel in relations %}<span class="relation">{{ rel.rel_type }}: <a href="/doc/{{ rel.target }}">{{ rel.target }}</a></span>{% if !loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
+{% match parent %}{% when Some with (p) %}<dt>parent</dt><dd class="doc-parent"><a href="/doc/{{ p.id }}">{{ p.title }}</a></dd>{% when None %}{% endmatch %}
+{% if !children.is_empty() %}<dt>children</dt><dd class="doc-children"><ul>{% for child in children %}<li><a href="/doc/{{ child.id }}">{{ child.title }}</a></li>{% endfor %}</ul></dd>{% endif %}
+</dl>
+</header>
+<article class="doc-body">
+{{ body_html|safe }}
+</article>
+</body>
+</html>

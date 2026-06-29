@@ -1,7 +1,7 @@
 ---
 title: 'Document page: frontmatter header, markdown-to-HTML, @ref expansion'
 type: iteration
-status: accepted
+status: complete
 author: unknown
 date: 2026-06-30
 tags: []

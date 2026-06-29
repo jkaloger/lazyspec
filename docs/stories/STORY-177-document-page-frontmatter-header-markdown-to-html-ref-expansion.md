@@ -1,7 +1,7 @@
 ---
 title: 'Document page: frontmatter header, markdown-to-HTML, @ref expansion'
 type: story
-status: accepted
+status: complete
 author: jkaloger
 date: 2026-06-30
 tags: []
