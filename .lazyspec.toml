@@ -132,6 +132,7 @@ traversal = "related"
 name = "targets"
 inverse = "targeted-by"
 github_native = "milestone"
+traversal = "chain"
 
 [[relationships]]
 name = "member-of"

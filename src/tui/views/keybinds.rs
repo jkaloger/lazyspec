@@ -242,23 +242,22 @@ pub fn keybinds_for(ctx: KeyContext) -> Vec<KeybindGroup> {
             ],
         }],
 
-        // handle_link_editor_key, keys.rs:145.
+        // handle_link_editor_key, keys.rs.
         KeyContext::LinkEditor => vec![KeybindGroup {
             title: "Relation",
             binds: vec![
                 bind!("Esc", "Cancel", [k(KeyCode::Esc)]),
-                bind!("Tab", "Cycle relation type", [k(KeyCode::Tab)]),
-                bind!("Enter", "Confirm", [k(KeyCode::Enter)]),
                 bind!(
-                    "j/k",
-                    "Navigate",
-                    [
-                        k(KeyCode::Char('j')),
-                        k(KeyCode::Down),
-                        k(KeyCode::Char('k')),
-                        k(KeyCode::Up)
-                    ]
+                    "←/→",
+                    "Cycle relation type",
+                    [k(KeyCode::Left), k(KeyCode::Right), k(KeyCode::Tab)]
                 ),
+                bind!(
+                    "↑/↓",
+                    "Navigate results",
+                    [k(KeyCode::Up), k(KeyCode::Down)]
+                ),
+                bind!("Enter", "Confirm", [k(KeyCode::Enter)]),
                 bind!("Backspace", "Delete char", [k(KeyCode::Backspace)]),
                 type_text(),
             ],

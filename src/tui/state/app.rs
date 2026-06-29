@@ -4746,6 +4746,47 @@ mod tests {
     }
 
     #[test]
+    fn link_editor_types_jk_into_query() {
+        let mut app = make_test_app(0);
+        let root = PathBuf::from(".");
+        let config = Config::default();
+        app.link_editor.active = true;
+
+        for c in ['j', 'a', 'c', 'k'] {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::NONE, &root, &config);
+        }
+
+        assert_eq!(
+            app.link_editor.query, "jack",
+            "j/k must type into the search query, not navigate the result list"
+        );
+    }
+
+    #[test]
+    fn link_editor_left_right_cycle_rel_type() {
+        let mut app = make_test_app(0);
+        let root = PathBuf::from(".");
+        let config = Config::default();
+        app.rel_types = vec![
+            "implements".to_string(),
+            "implemented-by".to_string(),
+            "related-to".to_string(),
+        ];
+        app.link_editor.active = true;
+        app.link_editor.rel_type_index = 0;
+
+        app.handle_key(KeyCode::Right, KeyModifiers::NONE, &root, &config);
+        assert_eq!(app.link_editor.rel_type_index, 1, "Right cycles forward");
+
+        app.handle_key(KeyCode::Left, KeyModifiers::NONE, &root, &config);
+        app.handle_key(KeyCode::Left, KeyModifiers::NONE, &root, &config);
+        assert_eq!(
+            app.link_editor.rel_type_index, 2,
+            "Left wraps backward past index 0"
+        );
+    }
+
+    #[test]
     fn apply_config_refreshes_icon_and_plural() {
         let mut app = make_test_app(0);
 

@@ -614,8 +614,10 @@ pub fn draw_link_editor(f: &mut Frame, app: &App) {
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("  Tab", Style::default().fg(Color::DarkGray)),
+        Span::styled("  ←/→", Style::default().fg(Color::DarkGray)),
         Span::raw(" type  "),
+        Span::styled("↑/↓", Style::default().fg(Color::DarkGray)),
+        Span::raw(" pick  "),
         Span::styled("Enter", Style::default().fg(Color::DarkGray)),
         Span::raw(" link  "),
         Span::styled("Esc", Style::default().fg(Color::DarkGray)),

@@ -160,10 +160,18 @@ impl App {
     pub(crate) fn handle_link_editor_key(&mut self, code: KeyCode, root: &Path, config: &Config) {
         match code {
             KeyCode::Esc => self.close_link_editor(),
-            KeyCode::Tab => {
+            // Left/Right (and Tab/BackTab) cycle the relation type. h/l and j/k
+            // are reserved for the search query below, since this is a text field.
+            KeyCode::Right | KeyCode::Tab => {
                 if !self.rel_types.is_empty() {
                     self.link_editor.rel_type_index =
                         (self.link_editor.rel_type_index + 1) % self.rel_types.len();
+                }
+            }
+            KeyCode::Left | KeyCode::BackTab => {
+                let n = self.rel_types.len();
+                if n > 0 {
+                    self.link_editor.rel_type_index = (self.link_editor.rel_type_index + n - 1) % n;
                 }
             }
             KeyCode::Enter => {
@@ -171,13 +179,13 @@ impl App {
                     let _ = self.confirm_link(root, config);
                 }
             }
-            KeyCode::Char('j') | KeyCode::Down => {
+            KeyCode::Down => {
                 if !self.link_editor.results.is_empty() {
                     let max = self.link_editor.results.len() - 1;
                     self.link_editor.selected = (self.link_editor.selected + 1).min(max);
                 }
             }
-            KeyCode::Char('k') | KeyCode::Up => {
+            KeyCode::Up => {
                 self.link_editor.selected = self.link_editor.selected.saturating_sub(1);
             }
             KeyCode::Backspace => {
