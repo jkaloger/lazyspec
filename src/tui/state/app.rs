@@ -148,6 +148,8 @@ fn store_from_variant(v: &str) -> Option<StoreBackend> {
     match v {
         "filesystem" => Some(StoreBackend::Filesystem),
         "github-issues" => Some(StoreBackend::GithubIssues),
+        "github-milestones" => Some(StoreBackend::GithubMilestones),
+        "github-projects" => Some(StoreBackend::GithubProjects),
         "git-ref" => Some(StoreBackend::GitRef),
         _ => None,
     }
@@ -192,7 +194,6 @@ fn rule_raw(rule: &ValidationRule, key: &RuleKey) -> String {
         }
         (ValidationRule::ParentChild { child, .. }, RuleKey::Child) => child.clone(),
         (ValidationRule::ParentChild { parent, .. }, RuleKey::Parent) => parent.clone(),
-        (ValidationRule::ParentChild { link, .. }, RuleKey::Link) => link.clone(),
         (ValidationRule::RelationExistence { doc_type, .. }, RuleKey::DocType) => doc_type.clone(),
         (ValidationRule::RelationExistence { require, .. }, RuleKey::Require) => require.clone(),
         (ValidationRule::ParentChild { severity, .. }, RuleKey::Severity)
@@ -213,14 +214,12 @@ fn rule_write(rule: &mut ValidationRule, key: &RuleKey, value: SettingsValue) {
             name,
             child,
             parent,
-            link,
             severity,
             ..
         } => match (key, value) {
             (RuleKey::Name, SettingsValue::Text(s)) => *name = s,
             (RuleKey::Child, SettingsValue::Text(s)) => *child = s,
             (RuleKey::Parent, SettingsValue::Text(s)) => *parent = s,
-            (RuleKey::Link, SettingsValue::Text(s)) => *link = s,
             (RuleKey::Severity, SettingsValue::Severity(sev)) => *severity = sev,
             _ => {}
         },
@@ -268,7 +267,9 @@ pub enum AppEvent {
     CreateComplete {
         result: Result<CreateResult, String>,
     },
-    CacheRefresh,
+    CacheRefresh {
+        warnings: Vec<String>,
+    },
     GhPushResult(Result<(), String>),
     #[cfg(feature = "agent")]
     AgentFinished,
@@ -563,6 +564,7 @@ pub struct App {
     pub validation_errors: Vec<String>,
     pub validation_warnings: Vec<String>,
     pub status_bar_warnings: Vec<String>,
+    pub gh_fetch_warnings: Vec<String>,
     pub fix_request: bool,
     pub config_reload_request: bool,
     pub fix_result: Option<String>,
@@ -735,6 +737,7 @@ impl App {
             validation_errors: Vec::new(),
             validation_warnings: Vec::new(),
             status_bar_warnings: Vec::new(),
+            gh_fetch_warnings: Vec::new(),
             fix_request: false,
             config_reload_request: false,
             fix_result: None,
@@ -849,6 +852,8 @@ impl App {
         self.validation_warnings = result.warnings.iter().map(|e| e.to_string()).collect();
         self.validation_warnings
             .extend(self.status_bar_warnings.iter().cloned());
+        self.validation_warnings
+            .extend(self.gh_fetch_warnings.iter().cloned());
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
     }
@@ -1541,7 +1546,7 @@ impl App {
                     key: TypeKey::Store,
                     ..
                 },
-                "github-issues",
+                "github-issues" | "github-milestones" | "github-projects",
             ) => Some(ConfigDep::Github),
             _ => None,
         };
@@ -1575,7 +1580,6 @@ impl App {
                     name: std::mem::take(name),
                     child: String::new(),
                     parent: String::new(),
-                    link: String::new(),
                     severity: severity.clone(),
                     require_parent_status: None,
                 }
@@ -2669,6 +2673,8 @@ impl App {
                 self.settings_buffer.relationships.push(RelationshipDef {
                     name: "relationship".to_string(),
                     inverse: None,
+                    github_native: None,
+                    traversal: None,
                 });
                 self.settings_entry = self.settings_buffer.relationships.len() - 1;
             }
@@ -2679,7 +2685,6 @@ impl App {
                         name: "rule".to_string(),
                         child: String::new(),
                         parent: String::new(),
-                        link: String::new(),
                         severity: Severity::Error,
                         require_parent_status: None,
                     });
@@ -3388,6 +3393,7 @@ pub(crate) mod parity_seed {
             validation_errors: Vec::new(),
             validation_warnings: Vec::new(),
             status_bar_warnings: Vec::new(),
+            gh_fetch_warnings: Vec::new(),
             fix_request: false,
             config_reload_request: false,
             fix_result: None,
@@ -3799,6 +3805,7 @@ mod tests {
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
+            related_relationships: vec!["related-to".to_string()],
         };
 
         let (tx, _rx) = crossbeam_channel::unbounded();
@@ -3860,6 +3867,7 @@ mod tests {
             validation_errors: Vec::new(),
             validation_warnings: Vec::new(),
             status_bar_warnings: Vec::new(),
+            gh_fetch_warnings: Vec::new(),
             fix_request: false,
             config_reload_request: false,
             fix_result: None,
@@ -4129,6 +4137,7 @@ mod tests {
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
+            related_relationships: vec!["related-to".to_string()],
         };
 
         let meta_a = DocMeta {
@@ -4180,6 +4189,35 @@ mod tests {
                 .any(|e| e.contains("duplicate id")),
             "expected a 'duplicate id' error, got: {:?}",
             app.validation_errors
+        );
+    }
+
+    #[test]
+    fn refresh_validation_folds_in_gh_fetch_warnings() {
+        use crate::engine::config::Config;
+        let config = Config::default();
+        let mut app = make_test_app(0);
+
+        // Warnings carried on the CacheRefresh event survive re-validation
+        // (which otherwise rebuilds validation_warnings from scratch).
+        app.gh_fetch_warnings = vec!["could not refresh gh schema snapshot".to_string()];
+        app.refresh_validation(&config);
+        assert!(
+            app.validation_warnings
+                .iter()
+                .any(|w| w.contains("could not refresh gh schema snapshot")),
+            "gh fetch warnings should appear in the panel after refresh: {:?}",
+            app.validation_warnings
+        );
+
+        // Empty gh warnings add nothing spurious.
+        app.gh_fetch_warnings = vec![];
+        app.refresh_validation(&config);
+        assert!(
+            !app.validation_warnings
+                .iter()
+                .any(|w| w.contains("gh schema snapshot")),
+            "no gh warning should remain once the source is cleared"
         );
     }
 
@@ -4694,6 +4732,8 @@ mod tests {
         config.relationships = vec![RelationshipDef {
             name: "derives-from".to_string(),
             inverse: Some("derived-by".to_string()),
+            github_native: None,
+            traversal: None,
         }];
 
         app.apply_config(&config);
@@ -5064,6 +5104,16 @@ mod tests {
         app.settings_space();
         assert_eq!(
             app.settings_buffer.documents.types[0].store,
+            StoreBackend::GithubMilestones
+        );
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].store,
+            StoreBackend::GithubProjects
+        );
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].store,
             StoreBackend::GitRef
         );
         app.settings_space();
@@ -5080,11 +5130,10 @@ mod tests {
             name: "r".to_string(),
             child: "story".to_string(),
             parent: "rfc".to_string(),
-            link: "implements".to_string(),
             severity: Severity::Error,
             require_parent_status: None,
         }];
-        let mut app = settings_app(config, 3, 5); // Validation Rules, severity (ParentChild)
+        let mut app = settings_app(config, 3, 4); // Validation Rules, severity (ParentChild)
         app.settings_drill = Some(0);
 
         app.settings_space();
@@ -5112,7 +5161,6 @@ mod tests {
             name: "my-rule".to_string(),
             child: "story".to_string(),
             parent: "rfc".to_string(),
-            link: "implements".to_string(),
             severity: Severity::Warning,
             require_parent_status: None,
         }];
@@ -5143,7 +5191,6 @@ mod tests {
                 name,
                 child,
                 parent,
-                link,
                 severity,
                 ..
             } => {
@@ -5151,7 +5198,6 @@ mod tests {
                 assert_eq!(*severity, Severity::Warning);
                 assert_eq!(child, "");
                 assert_eq!(parent, "");
-                assert_eq!(link, "");
             }
             _ => panic!("shape cycle must convert back to parent-child"),
         }
@@ -6776,6 +6822,8 @@ inverse = "implemented-by"
             relationships: vec![RelationshipDef {
                 name: "related-to".to_string(),
                 inverse: None,
+                github_native: None,
+                traversal: None,
             }],
             ..Config::default()
         };
@@ -6799,10 +6847,14 @@ inverse = "implemented-by"
                 RelationshipDef {
                     name: "implements".to_string(),
                     inverse: Some("implemented-by".to_string()),
+                    github_native: None,
+                    traversal: None,
                 },
                 RelationshipDef {
                     name: "related-to".to_string(),
                     inverse: None,
+                    github_native: None,
+                    traversal: None,
                 },
             ],
             ..Config::default()
@@ -7707,9 +7759,11 @@ kind = "int"
 [[relationships]]
 name = "implements"
 inverse = "implemented-by"
+traversal = "chain"
 
 [[relationships]]
 name = "related-to"
+traversal = "related"
 
 [tui.graph]
 columns = ["status", "estimate"]

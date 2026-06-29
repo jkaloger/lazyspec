@@ -1,12 +1,16 @@
 use crate::engine::config::Config;
-use crate::engine::gh::{AuthStatus, GhAuth, GhIssueReader};
+use crate::engine::gh::{AuthStatus, GhAuth, GhGraphql, GhIssueReader};
 use crate::engine::github::resolve_repo;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
-pub fn run(root: &Path, config: &Config, gh: &(impl GhIssueReader + GhAuth)) -> Result<()> {
+pub fn run(
+    root: &Path,
+    config: &Config,
+    gh: &(impl GhIssueReader + GhAuth + GhGraphql),
+) -> Result<()> {
     let gh_types = config.documents.github_issues_types();
     if gh_types.is_empty() {
         println!("No github-issues types configured; nothing to set up.");
@@ -46,7 +50,20 @@ pub fn run(root: &Path, config: &Config, gh: &(impl GhIssueReader + GhAuth)) -> 
             .iter()
             .map(|t| t.name.clone())
             .collect();
-        let result = cache.fetch_all(root, type_def, gh, &repo, &mut issue_map, &all_type_names)?;
+        let result = cache.fetch_all(
+            root,
+            type_def,
+            gh,
+            gh,
+            &repo,
+            &mut issue_map,
+            &all_type_names,
+            config,
+        )?;
+
+        for w in &result.warnings {
+            eprintln!("warning: {}", w.message);
+        }
 
         println!(
             "Fetched {} {} issue{}",
@@ -84,6 +101,7 @@ mod tests {
     fn make_issue(number: u64, title: &str, body: &str, labels: &[&str]) -> GhIssue {
         GhIssue {
             number,
+            id: String::new(),
             url: format!("https://github.com/owner/repo/issues/{}", number),
             title: title.to_string(),
             body: body.to_string(),
@@ -98,6 +116,8 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
+            milestone: None,
         }
     }
 
@@ -107,7 +127,7 @@ mod tests {
     fn issue_map_roundtrips_via_issue_map() {
         let dir = tempfile::tempdir().unwrap();
         let mut map = IssueMap::load(dir.path()).unwrap();
-        map.insert("ITERATION-042", 87, "2026-03-27T10:00:00Z");
+        map.insert("ITERATION-042", 87, "2026-03-27T10:00:00Z", "");
         map.save(dir.path()).unwrap();
 
         let loaded = IssueMap::load(dir.path()).unwrap();

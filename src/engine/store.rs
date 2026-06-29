@@ -2,7 +2,7 @@ mod links;
 mod loader;
 
 use crate::engine::cache_lock::CacheLock;
-use crate::engine::config::{Config, StoreBackend};
+use crate::engine::config::{Config, StoreBackend, Traversal};
 use crate::engine::document::{DocMeta, DocType, RelationType, Status};
 use crate::engine::fs::{FileSystem, RealFileSystem};
 use crate::engine::git_ref::GitRefOps;
@@ -32,11 +32,15 @@ pub struct Store {
     pub(crate) children: HashMap<PathBuf, Vec<PathBuf>>,
     pub(crate) parent_of: HashMap<PathBuf, PathBuf>,
     pub(crate) parse_errors: Vec<ParseError>,
-    /// The set of relationship names that form the parent-child chain
-    /// (extracted from `ParentChild` rules at load time, falling back to
-    /// `["implements"]`). Used by [`resolve_chain`](crate::engine::context::resolve_chain)
-    /// and [`resolve_forest`](crate::engine::context::resolve_forest) to walk the DAG.
+    /// The relationship names whose `traversal == Some(Traversal::Chain)`,
+    /// sourced from `config.relationships`. These form the parent-child DAG
+    /// walked by [`resolve_chain`](crate::engine::context::resolve_chain) and
+    /// [`resolve_forest`](crate::engine::context::resolve_forest).
     pub(crate) chain_relationships: Vec<String>,
+    /// The relationship names whose `traversal == Some(Traversal::Related)`,
+    /// walked by [`resolve_chain`](crate::engine::context::resolve_chain)'s
+    /// related neighbourhood.
+    pub(crate) related_relationships: Vec<String>,
 }
 
 impl Store {
@@ -58,9 +62,10 @@ impl Store {
 
         for type_def in &config.documents.types {
             let full_path = match type_def.store {
-                StoreBackend::GithubIssues | StoreBackend::GitRef => {
-                    root.join(".lazyspec/cache").join(&type_def.name)
-                }
+                StoreBackend::GithubIssues
+                | StoreBackend::GithubMilestones
+                | StoreBackend::GithubProjects
+                | StoreBackend::GitRef => root.join(".lazyspec/cache").join(&type_def.name),
                 _ => root.join(&type_def.dir),
             };
 
@@ -96,25 +101,18 @@ impl Store {
 
         let (forward_links, reverse_links) = Self::build_links(&docs);
 
-        let chain_relationships = {
-            let mut names: Vec<String> = config
-                .rules
-                .iter()
-                .filter_map(|r| match r {
-                    crate::engine::config::ValidationRule::ParentChild { link, .. } => {
-                        Some(link.clone())
-                    }
-                    _ => None,
-                })
-                .collect();
-            names.sort();
-            names.dedup();
-            if names.is_empty() {
-                vec!["implements".to_string()]
-            } else {
-                names
-            }
-        };
+        let chain_relationships: Vec<String> = config
+            .relationships
+            .iter()
+            .filter(|r| r.traversal == Some(Traversal::Chain))
+            .map(|r| r.name.clone())
+            .collect();
+        let related_relationships: Vec<String> = config
+            .relationships
+            .iter()
+            .filter(|r| r.traversal == Some(Traversal::Related))
+            .map(|r| r.name.clone())
+            .collect();
 
         let mut store = Store {
             root: root.to_path_buf(),
@@ -125,6 +123,7 @@ impl Store {
             parent_of,
             parse_errors,
             chain_relationships,
+            related_relationships,
         };
         store.propagate_parent_links();
 
@@ -455,9 +454,26 @@ fn extract_id(path: &Path) -> String {
         if parent_id != parent_name {
             return stem.to_string();
         }
+        // Materialized cache children live under a clean parent-id folder
+        // (e.g. `STORY-100/01-STORY-12.md`). Their `NN-` order prefix is not part
+        // of the doc id, so strip it before resolving the real child id.
+        if let Some(rest) = strip_order_prefix(stem) {
+            return extract_id_from_name(rest);
+        }
     }
 
     extract_id_from_name(stem)
+}
+
+/// Strip a leading zero-padded numeric order prefix (`NN-`) from a stem, returning
+/// the remainder. Returns `None` when no such prefix is present.
+pub(crate) fn strip_order_prefix(stem: &str) -> Option<&str> {
+    let (head, rest) = stem.split_once('-')?;
+    if !head.is_empty() && head.chars().all(|c| c.is_ascii_digit()) {
+        Some(rest)
+    } else {
+        None
+    }
 }
 
 fn strip_type_prefix_sqids(name: &str) -> &str {
@@ -990,5 +1006,33 @@ mod tests {
             Some("def456"),
             "cache.lock should contain materialized entry"
         );
+    }
+
+    #[test]
+    fn extract_id_nested_cache_child_strips_order_prefix() {
+        // A materialized cache child lives under a clean parent-id folder; its
+        // `NN-` order prefix is not part of the doc id.
+        let path = PathBuf::from(".lazyspec/cache/story/STORY-100/01-STORY-12.md");
+        assert_eq!(extract_id(&path), "STORY-12");
+    }
+
+    #[test]
+    fn extract_id_nested_cache_parent_uses_folder_id() {
+        let path = PathBuf::from(".lazyspec/cache/story/STORY-100/index.md");
+        assert_eq!(extract_id(&path), "STORY-100");
+    }
+
+    #[test]
+    fn extract_id_filesystem_subdir_child_keeps_full_stem() {
+        // Filesystem-authored subdir children sit under a slug folder (title
+        // suffix) and keep their full `NN-name` stem as the id.
+        let path = PathBuf::from("docs/stories/STORY-159-shape/01-first.md");
+        assert_eq!(extract_id(&path), "01-first");
+    }
+
+    #[test]
+    fn extract_id_flat_doc_unaffected_by_order_strip() {
+        let path = PathBuf::from(".lazyspec/cache/story/STORY-12.md");
+        assert_eq!(extract_id(&path), "STORY-12");
     }
 }

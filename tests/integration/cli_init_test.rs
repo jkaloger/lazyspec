@@ -1,5 +1,5 @@
 use lazyspec::engine::config::{
-    default_rules, starter_relationships, starter_types, Config, RelationshipDef,
+    default_rules, starter_relationships, starter_types, Config, RelationshipDef, Traversal,
 };
 use lazyspec::engine::store::Store;
 use std::fs;
@@ -109,6 +109,8 @@ fn init_related_to_is_symmetric_no_inverse() {
         RelationshipDef {
             name: "related-to".to_string(),
             inverse: None,
+            github_native: None,
+            traversal: Some(Traversal::Related),
         },
         "related-to must be symmetric (no inverse)"
     );

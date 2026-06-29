@@ -117,6 +117,7 @@ fn main() -> anyhow::Result<()> {
             doc_type,
             title,
             author,
+            parent,
             body,
             body_file,
             json,
@@ -132,6 +133,7 @@ fn main() -> anyhow::Result<()> {
                     &doc_type,
                     &title,
                     &author,
+                    parent.as_deref(),
                     body_content.as_deref(),
                     |_| {},
                 )?;
@@ -144,6 +146,7 @@ fn main() -> anyhow::Result<()> {
                     &doc_type,
                     &title,
                     &author,
+                    parent.as_deref(),
                     body_content.as_deref(),
                     |_| {},
                 )?;
@@ -167,12 +170,16 @@ fn main() -> anyhow::Result<()> {
             refresh_github_cache(&cwd, &config);
             let store = Store::load(&cwd, &config)?;
             if json {
+                let gh = GhCli::new();
                 let output = lazyspec::cli::show::run_json(
                     &store,
                     &id,
                     expand_references,
                     max_ref_lines,
                     &fs,
+                    &config,
+                    &cwd,
+                    &gh,
                 )?;
                 println!("{}", output);
             } else {
@@ -185,11 +192,13 @@ fn main() -> anyhow::Result<()> {
             title,
             body,
             body_file,
+            attr,
             json,
         }) => {
             lazyspec::cli::lease::check_lease_gate(&cwd, &config, &path)?;
             let body_content = lazyspec::cli::resolve_body(&body, &body_file)?;
             let store = Store::load(&cwd, &config)?;
+            let attr_pairs = lazyspec::cli::update::parse_attr_pairs(&attr)?;
             let mut updates = Vec::new();
             if let Some(ref s) = status {
                 updates.push(("status", s.as_str()));
@@ -199,6 +208,9 @@ fn main() -> anyhow::Result<()> {
             }
             if let Some(ref b) = body_content {
                 updates.push(("body", b.as_str()));
+            }
+            for (key, value) in &attr_pairs {
+                updates.push((key.as_str(), value.as_str()));
             }
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
             lazyspec::cli::update::run_with_config(&cwd, &store, &path, &updates, Some(&config))?;
@@ -277,7 +289,11 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Status { json }) => {
             let store = Store::load(&cwd, &config)?;
             if json {
-                println!("{}", lazyspec::cli::status::run_json(&store, &config));
+                let gh = GhCli::new();
+                println!(
+                    "{}",
+                    lazyspec::cli::status::run_json(&store, &config, &cwd, &gh)
+                );
             } else {
                 let output = lazyspec::cli::status::run_human(&store);
                 if output.is_empty() {
@@ -619,10 +635,12 @@ fn refresh_github_cache(cwd: &std::path::Path, config: &Config) {
             cwd,
             type_def,
             &gh,
+            &gh,
             &repo,
             &mut issue_map,
             ttl,
             &all_type_names,
+            config,
         );
         for warning in &result.warnings {
             eprintln!("warning: {}", warning.message);

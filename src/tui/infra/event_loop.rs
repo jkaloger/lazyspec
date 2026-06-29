@@ -256,12 +256,13 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
         AppEvent::DiagramRendered { source_hash, entry } => {
             app.diagram_cache.insert(source_hash, entry);
         }
-        AppEvent::CacheRefresh => {
+        AppEvent::CacheRefresh { warnings } => {
             let root = app.store.root().to_path_buf();
             if let Ok(refreshed) = Store::load(&root, config) {
                 app.store = refreshed;
             }
             app.last_sync = Some(Instant::now());
+            app.gh_fetch_warnings = warnings;
             app.filtered_docs_cache = None;
             app.rebuild_search_index();
             app.refresh_validation(config);
@@ -536,22 +537,33 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                     let client = GhCli::new();
                     let mut guard = poll_store.lock().unwrap();
                     let store = &mut *guard;
+                    let mut warnings: Vec<String> = Vec::new();
                     for type_def in &gh_types {
-                        if let Err(e) = store.issue_cache.fetch_all(
+                        match store.issue_cache.fetch_all(
                             &poll_root,
                             type_def,
+                            &client,
                             &client,
                             &store.repo,
                             &mut store.issue_map,
                             &all_type_names,
+                            &poll_config,
                         ) {
-                            eprintln!("cache refresh failed for {}: {}", type_def.name, e);
+                            Ok(result) => {
+                                warnings.extend(result.warnings.into_iter().map(|w| w.message));
+                            }
+                            Err(e) => {
+                                warnings.push(format!(
+                                    "cache refresh failed for {}: {}",
+                                    type_def.name, e
+                                ));
+                            }
                         }
                     }
                     let _ = store.issue_map.save(&poll_root);
                     drop(guard);
                     poll_flag.store(false, Ordering::Relaxed);
-                    let _ = poll_tx.send(AppEvent::CacheRefresh);
+                    let _ = poll_tx.send(AppEvent::CacheRefresh { warnings });
                 });
             }
         }

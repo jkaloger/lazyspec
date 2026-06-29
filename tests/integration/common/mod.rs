@@ -182,3 +182,34 @@ impl TestFixture {
         (fixture, bare_dir)
     }
 }
+
+/// Read-only no-op GitHub reader for tests that exercise filesystem/git-ref
+/// document paths through `show`/`status` `run_json`, which now require a
+/// `&dyn GhIssueReader`. Returns empty comment threads; never hits the network.
+pub struct NoopGh;
+
+impl lazyspec::engine::gh::GhIssueReader for NoopGh {
+    fn issue_list(
+        &self,
+        _repo: &str,
+        _labels: &[String],
+        _json_fields: &[String],
+        _limit: Option<u64>,
+    ) -> anyhow::Result<Vec<lazyspec::engine::gh::GhIssue>> {
+        Ok(vec![])
+    }
+    fn issue_view(
+        &self,
+        _repo: &str,
+        _number: u64,
+    ) -> anyhow::Result<lazyspec::engine::gh::GhIssue> {
+        unreachable!("NoopGh::issue_view should not be called")
+    }
+    fn issue_comments(
+        &self,
+        _repo: &str,
+        _number: u64,
+    ) -> anyhow::Result<Vec<lazyspec::engine::gh::GhComment>> {
+        Ok(vec![])
+    }
+}

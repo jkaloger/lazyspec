@@ -6,8 +6,9 @@ use chrono::Local;
 use serde::Serialize;
 
 use crate::engine::config::{Config, StoreBackend, TypeDef};
-use crate::engine::document::{compose_frontmatter, DocMeta, DocType, Status};
-use crate::engine::gh::{self, GhIssueReader, GhIssueWriter};
+use crate::engine::document::{compose_frontmatter, AttrValue, DocMeta, DocType, Status};
+use crate::engine::gh::{self, GhGraphql, GhIssueReader, GhIssueWriter, GqlVar};
+use crate::engine::gh_schema::{try_org_then_user, GhSchemaSnapshot};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::issue_body;
@@ -27,6 +28,11 @@ struct CacheFrontmatter {
     tags: Vec<String>,
     provenance: Vec<String>,
     related: Vec<BTreeMap<String, String>>,
+    /// Custom attributes are flattened to top-level frontmatter keys so the
+    /// cache loader's `parse_with_schema` (which reads undeclared top-level keys)
+    /// coerces them back to typed values on read-back.
+    #[serde(flatten)]
+    attributes: BTreeMap<String, AttrValue>,
 }
 
 #[derive(Debug)]
@@ -90,14 +96,15 @@ impl DocumentStore for FilesystemStore {
         Ok(CreatedDoc { path: relative, id })
     }
 
-    fn update(
-        &mut self,
-        _type_def: &TypeDef,
-        doc_id: &str,
-        updates: &[(&str, &str)],
-    ) -> Result<()> {
+    fn update(&mut self, type_def: &TypeDef, doc_id: &str, updates: &[(&str, &str)]) -> Result<()> {
         let store = Store::load(&self.root, &self.config)?;
-        crate::engine::fs_ops::update_document(&self.root, &store, doc_id, updates)
+        crate::engine::fs_ops::update_document_with_type(
+            &self.root,
+            &store,
+            doc_id,
+            updates,
+            Some(type_def),
+        )
     }
 
     fn delete(&mut self, _type_def: &TypeDef, doc_id: &str) -> Result<()> {
@@ -140,7 +147,7 @@ impl DocumentStore for FilesystemStore {
     }
 }
 
-pub struct GithubIssuesStore<G: GhIssueReader + GhIssueWriter> {
+pub struct GithubIssuesStore<G: GhIssueReader + GhIssueWriter + GhGraphql> {
     pub client: G,
     pub root: PathBuf,
     pub repo: String,
@@ -149,7 +156,7 @@ pub struct GithubIssuesStore<G: GhIssueReader + GhIssueWriter> {
     pub issue_cache: IssueCache,
 }
 
-impl<G: GhIssueReader + GhIssueWriter> GithubIssuesStore<G> {
+impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
     /// Push the current cache file content to GitHub.
     ///
     /// Reads the cache file for `doc_id`, parses its frontmatter and body,
@@ -170,11 +177,70 @@ impl<G: GhIssueReader + GhIssueWriter> GithubIssuesStore<G> {
         self.client
             .issue_edit(&self.repo, issue_number, None, Some(&new_body), &[], &[])?;
 
-        self.issue_map.insert(doc_id, issue_number, "");
+        let node_id = self.existing_node_id(doc_id);
+        self.issue_map.insert(doc_id, issue_number, "", node_id);
         self.issue_map.save(&self.root)?;
         self.issue_cache.touch_lock(doc_id);
 
         Ok(())
+    }
+
+    /// Re-mirror the cache body to GitHub after a native-relation edge write
+    /// (milestone / membership) WITHOUT the optimistic body lock.
+    ///
+    /// Native relations are last-write-wins: the field PATCH (e.g. milestone
+    /// association, Projects v2 membership) has already been applied and is
+    /// authoritative. This re-pushes the known-good local cache body the caller
+    /// just wrote, so an out-of-band `updated_at` advance (e.g. a remote comment)
+    /// cannot abort the mirror after the native PATCH already landed -- avoiding
+    /// the half-applied state where the remote edge exists but the cache and
+    /// `updated_at` baseline never reconcile.
+    ///
+    /// Unlike [`Self::push_cache`], this records the remote's CURRENT
+    /// `updated_at` (rather than clearing it) so the next ordinary body write has
+    /// an accurate lock baseline.
+    pub fn resync_after_native_edge(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()> {
+        let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
+        let cache_path = find_cache_file(&cache_dir, doc_id)
+            .ok_or_else(|| anyhow::anyhow!("cache file not found for {}", doc_id))?;
+        let content = std::fs::read_to_string(&cache_path)?;
+        let meta = DocMeta::parse(&content)?;
+        let body = DocMeta::extract_body(&content)?;
+
+        let issue_number = self
+            .issue_map
+            .get(doc_id)
+            .map(|e| e.issue_number)
+            .ok_or_else(|| anyhow::anyhow!("{} not found in issue map", doc_id))?;
+
+        // Read the remote ONCE to capture its current timestamp. Last-write-wins:
+        // the remote is authoritative for `updated_at`; we never reject on it.
+        let remote_issue = self.client.issue_view(&self.repo, issue_number)?;
+
+        let new_body = issue_body::serialize(&meta, &body);
+        self.client
+            .issue_edit(&self.repo, issue_number, None, Some(&new_body), &[], &[])?;
+
+        self.issue_map.insert(
+            doc_id,
+            issue_number,
+            &remote_issue.updated_at,
+            &remote_issue.id,
+        );
+        self.issue_map.save(&self.root)?;
+        self.issue_cache.touch_lock(doc_id);
+
+        Ok(())
+    }
+
+    /// The currently-mapped GraphQL node id for `doc_id`, or empty when unknown.
+    /// Used to preserve the node id across re-inserts that only clear
+    /// `updated_at`.
+    fn existing_node_id(&self, doc_id: &str) -> String {
+        self.issue_map
+            .get(doc_id)
+            .map(|e| e.node_id.clone())
+            .unwrap_or_default()
     }
 
     /// Fetch the remote issue and check the optimistic lock.
@@ -194,8 +260,12 @@ impl<G: GhIssueReader + GhIssueWriter> GithubIssuesStore<G> {
 
         if local_updated_at.is_empty() {
             // We pushed recently; accept remote state and record timestamp.
-            self.issue_map
-                .insert(doc_id, issue_number, &remote_issue.updated_at);
+            self.issue_map.insert(
+                doc_id,
+                issue_number,
+                &remote_issue.updated_at,
+                &remote_issue.id,
+            );
             self.issue_map.save(&self.root)?;
         } else if remote_issue.updated_at != local_updated_at {
             bail!(
@@ -211,9 +281,505 @@ impl<G: GhIssueReader + GhIssueWriter> GithubIssuesStore<G> {
 
         Ok((issue_number, remote_issue))
     }
+
+    /// Push the native issue-type to GitHub via a single `updateIssue` mutation.
+    /// `type_id` is `Some(id)` to set the type or `None` to clear it
+    /// (`issueTypeId: null`). The issue node id is resolved over GraphQL.
+    fn push_issue_type(&self, issue_number: u64, type_id: Option<&str>) -> Result<()> {
+        let (owner, name) = split_owner_repo(&self.repo)?;
+        let id_resp = self.client.graphql(
+            ISSUE_NODE_ID_QUERY,
+            &[
+                ("owner", GqlVar::Str(owner.to_string())),
+                ("name", GqlVar::Str(name.to_string())),
+                ("number", GqlVar::Int(issue_number as i64)),
+            ],
+        )?;
+        let issue_id = id_resp
+            .pointer("/data/repository/issue/id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!("could not resolve issue node id for #{}", issue_number)
+            })?
+            .to_string();
+
+        match type_id {
+            Some(id) => {
+                self.client.graphql(
+                    UPDATE_ISSUE_TYPE_MUTATION,
+                    &[
+                        ("issueId", GqlVar::Str(issue_id)),
+                        ("issueTypeId", GqlVar::Str(id.to_string())),
+                    ],
+                )?;
+            }
+            None => {
+                // gh cannot pass a null variable, so the clear value is inlined.
+                self.client.graphql(
+                    CLEAR_ISSUE_TYPE_MUTATION,
+                    &[("issueId", GqlVar::Str(issue_id))],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Materialize a subdirectory document type (`index.md` parent + sibling
+    /// child `.md` files) into GitHub issues, closing the silent-drop gap where
+    /// only the `index.md` parent reached GitHub.
+    ///
+    /// Loads the filesystem [`Store`] to resolve the parent's `index.md` path
+    /// and its path-sorted children (loader order). For the parent and each
+    /// child not yet in the issue map, runs the create steps
+    /// (label_ensure -> issue_create -> issue_map.insert -> write_cache_file).
+    /// Returns the parent issue number + node id and the ordered children, ready
+    /// to feed a [`crate::engine::gh_subissue::SubIssuePlan`].
+    pub fn materialize_subdir(
+        &mut self,
+        type_def: &TypeDef,
+        parent_doc_id: &str,
+    ) -> Result<MaterializeResult> {
+        let store = self.load_source_store(type_def)?;
+        let parent_meta = store
+            .resolve_shorthand(parent_doc_id)
+            .ok()
+            .or_else(|| store.resolve_relation_target(parent_doc_id))
+            .ok_or_else(|| anyhow::anyhow!("could not resolve subdir parent: {}", parent_doc_id))?;
+        let parent_path = parent_meta.path.clone();
+
+        let (parent_issue, parent_node) =
+            self.materialize_one(type_def, parent_doc_id, parent_meta)?;
+
+        let child_paths: Vec<PathBuf> = store.children_of(&parent_path).to_vec();
+        let mut children = Vec::new();
+        for (order_index, child_path) in child_paths.iter().enumerate() {
+            let child_meta = store
+                .get(child_path)
+                .ok_or_else(|| anyhow::anyhow!("child doc vanished: {}", child_path.display()))?;
+            let child_id = child_meta.id.clone();
+            let (issue_number, node_id) = self.materialize_one(type_def, &child_id, child_meta)?;
+            children.push(MaterializedChild {
+                child_id,
+                issue_number,
+                node_id,
+                order_index,
+            });
+        }
+
+        Ok(MaterializeResult {
+            parent_id: parent_doc_id.to_string(),
+            parent_issue,
+            parent_node,
+            children,
+        })
+    }
+
+    /// Load a [`Store`] over the type's *source* directory (`type_def.dir`).
+    /// `Store::load` routes github-issues types to the cache dir, but subdir
+    /// children are authored on disk in the source dir; this scans there so the
+    /// loader sees the `index.md` parent and its sibling children.
+    fn load_source_store(&self, type_def: &TypeDef) -> Result<Store> {
+        let mut source_config = self.config.clone();
+        for td in &mut source_config.documents.types {
+            if td.name == type_def.name {
+                td.store = StoreBackend::Filesystem;
+            }
+        }
+        Store::load(&self.root, &source_config)
+    }
+
+    /// Ensure a single doc is on GitHub: reuse its existing issue when already
+    /// mapped, otherwise create one (label_ensure -> issue_create ->
+    /// issue_map.insert -> write_cache_file). Returns `(issue_number, node_id)`.
+    fn materialize_one(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        meta: &DocMeta,
+    ) -> Result<(u64, String)> {
+        if let Some(entry) = self.issue_map.get(doc_id) {
+            return Ok((entry.issue_number, entry.node_id.clone()));
+        }
+
+        let body = std::fs::read_to_string(self.root.join(&meta.path))
+            .ok()
+            .and_then(|c| DocMeta::extract_body(&c).ok())
+            .unwrap_or_default();
+
+        let issue_body = issue_body::serialize(meta, &body);
+        let label = gh::type_label(&type_def.name);
+        let color = gh::deterministic_color(&type_def.name);
+        let description = format!("lazyspec document type: {}", type_def.name);
+        self.client
+            .label_ensure(&self.repo, &label, &description, &color)?;
+        let issue = self
+            .client
+            .issue_create(&self.repo, &meta.title, &issue_body, &[label])?;
+
+        let materialized_meta = DocMeta {
+            id: doc_id.to_string(),
+            ..meta.clone()
+        };
+        self.issue_map
+            .insert(doc_id, issue.number, &issue.updated_at, &issue.id);
+        self.issue_map.save(&self.root)?;
+        write_cache_file(&self.root, type_def, &materialized_meta, &body)?;
+        self.issue_cache.touch_lock(doc_id);
+
+        Ok((issue.number, issue.id))
+    }
+
+    /// Read the per-item project field values for this doc across every board it
+    /// is a member of, and inject them into `meta.attributes` keyed
+    /// `PROJECT-{number}.{field_name}`. The issue's GraphQL node id comes from
+    /// the issue map; a missing node id or zero memberships is a no-op. Values
+    /// are coerced [`AttrValue`]s (never `Raw`); the board number namespaces the
+    /// key so the same field name on two boards cannot collide.
+    pub fn inject_project_fields(&self, meta: &mut DocMeta) -> Result<()> {
+        let boards = self.membership_board_numbers(meta);
+        if boards.is_empty() {
+            return Ok(());
+        }
+        let Some(node_id) = self
+            .issue_map
+            .get(&meta.id)
+            .map(|e| e.node_id.clone())
+            .filter(|n| !n.is_empty())
+        else {
+            return Ok(());
+        };
+
+        let values = self.client.project_item_fields(&self.repo, &node_id)?;
+        for v in &values {
+            if !boards.contains(&v.project_number) {
+                continue;
+            }
+            let key = format!("PROJECT-{}.{}", v.project_number, v.field_name);
+            meta.attributes.insert(key, gh::gh_field_to_attr(&v.value));
+        }
+        Ok(())
+    }
+
+    /// The Projects v2 board numbers this doc is a member of, read from its
+    /// `related` relations whose relationship declares `github_native =
+    /// "membership"`. Targets are board doc ids (`PROJECT-n`).
+    fn membership_board_numbers(&self, meta: &DocMeta) -> Vec<u64> {
+        meta.related
+            .iter()
+            .filter(|r| {
+                self.config
+                    .relationship_by_name(&r.rel_type.to_string())
+                    .and_then(|rel| rel.github_native.as_deref())
+                    == Some("membership")
+            })
+            .filter_map(|r| board_number(&r.target).ok())
+            .collect()
+    }
+
+    /// Write (or clear) one `PROJECT-{number}.{field}` project field for the
+    /// issue. Resolution order, all ids never names:
+    ///   1. field id (+ option/iteration id) FROM the `gh-schema.json` snapshot
+    ///      offline -- an unknown option/iteration rejects here BEFORE any
+    ///      mutation;
+    ///   2. project node id -- reused from the issue map binding for `PROJECT-n`
+    ///      when present, otherwise a fresh org/user lookup;
+    ///   3. project item id for this issue on that board (live);
+    ///   4. `updateProjectV2ItemFieldValue`, or `clearProjectV2ItemFieldValue`
+    ///      for an empty value (a distinct mutation, never an empty-string text).
+    fn set_project_field(
+        &self,
+        content_node_id: &str,
+        project_number: u64,
+        field_name: &str,
+        value: &str,
+    ) -> Result<()> {
+        let snapshot = GhSchemaSnapshot::load(&self.root);
+        let field_id = snapshot
+            .field_id(project_number, field_name)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown project field '{}' on board #{} (refresh the schema snapshot)",
+                    field_name,
+                    project_number
+                )
+            })?
+            .to_string();
+        let data_type = snapshot
+            .project_fields
+            .iter()
+            .find(|f| f.project_number == project_number && f.field_name == field_name)
+            .map(|f| f.data_type.clone())
+            .unwrap_or_default();
+
+        // Empty value clears the field, regardless of kind. Resolve ids and
+        // dispatch the distinct clear mutation.
+        let input: Option<gh::GhFieldValueInput> = if value.is_empty() {
+            None
+        } else {
+            Some(self.resolve_field_value_input(&snapshot, &field_id, &data_type, value)?)
+        };
+
+        let project_id = self.resolve_project_node_id(project_number)?;
+        let item_id = self.resolve_project_item_id(content_node_id, &project_id)?;
+
+        match input {
+            Some(v) => {
+                self.client
+                    .update_project_v2_item_field_value(&project_id, &item_id, &field_id, &v)
+            }
+            None => self
+                .client
+                .clear_project_field(&project_id, &item_id, &field_id),
+        }
+    }
+
+    /// Build the typed [`gh::GhFieldValueInput`] for a field write, resolving
+    /// single-select option / iteration ids FROM the snapshot (offline). An
+    /// unknown option/iteration is an error here, before any mutation.
+    fn resolve_field_value_input(
+        &self,
+        snapshot: &GhSchemaSnapshot,
+        field_id: &str,
+        data_type: &str,
+        value: &str,
+    ) -> Result<gh::GhFieldValueInput> {
+        match data_type {
+            "SINGLE_SELECT" => {
+                let opt = snapshot.option_id(field_id, value).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown option '{}' for project field (not in schema snapshot)",
+                        value
+                    )
+                })?;
+                Ok(gh::GhFieldValueInput::SingleSelect(opt.to_string()))
+            }
+            "ITERATION" => {
+                let iter = snapshot.iteration_id(field_id, value).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown iteration '{}' for project field (not in schema snapshot)",
+                        value
+                    )
+                })?;
+                Ok(gh::GhFieldValueInput::Iteration(iter.to_string()))
+            }
+            "NUMBER" => {
+                let n: f64 = value.parse().map_err(|_| {
+                    anyhow::anyhow!("project number field expects a number: '{}'", value)
+                })?;
+                Ok(gh::GhFieldValueInput::Number(n))
+            }
+            "DATE" => {
+                let d = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
+                    anyhow::anyhow!("project date field expects YYYY-MM-DD: '{}'", value)
+                })?;
+                Ok(gh::GhFieldValueInput::Date(d))
+            }
+            // TEXT and any other text-shaped field.
+            _ => Ok(gh::GhFieldValueInput::Text(value.to_string())),
+        }
+    }
+
+    /// The project node id for `project_number`: reused from the issue map
+    /// binding (`PROJECT-n`) when present, else a fresh org-then-user lookup.
+    fn resolve_project_node_id(&self, project_number: u64) -> Result<String> {
+        let board_doc_id = format!("PROJECT-{}", project_number);
+        if let Some(id) = self
+            .issue_map
+            .get(&board_doc_id)
+            .map(|e| e.node_id.clone())
+            .filter(|n| !n.is_empty())
+        {
+            return Ok(id);
+        }
+        let owner = owner_of(&self.repo)?;
+        resolve_project_id_live(&self.client, owner, project_number)
+    }
+
+    /// The project item id for the issue (`content_node_id`) on the board with
+    /// node id `project_id`, looked up live over GraphQL.
+    fn resolve_project_item_id(&self, content_node_id: &str, project_id: &str) -> Result<String> {
+        if content_node_id.is_empty() {
+            bail!("issue has no GitHub node id; cannot resolve its project item");
+        }
+        let resp = self.client.graphql(
+            PROJECT_ITEM_ID_QUERY,
+            &[("id", GqlVar::Str(content_node_id.to_string()))],
+        )?;
+        resp.pointer("/data/node/projectItems/nodes")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| {
+                arr.iter().find_map(|n| {
+                    let pid = n.pointer("/project/id").and_then(|v| v.as_str())?;
+                    if pid == project_id {
+                        n.get("id").and_then(|v| v.as_str()).map(String::from)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .ok_or_else(|| anyhow::anyhow!("issue is not an item on board {}", project_id))
+    }
+
+    /// Materialize a subdir parent + children, then reconcile their native
+    /// sub-issue links over GraphQL. The single entry point used by both the
+    /// `create` path and cache refresh of subdir types.
+    pub fn sync_subissues(
+        &mut self,
+        type_def: &TypeDef,
+        parent_doc_id: &str,
+    ) -> Result<MaterializeResult> {
+        let result = self.materialize_subdir(type_def, parent_doc_id)?;
+        let plan = result.to_plan(type_def);
+        crate::engine::gh_subissue::reconcile_subissues(&self.client, &self.repo, &plan)?;
+        Ok(result)
+    }
+
+    /// Create a child as a real GitHub issue and bind it as a native sub-issue
+    /// of `parent_doc_id` at create time. The parent must already be a github
+    /// issue (it is itself a github-issues doc); an unmapped parent aborts before
+    /// the bind. The add is idempotent via
+    /// [`crate::engine::gh_subissue::reconcile_subissues`], which fetches the
+    /// remote sub-issue set and only issues the missing edge.
+    pub fn create_child_subissue(
+        &mut self,
+        type_def: &TypeDef,
+        parent_doc_id: &str,
+        title: &str,
+        author: &str,
+        body: &str,
+    ) -> Result<CreatedDoc> {
+        let parent_node = self
+            .issue_map
+            .get(parent_doc_id)
+            .map(|e| e.node_id.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "parent {} is not a github issue (no issue-map entry); \
+                     cannot bind a native sub-issue",
+                    parent_doc_id
+                )
+            })?;
+
+        let created = self.create(type_def, title, author, body)?;
+
+        let child_node = self
+            .issue_map
+            .get(&created.id)
+            .map(|e| e.node_id.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!("child {} missing from issue map after create", created.id)
+            })?;
+
+        let plan = crate::engine::gh_subissue::SubIssuePlan {
+            parent_id: parent_doc_id.to_string(),
+            parent_node,
+            parent_store: type_def.store.clone(),
+            children: vec![crate::engine::gh_subissue::PlannedChild {
+                doc_id: created.id.clone(),
+                node_id: child_node,
+                store: type_def.store.clone(),
+                order_index: 0,
+            }],
+        };
+        crate::engine::gh_subissue::reconcile_subissues(&self.client, &self.repo, &plan)?;
+
+        Ok(created)
+    }
 }
 
-impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
+/// One structural child materialized by [`GithubIssuesStore::materialize_subdir`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct MaterializedChild {
+    pub child_id: String,
+    pub issue_number: u64,
+    pub node_id: String,
+    pub order_index: usize,
+}
+
+/// Outcome of materializing a subdir parent and its children into GitHub issues.
+#[derive(Debug, Clone)]
+pub struct MaterializeResult {
+    pub parent_id: String,
+    pub parent_issue: u64,
+    pub parent_node: String,
+    pub children: Vec<MaterializedChild>,
+}
+
+impl MaterializeResult {
+    /// Build the sub-issue reconcile plan for this materialization. The parent
+    /// and its structural children all belong to the same subdir `type_def`, so
+    /// they share its [`StoreBackend`]; the same-store guard in
+    /// [`crate::engine::gh_subissue::reconcile_subissues`] enforces that.
+    pub fn to_plan(&self, type_def: &TypeDef) -> crate::engine::gh_subissue::SubIssuePlan {
+        use crate::engine::gh_subissue::{PlannedChild, SubIssuePlan};
+        SubIssuePlan {
+            parent_id: self.parent_id.clone(),
+            parent_node: self.parent_node.clone(),
+            parent_store: type_def.store.clone(),
+            children: self
+                .children
+                .iter()
+                .map(|c| PlannedChild {
+                    doc_id: c.child_id.clone(),
+                    node_id: c.node_id.clone(),
+                    store: type_def.store.clone(),
+                    order_index: c.order_index,
+                })
+                .collect(),
+        }
+    }
+}
+
+const ISSUE_NODE_ID_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { id } } }";
+
+const UPDATE_ISSUE_TYPE_MUTATION: &str = "mutation($issueId: ID!, $issueTypeId: ID!) { updateIssue(input: {id: $issueId, issueTypeId: $issueTypeId}) { issue { id } } }";
+
+const CLEAR_ISSUE_TYPE_MUTATION: &str = "mutation($issueId: ID!) { updateIssue(input: {id: $issueId, issueTypeId: null}) { issue { id } } }";
+
+fn split_owner_repo(repo: &str) -> Result<(&str, &str)> {
+    repo.split_once('/')
+        .filter(|(o, n)| !o.is_empty() && !n.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("repo '{}' must be in owner/name form", repo))
+}
+
+/// Parse a `PROJECT-{number}.{field}` attribute key into `(number, field)`.
+/// Returns `None` for any key that does not match the namespaced project-field
+/// shape, so ordinary attributes fall through to the body round-trip.
+pub fn parse_project_field_key(key: &str) -> Option<(u64, &str)> {
+    let rest = key.strip_prefix("PROJECT-")?;
+    let (num_str, field) = rest.split_once('.')?;
+    if field.is_empty() {
+        return None;
+    }
+    let number = num_str.parse::<u64>().ok()?;
+    Some((number, field))
+}
+
+const PROJECT_ITEM_ID_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on Issue { projectItems(first: 100) { nodes { id project { id } } } } } }";
+
+/// Live org-then-user resolve of a Projects v2 board number to its node id.
+/// Used by the issue store's field-write path when the issue map has no cached
+/// board binding.
+fn resolve_project_id_live<G: GhGraphql>(client: &G, owner: &str, number: u64) -> Result<String> {
+    let (_kind, id_node) = try_org_then_user(
+        client,
+        PROJECT_NODE_ID_ORG_QUERY,
+        PROJECT_NODE_ID_USER_QUERY,
+        &[
+            ("owner", GqlVar::Str(owner.to_string())),
+            ("number", GqlVar::Int(number as i64)),
+        ],
+        "/data/organization/projectV2/id",
+        "/data/user/projectV2/id",
+    )
+    .map_err(|_| anyhow::anyhow!("Projects v2 board #{} not found under '{}'", number, owner))?;
+    id_node
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| anyhow::anyhow!("Projects v2 board #{} not found under '{}'", number, owner))
+}
+
+impl<G: GhIssueReader + GhIssueWriter + GhGraphql> DocumentStore for GithubIssuesStore<G> {
     fn create(
         &mut self,
         type_def: &TypeDef,
@@ -272,11 +838,19 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
             ..placeholder_meta
         };
 
-        self.issue_map.insert(&id, issue.number, &issue.updated_at);
+        self.issue_map
+            .insert(&id, issue.number, &issue.updated_at, &issue.id);
         self.issue_map.save(&self.root)?;
 
         write_cache_file(&self.root, type_def, &doc_meta, body)?;
         self.issue_cache.touch_lock(&id);
+
+        // Subdir types: co-materialize sibling children into issues and bind
+        // them as native sub-issues. Best-effort during create -- children may
+        // not yet be on disk; cache refresh reconciles the settled state.
+        if type_def.subdirectory {
+            let _ = self.sync_subissues(type_def, &id);
+        }
 
         let cache_path = self
             .root
@@ -305,11 +879,22 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
                 .map(|t| t.name.clone())
                 .collect(),
             default_type: type_def.name.clone(),
+            attr_defs: type_def.attributes.clone(),
         };
         let (mut meta, mut body) = issue_body::deserialize(&remote_issue.body, &ctx)?;
 
         let mut new_status: Option<Status> = None;
+        let mut attr_updates: Vec<(&str, &str)> = Vec::new();
+        let mut issue_type_update: Option<&str> = None;
+        let mut project_field_updates: Vec<(u64, &str, &str)> = Vec::new();
         for &(key, value) in updates {
+            // `PROJECT-n.<field>` is a per-board project field, not a body
+            // attribute: route it to a GraphQL field mutation, never the HTML
+            // -comment round-trip.
+            if let Some((number, field)) = parse_project_field_key(key) {
+                project_field_updates.push((number, field, value));
+                continue;
+            }
             match key {
                 "status" => {
                     let s: Status = value.parse()?;
@@ -319,9 +904,60 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
                 "title" => meta.title = value.to_string(),
                 "author" => meta.author = value.to_string(),
                 "body" => body = value.to_string(),
-                _ => bail!("unknown update field: {}", key),
+                // The native issue-type lives in GitHub's `issueType` field, not
+                // the issue-body HTML comment, so it is kept out of attr_updates.
+                "issue_type" => issue_type_update = Some(value),
+                _ => attr_updates.push((key, value)),
             }
         }
+
+        // Project field writes are independent of the issue-body round-trip:
+        // resolve ids + validate offline first, then mutate, then return without
+        // touching the issue body or optimistic lock.
+        if !project_field_updates.is_empty() {
+            let content_node_id = self.existing_node_id(doc_id);
+            for (number, field, value) in &project_field_updates {
+                self.set_project_field(&content_node_id, *number, field, value)?;
+            }
+            if attr_updates.is_empty()
+                && new_status.is_none()
+                && issue_type_update.is_none()
+                && !updates.iter().any(|(k, _)| matches!(*k, "title" | "body"))
+            {
+                return Ok(());
+            }
+        }
+        if !attr_updates.is_empty() {
+            crate::engine::document::apply_attrs(type_def, &mut meta, &attr_updates)?;
+        }
+
+        // Resolve (and validate) the native issue-type offline before any remote
+        // write, so an invalid value rejects without an issue_edit or mutation.
+        // `Some(Some(id))` sets the type, `Some(None)` clears it, `None` leaves
+        // it untouched.
+        let issue_type_change: Option<Option<String>> = match issue_type_update {
+            Some("") => Some(None),
+            Some(name) => {
+                let snapshot = GhSchemaSnapshot::load(&self.root);
+                let id = snapshot.issue_type_id(name).ok_or_else(|| {
+                    if snapshot.issue_types.is_empty() {
+                        let (owner, _) = split_owner_repo(&self.repo)
+                            .unwrap_or((self.repo.as_str(), ""));
+                        anyhow::anyhow!(
+                            "native issue types require an organization-owned repository; '{}' has none",
+                            owner
+                        )
+                    } else {
+                        anyhow::anyhow!(
+                            "invalid issue_type '{}': not a known GitHub issue type",
+                            name
+                        )
+                    }
+                })?;
+                Some(Some(id.to_string()))
+            }
+            None => None,
+        };
 
         let new_body = issue_body::serialize(&meta, &body);
         self.client
@@ -340,9 +976,14 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
             }
         }
 
+        if let Some(type_id) = issue_type_change {
+            self.push_issue_type(issue_number, type_id.as_deref())?;
+        }
+
         // Clear updated_at: we just pushed, so our stored timestamp is stale.
         // The next edit's pre-flight fetch will record the fresh timestamp.
-        self.issue_map.insert(doc_id, issue_number, "");
+        let node_id = self.existing_node_id(doc_id);
+        self.issue_map.insert(doc_id, issue_number, "", node_id);
         self.issue_map.save(&self.root)?;
 
         let meta = DocMeta {
@@ -375,6 +1016,7 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
                 .map(|t| t.name.clone())
                 .collect(),
             default_type: type_def.name.clone(),
+            attr_defs: type_def.attributes.clone(),
         };
         let (mut meta, body) = issue_body::deserialize(&remote_issue.body, &ctx)?;
         meta.provenance = provenance.to_vec();
@@ -383,7 +1025,8 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
         self.client
             .issue_edit(&self.repo, issue_number, None, Some(&new_body), &[], &[])?;
 
-        self.issue_map.insert(doc_id, issue_number, "");
+        let node_id = self.existing_node_id(doc_id);
+        self.issue_map.insert(doc_id, issue_number, "", node_id);
         self.issue_map.save(&self.root)?;
 
         let meta = DocMeta {
@@ -421,17 +1064,647 @@ impl<G: GhIssueReader + GhIssueWriter> DocumentStore for GithubIssuesStore<G> {
     }
 }
 
+/// Map a lifecycle status to a milestone REST `state`. Closed-equivalent
+/// statuses (`complete`, `rejected`, `superseded`) map to `"closed"`; everything
+/// else (draft/review/accepted/in-progress) maps to `"open"`. Mirrors the
+/// open/closed set used for issues.
+pub fn status_to_milestone_state(status: &Status) -> &'static str {
+    match status.as_str() {
+        "complete" | "rejected" | "superseded" => "closed",
+        _ => "open",
+    }
+}
+
+/// Map a milestone REST `state` back to a lifecycle status. `"closed"` -> the
+/// closed-equivalent `complete`; anything else -> the open-equivalent
+/// `in-progress`.
+pub fn milestone_state_to_status(state: &str) -> Status {
+    if state.eq_ignore_ascii_case("closed") {
+        Status::new("complete")
+    } else {
+        Status::new("in-progress")
+    }
+}
+
+/// Progress as a 0..=100 percentage of closed issues over the total, or `None`
+/// when there are no issues. Computed at read time only; never stored or
+/// writable.
+pub fn percent_complete(open: u64, closed: u64) -> Option<u8> {
+    let total = open + closed;
+    if total == 0 {
+        None
+    } else {
+        Some((closed * 100 / total) as u8)
+    }
+}
+
+/// A milestone document store backed by the GitHub milestones REST API. The
+/// milestone number is the document id (`make_id(number)`), mirroring the
+/// github-issues backend. Write policy is last-write-wins + refresh: pushes
+/// happen unconditionally, then the milestone is re-read into the cache; there
+/// is no optimistic lock.
+pub struct GithubMilestonesStore<M: gh::GhMilestoneApi> {
+    pub client: M,
+    pub root: PathBuf,
+    pub repo: String,
+    pub config: Config,
+    pub issue_map: IssueMap,
+}
+
+impl<M: gh::GhMilestoneApi> GithubMilestonesStore<M> {
+    fn resolve_number(&self, doc_id: &str) -> Result<u64> {
+        self.issue_map
+            .get(doc_id)
+            .map(|e| e.issue_number)
+            .ok_or_else(|| anyhow::anyhow!("{} not found in milestone map", doc_id))
+    }
+
+    fn meta_from_milestone(
+        &self,
+        type_def: &TypeDef,
+        id: &str,
+        milestone: &gh::GhMilestone,
+        author: &str,
+    ) -> DocMeta {
+        let mut attributes: std::collections::BTreeMap<String, AttrValue> = Default::default();
+        if let Some(due) = &milestone.due_on {
+            attributes.insert("due_on".to_string(), AttrValue::Str(due.clone()));
+        }
+        attributes.insert(
+            "open_issues".to_string(),
+            AttrValue::Int(milestone.open_issues as i64),
+        );
+        attributes.insert(
+            "closed_issues".to_string(),
+            AttrValue::Int(milestone.closed_issues as i64),
+        );
+
+        // The milestone's `targeted-by` relations are derived virtually in
+        // `build_links` as the reverse of each issue's forward `targets` edge
+        // (read from the issue's native milestone at fetch). They are never
+        // stored on the cached milestone doc, so `related` is always empty here.
+        DocMeta {
+            path: PathBuf::new(),
+            title: milestone.title.clone(),
+            doc_type: DocType::new(&type_def.name),
+            status: milestone_state_to_status(&milestone.state),
+            author: author.to_string(),
+            date: Local::now().date_naive(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            attributes,
+            id: id.to_string(),
+        }
+    }
+}
+
+impl<M: gh::GhMilestoneApi> DocumentStore for GithubMilestonesStore<M> {
+    fn create(
+        &mut self,
+        type_def: &TypeDef,
+        title: &str,
+        author: &str,
+        body: &str,
+    ) -> Result<CreatedDoc> {
+        let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
+        std::fs::create_dir_all(&cache_dir)?;
+
+        let milestone = self
+            .client
+            .milestone_create(&self.repo, title, body, None, "open")?;
+
+        let id = type_def.make_id(milestone.number);
+        self.issue_map.insert_kind(
+            &id,
+            milestone.number,
+            "",
+            "",
+            crate::engine::issue_map::EntryKind::Milestone,
+        );
+        self.issue_map.save(&self.root)?;
+
+        let meta = self.meta_from_milestone(type_def, &id, &milestone, author);
+        write_cache_file(&self.root, type_def, &meta, body)?;
+
+        let cache_path = cache_dir.join(format!("{}.md", id));
+        let relative = cache_path
+            .strip_prefix(&self.root)
+            .unwrap_or(&cache_path)
+            .to_path_buf();
+        Ok(CreatedDoc { path: relative, id })
+    }
+
+    fn update(&mut self, type_def: &TypeDef, doc_id: &str, updates: &[(&str, &str)]) -> Result<()> {
+        let number = self.resolve_number(doc_id)?;
+
+        let mut title: Option<String> = None;
+        let mut description: Option<String> = None;
+        let mut due_on: Option<String> = None;
+        let mut state: Option<String> = None;
+        for &(key, value) in updates {
+            match key {
+                "title" => title = Some(value.to_string()),
+                "body" | "description" => description = Some(value.to_string()),
+                "due_on" => due_on = Some(value.to_string()),
+                "status" => {
+                    let s: Status = value.parse()?;
+                    state = Some(status_to_milestone_state(&s).to_string());
+                }
+                // `percent_complete` is a computed read-only field; reject writes
+                // so it is never PATCHed to GitHub.
+                "percent_complete" => {
+                    bail!("percent_complete is computed from issue counts and cannot be set")
+                }
+                other => bail!("unknown milestone field '{}'", other),
+            }
+        }
+
+        // Last-write-wins: push the changed fields unconditionally (no lock).
+        self.client.milestone_edit(
+            &self.repo,
+            number,
+            title.as_deref(),
+            description.as_deref(),
+            due_on.as_deref(),
+            state.as_deref(),
+        )?;
+
+        // Refresh: re-read the milestone and rewrite the cache from remote.
+        let milestone = self.client.milestone_view(&self.repo, number)?;
+        let meta = self.meta_from_milestone(type_def, doc_id, &milestone, "");
+        write_cache_file(&self.root, type_def, &meta, &milestone.description)?;
+
+        Ok(())
+    }
+
+    fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()> {
+        let number = self.resolve_number(doc_id)?;
+        self.client.milestone_delete(&self.repo, number)?;
+
+        self.issue_map.remove(doc_id);
+        self.issue_map.save(&self.root)?;
+
+        let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
+        if let Some(path) = find_cache_file(&cache_dir, doc_id) {
+            let _ = std::fs::remove_file(path);
+        }
+        Ok(())
+    }
+
+    fn set_provenance(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        provenance: &[String],
+    ) -> Result<()> {
+        // Milestones have no provenance field on GitHub; keep it in the local
+        // cache frontmatter only.
+        let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
+        let cache_path = find_cache_file(&cache_dir, doc_id)
+            .ok_or_else(|| anyhow::anyhow!("cache file not found for {}", doc_id))?;
+
+        let entries: Vec<serde_yaml::Value> = provenance
+            .iter()
+            .map(|s| serde_yaml::Value::String(s.clone()))
+            .collect();
+
+        crate::engine::document::rewrite_frontmatter(
+            &cache_path,
+            &crate::engine::fs::RealFileSystem,
+            |val| {
+                let map = val
+                    .as_mapping_mut()
+                    .ok_or_else(|| anyhow::anyhow!("frontmatter root must be a mapping"))?;
+                map.insert(
+                    serde_yaml::Value::String("provenance".to_string()),
+                    serde_yaml::Value::Sequence(entries.clone()),
+                );
+                Ok(())
+            },
+        )
+    }
+}
+
+const PROJECT_NODE_ID_ORG_QUERY: &str = "query($owner: String!, $number: Int!) { organization(login: $owner) { projectV2(number: $number) { id } } }";
+
+const PROJECT_NODE_ID_USER_QUERY: &str = "query($owner: String!, $number: Int!) { user(login: $owner) { projectV2(number: $number) { id } } }";
+
+const OWNER_NODE_ID_ORG_QUERY: &str =
+    "query($owner: String!) { organization(login: $owner) { id } }";
+
+const OWNER_NODE_ID_USER_QUERY: &str = "query($owner: String!) { user(login: $owner) { id } }";
+
+const CREATE_PROJECT_V2_MUTATION: &str = "mutation($ownerId: ID!, $title: String!) { createProjectV2(input: { ownerId: $ownerId, title: $title }) { projectV2 { id number } } }";
+
+/// Resolve an owner login to its GraphQL node id, trying the organization root
+/// first then the user root (mirrors [`resolve_project_id_live`]). The
+/// `createProjectV2` mutation needs the owner's *node id*, not the login.
+fn resolve_owner_node_id<G: GhGraphql>(client: &G, owner: &str) -> Result<String> {
+    let (_kind, id_node) = try_org_then_user(
+        client,
+        OWNER_NODE_ID_ORG_QUERY,
+        OWNER_NODE_ID_USER_QUERY,
+        &[("owner", GqlVar::Str(owner.to_string()))],
+        "/data/organization/id",
+        "/data/user/id",
+    )
+    .map_err(|_| anyhow::anyhow!("owner '{}' not found as org or user", owner))?;
+    id_node
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| anyhow::anyhow!("owner '{}' not found as org or user", owner))
+}
+
+/// True when a GraphQL response signals the `project` token scope is missing:
+/// a top-level `errors[]` entry whose type or message names insufficient
+/// scopes, the `project` scope, an inaccessible resource, or a missing
+/// permission. Board creation needs the `project` scope, which `repo` does not
+/// grant.
+fn missing_project_scope(resp: &serde_json::Value) -> bool {
+    let Some(errors) = resp.pointer("/errors").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    errors.iter().any(|e| {
+        let kind = e.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+        let msg = e
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        kind == "INSUFFICIENT_SCOPES"
+            || msg.contains("`project` scope")
+            || msg.contains("project scope")
+            || msg.contains("resource not accessible")
+            || msg.contains("does not have permission")
+    })
+}
+
+/// Parse the `owner` half of a `owner/repo` string. The github-projects backend
+/// resolves boards under this owner.
+fn owner_of(repo: &str) -> Result<&str> {
+    repo.split_once('/')
+        .map(|(o, _)| o)
+        .filter(|o| !o.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("repo '{}' must be in owner/name form", repo))
+}
+
+/// Extract the numeric board number from a board doc id (`PROJECT-7` -> 7, or a
+/// bare `7`). Project boards are addressed by their GitHub Projects v2 number.
+pub fn board_number(doc_id: &str) -> Result<u64> {
+    let suffix = doc_id.rsplit('-').next().unwrap_or(doc_id);
+    suffix
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("'{}' does not name a Projects v2 board number", doc_id))
+}
+
+/// A project-board document store backed by GitHub Projects v2 (GraphQL).
+/// `create` authors a board via `createProjectV2` and binds the returned number
+/// as the doc id (`PROJECT-n`); `delete` bails (boards are removed on GitHub).
+/// `update`/`set_provenance` resolve the board node id without mutating the
+/// board. The owner type (org vs user) is auto-detected by trying the
+/// organization root first, then falling back to the user root.
+pub struct GithubProjectsStore<G: GhGraphql> {
+    pub client: G,
+    pub root: PathBuf,
+    pub repo: String,
+    pub config: Config,
+    pub issue_map: IssueMap,
+}
+
+impl<G: GhGraphql> GithubProjectsStore<G> {
+    /// Resolve a Projects v2 board number to its GraphQL node id. Tries the
+    /// organization root first, then the user root. A board number that exists
+    /// under neither (both `projectV2` null) is a not-found error. NEVER issues a
+    /// create mutation.
+    pub fn resolve_board(&self, owner: &str, number: u64) -> Result<String> {
+        let org_resp = self.client.graphql(
+            PROJECT_NODE_ID_ORG_QUERY,
+            &[
+                ("owner", GqlVar::Str(owner.to_string())),
+                ("number", GqlVar::Int(number as i64)),
+            ],
+        )?;
+        if let Some(id) = org_resp
+            .pointer("/data/organization/projectV2/id")
+            .and_then(|v| v.as_str())
+        {
+            return Ok(id.to_string());
+        }
+
+        let user_resp = self.client.graphql(
+            PROJECT_NODE_ID_USER_QUERY,
+            &[
+                ("owner", GqlVar::Str(owner.to_string())),
+                ("number", GqlVar::Int(number as i64)),
+            ],
+        )?;
+        if let Some(id) = user_resp
+            .pointer("/data/user/projectV2/id")
+            .and_then(|v| v.as_str())
+        {
+            return Ok(id.to_string());
+        }
+
+        bail!(
+            "Projects v2 board #{} not found under owner '{}'",
+            number,
+            owner
+        )
+    }
+
+    /// Resolve a board doc id to its node id and materialize a cache file holding
+    /// it for offline lookup. Records the number+node id in the issue map.
+    fn bind_board(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<String> {
+        let owner = owner_of(&self.repo)?.to_string();
+        let number = board_number(doc_id)?;
+        let node_id = self.resolve_board(&owner, number)?;
+
+        self.issue_map.insert_kind(
+            doc_id,
+            number,
+            "",
+            node_id.clone(),
+            crate::engine::issue_map::EntryKind::Project,
+        );
+        self.issue_map.save(&self.root)?;
+
+        let meta = DocMeta {
+            path: PathBuf::new(),
+            title: doc_id.to_string(),
+            doc_type: DocType::new(&type_def.name),
+            status: Status::new("draft"),
+            author: String::new(),
+            date: Local::now().date_naive(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            attributes: Default::default(),
+            id: doc_id.to_string(),
+        };
+        write_cache_file(&self.root, type_def, &meta, &node_id)?;
+
+        Ok(node_id)
+    }
+}
+
+impl<G: GhGraphql> DocumentStore for GithubProjectsStore<G> {
+    fn create(
+        &mut self,
+        type_def: &TypeDef,
+        title: &str,
+        _author: &str,
+        _body: &str,
+    ) -> Result<CreatedDoc> {
+        let owner = owner_of(&self.repo)?.to_string();
+        let owner_id = resolve_owner_node_id(&self.client, &owner)?;
+
+        let resp = self.client.graphql(
+            CREATE_PROJECT_V2_MUTATION,
+            &[
+                ("ownerId", GqlVar::Str(owner_id)),
+                ("title", GqlVar::Str(title.to_string())),
+            ],
+        )?;
+
+        // Board creation needs the `project` token scope; `repo` does not grant
+        // it. Detect the scope-missing signal BEFORE any persist so the failure
+        // path writes no doc and no issue-map entry.
+        if missing_project_scope(&resp) || resp.pointer("/data/createProjectV2").is_none() {
+            if missing_project_scope(&resp) {
+                bail!("Projects v2 board creation needs the `project` token scope; run `gh auth refresh -s project`");
+            }
+            bail!("createProjectV2 returned no board number");
+        }
+
+        let number = resp
+            .pointer("/data/createProjectV2/projectV2/number")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| anyhow::anyhow!("createProjectV2 returned no board number"))?;
+        let node_id = resp
+            .pointer("/data/createProjectV2/projectV2/id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("createProjectV2 returned no board number"))?
+            .to_string();
+
+        let doc_id = format!("PROJECT-{}", number);
+
+        self.issue_map.insert_kind(
+            &doc_id,
+            number,
+            "",
+            node_id.clone(),
+            crate::engine::issue_map::EntryKind::Project,
+        );
+        self.issue_map.save(&self.root)?;
+
+        let meta = DocMeta {
+            path: PathBuf::new(),
+            title: doc_id.clone(),
+            doc_type: DocType::new(&type_def.name),
+            status: Status::new("draft"),
+            author: String::new(),
+            date: Local::now().date_naive(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            attributes: Default::default(),
+            id: doc_id.clone(),
+        };
+        write_cache_file(&self.root, type_def, &meta, &node_id)?;
+
+        let cache_path = self
+            .root
+            .join(".lazyspec/cache")
+            .join(&type_def.name)
+            .join(format!("{}.md", doc_id));
+        let relative = cache_path
+            .strip_prefix(&self.root)
+            .unwrap_or(&cache_path)
+            .to_path_buf();
+        Ok(CreatedDoc {
+            path: relative,
+            id: doc_id,
+        })
+    }
+
+    fn update(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        _updates: &[(&str, &str)],
+    ) -> Result<()> {
+        // Boards are not mutated from lazyspec; resolving the node id is the only
+        // side effect, so an out-of-date binding refreshes.
+        self.bind_board(type_def, doc_id)?;
+        Ok(())
+    }
+
+    fn delete(&mut self, _type_def: &TypeDef, _doc_id: &str) -> Result<()> {
+        bail!("github-projects backend does not delete boards; boards are managed on GitHub")
+    }
+
+    fn set_provenance(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        _provenance: &[String],
+    ) -> Result<()> {
+        self.bind_board(type_def, doc_id)?;
+        Ok(())
+    }
+}
+
 pub fn write_cache_file(
     root: &std::path::Path,
     type_def: &TypeDef,
     meta: &DocMeta,
     body: &str,
 ) -> Result<()> {
+    if meta.id.is_empty() {
+        anyhow::bail!("refusing cache write for empty doc id");
+    }
     let cache_dir = root.join(".lazyspec/cache").join(&type_def.name);
     std::fs::create_dir_all(&cache_dir)?;
     let cache_path = find_cache_file(&cache_dir, &meta.id)
         .unwrap_or_else(|| cache_dir.join(format!("{}.md", meta.id)));
 
+    let cache_content = render_cache_content(meta, body)?;
+    std::fs::write(&cache_path, &cache_content)?;
+    Ok(())
+}
+
+pub(crate) fn find_cache_file(cache_dir: &std::path::Path, doc_id: &str) -> Option<PathBuf> {
+    if let Some(flat) = find_cache_file_flat(cache_dir, doc_id) {
+        return Some(flat);
+    }
+    // Nested layout: a child lives inside a parent-id folder as `NN-<doc_id>.md`,
+    // and a parent-with-children lives at `<doc_id>/index.md`.
+    std::fs::read_dir(cache_dir).ok()?.find_map(|entry| {
+        let entry = entry.ok()?;
+        if !entry.file_type().ok()?.is_dir() {
+            return None;
+        }
+        let folder = entry.path();
+        if entry.file_name().to_string_lossy() == doc_id {
+            let index = folder.join("index.md");
+            if index.exists() {
+                return Some(index);
+            }
+        }
+        find_nested_child(&folder, doc_id)
+    })
+}
+
+fn find_cache_file_flat(cache_dir: &std::path::Path, doc_id: &str) -> Option<PathBuf> {
+    let prefix = format!("{}-", doc_id);
+    let exact = format!("{}.md", doc_id);
+    std::fs::read_dir(cache_dir).ok()?.find_map(|entry| {
+        let entry = entry.ok()?;
+        if entry.file_type().ok()?.is_dir() {
+            return None;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == exact || name.starts_with(&prefix) {
+            Some(entry.path())
+        } else {
+            None
+        }
+    })
+}
+
+/// Find a nested child `NN-<doc_id>.md` inside a parent folder.
+fn find_nested_child(folder: &std::path::Path, doc_id: &str) -> Option<PathBuf> {
+    std::fs::read_dir(folder).ok()?.find_map(|entry| {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            return None;
+        }
+        let stem = path.file_stem().and_then(|s| s.to_str())?;
+        if store::strip_order_prefix(stem) == Some(doc_id) {
+            Some(path)
+        } else {
+            None
+        }
+    })
+}
+
+/// Zero-padded order prefix width: lexicographic sort must equal numeric sort, so
+/// the width grows with the child count (`>=2` digits, `3` when more than 99).
+fn order_width(total: usize) -> usize {
+    if total > 99 {
+        3
+    } else {
+        2
+    }
+}
+
+fn child_cache_filename(order: usize, total: usize, child_id: &str) -> String {
+    format!(
+        "{:0width$}-{}.md",
+        order,
+        child_id,
+        width = order_width(total)
+    )
+}
+
+/// Write a parent that has children to `<type>/<PARENT>/index.md`.
+pub fn write_cache_parent(
+    root: &std::path::Path,
+    type_def: &TypeDef,
+    meta: &DocMeta,
+    body: &str,
+) -> Result<()> {
+    if meta.id.is_empty() {
+        anyhow::bail!("refusing cache write for empty doc id");
+    }
+    let folder = root
+        .join(".lazyspec/cache")
+        .join(&type_def.name)
+        .join(&meta.id);
+    std::fs::create_dir_all(&folder)?;
+    let cache_path = folder.join("index.md");
+    let content = render_cache_content(meta, body)?;
+    std::fs::write(&cache_path, &content)?;
+    Ok(())
+}
+
+/// Write a child to `<type>/<PARENT>/NN-<child-id>.md`, where `order` is the child's
+/// zero-based position and `total` the sibling count (sets the `NN` padding width).
+pub fn write_cache_child(
+    root: &std::path::Path,
+    type_def: &TypeDef,
+    parent_id: &str,
+    order: usize,
+    total: usize,
+    meta: &DocMeta,
+    body: &str,
+) -> Result<()> {
+    if meta.id.is_empty() {
+        anyhow::bail!("refusing cache write for empty doc id");
+    }
+    if parent_id.is_empty() {
+        anyhow::bail!("refusing nested cache write for empty parent id");
+    }
+    let folder = root
+        .join(".lazyspec/cache")
+        .join(&type_def.name)
+        .join(parent_id);
+    std::fs::create_dir_all(&folder)?;
+    let cache_path = folder.join(child_cache_filename(order, total, &meta.id));
+    let content = render_cache_content(meta, body)?;
+    std::fs::write(&cache_path, &content)?;
+    Ok(())
+}
+
+fn render_cache_content(meta: &DocMeta, body: &str) -> Result<String> {
     let frontmatter = CacheFrontmatter {
         title: meta.title.clone(),
         doc_type: meta.doc_type.as_str().to_string(),
@@ -449,38 +1722,31 @@ pub fn write_cache_file(
                 m
             })
             .collect(),
+        attributes: meta.attributes.clone(),
     };
-
     let yaml = serde_yaml::to_string(&frontmatter)?;
     let body_section = if body.is_empty() {
         String::new()
     } else {
         format!("\n{}\n", body)
     };
-    let cache_content = compose_frontmatter(&yaml, &body_section);
-    std::fs::write(&cache_path, &cache_content)?;
-    Ok(())
+    Ok(compose_frontmatter(&yaml, &body_section))
 }
 
-pub(crate) fn find_cache_file(cache_dir: &std::path::Path, doc_id: &str) -> Option<PathBuf> {
-    let prefix = format!("{}-", doc_id);
-    let exact = format!("{}.md", doc_id);
-    std::fs::read_dir(cache_dir).ok()?.find_map(|entry| {
-        let entry = entry.ok()?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name == exact || name.starts_with(&prefix) {
-            Some(entry.path())
-        } else {
-            None
-        }
-    })
-}
-
-pub fn dispatch_for_type<'a, G: GhIssueReader + GhIssueWriter, R: GitRefOps>(
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_for_type<
+    'a,
+    G: GhIssueReader + GhIssueWriter + GhGraphql,
+    R: GitRefOps,
+    M: gh::GhMilestoneApi,
+    P: GhGraphql,
+>(
     type_def: &TypeDef,
     fs_store: &'a mut FilesystemStore,
     gh_store: Option<&'a mut GithubIssuesStore<G>>,
     git_ref_store: Option<&'a mut GitRefStore<R>>,
+    milestone_store: Option<&'a mut GithubMilestonesStore<M>>,
+    projects_store: Option<&'a mut GithubProjectsStore<P>>,
 ) -> Result<&'a mut dyn DocumentStore> {
     match type_def.store {
         StoreBackend::Filesystem => Ok(fs_store as &mut dyn DocumentStore),
@@ -488,6 +1754,22 @@ pub fn dispatch_for_type<'a, G: GhIssueReader + GhIssueWriter, R: GitRefOps>(
             Some(s) => Ok(s as &mut dyn DocumentStore),
             None => bail!(
                 "type '{}' uses {} store but no GitHub backend is configured",
+                type_def.name,
+                type_def.store
+            ),
+        },
+        StoreBackend::GithubMilestones => match milestone_store {
+            Some(s) => Ok(s as &mut dyn DocumentStore),
+            None => bail!(
+                "type '{}' uses {} store but no GitHub milestones backend is configured",
+                type_def.name,
+                type_def.store
+            ),
+        },
+        StoreBackend::GithubProjects => match projects_store {
+            Some(s) => Ok(s as &mut dyn DocumentStore),
+            None => bail!(
+                "type '{}' uses {} store but no GitHub projects backend is configured",
                 type_def.name,
                 type_def.store
             ),
@@ -506,7 +1788,10 @@ pub fn dispatch_for_type<'a, G: GhIssueReader + GhIssueWriter, R: GitRefOps>(
 mod tests {
     use super::*;
     use crate::engine::config::{Config, NumberingStrategy, StoreBackend, TypeDef};
-    use crate::engine::gh::{test_support::MockGhClient, GhIssue, GhLabel};
+    use crate::engine::gh::{
+        test_support::{MockGhClient, MockGhMilestoneClient},
+        GhIssue, GhLabel, GhMilestoneApi,
+    };
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use crate::engine::issue_map::IssueMap;
 
@@ -772,6 +2057,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "original body");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
@@ -783,11 +2069,13 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
+            milestone: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -821,6 +2109,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
@@ -832,11 +2121,13 @@ mod tests {
             updated_at: "2026-03-27T10:45:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
+            milestone: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -858,12 +2149,88 @@ mod tests {
         assert!(msg.contains("background sync"));
     }
 
+    // ITERATION-222: the conflict-free native-relation resync re-mirrors the
+    // cache body WITHOUT the optimistic lock. An out-of-band remote updated_at
+    // bump (e.g. a comment) must not abort it; the issue-map baseline reconciles
+    // to the remote's CURRENT timestamp (not cleared, not left stale).
+    #[test]
+    fn resync_after_native_edge_ignores_updated_at_and_records_fresh() {
+        let root = tmp_root("gh_resync_native");
+        let cache_dir = root.join(".lazyspec/cache/rfc");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache_content = concat!(
+            "---\n",
+            "title: My RFC\n",
+            "type: rfc\n",
+            "status: draft\n",
+            "author: agent-7\n",
+            "date: 2026-03-27\n",
+            "tags: []\n",
+            "related:\n",
+            "- targets: MILESTONE-3\n",
+            "---\n",
+            "Some body text.\n",
+        );
+        std::fs::write(cache_dir.join("RFC-001.md"), cache_content).unwrap();
+
+        // Remote moved to 10:45 since our last fetch at 10:00.
+        let remote_body = make_issue_body("agent-7", "2026-03-27", None, "Some body text.");
+        let view_issue = GhIssue {
+            number: 42,
+            id: "I_node42".to_string(),
+            url: String::new(),
+            title: "My RFC".to_string(),
+            body: remote_body,
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T10:45:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+            issue_type: None,
+            milestone: None,
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
+
+        let mut gh_store = GithubIssuesStore {
+            client,
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        gh_store
+            .resync_after_native_edge(&td, "RFC-001")
+            .expect("resync must not abort on an out-of-band updated_at bump");
+
+        // The body was re-mirrored (issue_edit ran).
+        assert!(
+            gh_store.client.last_edit_body.borrow().is_some(),
+            "issue_edit should have been called"
+        );
+
+        // Baseline reconciled to the remote's fresh timestamp.
+        let reloaded = IssueMap::load(&root).unwrap();
+        let entry = reloaded.get("RFC-001").unwrap();
+        assert_eq!(entry.updated_at, "2026-03-27T10:45:00Z");
+        assert_eq!(entry.node_id, "I_node42");
+    }
+
     #[test]
     fn github_issues_update_status_complete_closes_issue() {
         let root = tmp_root("gh_update_close");
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
@@ -875,11 +2242,13 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
+            milestone: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -904,6 +2273,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
@@ -915,11 +2285,13 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
+            milestone: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -963,6 +2335,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "some content");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
@@ -974,11 +2347,13 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
+            milestone: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -1005,6 +2380,7 @@ mod tests {
         let root = tmp_root("gh_delete_lock");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: String::new(),
@@ -1013,11 +2389,13 @@ mod tests {
             updated_at: "2026-03-27T10:45:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
+            milestone: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -1057,6 +2435,7 @@ mod tests {
         let root = tmp_root("gh_delete_cache");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: String::new(),
@@ -1065,11 +2444,13 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
+            milestone: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let cache_dir = root.join(".lazyspec/cache/rfc");
         std::fs::create_dir_all(&cache_dir).unwrap();
@@ -1091,6 +2472,225 @@ mod tests {
         assert!(!cache_file.exists());
     }
 
+    fn milestone_store(
+        root: &std::path::Path,
+        client: MockGhMilestoneClient,
+    ) -> GithubMilestonesStore<MockGhMilestoneClient> {
+        GithubMilestonesStore {
+            client,
+            root: root.to_path_buf(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: IssueMap::load(root).unwrap(),
+        }
+    }
+
+    // AC1: create calls milestone_create with title/description, id == make_id(number),
+    // issue_map maps doc_id -> number, cache file written.
+    #[test]
+    fn milestone_create_writes_cache_and_maps_number() {
+        let root = tmp_root("ms_create");
+        let mut store = milestone_store(&root, MockGhMilestoneClient::new());
+        let td = test_type_def(StoreBackend::GithubMilestones);
+
+        let created = store
+            .create(&td, "v1.0", "author", "first release")
+            .unwrap();
+
+        assert_eq!(created.id, td.make_id(1));
+        assert_eq!(store.client.create_calls.get(), 1);
+        let ms = &store.client.milestones.borrow()[0];
+        assert_eq!(ms.title, "v1.0");
+        assert_eq!(ms.description, "first release");
+
+        let entry = store.issue_map.get(&created.id).unwrap();
+        assert_eq!(entry.issue_number, 1);
+
+        assert!(root.join(&created.path).exists());
+    }
+
+    // ITERATION-225 (AC2): the cached milestone doc carries NO stored relations;
+    // `targeted-by` is derived virtually in `build_links` as the reverse of each
+    // issue's forward `targets` edge, never written here.
+    #[test]
+    fn milestone_meta_stores_no_relations() {
+        let root = tmp_root("ms_no_stored_relations");
+        let client = MockGhMilestoneClient::new();
+        let store = milestone_store(&root, client);
+        let td = test_type_def(StoreBackend::GithubMilestones);
+
+        let milestone = crate::engine::gh::GhMilestone {
+            number: 7,
+            title: "v1.0".to_string(),
+            description: String::new(),
+            due_on: None,
+            state: "open".to_string(),
+            open_issues: 3,
+            closed_issues: 0,
+            url: String::new(),
+        };
+
+        let meta = store.meta_from_milestone(&td, "MILESTONE-7", &milestone, "author");
+        assert!(
+            meta.related.is_empty(),
+            "milestone doc must store no relations; targeted-by is virtual"
+        );
+    }
+
+    // AC2: update [title, body, due_on] -> milestone_edit records changed fields;
+    // re-read via milestone_view returns updates; cache reflects them.
+    #[test]
+    fn milestone_update_round_trips_changed_fields() {
+        let root = tmp_root("ms_update");
+        let mut store = milestone_store(&root, MockGhMilestoneClient::new());
+        let td = test_type_def(StoreBackend::GithubMilestones);
+
+        let created = store.create(&td, "v1.0", "author", "old desc").unwrap();
+        store
+            .update(
+                &td,
+                &created.id,
+                &[
+                    ("title", "v2.0"),
+                    ("body", "new desc"),
+                    ("due_on", "2026-09-01T00:00:00Z"),
+                ],
+            )
+            .unwrap();
+
+        let edit = store.client.last_edit.borrow();
+        let edit = edit.as_ref().unwrap();
+        assert_eq!(edit.title.as_deref(), Some("v2.0"));
+        assert_eq!(edit.description.as_deref(), Some("new desc"));
+        assert_eq!(edit.due_on.as_deref(), Some("2026-09-01T00:00:00Z"));
+
+        let viewed = store.client.milestone_view("owner/repo", 1).unwrap();
+        assert_eq!(viewed.title, "v2.0");
+        assert_eq!(viewed.description, "new desc");
+
+        let cache = std::fs::read_to_string(root.join(&created.path)).unwrap();
+        assert!(cache.contains("v2.0"), "cache title updated: {cache}");
+        assert!(cache.contains("new desc"), "cache body updated: {cache}");
+        assert!(
+            cache.contains("2026-09-01T00:00:00Z"),
+            "cache due_on updated: {cache}"
+        );
+    }
+
+    // AC3: state <-> status mappings, and loading a closed milestone materializes
+    // a closed-equivalent status in the cache.
+    #[test]
+    fn milestone_state_status_mappings() {
+        assert_eq!(milestone_state_to_status("closed").as_str(), "complete");
+        assert_eq!(milestone_state_to_status("open").as_str(), "in-progress");
+        assert_eq!(
+            status_to_milestone_state(&Status::new("complete")),
+            "closed"
+        );
+        assert_eq!(status_to_milestone_state(&Status::new("draft")), "open");
+    }
+
+    #[test]
+    fn milestone_update_status_complete_closes_state_and_cache() {
+        let root = tmp_root("ms_close");
+        let mut store = milestone_store(&root, MockGhMilestoneClient::new());
+        let td = test_type_def(StoreBackend::GithubMilestones);
+
+        let created = store.create(&td, "v1.0", "author", "desc").unwrap();
+        store
+            .update(&td, &created.id, &[("status", "complete")])
+            .unwrap();
+
+        let edit = store.client.last_edit.borrow();
+        assert_eq!(edit.as_ref().unwrap().state.as_deref(), Some("closed"));
+
+        let cache = std::fs::read_to_string(root.join(&created.path)).unwrap();
+        assert!(cache.contains("status: complete"), "cache: {cache}");
+    }
+
+    // AC5: percent_complete is computed, and updating it is rejected (never PATCHed).
+    #[test]
+    fn percent_complete_computed() {
+        assert_eq!(percent_complete(7, 3), Some(30));
+        assert_eq!(percent_complete(0, 0), None);
+        assert_eq!(percent_complete(0, 5), Some(100));
+    }
+
+    #[test]
+    fn milestone_update_percent_complete_is_rejected() {
+        let root = tmp_root("ms_pct_reject");
+        let mut store = milestone_store(&root, MockGhMilestoneClient::new());
+        let td = test_type_def(StoreBackend::GithubMilestones);
+        let created = store.create(&td, "v1.0", "author", "desc").unwrap();
+
+        let err = store
+            .update(&td, &created.id, &[("percent_complete", "50")])
+            .unwrap_err();
+        assert!(err.to_string().contains("percent_complete"), "{err}");
+        // No edit was issued.
+        assert!(store.client.last_edit.borrow().is_none());
+    }
+
+    #[test]
+    fn milestone_delete_removes_milestone_map_and_cache() {
+        let root = tmp_root("ms_delete");
+        let mut store = milestone_store(&root, MockGhMilestoneClient::new());
+        let td = test_type_def(StoreBackend::GithubMilestones);
+        let created = store.create(&td, "v1.0", "author", "desc").unwrap();
+
+        store.delete(&td, &created.id).unwrap();
+
+        assert!(store.client.milestones.borrow().is_empty());
+        assert!(store.issue_map.get(&created.id).is_none());
+        assert!(!root.join(&created.path).exists());
+    }
+
+    // AC6: dispatch routes a github-milestones type to the milestone store.
+    #[test]
+    fn dispatch_routes_to_github_milestones() {
+        let root = tmp_root("dispatch_ms");
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config: Config::default(),
+        };
+        let mut ms_store = milestone_store(&root, MockGhMilestoneClient::new());
+
+        let td = test_type_def(StoreBackend::GithubMilestones);
+        let store = dispatch_for_type::<MockGhClient, MockGitRefClient, _, MockGhClient>(
+            &td,
+            &mut fs_store,
+            None,
+            None,
+            Some(&mut ms_store),
+            None,
+        )
+        .unwrap();
+        let result = store.create(&td, "dispatched", "author", "");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_github_milestones_without_backend_errors() {
+        let root = tmp_root("dispatch_no_ms");
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config: Config::default(),
+        };
+        let td = test_type_def(StoreBackend::GithubMilestones);
+        let result = dispatch_for_type::<
+            MockGhClient,
+            MockGitRefClient,
+            MockGhMilestoneClient,
+            MockGhClient,
+        >(&td, &mut fs_store, None, None, None, None);
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("GitHub milestones backend"));
+    }
+
     #[test]
     fn dispatch_routes_to_filesystem() {
         let root = tmp_root("dispatch_fs");
@@ -1102,9 +2702,13 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::Filesystem);
-        let store =
-            dispatch_for_type::<MockGhClient, MockGitRefClient>(&td, &mut fs_store, None, None)
-                .unwrap();
+        let store = dispatch_for_type::<
+            MockGhClient,
+            MockGitRefClient,
+            MockGhMilestoneClient,
+            MockGhClient,
+        >(&td, &mut fs_store, None, None, None, None)
+        .unwrap();
 
         // Should succeed (routed to filesystem)
         let result = store.create(&td, "dispatched", "author", "");
@@ -1131,9 +2735,15 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
-        let store =
-            dispatch_for_type::<_, MockGitRefClient>(&td, &mut fs_store, Some(&mut gh_store), None)
-                .unwrap();
+        let store = dispatch_for_type::<_, MockGitRefClient, MockGhMilestoneClient, MockGhClient>(
+            &td,
+            &mut fs_store,
+            Some(&mut gh_store),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         let result = store.create(&td, "dispatched", "author", "");
         assert!(result.is_ok());
@@ -1145,6 +2755,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "original body");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
@@ -1156,11 +2767,13 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
+            milestone: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -1210,6 +2823,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "old body");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
@@ -1221,11 +2835,13 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
+            milestone: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -1258,6 +2874,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "some body");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
@@ -1269,11 +2886,13 @@ mod tests {
             updated_at: "2026-03-27T10:45:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
+            milestone: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -1338,8 +2957,12 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
-        let result =
-            dispatch_for_type::<MockGhClient, MockGitRefClient>(&td, &mut fs_store, None, None);
+        let result = dispatch_for_type::<
+            MockGhClient,
+            MockGitRefClient,
+            MockGhMilestoneClient,
+            MockGhClient,
+        >(&td, &mut fs_store, None, None, None, None);
         assert!(result.is_err());
         assert!(result
             .err()
@@ -1369,11 +2992,13 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::GitRef);
-        let store = dispatch_for_type::<MockGhClient, _>(
+        let store = dispatch_for_type::<MockGhClient, _, MockGhMilestoneClient, MockGhClient>(
             &td,
             &mut fs_store,
             None,
             Some(&mut git_ref_store),
+            None,
+            None,
         )
         .unwrap();
 
@@ -1400,11 +3025,13 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::Filesystem);
-        let store = dispatch_for_type::<MockGhClient, _>(
+        let store = dispatch_for_type::<MockGhClient, _, MockGhMilestoneClient, MockGhClient>(
             &td,
             &mut fs_store,
             None,
             Some(&mut git_ref_store),
+            None,
+            None,
         )
         .unwrap();
 
@@ -1427,8 +3054,12 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::GitRef);
-        let result =
-            dispatch_for_type::<MockGhClient, MockGitRefClient>(&td, &mut fs_store, None, None);
+        let result = dispatch_for_type::<
+            MockGhClient,
+            MockGitRefClient,
+            MockGhMilestoneClient,
+            MockGhClient,
+        >(&td, &mut fs_store, None, None, None, None);
         assert!(result.is_err());
         assert!(result
             .err()
@@ -1488,6 +3119,156 @@ mod tests {
         );
     }
 
+    fn cache_meta(id: &str) -> DocMeta {
+        use chrono::NaiveDate;
+        DocMeta {
+            path: PathBuf::new(),
+            title: format!("Title {id}"),
+            doc_type: DocType::new("story"),
+            status: Status::new("draft"),
+            author: "a".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 6, 26).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            attributes: Default::default(),
+            id: id.to_string(),
+        }
+    }
+
+    fn story_type_def() -> TypeDef {
+        let mut td = test_type_def(StoreBackend::GithubIssues);
+        td.name = "story".to_string();
+        td.subdirectory = true;
+        td
+    }
+
+    #[test]
+    fn nested_parent_writes_index_md() {
+        let root = tmp_root("nested_parent");
+        let td = story_type_def();
+
+        write_cache_parent(&root, &td, &cache_meta("STORY-100"), "parent body").unwrap();
+
+        let index = root.join(".lazyspec/cache/story/STORY-100/index.md");
+        assert!(index.is_file(), "parent should write to <PARENT>/index.md");
+        assert!(std::fs::read_to_string(&index)
+            .unwrap()
+            .contains("parent body"));
+    }
+
+    #[test]
+    fn nested_child_writes_padded_order_filename() {
+        let root = tmp_root("nested_child");
+        let td = story_type_def();
+
+        write_cache_child(&root, &td, "STORY-100", 0, 3, &cache_meta("STORY-12"), "c0").unwrap();
+        write_cache_child(&root, &td, "STORY-100", 1, 3, &cache_meta("STORY-13"), "c1").unwrap();
+
+        let folder = root.join(".lazyspec/cache/story/STORY-100");
+        assert!(folder.join("00-STORY-12.md").is_file());
+        assert!(folder.join("01-STORY-13.md").is_file());
+    }
+
+    #[test]
+    fn nested_child_uses_three_digit_padding_beyond_99() {
+        let root = tmp_root("nested_child_wide");
+        let td = story_type_def();
+
+        write_cache_child(
+            &root,
+            &td,
+            "STORY-100",
+            5,
+            150,
+            &cache_meta("STORY-12"),
+            "c",
+        )
+        .unwrap();
+
+        let folder = root.join(".lazyspec/cache/story/STORY-100");
+        assert!(folder.join("005-STORY-12.md").is_file());
+    }
+
+    #[test]
+    fn find_cache_file_resolves_nested_child() {
+        let root = tmp_root("find_nested_child");
+        let td = story_type_def();
+        write_cache_child(&root, &td, "STORY-100", 2, 3, &cache_meta("STORY-12"), "c").unwrap();
+
+        let cache_dir = root.join(".lazyspec/cache/story");
+        let found = find_cache_file(&cache_dir, "STORY-12").expect("child must be found");
+        assert!(found.ends_with("STORY-100/02-STORY-12.md"));
+    }
+
+    #[test]
+    fn find_cache_file_resolves_nested_parent_index() {
+        let root = tmp_root("find_nested_parent");
+        let td = story_type_def();
+        write_cache_parent(&root, &td, &cache_meta("STORY-100"), "p").unwrap();
+
+        let cache_dir = root.join(".lazyspec/cache/story");
+        let found = find_cache_file(&cache_dir, "STORY-100").expect("parent index must be found");
+        assert!(found.ends_with("STORY-100/index.md"));
+    }
+
+    #[test]
+    fn find_cache_file_still_resolves_flat() {
+        let root = tmp_root("find_flat");
+        let td = story_type_def();
+        write_cache_file(&root, &td, &cache_meta("STORY-7"), "flat").unwrap();
+
+        let cache_dir = root.join(".lazyspec/cache/story");
+        let found = find_cache_file(&cache_dir, "STORY-7").expect("flat doc must be found");
+        assert!(found.ends_with("STORY-7.md"));
+    }
+
+    #[test]
+    fn childless_doc_stays_flat() {
+        let root = tmp_root("childless_flat");
+        let td = story_type_def();
+
+        write_cache_file(&root, &td, &cache_meta("STORY-7"), "body").unwrap();
+
+        let flat = root.join(".lazyspec/cache/story/STORY-7.md");
+        assert!(flat.is_file(), "childless doc must stay flat");
+        assert!(!root.join(".lazyspec/cache/story/STORY-7").exists());
+    }
+
+    // Regression: write_cache_file refuses an empty doc id rather than writing
+    // a `cache_dir/.md` empty-stem file.
+    #[test]
+    fn write_cache_file_rejects_empty_id() {
+        use chrono::NaiveDate;
+
+        let root = tmp_root("cache_empty_id");
+        let td = test_type_def(StoreBackend::GithubIssues);
+        let meta = DocMeta {
+            path: PathBuf::new(),
+            title: "No id".to_string(),
+            doc_type: DocType::new("rfc"),
+            status: Status::new("draft"),
+            author: "a".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 3, 28).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            attributes: Default::default(),
+            id: String::new(),
+        };
+
+        let err = write_cache_file(&root, &td, &meta, "body").unwrap_err();
+        assert!(err.to_string().contains("empty doc id"), "got: {err}");
+        assert!(
+            !root.join(".lazyspec/cache/rfc/.md").exists(),
+            "no empty-stem cache file should be written"
+        );
+    }
+
     #[test]
     fn push_cache_sends_updated_relationships_to_github() {
         let root = tmp_root("gh_push_cache");
@@ -1514,6 +3295,7 @@ mod tests {
         let remote_body = make_issue_body("agent-7", "2026-03-27", None, "Some body text.");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: remote_body,
@@ -1525,11 +3307,13 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
+            milestone: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -1572,6 +3356,7 @@ mod tests {
         let issue_body = make_issue_body("agent-7", "2026-03-27", None, "body");
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body,
@@ -1583,11 +3368,13 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
+            milestone: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -1631,6 +3418,7 @@ mod tests {
             "<!-- lazyspec\n---\ndate: 2026-03-27\nprovenance:\n- old\n---\n-->\n\nbody";
         let view_issue = GhIssue {
             number: 42,
+            id: String::new(),
             url: String::new(),
             title: "My RFC".to_string(),
             body: issue_body_str.to_string(),
@@ -1642,11 +3430,13 @@ mod tests {
             updated_at: "2026-03-27T10:00:00Z".to_string(),
             created_at: "2026-03-27T10:00:00Z".to_string(),
             author: None,
+            issue_type: None,
+            milestone: None,
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client,
@@ -1732,11 +3522,1122 @@ mod tests {
         );
     }
 
+    use crate::engine::config::{AttrDef, AttrKind};
+
+    fn type_def_with_attrs(store: StoreBackend, attrs: Vec<AttrDef>) -> TypeDef {
+        TypeDef {
+            attributes: attrs,
+            ..test_type_def(store)
+        }
+    }
+
+    // AC1: fs --attr owner=jkaloger persists to frontmatter and reads back typed.
+    #[test]
+    fn fs_update_attr_persists_and_reads_back() {
+        let root = tmp_root("fs_attr_persist");
+        let config = Config::default();
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config,
+        };
+
+        let td = type_def_with_attrs(
+            StoreBackend::Filesystem,
+            vec![AttrDef {
+                name: "owner".to_string(),
+                kind: AttrKind::Str,
+                required: false,
+                values: vec![],
+            }],
+        );
+        let created = fs_store.create(&td, "doc", "author", "").unwrap();
+        fs_store
+            .update(&td, &created.id, &[("owner", "jkaloger")])
+            .unwrap();
+
+        let content = std::fs::read_to_string(root.join(&created.path)).unwrap();
+        assert!(content.contains("owner: jkaloger"), "got: {content}");
+
+        let meta = DocMeta::parse_with_schema(&content, &td.attributes).unwrap();
+        assert_eq!(
+            meta.attributes["owner"],
+            AttrValue::Str("jkaloger".to_string())
+        );
+    }
+
+    // AC2: bad enum value rejected; file left byte-identical (no write).
+    #[test]
+    fn fs_update_bad_enum_leaves_file_unchanged() {
+        let root = tmp_root("fs_attr_bad_enum");
+        let config = Config::default();
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config,
+        };
+
+        let td = type_def_with_attrs(
+            StoreBackend::Filesystem,
+            vec![AttrDef {
+                name: "priority".to_string(),
+                kind: AttrKind::Enum,
+                required: false,
+                values: vec!["low".to_string(), "med".to_string(), "high".to_string()],
+            }],
+        );
+        let created = fs_store.create(&td, "doc", "author", "").unwrap();
+        let before = std::fs::read_to_string(root.join(&created.path)).unwrap();
+
+        let err = fs_store
+            .update(&td, &created.id, &[("priority", "urgent")])
+            .unwrap_err();
+        assert!(err.to_string().contains("priority"), "got: {err}");
+
+        let after = std::fs::read_to_string(root.join(&created.path)).unwrap();
+        assert_eq!(
+            before, after,
+            "file must be unchanged on validation failure"
+        );
+    }
+
+    // AC2: int kind mismatch rejected; file unchanged.
+    #[test]
+    fn fs_update_bad_int_leaves_file_unchanged() {
+        let root = tmp_root("fs_attr_bad_int");
+        let config = Config::default();
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config,
+        };
+
+        let td = type_def_with_attrs(
+            StoreBackend::Filesystem,
+            vec![AttrDef {
+                name: "estimate".to_string(),
+                kind: AttrKind::Int,
+                required: false,
+                values: vec![],
+            }],
+        );
+        let created = fs_store.create(&td, "doc", "author", "").unwrap();
+        let before = std::fs::read_to_string(root.join(&created.path)).unwrap();
+
+        let err = fs_store
+            .update(&td, &created.id, &[("estimate", "notanumber")])
+            .unwrap_err();
+        assert!(err.to_string().contains("estimate"), "got: {err}");
+
+        let after = std::fs::read_to_string(root.join(&created.path)).unwrap();
+        assert_eq!(before, after);
+    }
+
+    // AC3 (cache sink) + AC5: github update --attr mirrors typed attrs into the
+    // cache .md, where parse_with_schema reads them back as typed values.
+    #[test]
+    fn github_update_attr_round_trips_through_cache() {
+        let root = tmp_root("gh_attr_cache");
+        let issue_body = make_issue_body("agent-7", "2026-03-27", None, "body");
+        let view_issue = GhIssue {
+            number: 42,
+            id: String::new(),
+            url: String::new(),
+            title: "My doc".to_string(),
+            body: issue_body,
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+            issue_type: None,
+            milestone: None,
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
+
+        let mut gh_store = GithubIssuesStore {
+            client,
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let td = type_def_with_attrs(
+            StoreBackend::GithubIssues,
+            vec![
+                AttrDef {
+                    name: "owner".to_string(),
+                    kind: AttrKind::Str,
+                    required: false,
+                    values: vec![],
+                },
+                AttrDef {
+                    name: "estimate".to_string(),
+                    kind: AttrKind::Int,
+                    required: false,
+                    values: vec![],
+                },
+            ],
+        );
+        gh_store
+            .update(&td, "RFC-001", &[("owner", "jkaloger"), ("estimate", "3")])
+            .unwrap();
+
+        // Remote body carries the attributes block (clobber-protection sink).
+        let captured = gh_store.client.last_edit_body.borrow();
+        let body_str = captured.as_deref().expect("issue_edit called");
+        assert!(body_str.contains("attributes:"), "got: {body_str}");
+        assert!(body_str.contains("owner: jkaloger"));
+
+        // Cache .md is the show --json read-back: parse_with_schema -> typed.
+        let cache_path = root.join(".lazyspec/cache/rfc/RFC-001.md");
+        let cache_content = std::fs::read_to_string(&cache_path).unwrap();
+        let meta = DocMeta::parse_with_schema(&cache_content, &td.attributes).unwrap();
+        assert_eq!(
+            meta.attributes["owner"],
+            AttrValue::Str("jkaloger".to_string())
+        );
+        assert_eq!(meta.attributes["estimate"], AttrValue::Int(3));
+
+        // AC5: doc_to_json emits estimate as a JSON number, not a string.
+        let json = crate::engine::document::AttrValue::Int(3);
+        assert_eq!(serde_json::to_value(&json).unwrap(), serde_json::json!(3));
+        assert_eq!(
+            serde_json::to_value(&meta.attributes["estimate"]).unwrap(),
+            serde_json::json!(3)
+        );
+    }
+
+    // AC2 (github atomicity): bad attr bails before any remote issue_edit.
+    #[test]
+    fn github_update_bad_attr_no_remote_write() {
+        let root = tmp_root("gh_attr_bad");
+        let issue_body = make_issue_body("agent-7", "2026-03-27", None, "body");
+        let view_issue = GhIssue {
+            number: 42,
+            id: String::new(),
+            url: String::new(),
+            title: "My doc".to_string(),
+            body: issue_body,
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+            issue_type: None,
+            milestone: None,
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
+
+        let mut gh_store = GithubIssuesStore {
+            client,
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let td = type_def_with_attrs(
+            StoreBackend::GithubIssues,
+            vec![AttrDef {
+                name: "estimate".to_string(),
+                kind: AttrKind::Int,
+                required: false,
+                values: vec![],
+            }],
+        );
+        let err = gh_store
+            .update(&td, "RFC-001", &[("estimate", "notanumber")])
+            .unwrap_err();
+        assert!(err.to_string().contains("estimate"), "got: {err}");
+        assert!(
+            gh_store.client.last_edit_body.borrow().is_none(),
+            "no remote issue_edit should have fired"
+        );
+    }
+
+    use crate::engine::gh_schema::{GhSchemaSnapshot, IssueTypeId};
+
+    fn write_bug_snapshot(root: &std::path::Path) {
+        let snapshot = GhSchemaSnapshot {
+            issue_types: vec![IssueTypeId {
+                name: "Bug".to_string(),
+                id: "IT_bug".to_string(),
+            }],
+            ..Default::default()
+        };
+        snapshot.save(root).unwrap();
+    }
+
+    fn issue_node_id_response() -> serde_json::Value {
+        serde_json::json!({
+            "data": { "repository": { "issue": { "id": "I_node1" } } }
+        })
+    }
+
+    fn gh_view_issue_with_lazyspec_body(number: u64, labels: Vec<&str>) -> GhIssue {
+        GhIssue {
+            number,
+            id: format!("I_node{}", number),
+            url: String::new(),
+            title: "My doc".to_string(),
+            body: make_issue_body("agent-7", "2026-03-27", None, "body"),
+            labels: labels
+                .into_iter()
+                .map(|l| GhLabel {
+                    name: l.to_string(),
+                    color: String::new(),
+                })
+                .collect(),
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+            issue_type: None,
+            milestone: None,
+        }
+    }
+
+    fn issue_type_store(
+        root: &std::path::Path,
+        graphql: Vec<serde_json::Value>,
+    ) -> GithubIssuesStore<MockGhClient> {
+        let view_issue = gh_view_issue_with_lazyspec_body(42, vec!["lazyspec:story"]);
+        let client = MockGhClient::new()
+            .with_view_issue(view_issue)
+            .with_graphql_responses(graphql);
+        let mut map = IssueMap::load(root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
+        GithubIssuesStore {
+            client,
+            root: root.to_path_buf(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(root),
+        }
+    }
+
+    fn issue_type_attr_td() -> TypeDef {
+        type_def_with_attrs(
+            StoreBackend::GithubIssues,
+            vec![AttrDef {
+                name: "issue_type".to_string(),
+                kind: AttrKind::Str,
+                required: false,
+                values: vec![],
+            }],
+        )
+    }
+
+    // AC3: set issue_type=Bug -> exactly ONE updateIssue mutation carrying the
+    // resolved id, and NO issue_type in the issue-body HTML comment.
+    #[test]
+    fn github_update_issue_type_sets_native_field_only() {
+        let root = tmp_root("gh_issue_type_set");
+        write_bug_snapshot(&root);
+        // First graphql response resolves the issue node id; the mutation records.
+        let mut gh_store = issue_type_store(
+            &root,
+            vec![
+                issue_node_id_response(),
+                serde_json::json!({"data": {"updateIssue": {"issue": {"id": "I_node1"}}}}),
+            ],
+        );
+
+        let td = issue_type_attr_td();
+        gh_store
+            .update(&td, "RFC-001", &[("issue_type", "Bug")])
+            .unwrap();
+
+        let calls = gh_store.client.graphql_calls.borrow();
+        let mutations: Vec<_> = calls
+            .iter()
+            .filter(|(q, _)| q.contains("updateIssue"))
+            .collect();
+        assert_eq!(mutations.len(), 1, "exactly one updateIssue mutation");
+        let (_, vars) = mutations[0];
+        assert!(
+            vars.contains(&("issueTypeId".to_string(), GqlVar::Str("IT_bug".to_string()))),
+            "mutation must carry resolved issueTypeId=IT_bug, got: {:?}",
+            vars
+        );
+
+        // The issue-body HTML comment must NOT carry issue_type.
+        let body = gh_store.client.last_edit_body.borrow();
+        let body_str = body.as_deref().expect("issue_edit called");
+        assert!(
+            !body_str.contains("issue_type"),
+            "issue_type must not leak into issue body, got: {body_str}"
+        );
+    }
+
+    // AC4: clearing issue_type sends issueTypeId: null.
+    #[test]
+    fn github_update_issue_type_clear_sends_null() {
+        let root = tmp_root("gh_issue_type_clear");
+        write_bug_snapshot(&root);
+        let mut gh_store = issue_type_store(
+            &root,
+            vec![
+                issue_node_id_response(),
+                serde_json::json!({"data": {"updateIssue": {"issue": {"id": "I_node1"}}}}),
+            ],
+        );
+
+        let td = issue_type_attr_td();
+        gh_store
+            .update(&td, "RFC-001", &[("issue_type", "")])
+            .unwrap();
+
+        let calls = gh_store.client.graphql_calls.borrow();
+        let mutation = calls
+            .iter()
+            .find(|(q, _)| q.contains("updateIssue"))
+            .expect("an updateIssue mutation");
+        assert!(
+            mutation.0.contains("issueTypeId: null"),
+            "clear must send issueTypeId: null, got query: {}",
+            mutation.0
+        );
+        // No issueTypeId var on the clear path.
+        assert!(
+            !mutation.1.iter().any(|(k, _)| k == "issueTypeId"),
+            "clear must not pass an issueTypeId value var"
+        );
+    }
+
+    // AC5: invalid value rejects offline; zero mutations, no issue_edit.
+    #[test]
+    fn github_update_issue_type_invalid_rejected_offline() {
+        let root = tmp_root("gh_issue_type_invalid");
+        write_bug_snapshot(&root);
+        // No graphql responses at all -> any graphql call would error anyway.
+        let mut gh_store = issue_type_store(&root, vec![]);
+
+        let td = issue_type_attr_td();
+        let err = gh_store
+            .update(&td, "RFC-001", &[("issue_type", "Nonsense")])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Nonsense"),
+            "error must name the invalid value, got: {err}"
+        );
+        assert!(
+            gh_store.client.graphql_calls.borrow().is_empty(),
+            "zero graphql mutations on invalid issue_type"
+        );
+        assert!(
+            gh_store.client.last_edit_body.borrow().is_none(),
+            "no issue_edit on invalid issue_type"
+        );
+    }
+
+    // ITERATION-220 AC4: user account (zero issue types) -> issue_type set
+    // rejects pre-mutation with an org-only message, no updateIssue mutation.
+    #[test]
+    fn github_update_issue_type_user_account_org_only_message() {
+        let root = tmp_root("gh_issue_type_user_account");
+        // Empty snapshot mirrors a user-owned repo: no native issue types at all.
+        GhSchemaSnapshot {
+            issue_types: vec![],
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+        let mut gh_store = issue_type_store(&root, vec![]);
+
+        let td = issue_type_attr_td();
+        let err = gh_store
+            .update(&td, "RFC-001", &[("issue_type", "Bug")])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("require an organization"),
+            "error must name the org-only constraint, got: {err}"
+        );
+        let mutations = gh_store
+            .client
+            .graphql_calls
+            .borrow()
+            .iter()
+            .filter(|(q, _)| q.contains("updateIssue"))
+            .count();
+        assert_eq!(mutations, 0, "no updateIssue mutation on user account");
+        assert!(
+            gh_store.client.last_edit_body.borrow().is_none(),
+            "no issue_edit on user account"
+        );
+    }
+
+    // AC6 (write half): setting issue_type does not touch labels or doc_type.
+    #[test]
+    fn github_update_issue_type_does_not_touch_labels() {
+        let root = tmp_root("gh_issue_type_labels");
+        write_bug_snapshot(&root);
+        let snapshot = GhSchemaSnapshot {
+            issue_types: vec![
+                IssueTypeId {
+                    name: "Bug".to_string(),
+                    id: "IT_bug".to_string(),
+                },
+                IssueTypeId {
+                    name: "Task".to_string(),
+                    id: "IT_task".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        snapshot.save(&root).unwrap();
+
+        let mut gh_store = issue_type_store(
+            &root,
+            vec![
+                issue_node_id_response(),
+                serde_json::json!({"data": {"updateIssue": {"issue": {"id": "I_node1"}}}}),
+            ],
+        );
+
+        let td = issue_type_attr_td();
+        gh_store
+            .update(&td, "RFC-001", &[("issue_type", "Task")])
+            .unwrap();
+
+        // No label add/remove recorded.
+        assert!(
+            gh_store.client.last_edit_labels_remove.borrow().is_empty(),
+            "issue_type write must not remove labels"
+        );
+
+        // doc_type stays story in the cache file (from the lazyspec:story label).
+        let cache_path = root.join(".lazyspec/cache/rfc/RFC-001.md");
+        let cache_content = std::fs::read_to_string(&cache_path).unwrap();
+        let (yaml, _) = crate::engine::document::split_frontmatter(&cache_content).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed["type"].as_str().unwrap(), "story");
+    }
+
+    // --- Subdir sub-issue materialization (ITERATION-214) ---
+
+    fn subdir_type_def() -> TypeDef {
+        TypeDef {
+            subdirectory: true,
+            dir: "docs/stories".to_string(),
+            ..test_type_def(StoreBackend::GithubIssues)
+        }
+    }
+
+    fn subdir_config(td: &TypeDef) -> Config {
+        let mut config = Config::default();
+        config.documents.types = vec![td.clone()];
+        config
+    }
+
+    fn write_doc(path: &std::path::Path, title: &str, extra: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let content = format!(
+            "---\ntitle: {}\ntype: rfc\nstatus: draft\nauthor: a\ndate: 2026-06-25\ntags: []\n{}---\n\nbody for {}\n",
+            title, extra, title
+        );
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn subdir_gh_store(root: &std::path::Path, td: &TypeDef) -> GithubIssuesStore<MockGhClient> {
+        // The subIssues read (empty) followed by enough generic mutation-OK
+        // responses for the add/reprioritize calls the reconcile may issue.
+        let mut responses = vec![serde_json::json!({
+            "data": {"node": {"subIssues": {"nodes": []}}}
+        })];
+        responses.extend(std::iter::repeat_with(|| serde_json::json!({"data": {}})).take(8));
+        GithubIssuesStore {
+            client: MockGhClient::new().with_graphql_responses(responses),
+            root: root.to_path_buf(),
+            repo: "owner/repo".to_string(),
+            config: subdir_config(td),
+            issue_map: IssueMap::load(root).unwrap(),
+            issue_cache: IssueCache::new(root),
+        }
+    }
+
+    // AC1: parent index.md + 2 child .md -> materialize_subdir maps parent +
+    // both children AND records 3 issue_create calls (pre-fix: 1).
+    #[test]
+    fn materialize_subdir_creates_parent_and_children_issues() {
+        let root = tmp_root("subdir_materialize");
+        let td = subdir_type_def();
+        let folder = root.join("docs/stories/STORY-159-shape");
+        write_doc(&folder.join("index.md"), "Parent", "");
+        write_doc(&folder.join("01-first.md"), "First child", "");
+        write_doc(&folder.join("02-second.md"), "Second child", "");
+
+        let mut store = subdir_gh_store(&root, &td);
+        let result = store.materialize_subdir(&td, "STORY-159").unwrap();
+
+        assert_eq!(result.children.len(), 2);
+        assert!(store.issue_map.get("STORY-159").is_some());
+        assert!(store.issue_map.get("01-first").is_some());
+        assert!(store.issue_map.get("02-second").is_some());
+
+        assert_eq!(
+            store.client.create_titles.borrow().len(),
+            3,
+            "parent + 2 children = 3 issue_create calls"
+        );
+    }
+
+    // AC1 (ordering): children come back in loader (path-sorted) order.
+    #[test]
+    fn materialize_subdir_children_in_loader_order() {
+        let root = tmp_root("subdir_order");
+        let td = subdir_type_def();
+        let folder = root.join("docs/stories/STORY-200-x");
+        write_doc(&folder.join("index.md"), "Parent", "");
+        write_doc(&folder.join("02-b.md"), "B", "");
+        write_doc(&folder.join("01-a.md"), "A", "");
+
+        let mut store = subdir_gh_store(&root, &td);
+        let result = store.materialize_subdir(&td, "STORY-200").unwrap();
+
+        let ids: Vec<&str> = result
+            .children
+            .iter()
+            .map(|c| c.child_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["01-a", "02-b"]);
+        for (i, c) in result.children.iter().enumerate() {
+            assert_eq!(c.order_index, i);
+        }
+    }
+
+    // AC2 (via wiring): sync_subissues materializes then issues addSubIssue once
+    // per child with issueId=parent_node, subIssueId=child_node.
+    #[test]
+    fn sync_subissues_adds_each_child_as_native_sub_issue() {
+        let root = tmp_root("subdir_sync_add");
+        let td = subdir_type_def();
+        let folder = root.join("docs/stories/STORY-300-y");
+        write_doc(&folder.join("index.md"), "Parent", "");
+        write_doc(&folder.join("01-a.md"), "A", "");
+        write_doc(&folder.join("02-b.md"), "B", "");
+
+        let mut store = subdir_gh_store(&root, &td);
+        let result = store.sync_subissues(&td, "STORY-300").unwrap();
+
+        let parent_node = result.parent_node.clone();
+        let calls = store.client.graphql_calls.borrow();
+        let adds: Vec<_> = calls
+            .iter()
+            .filter(|(q, _)| q.contains("addSubIssue"))
+            .collect();
+        assert_eq!(adds.len(), 2, "one addSubIssue per child");
+        for (_, vars) in &adds {
+            assert!(vars.contains(&("issueId".to_string(), GqlVar::Str(parent_node.clone()))));
+        }
+        let child_nodes: Vec<String> = result.children.iter().map(|c| c.node_id.clone()).collect();
+        for cn in &child_nodes {
+            assert!(
+                adds.iter()
+                    .any(|(_, vars)| vars
+                        .contains(&("subIssueId".to_string(), GqlVar::Str(cn.clone())))),
+                "child node {cn} must be added as a sub-issue"
+            );
+        }
+    }
+
+    // AC2 (CLI-authored child -> native sub-issue): author a flat github-issues
+    // parent on disk, then drive the CLI create-with-parent path (promote flat
+    // parent to index.md + write a sibling child via fs_ops::create_child_in_dir)
+    // to produce the subdir source tree. sync_subissues then materializes the
+    // child and fires an addSubIssue for it.
+    #[test]
+    fn cli_authored_child_becomes_native_sub_issue() {
+        let root = tmp_root("subdir_cli_child");
+        let td = subdir_type_def();
+        let config = subdir_config(&td);
+
+        // Flat parent authored on disk in the source dir.
+        let stories = root.join("docs/stories");
+        std::fs::create_dir_all(&stories).unwrap();
+        write_doc(&stories.join("STORY-159-shape.md"), "Parent", "");
+
+        // Emulate create --parent STORY-159: promote the flat parent to a subdir
+        // index.md, then write the child as a sibling .md inside it.
+        let subdir = stories.join("STORY-159-shape");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::rename(stories.join("STORY-159-shape.md"), subdir.join("index.md")).unwrap();
+        let child = crate::engine::fs_ops::create_child_in_dir(
+            &root, &config, &td, &subdir, "Appendix", "a", None,
+        )
+        .unwrap();
+        assert!(child.starts_with(&subdir));
+
+        let mut store = subdir_gh_store(&root, &td);
+        let result = store.sync_subissues(&td, "STORY-159").unwrap();
+
+        assert_eq!(result.children.len(), 1, "one CLI-authored child");
+        let child_node = result.children[0].node_id.clone();
+        let calls = store.client.graphql_calls.borrow();
+        let adds: Vec<_> = calls
+            .iter()
+            .filter(|(q, _)| q.contains("addSubIssue"))
+            .collect();
+        assert_eq!(adds.len(), 1, "child added as a native sub-issue");
+        assert!(adds[0]
+            .1
+            .contains(&("subIssueId".to_string(), GqlVar::Str(child_node))));
+    }
+
+    // AC6: a subdir doc with children AND an `implements` relation -> children
+    // route to addSubIssue (GraphQL) while the implements relation stays in the
+    // issue-body HTML comment and is NOT sent to GraphQL.
+    #[test]
+    fn structural_children_native_while_implements_stays_in_body() {
+        let root = tmp_root("subdir_ac6");
+        let td = subdir_type_def();
+        let folder = root.join("docs/stories/STORY-400-z");
+        write_doc(
+            &folder.join("index.md"),
+            "Parent",
+            "related:\n- implements: RFC-050\n",
+        );
+        write_doc(&folder.join("01-a.md"), "A", "");
+
+        let mut store = subdir_gh_store(&root, &td);
+        let result = store.sync_subissues(&td, "STORY-400").unwrap();
+
+        // Child routed to GraphQL addSubIssue.
+        let calls = store.client.graphql_calls.borrow();
+        let adds: Vec<_> = calls
+            .iter()
+            .filter(|(q, _)| q.contains("addSubIssue"))
+            .collect();
+        assert_eq!(adds.len(), 1);
+        let child_node = result.children[0].node_id.clone();
+        assert!(adds[0]
+            .1
+            .contains(&("subIssueId".to_string(), GqlVar::Str(child_node))));
+
+        // implements never appears in any GraphQL call.
+        assert!(
+            !calls.iter().any(|(q, vars)| q.contains("implements")
+                || vars.iter().any(|(_, v)| matches!(
+                    v,
+                    GqlVar::Str(s) if s.contains("implements") || s == "RFC-050"
+                ))),
+            "implements relation must not be sent to GraphQL"
+        );
+
+        // implements lives in the parent issue body produced by issue_body::serialize.
+        let parent_body = store.client.last_create_body.borrow();
+        // last_create_body holds the most recent create (the child). Verify the
+        // parent's body directly via the serializer instead.
+        drop(parent_body);
+        let parent_meta = crate::engine::document::DocMeta {
+            path: PathBuf::new(),
+            title: "Parent".to_string(),
+            doc_type: DocType::new("rfc"),
+            status: Status::new("draft"),
+            author: "a".to_string(),
+            date: chrono::NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![crate::engine::document::Relation {
+                rel_type: crate::engine::document::RelationType::new("implements"),
+                target: "RFC-050".to_string(),
+            }],
+            validate_ignore: false,
+            virtual_doc: false,
+            attributes: Default::default(),
+            id: "STORY-400".to_string(),
+        };
+        let body = issue_body::serialize(&parent_meta, "body");
+        assert!(
+            body.contains("implements: RFC-050"),
+            "implements must be in the serialized issue body, got: {body}"
+        );
+    }
+
+    // --- github-native immediate child sub-issue (ITERATION-226) ---
+
+    // AC: creating a child under a github-issues parent fires exactly one
+    // addSubIssue whose issueId is the parent node and subIssueId is the
+    // newly-created child's node.
+    #[test]
+    fn create_child_subissue_binds_child_to_parent_node() {
+        let root = tmp_root("create_child_subissue");
+        let td = test_type_def(StoreBackend::GithubIssues);
+
+        let mut store = subdir_gh_store(&root, &td);
+        // Parent already a github issue (it is a github-issues doc).
+        store.issue_map.insert("RFC-1", 1, "ts", "I_parent");
+        store.issue_map.save(&root).unwrap();
+
+        let created = store
+            .create_child_subissue(&td, "RFC-1", "Child", "author", "")
+            .unwrap();
+
+        // A real child issue was created.
+        assert_eq!(store.client.create_titles.borrow().len(), 1);
+        let child_node = store.issue_map.get(&created.id).unwrap().node_id.clone();
+        assert!(!child_node.is_empty());
+
+        let calls = store.client.graphql_calls.borrow();
+        let adds: Vec<_> = calls
+            .iter()
+            .filter(|(q, _)| q.contains("addSubIssue"))
+            .collect();
+        assert_eq!(adds.len(), 1, "exactly one addSubIssue edge");
+        assert!(adds[0]
+            .1
+            .contains(&("issueId".to_string(), GqlVar::Str("I_parent".to_string()))));
+        assert!(adds[0]
+            .1
+            .contains(&("subIssueId".to_string(), GqlVar::Str(child_node))));
+    }
+
+    // The parent must already be a github issue; absent from the issue map, the
+    // child create + bind aborts with a clear error.
+    #[test]
+    fn create_child_subissue_errors_when_parent_unmapped() {
+        let root = tmp_root("create_child_no_parent");
+        let td = test_type_def(StoreBackend::GithubIssues);
+        let mut store = subdir_gh_store(&root, &td);
+
+        let err = store
+            .create_child_subissue(&td, "RFC-99", "Child", "author", "")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("RFC-99"),
+            "names the unmapped parent: {err}"
+        );
+    }
+
+    // --- github-projects board store (ITERATION-216) ---
+
+    fn projects_type_def() -> TypeDef {
+        TypeDef {
+            name: "project".to_string(),
+            plural: "projects".to_string(),
+            dir: "docs/projects".to_string(),
+            prefix: "PROJECT".to_string(),
+            ..test_type_def(StoreBackend::GithubProjects)
+        }
+    }
+
+    fn projects_store(
+        root: &std::path::Path,
+        graphql: Vec<serde_json::Value>,
+    ) -> GithubProjectsStore<MockGhClient> {
+        GithubProjectsStore {
+            client: MockGhClient::new().with_graphql_responses(graphql),
+            root: root.to_path_buf(),
+            repo: "my-org/repo".to_string(),
+            config: Config::default(),
+            issue_map: IssueMap::load(root).unwrap(),
+        }
+    }
+
+    fn org_board_response(id: &str) -> serde_json::Value {
+        serde_json::json!({"data": {"organization": {"projectV2": {"id": id}}}})
+    }
+
+    fn org_board_null() -> serde_json::Value {
+        serde_json::json!({"data": {"organization": {"projectV2": null}}})
+    }
+
+    fn user_board_null() -> serde_json::Value {
+        serde_json::json!({"data": {"user": {"projectV2": null}}})
+    }
+
+    fn owner_org_response(id: &str) -> serde_json::Value {
+        serde_json::json!({"data": {"organization": {"id": id}}})
+    }
+
+    fn user_owner_response(id: &str) -> serde_json::Value {
+        serde_json::json!({"data": {"user": {"id": id}}})
+    }
+
+    fn org_owner_null() -> serde_json::Value {
+        serde_json::json!({"data": {"organization": null}})
+    }
+
+    fn create_project_response(number: u64, id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "data": {"createProjectV2": {"projectV2": {"id": id, "number": number}}}
+        })
+    }
+
+    fn str_var<'a>(vars: &'a [(String, GqlVar)], key: &str) -> Option<&'a str> {
+        vars.iter().find_map(|(k, v)| match v {
+            GqlVar::Str(s) if k == key => Some(s.as_str()),
+            _ => None,
+        })
+    }
+
+    // AC1: create issues createProjectV2 over the GhGraphql seam, binds the
+    // returned board number as the doc id, and persists the node id.
+    #[test]
+    fn projects_create_authors_board_via_graphql() {
+        let root = tmp_root("proj_create_ok");
+        let mut store = projects_store(
+            &root,
+            vec![
+                owner_org_response("OWN_org"),
+                create_project_response(42, "PVT_42"),
+            ],
+        );
+        let td = projects_type_def();
+
+        let created = store.create(&td, "My Board", "", "").unwrap();
+        assert_eq!(created.id, "PROJECT-42");
+
+        let calls = store.client.graphql_calls.borrow();
+        // First call resolves the owner node id via the organization root.
+        assert!(
+            calls[0].0.contains("organization") && calls[0].0.contains("id"),
+            "first call must resolve owner node id via organization, got: {}",
+            calls[0].0
+        );
+        let create_call = calls
+            .iter()
+            .find(|(q, _)| q.contains("createProjectV2"))
+            .expect("a createProjectV2 mutation must be issued");
+        assert_eq!(str_var(&create_call.1, "ownerId"), Some("OWN_org"));
+        assert_eq!(str_var(&create_call.1, "title"), Some("My Board"));
+
+        let entry = store.issue_map.get("PROJECT-42").unwrap();
+        assert_eq!(entry.issue_number, 42);
+        assert_eq!(entry.node_id, "PVT_42");
+    }
+
+    // AC2: a missing `project` token scope yields an actionable error and
+    // persists nothing (no issue-map entry, no cache file).
+    #[test]
+    fn projects_create_missing_scope_actionable_no_persist() {
+        let root = tmp_root("proj_create_scope");
+        let mut store = projects_store(
+            &root,
+            vec![
+                owner_org_response("OWN_org"),
+                serde_json::json!({"errors": [
+                    {"type": "INSUFFICIENT_SCOPES",
+                     "message": "Your token has not been granted the required scopes: `project`"}
+                ]}),
+            ],
+        );
+        let td = projects_type_def();
+
+        let err = store.create(&td, "My Board", "", "").unwrap_err();
+        assert!(
+            err.to_string().contains("gh auth refresh -s project"),
+            "must name the remedy, got: {err}"
+        );
+
+        let reloaded = IssueMap::load(&root).unwrap();
+        assert!(
+            reloaded.get("PROJECT-42").is_none(),
+            "no board binding may be persisted on the scope-missing path"
+        );
+        let cache_dir = root.join(".lazyspec/cache").join(&td.name);
+        assert!(
+            find_cache_file(&cache_dir, "PROJECT-42").is_none(),
+            "no cache file may be written on the scope-missing path"
+        );
+    }
+
+    // AC3: the freshly created board binding resolves offline -- a subsequent
+    // membership read keys off PROJECT-42 with no further graphql.
+    #[test]
+    fn projects_create_binding_resolves_offline() {
+        let root = tmp_root("proj_create_offline");
+        let mut store = projects_store(
+            &root,
+            vec![
+                owner_org_response("OWN_org"),
+                create_project_response(42, "PVT_42"),
+            ],
+        );
+        let td = projects_type_def();
+        store.create(&td, "My Board", "", "").unwrap();
+
+        let calls_before = store.client.graphql_calls.borrow().len();
+        let entry = store.issue_map.get("PROJECT-42").unwrap();
+        assert_eq!(entry.node_id, "PVT_42");
+        // The binding came from the create response; the issue map read does not
+        // touch graphql.
+        assert_eq!(
+            store.client.graphql_calls.borrow().len(),
+            calls_before,
+            "reading the cached binding must not issue graphql"
+        );
+    }
+
+    // AC4: owner resolution falls through the organization root (null) to the
+    // user root for a user account.
+    #[test]
+    fn projects_create_owner_is_user_account() {
+        let root = tmp_root("proj_create_user");
+        let mut store = projects_store(
+            &root,
+            vec![
+                org_owner_null(),
+                user_owner_response("OWN_usr"),
+                create_project_response(7, "PVT_7"),
+            ],
+        );
+        let td = projects_type_def();
+
+        let created = store.create(&td, "User Board", "", "").unwrap();
+        assert_eq!(created.id, "PROJECT-7");
+
+        let calls = store.client.graphql_calls.borrow();
+        assert!(
+            calls[0].0.contains("organization"),
+            "first owner query is the organization root"
+        );
+        assert!(
+            calls[1].0.contains("user"),
+            "owner resolution falls through to the user root, got: {}",
+            calls[1].0
+        );
+        let create_call = calls
+            .iter()
+            .find(|(q, _)| q.contains("createProjectV2"))
+            .expect("createProjectV2 mutation");
+        assert_eq!(str_var(&create_call.1, "ownerId"), Some("OWN_usr"));
+    }
+
+    // AC1: an existing org board number resolves via the organization root
+    // projectV2(number) query, the returned node id binds, and ZERO create
+    // mutations are issued.
+    #[test]
+    fn projects_resolve_board_binds_node_id_no_create() {
+        let root = tmp_root("proj_resolve");
+        let mut store = projects_store(&root, vec![org_board_response("PVT_board7")]);
+        let td = projects_type_def();
+
+        store.set_provenance(&td, "PROJECT-7", &[]).unwrap();
+
+        let calls = store.client.graphql_calls.borrow();
+        assert_eq!(calls.len(), 1, "one org query, nothing else");
+        assert!(
+            calls[0].0.contains("organization") && calls[0].0.contains("projectV2"),
+            "must query organization.projectV2, got: {}",
+            calls[0].0
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|(q, _)| q.to_lowercase().contains("create")),
+            "no create mutation may be issued"
+        );
+
+        let entry = store.issue_map.get("PROJECT-7").unwrap();
+        assert_eq!(entry.issue_number, 7);
+        assert_eq!(entry.node_id, "PVT_board7");
+    }
+
+    // AC2: a board number absent under both org and user roots (projectV2 null)
+    // bails not-found; zero create mutations.
+    #[test]
+    fn projects_resolve_board_not_found_no_create() {
+        let root = tmp_root("proj_notfound");
+        let store = projects_store(&root, vec![org_board_null(), user_board_null()]);
+
+        let err = store.resolve_board("my-org", 99).unwrap_err();
+        assert!(err.to_string().contains("not found"), "got: {err}");
+
+        let calls = store.client.graphql_calls.borrow();
+        assert!(
+            !calls
+                .iter()
+                .any(|(q, _)| q.to_lowercase().contains("create")),
+            "no create mutation on not-found"
+        );
+    }
+
+    #[test]
+    fn projects_delete_bails() {
+        let root = tmp_root("proj_delete_bail");
+        let mut store = projects_store(&root, vec![]);
+        let td = projects_type_def();
+        let err = store.delete(&td, "PROJECT-7").unwrap_err();
+        assert!(
+            err.to_string().contains("does not delete boards"),
+            "got: {err}"
+        );
+    }
+
+    // AC6: dispatch routes a github-projects type to the projects store.
+    #[test]
+    fn dispatch_routes_to_github_projects() {
+        let root = tmp_root("dispatch_proj");
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config: Config::default(),
+        };
+        let mut proj_store = projects_store(&root, vec![org_board_response("PVT_x")]);
+
+        let td = projects_type_def();
+        let store = dispatch_for_type::<MockGhClient, MockGitRefClient, MockGhMilestoneClient, _>(
+            &td,
+            &mut fs_store,
+            None,
+            None,
+            None,
+            Some(&mut proj_store),
+        )
+        .unwrap();
+        assert!(store.update(&td, "PROJECT-1", &[]).is_ok());
+    }
+
+    #[test]
+    fn dispatch_github_projects_without_backend_errors() {
+        let root = tmp_root("dispatch_no_proj");
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config: Config::default(),
+        };
+        let td = projects_type_def();
+        let result = dispatch_for_type::<
+            MockGhClient,
+            MockGitRefClient,
+            MockGhMilestoneClient,
+            MockGhClient,
+        >(&td, &mut fs_store, None, None, None, None);
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("GitHub projects backend"));
+    }
+
+    #[test]
+    fn board_number_parses_prefixed_and_bare() {
+        assert_eq!(board_number("PROJECT-7").unwrap(), 7);
+        assert_eq!(board_number("12").unwrap(), 12);
+        assert!(board_number("PROJECT-abc").is_err());
+    }
+
     #[test]
     fn push_cache_missing_cache_file_errors() {
         let root = tmp_root("gh_push_cache_missing");
         let mut map = IssueMap::load(&root).unwrap();
-        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z");
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
             client: MockGhClient::new(),
@@ -1754,5 +4655,480 @@ mod tests {
             "got: {}",
             err
         );
+    }
+
+    // --- ITERATION-217: per-board project field attributes ---
+
+    use crate::engine::config::RelationshipDef;
+    use crate::engine::document::{Relation, RelationType};
+    use crate::engine::gh::{GhFieldKind, GhFieldValueInput, GhFieldValueRepr, ProjectFieldValue};
+    use crate::engine::gh_schema::{OptionId, ProjectFieldId};
+
+    fn membership_relationship_config() -> Config {
+        Config {
+            relationships: vec![RelationshipDef {
+                name: "member-of".to_string(),
+                inverse: Some("has-member".to_string()),
+                github_native: Some("membership".to_string()),
+                traversal: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn member_meta(id: &str, boards: &[u64]) -> DocMeta {
+        let related = boards
+            .iter()
+            .map(|n| Relation {
+                rel_type: RelationType::new("member-of"),
+                target: format!("PROJECT-{}", n),
+            })
+            .collect();
+        DocMeta {
+            path: PathBuf::new(),
+            title: "Story".to_string(),
+            doc_type: DocType::new("story"),
+            status: Status::new("draft"),
+            author: String::new(),
+            date: Local::now().date_naive(),
+            tags: vec![],
+            provenance: vec![],
+            related,
+            validate_ignore: false,
+            virtual_doc: false,
+            attributes: Default::default(),
+            id: id.to_string(),
+        }
+    }
+
+    fn issues_store_with(
+        root: &std::path::Path,
+        client: MockGhClient,
+    ) -> GithubIssuesStore<MockGhClient> {
+        GithubIssuesStore {
+            client,
+            root: root.to_path_buf(),
+            repo: "my-org/repo".to_string(),
+            config: membership_relationship_config(),
+            issue_map: IssueMap::load(root).unwrap(),
+            issue_cache: IssueCache::new(root),
+        }
+    }
+
+    // AC1: each field kind surfaces as the right coerced AttrValue under the
+    // namespaced key.
+    #[test]
+    fn inject_project_fields_surfaces_all_kinds() {
+        let root = tmp_root("iter217_inject_kinds");
+        let values = vec![
+            ProjectFieldValue {
+                project_number: 1,
+                field_name: "Status".into(),
+                kind: GhFieldKind::SingleSelect,
+                value: GhFieldValueRepr::OptionName("In Progress".into()),
+            },
+            ProjectFieldValue {
+                project_number: 1,
+                field_name: "Estimate".into(),
+                kind: GhFieldKind::Number,
+                value: GhFieldValueRepr::Number(3.0),
+            },
+            ProjectFieldValue {
+                project_number: 1,
+                field_name: "Due".into(),
+                kind: GhFieldKind::Date,
+                value: GhFieldValueRepr::Date(
+                    chrono::NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
+                ),
+            },
+            ProjectFieldValue {
+                project_number: 1,
+                field_name: "Notes".into(),
+                kind: GhFieldKind::Text,
+                value: GhFieldValueRepr::Text("freeform".into()),
+            },
+            ProjectFieldValue {
+                project_number: 1,
+                field_name: "Sprint".into(),
+                kind: GhFieldKind::Iteration,
+                value: GhFieldValueRepr::IterationTitle("Sprint 4".into()),
+            },
+        ];
+        let client = MockGhClient::new().with_project_field_values(values);
+        let mut store = issues_store_with(&root, client);
+        store.issue_map.insert("STORY-7", 7, "", "I_issue7");
+
+        let mut meta = member_meta("STORY-7", &[1]);
+        store.inject_project_fields(&mut meta).unwrap();
+
+        assert_eq!(
+            meta.attributes["PROJECT-1.Status"],
+            AttrValue::Str("In Progress".into())
+        );
+        assert_eq!(meta.attributes["PROJECT-1.Estimate"], AttrValue::Int(3));
+        assert_eq!(
+            meta.attributes["PROJECT-1.Due"],
+            AttrValue::Date(chrono::NaiveDate::from_ymd_opt(2026, 6, 25).unwrap())
+        );
+        assert_eq!(
+            meta.attributes["PROJECT-1.Notes"],
+            AttrValue::Str("freeform".into())
+        );
+        assert_eq!(
+            meta.attributes["PROJECT-1.Sprint"],
+            AttrValue::Str("Sprint 4".into())
+        );
+    }
+
+    // AC2: same field name on two boards yields two distinct namespaced keys,
+    // neither overwriting the other.
+    #[test]
+    fn inject_project_fields_namespaces_per_board_no_collision() {
+        let root = tmp_root("iter217_namespace");
+        let values = vec![
+            ProjectFieldValue {
+                project_number: 1,
+                field_name: "Status".into(),
+                kind: GhFieldKind::SingleSelect,
+                value: GhFieldValueRepr::OptionName("Todo".into()),
+            },
+            ProjectFieldValue {
+                project_number: 2,
+                field_name: "Status".into(),
+                kind: GhFieldKind::SingleSelect,
+                value: GhFieldValueRepr::OptionName("Done".into()),
+            },
+        ];
+        let client = MockGhClient::new().with_project_field_values(values);
+        let mut store = issues_store_with(&root, client);
+        store.issue_map.insert("STORY-7", 7, "", "I_issue7");
+
+        let mut meta = member_meta("STORY-7", &[1, 2]);
+        store.inject_project_fields(&mut meta).unwrap();
+
+        assert_eq!(
+            meta.attributes["PROJECT-1.Status"],
+            AttrValue::Str("Todo".into())
+        );
+        assert_eq!(
+            meta.attributes["PROJECT-2.Status"],
+            AttrValue::Str("Done".into())
+        );
+    }
+
+    fn write_status_snapshot(root: &std::path::Path) {
+        let snapshot = GhSchemaSnapshot {
+            project_fields: vec![ProjectFieldId {
+                project_number: 1,
+                field_name: "Status".into(),
+                id: "F_status".into(),
+                data_type: "SINGLE_SELECT".into(),
+            }],
+            single_select_options: vec![OptionId {
+                field_id: "F_status".into(),
+                name: "In Progress".into(),
+                id: "opt_inprog".into(),
+            }],
+            ..Default::default()
+        };
+        snapshot.save(root).unwrap();
+    }
+
+    fn item_id_response(project_id: &str, item_id: &str) -> serde_json::Value {
+        serde_json::json!({"data": {"node": {"projectItems": {"nodes": [
+            {"id": item_id, "project": {"id": project_id}}
+        ]}}}})
+    }
+
+    fn update_doc_with_attr(
+        value: &str,
+        root: &std::path::Path,
+    ) -> GithubIssuesStore<MockGhClient> {
+        write_status_snapshot(root);
+        // Responses: project node-id resolve (org), then item-id lookup.
+        let client = MockGhClient::new().with_graphql_responses(vec![
+            org_board_response("PVT_board1"),
+            item_id_response("PVT_board1", "PVTI_item1"),
+        ]);
+        let issue_body = make_issue_body("agent", "2026-06-25", None, "");
+        let view = GhIssue {
+            number: 7,
+            id: "I_issue7".into(),
+            url: String::new(),
+            title: "Story".into(),
+            body: issue_body,
+            labels: vec![GhLabel {
+                name: "lazyspec:story".into(),
+                color: String::new(),
+            }],
+            state: "OPEN".into(),
+            updated_at: "2026-06-25T00:00:00Z".into(),
+            created_at: "2026-06-25T00:00:00Z".into(),
+            author: None,
+            issue_type: None,
+            milestone: None,
+        };
+        let client = client.with_view_issue(view);
+        let mut store = issues_store_with(root, client);
+        store
+            .issue_map
+            .insert("STORY-7", 7, "2026-06-25T00:00:00Z", "I_issue7");
+        store.issue_map.save(root).unwrap();
+        let td = TypeDef {
+            name: "story".into(),
+            ..test_type_def(StoreBackend::GithubIssues)
+        };
+        store
+            .update(&td, "STORY-7", &[("PROJECT-1.Status", value)])
+            .unwrap();
+        store
+    }
+
+    // AC3: single-select write resolves node-id + field/option ids, then records
+    // an update whose value object is exactly {singleSelectOptionId}.
+    #[test]
+    fn write_single_select_three_ids_one_key() {
+        let root = tmp_root("iter217_write_select");
+        let store = update_doc_with_attr("In Progress", &root);
+
+        let updates = store.client.field_updates.borrow();
+        assert_eq!(updates.len(), 1, "one field update");
+        let (project_id, item_id, field_id, value) = &updates[0];
+        assert_eq!(project_id, "PVT_board1");
+        assert_eq!(item_id, "PVTI_item1");
+        assert_eq!(field_id, "F_status");
+        assert_eq!(*value, GhFieldValueInput::SingleSelect("opt_inprog".into()));
+        let json = serde_json::to_value(value).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"singleSelectOptionId": "opt_inprog"})
+        );
+        assert!(store.client.field_clears.borrow().is_empty());
+    }
+
+    // AC4: iteration write records exactly {iterationId}.
+    #[test]
+    fn write_iteration_one_key() {
+        let root = tmp_root("iter217_write_iter");
+        let snapshot = GhSchemaSnapshot {
+            project_fields: vec![ProjectFieldId {
+                project_number: 1,
+                field_name: "Sprint".into(),
+                id: "F_sprint".into(),
+                data_type: "ITERATION".into(),
+            }],
+            iterations: vec![crate::engine::gh_schema::IterationId {
+                field_id: "F_sprint".into(),
+                title: "Sprint 4".into(),
+                id: "iter_4".into(),
+            }],
+            ..Default::default()
+        };
+        snapshot.save(&root).unwrap();
+
+        let client = MockGhClient::new()
+            .with_graphql_responses(vec![
+                org_board_response("PVT_board1"),
+                item_id_response("PVT_board1", "PVTI_item1"),
+            ])
+            .with_view_issue(GhIssue {
+                number: 7,
+                id: "I_issue7".into(),
+                url: String::new(),
+                title: "Story".into(),
+                body: make_issue_body("agent", "2026-06-25", None, ""),
+                labels: vec![GhLabel {
+                    name: "lazyspec:story".into(),
+                    color: String::new(),
+                }],
+                state: "OPEN".into(),
+                updated_at: "2026-06-25T00:00:00Z".into(),
+                created_at: "2026-06-25T00:00:00Z".into(),
+                author: None,
+                issue_type: None,
+                milestone: None,
+            });
+        let mut store = issues_store_with(&root, client);
+        store
+            .issue_map
+            .insert("STORY-7", 7, "2026-06-25T00:00:00Z", "I_issue7");
+        store.issue_map.save(&root).unwrap();
+        let td = TypeDef {
+            name: "story".into(),
+            ..test_type_def(StoreBackend::GithubIssues)
+        };
+        store
+            .update(&td, "STORY-7", &[("PROJECT-1.Sprint", "Sprint 4")])
+            .unwrap();
+
+        let updates = store.client.field_updates.borrow();
+        assert_eq!(updates.len(), 1);
+        let json = serde_json::to_value(&updates[0].3).unwrap();
+        assert_eq!(json, serde_json::json!({"iterationId": "iter_4"}));
+    }
+
+    // AC5: clearing a set single-select uses clearProjectV2ItemFieldValue, NOT an
+    // empty-string text update.
+    #[test]
+    fn clear_field_uses_distinct_mutation() {
+        let root = tmp_root("iter217_clear");
+        let store = update_doc_with_attr("", &root);
+
+        assert!(
+            store.client.field_updates.borrow().is_empty(),
+            "no update mutation on clear"
+        );
+        let clears = store.client.field_clears.borrow();
+        assert_eq!(clears.len(), 1, "one clear mutation");
+        assert_eq!(
+            clears[0],
+            (
+                "PVT_board1".to_string(),
+                "PVTI_item1".to_string(),
+                "F_status".to_string()
+            )
+        );
+    }
+
+    // AC7: number/date/text writes record exactly {number}/{date}/{text}.
+    #[test]
+    fn write_number_date_text_single_key() {
+        for (data_type, field, id, raw, expected) in [
+            (
+                "NUMBER",
+                "Est",
+                "F_num",
+                "5",
+                serde_json::json!({"number": 5.0}),
+            ),
+            (
+                "DATE",
+                "Due",
+                "F_date",
+                "2026-06-25",
+                serde_json::json!({"date": "2026-06-25"}),
+            ),
+            (
+                "TEXT",
+                "Notes",
+                "F_text",
+                "hello",
+                serde_json::json!({"text": "hello"}),
+            ),
+        ] {
+            let root = tmp_root(&format!("iter217_write_{}", data_type));
+            let snapshot = GhSchemaSnapshot {
+                project_fields: vec![ProjectFieldId {
+                    project_number: 1,
+                    field_name: field.into(),
+                    id: id.into(),
+                    data_type: data_type.into(),
+                }],
+                ..Default::default()
+            };
+            snapshot.save(&root).unwrap();
+
+            let client = MockGhClient::new()
+                .with_graphql_responses(vec![
+                    org_board_response("PVT_board1"),
+                    item_id_response("PVT_board1", "PVTI_item1"),
+                ])
+                .with_view_issue(GhIssue {
+                    number: 7,
+                    id: "I_issue7".into(),
+                    url: String::new(),
+                    title: "Story".into(),
+                    body: make_issue_body("agent", "2026-06-25", None, ""),
+                    labels: vec![GhLabel {
+                        name: "lazyspec:story".into(),
+                        color: String::new(),
+                    }],
+                    state: "OPEN".into(),
+                    updated_at: "2026-06-25T00:00:00Z".into(),
+                    created_at: "2026-06-25T00:00:00Z".into(),
+                    author: None,
+                    issue_type: None,
+                    milestone: None,
+                });
+            let mut store = issues_store_with(&root, client);
+            store
+                .issue_map
+                .insert("STORY-7", 7, "2026-06-25T00:00:00Z", "I_issue7");
+            store.issue_map.save(&root).unwrap();
+            let td = TypeDef {
+                name: "story".into(),
+                ..test_type_def(StoreBackend::GithubIssues)
+            };
+            let key = format!("PROJECT-1.{}", field);
+            store.update(&td, "STORY-7", &[(&key, raw)]).unwrap();
+
+            let updates = store.client.field_updates.borrow();
+            assert_eq!(updates.len(), 1, "{}: one update", data_type);
+            let json = serde_json::to_value(&updates[0].3).unwrap();
+            assert_eq!(json, expected, "{} value object", data_type);
+        }
+    }
+
+    // AC6 (write path): an unknown option rejects offline from the snapshot
+    // before ANY mutation or even a project/item id lookup is attempted.
+    #[test]
+    fn write_unknown_option_rejects_zero_mutations() {
+        let root = tmp_root("iter217_unknown_option");
+        write_status_snapshot(&root);
+        let client = MockGhClient::new()
+            .with_graphql_responses(vec![])
+            .with_view_issue(GhIssue {
+                number: 7,
+                id: "I_issue7".into(),
+                url: String::new(),
+                title: "Story".into(),
+                body: make_issue_body("agent", "2026-06-25", None, ""),
+                labels: vec![GhLabel {
+                    name: "lazyspec:story".into(),
+                    color: String::new(),
+                }],
+                state: "OPEN".into(),
+                updated_at: "2026-06-25T00:00:00Z".into(),
+                created_at: "2026-06-25T00:00:00Z".into(),
+                author: None,
+                issue_type: None,
+                milestone: None,
+            });
+        let mut store = issues_store_with(&root, client);
+        store
+            .issue_map
+            .insert("STORY-7", 7, "2026-06-25T00:00:00Z", "I_issue7");
+        store.issue_map.save(&root).unwrap();
+        let td = TypeDef {
+            name: "story".into(),
+            ..test_type_def(StoreBackend::GithubIssues)
+        };
+
+        let err = store
+            .update(&td, "STORY-7", &[("PROJECT-1.Status", "Frozen")])
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown option"), "got: {}", err);
+        assert!(store.client.field_updates.borrow().is_empty());
+        assert!(store.client.field_clears.borrow().is_empty());
+        // Only the check_lock issue_view read happened; no project/item graphql.
+        assert!(
+            store.client.graphql_calls.borrow().is_empty(),
+            "no project/item graphql lookups before offline reject"
+        );
+    }
+
+    #[test]
+    fn parse_project_field_key_matches_and_rejects() {
+        assert_eq!(
+            parse_project_field_key("PROJECT-1.Status"),
+            Some((1, "Status"))
+        );
+        assert_eq!(
+            parse_project_field_key("PROJECT-12.Due Date"),
+            Some((12, "Due Date"))
+        );
+        assert_eq!(parse_project_field_key("owner"), None);
+        assert_eq!(parse_project_field_key("PROJECT-1"), None);
+        assert_eq!(parse_project_field_key("PROJECT-x.Status"), None);
     }
 }

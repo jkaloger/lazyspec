@@ -212,6 +212,8 @@ fn parse_store(value: &str) -> Result<StoreBackend> {
     match value {
         "filesystem" => Ok(StoreBackend::Filesystem),
         "github-issues" => Ok(StoreBackend::GithubIssues),
+        "github-milestones" => Ok(StoreBackend::GithubMilestones),
+        "github-projects" => Ok(StoreBackend::GithubProjects),
         "git-ref" => Ok(StoreBackend::GitRef),
         other => bail!("unknown store backend \"{}\"", other),
     }
@@ -271,7 +273,6 @@ name = "stories-need-rfcs"
 shape = "parent-child"
 child = "story"
 parent = "rfc"
-link = "implements"
 severity = "warning"
 
 [[rules]]
@@ -358,7 +359,6 @@ name = "stories-need-rfcs"
 shape = "parent-child"
 child = "story"
 parent = "rfc"
-link = "implements"
 severity = "warning"
 require_parent_status = "accepted"
 "#;

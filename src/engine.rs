@@ -11,6 +11,8 @@ pub mod document;
 pub mod fs;
 pub mod fs_ops;
 pub mod gh;
+pub mod gh_schema;
+pub mod gh_subissue;
 pub mod git_ref;
 pub mod git_ref_store;
 pub mod git_status;

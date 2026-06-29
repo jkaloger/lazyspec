@@ -11,6 +11,18 @@ pub enum Severity {
     Warning,
 }
 
+/// How a relationship participates in context traversal. `Chain` relationships
+/// form the parent-child DAG walked by `resolve_chain`/`resolve_forest`;
+/// `Related` relationships form the symmetric depth-bounded neighbourhood.
+/// Absence (`None` on `RelationshipDef`) means the relationship participates in
+/// neither walk.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Traversal {
+    Chain,
+    Related,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "shape")]
 pub enum ValidationRule {
@@ -19,7 +31,6 @@ pub enum ValidationRule {
         name: String,
         child: String,
         parent: String,
-        link: String,
         severity: Severity,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         require_parent_status: Option<String>,
@@ -119,6 +130,10 @@ pub enum StoreBackend {
     Filesystem,
     #[serde(rename = "github-issues")]
     GithubIssues,
+    #[serde(rename = "github-milestones")]
+    GithubMilestones,
+    #[serde(rename = "github-projects")]
+    GithubProjects,
     #[serde(rename = "git-ref")]
     GitRef,
 }
@@ -128,6 +143,8 @@ impl fmt::Display for StoreBackend {
         match self {
             StoreBackend::Filesystem => write!(f, "filesystem"),
             StoreBackend::GithubIssues => write!(f, "github-issues"),
+            StoreBackend::GithubMilestones => write!(f, "github-milestones"),
+            StoreBackend::GithubProjects => write!(f, "github-projects"),
             StoreBackend::GitRef => write!(f, "git-ref"),
         }
     }
@@ -257,6 +274,17 @@ pub struct RelationshipDef {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inverse: Option<String>,
+    /// Names a GitHub-native edge this relationship maps onto (e.g.
+    /// `"milestone"`, `"sub-issue"`, `"membership"`), so linking writes the
+    /// native association instead of (or alongside) the frontmatter relation.
+    /// Absent for ordinary relationships.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_native: Option<String>,
+    /// How this relationship participates in context traversal. `None` (the
+    /// default, absent from TOML) means it drives neither the chain walk nor the
+    /// related neighbourhood.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traversal: Option<Traversal>,
 }
 
 /// The canonical starter relationship vocabulary, mirroring the closed enum that
@@ -264,17 +292,21 @@ pub struct RelationshipDef {
 /// `to_toml` writer, and the test-only `Config::default()`. The load path
 /// carries none (ADR-011): a real config must declare `[[relationships]]`.
 pub fn starter_relationships() -> Vec<RelationshipDef> {
-    let directional = |name: &str, inverse: &str| RelationshipDef {
+    let directional = |name: &str, inverse: &str, traversal: Option<Traversal>| RelationshipDef {
         name: name.to_string(),
         inverse: Some(inverse.to_string()),
+        github_native: None,
+        traversal,
     };
     vec![
-        directional("implements", "implemented-by"),
-        directional("supersedes", "superseded-by"),
-        directional("blocks", "blocked-by"),
+        directional("implements", "implemented-by", Some(Traversal::Chain)),
+        directional("supersedes", "superseded-by", None),
+        directional("blocks", "blocked-by", None),
         RelationshipDef {
             name: "related-to".to_string(),
             inverse: None,
+            github_native: None,
+            traversal: Some(Traversal::Related),
         },
     ]
 }
@@ -647,7 +679,6 @@ pub fn default_rules() -> Vec<ValidationRule> {
             name: "stories-need-rfcs".to_string(),
             child: "story".to_string(),
             parent: "rfc".to_string(),
-            link: "implements".to_string(),
             severity: Severity::Warning,
             require_parent_status: None,
         },
@@ -655,7 +686,6 @@ pub fn default_rules() -> Vec<ValidationRule> {
             name: "iterations-need-stories".to_string(),
             child: "iteration".to_string(),
             parent: "story".to_string(),
-            link: "implements".to_string(),
             severity: Severity::Error,
             require_parent_status: None,
         },
@@ -796,9 +826,16 @@ impl Config {
             }
         }
 
-        let any_github_issues = types.iter().any(|t| t.store == StoreBackend::GithubIssues);
-        if any_github_issues && raw.github.is_none() {
-            bail!("store = \"github-issues\" requires a [github] section");
+        let any_github = types.iter().any(|t| {
+            matches!(
+                t.store,
+                StoreBackend::GithubIssues
+                    | StoreBackend::GithubMilestones
+                    | StoreBackend::GithubProjects
+            )
+        });
+        if any_github && raw.github.is_none() {
+            bail!("store = \"github-issues\", \"github-milestones\", or \"github-projects\" requires a [github] section");
         }
 
         let ref_count_ceiling = raw.ref_count_ceiling.unwrap_or(15);
@@ -874,6 +911,15 @@ impl Config {
     /// The relationship declared under the canonical `name`, if any.
     pub fn relationship_by_name(&self, name: &str) -> Option<&RelationshipDef> {
         self.relationships.iter().find(|r| r.name == name)
+    }
+
+    /// The relationship whose `github_native` edge equals `native` (e.g.
+    /// `"milestone"`), if one is declared. Lets fetch resolve the rel name to
+    /// surface a native association under rather than hardcoding `targets`.
+    pub fn relationship_by_github_native(&self, native: &str) -> Option<&RelationshipDef> {
+        self.relationships
+            .iter()
+            .find(|r| r.github_native.as_deref() == Some(native))
     }
 
     /// The declared inverse keyword for a canonical relationship `name`, if it
@@ -1340,6 +1386,148 @@ store = "github-issues"
     }
 
     #[test]
+    fn test_store_backend_display_github_milestones() {
+        assert_eq!(
+            StoreBackend::GithubMilestones.to_string(),
+            "github-milestones"
+        );
+    }
+
+    #[test]
+    fn test_store_backend_parses_github_milestones() {
+        let toml_str = r#"
+[github]
+repo = "owner/repo"
+
+[[types]]
+name = "milestone"
+plural = "milestones"
+dir = "docs/milestones"
+prefix = "MILESTONE"
+store = "github-milestones"
+"#;
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+        assert_eq!(
+            config.documents.types[0].store,
+            StoreBackend::GithubMilestones
+        );
+    }
+
+    #[test]
+    fn test_store_backend_display_github_projects() {
+        assert_eq!(StoreBackend::GithubProjects.to_string(), "github-projects");
+    }
+
+    #[test]
+    fn test_store_backend_parses_github_projects() {
+        let toml_str = r#"
+[github]
+repo = "owner/repo"
+
+[[types]]
+name = "project"
+plural = "projects"
+dir = "docs/projects"
+prefix = "PROJECT"
+store = "github-projects"
+"#;
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+        assert_eq!(
+            config.documents.types[0].store,
+            StoreBackend::GithubProjects
+        );
+    }
+
+    #[test]
+    fn test_github_projects_without_github_section_fails() {
+        let toml_str = r#"
+[[types]]
+name = "project"
+plural = "projects"
+dir = "docs/projects"
+prefix = "PROJECT"
+store = "github-projects"
+"#;
+        let err = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap_err();
+        assert!(err.to_string().contains("[github] section"), "got: {err}");
+    }
+
+    #[test]
+    fn relationship_github_native_membership_round_trips() {
+        let toml_str = r#"
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[relationships]]
+name = "member-of"
+inverse = "has-member"
+github_native = "membership"
+
+[[relationships]]
+name = "related-to"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let rel = config.relationship_by_name("member-of").unwrap();
+        assert_eq!(rel.github_native.as_deref(), Some("membership"));
+        let emitted = config.to_toml().unwrap();
+        assert!(
+            emitted.contains("github_native = \"membership\""),
+            "{emitted}"
+        );
+    }
+
+    #[test]
+    fn test_github_milestones_without_github_section_fails() {
+        let toml_str = r#"
+[[types]]
+name = "milestone"
+plural = "milestones"
+dir = "docs/milestones"
+prefix = "MILESTONE"
+store = "github-milestones"
+"#;
+        let err = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap_err();
+        assert!(err.to_string().contains("[github] section"), "got: {err}");
+    }
+
+    #[test]
+    fn relationship_github_native_round_trips() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "targets"
+inverse = "targeted-by"
+github_native = "milestone"
+
+[[relationships]]
+name = "related-to"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        let rel = config.relationship_by_name("targets").unwrap();
+        assert_eq!(rel.github_native.as_deref(), Some("milestone"));
+        // A relationship without the key carries None.
+        assert!(config
+            .relationship_by_name("related-to")
+            .unwrap()
+            .github_native
+            .is_none());
+        // The field survives the to_toml writer.
+        let emitted = config.to_toml().unwrap();
+        assert!(
+            emitted.contains("github_native = \"milestone\""),
+            "{emitted}"
+        );
+    }
+
+    #[test]
     fn test_store_backend_parses_git_ref() {
         let toml_str = r#"
 [[types]]
@@ -1604,7 +1792,6 @@ name = "stories-need-accepted-rfcs"
 shape = "parent-child"
 child = "story"
 parent = "rfc"
-link = "implements"
 severity = "error"
 require_parent_status = "accepted"
 "#;
@@ -1637,7 +1824,6 @@ name = "stories-need-rfcs"
 shape = "parent-child"
 child = "story"
 parent = "rfc"
-link = "implements"
 severity = "warning"
 "#;
         let config = Config::parse(toml_str).unwrap();
@@ -1785,5 +1971,61 @@ name = "related-to"
         // Unknown keyword errors, naming it.
         let err = config.resolve_relationship("frobs").unwrap_err();
         assert!(err.to_string().contains("frobs"));
+    }
+
+    #[test]
+    fn relationship_traversal_round_trips() {
+        assert_eq!(
+            serde_json::to_string(&Traversal::Chain).unwrap(),
+            "\"chain\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Traversal::Related).unwrap(),
+            "\"related\""
+        );
+
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+traversal = "chain"
+
+[[relationships]]
+name = "related-to"
+traversal = "related"
+
+[[relationships]]
+name = "mentions"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert_eq!(
+            config.relationship_by_name("implements").unwrap().traversal,
+            Some(Traversal::Chain)
+        );
+        assert_eq!(
+            config.relationship_by_name("related-to").unwrap().traversal,
+            Some(Traversal::Related)
+        );
+        assert_eq!(
+            config.relationship_by_name("mentions").unwrap().traversal,
+            None
+        );
+
+        let emitted = config.to_toml().unwrap();
+        assert!(emitted.contains("traversal = \"chain\""), "{emitted}");
+        assert!(emitted.contains("traversal = \"related\""), "{emitted}");
+        // Only the two marked relationships emit the key; `mentions` (None) is
+        // skipped, so `skip_serializing_if` genuinely omits absent traversal.
+        assert_eq!(
+            emitted.matches("traversal =").count(),
+            2,
+            "skip_serializing_if must omit absent traversal: {emitted}"
+        );
     }
 }

@@ -146,7 +146,6 @@ fn config_with_parent_status_gate() -> Config {
             name: "stories-need-accepted-rfcs".to_string(),
             child: "story".to_string(),
             parent: "rfc".to_string(),
-            link: "implements".to_string(),
             severity: Severity::Error,
             require_parent_status: Some("accepted".to_string()),
         }],
@@ -177,6 +176,7 @@ fn parent_status_gate_blocks_then_allows() {
         "Child",
         "test",
         None,
+        None,
         |_| {},
     )
     .unwrap_err();
@@ -199,6 +199,7 @@ fn parent_status_gate_blocks_then_allows() {
         "story",
         "Child",
         "test",
+        None,
         None,
         |_| {},
     )
@@ -228,6 +229,7 @@ fn no_gate_when_require_parent_status_unset() {
         "story",
         "Child",
         "test",
+        None,
         None,
         |_| {},
     )

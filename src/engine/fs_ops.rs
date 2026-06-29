@@ -1,11 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::Local;
 
-use crate::engine::config::{Config, NumberingStrategy, ReservedFormat};
-use crate::engine::document::{compose_frontmatter, split_frontmatter};
+use crate::engine::config::{Config, NumberingStrategy, ReservedFormat, TypeDef};
+use crate::engine::document::{apply_attrs, compose_frontmatter, split_frontmatter, DocMeta};
 use crate::engine::reservation;
 use crate::engine::store::Store;
 use crate::engine::template;
@@ -164,6 +164,71 @@ pub fn create_document(
     Ok(target_path)
 }
 
+/// Author a single child document as a `.md` directly inside `target_dir`.
+///
+/// Unlike [`create_document`], which decides between a flat file and a
+/// `<dir>/index.md` subdir from the type's `subdirectory` flag, this writes
+/// exactly one `.md` into the explicit `target_dir`. Numbering scans
+/// `target_dir`, so a subdir child's `{n:03}` is local to its parent's
+/// subdirectory rather than the type's flat `dir`. Used by `create --parent`
+/// to place a child alongside a promoted parent's `index.md`.
+pub fn create_child_in_dir(
+    root: &Path,
+    config: &Config,
+    child_type_def: &TypeDef,
+    target_dir: &Path,
+    title: &str,
+    author: &str,
+    body: Option<&str>,
+) -> Result<PathBuf> {
+    fs::create_dir_all(target_dir)?;
+
+    let numbering = match &child_type_def.numbering {
+        NumberingStrategy::Sqids => {
+            let sqids_config = config.documents.sqids.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "type '{}' uses sqids numbering but no [numbering.sqids] config found",
+                    child_type_def.name
+                )
+            })?;
+            Some((&child_type_def.numbering, sqids_config))
+        }
+        _ => None,
+    };
+
+    let filename = template::resolve_filename(
+        &config.documents.naming.pattern,
+        &child_type_def.prefix,
+        title,
+        target_dir,
+        numbering,
+        None,
+    )
+    .map_err(|e| anyhow!("{}", e))?;
+
+    let date = Local::now().format("%Y-%m-%d").to_string();
+    let vars = vec![
+        ("title", title),
+        ("author", author),
+        ("date", date.as_str()),
+        ("type", child_type_def.name.as_str()),
+    ];
+    let template_content = load_template(root, config, &child_type_def.name);
+    let content = template::render_template(&template_content, &vars);
+
+    let target_path = target_dir.join(&filename);
+    fs::write(&target_path, &content)?;
+
+    if let Some(body_text) = body {
+        let written = fs::read_to_string(&target_path)?;
+        let (yaml, _) = split_frontmatter(&written)?;
+        let new_content = format!("---\n{}\n---\n\n{}\n", yaml.trim(), body_text);
+        fs::write(&target_path, new_content)?;
+    }
+
+    Ok(target_path)
+}
+
 /// Delete a filesystem document by ID or shorthand.
 pub fn delete_document(root: &Path, store: &Store, doc_id: &str) -> Result<()> {
     let doc = store
@@ -187,6 +252,24 @@ pub fn update_document(
     doc_id: &str,
     updates: &[(&str, &str)],
 ) -> Result<()> {
+    update_document_with_type(root, store, doc_id, updates, None)
+}
+
+const RESERVED_UPDATE_KEYS: &[&str] = &["status", "title", "body", "author"];
+
+/// Update a filesystem document's frontmatter. Reserved keys (status/title/body/
+/// author) follow the in-place replace path; any other key is a declared custom
+/// attribute, coerced and validated via [`apply_attrs`] against `type_def` and
+/// then written back (replacing an existing line or appending a new one). When
+/// `type_def` is absent, non-reserved keys are treated as plain replacements
+/// (legacy behaviour for callers without type context).
+pub fn update_document_with_type(
+    root: &Path,
+    store: &Store,
+    doc_id: &str,
+    updates: &[(&str, &str)],
+    type_def: Option<&TypeDef>,
+) -> Result<()> {
     let doc = store
         .get(Path::new(doc_id))
         .or_else(|| store.resolve_shorthand(doc_id).ok())
@@ -197,6 +280,35 @@ pub fn update_document(
 
     let (yaml, body) = split_frontmatter(&content)?;
 
+    let attr_updates: Vec<(&str, &str)> = updates
+        .iter()
+        .filter(|(k, _)| !RESERVED_UPDATE_KEYS.contains(k))
+        .copied()
+        .collect();
+
+    let coerced_attrs: Vec<(String, String)> = match type_def {
+        Some(td) if !attr_updates.is_empty() => {
+            let schema = &td.attributes;
+            let mut meta = DocMeta::parse_with_schema(&content, schema)
+                .with_context(|| format!("parsing {}", doc.path.display()))?;
+            apply_attrs(td, &mut meta, &attr_updates)?;
+            attr_updates
+                .iter()
+                .map(|(key, _)| {
+                    let value = meta
+                        .attributes
+                        .get(*key)
+                        .expect("attr inserted by apply_attrs");
+                    let scalar = serde_yaml::to_string(value)
+                        .map(|s| s.trim_end().to_string())
+                        .unwrap_or_default();
+                    ((*key).to_string(), scalar)
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+
     let mut new_body = body;
     let mut lines: Vec<String> = yaml.lines().map(|l| l.to_string()).collect();
     for (key, value) in updates {
@@ -204,12 +316,26 @@ pub fn update_document(
             new_body = value.to_string();
             continue;
         }
+        if RESERVED_UPDATE_KEYS.contains(key) {
+            let prefix = format!("{}:", key);
+            if let Some(line) = lines
+                .iter_mut()
+                .find(|l| l.trim_start().starts_with(&prefix))
+            {
+                *line = format!("{}: {}", key, value);
+            }
+        }
+    }
+
+    for (key, scalar) in &coerced_attrs {
         let prefix = format!("{}:", key);
         if let Some(line) = lines
             .iter_mut()
             .find(|l| l.trim_start().starts_with(&prefix))
         {
-            *line = format!("{}: {}", key, value);
+            *line = format!("{}: {}", key, scalar);
+        } else {
+            lines.push(format!("{}: {}", key, scalar));
         }
     }
 

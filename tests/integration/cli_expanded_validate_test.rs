@@ -239,7 +239,6 @@ fn custom_parent_child_rule_fires_when_story_lacks_rfc_link() {
         name: "stories-must-implement-rfcs".to_string(),
         child: "story".to_string(),
         parent: "rfc".to_string(),
-        link: "implements".to_string(),
         severity: Severity::Error,
         require_parent_status: None,
     }]);
@@ -296,7 +295,6 @@ fn custom_rule_with_warning_severity_produces_warning_not_error() {
         name: "soft-story-check".to_string(),
         child: "story".to_string(),
         parent: "rfc".to_string(),
-        link: "implements".to_string(),
         severity: Severity::Warning,
         require_parent_status: None,
     }]);
@@ -381,7 +379,6 @@ fn status_based_checks_work_with_custom_hierarchy() {
         name: "stories-need-rfcs".to_string(),
         child: "story".to_string(),
         parent: "rfc".to_string(),
-        link: "implements".to_string(),
         severity: Severity::Warning,
         require_parent_status: None,
     }]);
@@ -420,7 +417,6 @@ fn all_children_accepted_fires_with_custom_hierarchy() {
         name: "stories-need-rfcs".to_string(),
         child: "story".to_string(),
         parent: "rfc".to_string(),
-        link: "implements".to_string(),
         severity: Severity::Warning,
         require_parent_status: None,
     }]);

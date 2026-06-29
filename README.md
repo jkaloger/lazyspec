@@ -203,10 +203,10 @@ All document management is available as subcommands. Most accept `--json` for ma
 | Command                                                         | Description                                                                                     |
 | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `init`                                                          | Initialise lazyspec in the current project                                                      |
-| `create <type> <title> [--author X] [--body / --body-file]`     | Create a document (rfc, adr, story, iteration); seed body inline, from a file, or `-` for stdin |
+| `create <type> <title> [--author X] [--parent ID] [--body / --body-file]` | Create a document (rfc, adr, story, iteration); seed body inline, from a file, or `-` for stdin. `--parent <ID>` makes the new doc a child of an existing doc; the child must be the same store as its parent. For filesystem-store types the child is authored as a sibling `.md` inside the parent's subdir (promoting a flat parent to `TYPE-n-slug/index.md` on the first child). For `github-issues`-store types the child is created as a real GitHub issue and bound as a native sub-issue of the parent at create time; a later `fetch` mirrors them into the nested cache layout (`.lazyspec/cache/<type>/<PARENT>/index.md` + `NN-<child>.md`) |
 | `list [type] [--status X]`                                      | List documents with optional filters                                                            |
 | `show <id> [-e]`                                                | Display a document by path or shorthand ID (e.g. `RFC-001`)                                     |
-| `update <path> [--status X] [--title X] [--body / --body-file]` | Update frontmatter and/or body content (`--body-file -` reads stdin); works for all stores      |
+| `update <path> [--status X] [--title X] [--body / --body-file] [--attr key=value]` | Update frontmatter and/or body content (`--body-file -` reads stdin); `--attr` (repeatable) sets a declared custom attribute, coerced and validated against its type; works for all stores |
 | `delete <path>`                                                 | Delete a document                                                                               |
 | `link <from> <rel> <to>`                                        | Add a typed relationship (canonical or inverse keyword)                                         |
 | `unlink <from> <rel> <to>`                                      | Remove a relationship (canonical or inverse keyword)                                            |
@@ -246,6 +246,8 @@ A relationship declared without an `inverse` is symmetric (like `related-to`) an
 | `--max-ref-lines N`         | Max lines per expanded ref (default: 25)         |
 
 Each document entry in `show --json` and `status --json` (under `documents[]`) includes an `attributes` object holding the document's custom frontmatter attributes (declared via `[[types.attributes]]`). Declared attributes are emitted as their typed JSON value -- `int`/`float` as numbers, `string`/`enum` as strings, `bool` as a boolean, `date` as a `"YYYY-MM-DD"` string -- and undeclared keys pass through with their raw YAML value. The field is always present; a document with no attributes serializes it as `{}`, so consumers needn't null-check.
+
+`show --json` and `status --json` also include a read-only `comments` array. For documents whose type uses the `github-issues` store, this fetches the issue's GitHub comment thread live (each entry `{ "author", "body", "timestamp" }`); for all other documents it is an empty array. Comments are never written back to GitHub, never merged into `body`, and never cached. The field is always present.
 
 #### `context` Flags
 
@@ -456,7 +458,7 @@ lazyspec config --json                      # print the resolved config as JSON
 lazyspec config add-type spike spikes docs/spikes SPIKE \
   --icon "◆" --parent-type rfc --intent "throwaway exploration" \
   --authorship generated
-# also accepts --singleton, --store <filesystem|github-issues|git-ref>,
+# also accepts --singleton, --store <filesystem|github-issues|github-milestones|github-projects|git-ref>,
 # --numbering <incremental|sqids|reserved>
 
 # Replace a type's lifecycle (states + edges; `*` matches any source state)
@@ -473,6 +475,70 @@ lazyspec config add-gate stories-need-rfcs --status accepted
 unknown rule and refuses a `relation-existence` rule (the gate applies only to
 `parent-child` rules). The mutators require an already-valid config; run
 `lazyspec fix --config` first to migrate a legacy one.
+
+#### `github-issues` store auth
+
+Types stored as GitHub issues (`--store github-issues`) shell out to the `gh`
+CLI, so run `gh auth login` first. Beyond plain issue access, lazyspec reads
+native GitHub fields (issue types, Projects v2 fields) over the GraphQL API,
+which needs the `project` scope on your token:
+
+```sh
+gh auth refresh -s project
+```
+
+Without it, schema-snapshot refreshes degrade gracefully -- they emit a warning
+and keep serving the last cached snapshot, so offline validation still works.
+
+#### `github-milestones` store
+
+Types stored as `--store github-milestones` map each document to a GitHub
+milestone over the REST API (title -> title, body -> description, `status` ->
+open/closed state, `due_on` passed through verbatim). Progress
+(`percent_complete`) is computed from the milestone's issue counts at read time
+and is never writable. The write policy is last-write-wins: a push happens
+unconditionally, then the milestone is re-read into the cache (no optimistic
+lock). An issue -> milestone association is surfaced as a forward relation on
+the issue document: declare a relationship with `github_native = "milestone"`,
+and at fetch each issue's native milestone is read back as that relation (e.g.
+`targets: MILESTONE-1`), resolving the milestone number to its document.
+`link` an issue-backed document to a milestone sets the association on GitHub
+(`unlink` clears it). The inverse is read-only and never stored: a milestone
+document's `targeted-by` entries are derived virtually as the reverse of each
+issue's forward relation; an issue whose milestone maps to no lazyspec document
+is skipped.
+
+#### `github-projects` store
+
+Types stored as `--store github-projects` bind each document to an existing
+GitHub Projects v2 board, addressed by its board number (`PROJECT-7` -> board
+#7 under `[github].repo`'s owner). The backend is **read/associate only**:
+lazyspec never creates or deletes boards (they are authored on GitHub), so
+`create` and `delete` are rejected. Resolving a board (`update`/binding) looks it
+up over GraphQL under the organization root first, then the user root, and
+errors if the number exists under neither -- no create mutation is ever issued.
+
+Board membership is a many-to-many relation: declare a relationship with
+`github_native = "membership"`, then `link` an issue-backed document to a board
+document to add the issue to that board (`addProjectV2ItemById`); `unlink`
+removes only that board's item (`deleteProjectV2Item`), leaving memberships of
+other boards untouched. Each membership relation maps to exactly one board and is
+synced independently. Membership mutations are self-contained -- no `--attr` is
+involved (per-board field values are a separate concern).
+
+Projects v2 mutations require the `project` scope on your `gh` token:
+
+```sh
+gh auth refresh -s project
+```
+
+On macOS, a slow keyring lookup can make `gh api` fall back to an unauthenticated
+request (surfacing as a surprise 403 / rate-limit). If you hit that, pass the
+token explicitly:
+
+```sh
+GH_TOKEN="$(gh auth token)" lazyspec fetch
+```
 
 ### Custom Types
 
@@ -533,10 +599,17 @@ registry -- a canonical `name` links in the stated direction, while a declared
 `inverse` flips it and stores the canonical relation on the target. `validate`
 flags any document carrying a relationship name not declared here.
 
+A relationship may also declare `traversal`, which governs how it participates in
+context traversal: `chain` relationships form the parent-child hierarchy that
+`parent-child` validation rules and the context chain walk follow, while
+`related` relationships form the symmetric related-context neighbourhood. A
+relationship with no `traversal` participates in neither.
+
 ```toml
 [[relationships]]
 name = "implements"
 inverse = "implemented-by"
+traversal = "chain"
 
 [[relationships]]
 name = "tracks"
@@ -544,13 +617,14 @@ inverse = "tracked-by"
 
 [[relationships]]
 name = "related-to"
+traversal = "related"
 ```
 
 ### Validation Rules
 
 Validation rules define structural constraints between document types. Two shapes are supported:
 
-- `parent-child` -- the child type must link to a parent type via a given relationship.
+- `parent-child` -- the child type must link to a parent type via any chain relationship (a relationship marked `traversal = "chain"` in `[[relationships]]`).
 - `relation-existence` -- documents of a given type must have at least one relationship.
 
 A `parent-child` rule may also carry `require_parent_status`: when set, `create`
@@ -565,7 +639,6 @@ shape = "parent-child"
 name = "stories-need-rfcs"
 child = "story"
 parent = "rfc"
-link = "implements"
 severity = "warning"
 require_parent_status = "accepted"  # optional: a story cannot be created until an rfc is accepted
 

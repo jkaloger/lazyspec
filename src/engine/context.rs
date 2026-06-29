@@ -102,13 +102,13 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
         })
         .unwrap_or_default();
 
-    // Related: BFS over `related-to` links (both directions), bounded by
-    // `depth`. Hop 0's frontier is the chain/DAG nodes; each subsequent hop
-    // expands one ring of `related-to` neighbours. First discovery wins, so a
-    // doc's recorded `distance` is its shortest hop count. Frontiers and
-    // neighbours are processed in path order, so when a doc is reachable from
-    // two frontier docs at the same hop the lexicographically-smallest `via`
-    // wins (deterministic, test-stable).
+    // Related: BFS over the configured related relationships (both directions),
+    // bounded by `depth`. Hop 0's frontier is the chain/DAG nodes; each
+    // subsequent hop expands one ring of related neighbours. First discovery
+    // wins, so a doc's recorded `distance` is its shortest hop count. Frontiers
+    // and neighbours are processed in path order, so when a doc is reachable
+    // from two frontier docs at the same hop the lexicographically-smallest
+    // `via` wins (deterministic, test-stable).
     let chain_paths: HashSet<PathBuf> = nodes.iter().map(|n| n.doc.path.clone()).collect();
     let mut related_seen: HashSet<PathBuf> = HashSet::new();
     let mut related: Vec<RelatedRef> = Vec::new();
@@ -120,31 +120,39 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
         let mut next_frontier: Vec<PathBuf> = Vec::new();
 
         for from in &frontier {
-            let mut neighbours: Vec<PathBuf> = Vec::new();
+            let mut neighbours: Vec<(RelationType, PathBuf)> = Vec::new();
             if let Some(fwd) = store.forward_links.get(from) {
                 for (rel_type, target) in fwd {
-                    if rel_type.as_str() == "related-to" {
-                        neighbours.push(target.clone());
+                    if store
+                        .related_relationships
+                        .iter()
+                        .any(|r| r == rel_type.as_str())
+                    {
+                        neighbours.push((rel_type.clone(), target.clone()));
                     }
                 }
             }
             if let Some(rev) = store.reverse_links.get(from) {
                 for (rel_type, source) in rev {
-                    if rel_type.as_str() == "related-to" {
-                        neighbours.push(source.clone());
+                    if store
+                        .related_relationships
+                        .iter()
+                        .any(|r| r == rel_type.as_str())
+                    {
+                        neighbours.push((rel_type.clone(), source.clone()));
                     }
                 }
             }
-            neighbours.sort();
+            neighbours.sort_by(|a, b| a.1.cmp(&b.1));
 
-            for neighbour in neighbours {
+            for (rel_type, neighbour) in neighbours {
                 if chain_paths.contains(&neighbour) || !related_seen.insert(neighbour.clone()) {
                     continue;
                 }
                 if let Some(resolved) = store.get(&neighbour) {
                     related.push(RelatedRef {
                         doc: resolved,
-                        relation: RelationType::new("related-to"),
+                        relation: rel_type,
                         distance: hop,
                         via: from.clone(),
                     });
@@ -393,7 +401,7 @@ fn topo_order<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::Config;
+    use crate::engine::config::{Config, Traversal};
     use std::collections::BTreeSet;
     use tempfile::TempDir;
 
@@ -422,6 +430,19 @@ mod tests {
             std::fs::write(&full, contents).unwrap();
         }
         let store = Store::load(tmp.path(), &Config::default()).unwrap();
+        (tmp, store)
+    }
+
+    /// Like [`store_from`] but loads under a caller-supplied `config`, so a test
+    /// can pin the traversal markers (or their absence) that drive the walk.
+    fn store_from_with_config(files: &[(&str, &str)], config: &Config) -> (TempDir, Store) {
+        let tmp = TempDir::new().unwrap();
+        for (rel_path, contents) in files {
+            let full = tmp.path().join(rel_path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, contents).unwrap();
+        }
+        let store = Store::load(tmp.path(), config).unwrap();
         (tmp, store)
     }
 
@@ -635,6 +656,72 @@ mod tests {
         assert!(
             resolved.nodes.iter().any(|n| n.doc.id == "RFC-001"),
             "path implements target should resolve into the chain"
+        );
+    }
+
+    // Verify item 2: a Chain relationship forms the chain purely from its
+    // `traversal` marker, with NO ParentChild rule declaring the link.
+    #[test]
+    fn chain_forms_from_traversal_marker_without_validation_rule() {
+        let mut config = Config::default();
+        config.rules.clear();
+        assert!(
+            config.relationship_by_name("implements").unwrap().traversal == Some(Traversal::Chain),
+            "implements is Chain by marker"
+        );
+
+        let (_tmp, store) = store_from_with_config(
+            &[
+                ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
+                (
+                    "docs/iterations/ITERATION-001-leaf.md",
+                    &doc_md("Leaf", "iteration", "- implements: RFC-001"),
+                ),
+            ],
+            &config,
+        );
+
+        let resolved = resolve_chain(&store, "ITERATION-001", 1).unwrap();
+        assert_eq!(
+            node_ids(&resolved.nodes),
+            BTreeSet::from(["RFC-001".to_string(), "ITERATION-001".to_string()]),
+            "chain forms from the traversal marker even with no validation rule"
+        );
+    }
+
+    // Verify item 3: a config with NO traversal markers yields a target-only
+    // context (empty chain + empty related), no panic.
+    #[test]
+    fn no_traversal_markers_yields_target_only_context() {
+        let mut config = Config::default();
+        for rel in &mut config.relationships {
+            rel.traversal = None;
+        }
+
+        let (_tmp, store) = store_from_with_config(
+            &[
+                ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
+                (
+                    "docs/iterations/ITERATION-001-leaf.md",
+                    &doc_md("Leaf", "iteration", "- implements: RFC-001"),
+                ),
+            ],
+            &config,
+        );
+
+        let resolved = resolve_chain(&store, "ITERATION-001", 3).unwrap();
+        assert_eq!(
+            node_ids(&resolved.nodes),
+            BTreeSet::from(["ITERATION-001".to_string()]),
+            "no chain markers => the target stands alone"
+        );
+        assert!(
+            resolved.forward.is_empty(),
+            "no chain markers => no forward"
+        );
+        assert!(
+            resolved.related.is_empty(),
+            "no related markers => no related"
         );
     }
 

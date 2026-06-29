@@ -95,6 +95,9 @@ fn load_child_markdown_files(
             child_paths.push(rel);
         }
     }
+    // Deterministic loader order: the sub-issue reconcile keys remote ordering
+    // off this, and `fs.read_dir` is unordered on most platforms.
+    child_paths.sort();
     Ok(child_paths)
 }
 

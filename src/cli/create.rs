@@ -10,7 +10,7 @@ use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::reservation;
 use crate::engine::store::{Filter, Store};
-use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
+use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore, GithubMilestonesStore};
 use anyhow::{anyhow, bail, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,6 +32,7 @@ pub fn run(
         title,
         author,
         None,
+        None,
         on_progress,
     )
 }
@@ -44,6 +45,7 @@ pub fn run_with_body(
     doc_type: &str,
     title: &str,
     author: &str,
+    parent: Option<&str>,
     body: Option<&str>,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<PathBuf> {
@@ -104,6 +106,12 @@ pub fn run_with_body(
         }
     }
 
+    if let Some(parent_id) = parent {
+        return create_with_parent(
+            root, config, store, type_def, title, author, body, parent_id,
+        );
+    }
+
     if type_def.store == StoreBackend::GithubIssues {
         let gh_config = config.documents.github.as_ref().ok_or_else(|| {
             anyhow!(
@@ -124,6 +132,54 @@ pub fn run_with_body(
             config: config.clone(),
             issue_map: IssueMap::load(root)?,
             issue_cache: IssueCache::new(root),
+        };
+        let created = store.create(type_def, title, author, body.unwrap_or(""))?;
+        return Ok(root.join(&created.path));
+    }
+
+    if type_def.store == StoreBackend::GithubMilestones {
+        let gh_config = config.documents.github.as_ref().ok_or_else(|| {
+            anyhow!(
+                "type '{}' uses github-milestones store but no [github] config found",
+                doc_type
+            )
+        })?;
+        let repo = gh_config.repo.as_ref().ok_or_else(|| {
+            anyhow!(
+                "type '{}' uses github-milestones store but no github.repo configured",
+                doc_type
+            )
+        })?;
+        let mut store = GithubMilestonesStore {
+            client: GhCli::new(),
+            root: root.to_path_buf(),
+            repo: repo.clone(),
+            config: config.clone(),
+            issue_map: IssueMap::load(root)?,
+        };
+        let created = store.create(type_def, title, author, body.unwrap_or(""))?;
+        return Ok(root.join(&created.path));
+    }
+
+    if type_def.store == StoreBackend::GithubProjects {
+        let gh_config = config.documents.github.as_ref().ok_or_else(|| {
+            anyhow!(
+                "type '{}' uses github-projects store but no [github] config found",
+                doc_type
+            )
+        })?;
+        let repo = gh_config.repo.as_ref().ok_or_else(|| {
+            anyhow!(
+                "type '{}' uses github-projects store but no github.repo configured",
+                doc_type
+            )
+        })?;
+        let mut store = crate::engine::store_dispatch::GithubProjectsStore {
+            client: GhCli::new(),
+            root: root.to_path_buf(),
+            repo: repo.clone(),
+            config: config.clone(),
+            issue_map: IssueMap::load(root)?,
         };
         let created = store.create(type_def, title, author, body.unwrap_or(""))?;
         return Ok(root.join(&created.path));
@@ -177,6 +233,128 @@ pub fn run_with_body(
     Ok(path)
 }
 
+/// Author a child of `parent_id`, branching on the child type's store.
+///
+/// For github-issues children the child becomes a REAL GitHub issue bound as a
+/// native sub-issue of the parent immediately at create time (via
+/// [`GithubIssuesStore::create_child_subissue`]) -- no local-only `.md` is left
+/// behind. For filesystem (and any other) store the child is written as a
+/// sibling `.md` inside the parent's subdirectory, promoting a flat parent to
+/// `TYPE-n-slug/index.md` on the first child; the loader tracks the new
+/// parent/child edges directly.
+///
+/// Both branches enforce the same-store guard: parent and child must share a
+/// [`StoreBackend`].
+#[allow(clippy::too_many_arguments)]
+fn create_with_parent(
+    root: &Path,
+    config: &Config,
+    store: &Store,
+    child_type_def: &crate::engine::config::TypeDef,
+    title: &str,
+    author: &str,
+    body: Option<&str>,
+    parent_id: &str,
+) -> Result<PathBuf> {
+    let parent_meta = store
+        .resolve_shorthand(parent_id)
+        .map_err(|_| anyhow!("could not resolve parent document: {}", parent_id))?;
+
+    let parent_type_def = config
+        .type_by_name(parent_meta.doc_type.as_str())
+        .ok_or_else(|| {
+            anyhow!(
+                "parent {} has unknown type '{}'",
+                parent_id,
+                parent_meta.doc_type
+            )
+        })?;
+
+    if child_type_def.store != parent_type_def.store {
+        bail!(
+            "sub-issue link rejected: parent {} (store {}) and child type {} (store {}) \
+             are in different stores; lazyspec sub-issues are same-store only",
+            parent_id,
+            parent_type_def.store,
+            child_type_def.name,
+            child_type_def.store
+        );
+    }
+
+    if child_type_def.store == StoreBackend::GithubIssues {
+        let gh_config = config.documents.github.as_ref().ok_or_else(|| {
+            anyhow!(
+                "type '{}' uses github-issues store but no [github] config found",
+                child_type_def.name
+            )
+        })?;
+        let repo = gh_config.repo.as_ref().ok_or_else(|| {
+            anyhow!(
+                "type '{}' uses github-issues store but no github.repo configured",
+                child_type_def.name
+            )
+        })?;
+        let mut gh_store = GithubIssuesStore {
+            client: GhCli::new(),
+            root: root.to_path_buf(),
+            repo: repo.clone(),
+            config: config.clone(),
+            issue_map: IssueMap::load(root)?,
+            issue_cache: IssueCache::new(root),
+        };
+        let created = gh_store.create_child_subissue(
+            child_type_def,
+            parent_id,
+            title,
+            author,
+            body.unwrap_or(""),
+        )?;
+        return Ok(root.join(&created.path));
+    }
+
+    let parent_path = root.join(&parent_meta.path);
+    let is_index = parent_path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .map(|f| f == "index.md")
+        .unwrap_or(false);
+
+    let parent_subdir = if is_index {
+        parent_path
+            .parent()
+            .ok_or_else(|| {
+                anyhow!(
+                    "parent index.md has no directory: {}",
+                    parent_path.display()
+                )
+            })?
+            .to_path_buf()
+    } else {
+        let parent_dir = parent_path
+            .parent()
+            .ok_or_else(|| anyhow!("parent doc has no directory: {}", parent_path.display()))?;
+        let stem = parent_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow!("parent doc has no file stem: {}", parent_path.display()))?;
+        let new_dir = parent_dir.join(stem);
+        let new_index = new_dir.join("index.md");
+        fs::create_dir_all(&new_dir)?;
+        fs::rename(&parent_path, &new_index)?;
+        new_dir
+    };
+
+    fs_ops::create_child_in_dir(
+        root,
+        config,
+        child_type_def,
+        &parent_subdir,
+        title,
+        author,
+        body,
+    )
+}
+
 pub fn run_json(
     root: &Path,
     config: &Config,
@@ -194,6 +372,7 @@ pub fn run_json(
         title,
         author,
         None,
+        None,
         on_progress,
     )
 }
@@ -206,6 +385,7 @@ pub fn run_json_with_body(
     doc_type: &str,
     title: &str,
     author: &str,
+    parent: Option<&str>,
     body: Option<&str>,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<String> {
@@ -216,6 +396,7 @@ pub fn run_json_with_body(
         doc_type,
         title,
         author,
+        parent,
         body,
         on_progress,
     )?;

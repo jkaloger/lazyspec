@@ -98,6 +98,11 @@ pub enum ValidationIssue {
         path: PathBuf,
         attr: String,
     },
+    UnknownProjectFieldOption {
+        path: PathBuf,
+        attr: String,
+        allowed: Vec<String>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -309,6 +314,19 @@ impl std::fmt::Display for ValidationIssue {
             ValidationIssue::UndeclaredAttribute { path, attr } => {
                 write!(f, "undeclared attribute \"{}\": {}", attr, path.display())
             }
+            ValidationIssue::UnknownProjectFieldOption {
+                path,
+                attr,
+                allowed,
+            } => {
+                write!(
+                    f,
+                    "project field \"{}\" in {} is not one of the board's options: {}",
+                    attr,
+                    path.display(),
+                    allowed.join(", ")
+                )
+            }
         }
     }
 }
@@ -321,17 +339,12 @@ pub trait Checker {
     ) -> Vec<(Severity, ValidationIssue)>;
 }
 
-fn hierarchy_from_config(config: &Config) -> Vec<(String, String, String)> {
+fn hierarchy_from_config(config: &Config) -> Vec<(String, String)> {
     config
         .rules
         .iter()
         .filter_map(|rule| match rule {
-            ConfigRule::ParentChild {
-                parent,
-                child,
-                link,
-                ..
-            } => Some((parent.clone(), child.clone(), link.clone())),
+            ConfigRule::ParentChild { parent, child, .. } => Some((parent.clone(), child.clone())),
             _ => None,
         })
         .collect()
@@ -380,9 +393,10 @@ impl Checker for BrokenLinkRule {
                     continue;
                 };
 
-                let is_hierarchy_link = hierarchy
+                let is_hierarchy_link = store
+                    .chain_relationships
                     .iter()
-                    .any(|(_, _, link)| rel.rel_type.to_string() == *link);
+                    .any(|r| r == rel.rel_type.as_str());
                 if !is_hierarchy_link {
                     continue;
                 }
@@ -411,10 +425,13 @@ impl Checker for BrokenLinkRule {
                     ));
                 }
 
-                let is_child_in_hierarchy = hierarchy.iter().any(|(pt, ct, link)| {
+                let is_child_in_hierarchy = hierarchy.iter().any(|(pt, ct)| {
                     meta.doc_type == DocType::new(ct)
                         && parent_doc.doc_type == DocType::new(pt)
-                        && rel.rel_type.to_string() == *link
+                        && store
+                            .chain_relationships
+                            .iter()
+                            .any(|r| r == rel.rel_type.as_str())
                 });
                 if is_child_in_hierarchy
                     && meta.status == Status::new("accepted")
@@ -462,7 +479,6 @@ impl Checker for ParentLinkRule {
                         name,
                         child,
                         parent,
-                        link,
                         severity,
                         ..
                     } => {
@@ -474,7 +490,10 @@ impl Checker for ParentLinkRule {
                                 .get(&r.target)
                                 .cloned()
                                 .unwrap_or_else(|| PathBuf::from(&r.target));
-                            r.rel_type.to_string() == *link
+                            store
+                                .chain_relationships
+                                .iter()
+                                .any(|c| c == r.rel_type.as_str())
                                 && store
                                     .docs
                                     .get(&resolved)
@@ -532,7 +551,7 @@ impl Checker for StatusConsistencyRule {
         let hierarchy = hierarchy_from_config(config);
         let mut issues = Vec::new();
 
-        for (parent_type, child_type, link) in &hierarchy {
+        for (parent_type, child_type) in &hierarchy {
             for (parent_path, meta) in &store.docs {
                 if meta.doc_type != DocType::new(parent_type) {
                     continue;
@@ -544,7 +563,10 @@ impl Checker for StatusConsistencyRule {
                     .into_iter()
                     .flatten()
                     .filter(|(rel_type, child_path)| {
-                        rel_type.to_string() == *link
+                        store
+                            .chain_relationships
+                            .iter()
+                            .any(|c| c == rel_type.as_str())
                             && store
                                 .docs
                                 .get(child_path)
@@ -943,12 +965,19 @@ impl Checker for UnknownRelationshipRule {
     ) -> Vec<(Severity, ValidationIssue)> {
         let mut issues = Vec::new();
 
+        // A relation is known if its keyword matches a declared relationship
+        // `name` or a declared `inverse`; `relationship_keywords` is the
+        // registry's source of truth for both. A stored inverse keyword (e.g.
+        // `targeted-by`, the inverse of `targets`) must validate clean.
+        let known: std::collections::HashSet<String> =
+            config.relationship_keywords().into_iter().collect();
+
         for (path, meta) in &store.docs {
             if meta.validate_ignore {
                 continue;
             }
             for rel in &meta.related {
-                if config.relationship_by_name(rel.rel_type.as_str()).is_none() {
+                if !known.contains(rel.rel_type.as_str()) {
                     issues.push((
                         Severity::Error,
                         ValidationIssue::UnknownRelationship {
@@ -1033,7 +1062,20 @@ impl Checker for AttributeSchemaChecker {
                 }
             }
 
-            for key in meta.attributes.keys() {
+            for (key, value) in &meta.attributes {
+                // Dynamic per-board project fields are namespaced
+                // `PROJECT-n.<field>`; they bypass the declared-AttrDef surface
+                // and are validated against the gh-schema snapshot instead.
+                if let Some((number, field)) =
+                    crate::engine::store_dispatch::parse_project_field_key(key)
+                {
+                    if let Some(issue) =
+                        check_project_field(&store.root, path, key, number, field, value)
+                    {
+                        issues.push((Severity::Error, issue));
+                    }
+                    continue;
+                }
                 if !type_def.attributes.iter().any(|d| &d.name == key) {
                     issues.push((
                         Severity::Warning,
@@ -1047,6 +1089,89 @@ impl Checker for AttributeSchemaChecker {
         }
 
         issues
+    }
+}
+
+/// Offline snapshot-backed check for a single `PROJECT-n.<field>` attribute.
+/// SingleSelect/Iteration values must be in the board's option set; Number/Date
+/// fields are shape-checked against the value's kind; Text/unknown always pass.
+/// An unresolvable field or board (snapshot absent) yields no issue: the live
+/// mutation is the backstop.
+fn check_project_field(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    attr: &str,
+    project_number: u64,
+    field_name: &str,
+    value: &AttrValue,
+) -> Option<ValidationIssue> {
+    let snapshot = crate::engine::gh_schema::GhSchemaSnapshot::load(root);
+    let field_id = snapshot.field_id(project_number, field_name)?;
+    let data_type = snapshot
+        .project_fields
+        .iter()
+        .find(|f| f.project_number == project_number && f.field_name == field_name)
+        .map(|f| f.data_type.as_str())?;
+
+    let as_str = || match value {
+        AttrValue::Str(s) => Some(s.clone()),
+        _ => None,
+    };
+
+    match data_type {
+        "SINGLE_SELECT" => {
+            let v = as_str()?;
+            if snapshot.option_id(field_id, &v).is_some() {
+                None
+            } else {
+                let allowed = snapshot
+                    .single_select_options
+                    .iter()
+                    .filter(|o| o.field_id == field_id)
+                    .map(|o| o.name.clone())
+                    .collect();
+                Some(ValidationIssue::UnknownProjectFieldOption {
+                    path: path.to_path_buf(),
+                    attr: attr.to_string(),
+                    allowed,
+                })
+            }
+        }
+        "ITERATION" => {
+            let v = as_str()?;
+            if snapshot.iteration_id(field_id, &v).is_some() {
+                None
+            } else {
+                let allowed = snapshot
+                    .iterations
+                    .iter()
+                    .filter(|i| i.field_id == field_id)
+                    .map(|i| i.title.clone())
+                    .collect();
+                Some(ValidationIssue::UnknownProjectFieldOption {
+                    path: path.to_path_buf(),
+                    attr: attr.to_string(),
+                    allowed,
+                })
+            }
+        }
+        "NUMBER" => match value {
+            AttrValue::Int(_) | AttrValue::Float(_) => None,
+            _ => Some(ValidationIssue::UnknownProjectFieldOption {
+                path: path.to_path_buf(),
+                attr: attr.to_string(),
+                allowed: vec!["<number>".to_string()],
+            }),
+        },
+        "DATE" => match value {
+            AttrValue::Date(_) => None,
+            _ => Some(ValidationIssue::UnknownProjectFieldOption {
+                path: path.to_path_buf(),
+                attr: attr.to_string(),
+                allowed: vec!["<date>".to_string()],
+            }),
+        },
+        _ => None,
     }
 }
 
@@ -1133,6 +1258,7 @@ mod attr_schema_tests {
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
+            related_relationships: vec!["related-to".to_string()],
         }
     }
 
@@ -1213,6 +1339,106 @@ mod attr_schema_tests {
             .any(|e| matches!(e, ValidationIssue::UndeclaredAttribute { .. })));
     }
 
+    // --- ITERATION-217: PROJECT-n.<field> snapshot-backed validation (AC6) ---
+
+    fn store_with_root(doc: DocMeta, root: PathBuf) -> super::super::store::Store {
+        let mut docs = HashMap::new();
+        docs.insert(doc.path.clone(), doc);
+        super::super::store::Store {
+            root,
+            docs,
+            forward_links: HashMap::new(),
+            reverse_links: HashMap::new(),
+            children: HashMap::new(),
+            parent_of: HashMap::new(),
+            parse_errors: Vec::new(),
+            chain_relationships: vec!["implements".to_string()],
+            related_relationships: vec!["related-to".to_string()],
+        }
+    }
+
+    fn write_status_snapshot(root: &std::path::Path) {
+        use crate::engine::gh_schema::{GhSchemaSnapshot, OptionId, ProjectFieldId};
+        let snapshot = GhSchemaSnapshot {
+            project_fields: vec![ProjectFieldId {
+                project_number: 1,
+                field_name: "Status".into(),
+                id: "F_status".into(),
+                data_type: "SINGLE_SELECT".into(),
+            }],
+            single_select_options: vec![OptionId {
+                field_id: "F_status".into(),
+                name: "In Progress".into(),
+                id: "opt_inprog".into(),
+            }],
+            ..Default::default()
+        };
+        snapshot.save(root).unwrap();
+    }
+
+    fn tmp_root(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lazyspec-validation-iter217-{}-{}",
+            std::process::id(),
+            name
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // AC6: an option not in the snapshot is an Error (UnknownProjectFieldOption),
+    // never just an undeclared-key warning.
+    #[test]
+    fn unknown_project_option_is_error() {
+        let root = tmp_root("unknown_option");
+        write_status_snapshot(&root);
+        let config = config_with_story_attrs(vec![]);
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "PROJECT-1.Status".to_string(),
+            AttrValue::Str("Frozen".to_string()),
+        );
+        let result = validate_full(&store_with_root(story_doc(attrs), root), &config);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationIssue::UnknownProjectFieldOption { .. })),
+            "expected UnknownProjectFieldOption error, got: {:?}",
+            result.errors
+        );
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ValidationIssue::UndeclaredAttribute { .. })),
+            "PROJECT-n.<field> must bypass the undeclared-key warning"
+        );
+    }
+
+    // AC6 (positive): a known option produces no error and no undeclared warning.
+    #[test]
+    fn known_project_option_is_clean() {
+        let root = tmp_root("known_option");
+        write_status_snapshot(&root);
+        let config = config_with_story_attrs(vec![]);
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "PROJECT-1.Status".to_string(),
+            AttrValue::Str("In Progress".to_string()),
+        );
+        let result = validate_full(&store_with_root(story_doc(attrs), root), &config);
+        assert!(!result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationIssue::UnknownProjectFieldOption { .. })));
+        assert!(!result
+            .warnings
+            .iter()
+            .any(|w| matches!(w, ValidationIssue::UndeclaredAttribute { .. })));
+    }
+
     // A correctly-typed declared value produces neither error nor warning.
     #[test]
     fn valid_declared_attribute_is_clean() {
@@ -1229,5 +1455,193 @@ mod attr_schema_tests {
             .warnings
             .iter()
             .any(|w| matches!(w, ValidationIssue::UndeclaredAttribute { .. })));
+    }
+}
+
+#[cfg(test)]
+mod unknown_relationship_tests {
+    use super::*;
+    use crate::engine::config::RelationshipDef;
+    use crate::engine::document::{Relation, RelationType};
+    use chrono::NaiveDate;
+    use std::collections::HashMap;
+
+    fn doc_with_relation(rel_type: &str) -> DocMeta {
+        DocMeta {
+            path: PathBuf::from("docs/milestones/MILESTONE-001.md"),
+            title: "M".to_string(),
+            doc_type: DocType::new("milestone"),
+            status: Status::new("draft"),
+            author: "a".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![Relation {
+                rel_type: RelationType::new(rel_type),
+                target: "STORY-1".to_string(),
+            }],
+            validate_ignore: false,
+            virtual_doc: false,
+            id: "MILESTONE-001".to_string(),
+            attributes: Default::default(),
+        }
+    }
+
+    fn store_with(doc: DocMeta) -> super::super::store::Store {
+        let mut docs = HashMap::new();
+        docs.insert(doc.path.clone(), doc);
+        super::super::store::Store {
+            root: PathBuf::from("."),
+            docs,
+            forward_links: HashMap::new(),
+            reverse_links: HashMap::new(),
+            children: HashMap::new(),
+            parent_of: HashMap::new(),
+            parse_errors: Vec::new(),
+            chain_relationships: vec!["implements".to_string()],
+            related_relationships: vec!["related-to".to_string()],
+        }
+    }
+
+    // Production-shaped config: `targeted-by` is the declared *inverse* of the
+    // `targets` milestone relationship, never a top-level name.
+    fn config_with_targets() -> Config {
+        let mut config = Config::default();
+        config.relationships.push(RelationshipDef {
+            name: "targets".to_string(),
+            inverse: Some("targeted-by".to_string()),
+            github_native: Some("milestone".to_string()),
+            traversal: None,
+        });
+        config
+    }
+
+    // A stored relation keyed by a declared INVERSE keyword validates clean.
+    #[test]
+    fn unknown_relationship_accepts_declared_inverse_keyword() {
+        let config = config_with_targets();
+        let issues =
+            UnknownRelationshipRule.check(&store_with(doc_with_relation("targeted-by")), &config);
+        assert!(
+            issues.is_empty(),
+            "stored inverse keyword `targeted-by` must validate clean, got: {:?}",
+            issues
+        );
+    }
+
+    // A genuinely undeclared keyword is still flagged as unknown.
+    #[test]
+    fn unknown_relationship_flags_undeclared_keyword() {
+        let config = config_with_targets();
+        let issues =
+            UnknownRelationshipRule.check(&store_with(doc_with_relation("bogus-rel")), &config);
+        assert!(
+            issues
+                .iter()
+                .any(|(_, i)| matches!(i, ValidationIssue::UnknownRelationship { .. })),
+            "undeclared keyword `bogus-rel` must be flagged, got: {:?}",
+            issues
+        );
+    }
+}
+
+// ITERATION-227: validation rules carry no `link`; a parent-child rule resolves
+// the parent via membership in `store.chain_relationships`, not a per-rule link.
+#[cfg(test)]
+mod parent_link_chain_tests {
+    use super::*;
+    use crate::engine::document::{Relation, RelationType};
+    use chrono::NaiveDate;
+    use std::collections::HashMap;
+
+    fn doc(path: &str, doc_type: &str, id: &str, related: Vec<Relation>) -> DocMeta {
+        DocMeta {
+            path: PathBuf::from(path),
+            title: "T".to_string(),
+            doc_type: DocType::new(doc_type),
+            status: Status::new("draft"),
+            author: "a".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related,
+            validate_ignore: false,
+            virtual_doc: false,
+            id: id.to_string(),
+            attributes: Default::default(),
+        }
+    }
+
+    fn store_from(docs: Vec<DocMeta>) -> super::super::store::Store {
+        let mut map = HashMap::new();
+        for d in docs {
+            map.insert(d.path.clone(), d);
+        }
+        super::super::store::Store {
+            root: PathBuf::from("."),
+            docs: map,
+            forward_links: HashMap::new(),
+            reverse_links: HashMap::new(),
+            children: HashMap::new(),
+            parent_of: HashMap::new(),
+            parse_errors: Vec::new(),
+            chain_relationships: vec!["implements".to_string()],
+            related_relationships: vec!["related-to".to_string()],
+        }
+    }
+
+    // AC (Verify 3): a ParentChild rule with NO `link` field passes when the child
+    // has a Chain relation (`implements`, declared chain in Config::default) to a
+    // `parent`-typed doc.
+    #[test]
+    fn parent_child_rule_passes_via_chain_relation() {
+        let config = Config::default();
+        let store = store_from(vec![
+            doc("docs/rfcs/RFC-001.md", "rfc", "RFC-001", vec![]),
+            doc(
+                "docs/stories/STORY-001.md",
+                "story",
+                "STORY-001",
+                vec![Relation {
+                    rel_type: RelationType::new("implements"),
+                    target: "RFC-001".to_string(),
+                }],
+            ),
+        ]);
+        let result = validate_full(&store, &config);
+        assert!(
+            !result.warnings.iter().chain(result.errors.iter()).any(|i| matches!(
+                i,
+                ValidationIssue::MissingParentLink { child_type, .. } if child_type == "story"
+            )),
+            "story with a chain relation to its rfc must not be flagged, got errors {:?} warnings {:?}",
+            result.errors,
+            result.warnings
+        );
+    }
+
+    // AC (Verify 4): the `iterations-need-stories` rule still fires -- an iteration
+    // with no chain relation to a story is flagged MissingParentLink (Error).
+    #[test]
+    fn iterations_need_stories_fires_without_chain_relation() {
+        let config = Config::default();
+        let store = store_from(vec![doc(
+            "docs/iterations/ITERATION-001.md",
+            "iteration",
+            "ITERATION-001",
+            vec![],
+        )]);
+        let result = validate_full(&store, &config);
+        assert!(
+            result.errors.iter().any(|e| matches!(
+                e,
+                ValidationIssue::MissingParentLink { rule_name, child_type, parent_type, .. }
+                    if rule_name == "iterations-need-stories"
+                    && child_type == "iteration"
+                    && parent_type == "story"
+            )),
+            "iteration without a chain relation to a story must be flagged, got: {:?}",
+            result.errors
+        );
     }
 }

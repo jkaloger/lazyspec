@@ -24,6 +24,8 @@ fn rel(name: &str, inverse: Option<&str>) -> RelationshipDef {
     RelationshipDef {
         name: name.to_string(),
         inverse: inverse.map(|s| s.to_string()),
+        github_native: None,
+        traversal: None,
     }
 }
 

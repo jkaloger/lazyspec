@@ -95,6 +95,9 @@ See the code:
         true,
         25,
         &lazyspec::engine::fs::RealFileSystem,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
     );
 
     assert!(result.is_ok());
@@ -148,6 +151,9 @@ See the code:
         true,
         25,
         &lazyspec::engine::fs::RealFileSystem,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
     );
 
     assert!(result.is_ok());
@@ -186,6 +192,9 @@ See the code:
         true,
         25,
         &lazyspec::engine::fs::RealFileSystem,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
     );
 
     assert!(result.is_ok());
@@ -230,6 +239,9 @@ See the code:
         true,
         25,
         &lazyspec::engine::fs::RealFileSystem,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
     );
 
     assert!(result.is_ok());
@@ -269,6 +281,9 @@ See the code:
         true,
         25,
         &lazyspec::engine::fs::RealFileSystem,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
     );
 
     assert!(result.is_ok());
@@ -311,6 +326,9 @@ tags: []
         true,
         25,
         &lazyspec::engine::fs::RealFileSystem,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
     );
 
     assert!(result.is_ok());
@@ -351,6 +369,9 @@ tags: []
         true,
         25,
         &lazyspec::engine::fs::RealFileSystem,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
     );
 
     assert!(result.is_ok());
@@ -400,6 +421,9 @@ See the code:
         true,
         25,
         &lazyspec::engine::fs::RealFileSystem,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
     );
 
     assert!(result.is_ok());
@@ -448,6 +472,9 @@ See the code:
         false,
         25,
         &lazyspec::engine::fs::RealFileSystem,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
     );
 
     assert!(result.is_ok());
@@ -676,6 +703,9 @@ tags: []
         true,
         9999,
         &lazyspec::engine::fs::RealFileSystem,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
     );
     assert!(result.is_ok());
     let output = result.unwrap();

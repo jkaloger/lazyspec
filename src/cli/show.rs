@@ -1,10 +1,57 @@
 use crate::cli::json::doc_to_json_with_family;
 use crate::cli::resolve::resolve_shorthand_or_path;
 use crate::cli::style::{bold, dim, separator, styled_status};
+use crate::engine::config::{Config, StoreBackend};
+use crate::engine::document::DocMeta;
 use crate::engine::fs::FileSystem;
+use crate::engine::gh::GhIssueReader;
+use crate::engine::github::resolve_repo;
+use crate::engine::issue_map::IssueMap;
 use crate::engine::store::{ResolveError, Store};
 use anyhow::Result;
 use console::colors_enabled;
+use std::path::Path;
+
+/// Read-only fetch of a document's GitHub issue comment thread as JSON values.
+///
+/// Filesystem-backed documents short-circuit to `vec![]` without touching `gh`.
+/// Comments are fetched live and surfaced as a JSON sidecar; they never enter
+/// the document body or cache, and are never written back to GitHub.
+pub fn fetch_comments_for_doc(
+    doc: &DocMeta,
+    config: &Config,
+    root: &Path,
+    gh: &dyn GhIssueReader,
+) -> Vec<serde_json::Value> {
+    let is_github = config
+        .type_by_name(doc.doc_type.as_str())
+        .map(|t| t.store == StoreBackend::GithubIssues)
+        .unwrap_or(false);
+    if !is_github {
+        return vec![];
+    }
+
+    let comments = (|| {
+        let repo = resolve_repo(config, root)?;
+        let number = IssueMap::load(root)?
+            .get(&doc.id)
+            .map(|e| e.issue_number)
+            .ok_or_else(|| anyhow::anyhow!("no issue mapping for {}", doc.id))?;
+        gh.issue_comments(&repo, number)
+    })()
+    .unwrap_or_default();
+
+    comments
+        .into_iter()
+        .map(|c| {
+            serde_json::json!({
+                "author": c.author,
+                "body": c.body,
+                "timestamp": c.timestamp,
+            })
+        })
+        .collect()
+}
 
 /// Remove HTML comments (`<!-- ... -->`) from a body before plaintext display.
 /// The TUI renderer drops HTML events on its own; `show` prints raw, so it strips here.
@@ -114,12 +161,16 @@ pub fn run(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_json(
     store: &Store,
     id: &str,
     expand: bool,
     max_ref_lines: usize,
     fs: &dyn FileSystem,
+    config: &Config,
+    root: &Path,
+    gh: &dyn GhIssueReader,
 ) -> Result<String> {
     let doc = match resolve_shorthand_or_path(store, id) {
         Ok(doc) => doc,
@@ -147,12 +198,118 @@ pub fn run_json(
         store.get_body_raw(&doc.path, fs)?
     };
     json["body"] = serde_json::Value::String(body);
+    json["comments"] = serde_json::Value::Array(fetch_comments_for_doc(doc, config, root, gh));
 
     Ok(serde_json::to_string_pretty(&json)?)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::engine::config::TypeDef;
+    use crate::engine::document::{DocType, Status};
+    use crate::engine::gh::test_support::MockGhClient;
+    use crate::engine::gh::GhComment;
+    use crate::engine::issue_map::IssueMap;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    fn doc(doc_type: &str) -> DocMeta {
+        DocMeta {
+            path: PathBuf::from(format!("docs/{}/X-1.md", doc_type)),
+            title: "X".to_string(),
+            doc_type: DocType::new(doc_type),
+            status: Status::new("draft"),
+            author: "a".to_string(),
+            date: chrono::NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            attributes: Default::default(),
+            id: "X-1".to_string(),
+        }
+    }
+
+    fn github_config(type_name: &str) -> Config {
+        let mut config = Config::default();
+        config
+            .documents
+            .types
+            .push(TypeDef::test_fixture(type_name, StoreBackend::GithubIssues));
+        config.documents.github = Some(crate::engine::config::GithubConfig {
+            repo: Some("owner/repo".to_string()),
+            cache_ttl: 60,
+        });
+        config
+    }
+
+    fn comment(author: &str, body: &str) -> GhComment {
+        GhComment {
+            author: author.to_string(),
+            body: body.to_string(),
+            timestamp: "2026-06-01T00:00:00Z".to_string(),
+        }
+    }
+
+    // AC1: github-backed doc surfaces each fetched comment as an
+    // {author, body, timestamp} JSON object.
+    #[test]
+    fn fetch_comments_maps_github_comments() {
+        let tmp = TempDir::new().unwrap();
+        let mut map = IssueMap::load(tmp.path()).unwrap();
+        map.insert("X-1", 42, "ts", "");
+        map.save(tmp.path()).unwrap();
+
+        let config = github_config("ghtype");
+        let gh = MockGhClient::new()
+            .with_comments(vec![comment("alice", "first"), comment("bob", "second")]);
+
+        let out = fetch_comments_for_doc(&doc("ghtype"), &config, tmp.path(), &gh);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["author"], "alice");
+        assert_eq!(out[0]["body"], "first");
+        assert_eq!(out[0]["timestamp"], "2026-06-01T00:00:00Z");
+        assert_eq!(out[1]["author"], "bob");
+    }
+
+    // AC4: a filesystem-backed type never triggers a comment fetch.
+    #[test]
+    fn fetch_comments_short_circuits_filesystem() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = Config::default();
+        config
+            .documents
+            .types
+            .push(TypeDef::test_fixture("fstype", StoreBackend::Filesystem));
+        let gh = MockGhClient::new().with_comments(vec![comment("alice", "x")]);
+
+        let out = fetch_comments_for_doc(&doc("fstype"), &config, tmp.path(), &gh);
+        assert!(out.is_empty());
+        assert_eq!(gh.comments_call_count.get(), 0);
+    }
+
+    // AC5: a github-backed doc with no comments yields an empty array (present,
+    // not absent).
+    #[test]
+    fn fetch_comments_empty_is_empty_array() {
+        let tmp = TempDir::new().unwrap();
+        let mut map = IssueMap::load(tmp.path()).unwrap();
+        map.insert("X-1", 42, "ts", "");
+        map.save(tmp.path()).unwrap();
+
+        let config = github_config("ghtype");
+        let gh = MockGhClient::new().with_comments(vec![]);
+
+        let out = fetch_comments_for_doc(&doc("ghtype"), &config, tmp.path(), &gh);
+        assert!(out.is_empty());
+        assert_eq!(gh.comments_call_count.get(), 1);
+    }
+}
+
+#[cfg(test)]
+mod strip_tests {
     use super::strip_html_comments;
 
     #[test]

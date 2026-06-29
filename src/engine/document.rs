@@ -1,4 +1,4 @@
-use crate::engine::config::{AttrDef, AttrKind};
+use crate::engine::config::{AttrDef, AttrKind, TypeDef};
 use crate::engine::fs::FileSystem;
 use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
@@ -248,6 +248,63 @@ pub(crate) fn coerce_attr(value: &serde_yaml::Value, def: &AttrDef) -> Option<At
         AttrKind::Date => naive_date_from_yaml(value).map(AttrValue::Date),
         AttrKind::Bool => value.as_bool().map(AttrValue::Bool),
     }
+}
+
+/// Coerce and validate raw `key=value` attribute updates against a type's
+/// declared [`AttrDef`]s, inserting the typed [`AttrValue`]s into `meta`.
+///
+/// This is the single seam through which both stores turn raw CLI strings into
+/// typed attributes, so coercion fidelity is identical across backends. Any
+/// failure (unknown key, kind mismatch, bad enum option, or a now-missing
+/// required attribute) returns an error before `meta` is persisted.
+pub fn apply_attrs(type_def: &TypeDef, meta: &mut DocMeta, attrs: &[(&str, &str)]) -> Result<()> {
+    for (key, value) in attrs {
+        let def = type_def
+            .attributes
+            .iter()
+            .find(|d| d.name == *key)
+            .ok_or_else(|| anyhow!("unknown attribute '{}' for type '{}'", key, type_def.name))?;
+
+        // String/enum kinds take the raw text verbatim; numeric/bool/date kinds
+        // are parsed as YAML scalars so `coerce_attr` sees a typed value (e.g.
+        // "3" -> Number(3), not String("3")).
+        let yaml = match def.kind {
+            AttrKind::Str | AttrKind::Enum => serde_yaml::Value::String((*value).to_string()),
+            _ => serde_yaml::from_str(value)
+                .unwrap_or_else(|_| serde_yaml::Value::String((*value).to_string())),
+        };
+        let coerced = coerce_attr(&yaml, def).ok_or_else(|| {
+            if def.kind == AttrKind::Enum {
+                anyhow!(
+                    "invalid value for attribute '{}': '{}' is not one of [{}]",
+                    key,
+                    value,
+                    def.values.join(", ")
+                )
+            } else {
+                anyhow!(
+                    "invalid value for attribute '{}': '{}' is not a valid {}",
+                    key,
+                    value,
+                    format!("{:?}", def.kind).to_lowercase()
+                )
+            }
+        })?;
+
+        meta.attributes.insert((*key).to_string(), coerced);
+    }
+
+    for def in &type_def.attributes {
+        if def.required && !meta.attributes.contains_key(&def.name) {
+            return Err(anyhow!(
+                "missing required attribute '{}' for type '{}'",
+                def.name,
+                type_def.name
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -767,5 +824,120 @@ Body.
         assert_eq!(s.to_string(), "in-progress");
         let arbitrary: Status = "frozen".parse().unwrap();
         assert_eq!(arbitrary, Status::new("frozen"));
+    }
+
+    fn type_def_with_attrs(attrs: Vec<AttrDef>) -> TypeDef {
+        use crate::engine::config::{NumberingStrategy, StoreBackend};
+        TypeDef {
+            name: "story".to_string(),
+            plural: "stories".to_string(),
+            dir: "docs/stories".to_string(),
+            prefix: "STORY".to_string(),
+            icon: None,
+            numbering: NumberingStrategy::Incremental,
+            subdirectory: false,
+            store: StoreBackend::Filesystem,
+            singleton: false,
+            parent_type: None,
+            agents: Vec::new(),
+            intent: None,
+            authorship: Default::default(),
+            lifecycle: Default::default(),
+            attributes: attrs,
+        }
+    }
+
+    fn blank_meta() -> DocMeta {
+        DocMeta {
+            path: PathBuf::new(),
+            title: String::new(),
+            doc_type: DocType::new("story"),
+            status: Status::new("draft"),
+            author: String::new(),
+            date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            id: String::new(),
+            attributes: BTreeMap::new(),
+        }
+    }
+
+    // AC4: multiple attrs coerce per-kind; estimate becomes Int, not Str.
+    #[test]
+    fn apply_attrs_coerces_per_kind() {
+        let td = type_def_with_attrs(vec![
+            AttrDef {
+                name: "owner".to_string(),
+                kind: AttrKind::Str,
+                required: false,
+                values: vec![],
+            },
+            AttrDef {
+                name: "estimate".to_string(),
+                kind: AttrKind::Int,
+                required: false,
+                values: vec![],
+            },
+        ]);
+        let mut meta = blank_meta();
+        apply_attrs(&td, &mut meta, &[("owner", "jkaloger"), ("estimate", "3")]).unwrap();
+        assert_eq!(
+            meta.attributes["owner"],
+            AttrValue::Str("jkaloger".to_string())
+        );
+        assert_eq!(meta.attributes["estimate"], AttrValue::Int(3));
+    }
+
+    // AC2: bad enum option errors and names the key.
+    #[test]
+    fn apply_attrs_rejects_bad_enum() {
+        let td = type_def_with_attrs(vec![AttrDef {
+            name: "priority".to_string(),
+            kind: AttrKind::Enum,
+            required: false,
+            values: vec!["low".to_string(), "med".to_string(), "high".to_string()],
+        }]);
+        let mut meta = blank_meta();
+        let err = apply_attrs(&td, &mut meta, &[("priority", "urgent")]).unwrap_err();
+        assert!(err.to_string().contains("priority"), "got: {err}");
+        assert!(meta.attributes.is_empty());
+    }
+
+    // AC2: kind mismatch errors and names the key.
+    #[test]
+    fn apply_attrs_rejects_kind_mismatch() {
+        let td = type_def_with_attrs(vec![AttrDef {
+            name: "estimate".to_string(),
+            kind: AttrKind::Int,
+            required: false,
+            values: vec![],
+        }]);
+        let mut meta = blank_meta();
+        let err = apply_attrs(&td, &mut meta, &[("estimate", "notanumber")]).unwrap_err();
+        assert!(err.to_string().contains("estimate"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_attrs_rejects_unknown_key() {
+        let td = type_def_with_attrs(vec![]);
+        let mut meta = blank_meta();
+        let err = apply_attrs(&td, &mut meta, &[("mystery", "x")]).unwrap_err();
+        assert!(err.to_string().contains("mystery"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_attrs_enforces_required() {
+        let td = type_def_with_attrs(vec![AttrDef {
+            name: "owner".to_string(),
+            kind: AttrKind::Str,
+            required: true,
+            values: vec![],
+        }]);
+        let mut meta = blank_meta();
+        let err = apply_attrs(&td, &mut meta, &[]).unwrap_err();
+        assert!(err.to_string().contains("owner"), "got: {err}");
     }
 }

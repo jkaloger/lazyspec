@@ -82,6 +82,9 @@ pub enum Commands {
         /// Author name
         #[arg(long, default_value = "unknown")]
         author: String,
+        /// Place the new document under a parent doc, as a subdir child.
+        #[arg(long)]
+        parent: Option<String>,
         /// Set body content inline
         #[arg(long)]
         body: Option<String>,
@@ -136,6 +139,9 @@ pub enum Commands {
         /// Read body from file (use `-` for stdin)
         #[arg(long)]
         body_file: Option<String>,
+        /// Set a custom attribute (repeatable): --attr key=value
+        #[arg(long = "attr", value_name = "KEY=VALUE")]
+        attr: Vec<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,

@@ -2,7 +2,11 @@ use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use regex::Regex;
 
-use crate::engine::document::{self, deserialize_naive_date, DocMeta, DocType, Relation, Status};
+use crate::engine::config::AttrDef;
+use crate::engine::document::{
+    self, coerce_attr, deserialize_naive_date, AttrValue, DocMeta, DocType, Relation, Status,
+};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Fields that come from GitHub Issue primitives rather than the issue body.
@@ -12,6 +16,9 @@ pub struct IssueContext {
     pub is_open: bool,
     pub known_types: Vec<String>,
     pub default_type: String,
+    /// Declared attribute schema for the document's type, used to coerce the
+    /// `attributes:` block in the HTML comment back into typed [`AttrValue`]s.
+    pub attr_defs: Vec<AttrDef>,
 }
 
 const COMMENT_START: &str = "<!-- lazyspec\n";
@@ -43,6 +50,16 @@ pub fn serialize(doc: &DocMeta, body: &str) -> String {
         yaml_lines.push("related:".to_string());
         for rel in &doc.related {
             yaml_lines.push(format!("- {}: {}", rel.rel_type, rel.target));
+        }
+    }
+
+    if !doc.attributes.is_empty() {
+        yaml_lines.push("attributes:".to_string());
+        for (key, value) in &doc.attributes {
+            let scalar = serde_yaml::to_string(value)
+                .map(|s| s.trim_end().to_string())
+                .unwrap_or_default();
+            yaml_lines.push(format!("  {}: {}", key, scalar));
         }
     }
 
@@ -80,6 +97,8 @@ pub fn deserialize(issue_body: &str, ctx: &IssueContext) -> Result<(DocMeta, Str
 
     let status = reconstruct_status(ctx.is_open, parsed.status.as_deref());
 
+    let attributes = parse_attributes(parsed.attributes.as_ref(), &ctx.attr_defs);
+
     let meta = DocMeta {
         path: PathBuf::new(),
         title: ctx.title.clone(),
@@ -92,11 +111,34 @@ pub fn deserialize(issue_body: &str, ctx: &IssueContext) -> Result<(DocMeta, Str
         related,
         validate_ignore: false,
         virtual_doc: false,
-        attributes: Default::default(),
+        attributes,
         id: String::new(),
     };
 
     Ok((meta, body))
+}
+
+/// Coerce the raw `attributes:` mapping from the HTML comment against the type's
+/// declared [`AttrDef`]s. Declared keys are coerced to their kind; undeclared
+/// keys are preserved as [`AttrValue::Raw`], mirroring `parse_with_schema`.
+fn parse_attributes(
+    mapping: Option<&serde_yaml::Mapping>,
+    attr_defs: &[AttrDef],
+) -> BTreeMap<String, AttrValue> {
+    let Some(mapping) = mapping else {
+        return BTreeMap::new();
+    };
+    mapping
+        .iter()
+        .filter_map(|(k, v)| {
+            let key = k.as_str()?.to_string();
+            let coerced = match attr_defs.iter().find(|d| d.name == key) {
+                Some(def) => coerce_attr(v, def).unwrap_or_else(|| AttrValue::Raw(v.clone())),
+                None => AttrValue::Raw(v.clone()),
+            };
+            Some((key, coerced))
+        })
+        .collect()
 }
 
 fn needs_frontmatter_status(status: &Status) -> bool {
@@ -159,6 +201,8 @@ struct CommentFrontmatter {
     provenance: Option<Vec<String>>,
     #[serde(default)]
     related: Option<Vec<serde_yaml::Value>>,
+    #[serde(default)]
+    attributes: Option<serde_yaml::Mapping>,
 }
 
 fn parse_relation(value: &serde_yaml::Value) -> Result<Relation> {
@@ -225,6 +269,7 @@ mod tests {
             is_open: true,
             known_types: default_known_types(),
             default_type: "spec".to_string(),
+            attr_defs: vec![],
         }
     }
 
@@ -349,6 +394,46 @@ mod tests {
         assert_eq!(tags, vec!["random-label"]);
     }
 
+    // AC3: typed attributes survive serialize -> deserialize through the HTML comment.
+    #[test]
+    fn round_trip_preserves_typed_attributes() {
+        use crate::engine::config::{AttrDef, AttrKind};
+
+        let mut doc = sample_doc();
+        doc.attributes
+            .insert("owner".to_string(), AttrValue::Str("jkaloger".to_string()));
+        doc.attributes
+            .insert("estimate".to_string(), AttrValue::Int(3));
+
+        let serialized = serialize(&doc, "body");
+        assert!(serialized.contains("attributes:"), "got: {serialized}");
+
+        let ctx = IssueContext {
+            attr_defs: vec![
+                AttrDef {
+                    name: "owner".to_string(),
+                    kind: AttrKind::Str,
+                    required: false,
+                    values: vec![],
+                },
+                AttrDef {
+                    name: "estimate".to_string(),
+                    kind: AttrKind::Int,
+                    required: false,
+                    values: vec![],
+                },
+            ],
+            ..sample_context()
+        };
+
+        let (meta, _) = deserialize(&serialized, &ctx).unwrap();
+        assert_eq!(
+            meta.attributes["owner"],
+            AttrValue::Str("jkaloger".to_string())
+        );
+        assert_eq!(meta.attributes["estimate"], AttrValue::Int(3));
+    }
+
     #[test]
     fn round_trip_with_non_lifecycle_status() {
         let mut doc = sample_doc();
@@ -361,6 +446,7 @@ mod tests {
             is_open: false,
             known_types: default_known_types(),
             default_type: "spec".to_string(),
+            attr_defs: vec![],
         };
 
         let (meta, _) = deserialize(&serialized, &ctx).unwrap();

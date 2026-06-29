@@ -578,7 +578,7 @@ pub enum RelKey {
     Inverse,
 }
 
-/// A rule-key inside a drilled [[rules]] entry. `child`/`parent`/`link` are
+/// A rule-key inside a drilled [[rules]] entry. `child`/`parent` are
 /// ParentChild-only; `doc_type`/`require` are RelationExistence-only.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuleKey {
@@ -586,7 +586,6 @@ pub enum RuleKey {
     Shape,
     Child,
     Parent,
-    Link,
     DocType,
     Require,
     Severity,

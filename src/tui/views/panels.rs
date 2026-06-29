@@ -1841,7 +1841,13 @@ fn numbering_str(n: &NumberingStrategy) -> &'static str {
 }
 
 const NUMBERING_VARIANTS: &[&str] = &["incremental", "sqids", "reserved"];
-const STORE_VARIANTS: &[&str] = &["filesystem", "github-issues", "git-ref"];
+const STORE_VARIANTS: &[&str] = &[
+    "filesystem",
+    "github-issues",
+    "github-milestones",
+    "github-projects",
+    "git-ref",
+];
 const RULE_SHAPE_VARIANTS: &[&str] = &["parent-child", "relation-existence"];
 const SEVERITY_VARIANTS: &[&str] = &["error", "warning"];
 const RESERVED_FORMAT_VARIANTS: &[&str] = &["incremental", "sqids"];
@@ -2021,7 +2027,6 @@ pub fn settings_fields(
                             name,
                             child,
                             parent,
-                            link,
                             severity,
                             ..
                         } => {
@@ -2050,12 +2055,6 @@ pub fn settings_fields(
                                 parent.clone(),
                                 FieldEditor::Text,
                                 key(RuleKey::Parent),
-                            ));
-                            fields.push(field(
-                                "link",
-                                link.clone(),
-                                FieldEditor::Text,
-                                key(RuleKey::Link),
                             ));
                             fields.push(field(
                                 "severity",
@@ -3501,9 +3500,12 @@ mod tests {
         assert!(lines.contains(&"shape: parent-child".to_string()));
         assert!(lines.contains(&"child: story".to_string()));
         assert!(lines.contains(&"parent: rfc".to_string()));
-        assert!(lines.contains(&"link: implements".to_string()));
         assert!(lines.contains(&"severity: warning".to_string()));
-        assert_eq!(lines.len(), 6);
+        assert!(
+            !lines.iter().any(|l| l.starts_with("link:")),
+            "the link field no longer renders: {lines:?}"
+        );
+        assert_eq!(lines.len(), 5);
     }
 
     #[test]
