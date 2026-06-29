@@ -3109,16 +3109,34 @@ impl App {
         let query = self.link_editor.query.to_lowercase();
         let doc_path = self.link_editor.doc_path.clone();
 
-        // The selected relation's github_native edge constrains which store a
-        // candidate may live in: a `milestone` rel (`targets`) accepts ONLY
-        // github-milestones docs; every other rel EXCLUDES them entirely (a
-        // milestone can only be the target of `targets`).
-        let rel_native = self
+        // The selected relation and the viewed doc's store together fix which
+        // store a candidate may live in. A milestone-native relation (`targets`)
+        // bridges github-issues <-> github-milestones: from an issue source the
+        // candidate must be a milestone, from a milestone source (the
+        // `targeted-by` inverse) it must be an issue. Every ordinary relation
+        // excludes milestone docs (a milestone is only ever the target of
+        // `targets`). The selected keyword may be an inverse, so resolve it to
+        // its canonical relationship before reading `github_native`.
+        let is_milestone_rel = self
             .rel_types
             .get(self.link_editor.rel_type_index)
-            .and_then(|rel| config.relationship_by_name(rel))
-            .and_then(|r| r.github_native.as_deref());
-        let want_milestone_target = rel_native == Some("milestone");
+            .and_then(|kw| config.resolve_relationship(kw).ok())
+            .and_then(|(name, _)| {
+                config
+                    .relationship_by_name(&name)
+                    .and_then(|r| r.github_native.as_deref())
+                    .map(str::to_owned)
+            })
+            == Some("milestone".to_string());
+        let source_is_milestone =
+            self.store_of_path(&doc_path, config) == Some(StoreBackend::GithubMilestones);
+        let required_store = is_milestone_rel.then(|| {
+            if source_is_milestone {
+                StoreBackend::GithubIssues
+            } else {
+                StoreBackend::GithubMilestones
+            }
+        });
 
         let mut candidates: Vec<(String, PathBuf)> = self
             .store
@@ -3126,11 +3144,11 @@ impl App {
             .iter()
             .filter(|d| d.path != doc_path)
             .filter(|d| {
-                let is_milestone = config
-                    .type_by_name(d.doc_type.as_str())
-                    .map(|t| t.store == StoreBackend::GithubMilestones)
-                    .unwrap_or(false);
-                is_milestone == want_milestone_target
+                let store = config.type_by_name(d.doc_type.as_str()).map(|t| &t.store);
+                match &required_store {
+                    Some(want) => store == Some(want),
+                    None => store != Some(&StoreBackend::GithubMilestones),
+                }
             })
             .filter(|d| {
                 if query.is_empty() {
@@ -4671,6 +4689,72 @@ mod tests {
             ids,
             vec!["ISSUE-002".to_string()],
             "an ordinary rel must exclude every github-milestones doc"
+        );
+    }
+
+    // From a github-milestones VIEWED doc the only legal relation is the inverse
+    // of the milestone-native rel (`targeted-by`), and its other end must be a
+    // github-issues doc. The candidate list must therefore exclude every
+    // non-issue doc (filesystem specs, other milestones), not merely every
+    // milestone -- this is the inverse-direction counterpart to the forward
+    // issue -> milestone scoping.
+    #[test]
+    fn update_link_search_from_milestone_source_offers_only_issues() {
+        let mut app = make_test_app(0);
+        let mut config = milestone_vocab_config();
+        config.relationships[0].inverse = Some("targeted-by".to_string());
+        let template = config.documents.types[0].clone();
+        config.documents.types.push(TypeDef {
+            name: "spec".to_string(),
+            plural: "specs".to_string(),
+            dir: "docs/specs".to_string(),
+            prefix: "SPEC".to_string(),
+            store: StoreBackend::Filesystem,
+            ..template
+        });
+        app.apply_config(&config);
+
+        insert_doc(&mut app, "docs/issues/ISSUE-001.md", "ISSUE-001", "issue");
+        insert_doc(&mut app, "docs/specs/SPEC-001.md", "SPEC-001", "spec");
+        insert_doc(
+            &mut app,
+            "docs/milestones/MILESTONE-002.md",
+            "MILESTONE-002",
+            "milestone",
+        );
+
+        app.doc_tree = vec![DocListNode {
+            path: PathBuf::from("docs/milestones/MILESTONE-001.md"),
+            id: "MILESTONE-001".to_string(),
+            title: "MILESTONE-001".to_string(),
+            doc_type: DocType::new("milestone"),
+            status: Status::new("draft"),
+            depth: 0,
+            is_parent: false,
+            is_virtual: false,
+            has_duplicate_id: false,
+        }];
+        insert_doc(
+            &mut app,
+            "docs/milestones/MILESTONE-001.md",
+            "MILESTONE-001",
+            "milestone",
+        );
+        app.selected_doc = 0;
+        app.view_mode = ViewMode::Types;
+
+        app.open_link_editor(&config);
+        assert_eq!(
+            app.rel_types,
+            vec!["targeted-by".to_string()],
+            "a milestone source offers only the milestone-native inverse"
+        );
+
+        let ids: Vec<String> = ids_for_paths(&app, &app.link_editor.results);
+        assert_eq!(
+            ids,
+            vec!["ISSUE-001".to_string()],
+            "a milestone source must offer only github-issues candidates"
         );
     }
 
