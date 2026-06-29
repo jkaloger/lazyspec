@@ -38,11 +38,17 @@ pulldown-cmark = "0.13"
 indicatif = "0.17"
 textwrap = "0.16"
 tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"], optional = true }
+axum = { version = "0.8", optional = true }
+askama = { version = "0.14", optional = true }
 
 [features]
 default = []
 agent = []
 metrics = []
+# Read-only web view (RFC-052). Gates the entire `src/web/` module and its async
+# stack so default builds link no tokio/axum/askama and expose no `serve` command.
+web = ["dep:tokio", "dep:axum", "dep:askama"]
 # Exposes test-only fixtures (e.g. `Config::default()`) to the integration test
 # crates, which compile against the non-test build of the library. The binary
 # never enables this, so the production load path carries no default config.
@@ -57,3 +63,8 @@ debug = "line-tables-only"
 [dev-dependencies]
 # Self-reference so integration tests link the library with test-only fixtures.
 lazyspec = { path = ".", features = ["test-support"] }
+# Web-view tests (gated `#[cfg(feature = "web")]`) drive the axum Router directly
+# via `tower::ServiceExt::oneshot` to avoid real-network flakiness. Dev-only;
+# never enters the library or binary build.
+tower = { version = "0.5", features = ["util"] }
+

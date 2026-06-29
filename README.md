@@ -219,6 +219,17 @@ sort = "path"                     # default
 
 Both keys carry defaults, so a config without a `[tui.graph]` block still loads.
 
+### Web view
+
+A read-only web view of the project's documents is available behind the `web` cargo feature, so default builds carry no async/HTTP dependencies:
+
+```sh
+cargo run --features web -- serve            # binds 127.0.0.1:8787
+cargo run --features web -- serve --port 9000
+```
+
+`serve` loads the store once and renders a server-side document list (grouped by type) with htmx status/tag filtering. It binds loopback only.
+
 <details>
 <summary><h3>CLI</h3></summary>
 

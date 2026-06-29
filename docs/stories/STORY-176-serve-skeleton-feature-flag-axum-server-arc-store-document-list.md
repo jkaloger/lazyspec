@@ -1,7 +1,7 @@
 ---
 title: 'serve skeleton: feature flag, axum server, Arc<Store>, document list'
 type: story
-status: accepted
+status: complete
 author: jkaloger
 date: 2026-06-30
 tags: []

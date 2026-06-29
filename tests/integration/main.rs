@@ -72,3 +72,5 @@ mod tui_tree_test;
 mod tui_view_mode_test;
 mod tui_warnings_test;
 mod validate_ignore_test;
+#[cfg(feature = "web")]
+mod web_serve_test;

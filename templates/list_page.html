@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>lazyspec</title>
+<script src="https://unpkg.com/htmx.org@1.9.12"></script>
+</head>
+<body>
+<h1>lazyspec documents</h1>
+<form id="filters" hx-get="/fragment/list" hx-target="#doc-list" hx-swap="innerHTML" hx-trigger="change">
+  <label>status
+    <select name="status">
+      <option value="">all</option>
+      {% for s in statuses %}<option value="{{ s.value }}">{{ s.value }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>tag
+    <select name="tag">
+      <option value="">all</option>
+      {% for t in tags %}<option value="{{ t.value }}">{{ t.value }}</option>
+      {% endfor %}
+    </select>
+  </label>
+</form>
+<div id="doc-list">
+{{ list|safe }}
+</div>
+</body>
+</html>

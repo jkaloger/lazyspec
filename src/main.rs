@@ -573,6 +573,11 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        #[cfg(feature = "web")]
+        Some(Commands::Serve { port }) => {
+            let store = std::sync::Arc::new(Store::load(&cwd, &config)?);
+            lazyspec::web::serve(store, port)?;
+        }
         None => {
             let store = Store::load(&cwd, &config)?;
             lazyspec::tui::run(store, &config)?;

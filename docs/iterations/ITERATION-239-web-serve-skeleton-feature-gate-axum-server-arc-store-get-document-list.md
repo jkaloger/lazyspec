@@ -1,7 +1,7 @@
 ---
 title: 'web serve skeleton: feature gate, axum server, Arc<Store>, GET / document list'
 type: iteration
-status: accepted
+status: complete
 author: unknown
 date: 2026-06-30
 tags: []

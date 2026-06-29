@@ -367,4 +367,11 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Serve a read-only web view of the documents (loopback only)
+    #[cfg(feature = "web")]
+    Serve {
+        /// Port to bind on 127.0.0.1 (default 8787)
+        #[arg(long)]
+        port: Option<u16>,
+    },
 }
