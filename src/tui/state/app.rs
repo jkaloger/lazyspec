@@ -3130,7 +3130,7 @@ impl App {
             == Some("milestone".to_string());
         let source_is_milestone =
             self.store_of_path(&doc_path, config) == Some(StoreBackend::GithubMilestones);
-        let required_store = is_milestone_rel.then(|| {
+        let required_store = is_milestone_rel.then_some({
             if source_is_milestone {
                 StoreBackend::GithubIssues
             } else {
