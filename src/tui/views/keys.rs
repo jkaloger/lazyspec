@@ -190,11 +190,13 @@ impl App {
             }
             KeyCode::Backspace => {
                 self.link_editor.query.pop();
-                self.update_link_search();
+                self.link_editor.error = None;
+                self.update_link_search(config);
             }
             KeyCode::Char(c) => {
                 self.link_editor.query.push(c);
-                self.update_link_search();
+                self.link_editor.error = None;
+                self.update_link_search(config);
             }
             _ => {}
         }
@@ -658,7 +660,7 @@ impl App {
                 self.open_status_picker(config);
             }
             KeyCode::Char('r') => {
-                self.open_link_editor();
+                self.open_link_editor(config);
             }
             KeyCode::Char('p') => {
                 self.open_provenance_editor();
@@ -1173,7 +1175,7 @@ impl App {
             (KeyCode::Char('s'), _) => self.open_status_picker(config),
             (KeyCode::Char('p'), _) => self.open_provenance_editor(),
             (KeyCode::Char('r'), _) => {
-                self.open_link_editor();
+                self.open_link_editor(config);
             }
             (KeyCode::Char('R'), _) => {
                 self.config_reload_request = true;

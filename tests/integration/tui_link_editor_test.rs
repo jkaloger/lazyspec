@@ -18,12 +18,12 @@ fn setup_app_with_rfc(title: &str, status: &str) -> (TestFixture, App) {
 // AC1: pressing 'r' on Relations tab opens the link editor
 #[test]
 fn test_open_link_editor_on_relations_tab() {
-    let (_fixture, mut app) = setup_app_with_rfc("Test RFC", "draft");
+    let (fixture, mut app) = setup_app_with_rfc("Test RFC", "draft");
 
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     assert!(app.link_editor.active);
     assert_eq!(
@@ -48,7 +48,7 @@ fn test_open_link_editor_no_doc_selected_noop() {
     );
 
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     assert!(!app.link_editor.active);
 }
@@ -56,12 +56,12 @@ fn test_open_link_editor_no_doc_selected_noop() {
 // AC6: pressing Esc closes the link editor without changes
 #[test]
 fn test_close_link_editor_resets_state() {
-    let (_fixture, mut app) = setup_app_with_rfc("Test RFC", "draft");
+    let (fixture, mut app) = setup_app_with_rfc("Test RFC", "draft");
 
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
     assert!(app.link_editor.active);
 
     app.close_link_editor();
@@ -80,7 +80,7 @@ fn test_esc_key_closes_link_editor() {
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
     assert!(app.link_editor.active);
 
     app.handle_key(
@@ -148,7 +148,7 @@ fn test_open_link_editor_results_exclude_self() {
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     assert!(app.link_editor.active);
     assert!(!app.link_editor.results.contains(&app.link_editor.doc_path));
@@ -163,7 +163,7 @@ fn test_link_editor_intercepts_keys() {
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     // 'q' normally quits, but link editor should intercept it
     let should_quit_before = app.should_quit;
@@ -195,7 +195,7 @@ fn test_typing_filters_results() {
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     // All non-self docs should appear initially
     let initial_count = app.link_editor.results.len();
@@ -237,7 +237,7 @@ fn test_backspace_updates_filter() {
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     // Should have 2 non-self results initially
     assert_eq!(app.link_editor.results.len(), 2);
@@ -284,7 +284,7 @@ fn test_search_case_insensitive() {
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     // Search with uppercase should still match
     for c in "TARGET".chars() {
@@ -319,7 +319,7 @@ fn test_display_format_type_nnn_colon_title() {
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     // Verify the display string can be constructed from the store
     let result_path = &app.link_editor.results[0];
@@ -345,7 +345,7 @@ fn test_self_excluded_after_search() {
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     let self_path = app.link_editor.doc_path.clone();
 
@@ -382,7 +382,7 @@ fn test_jk_navigation() {
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     assert_eq!(app.link_editor.selected, 0);
 
@@ -447,7 +447,7 @@ fn test_arrow_navigation() {
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     app.handle_key(
         KeyCode::Down,
@@ -483,7 +483,7 @@ fn test_navigation_clamps_to_bounds() {
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     // Only 1 result, j should not go past 0
     assert_eq!(app.link_editor.results.len(), 1);
@@ -515,7 +515,7 @@ fn test_selected_clamps_on_filter() {
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     // Navigate to last item
     app.handle_key(
@@ -564,7 +564,7 @@ fn test_results_sorted_by_display_string() {
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     // Results should be sorted: RFC-001, RFC-002 (RFC-003 excluded as self)
     // or if RFC-001 is selected: RFC-002, RFC-003
@@ -592,7 +592,7 @@ fn test_tab_cycles_rel_type() {
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     assert_eq!(app.link_editor.rel_type_index, 0); // implements
 
@@ -672,7 +672,7 @@ fn test_inverse_keyword_writes_flipped_relation_to_target() {
     app.selected_type = 0;
     app.selected_doc = 0; // RFC-001 is the viewed (source) doc
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     // Canonical keywords occupy 0..=3, inverse keywords 4..=6; blocked-by is 6.
     for _ in 0..6 {
@@ -733,7 +733,7 @@ fn test_inverse_link_refreshes_live_store_reverse_links() {
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     for _ in 0..6 {
         app.handle_key(
@@ -780,7 +780,7 @@ fn test_enter_creates_link_and_closes() {
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     assert!(app.link_editor.active);
     assert!(!app.link_editor.results.is_empty());
@@ -815,12 +815,12 @@ fn test_enter_creates_link_and_closes() {
 // AC5: Enter with empty results is a no-op
 #[test]
 fn test_enter_with_empty_results_noop() {
-    let (_fixture, mut app) = setup_app_with_rfc("Test RFC", "draft");
+    let (fixture, mut app) = setup_app_with_rfc("Test RFC", "draft");
 
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     // Only one doc in store, so results should be empty (self is excluded)
     assert!(app.link_editor.results.is_empty());
@@ -829,8 +829,8 @@ fn test_enter_with_empty_results_noop() {
     app.handle_key(
         KeyCode::Enter,
         KeyModifiers::NONE,
-        _fixture.root(),
-        &_fixture.config(),
+        fixture.root(),
+        &fixture.config(),
     );
 
     assert!(app.link_editor.active);
@@ -853,7 +853,7 @@ fn test_enter_with_tab_writes_correct_rel_type() {
     app.selected_type = 0;
     app.selected_doc = 0;
     app.preview_tab = PreviewTab::Relations;
-    app.open_link_editor();
+    app.open_link_editor(&fixture.config());
 
     // Tab twice to get to "blocks"
     app.handle_key(

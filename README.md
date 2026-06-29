@@ -508,6 +508,16 @@ document's `targeted-by` entries are derived virtually as the reverse of each
 issue's forward relation; an issue whose milestone maps to no lazyspec document
 is skipped.
 
+The relation vocabulary is store-constrained for milestones: `link`/`unlink`
+reject store-illegal edges before writing. A `github-milestones` document may be
+the target only of the `targets` relation (the `github_native = "milestone"`
+edge) and may never be the source of any relation, and `targets` requires its
+target to be a milestone document. Violations exit non-zero with a clear message
+(e.g. "milestone docs cannot be the source of a relation", "`targets` requires a
+milestone target", "milestone docs can only be targeted by `targets`"). In the
+TUI link editor, milestone documents offer no relation types and the candidate
+search is scoped to match.
+
 #### `github-projects` store
 
 Types stored as `--store github-projects` bind each document to an existing
