@@ -328,6 +328,13 @@ fn validate_milestone_relation(
         .and_then(|r| r.github_native.as_deref())
         == Some("milestone");
 
+    if is_milestone_rel && source_store != Some(StoreBackend::GithubIssues) {
+        return Err(anyhow!(
+            "only github-issues docs can target a milestone ('{}' is not a github-issues doc)",
+            from_id
+        ));
+    }
+
     match (
         is_milestone_rel,
         target_store == Some(StoreBackend::GithubMilestones),
@@ -628,6 +635,7 @@ mod tests {
             issue_type("story", "STORY", StoreBackend::GithubIssues),
             issue_type("story2", "STORY2", StoreBackend::GithubIssues),
             issue_type("milestone", "MILESTONE", StoreBackend::GithubMilestones),
+            issue_type("spec", "SPEC", StoreBackend::Filesystem),
         ];
         config.documents.github = Some(GithubConfig {
             repo: Some("owner/repo".to_string()),
@@ -960,6 +968,53 @@ mod tests {
             !updated.contains("related"),
             "cache must be unchanged after a rejected link, got:\n{updated}"
         );
+    }
+
+    // A milestone-native relation may only originate from a github-issues doc.
+    // A filesystem doc (here a spec) targeting a milestone is rejected at
+    // validate_milestone_relation, before any native PATCH.
+    #[test]
+    fn targets_from_non_issue_source_rejected() {
+        let root = tmp_root("guard_non_issue_source");
+        let config = milestone_assoc_config();
+        write_cache_doc(
+            &root.join(".lazyspec/cache/spec"),
+            "SPEC-1.md",
+            "A Spec",
+            "spec",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/milestone"),
+            "MILESTONE-3.md",
+            "v1.0",
+            "milestone",
+        );
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("MILESTONE-3", 3, "", "");
+        issue_map.save(&root).unwrap();
+        let store = Store::load(&root, &config).unwrap();
+
+        let err = validate_milestone_relation(&config, &store, "SPEC-1", "MILESTONE-3", "targets")
+            .expect_err("a non-issue source must be rejected for a milestone-native relation");
+        assert!(
+            err.to_string().contains("SPEC-1"),
+            "error should name the source, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("github-issues"),
+            "error should explain only github-issues docs can target a milestone, got: {err}"
+        );
+    }
+
+    // A github-issues source targeting a milestone passes validation.
+    #[test]
+    fn targets_from_issue_source_ok() {
+        let root = tmp_root("guard_issue_source_ok");
+        let config = milestone_assoc_config();
+        let store = seed_milestone_guard_fixture(&root);
+
+        validate_milestone_relation(&config, &store, "STORY-7", "MILESTONE-3", "targets")
+            .expect("a github-issues source targeting a milestone must validate");
     }
 
     // AC5: unlink honours the same store guard. An illegal unlink from a

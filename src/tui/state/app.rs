@@ -2947,11 +2947,16 @@ impl App {
         // relation (e.g. `targeted-by`): selecting one plus an issue flips
         // direction in the core (link.rs:65), writing `targets: <milestone>` on the
         // issue. A milestone whose native relation declares no inverse has no legal
-        // relation and falls back to the empty-state. Every other doc recomputes
-        // the global keyword list (it may have been narrowed by a prior milestone
-        // open) and offers the full set.
-        let is_milestone_doc =
-            self.store_of_path(&path, config) == Some(StoreBackend::GithubMilestones);
+        // relation and falls back to the empty-state.
+        //
+        // A milestone-native relation may *only* originate on a github-issues doc
+        // (the core guard rejects any other source). So a non-issue, non-milestone
+        // source (e.g. a filesystem spec) is offered the global keyword list with
+        // every milestone-native keyword (both the forward name and its inverse)
+        // removed; a github-issues source keeps the full set.
+        let store = self.store_of_path(&path, config);
+        let is_milestone_doc = store == Some(StoreBackend::GithubMilestones);
+        let is_issue_doc = store == Some(StoreBackend::GithubIssues);
         self.rel_types = if is_milestone_doc {
             config
                 .relationships
@@ -2959,10 +2964,22 @@ impl App {
                 .filter(|r| r.github_native.as_deref() == Some("milestone"))
                 .filter_map(|r| r.inverse.clone())
                 .collect()
-        } else {
+        } else if is_issue_doc {
             config.relationship_keywords()
+        } else {
+            let milestone_keywords: Vec<String> = config
+                .relationships
+                .iter()
+                .filter(|r| r.github_native.as_deref() == Some("milestone"))
+                .flat_map(|r| std::iter::once(r.name.clone()).chain(r.inverse.clone()))
+                .collect();
+            config
+                .relationship_keywords()
+                .into_iter()
+                .filter(|kw| !milestone_keywords.contains(kw))
+                .collect()
         };
-        let source_blocked = is_milestone_doc && self.rel_types.is_empty();
+        let source_blocked = !is_issue_doc && self.rel_types.is_empty();
 
         self.link_editor.active = true;
         self.link_editor.doc_path = path;
@@ -4727,6 +4744,73 @@ mod tests {
             app.rel_types,
             config.relationship_keywords(),
             "the global rel-type list is restored for a non-milestone open"
+        );
+    }
+
+    // A non-issue, non-milestone VIEWED doc (a filesystem spec) can never be the
+    // source of the milestone-native `targets` edge (the core guard rejects it),
+    // so the editor must not even offer that keyword. An issue source keeps it.
+    #[test]
+    fn open_link_editor_hides_milestone_keyword_for_non_issue_source() {
+        let mut app = make_test_app(0);
+        let mut config = milestone_vocab_config();
+        // Give the milestone rel an inverse too, to confirm inverse keywords of
+        // milestone-native rels are also withheld from a non-issue source.
+        config.relationships[0].inverse = Some("targeted-by".to_string());
+        let template = config.documents.types[0].clone();
+        config.documents.types.push(TypeDef {
+            name: "spec".to_string(),
+            plural: "specs".to_string(),
+            dir: "docs/specs".to_string(),
+            prefix: "SPEC".to_string(),
+            store: StoreBackend::Filesystem,
+            ..template
+        });
+        app.apply_config(&config);
+
+        insert_doc(&mut app, "docs/specs/SPEC-001.md", "SPEC-001", "spec");
+        insert_doc(&mut app, "docs/issues/ISSUE-001.md", "ISSUE-001", "issue");
+
+        let view = |app: &mut App, path: &str, id: &str, doc_type: &str| {
+            app.doc_tree = vec![DocListNode {
+                path: PathBuf::from(path),
+                id: id.to_string(),
+                title: id.to_string(),
+                doc_type: DocType::new(doc_type),
+                status: Status::new("draft"),
+                depth: 0,
+                is_parent: false,
+                is_virtual: false,
+                has_duplicate_id: false,
+            }];
+            app.selected_doc = 0;
+            app.view_mode = ViewMode::Types;
+        };
+
+        view(&mut app, "docs/specs/SPEC-001.md", "SPEC-001", "spec");
+        app.open_link_editor(&config);
+        assert!(
+            !app.rel_types.iter().any(|r| r == "targets"),
+            "a filesystem source must not be offered the milestone-native keyword"
+        );
+        assert!(
+            !app.rel_types.iter().any(|r| r == "targeted-by"),
+            "a filesystem source must not be offered a milestone-native inverse"
+        );
+        assert!(
+            app.rel_types.iter().any(|r| r == "related-to"),
+            "ordinary keywords are still offered to a filesystem source"
+        );
+        assert!(
+            !app.link_editor.source_blocked,
+            "a filesystem source with usable keywords is not blocked"
+        );
+
+        view(&mut app, "docs/issues/ISSUE-001.md", "ISSUE-001", "issue");
+        app.open_link_editor(&config);
+        assert!(
+            app.rel_types.iter().any(|r| r == "targets"),
+            "a github-issues source keeps the milestone-native keyword"
         );
     }
 
