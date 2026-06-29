@@ -51,6 +51,15 @@ impl ListFragment {
     }
 }
 
+/// The search-results fragment: a flat list of rows in the engine's returned
+/// order (never re-sorted in the web layer), reusing the shared list-row
+/// partial. An empty `rows` renders the no-results state.
+#[derive(Template)]
+#[template(path = "search_fragment.html")]
+pub struct SearchFragment {
+    pub rows: Vec<DocRow>,
+}
+
 /// A typed relationship shown in the frontmatter header (`implements`, etc.).
 pub struct RelationLink {
     pub rel_type: String,

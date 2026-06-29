@@ -1,7 +1,7 @@
 ---
 title: Search route over engine search
 type: story
-status: accepted
+status: complete
 author: jkaloger
 date: 2026-06-30
 tags: []

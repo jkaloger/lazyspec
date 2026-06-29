@@ -15,7 +15,8 @@ use crate::engine::document::Status;
 use crate::engine::fs::RealFileSystem;
 use crate::engine::store::{Filter, Store};
 use crate::web::render::{
-    markdown_to_html, DocGroup, DocPage, DocRow, FilterOption, ListFragment, ListPage, NotFoundPage,
+    markdown_to_html, DocGroup, DocPage, DocRow, FilterOption, ListFragment, ListPage,
+    NotFoundPage, SearchFragment,
 };
 
 /// Default lines per expanded `@ref` block, mirroring `show --expand-references`.
@@ -33,6 +34,14 @@ pub struct ListQuery {
 
 fn empty_to_none(s: Option<String>) -> Option<String> {
     s.filter(|v| !v.is_empty())
+}
+
+/// Query parameters for `GET /search`. An absent or empty `q` is valid and
+/// falls back to the full unfiltered list.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct SearchQuery {
+    #[serde(default)]
+    pub q: Option<String>,
 }
 
 /// Build the type-grouped rows for the documents matching `filter`, sorted by
@@ -106,6 +115,32 @@ pub async fn list_fragment(
     let groups = build_groups(&store, &filter);
     let fragment = ListFragment { groups };
     Html(fragment.render().unwrap_or_default())
+}
+
+/// `GET /search?q=` -- thin adapter over [`Store::search`]. An empty/absent `q`
+/// renders the full unfiltered list fragment (identical to the `GET /` list
+/// region). Otherwise the engine search runs and its results are rendered in
+/// the engine's returned order; zero results yield the empty-result state.
+pub async fn search(
+    State(store): State<Arc<Store>>,
+    Query(query): Query<SearchQuery>,
+) -> Html<String> {
+    let Some(q) = empty_to_none(query.q) else {
+        let groups = build_groups(&store, &Filter::default());
+        return Html(ListFragment { groups }.render().unwrap_or_default());
+    };
+
+    let rows = store
+        .search(&q, &RealFileSystem)
+        .into_iter()
+        .map(|r| DocRow {
+            id: r.doc.id.clone(),
+            title: r.doc.title.clone(),
+            status: r.doc.status.to_string(),
+        })
+        .collect();
+
+    Html(SearchFragment { rows }.render().unwrap_or_default())
 }
 
 /// `GET /doc/{id}` -- the per-document page: frontmatter header, body rendered

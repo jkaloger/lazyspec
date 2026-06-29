@@ -1,7 +1,7 @@
 {% for group in groups %}<section class="doc-group" data-doc-type="{{ group.doc_type }}">
 <h2>{{ group.doc_type }}</h2>
 <ul>
-{% for doc in group.docs %}<li data-id="{{ doc.id }}"><a href="/doc/{{ doc.id }}"><span class="doc-id">{{ doc.id }}</span> <span class="doc-title">{{ doc.title }}</span></a> <span class="doc-status">{{ doc.status }}</span></li>
+{% for doc in group.docs %}{% include "list_row.html" %}
 {% endfor %}</ul>
 </section>
 {% endfor %}

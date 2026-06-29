@@ -7,6 +7,9 @@
 </head>
 <body>
 <h1>lazyspec documents</h1>
+<input type="search" name="q" placeholder="search"
+  hx-get="/search" hx-target="#doc-list" hx-swap="innerHTML"
+  hx-trigger="input changed delay:200ms, search">
 <form id="filters" hx-get="/fragment/list" hx-target="#doc-list" hx-swap="innerHTML" hx-trigger="change">
   <label>status
     <select name="status">

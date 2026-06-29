@@ -203,6 +203,125 @@ async fn list_rows_link_to_doc_pages() {
     );
 }
 
+/// Extract `data-id` values in document order from a list/search fragment, which
+/// equals the row render order.
+fn ids_in_order(body: &str) -> Vec<String> {
+    body.match_indices("data-id=\"")
+        .map(|(i, m)| {
+            let rest = &body[i + m.len()..];
+            let end = rest.find('"').unwrap();
+            rest[..end].to_string()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn search_id_order_matches_engine_search_order() {
+    use lazyspec::engine::fs::RealFileSystem;
+
+    let fixture = TestFixture::new();
+    // Distinct dates so the engine's date-asc ordering is observable and crosses
+    // type boundaries (search results are not grouped by type).
+    fixture.write_doc(
+        "docs/rfcs/RFC-010-search-alpha.md",
+        "---\ntitle: \"Searchterm alpha\"\ntype: rfc\nstatus: draft\nauthor: \"t\"\ndate: 2026-03-03\ntags: []\n---\n",
+    );
+    fixture.write_doc(
+        "docs/stories/STORY-010-search-beta.md",
+        "---\ntitle: \"Searchterm beta\"\ntype: story\nstatus: draft\nauthor: \"t\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    fixture.write_doc(
+        "docs/iterations/ITERATION-010-search-gamma.md",
+        "---\ntitle: \"Searchterm gamma\"\ntype: iteration\nstatus: draft\nauthor: \"t\"\ndate: 2026-02-02\ntags: []\n---\n",
+    );
+    // A non-matching doc to ensure filtering happens.
+    fixture.write_rfc("RFC-011-other.md", "Unrelated title", "draft");
+
+    let st = store(&fixture);
+
+    // Engine order (oracle): ids in the order Store::search returns them.
+    let engine_ids: Vec<String> = st
+        .search("searchterm", &RealFileSystem)
+        .iter()
+        .map(|r| r.doc.id.clone())
+        .collect();
+
+    let (status, body) = get(st, "/search?q=searchterm").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !body.contains("<!DOCTYPE html>"),
+        "search must return a fragment, not the full page"
+    );
+    assert_eq!(
+        ids_in_order(&body),
+        engine_ids,
+        "search route id order must equal engine search order:\n{body}"
+    );
+    assert!(
+        !body.contains("RFC-011"),
+        "non-matching doc must be excluded:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn search_empty_query_returns_full_list() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+    fixture.write_story("STORY-001-beta.md", "Beta story", "draft", None);
+
+    let (status, body) = get(store(&fixture), "/search?q=").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("RFC-001"), "missing RFC-001:\n{body}");
+    assert!(body.contains("STORY-001"), "missing STORY-001:\n{body}");
+    // Same content shape as the GET / list region (grouped by type), no chrome.
+    assert!(
+        !body.contains("<!DOCTYPE html>"),
+        "fragment must omit page chrome"
+    );
+    assert!(
+        body.contains("data-doc-type=\"rfc\""),
+        "empty query should reuse the grouped list fragment:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn search_no_match_renders_empty_state() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    let (status, body) = get(store(&fixture), "/search?q=zzznomatchzzz").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !body.contains("RFC-001"),
+        "stale list must not appear for a no-match query:\n{body}"
+    );
+    assert!(
+        body.to_lowercase().contains("no results"),
+        "expected an empty-result state:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn list_page_has_search_input_targeting_search_route() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    let (status, body) = get(store(&fixture), "/").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("hx-get=\"/search\""),
+        "search input should htmx-GET /search:\n{body}"
+    );
+    assert!(
+        body.contains("name=\"q\""),
+        "search input should send q:\n{body}"
+    );
+}
+
 #[test]
 fn default_port_is_8787() {
     assert_eq!(DEFAULT_PORT, 8787);
