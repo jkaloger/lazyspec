@@ -1,7 +1,7 @@
 ---
 title: 'GitHub deep-links: repo coordinates + engine::github_url per backend'
 type: story
-status: accepted
+status: complete
 author: jkaloger
 date: 2026-06-30
 tags: []

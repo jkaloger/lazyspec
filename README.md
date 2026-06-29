@@ -230,6 +230,17 @@ cargo run --features web -- serve --port 9000
 
 `serve` loads the store once and renders a server-side document list (grouped by type) with htmx status/tag filtering. It binds loopback only.
 
+Each document page carries an outbound "edit on GitHub" deep-link, derived from the document's store backend: filesystem docs link to the blob (`/blob/{branch}/{path}`), `github-issues` docs to the issue, `github-milestones` docs to the milestone. The repo coordinates resolve from the `origin` remote (owner/repo) and current branch, overridable per field with an optional `[web]` table:
+
+```toml
+[web]
+owner = "acme"      # optional; defaults to the origin remote's owner
+repo = "widgets"    # optional; defaults to the origin remote's repo
+branch = "main"     # optional; defaults to the current branch
+```
+
+When owner/repo can't be resolved (no `origin` remote and no override), deep-links are omitted and `serve` logs a single startup warning rather than rendering broken links.
+
 <details>
 <summary><h3>CLI</h3></summary>
 

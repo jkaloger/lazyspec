@@ -18,6 +18,7 @@
 {% if !relations.is_empty() %}<dt>relations</dt><dd class="doc-relations">{% for rel in relations %}<span class="relation">{{ rel.rel_type }}: <a href="/doc/{{ rel.target }}">{{ rel.target }}</a></span>{% if !loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
 {% match parent %}{% when Some with (p) %}<dt>parent</dt><dd class="doc-parent"><a href="/doc/{{ p.id }}">{{ p.title }}</a></dd>{% when None %}{% endmatch %}
 {% if !children.is_empty() %}<dt>children</dt><dd class="doc-children"><ul>{% for child in children %}<li><a href="/doc/{{ child.id }}">{{ child.title }}</a></li>{% endfor %}</ul></dd>{% endif %}
+{% match github_url %}{% when Some with (url) %}<dt>github</dt><dd class="doc-github"><a class="edit-on-github" href="{{ url }}">edit on GitHub</a></dd>{% when None %}{% endmatch %}
 </dl>
 </header>
 <article class="doc-body">

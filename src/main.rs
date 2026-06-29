@@ -576,7 +576,18 @@ fn main() -> anyhow::Result<()> {
         #[cfg(feature = "web")]
         Some(Commands::Serve { port }) => {
             let store = std::sync::Arc::new(Store::load(&cwd, &config)?);
-            lazyspec::web::serve(store, port)?;
+            let coords = lazyspec::engine::github_url::resolve_repo_coords(&config, &cwd);
+            if coords.is_none() {
+                eprintln!("lazyspec serve: repo coordinates unresolved (no origin remote or [web] override); GitHub deep-links disabled");
+            }
+            let issue_map = std::sync::Arc::new(IssueMap::load(&cwd).unwrap_or_default());
+            let state = lazyspec::web::server::AppState {
+                store,
+                config: std::sync::Arc::new(config),
+                coords,
+                issue_map,
+            };
+            lazyspec::web::serve(state, port)?;
         }
         None => {
             let store = Store::load(&cwd, &config)?;

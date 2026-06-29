@@ -91,12 +91,21 @@ pub struct DocPage {
     pub children: Vec<RelativeLink>,
     /// The body, ref-expanded then rendered to HTML.
     pub body_html: String,
+    /// The outbound "edit on GitHub" deep-link, or `None` when no link could be
+    /// resolved (unresolvable coords, or a backend with no stable URL).
+    pub github_url: Option<String>,
 }
 
 impl DocPage {
     /// Build the frontmatter view model from a document and its store context.
-    /// `body_html` is the already-expanded, already-rendered HTML body.
-    pub fn from_doc(doc: &DocMeta, store: &Store, body_html: String) -> Self {
+    /// `body_html` is the already-expanded, already-rendered HTML body;
+    /// `github_url` is the resolved outbound deep-link, or `None`.
+    pub fn from_doc(
+        doc: &DocMeta,
+        store: &Store,
+        body_html: String,
+        github_url: Option<String>,
+    ) -> Self {
         let relations = doc
             .related
             .iter()
@@ -136,6 +145,7 @@ impl DocPage {
             parent,
             children,
             body_html,
+            github_url,
         }
     }
 }

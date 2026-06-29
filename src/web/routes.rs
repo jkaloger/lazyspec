@@ -4,7 +4,6 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
 
 use askama::Template;
 use axum::extract::{Path as AxumPath, Query, State};
@@ -14,12 +13,14 @@ use axum::response::{Html, IntoResponse, Response};
 use crate::engine::context::resolve_forest;
 use crate::engine::document::Status;
 use crate::engine::fs::RealFileSystem;
+use crate::engine::github_url::github_url;
 use crate::engine::graph::{flatten_forest, GraphSort};
 use crate::engine::store::{Filter, Store};
 use crate::web::render::{
     markdown_to_html, DocGroup, DocPage, DocRow, FilterOption, GraphPage, GraphTreeNode,
     ListFragment, ListPage, NotFoundPage, SearchFragment,
 };
+use crate::web::server::AppState;
 
 /// Default lines per expanded `@ref` block, mirroring `show --expand-references`.
 const MAX_REF_LINES: usize = 25;
@@ -91,7 +92,8 @@ fn filter_options(store: &Store) -> (Vec<FilterOption>, Vec<FilterOption>) {
 
 /// `GET /` -- the full document-list page with filter controls and the initial
 /// (unfiltered) list grouped by type.
-pub async fn list_page(State(store): State<Arc<Store>>) -> Html<String> {
+pub async fn list_page(State(state): State<AppState>) -> Html<String> {
+    let store = state.store;
     let groups = build_groups(&store, &Filter::default());
     let list = ListFragment { groups }.render_string();
     let (statuses, tags) = filter_options(&store);
@@ -106,9 +108,10 @@ pub async fn list_page(State(store): State<Arc<Store>>) -> Html<String> {
 /// `GET /fragment/list?status=&tag=` -- the htmx filter handler. Reuses
 /// [`Store::list`] for the matching subset and returns only the list fragment.
 pub async fn list_fragment(
-    State(store): State<Arc<Store>>,
+    State(state): State<AppState>,
     Query(query): Query<ListQuery>,
 ) -> Html<String> {
+    let store = state.store;
     let filter = Filter {
         doc_type: None,
         status: empty_to_none(query.status).map(|s| Status::new(&s)),
@@ -124,9 +127,10 @@ pub async fn list_fragment(
 /// region). Otherwise the engine search runs and its results are rendered in
 /// the engine's returned order; zero results yield the empty-result state.
 pub async fn search(
-    State(store): State<Arc<Store>>,
+    State(state): State<AppState>,
     Query(query): Query<SearchQuery>,
 ) -> Html<String> {
+    let store = state.store;
     let Some(q) = empty_to_none(query.q) else {
         let groups = build_groups(&store, &Filter::default());
         return Html(ListFragment { groups }.render().unwrap_or_default());
@@ -150,7 +154,8 @@ pub async fn search(
 /// interactive sort control). Reuses the engine's `resolve_forest` +
 /// `flatten_forest` ordering, so diamonds (shared node re-emitted without its
 /// subtree) and cycles (back-edge dropped, every node once) match the TUI.
-pub async fn graph(State(store): State<Arc<Store>>) -> Html<String> {
+pub async fn graph(State(state): State<AppState>) -> Html<String> {
+    let store = state.store;
     let forest = resolve_forest(&store, None);
     let flat = flatten_forest(&forest, &store, &GraphSort::default());
     let roots = GraphTreeNode::nest(&flat);
@@ -160,7 +165,8 @@ pub async fn graph(State(store): State<Arc<Store>>) -> Html<String> {
 /// `GET /doc/{id}` -- the per-document page: frontmatter header, body rendered
 /// to HTML with `@ref` directives expanded inline. Unknown ids yield a handled
 /// 404 with the not-found page, never a 500.
-pub async fn doc_page(State(store): State<Arc<Store>>, AxumPath(id): AxumPath<String>) -> Response {
+pub async fn doc_page(State(state): State<AppState>, AxumPath(id): AxumPath<String>) -> Response {
+    let store = state.store;
     // Resolve id -> document. Try a literal path first, then shorthand,
     // mirroring the engine resolution that backs `show` without importing cli.
     let doc = store
@@ -177,6 +183,13 @@ pub async fn doc_page(State(store): State<Arc<Store>>, AxumPath(id): AxumPath<St
         .unwrap_or_default();
     let body_html = markdown_to_html(&expanded);
 
-    let page = DocPage::from_doc(doc, &store, body_html);
+    // The outbound "edit on GitHub" link. `None` when coords are unresolved or
+    // the backend has no stable single-doc URL -- the template then renders no
+    // link rather than a broken one.
+    let github_url = state.coords.as_ref().and_then(|coords| {
+        github_url(doc, coords, &state.config, &state.issue_map, None, None).map(|u| u.0)
+    });
+
+    let page = DocPage::from_doc(doc, &store, body_html, github_url);
     Html(page.render().unwrap_or_default()).into_response()
 }

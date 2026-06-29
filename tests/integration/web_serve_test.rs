@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
+use lazyspec::engine::issue_map::IssueMap;
 use lazyspec::engine::store::Store;
-use lazyspec::web::server::{router, DEFAULT_PORT};
+use lazyspec::web::server::{router, AppState, DEFAULT_PORT};
 use tower::ServiceExt;
 
 use crate::common::TestFixture;
@@ -18,8 +19,18 @@ fn store(fixture: &TestFixture) -> Arc<Store> {
     Arc::new(fixture.store())
 }
 
+/// Build app state with deep-links disabled (no coords) for the skeleton tests.
+fn state(store: Arc<Store>) -> AppState {
+    AppState {
+        store,
+        config: Arc::new(lazyspec::engine::config::Config::default()),
+        coords: None,
+        issue_map: Arc::new(IssueMap::default()),
+    }
+}
+
 async fn get(store: Arc<Store>, uri: &str) -> (StatusCode, String) {
-    let app = router(store);
+    let app = router(state(store));
     let response = app
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
@@ -124,6 +135,60 @@ async fn doc_page_renders_frontmatter_header_and_body_html() {
     assert!(
         body.contains("<strong>bold</strong>"),
         "expected rendered <strong>:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn doc_page_renders_github_deep_link_when_coords_resolved() {
+    use lazyspec::engine::github_url::RepoCoords;
+
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-042-page.md",
+        "---\ntitle: \"Page RFC\"\ntype: rfc\nstatus: accepted\nauthor: \"alice\"\ndate: 2026-02-03\ntags: []\n---\n\nbody\n",
+    );
+
+    let mut st = state(store(&fixture));
+    st.coords = Some(RepoCoords {
+        owner: "acme".to_string(),
+        repo: "widgets".to_string(),
+        branch: Some("main".to_string()),
+    });
+    let app = router(st);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/doc/RFC-042")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+
+    assert!(
+        body.contains("https://github.com/acme/widgets/blob/main/docs/rfcs/RFC-042-page.md"),
+        "expected blob deep-link:\n{body}"
+    );
+    assert!(
+        body.contains("edit on GitHub"),
+        "expected link text:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn doc_page_omits_github_link_when_coords_unresolved() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    // Default `state(..)` carries `coords: None` -> no link rendered.
+    let (status, body) = get(store(&fixture), "/doc/RFC-001").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !body.contains("edit on GitHub"),
+        "deep-link should be omitted with no coords:\n{body}"
     );
 }
 

@@ -387,6 +387,7 @@ mod tests {
             coordination: None,
             agents: Default::default(),
             skills: Default::default(),
+            web: None,
         }
     }
 

@@ -1,7 +1,7 @@
 ---
 title: 'GitHub deep-links: engine::github_url per backend + repo coordinates'
 type: iteration
-status: accepted
+status: complete
 author: unknown
 date: 2026-06-30
 tags: []
