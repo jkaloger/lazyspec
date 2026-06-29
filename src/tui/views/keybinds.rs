@@ -250,7 +250,12 @@ pub fn keybinds_for(ctx: KeyContext) -> Vec<KeybindGroup> {
                 bind!(
                     "←/→",
                     "Cycle relation type",
-                    [k(KeyCode::Left), k(KeyCode::Right), k(KeyCode::Tab)]
+                    [
+                        k(KeyCode::Left),
+                        k(KeyCode::Right),
+                        k(KeyCode::Tab),
+                        k(KeyCode::BackTab)
+                    ]
                 ),
                 bind!(
                     "↑/↓",

@@ -800,6 +800,53 @@ mod tests {
         );
     }
 
+    // Inverse flow: from a milestone doc, `MILESTONE-3 --targeted-by--> STORY-7`
+    // flips to `STORY-7 targets MILESTONE-3` (link.rs:65) -- legal, since the
+    // milestone is the TARGET. The edge lands on the issue's frontmatter, not the
+    // milestone, and the native PATCH is recorded. This is the path the TUI link
+    // editor takes when adding a relation while viewing a milestone.
+    #[test]
+    fn link_milestone_inverse_targeted_by_writes_on_issue() {
+        let root = tmp_root("guard_inverse_targeted_by");
+        let config = milestone_assoc_config();
+        let store = seed_milestone_guard_fixture(&root);
+        let fs = RealFileSystem;
+        let recorder = std::rc::Rc::new(MockGhMilestoneClient::new());
+
+        let outcome = link_inner(
+            &root,
+            &store,
+            "MILESTONE-3",
+            "targeted-by",
+            "STORY-7",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            || recorder.clone(),
+            MockGhClient::new,
+        )
+        .expect("inverse `targeted-by` from a milestone must succeed");
+
+        // Direction flipped: the edge is the canonical `targets` written on the
+        // issue, with the milestone as the target.
+        assert_eq!(outcome.rel_type.to_string(), "targets");
+        assert_eq!(outcome.target, "MILESTONE-3");
+        assert!(outcome.source.ends_with("STORY-7.md"));
+
+        assert_eq!(*recorder.last_set_milestone.borrow(), Some((7, Some(3))));
+        let story = std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(
+            story.contains("targets: MILESTONE-3"),
+            "the edge lands on the issue, got:\n{story}"
+        );
+        let milestone =
+            std::fs::read_to_string(root.join(".lazyspec/cache/milestone/MILESTONE-3.md")).unwrap();
+        assert!(
+            !milestone.contains("related"),
+            "the milestone frontmatter must stay untouched, got:\n{milestone}"
+        );
+    }
+
     // AC2: link STORY-7 --implements--> MILESTONE-3 is rejected -- a milestone may
     // only be targeted by `targets`. No frontmatter write.
     #[test]

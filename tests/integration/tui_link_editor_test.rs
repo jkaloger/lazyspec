@@ -363,9 +363,11 @@ fn test_self_excluded_after_search() {
     assert!(!app.link_editor.results.contains(&self_path));
 }
 
-// j/k navigation changes selected index
+// Down/Up navigation moves and clamps the selected index. The Find field is a
+// text input, so j/k type into the query (see `link_editor_types_jk_into_query`)
+// rather than navigate; only the arrow keys move the selection.
 #[test]
-fn test_jk_navigation() {
+fn test_arrow_navigation_multi_step_and_clamp() {
     let fixture = TestFixture::new();
     fixture.write_rfc("RFC-001-source.md", "Source Doc", "draft");
     fixture.write_rfc("RFC-002-alpha.md", "Alpha", "draft");
@@ -386,9 +388,9 @@ fn test_jk_navigation() {
 
     assert_eq!(app.link_editor.selected, 0);
 
-    // j moves down
+    // Down moves down
     app.handle_key(
-        KeyCode::Char('j'),
+        KeyCode::Down,
         KeyModifiers::NONE,
         fixture.root(),
         &fixture.config(),
@@ -396,32 +398,32 @@ fn test_jk_navigation() {
     assert_eq!(app.link_editor.selected, 1);
 
     app.handle_key(
-        KeyCode::Char('j'),
+        KeyCode::Down,
         KeyModifiers::NONE,
         fixture.root(),
         &fixture.config(),
     );
     assert_eq!(app.link_editor.selected, 2);
 
-    // k moves up
+    // Up moves up
     app.handle_key(
-        KeyCode::Char('k'),
+        KeyCode::Up,
         KeyModifiers::NONE,
         fixture.root(),
         &fixture.config(),
     );
     assert_eq!(app.link_editor.selected, 1);
 
-    // k at 0 stays at 0
+    // Up at 0 stays at 0
     app.handle_key(
-        KeyCode::Char('k'),
+        KeyCode::Up,
         KeyModifiers::NONE,
         fixture.root(),
         &fixture.config(),
     );
     assert_eq!(app.link_editor.selected, 0);
     app.handle_key(
-        KeyCode::Char('k'),
+        KeyCode::Up,
         KeyModifiers::NONE,
         fixture.root(),
         &fixture.config(),
@@ -466,7 +468,7 @@ fn test_arrow_navigation() {
     assert_eq!(app.link_editor.selected, 0);
 }
 
-// j/k clamps to bounds
+// Down clamps to bounds
 #[test]
 fn test_navigation_clamps_to_bounds() {
     let fixture = TestFixture::new();
@@ -485,10 +487,10 @@ fn test_navigation_clamps_to_bounds() {
     app.preview_tab = PreviewTab::Relations;
     app.open_link_editor(&fixture.config());
 
-    // Only 1 result, j should not go past 0
+    // Only 1 result, Down should not go past 0
     assert_eq!(app.link_editor.results.len(), 1);
     app.handle_key(
-        KeyCode::Char('j'),
+        KeyCode::Down,
         KeyModifiers::NONE,
         fixture.root(),
         &fixture.config(),
@@ -517,15 +519,15 @@ fn test_selected_clamps_on_filter() {
     app.preview_tab = PreviewTab::Relations;
     app.open_link_editor(&fixture.config());
 
-    // Navigate to last item
+    // Navigate to last item (arrows move the selection; letters filter)
     app.handle_key(
-        KeyCode::Char('j'),
+        KeyCode::Down,
         KeyModifiers::NONE,
         fixture.root(),
         &fixture.config(),
     );
     app.handle_key(
-        KeyCode::Char('j'),
+        KeyCode::Down,
         KeyModifiers::NONE,
         fixture.root(),
         &fixture.config(),

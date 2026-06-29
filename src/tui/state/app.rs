@@ -2941,18 +2941,28 @@ impl App {
 
         let path = doc.path.clone();
 
-        // A doc in the `github-milestones` store can never be the source of a
-        // relation (CORE guard rejects it), so the editor offers no relation
-        // types and surfaces an empty-state. For every other doc, recompute the
-        // global keyword list (it may have been blanked by a prior milestone
-        // open) and offer the full set.
-        let source_blocked =
+        // A `github-milestones` doc can never be the SOURCE of a relation, but it
+        // can be the TARGET of `targets` (`github_native = "milestone"`). So from
+        // a milestone doc we offer the inverse keyword(s) of every milestone-native
+        // relation (e.g. `targeted-by`): selecting one plus an issue flips
+        // direction in the core (link.rs:65), writing `targets: <milestone>` on the
+        // issue. A milestone whose native relation declares no inverse has no legal
+        // relation and falls back to the empty-state. Every other doc recomputes
+        // the global keyword list (it may have been narrowed by a prior milestone
+        // open) and offers the full set.
+        let is_milestone_doc =
             self.store_of_path(&path, config) == Some(StoreBackend::GithubMilestones);
-        if source_blocked {
-            self.rel_types = Vec::new();
+        self.rel_types = if is_milestone_doc {
+            config
+                .relationships
+                .iter()
+                .filter(|r| r.github_native.as_deref() == Some("milestone"))
+                .filter_map(|r| r.inverse.clone())
+                .collect()
         } else {
-            self.rel_types = config.relationship_keywords();
-        }
+            config.relationship_keywords()
+        };
+        let source_blocked = is_milestone_doc && self.rel_types.is_empty();
 
         self.link_editor.active = true;
         self.link_editor.doc_path = path;
@@ -4647,11 +4657,13 @@ mod tests {
         );
     }
 
-    // AC8: opening the editor against a github-milestones VIEWED doc yields an
-    // empty rel-type list and flags the empty-state, since a milestone can never
-    // be a relation source. No candidate is offered.
+    // A github-milestones VIEWED doc whose native relation declares NO inverse
+    // has no legal relation (a milestone can never be a source, and without an
+    // inverse keyword it cannot host the flip-to-target flow either), so the
+    // editor yields an empty rel-type list and flags the empty-state. The
+    // `milestone_vocab_config` `targets` rel has `inverse: None`.
     #[test]
-    fn open_link_editor_blocks_milestone_source() {
+    fn open_link_editor_blocks_milestone_source_without_inverse() {
         let mut app = make_test_app(0);
         let config = milestone_vocab_config();
         app.apply_config(&config);
@@ -4715,6 +4727,58 @@ mod tests {
             app.rel_types,
             config.relationship_keywords(),
             "the global rel-type list is restored for a non-milestone open"
+        );
+    }
+
+    // From a milestone VIEWED doc whose native `targets` rel declares an inverse,
+    // the editor offers that inverse (`targeted-by`) so the user can link an issue
+    // *to* this milestone; confirm flips direction and writes the edge on the
+    // issue. Candidates are the issues (the milestone can only be a target).
+    #[test]
+    fn open_link_editor_offers_inverse_on_milestone() {
+        let mut app = make_test_app(0);
+        let mut config = milestone_vocab_config();
+        // Declare the milestone rel's inverse, mirroring the real `.lazyspec.toml`.
+        config.relationships[0].inverse = Some("targeted-by".to_string());
+        app.apply_config(&config);
+
+        insert_doc(
+            &mut app,
+            "docs/milestones/MILESTONE-001.md",
+            "MILESTONE-001",
+            "milestone",
+        );
+        insert_doc(&mut app, "docs/issues/ISSUE-001.md", "ISSUE-001", "issue");
+
+        app.doc_tree = vec![DocListNode {
+            path: PathBuf::from("docs/milestones/MILESTONE-001.md"),
+            id: "MILESTONE-001".to_string(),
+            title: "MILESTONE-001".to_string(),
+            doc_type: DocType::new("milestone"),
+            status: Status::new("draft"),
+            depth: 0,
+            is_parent: false,
+            is_virtual: false,
+            has_duplicate_id: false,
+        }];
+        app.selected_doc = 0;
+        app.view_mode = ViewMode::Types;
+
+        app.open_link_editor(&config);
+
+        assert_eq!(
+            app.rel_types,
+            vec!["targeted-by".to_string()],
+            "a milestone doc offers the inverse of its native relation"
+        );
+        assert!(
+            !app.link_editor.source_blocked,
+            "the inverse-relation flow is available, so the editor is not blocked"
+        );
+        assert_eq!(
+            app.link_editor.results,
+            vec![PathBuf::from("docs/issues/ISSUE-001.md")],
+            "candidates are the issues that can target this milestone"
         );
     }
 
