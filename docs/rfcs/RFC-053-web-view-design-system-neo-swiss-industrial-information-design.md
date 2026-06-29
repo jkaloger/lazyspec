@@ -1,7 +1,7 @@
 ---
 title: "Web view design system: Neo Swiss industrial information design"
 type: rfc
-status: draft
+status: accepted
 author: "jkaloger"
 date: 2026-06-30
 tags: []
