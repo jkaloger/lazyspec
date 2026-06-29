@@ -5,7 +5,7 @@ use crate::engine::git_ref::GitRefOps;
 use crate::engine::github::resolve_repo;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
-use crate::engine::store_dispatch::{milestone_state_to_status, GithubIssuesStore};
+use crate::engine::store_dispatch::GithubIssuesStore;
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::path::Path;
@@ -82,8 +82,24 @@ pub fn run(
             let type_def = config
                 .type_by_name(type_name)
                 .ok_or_else(|| anyhow::anyhow!("type '{}' not found in config", type_name))?;
-            let summary = fetch_milestones(root, type_def, gh, &repo, &mut issue_map)?;
-            summaries.push(summary);
+            let result = crate::engine::milestone_cache::fetch_milestones(
+                root,
+                type_def,
+                gh,
+                &repo,
+                &mut issue_map,
+            )?;
+
+            for w in &result.warnings {
+                eprintln!("warning: {}", w.message);
+            }
+
+            summaries.push(TypeSummary {
+                type_name: type_name.to_string(),
+                fetched: result.fetched,
+                new: result.new,
+                removed: result.removed,
+            });
         }
 
         issue_map.save(root)?;
@@ -239,85 +255,6 @@ fn filter_types<'a>(all: Vec<&'a str>, filter: Option<&'a str>) -> Vec<&'a str> 
     }
 }
 
-/// Fetch all milestones for a `github-milestones` type and materialize them as
-/// cache documents, mapping REST `state` to a lifecycle status. The milestone
-/// number is the document id (`make_id(number)`), mirroring github-issues.
-fn fetch_milestones(
-    root: &Path,
-    type_def: &crate::engine::config::TypeDef,
-    gh: &impl GhMilestoneApi,
-    repo: &str,
-    issue_map: &mut IssueMap,
-) -> Result<TypeSummary> {
-    use crate::engine::document::{AttrValue, DocMeta, DocType};
-
-    let milestones = gh.milestone_list(repo)?;
-
-    let cache = IssueCache::new(root);
-    let previously: std::collections::HashSet<String> =
-        cache.list_cached(&type_def.name).into_iter().collect();
-    let mut fetched_ids = std::collections::HashSet::new();
-    let mut new_count = 0usize;
-
-    for m in &milestones {
-        let id = type_def.make_id(m.number);
-        let mut attributes: std::collections::BTreeMap<String, AttrValue> = Default::default();
-        if let Some(due) = &m.due_on {
-            attributes.insert("due_on".to_string(), AttrValue::Str(due.clone()));
-        }
-        attributes.insert(
-            "open_issues".to_string(),
-            AttrValue::Int(m.open_issues as i64),
-        );
-        attributes.insert(
-            "closed_issues".to_string(),
-            AttrValue::Int(m.closed_issues as i64),
-        );
-        let meta = DocMeta {
-            path: std::path::PathBuf::new(),
-            title: m.title.clone(),
-            doc_type: DocType::new(&type_def.name),
-            status: milestone_state_to_status(&m.state),
-            author: "github".to_string(),
-            date: chrono::Utc::now().date_naive(),
-            tags: vec![],
-            provenance: vec![],
-            related: vec![],
-            validate_ignore: false,
-            virtual_doc: false,
-            attributes,
-            id: id.clone(),
-        };
-
-        if !previously.contains(&id) {
-            new_count += 1;
-        }
-        crate::engine::store_dispatch::write_cache_file(root, type_def, &meta, &m.description)?;
-        cache.touch_lock(&id);
-        issue_map.insert_kind(
-            &id,
-            m.number,
-            "",
-            "",
-            crate::engine::issue_map::EntryKind::Milestone,
-        );
-        fetched_ids.insert(id);
-    }
-
-    let removed: Vec<String> = previously.difference(&fetched_ids).cloned().collect();
-    for id in &removed {
-        cache.remove(id, &type_def.name);
-        issue_map.remove(id);
-    }
-
-    Ok(TypeSummary {
-        type_name: type_def.name.to_string(),
-        fetched: milestones.len(),
-        new: new_count,
-        removed: removed.len(),
-    })
-}
-
 fn fetch_git_ref_type(
     root: &Path,
     git_ref_ops: &dyn GitRefOps,
@@ -404,78 +341,8 @@ struct TypeSummary {
 mod tests {
     use super::*;
     use crate::engine::config::{NumberingStrategy, StoreBackend, TypeDef};
-    use crate::engine::gh::test_support::MockGhMilestoneClient;
-    use crate::engine::gh::GhMilestone;
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use tempfile::TempDir;
-
-    fn milestone_type_def() -> TypeDef {
-        TypeDef {
-            name: "milestone".to_string(),
-            plural: "milestones".to_string(),
-            dir: "docs/milestones".to_string(),
-            prefix: "MILESTONE".to_string(),
-            icon: None,
-            numbering: NumberingStrategy::Incremental,
-            subdirectory: false,
-            store: StoreBackend::GithubMilestones,
-            singleton: false,
-            parent_type: None,
-            agents: Vec::new(),
-            intent: None,
-            authorship: Default::default(),
-            lifecycle: Default::default(),
-            attributes: Default::default(),
-        }
-    }
-
-    // AC1/AC3/AC6: fetch_milestones writes a cache doc per milestone with the
-    // state mapped to a lifecycle status and counts stored, all via the mock seam.
-    #[test]
-    fn fetch_milestones_writes_cache_docs() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        let td = milestone_type_def();
-
-        let gh = MockGhMilestoneClient::with_milestones(vec![
-            GhMilestone {
-                number: 3,
-                title: "v1.0".to_string(),
-                description: "first".to_string(),
-                due_on: Some("2026-09-01T00:00:00Z".to_string()),
-                state: "open".to_string(),
-                open_issues: 7,
-                closed_issues: 3,
-                url: String::new(),
-            },
-            GhMilestone {
-                number: 4,
-                title: "v2.0".to_string(),
-                description: "second".to_string(),
-                due_on: None,
-                state: "closed".to_string(),
-                open_issues: 0,
-                closed_issues: 5,
-                url: String::new(),
-            },
-        ]);
-
-        let mut issue_map = IssueMap::load(root).unwrap();
-        let summary = fetch_milestones(root, &td, &gh, "owner/repo", &mut issue_map).unwrap();
-
-        assert_eq!(summary.fetched, 2);
-        assert_eq!(summary.new, 2);
-
-        let cache_dir = root.join(".lazyspec/cache/milestone");
-        let open = std::fs::read_to_string(cache_dir.join("MILESTONE-3.md")).unwrap();
-        assert!(open.contains("status: in-progress"), "{open}");
-        assert!(open.contains("open_issues: 7"), "{open}");
-        let closed = std::fs::read_to_string(cache_dir.join("MILESTONE-4.md")).unwrap();
-        assert!(closed.contains("status: complete"), "{closed}");
-
-        assert_eq!(issue_map.get("MILESTONE-3").unwrap().issue_number, 3);
-        assert_eq!(issue_map.get("MILESTONE-4").unwrap().issue_number, 4);
-    }
 
     // ITERATION-226 task 3: github-issues cache files carry no `id:` in their
     // frontmatter, so DocMeta::parse yields meta.id == "". The fix derives the id
