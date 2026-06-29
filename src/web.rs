@@ -4,6 +4,7 @@
 //! (tokio/axum/askama) never enters default builds. Per convention principle 3
 //! it imports only from [`crate::engine`], never from `cli` or `tui`.
 
+pub mod assets;
 pub mod render;
 pub mod routes;
 pub mod server;

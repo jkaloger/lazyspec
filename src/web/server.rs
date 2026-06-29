@@ -10,7 +10,7 @@ use axum::Router;
 use crate::engine::github_url::RepoCoords;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
-use crate::web::routes;
+use crate::web::{assets, routes};
 
 /// The default loopback port for `lazyspec serve` (RFC-052 / STORY-176).
 pub const DEFAULT_PORT: u16 = 8787;
@@ -42,6 +42,8 @@ pub fn router(state: AppState) -> Router {
         .route("/search", get(routes::search))
         .route("/graph", get(routes::graph))
         .route("/doc/{id}", get(routes::doc_page))
+        .route("/static/lazyspec.css", get(assets::stylesheet))
+        .route("/static/fonts/{name}", get(assets::font))
         .with_state(state)
 }
 

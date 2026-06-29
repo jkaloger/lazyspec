@@ -522,3 +522,114 @@ fn resolve_port_defaults_and_overrides() {
     assert_eq!(resolve_port(None), 8787);
     assert_eq!(resolve_port(Some(9000)), 9000);
 }
+
+// --- Static assets: stylesheet + fonts (ITERATION-242) -----------------------
+
+/// The `<link>` every page head must carry to pull in the stylesheet (AC1).
+const STYLESHEET_LINK: &str = "<link rel=\"stylesheet\" href=\"/static/lazyspec.css\">";
+
+#[tokio::test]
+async fn stylesheet_route_returns_200_text_css() {
+    use axum::http::header::CONTENT_TYPE;
+
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    // Inspecting the Content-Type header requires the manual oneshot path; the
+    // `get` helper discards response headers.
+    let app = router(state(store(&fixture)));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/static/lazyspec.css")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(CONTENT_TYPE).unwrap(),
+        "text/css; charset=utf-8",
+        "stylesheet must be served as CSS"
+    );
+
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    // Proves the real stylesheet is served, not an empty stub.
+    assert!(body.contains(":root"), "expected CSS :root block:\n{body}");
+    assert!(
+        body.contains("--accent"),
+        "expected --accent token:\n{body}"
+    );
+}
+
+/// Fonts are a SANDBOX BLOCKER: the woff2 binaries cannot be fetched (network is
+/// restricted to github.com, no Google Fonts CDN; git object writes to github are
+/// also blocked), so no font is embedded yet and `src/web/assets.rs` 404s every
+/// request by design (its `font_bytes` match has only commented-out arms).
+///
+/// TODO(fonts): WHEN the woff2 binaries land in `static/fonts/` and the
+/// `font_bytes` match arms in `src/web/assets.rs` are uncommented, FLIP this test
+/// to assert `StatusCode::OK` and Content-Type `font/woff2`.
+#[tokio::test]
+async fn font_route_returns_404_until_fonts_embedded() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    let app = router(state(store(&fixture)));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/static/fonts/archivo-latin.woff2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn doc_page_head_links_stylesheet() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    let (status, body) = get(store(&fixture), "/doc/RFC-001").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains(STYLESHEET_LINK),
+        "doc page head must link the stylesheet:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn list_page_head_links_stylesheet() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    let (status, body) = get(store(&fixture), "/").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains(STYLESHEET_LINK),
+        "list page head must link the stylesheet:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn graph_page_head_links_stylesheet() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    let (status, body) = get(store(&fixture), "/graph").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains(STYLESHEET_LINK),
+        "graph page head must link the stylesheet:\n{body}"
+    );
+}
