@@ -1,7 +1,7 @@
 ---
 title: 'Convention hook: add hooks.json UserPromptSubmit'
 type: iteration
-status: draft
+status: complete
 author: jkaloger
 date: 2026-06-29
 tags: []

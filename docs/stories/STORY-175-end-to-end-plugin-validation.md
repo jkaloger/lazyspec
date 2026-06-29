@@ -1,7 +1,7 @@
 ---
 title: End-to-end plugin validation
 type: story
-status: draft
+status: complete
 author: jkaloger
 date: 2026-06-29
 tags: []

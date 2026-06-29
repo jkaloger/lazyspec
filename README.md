@@ -110,6 +110,30 @@ For other agents, the same prose is concatenated into `./AGENTS.md`. Re-running
 is idempotent. Configure the router name via `[skills] entry` in
 `.lazyspec.toml`.
 
+### Install as a Claude Code plugin
+
+Claude Code users can install the skills and the convention hook together
+through the plugin marketplace hosted in this repo, instead of running `skills
+install` and hand-editing settings. Two commands:
+
+```
+/plugin marketplace add jkaloger/lazyspec
+/plugin install lazyspec@lazyspec
+```
+
+This loads every on-disk skill under `skills/` and registers a
+`UserPromptSubmit` hook that injects the project convention (`lazyspec
+convention --preamble`) into the agent's context on each prompt.
+
+**Prerequisite:** the `lazyspec` binary must be on `PATH`. The hook shells out
+to it; without the binary the hook is inert (a silent noop), and in any
+directory lacking a `.lazyspec.toml` it injects nothing.
+
+The plugin is an additional channel, not a replacement for `skills install`.
+Use `skills install` when you need the `AGENTS.md` target or a renamed router
+entry via `[skills] entry` -- a static plugin ships the default `lazy` entry and
+the Claude runtime only.
+
 ## Usage
 
 ### Quick Start
