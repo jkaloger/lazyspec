@@ -1,7 +1,7 @@
 ---
 title: Package skills and convention hook as a Claude Code plugin
 type: rfc
-status: accepted
+status: complete
 author: unknown
 date: 2026-06-29
 tags: []
@@ -58,7 +58,9 @@ The existing `hooks/claude-code-settings.json` (lease coordination) is a differe
 
 ### Same-repo marketplace
 
-Add `.claude-plugin/marketplace.json` declaring a marketplace named `lazyspec`. Required fields: `name`, `owner` (an object with `name`, here `jkaloger`), and `plugins` (an array). The single plugin entry uses `source: "."` -- the plugin *is* the marketplace root -- which is what lets it reuse the root `skills/` and `hooks/`. Because a `plugin.json` also lives at that same root, the entry must set `strict: false`; otherwise the loader treats the marketplace entry as the sole component authority and ignores the root `plugin.json`. Both `marketplace.json` and `plugin.json` therefore coexist under `.claude-plugin/`, each serving its distinct role.
+Add `.claude-plugin/marketplace.json` declaring a marketplace named `lazyspec`. Required fields: `name`, `owner` (an object with `name`, here `jkaloger`), and `plugins` (an array). The single plugin entry uses `source: "./"` -- the plugin *is* the marketplace root -- which is what lets it reuse the root `skills/` and `hooks/`. Because a `plugin.json` also lives at that same root, the entry keeps `strict: true` (the default): under `strict: true` the root `plugin.json` is the authority for components and the marketplace entry merely supplements it, so auto-discovery of `skills/` and `hooks/hooks.json` proceeds from the root manifest. Both `marketplace.json` and `plugin.json` therefore coexist under `.claude-plugin/`, each serving its distinct role.
+
+> Correction (post-validation): an earlier draft of this RFC specified `strict: false` here, reasoning that it was required for the root `plugin.json` to be honoured. That is inverted. The Claude Code marketplace docs define `strict: false` as making the marketplace entry the *entire* component definition -- a co-located `plugin.json` that declares components then produces a "conflicting manifests" load failure. `strict: true` (default) is the value under which `plugin.json` is the authority. This was the RFC's stated gating risk (see Risks), resolved against the docs before any live install.
 
 Install flow:
 
@@ -80,7 +82,7 @@ The alternative spec-idiomatic layout -- `marketplace.json` at root listing a pl
 New files (all proposed, `@draft`):
 
 - `.claude-plugin/plugin.json` -- plugin manifest. Required: `name` (`lazyspec`). Also set: `description`, `version`, `author`.
-- `.claude-plugin/marketplace.json` -- marketplace named `lazyspec`. Required: `name`, `owner` (`{ "name": "jkaloger" }`), `plugins` (array). The single entry sets `source: "."` and `strict: false` (the latter required because a root `plugin.json` coexists).
+- `.claude-plugin/marketplace.json` -- marketplace named `lazyspec`. Required: `name`, `owner` (`{ "name": "jkaloger" }`), `plugins` (array). The single entry sets `source: "./"` and `strict: true` (default; the root `plugin.json` is the component authority and the marketplace entry supplements it).
 - `hooks/hooks.json` -- top-level `{ "hooks": { "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "..." } ] } ] } }`; the matcher is omitted (matches all). The command is the guarded `lazyspec convention --preamble 2>/dev/null || true`. No `${CLAUDE_PLUGIN_ROOT}` needed -- the command invokes the on-PATH binary, not a bundled script.
 
 Install: `/plugin marketplace add jkaloger/lazyspec` then `/plugin install lazyspec@lazyspec`.
@@ -92,7 +94,7 @@ No Rust CLI signatures change. `lazyspec convention --preamble` and `lazyspec sk
 - **Plugin as an additional distribution channel, not a replacement for `skills install`.** The CLI install retains capabilities a static plugin lacks (AGENTS.md target, custom entry renaming); the two coexist.
 - **Reuse root `skills/` as the plugin skill source rather than a CLI-generated bundle.** Avoids a second copy and a new generator command; accepts that the plugin ships the full on-disk set (10) while `skills install` ships the embedded set (8).
 - **Guard the convention hook in the shell rather than hardening the CLI.** `2>/dev/null || true` keeps the hook silent in non-lazyspec repos with no Rust change; CLI hardening (exit 0 + empty output when no config) is the alternative, deferred.
-- **Marketplace and plugin manifest coexist at repo root via `source: "."` + `strict: false`.** This is the layout that lets the plugin reuse the root `skills/` and `hooks/`. The spec-idiomatic alternative (marketplace at root, plugin in a `plugins/` subdir with relative source) is rejected because it forces a copy of the skill sources.
+- **Marketplace and plugin manifest coexist at repo root via `source: "./"` + `strict: true` (default).** This is the layout that lets the plugin reuse the root `skills/` and `hooks/`; `strict: true` keeps the root `plugin.json` as the component authority. The spec-idiomatic alternative (marketplace at root, plugin in a `plugins/` subdir with relative source) is rejected because it forces a copy of the skill sources. (An earlier draft said `strict: false`; corrected against the docs -- see Design.)
 
 ## Stories
 
@@ -108,4 +110,4 @@ No Rust CLI signatures change. `lazyspec convention --preamble` and `lazyspec sk
 - **Preamble injected on every prompt.** In any project with a `.lazyspec.toml`, the convention preamble is added to context on each `UserPromptSubmit` -- a per-prompt token cost. This is the current behavior in this repo, accepted as the point of the hook.
 - **No custom entry naming through the plugin.** Projects that rename the router entry must still use `skills install`. Accepted: the plugin targets the common default-entry case.
 - **Shell-guard portability.** The `|| true` guard assumes a POSIX `/bin/sh`. Claude Code runs shell-form hook commands (no `args` field) under `/bin/sh -c`, so this holds; hardening the CLI remains the fallback if that assumption ever breaks.
-- **`source: "." ` + `strict: false` is a less-trodden configuration.** Most marketplaces point at subdir plugins with relative sources. The root-as-plugin path is documented and supported, but Story 4's end-to-end validation must confirm the loader picks up the root `skills/` and `hooks/hooks.json` under this config before the RFC is accepted.
+- **`source: "./"` (root-as-plugin) is a less-trodden configuration.** Most marketplaces point at subdir plugins with relative sources. The root-as-plugin path is documented and supported. Story 4's end-to-end validation must confirm the loader picks up the root `skills/` and `hooks/hooks.json` under this config. Resolved at implementation time: the original `strict: false` was found inverted against the docs and corrected to `strict: true` (default); a live `/plugin install` against the pushed repo remains the final confirmation.

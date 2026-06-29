@@ -57,6 +57,15 @@ Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always
 
 Execute is **work, not authoring.** The `scaffold < co-write < generate` ceiling does not apply here -- it governs who writes a document's prose, not who does the work the document describes. Do not confuse execute with the authoring trio.
 
+## Status bracketing
+
+A document's status should track reality: the work-active status (in the shipped default lifecycle, `in-progress`) means the build loop is running right now, not "queued" and not "finished". Because execute is the only step that runs the build loop, it is the only step positioned to open and close that status. So execute brackets its work with two status moves, both dispatched through /advance (the sole status writer -- execute never writes status frontmatter directly):
+
+- **Open (before the first task).** The delivery doc arrives at the status that precedes work (the default DAG calls it `accepted`; read the edge from `lazyspec config --json`, do not assume the name). Advance it across the edge into the work-active status (`accepted -> in-progress`) so the status reflects that work has started. If the doc is already in the work-active status, or no such edge exists, skip.
+- **Close (at Final Review).** After /review passes, advance the work-active status to its completion status (`in-progress -> complete`).
+
+This is why the previous flow left `in-progress` meaningless: nothing opened it at the start, so the doc sat at `accepted` through the whole loop and only passed through `in-progress` in a single tick at the very end. Opening it here keeps `in-progress` true exactly while the loop runs.
+
 ## Preflight
 
 1. `lazyspec config --json` -- confirm the document's `<type>` is a delivery type in this DAG (the type whose breakdown describes implementation work; in the shipped default config that is the `iteration` type, but read it -- do not assume the name).
@@ -77,6 +86,8 @@ Execute is **work, not authoring.** The `scaffold < co-write < generate` ceiling
 Model tier is by capability, not product name: "most capable" for implementation and the correctness-bearing reviews, a "lighter" model for the code-quality pass. The orchestrator picks the concrete model.
 
 ## Per-Task Loop
+
+**First, open the bracket** (see Status bracketing): advance the delivery doc into its work-active status (`accepted -> in-progress` in the default DAG) before dispatching any implementer. This is the one status move that opens the loop.
 
 Iterate the breakdown's tasks **sequentially**. For each task, dispatch an implementer subagent (general-purpose, most capable model) with:
 
@@ -110,4 +121,4 @@ The orchestrator runs this gate itself after all tasks complete. Subagents only 
 2. **Run the full check once.** It must pass -- required gate, no acceptance on failure. On failure, dispatch a targeted fix subagent, then re-run.
 3. Run `lazyspec validate --json`.
 4. Dispatch a final reviewer (most capable model) with all acceptance criteria and the implementation summary.
-5. On pass, route to /review for critique, then to /advance for the status move. **/advance owns the status transition** -- execute does not move statuses itself.
+5. On pass, route to /review for critique, then to /advance to close the bracket: move the work-active status to its completion status (`in-progress -> complete` in the default DAG). **/advance owns the status write** -- execute dispatches it at the work boundaries (open into `in-progress` at loop start, close to `complete` here) but never writes status frontmatter itself.

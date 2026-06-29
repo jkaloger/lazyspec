@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "lazyspec convention --preamble 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
+}

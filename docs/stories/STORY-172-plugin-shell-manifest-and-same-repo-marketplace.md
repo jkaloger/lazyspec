@@ -1,7 +1,7 @@
 ---
 title: 'Plugin shell: manifest and same-repo marketplace'
 type: story
-status: draft
+status: complete
 author: jkaloger
 date: 2026-06-29
 tags: []
@@ -21,7 +21,7 @@ This story delivers the plugin *shell*: the manifest and the same-repo marketpla
 ## Scope
 
 - `.claude-plugin/plugin.json` at repo root. Required `name: "lazyspec"`; also set `description`, `version`, `author`. Manifest at root so the loader auto-discovers components relative to root: existing `skills/` and (later) `hooks/hooks.json`. No `commands/` or `agents/` declared.
-- `.claude-plugin/marketplace.json` at repo root. Marketplace named `lazyspec`. Required `name`, `owner` (`{ "name": "jkaloger" }`), `plugins` array. Single entry: `source: "."`, `strict: false` (required so the root `plugin.json` is honoured alongside the marketplace entry).
+- `.claude-plugin/marketplace.json` at repo root. Marketplace named `lazyspec`. Required `name`, `owner` (`{ "name": "jkaloger" }`), `plugins` array. Single entry: `source: "./"`, `strict: true` (default; required so the root `plugin.json` is the authority and auto-discovery of `skills/`+`hooks/` works alongside the marketplace entry).
 - Both files coexist under `.claude-plugin/`, each its own role.
 
 ## Out of scope
@@ -35,9 +35,9 @@ This story delivers the plugin *shell*: the manifest and the same-repo marketpla
 - `/plugin marketplace add jkaloger/lazyspec` registers the marketplace.
 - `/plugin install lazyspec@lazyspec` installs the plugin.
 - After install, all ten skill directories under root `skills/` (`lazy`, `scaffold`, `co-write`, `generate`, `advance`, `execute`, `review`, `systematic-debugging`, `configure-type`, `create-audit`) are discovered; loose `skills/README.md` and `skills/MIGRATION-*.md` (no `SKILL.md`) are ignored.
-- The root `plugin.json` is honoured (not shadowed by the marketplace entry) — confirms `strict: false` + `source: "."`.
+- The root `plugin.json` is honoured (authority for components) — confirms `strict: true` (default) + `source: "./"`.
 
 ## Notes
 
-`source: "."` + `strict: false` is the less-trodden config. The spec-idiomatic alternative (plugin in a `plugins/` subdir with relative source) is rejected: a subdir plugin cannot reuse root `skills/` without a copy.
+`source: "./"` (root-as-plugin) is the less-trodden config. The spec-idiomatic alternative (plugin in a `plugins/` subdir with relative source) is rejected: a subdir plugin cannot reuse root `skills/` without a copy. NOTE: the RFC draft specified `strict: false` for this entry; verification against the Claude Code marketplace docs showed that inverted — `strict: false` makes the marketplace entry the entire definition and conflicts with a co-located `plugin.json`. The correct value is `strict: true` (the default), under which `plugin.json` is the component authority. Artifact and RFC updated accordingly.
 

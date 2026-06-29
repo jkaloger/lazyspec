@@ -1,0 +1,14 @@
+{
+  "name": "lazyspec",
+  "owner": {
+    "name": "jkaloger"
+  },
+  "plugins": [
+    {
+      "name": "lazyspec",
+      "source": "./",
+      "strict": true,
+      "description": "Spec-driven documentation workflow for Claude Code: lazyspec verb skills plus a convention-preamble hook."
+    }
+  ]
+}

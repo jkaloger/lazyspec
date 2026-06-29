@@ -1,0 +1,8 @@
+{
+  "name": "lazyspec",
+  "description": "Spec-driven documentation workflow for Claude Code: lazyspec verb skills plus a convention-preamble hook that injects the project convention on every prompt.",
+  "version": "0.9.0",
+  "author": {
+    "name": "jkaloger"
+  }
+}
