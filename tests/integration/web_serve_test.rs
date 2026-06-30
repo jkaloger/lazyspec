@@ -139,6 +139,43 @@ async fn doc_page_renders_frontmatter_header_and_body_html() {
 }
 
 #[tokio::test]
+async fn doc_page_emits_grid_container_and_status_swatch_hooks() {
+    // ITERATION-243: the document-page CSS styles existing class hooks, so the
+    // template must keep emitting them. Asserts the asymmetric-grid container,
+    // the metadata <dl>, and the label-first status swatch keyed off
+    // `data-status` (the hook the status legend colors).
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-044-hooks.md",
+        "---\ntitle: \"Hooks RFC\"\ntype: rfc\nstatus: in-progress\nauthor: \"alice\"\ndate: 2026-02-03\ntags: []\n---\n\nbody\n",
+    );
+
+    let (status, body) = get(store(&fixture), "/doc/RFC-044").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("class=\"doc-grid\""),
+        "missing doc-grid container:\n{body}"
+    );
+    assert!(
+        body.contains("class=\"doc-frontmatter\""),
+        "missing frontmatter <dl>:\n{body}"
+    );
+    assert!(
+        body.contains("class=\"doc-status\" data-status=\"in-progress\""),
+        "status must carry data-status for the legend:\n{body}"
+    );
+    assert!(
+        body.contains("class=\"status-swatch\""),
+        "missing leading status swatch:\n{body}"
+    );
+    assert!(
+        body.contains("class=\"doc-body\""),
+        "missing reading-column body:\n{body}"
+    );
+}
+
+#[tokio::test]
 async fn doc_page_renders_github_deep_link_when_coords_resolved() {
     use lazyspec::engine::github_url::RepoCoords;
 

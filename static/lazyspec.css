@@ -174,3 +174,233 @@ code,
     animation: none !important;
   }
 }
+
+/* ── Document page ───────────────────────────────────────────────────────── */
+
+.doc-grid {
+  display: grid;
+  grid-template-columns: var(--col-meta) var(--col-body);
+  column-gap: var(--sp-6);
+  row-gap: var(--sp-4);
+  max-width: var(--page-max);
+  margin-inline: auto;
+  padding: var(--sp-8) var(--page-pad) var(--sp-8);
+}
+
+.doc-grid > h1 {
+  grid-column: 1 / -1;
+  font-size: var(--t-display-size);
+  line-height: var(--t-display-lh);
+  letter-spacing: var(--t-display-tracking);
+  font-weight: 600;
+  padding-bottom: var(--sp-3);
+  border-bottom: var(--rule-w) solid var(--rule-strong);
+}
+
+.doc-frontmatter {
+  grid-column: 1;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--sp-3);
+  align-content: start;
+}
+
+.doc-frontmatter dt {
+  font-family: var(--font-mono);
+  font-size: var(--t-label-size);
+  line-height: var(--t-label-lh);
+  letter-spacing: var(--t-label-tracking);
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin-bottom: var(--sp-1);
+}
+
+.doc-frontmatter dd {
+  font-family: var(--font-mono);
+  font-size: var(--t-meta-size);
+  line-height: var(--t-meta-lh);
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+.doc-frontmatter dd + dt {
+  margin-top: var(--sp-2);
+}
+
+.doc-type {
+  font-family: var(--font-mono);
+}
+
+/* Status: mono label preceded by a swatch. Color is the secondary, redundant
+   axis; the label text always carries the state. */
+.doc-status {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: var(--t-label-tracking);
+}
+
+.status-swatch {
+  flex: none;
+  width: var(--sp-2);
+  height: var(--sp-2);
+  background: var(--ink-faint);
+}
+
+.doc-status[data-status="draft"] .status-swatch {
+  background: var(--st-draft);
+}
+.doc-status[data-status="review"] .status-swatch {
+  background: var(--st-review);
+}
+.doc-status[data-status="accepted"] .status-swatch {
+  background: var(--st-accepted);
+}
+.doc-status[data-status="complete"] .status-swatch {
+  background: var(--st-complete);
+}
+
+/* in-progress reads hollow (ring) against complete's solid fill, so the two
+   share a hue but stay distinct without relying on color alone. */
+.doc-status[data-status="in-progress"] .status-swatch {
+  background: transparent;
+  box-shadow: inset 0 0 0 var(--rule-w) var(--st-progress);
+}
+
+/* Terminal-dead states read without hue: struck label, faded swatch. */
+.doc-status[data-status="rejected"],
+.doc-status[data-status="superseded"] {
+  color: var(--ink-faint);
+  text-decoration: line-through;
+}
+.doc-status[data-status="rejected"] .status-swatch {
+  background: var(--st-rejected);
+  opacity: 0.6;
+}
+.doc-status[data-status="superseded"] .status-swatch {
+  background: var(--st-superseded);
+  opacity: 0.6;
+}
+
+/* Relations: mono ids, muted relation-type prefix, accent only on the link. */
+.doc-relations,
+.doc-parent,
+.doc-children {
+  font-family: var(--font-mono);
+}
+
+.relation {
+  color: var(--ink-muted);
+}
+
+.doc-children ul {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: var(--sp-1);
+}
+
+.doc-frontmatter a {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-underline-offset: 2px;
+  transition: color var(--motion-hover) var(--motion-hover-ease);
+}
+
+.doc-frontmatter a:hover {
+  color: var(--accent);
+}
+
+.doc-tags .tag {
+  font-family: var(--font-mono);
+  color: var(--ink-muted);
+}
+
+/* Reading column: capped measure, ragged-right, flat structural accents. */
+.doc-body {
+  grid-column: 2;
+  max-width: var(--measure);
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-lh);
+  text-align: left;
+  text-wrap: pretty;
+}
+
+.doc-body > * + * {
+  margin-top: var(--sp-3);
+}
+
+.doc-body h2 {
+  font-size: var(--t-h2-size);
+  line-height: var(--t-h2-lh);
+  letter-spacing: var(--t-h2-tracking);
+  font-weight: 600;
+  margin-top: var(--sp-6);
+}
+
+.doc-body h3 {
+  font-size: var(--t-h3-size);
+  line-height: var(--t-h3-lh);
+  font-weight: 600;
+  margin-top: var(--sp-4);
+}
+
+.doc-body a {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-underline-offset: 2px;
+  transition: color var(--motion-hover) var(--motion-hover-ease);
+}
+
+.doc-body a:hover {
+  color: var(--accent);
+}
+
+.doc-body code {
+  background: var(--surface-raised);
+  padding: 0 var(--sp-1);
+}
+
+.doc-body pre {
+  background: var(--surface-raised);
+  border: var(--rule-w) solid var(--rule);
+  padding: var(--sp-3);
+  overflow-x: auto;
+}
+
+.doc-body pre code {
+  background: none;
+  padding: 0;
+}
+
+.doc-body blockquote {
+  border-left: var(--rule-w) solid var(--rule-strong);
+  padding-left: var(--sp-3);
+  color: var(--ink-muted);
+}
+
+.doc-body ul,
+.doc-body ol {
+  padding-left: var(--sp-4);
+}
+
+@media (max-width: 768px) {
+  .doc-grid {
+    grid-template-columns: 1fr;
+    padding-top: var(--sp-6);
+  }
+
+  .doc-grid > h1,
+  .doc-frontmatter,
+  .doc-body {
+    grid-column: 1;
+  }
+
+  .doc-frontmatter {
+    padding-bottom: var(--sp-4);
+    border-bottom: var(--rule-w) solid var(--rule);
+  }
+}

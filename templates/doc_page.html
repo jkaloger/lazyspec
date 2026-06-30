@@ -9,12 +9,12 @@
 </head>
 <body>
 <a href="/">&larr; all documents</a>
-<header class="doc-frontmatter" data-id="{{ id }}">
+<main class="doc-grid" data-id="{{ id }}">
 <h1>{{ title }}</h1>
-<dl>
+<dl class="doc-frontmatter">
 <dt>id</dt><dd class="doc-id">{{ id }}</dd>
 <dt>type</dt><dd class="doc-type">{{ doc_type }}</dd>
-<dt>status</dt><dd class="doc-status">{{ status }}</dd>
+<dt>status</dt><dd class="doc-status" data-status="{{ status }}"><span class="status-swatch"></span>{{ status }}</dd>
 <dt>author</dt><dd class="doc-author">{{ author }}</dd>
 <dt>date</dt><dd class="doc-date">{{ date }}</dd>
 {% if !tags.is_empty() %}<dt>tags</dt><dd class="doc-tags">{% for tag in tags %}<span class="tag">{{ tag }}</span>{% if !loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
@@ -23,9 +23,9 @@
 {% if !children.is_empty() %}<dt>children</dt><dd class="doc-children"><ul>{% for child in children %}<li><a href="/doc/{{ child.id }}">{{ child.title }}</a></li>{% endfor %}</ul></dd>{% endif %}
 {% match github_url %}{% when Some with (url) %}<dt>github</dt><dd class="doc-github"><a class="edit-on-github" href="{{ url }}">edit on GitHub</a></dd>{% when None %}{% endmatch %}
 </dl>
-</header>
 <article class="doc-body">
 {{ body_html|safe }}
 </article>
+</main>
 </body>
 </html>
