@@ -2,8 +2,10 @@
 <p class="sidebar-label">View</p>
 <a class="nav-item{% if sidebar.view == "list" %} is-active{% endif %}" href="/"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M9 6l11 0" /><path d="M9 12l11 0" /><path d="M9 18l11 0" /><path d="M5 6l0 .01" /><path d="M5 12l0 .01" /><path d="M5 18l0 .01" /></svg><span class="nav-label">List</span></a>
 <a class="nav-item{% if sidebar.view == "graph" %} is-active{% endif %}" href="/graph"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M5 17a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M15 17a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M10 5a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M12 7v4" /><path d="M6 15l5 -2" /><path d="M18 15l-5 -2" /></svg><span class="nav-label">Graph</span></a>
-{% if !sidebar.filters.is_empty() %}<p class="sidebar-label">Filter</p>
-{% for e in sidebar.filters %}<a class="nav-item{% if e.active %} is-active{% endif %}" href="{{ e.href }}"><span class="nav-glyph" aria-hidden="true">{{ e.glyph }}</span><span class="nav-label">{{ e.label }}</span></a>
+{% if !sidebar.types.is_empty() %}<p class="sidebar-label">Filter</p>
+{% for e in sidebar.types %}<a class="nav-item{% if e.active %} is-active{% endif %}" href="{{ e.href }}"><span class="nav-glyph" aria-hidden="true">{{ e.glyph }}</span><span class="nav-label">{{ e.label }}</span></a>
+{% endfor %}{% endif %}{% if !sidebar.tags.is_empty() %}<div class="sidebar-divider" aria-hidden="true"></div><p class="sidebar-label">Tags</p>
+{% for e in sidebar.tags %}<a class="nav-item nav-tag{% if e.active %} is-active{% endif %}" href="{{ e.href }}" style="--nav-tag-color: var(--tag-h{{ e.hue }})"><span class="nav-label">{{ e.label }}</span></a>
 {% endfor %}{% endif %}
 <button class="sidebar-toggle" type="button" data-sidebar-toggle aria-expanded="true" aria-label="Collapse sidebar"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M15 6l-6 6l6 6" /></svg></button>
 </nav>

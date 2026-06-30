@@ -138,13 +138,14 @@ fn doc_tags(store: &Store) -> Vec<String> {
 /// `active_tag`, graph view from `active_pivot` (`type:{t}` / `tag:{t}`).
 fn build_sidebar(
     store: &Store,
+    config: &crate::engine::config::Config,
     view: &str,
     active_type: Option<&str>,
     active_tag: Option<&str>,
     active_pivot: Option<&str>,
 ) -> Sidebar {
     let list_view = view == "list";
-    let mut filters = Vec::new();
+    let mut types = Vec::new();
     for t in doc_types(store) {
         let (href, active) = if list_view {
             (format!("/?type={t}"), active_type == Some(t.as_str()))
@@ -155,19 +156,29 @@ fn build_sidebar(
                 active_pivot == Some(value.as_str()),
             )
         };
-        let glyph = t
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_default();
-        filters.push(SidebarEntry {
+        // The collapsed-rail badge is the type's configured icon; fall back to
+        // the uppercased first character for types with no icon set.
+        let glyph = config
+            .documents
+            .types
+            .iter()
+            .find(|d| d.name == t)
+            .and_then(|d| d.icon.clone())
+            .unwrap_or_else(|| {
+                t.chars()
+                    .next()
+                    .map(|c| c.to_uppercase().to_string())
+                    .unwrap_or_default()
+            });
+        types.push(SidebarEntry {
             label: t,
             href,
             active,
-            kind: "type".to_string(),
             glyph,
+            hue: 0,
         });
     }
+    let mut tags = Vec::new();
     for tag in doc_tags(store) {
         let (href, active) = if list_view {
             (format!("/?tag={tag}"), active_tag == Some(tag.as_str()))
@@ -178,22 +189,19 @@ fn build_sidebar(
                 active_pivot == Some(value.as_str()),
             )
         };
-        let glyph = tag
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_default();
-        filters.push(SidebarEntry {
+        let hue = tag_hue(&tag);
+        tags.push(SidebarEntry {
             label: tag,
             href,
             active,
-            kind: "tag".to_string(),
-            glyph,
+            glyph: String::new(),
+            hue,
         });
     }
     Sidebar {
         view: view.to_string(),
-        filters,
+        types,
+        tags,
     }
 }
 
@@ -225,6 +233,7 @@ pub async fn list_page(
         list,
         sidebar: build_sidebar(
             &store,
+            &state.config,
             "list",
             active_type.as_deref(),
             active_tag.as_deref(),
@@ -308,7 +317,7 @@ pub async fn graph(State(state): State<AppState>, Query(query): Query<GraphQuery
     Html(
         GraphPage {
             roots,
-            sidebar: build_sidebar(&store, "graph", None, None, pivot.as_deref()),
+            sidebar: build_sidebar(&store, &state.config, "graph", None, None, pivot.as_deref()),
             repo_name: state.repo_name.clone(),
             branch: state.branch.clone(),
         }
@@ -352,7 +361,7 @@ pub async fn doc_page(State(state): State<AppState>, AxumPath(id): AxumPath<Stri
     let context = resolve_chain(&store, &doc.id, 1).ok();
 
     let mut page = DocPage::from_doc(doc, &store, body_html, github_url, context.as_ref());
-    page.sidebar = build_sidebar(&store, "list", None, None, None);
+    page.sidebar = build_sidebar(&store, &state.config, "list", None, None, None);
     page.repo_name = state.repo_name.clone();
     page.branch = state.branch.clone();
     Html(page.render().unwrap_or_default()).into_response()

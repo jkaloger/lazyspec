@@ -1,7 +1,7 @@
 ---
 title: 'Web view: information architecture, categorical tag color, responsive app chrome'
 type: story
-status: draft
+status: complete
 author: jkaloger
 date: 2026-07-01
 tags: []

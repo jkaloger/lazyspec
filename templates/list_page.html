@@ -23,13 +23,6 @@
       {% endfor %}
     </select>
   </label>
-  <label>tag
-    <select name="tag">
-      <option value="">all</option>
-      {% for t in tags %}<option value="{{ t.value }}">{{ t.value }}</option>
-      {% endfor %}
-    </select>
-  </label>
 </form>
 <div id="doc-list">
 {{ list|safe }}

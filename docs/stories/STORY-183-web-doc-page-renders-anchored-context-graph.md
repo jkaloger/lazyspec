@@ -1,13 +1,15 @@
 ---
 title: Web doc page renders anchored context graph
 type: story
-status: in-progress
+status: review
 author: unknown
 date: 2026-07-01
 tags: []
 related:
-- implements: RFC-052
----## Value
+  - implements: RFC-052
+---
+
+## Value
 
 As a non-technical reviewer reading a doc in the web view, I want to see every
 document in that doc's context -- what it implements/targets, what implements or
@@ -18,7 +20,7 @@ directions without a terminal.
 
 RFC-052 specifies the per-document web page (STORY-177: frontmatter + body +
 `@ref`) and a global `/graph` tree (STORY-179). Neither renders the context
-*around a single doc* on its own page. This story adds that: `GET /doc/{id}`
+_around a single doc_ on its own page. This story adds that: `GET /doc/{id}`
 shows every document in the doc's anchored context -- chain ancestors, chain
 descendants, and related-to peers -- by reusing
 `engine::context::resolve_chain(store, id, depth)`, the same per-doc resolver
@@ -57,12 +59,15 @@ related. Depends on STORY-177 (the doc page).
 ## Scope
 
 ### In Scope
+
 - Per-doc context resolution on the doc page via `resolve_chain`.
 - Context section template + entry links grouped by direction (ancestors,
   descendants, related).
 
 ### Out of Scope
+
 - The global `/graph` page (STORY-179).
 - Any write/edit affordance (out of RFC-052 entirely).
 - New engine traversal logic -- `resolve_chain` already resolves all three
   directions.
+

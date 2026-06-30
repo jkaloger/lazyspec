@@ -46,8 +46,12 @@
   --tag-h6: #487e99; /* cyan-slate */
   --tag-h7: #484b99; /* blue-indigo */
 
-  --font-sans: "Archivo", "Helvetica Neue", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --font-sans:
+    "Archivo", "Helvetica Neue", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    system-ui, sans-serif;
+  --font-mono:
+    "IBM Plex Mono", ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas,
+    monospace;
 
   --t-display-size: 28px;
   --t-display-lh: 1.15;
@@ -837,7 +841,7 @@ ul.search-results .doc-tags {
 }
 
 .search-trigger {
-  margin-inline: auto;
+  margin-left: auto;
   display: inline-flex;
   align-items: center;
   gap: var(--sp-1);
@@ -902,6 +906,20 @@ ul.search-results .doc-tags {
   color: var(--accent);
 }
 
+.app-sidebar .nav-tag {
+  color: var(--nav-tag-color);
+}
+
+.app-sidebar .nav-tag:hover {
+  color: var(--accent);
+}
+
+.sidebar-divider {
+  height: var(--rule-w);
+  margin: var(--sp-2) var(--sp-3);
+  background: var(--rule);
+}
+
 .nav-icon {
   width: var(--icon-size);
   height: var(--icon-size);
@@ -952,6 +970,13 @@ body[data-sidebar="collapsed"] .app-sidebar .nav-item,
 html[data-sidebar-init="collapsed"] .app-sidebar .nav-item {
   justify-content: center;
   padding-inline: 0;
+}
+
+body[data-sidebar="collapsed"] .nav-tag,
+body[data-sidebar="collapsed"] .sidebar-divider,
+html[data-sidebar-init="collapsed"] .nav-tag,
+html[data-sidebar-init="collapsed"] .sidebar-divider {
+  display: none;
 }
 
 .drawer-toggle {
@@ -1014,14 +1039,30 @@ a.tag:hover {
 }
 
 /* Categorical hue per tag; a.tag:hover outranks these on specificity, so hover stays accent. */
-.tag--h0 { color: var(--tag-h0); }
-.tag--h1 { color: var(--tag-h1); }
-.tag--h2 { color: var(--tag-h2); }
-.tag--h3 { color: var(--tag-h3); }
-.tag--h4 { color: var(--tag-h4); }
-.tag--h5 { color: var(--tag-h5); }
-.tag--h6 { color: var(--tag-h6); }
-.tag--h7 { color: var(--tag-h7); }
+.tag--h0 {
+  color: var(--tag-h0);
+}
+.tag--h1 {
+  color: var(--tag-h1);
+}
+.tag--h2 {
+  color: var(--tag-h2);
+}
+.tag--h3 {
+  color: var(--tag-h3);
+}
+.tag--h4 {
+  color: var(--tag-h4);
+}
+.tag--h5 {
+  color: var(--tag-h5);
+}
+.tag--h6 {
+  color: var(--tag-h6);
+}
+.tag--h7 {
+  color: var(--tag-h7);
+}
 
 .search-modal {
   position: fixed;
@@ -1046,7 +1087,7 @@ a.tag:hover {
   position: relative;
   z-index: 1;
   margin-top: 12vh;
-  width: 560px;
+  width: 1024px;
   max-width: 90%;
   padding: var(--sp-3);
   border: var(--rule-w) solid var(--rule);
@@ -1141,4 +1182,3 @@ a.tag:hover {
     width: 92%;
   }
 }
-

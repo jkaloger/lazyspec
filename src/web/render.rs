@@ -51,23 +51,25 @@ pub struct FilterOption {
 }
 
 /// One entry in the sidebar's Filter section: a type or tag, with a view-aware
-/// href and active state. `kind` is `type` or `tag`.
+/// href and active state.
 pub struct SidebarEntry {
     pub label: String,
     pub href: String,
     pub active: bool,
-    pub kind: String,
-    /// Uppercased first character of `label`, used as the collapsed-rail badge
-    /// for entries (arbitrary types/tags) that have no icon.
+    /// The collapsed-rail badge: the type's configured icon for type entries,
+    /// the uppercased first character otherwise.
     pub glyph: String,
+    /// Categorical hue (`0..TAG_HUES`) for tag entries; unused for types.
+    pub hue: u8,
 }
 
 /// The unified left sidebar: a View section (List/Graph, active driven by
-/// `view`) and a Filter section (`filters`, types then tags). `view` is
-/// `list` or `graph`.
+/// `view`), a type filter section (`types`), and a tag filter section (`tags`).
+/// `view` is `list` or `graph`.
 pub struct Sidebar {
     pub view: String,
-    pub filters: Vec<SidebarEntry>,
+    pub types: Vec<SidebarEntry>,
+    pub tags: Vec<SidebarEntry>,
 }
 
 /// The full document-list page: filter controls plus the (server-rendered)
@@ -246,7 +248,8 @@ impl DocPage {
             github_url,
             sidebar: Sidebar {
                 view: String::new(),
-                filters: Vec::new(),
+                types: Vec::new(),
+                tags: Vec::new(),
             },
             repo_name: String::new(),
             branch: None,
