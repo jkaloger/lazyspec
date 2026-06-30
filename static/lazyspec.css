@@ -82,6 +82,8 @@
   --motion-swap-ease: ease-out;
   --motion-hover: 80ms;
   --motion-hover-ease: linear;
+
+  color-scheme: light dark;
 }
 
 /* Dark status hues reuse light values; per-mode contrast tuning is deferred to a later contrast pass. */
@@ -143,6 +145,8 @@
 
 html {
   -webkit-text-size-adjust: 100%;
+  min-height: 100%;
+  background: var(--surface);
 }
 
 body {
@@ -436,8 +440,8 @@ body > h1 {
    ring. It sits on the raised surface to lift it a hair off the page. */
 input[type="search"] {
   display: block;
-  max-width: var(--page-max);
-  width: 100%;
+  width: calc(100% - 2 * var(--page-pad));
+  max-width: calc(var(--page-max) - 2 * var(--page-pad));
   margin-inline: auto;
   margin-top: var(--sp-4);
   padding: var(--sp-2) var(--sp-3);

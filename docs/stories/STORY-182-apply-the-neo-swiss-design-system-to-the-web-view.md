@@ -6,8 +6,12 @@ author: unknown
 date: 2026-06-30
 tags: []
 related:
-- implements: RFC-053
----<\!-- intent: one thin slice of user-observable value, testable -->
+  - implements: RFC-053
+---
+
+<\!-- intent: one thin slice of user-observable value, testable -->
+
+test
 
 ## Story
 
