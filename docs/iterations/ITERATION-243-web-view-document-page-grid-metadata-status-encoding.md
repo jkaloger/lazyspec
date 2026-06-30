@@ -1,7 +1,7 @@
 ---
 title: 'Web view document page: grid, metadata, status encoding'
 type: iteration
-status: in-progress
+status: complete
 author: unknown
 date: 2026-06-30
 tags: []
