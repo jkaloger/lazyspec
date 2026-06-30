@@ -18,7 +18,7 @@ use crate::engine::graph::{flatten_forest, GraphSort};
 use crate::engine::store::{Filter, Store};
 use crate::web::render::{
     markdown_to_html, tag_hue, DocGroup, DocPage, DocRow, FilterOption, GraphPage, GraphTreeNode,
-    ListFragment, ListPage, NotFoundPage, PivotRow, SearchFragment, TagChip,
+    ListFragment, ListPage, NotFoundPage, SearchFragment, Sidebar, SidebarEntry, TagChip,
 };
 use crate::web::server::AppState;
 
@@ -131,6 +131,60 @@ fn doc_tags(store: &Store) -> Vec<String> {
     set.into_iter().collect()
 }
 
+/// Build the unified sidebar's Filter section. Each type then each tag becomes
+/// an entry whose href is list-form (`/?type=`/`/?tag=`) when `view == "list"`
+/// and graph-pivot-form (`/graph?pivot=type:`/`/graph?pivot=tag:`) otherwise.
+/// Active is computed from the relevant param: list view from `active_type`/
+/// `active_tag`, graph view from `active_pivot` (`type:{t}` / `tag:{t}`).
+fn build_sidebar(
+    store: &Store,
+    view: &str,
+    active_type: Option<&str>,
+    active_tag: Option<&str>,
+    active_pivot: Option<&str>,
+) -> Sidebar {
+    let list_view = view == "list";
+    let mut filters = Vec::new();
+    for t in doc_types(store) {
+        let (href, active) = if list_view {
+            (format!("/?type={t}"), active_type == Some(t.as_str()))
+        } else {
+            let value = format!("type:{t}");
+            (
+                format!("/graph?pivot={value}"),
+                active_pivot == Some(value.as_str()),
+            )
+        };
+        filters.push(SidebarEntry {
+            label: t,
+            href,
+            active,
+            kind: "type".to_string(),
+        });
+    }
+    for tag in doc_tags(store) {
+        let (href, active) = if list_view {
+            (format!("/?tag={tag}"), active_tag == Some(tag.as_str()))
+        } else {
+            let value = format!("tag:{tag}");
+            (
+                format!("/graph?pivot={value}"),
+                active_pivot == Some(value.as_str()),
+            )
+        };
+        filters.push(SidebarEntry {
+            label: tag,
+            href,
+            active,
+            kind: "tag".to_string(),
+        });
+    }
+    Sidebar {
+        view: view.to_string(),
+        filters,
+    }
+}
+
 /// Build the [`Filter`] from list query params, treating empty strings as absent.
 fn filter_from_query(query: ListQuery) -> Filter {
     Filter {
@@ -147,6 +201,8 @@ pub async fn list_page(
     Query(query): Query<ListQuery>,
 ) -> Html<String> {
     let store = state.store;
+    let active_type = empty_to_none(query.r#type.clone());
+    let active_tag = empty_to_none(query.tag.clone());
     let filter = filter_from_query(query);
     let groups = build_groups(&store, &filter);
     let list = ListFragment { groups }.render_string();
@@ -155,7 +211,13 @@ pub async fn list_page(
         statuses,
         tags,
         list,
-        types: doc_types(&store),
+        sidebar: build_sidebar(
+            &store,
+            "list",
+            active_type.as_deref(),
+            active_tag.as_deref(),
+            None,
+        ),
         repo_name: state.repo_name.clone(),
         branch: state.branch.clone(),
     };
@@ -231,39 +293,10 @@ pub async fn graph(State(state): State<AppState>, Query(query): Query<GraphQuery
     let flat = flatten_forest(&forest, &store, &GraphSort::default());
     let roots = GraphTreeNode::nest(&flat);
 
-    // Pivot rows in the TUI's flat order: All, then each doc-type, then each tag.
-    // The row whose href-pivot matches the current selection is marked active.
-    let active = pivot.as_deref();
-    let mut pivots = vec![PivotRow {
-        label: "All".to_string(),
-        href: "/graph".to_string(),
-        active: active.is_none(),
-        kind: "all".to_string(),
-    }];
-    for t in doc_types(&store) {
-        let value = format!("type:{t}");
-        pivots.push(PivotRow {
-            active: active == Some(value.as_str()),
-            href: format!("/graph?pivot={value}"),
-            label: t,
-            kind: "type".to_string(),
-        });
-    }
-    for tag in doc_tags(&store) {
-        let value = format!("tag:{tag}");
-        pivots.push(PivotRow {
-            active: active == Some(value.as_str()),
-            href: format!("/graph?pivot={value}"),
-            label: tag,
-            kind: "tag".to_string(),
-        });
-    }
-
     Html(
         GraphPage {
             roots,
-            pivots,
-            types: doc_types(&store),
+            sidebar: build_sidebar(&store, "graph", None, None, pivot.as_deref()),
             repo_name: state.repo_name.clone(),
             branch: state.branch.clone(),
         }
@@ -307,7 +340,7 @@ pub async fn doc_page(State(state): State<AppState>, AxumPath(id): AxumPath<Stri
     let context = resolve_chain(&store, &doc.id, 1).ok();
 
     let mut page = DocPage::from_doc(doc, &store, body_html, github_url, context.as_ref());
-    page.types = doc_types(&store);
+    page.sidebar = build_sidebar(&store, "list", None, None, None);
     page.repo_name = state.repo_name.clone();
     page.branch = state.branch.clone();
     Html(page.render().unwrap_or_default()).into_response()

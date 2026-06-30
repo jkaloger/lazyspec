@@ -50,6 +50,23 @@ pub struct FilterOption {
     pub value: String,
 }
 
+/// One entry in the sidebar's Filter section: a type or tag, with a view-aware
+/// href and active state. `kind` is `type` or `tag`.
+pub struct SidebarEntry {
+    pub label: String,
+    pub href: String,
+    pub active: bool,
+    pub kind: String,
+}
+
+/// The unified left sidebar: a View section (List/Graph, active driven by
+/// `view`) and a Filter section (`filters`, types then tags). `view` is
+/// `list` or `graph`.
+pub struct Sidebar {
+    pub view: String,
+    pub filters: Vec<SidebarEntry>,
+}
+
 /// The full document-list page: filter controls plus the (server-rendered)
 /// initial list fragment. htmx swaps `#doc-list` in place on filter changes.
 #[derive(Template)]
@@ -58,8 +75,7 @@ pub struct ListPage {
     pub statuses: Vec<FilterOption>,
     pub tags: Vec<FilterOption>,
     pub list: String,
-    /// Distinct doc-types for the sidebar type links.
-    pub types: Vec<String>,
+    pub sidebar: Sidebar,
     pub repo_name: String,
     pub branch: Option<String>,
 }
@@ -138,7 +154,7 @@ pub struct DocPage {
     /// resolved (unresolvable coords, or a backend with no stable URL).
     pub github_url: Option<String>,
     /// Shell fields, set by the route after `from_doc`.
-    pub types: Vec<String>,
+    pub sidebar: Sidebar,
     pub repo_name: String,
     pub branch: Option<String>,
 }
@@ -225,7 +241,10 @@ impl DocPage {
             related,
             body_html,
             github_url,
-            types: Vec::new(),
+            sidebar: Sidebar {
+                view: String::new(),
+                filters: Vec::new(),
+            },
             repo_name: String::new(),
             branch: None,
         }
@@ -308,27 +327,15 @@ impl GraphTreeNode {
     }
 }
 
-/// One row in the graph pivot picker: a label, the `/graph?pivot=...` href that
-/// selects it, whether it is the current selection, and its `kind`
-/// (`all`/`type`/`tag`) for any per-kind styling. Mirrors the TUI `GraphAnchor`.
-pub struct PivotRow {
-    pub label: String,
-    pub href: String,
-    pub active: bool,
-    pub kind: String,
-}
-
 /// The `/graph` page: the relationship forest rendered as a topologically-sorted
 /// nested `<ul>` tree, ordered by `GraphSort::default()` (RFC-052 / STORY-179).
-/// The left pivot picker re-roots the forest (parity with the TUI pivot panel).
+/// The sidebar's Filter section re-roots the forest (parity with the TUI pivot
+/// panel).
 #[derive(Template)]
 #[template(path = "graph_page.html")]
 pub struct GraphPage {
     pub roots: Vec<GraphTreeNode>,
-    /// Pivot picker rows in TUI flat order: All, types…, tags…
-    pub pivots: Vec<PivotRow>,
-    /// Distinct doc-types for the sidebar type links.
-    pub types: Vec<String>,
+    pub sidebar: Sidebar,
     pub repo_name: String,
     pub branch: Option<String>,
 }

@@ -15,18 +15,11 @@
 <main>
 <a class="back-link" href="/">&larr; all documents</a>
 <h1>lazyspec graph</h1>
-<div class="graph-layout">
-<nav class="graph-pivot" aria-label="Pivot">
-{% for row in pivots %}<a class="graph-pivot-row{% if row.active %} is-active{% endif %}" href="{{ row.href }}" data-pivot-kind="{{ row.kind }}"{% if row.active %} data-active="true" aria-current="true"{% endif %}>{{ row.label }}</a>
-{% endfor %}</nav>
-<div class="graph-tree-pane">
 {% if roots.is_empty() %}<p class="graph-empty">No documents.</p>{% else %}
 <ul class="graph-tree">
 {% for node in roots %}{{ node.render().unwrap()|safe }}{% endfor %}
 </ul>
 {% endif %}
-</div>
-</div>
 </main>
 </div>
 {% include "_search_modal.html" %}

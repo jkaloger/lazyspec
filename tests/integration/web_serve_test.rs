@@ -632,20 +632,18 @@ async fn graph_pivot_picker_lists_all_plus_types_and_tags() {
     let (status, body) = get(store(&fixture), "/graph").await;
 
     assert_eq!(status, StatusCode::OK);
-    // The All row points back at the bare graph route.
+    // The View section offers the Graph link in place of the old All pivot row.
     assert!(
         body.contains("href=\"/graph\""),
-        "pivot picker must offer an All row:\n{body}"
+        "sidebar must offer a Graph view link:\n{body}"
     );
-    // At least one doc-type pivot.
     assert!(
         body.contains("href=\"/graph?pivot=type:rfc\""),
-        "pivot picker must offer a type row:\n{body}"
+        "sidebar filter section must offer a type pivot:\n{body}"
     );
-    // At least one tag pivot.
     assert!(
         body.contains("href=\"/graph?pivot=tag:alpha\""),
-        "pivot picker must offer a tag row:\n{body}"
+        "sidebar filter section must offer a tag pivot:\n{body}"
     );
 }
 
@@ -696,20 +694,84 @@ async fn graph_pivot_tag_reroots_on_tagged_docs() {
 async fn graph_pivot_marks_active_row() {
     let fixture = pivot_fixture();
 
-    // Default view: the All row is active.
+    // Default view: no filter entry is active, but the View section marks Graph.
     let (_s, body) = get(store(&fixture), "/graph").await;
     assert!(
-        body.contains("class=\"graph-pivot-row is-active\" href=\"/graph\""),
-        "All row must be active on the default graph view:\n{body}"
+        body.contains("class=\"nav-item is-active\" href=\"/graph\""),
+        "Graph view link must be active on the default graph view:\n{body}"
     );
 
-    // Anchored view: the matching type row is active, carrying the marker.
+    // Anchored view: the matching filter entry is active.
     let (_s, body) = get(store(&fixture), "/graph?pivot=type:rfc").await;
     assert!(
-        body.contains(
-            "href=\"/graph?pivot=type:rfc\" data-pivot-kind=\"type\" data-active=\"true\""
-        ),
-        "the selected pivot row must carry the active marker:\n{body}"
+        body.contains("class=\"nav-item is-active\" href=\"/graph?pivot=type:rfc\""),
+        "the selected pivot filter must carry the active marker:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn graph_has_no_second_pivot_rail_and_one_sidebar() {
+    let fixture = pivot_fixture();
+    let (status, body) = get(store(&fixture), "/graph").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !body.contains("graph-pivot"),
+        "graph page must not render the old second pivot rail:\n{body}"
+    );
+    assert_eq!(
+        body.matches("class=\"app-sidebar\"").count(),
+        1,
+        "exactly one sidebar must be present:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn list_filter_entry_uses_list_href_graph_uses_pivot_href() {
+    let fixture = pivot_fixture();
+    let (_s, list) = get(store(&fixture), "/").await;
+    assert!(
+        list.contains("href=\"/?type=rfc\""),
+        "list view type filter must use list href:\n{list}"
+    );
+    let (_s, graph) = get(store(&fixture), "/graph").await;
+    assert!(
+        graph.contains("href=\"/graph?pivot=type:rfc\""),
+        "graph view same entry must use pivot href:\n{graph}"
+    );
+}
+
+#[tokio::test]
+async fn list_active_filter_matches_query_param() {
+    let fixture = pivot_fixture();
+    let (_s, body) = get(store(&fixture), "/?type=rfc").await;
+    assert!(
+        body.contains("class=\"nav-item is-active\" href=\"/?type=rfc\""),
+        "the active type filter must be marked is-active:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn view_section_marks_list_active_on_root_and_graph_active_on_graph() {
+    let fixture = pivot_fixture();
+    let (_s, root) = get(store(&fixture), "/").await;
+    assert!(
+        root.contains("class=\"nav-item is-active\" href=\"/\""),
+        "List must be active on /:\n{root}"
+    );
+    let (_s, graph) = get(store(&fixture), "/graph").await;
+    assert!(
+        graph.contains("class=\"nav-item is-active\" href=\"/graph\""),
+        "Graph must be active on /graph:\n{graph}"
+    );
+}
+
+#[tokio::test]
+async fn pages_emit_sticky_app_header_markup() {
+    let fixture = pivot_fixture();
+    let (_s, body) = get(store(&fixture), "/").await;
+    assert!(
+        body.contains("app-header"),
+        "header markup must carry app-header:\n{body}"
     );
 }
 

@@ -1,6 +1,8 @@
 <nav class="app-sidebar">
-<a class="nav-item" href="/">All documents</a>
-<a class="nav-item" href="/graph">Graph</a>
-{% for t in types %}<a class="nav-item" href="/?type={{ t }}">{{ t }}</a>
-{% endfor %}
+<p class="sidebar-label">View</p>
+<a class="nav-item{% if sidebar.view == "list" %} is-active{% endif %}" href="/">List</a>
+<a class="nav-item{% if sidebar.view == "graph" %} is-active{% endif %}" href="/graph">Graph</a>
+{% if !sidebar.filters.is_empty() %}<p class="sidebar-label">Filter</p>
+{% for e in sidebar.filters %}<a class="nav-item{% if e.active %} is-active{% endif %}" href="{{ e.href }}">{{ e.label }}</a>
+{% endfor %}{% endif %}
 </nav>

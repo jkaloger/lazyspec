@@ -1,7 +1,7 @@
 ---
 title: 'Single-sidebar IA: view plus shared filter/pivot, sticky header, remove graph rail'
 type: iteration
-status: draft
+status: complete
 author: jkaloger
 date: 2026-07-01
 tags: []
