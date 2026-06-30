@@ -950,6 +950,104 @@ async fn doc_page_tags_are_filter_links() {
     );
 }
 
+// --- GET /doc/{id}: anchored context graph (STORY-183 / ITERATION-248) --------
+
+/// Extract the inner markup of the `<section class="doc-context" ...>` block, or
+/// `None` when the page has no Context section. Used to scope group/order asserts
+/// to the context band (so a body mention of an id never trips a context assert).
+fn context_section(body: &str) -> Option<String> {
+    let start = body.find("<section class=\"doc-context\"")?;
+    let rest = &body[start..];
+    let end = rest
+        .find("</section>")
+        .expect("context section must be closed")
+        + "</section>".len();
+    Some(rest[..end].to_string())
+}
+
+/// A doc that both implements a parent (chain ancestor) and is implemented-by a
+/// child (chain descendant), plus a related-to peer, surfaces all three in the
+/// right groups -- matching `lazyspec context <id>`.
+#[tokio::test]
+async fn doc_page_renders_context_in_three_groups() {
+    let fixture = TestFixture::new();
+    // RFC-001 (parent) <- STORY-001 (target) <- ITERATION-001 (child). STORY-001
+    // is also related-to RFC-002 (a peer).
+    fixture.write_rfc("RFC-001-parent.md", "Parent RFC", "accepted");
+    fixture.write_rfc("RFC-002-peer.md", "Peer RFC", "draft");
+    fixture.write_doc(
+        "docs/stories/STORY-001-target.md",
+        "---\ntitle: \"Target story\"\ntype: story\nstatus: in-progress\nauthor: \"t\"\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: RFC-001\n- related-to: RFC-002\n---\n\nbody\n",
+    );
+    fixture.write_iteration(
+        "ITERATION-001-child.md",
+        "Child iter",
+        "draft",
+        Some("STORY-001"),
+    );
+
+    let (status, body) = get(store(&fixture), "/doc/STORY-001").await;
+
+    assert_eq!(status, StatusCode::OK);
+    let ctx = context_section(&body).expect("expected a Context section:\n");
+
+    // Ancestor (parent), descendant (child), and related peer each appear, each
+    // linking to its /doc page, scoped to their direction group.
+    let ancestors = group_block(&ctx, "ancestors");
+    let descendants = group_block(&ctx, "descendants");
+    let related = group_block(&ctx, "related");
+
+    assert!(
+        ancestors.contains("/doc/RFC-001"),
+        "parent must be an ancestor:\n{ctx}"
+    );
+    assert!(
+        descendants.contains("/doc/ITERATION-001"),
+        "child must be a descendant:\n{ctx}"
+    );
+    assert!(
+        related.contains("/doc/RFC-002"),
+        "peer must be related:\n{ctx}"
+    );
+
+    // Cross-group leakage guard: the child is not an ancestor, the parent not a
+    // descendant.
+    assert!(
+        !ancestors.contains("/doc/ITERATION-001"),
+        "child must not appear under ancestors:\n{ctx}"
+    );
+    assert!(
+        !descendants.contains("/doc/RFC-001"),
+        "parent must not appear under descendants:\n{ctx}"
+    );
+}
+
+/// Extract the inner markup of one `data-direction="..."` context group.
+fn group_block(ctx: &str, direction: &str) -> String {
+    let needle = format!("data-direction=\"{direction}\"");
+    let start = ctx
+        .find(&needle)
+        .unwrap_or_else(|| panic!("no {direction} group in:\n{ctx}"));
+    let rest = &ctx[start..];
+    let end = rest.find("</div>").expect("group must be closed") + "</div>".len();
+    rest[..end].to_string()
+}
+
+/// A doc with no relations renders cleanly: a 200, and no Context section at all.
+#[tokio::test]
+async fn doc_page_with_no_relations_omits_context_section() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-lonely.md", "Lonely RFC", "draft");
+
+    let (status, body) = get(store(&fixture), "/doc/RFC-001").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        context_section(&body).is_none(),
+        "a relation-less doc must render no Context section:\n{body}"
+    );
+}
+
 /// The doc/graph back-link carries the styled `back-link` class.
 #[tokio::test]
 async fn back_link_is_styled() {

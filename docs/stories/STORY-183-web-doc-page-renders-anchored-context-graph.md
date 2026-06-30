@@ -1,7 +1,7 @@
 ---
 title: Web doc page renders anchored context graph
 type: story
-status: accepted
+status: in-progress
 author: unknown
 date: 2026-07-01
 tags: []

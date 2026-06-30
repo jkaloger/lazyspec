@@ -10,7 +10,7 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 
-use crate::engine::context::{resolve_forest, resolve_forest_by_tag};
+use crate::engine::context::{resolve_chain, resolve_forest, resolve_forest_by_tag};
 use crate::engine::document::{DocType, Status};
 use crate::engine::fs::RealFileSystem;
 use crate::engine::github_url::github_url;
@@ -283,7 +283,13 @@ pub async fn doc_page(State(state): State<AppState>, AxumPath(id): AxumPath<Stri
         github_url(doc, coords, &state.config, &state.issue_map, None, None).map(|u| u.0)
     });
 
-    let mut page = DocPage::from_doc(doc, &store, body_html, github_url);
+    // The anchored context (chain ancestors, chain descendants, related peers),
+    // depth 1 to match `lazyspec context`'s default. Resolution failure (the
+    // unknown-id case already 404'd above) degrades to no Context section rather
+    // than a 500.
+    let context = resolve_chain(&store, &doc.id, 1).ok();
+
+    let mut page = DocPage::from_doc(doc, &store, body_html, github_url, context.as_ref());
     page.types = doc_types(&store);
     page.repo_name = state.repo_name.clone();
     page.branch = state.branch.clone();

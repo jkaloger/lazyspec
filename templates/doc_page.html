@@ -31,6 +31,29 @@
 <article class="doc-body">
 {{ body_html|safe }}
 </article>
+{% if !ancestors.is_empty() || !descendants.is_empty() || !related.is_empty() %}
+<section class="doc-context" aria-label="context">
+<h2>context</h2>
+{% if !ancestors.is_empty() %}
+<div class="context-group" data-direction="ancestors">
+<span class="context-label">implements</span>
+<ul>{% for e in ancestors %}<li class="context-entry"><a href="/doc/{{ e.id }}">{{ e.id }}</a> <span class="context-type">{{ e.doc_type }}</span> <span class="context-status" data-status="{{ e.status }}"><span class="status-swatch"></span>{{ e.status }}</span> <span class="context-title">{{ e.title }}</span></li>{% endfor %}</ul>
+</div>
+{% endif %}
+{% if !descendants.is_empty() %}
+<div class="context-group" data-direction="descendants">
+<span class="context-label">implemented by</span>
+<ul>{% for e in descendants %}<li class="context-entry"><a href="/doc/{{ e.id }}">{{ e.id }}</a> <span class="context-type">{{ e.doc_type }}</span> <span class="context-status" data-status="{{ e.status }}"><span class="status-swatch"></span>{{ e.status }}</span> <span class="context-title">{{ e.title }}</span></li>{% endfor %}</ul>
+</div>
+{% endif %}
+{% if !related.is_empty() %}
+<div class="context-group" data-direction="related">
+<span class="context-label">related</span>
+<ul>{% for e in related %}<li class="context-entry"><a href="/doc/{{ e.id }}">{{ e.id }}</a> <span class="context-type">{{ e.doc_type }}</span> <span class="context-status" data-status="{{ e.status }}"><span class="status-swatch"></span>{{ e.status }}</span> <span class="context-title">{{ e.title }}</span></li>{% endfor %}</ul>
+</div>
+{% endif %}
+</section>
+{% endif %}
 </div>
 </main>
 </div>

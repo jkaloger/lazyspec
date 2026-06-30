@@ -5,6 +5,7 @@
 
 use askama::Template;
 
+use crate::engine::context::ResolvedContext;
 use crate::engine::document::DocMeta;
 use crate::engine::graph::GraphNode;
 use crate::engine::store::{extract_id_from_name, Store};
@@ -77,6 +78,15 @@ pub struct RelativeLink {
     pub title: String,
 }
 
+/// One document in the anchored context (ancestor, descendant, or related peer),
+/// carrying the identity needed to render a row that links to its `/doc/{id}` page.
+pub struct ContextEntry {
+    pub id: String,
+    pub doc_type: String,
+    pub status: String,
+    pub title: String,
+}
+
 /// The document-page view model: the structured frontmatter header fields plus
 /// the body already rendered to HTML. Built from a [`DocMeta`] and its
 /// parent/children in the [`Store`].
@@ -93,6 +103,13 @@ pub struct DocPage {
     pub relations: Vec<RelationLink>,
     pub parent: Option<RelativeLink>,
     pub children: Vec<RelativeLink>,
+    /// The anchored context, grouped by direction. Chain ancestors (the doc's
+    /// own chain above it, target excluded), chain descendants (docs that
+    /// implement/target this doc), and related-to peers. Empty groups render
+    /// nothing; all-empty omits the Context section entirely.
+    pub ancestors: Vec<ContextEntry>,
+    pub descendants: Vec<ContextEntry>,
+    pub related: Vec<ContextEntry>,
     /// The body, ref-expanded then rendered to HTML.
     pub body_html: String,
     /// The outbound "edit on GitHub" deep-link, or `None` when no link could be
@@ -107,12 +124,15 @@ pub struct DocPage {
 impl DocPage {
     /// Build the frontmatter view model from a document and its store context.
     /// `body_html` is the already-expanded, already-rendered HTML body;
-    /// `github_url` is the resolved outbound deep-link, or `None`.
+    /// `github_url` is the resolved outbound deep-link, or `None`. `context` is
+    /// the resolved anchored context (`None` when resolution failed; the page
+    /// then renders with empty context groups rather than erroring).
     pub fn from_doc(
         doc: &DocMeta,
         store: &Store,
         body_html: String,
         github_url: Option<String>,
+        context: Option<&ResolvedContext>,
     ) -> Self {
         let relations = doc
             .related
@@ -141,6 +161,25 @@ impl DocPage {
             })
             .collect();
 
+        let entry = |d: &DocMeta| ContextEntry {
+            id: d.id.clone(),
+            doc_type: d.doc_type.to_string(),
+            status: d.status.to_string(),
+            title: d.title.clone(),
+        };
+        let (ancestors, descendants, related) = match context {
+            Some(ctx) => (
+                ctx.nodes
+                    .iter()
+                    .filter(|n| n.doc.path != ctx.target.path)
+                    .map(|n| entry(n.doc))
+                    .collect(),
+                ctx.forward.iter().map(|r| entry(r.doc)).collect(),
+                ctx.related.iter().map(|r| entry(r.doc)).collect(),
+            ),
+            None => (Vec::new(), Vec::new(), Vec::new()),
+        };
+
         DocPage {
             id: doc.id.clone(),
             title: doc.title.clone(),
@@ -152,6 +191,9 @@ impl DocPage {
             relations,
             parent,
             children,
+            ancestors,
+            descendants,
+            related,
             body_html,
             github_url,
             types: Vec::new(),

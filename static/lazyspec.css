@@ -256,26 +256,31 @@ code,
    (.doc-status) and the graph node (.graph-status) so both surfaces read the
    state identically without duplicating color values. */
 .doc-status[data-status="draft"] .status-swatch,
-.graph-status[data-status="draft"] .status-swatch {
+.graph-status[data-status="draft"] .status-swatch,
+.context-status[data-status="draft"] .status-swatch {
   background: var(--st-draft);
 }
 .doc-status[data-status="review"] .status-swatch,
-.graph-status[data-status="review"] .status-swatch {
+.graph-status[data-status="review"] .status-swatch,
+.context-status[data-status="review"] .status-swatch {
   background: var(--st-review);
 }
 .doc-status[data-status="accepted"] .status-swatch,
-.graph-status[data-status="accepted"] .status-swatch {
+.graph-status[data-status="accepted"] .status-swatch,
+.context-status[data-status="accepted"] .status-swatch {
   background: var(--st-accepted);
 }
 .doc-status[data-status="complete"] .status-swatch,
-.graph-status[data-status="complete"] .status-swatch {
+.graph-status[data-status="complete"] .status-swatch,
+.context-status[data-status="complete"] .status-swatch {
   background: var(--st-complete);
 }
 
 /* in-progress reads hollow (ring) against complete's solid fill, so the two
    share a hue but stay distinct without relying on color alone. */
 .doc-status[data-status="in-progress"] .status-swatch,
-.graph-status[data-status="in-progress"] .status-swatch {
+.graph-status[data-status="in-progress"] .status-swatch,
+.context-status[data-status="in-progress"] .status-swatch {
   background: transparent;
   box-shadow: inset 0 0 0 var(--rule-w) var(--st-progress);
 }
@@ -284,17 +289,21 @@ code,
 .doc-status[data-status="rejected"],
 .doc-status[data-status="superseded"],
 .graph-status[data-status="rejected"],
-.graph-status[data-status="superseded"] {
+.graph-status[data-status="superseded"],
+.context-status[data-status="rejected"],
+.context-status[data-status="superseded"] {
   color: var(--ink-faint);
   text-decoration: line-through;
 }
 .doc-status[data-status="rejected"] .status-swatch,
-.graph-status[data-status="rejected"] .status-swatch {
+.graph-status[data-status="rejected"] .status-swatch,
+.context-status[data-status="rejected"] .status-swatch {
   background: var(--st-rejected);
   opacity: 0.6;
 }
 .doc-status[data-status="superseded"] .status-swatch,
-.graph-status[data-status="superseded"] .status-swatch {
+.graph-status[data-status="superseded"] .status-swatch,
+.context-status[data-status="superseded"] .status-swatch {
   background: var(--st-superseded);
   opacity: 0.6;
 }
@@ -419,6 +428,88 @@ code,
     padding-bottom: var(--sp-4);
     border-bottom: var(--rule-w) solid var(--rule);
   }
+}
+
+/* Context: the anchored graph rendered as direction-grouped rows below the body.
+   Spans both grid columns, set off by a strong rule so it reads as its own band.
+   Direction labels are mono micro-labels; each entry is a mono row reusing the
+   shared type label + status swatch, accent only on the id link. */
+.doc-context {
+  grid-column: 1 / -1;
+  padding-top: var(--sp-4);
+  border-top: var(--rule-w) solid var(--rule-strong);
+  display: grid;
+  gap: var(--sp-4);
+}
+
+.doc-context > h2 {
+  font-family: var(--font-mono);
+  font-size: var(--t-label-size);
+  line-height: var(--t-label-lh);
+  letter-spacing: var(--t-label-tracking);
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+.context-label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--t-label-size);
+  line-height: var(--t-label-lh);
+  letter-spacing: var(--t-label-tracking);
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: var(--sp-2);
+}
+
+.context-group ul {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: var(--sp-1);
+}
+
+.context-entry {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: var(--t-meta-size);
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+.context-entry > a {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-underline-offset: 2px;
+  transition: color var(--motion-hover) var(--motion-hover-ease);
+}
+
+.context-entry > a:hover {
+  color: var(--accent);
+}
+
+.context-type {
+  font-family: var(--font-mono);
+  font-size: var(--t-label-size);
+  letter-spacing: var(--t-label-tracking);
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+.context-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: var(--t-label-size);
+  letter-spacing: var(--t-label-tracking);
+  text-transform: uppercase;
+}
+
+.context-title {
+  color: var(--ink-muted);
 }
 
 /* ── List, search, filter ────────────────────────────────────────────────── */
