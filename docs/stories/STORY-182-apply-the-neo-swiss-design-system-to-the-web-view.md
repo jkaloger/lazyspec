@@ -1,7 +1,7 @@
 ---
 title: Apply the Neo-Swiss design system to the web view
 type: story
-status: in-progress
+status: complete
 author: unknown
 date: 2026-06-30
 tags: []

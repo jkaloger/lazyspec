@@ -6,7 +6,7 @@ author: unknown
 date: 2026-06-30
 tags: []
 related:
-- implements: STORY-181
+  - implements: STORY-181
 ---
 
 ## Objective
@@ -62,4 +62,3 @@ Threat model (what the gate defends and what it does not): `state` defends the O
 - `state` mismatch on `/auth/callback` returns 400 with no `Set-Cookie`.
 - Collaborator with `read`+ gets a `Set-Cookie`; non-collaborator gets 403; simulated GitHub API error yields 503 — all with no session leaked.
 - A cookie with a flipped signature byte is rejected and redirects into `/auth/github`.
-

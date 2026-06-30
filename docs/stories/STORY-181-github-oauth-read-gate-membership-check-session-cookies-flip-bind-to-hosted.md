@@ -6,8 +6,10 @@ author: jkaloger
 date: 2026-06-30
 tags: []
 related:
-- implements: RFC-052
----## Context
+  - implements: RFC-052
+---
+
+## Context
 
 RFC-052 gates the hosted view behind GitHub OAuth: a reviewer authenticates with their existing GitHub account and is admitted iff they are a collaborator/member on the configured repo. This story adds the OAuth web-application flow (`GET /auth/github`, `GET /auth/callback`), the membership check, signed-cookie sessions, and the bind policy that ties auth to hosting. It is the last story and gates hosted deployment; STORY-176 through 180 are developable and demoable on loopback without it.
 
