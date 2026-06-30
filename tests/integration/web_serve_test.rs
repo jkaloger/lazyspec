@@ -945,8 +945,45 @@ async fn doc_page_tags_are_filter_links() {
 
     assert_eq!(status, StatusCode::OK);
     assert!(
-        body.contains("<a class=\"tag\" href=\"/?tag=web\">web</a>"),
+        body.contains("class=\"tag tag--h"),
+        "tag should carry a categorical hue class:\n{body}"
+    );
+    assert!(
+        body.contains("href=\"/?tag=web\""),
         "tag should be a filter link:\n{body}"
+    );
+    assert!(body.contains(">web</a>"), "tag text missing:\n{body}");
+}
+
+/// A list-fragment row for a tagged doc renders colored tag chips that link to
+/// the tag filter, and its status carries the data-status + swatch hooks.
+#[tokio::test]
+async fn list_row_renders_tag_chips_and_status_swatch() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-051-tagged.md",
+        "---\ntitle: \"Tagged RFC\"\ntype: rfc\nstatus: draft\nauthor: \"t\"\ndate: 2026-01-01\ntags: [web]\n---\n\nbody\n",
+    );
+
+    let (status, body) = get(store(&fixture), "/fragment/list?status=&tag=").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("tag--h"),
+        "tag chip should carry a hue class:\n{body}"
+    );
+    assert!(
+        body.contains("href=\"/?tag=web\""),
+        "tag chip should link to the tag filter:\n{body}"
+    );
+    assert!(body.contains(">web</a>"), "tag text missing:\n{body}");
+    assert!(
+        body.contains("class=\"doc-status\" data-status=\"draft\""),
+        "row status must carry data-status:\n{body}"
+    );
+    assert!(
+        body.contains("class=\"status-swatch\""),
+        "row status must carry the swatch:\n{body}"
     );
 }
 

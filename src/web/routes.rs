@@ -17,8 +17,8 @@ use crate::engine::github_url::github_url;
 use crate::engine::graph::{flatten_forest, GraphSort};
 use crate::engine::store::{Filter, Store};
 use crate::web::render::{
-    markdown_to_html, DocGroup, DocPage, DocRow, FilterOption, GraphPage, GraphTreeNode,
-    ListFragment, ListPage, NotFoundPage, PivotRow, SearchFragment,
+    markdown_to_html, tag_hue, DocGroup, DocPage, DocRow, FilterOption, GraphPage, GraphTreeNode,
+    ListFragment, ListPage, NotFoundPage, PivotRow, SearchFragment, TagChip,
 };
 use crate::web::server::AppState;
 
@@ -70,6 +70,14 @@ fn build_groups(store: &Store, filter: &Filter) -> Vec<DocGroup> {
                 id: doc.id.clone(),
                 title: doc.title.clone(),
                 status: doc.status.to_string(),
+                tags: doc
+                    .tags
+                    .iter()
+                    .map(|t| TagChip {
+                        name: t.clone(),
+                        hue: tag_hue(t),
+                    })
+                    .collect(),
             });
     }
 
@@ -188,6 +196,15 @@ pub async fn search(
             id: r.doc.id.clone(),
             title: r.doc.title.clone(),
             status: r.doc.status.to_string(),
+            tags: r
+                .doc
+                .tags
+                .iter()
+                .map(|t| TagChip {
+                    name: t.clone(),
+                    hue: tag_hue(t),
+                })
+                .collect(),
         })
         .collect();
 

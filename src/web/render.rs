@@ -10,11 +10,33 @@ use crate::engine::document::DocMeta;
 use crate::engine::graph::GraphNode;
 use crate::engine::store::{extract_id_from_name, Store};
 
-/// One row in the document list: id, title, status.
+/// Size of the categorical tag palette; `tag_hue` returns a value in `0..TAG_HUES`.
+pub const TAG_HUES: u8 = 8;
+
+/// A tag with its categorical hue index, for the colored tag chips.
+pub struct TagChip {
+    pub name: String,
+    pub hue: u8,
+}
+
+/// One row in the document list: id, title, status, tags.
 pub struct DocRow {
     pub id: String,
     pub title: String,
     pub status: String,
+    pub tags: Vec<TagChip>,
+}
+
+/// A web-only categorical (wayfinding) hue for a tag label, in `0..TAG_HUES`.
+/// Presentation-only: an FNV-1a byte hash mod the palette size, total over any
+/// string. Collisions are acceptable since the label carries identity.
+pub fn tag_hue(tag: &str) -> u8 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in tag.bytes() {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    (hash % TAG_HUES as u32) as u8
 }
 
 /// A group of rows sharing a `doc_type`, rendered under a type heading.
@@ -99,7 +121,7 @@ pub struct DocPage {
     pub status: String,
     pub author: String,
     pub date: String,
-    pub tags: Vec<String>,
+    pub tags: Vec<TagChip>,
     pub relations: Vec<RelationLink>,
     pub parent: Option<RelativeLink>,
     pub children: Vec<RelativeLink>,
@@ -187,7 +209,14 @@ impl DocPage {
             status: doc.status.to_string(),
             author: doc.author.clone(),
             date: doc.date.to_string(),
-            tags: doc.tags.clone(),
+            tags: doc
+                .tags
+                .iter()
+                .map(|t| TagChip {
+                    name: t.clone(),
+                    hue: tag_hue(t),
+                })
+                .collect(),
             relations,
             parent,
             children,
@@ -319,4 +348,32 @@ pub fn markdown_to_html(body: &str) -> String {
     let mut out = String::new();
     html::push_html(&mut out, parser);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tag_hue_is_deterministic() {
+        assert_eq!(tag_hue("web"), tag_hue("web"));
+        assert_eq!(tag_hue("render"), tag_hue("render"));
+    }
+
+    #[test]
+    fn tag_hue_is_total_and_in_range() {
+        for tag in ["", "web", "render", "日本語", "café"] {
+            assert!(tag_hue(tag) < TAG_HUES, "{tag} out of range");
+        }
+    }
+
+    #[test]
+    fn tag_hue_spreads_across_palette() {
+        let hues: std::collections::BTreeSet<u8> =
+            ["web", "render", "engine", "tui", "cli", "docs"]
+                .iter()
+                .map(|t| tag_hue(t))
+                .collect();
+        assert!(hues.len() >= 2, "hues collapsed to one value: {hues:?}");
+    }
 }

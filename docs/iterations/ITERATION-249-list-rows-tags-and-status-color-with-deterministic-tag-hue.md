@@ -1,7 +1,7 @@
 ---
 title: 'List rows: tags and status color with deterministic tag hue'
 type: iteration
-status: draft
+status: complete
 author: jkaloger
 date: 2026-07-01
 tags: []
