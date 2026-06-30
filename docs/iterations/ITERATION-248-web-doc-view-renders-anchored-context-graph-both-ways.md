@@ -1,7 +1,7 @@
 ---
 title: Web doc view renders anchored context graph both ways
 type: iteration
-status: in-progress
+status: complete
 author: unknown
 date: 2026-07-01
 tags: []
