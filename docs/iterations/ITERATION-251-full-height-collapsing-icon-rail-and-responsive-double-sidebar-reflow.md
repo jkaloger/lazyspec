@@ -1,7 +1,7 @@
 ---
 title: Full-height collapsing icon rail and responsive double-sidebar reflow
 type: iteration
-status: draft
+status: complete
 author: jkaloger
 date: 2026-07-01
 tags: []

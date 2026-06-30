@@ -932,6 +932,102 @@ async fn all_pages_carry_header_sidebar_and_search_modal() {
     }
 }
 
+// --- Collapsing icon rail + responsive drawer (ITERATION-251) ----------------
+
+/// The sidebar carries a collapse toggle and inline View icons.
+#[tokio::test]
+async fn sidebar_has_collapse_toggle_and_view_icons() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    let (status, body) = get(store(&fixture), "/").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("data-sidebar-toggle"),
+        "missing collapse toggle:\n{body}"
+    );
+    assert!(
+        body.contains("class=\"nav-icon\""),
+        "missing nav-icon svg class:\n{body}"
+    );
+    assert!(
+        body.contains("<svg") && body.contains("aria-hidden=\"true\""),
+        "missing inline aria-hidden svg:\n{body}"
+    );
+    // Existing anchor opening tags must remain intact.
+    assert!(
+        body.contains("class=\"nav-item is-active\" href=\"/\""),
+        "list nav-item anchor changed:\n{body}"
+    );
+}
+
+/// Filter entries carry a mono first-letter glyph badge for the collapsed rail.
+#[tokio::test]
+async fn sidebar_filter_entries_carry_nav_glyph() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    let (status, body) = get(store(&fixture), "/").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("class=\"nav-glyph\""),
+        "missing nav-glyph badge:\n{body}"
+    );
+}
+
+/// The header carries a drawer menu button for the mobile off-canvas nav.
+#[tokio::test]
+async fn header_has_drawer_toggle() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    let (status, body) = get(store(&fixture), "/").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("data-drawer-toggle"),
+        "missing drawer toggle:\n{body}"
+    );
+}
+
+/// All three top-level pages carry both the collapse and drawer controls.
+#[tokio::test]
+async fn all_pages_carry_collapse_and_drawer_controls() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    for uri in ["/", "/graph", "/doc/RFC-001"] {
+        let (status, body) = get(store(&fixture), uri).await;
+        assert_eq!(status, StatusCode::OK, "page {uri} not OK");
+        assert!(
+            body.contains("data-sidebar-toggle"),
+            "{uri} missing collapse toggle:\n{body}"
+        );
+        assert!(
+            body.contains("data-drawer-toggle"),
+            "{uri} missing drawer toggle:\n{body}"
+        );
+    }
+}
+
+/// Each page emits the no-flash head script keyed on the localStorage key.
+#[tokio::test]
+async fn pages_have_no_flash_sidebar_script() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    for uri in ["/", "/graph", "/doc/RFC-001"] {
+        let (status, body) = get(store(&fixture), uri).await;
+        assert_eq!(status, StatusCode::OK, "page {uri} not OK");
+        assert!(
+            body.contains("ls-sidebar"),
+            "{uri} missing no-flash sidebar script:\n{body}"
+        );
+    }
+}
+
 /// The header repo chip shows repo and branch from AppState, joined by a `·`.
 #[tokio::test]
 async fn header_chip_shows_repo_and_branch() {

@@ -57,6 +57,9 @@ pub struct SidebarEntry {
     pub href: String,
     pub active: bool,
     pub kind: String,
+    /// Uppercased first character of `label`, used as the collapsed-rail badge
+    /// for entries (arbitrary types/tags) that have no icon.
+    pub glyph: String,
 }
 
 /// The unified left sidebar: a View section (List/Graph, active driven by

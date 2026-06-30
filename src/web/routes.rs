@@ -155,11 +155,17 @@ fn build_sidebar(
                 active_pivot == Some(value.as_str()),
             )
         };
+        let glyph = t
+            .chars()
+            .next()
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_default();
         filters.push(SidebarEntry {
             label: t,
             href,
             active,
             kind: "type".to_string(),
+            glyph,
         });
     }
     for tag in doc_tags(store) {
@@ -172,11 +178,17 @@ fn build_sidebar(
                 active_pivot == Some(value.as_str()),
             )
         };
+        let glyph = tag
+            .chars()
+            .next()
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_default();
         filters.push(SidebarEntry {
             label: tag,
             href,
             active,
             kind: "tag".to_string(),
+            glyph,
         });
     }
     Sidebar {
