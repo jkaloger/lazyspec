@@ -11,7 +11,7 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 
 use crate::engine::context::resolve_forest;
-use crate::engine::document::Status;
+use crate::engine::document::{DocType, Status};
 use crate::engine::fs::RealFileSystem;
 use crate::engine::github_url::github_url;
 use crate::engine::graph::{flatten_forest, GraphSort};
@@ -33,6 +33,8 @@ pub struct ListQuery {
     pub status: Option<String>,
     #[serde(default)]
     pub tag: Option<String>,
+    #[serde(default)]
+    pub r#type: Option<String>,
 }
 
 fn empty_to_none(s: Option<String>) -> Option<String> {
@@ -90,17 +92,43 @@ fn filter_options(store: &Store) -> (Vec<FilterOption>, Vec<FilterOption>) {
     (to_opts(statuses), to_opts(tags))
 }
 
-/// `GET /` -- the full document-list page with filter controls and the initial
-/// (unfiltered) list grouped by type.
-pub async fn list_page(State(state): State<AppState>) -> Html<String> {
+/// Collect the distinct doc-type names present across all documents, sorted, for
+/// the sidebar type links.
+fn doc_types(store: &Store) -> Vec<String> {
+    let mut set = std::collections::BTreeSet::new();
+    for doc in store.all_docs() {
+        set.insert(doc.doc_type.to_string());
+    }
+    set.into_iter().collect()
+}
+
+/// Build the [`Filter`] from list query params, treating empty strings as absent.
+fn filter_from_query(query: ListQuery) -> Filter {
+    Filter {
+        doc_type: empty_to_none(query.r#type).map(|t| DocType::new(&t)),
+        status: empty_to_none(query.status).map(|s| Status::new(&s)),
+        tag: empty_to_none(query.tag),
+    }
+}
+
+/// `GET /?status=&tag=&type=` -- the full document-list page with filter controls
+/// and the (optionally filtered) list grouped by type.
+pub async fn list_page(
+    State(state): State<AppState>,
+    Query(query): Query<ListQuery>,
+) -> Html<String> {
     let store = state.store;
-    let groups = build_groups(&store, &Filter::default());
+    let filter = filter_from_query(query);
+    let groups = build_groups(&store, &filter);
     let list = ListFragment { groups }.render_string();
     let (statuses, tags) = filter_options(&store);
     let page = ListPage {
         statuses,
         tags,
         list,
+        types: doc_types(&store),
+        repo_name: state.repo_name.clone(),
+        branch: state.branch.clone(),
     };
     Html(page.render().unwrap_or_default())
 }
@@ -112,11 +140,7 @@ pub async fn list_fragment(
     Query(query): Query<ListQuery>,
 ) -> Html<String> {
     let store = state.store;
-    let filter = Filter {
-        doc_type: None,
-        status: empty_to_none(query.status).map(|s| Status::new(&s)),
-        tag: empty_to_none(query.tag),
-    };
+    let filter = filter_from_query(query);
     let groups = build_groups(&store, &filter);
     let fragment = ListFragment { groups };
     Html(fragment.render().unwrap_or_default())
@@ -159,7 +183,16 @@ pub async fn graph(State(state): State<AppState>) -> Html<String> {
     let forest = resolve_forest(&store, None);
     let flat = flatten_forest(&forest, &store, &GraphSort::default());
     let roots = GraphTreeNode::nest(&flat);
-    Html(GraphPage { roots }.render().unwrap_or_default())
+    Html(
+        GraphPage {
+            roots,
+            types: doc_types(&store),
+            repo_name: state.repo_name.clone(),
+            branch: state.branch.clone(),
+        }
+        .render()
+        .unwrap_or_default(),
+    )
 }
 
 /// `GET /doc/{id}` -- the per-document page: frontmatter header, body rendered
@@ -190,6 +223,9 @@ pub async fn doc_page(State(state): State<AppState>, AxumPath(id): AxumPath<Stri
         github_url(doc, coords, &state.config, &state.issue_map, None, None).map(|u| u.0)
     });
 
-    let page = DocPage::from_doc(doc, &store, body_html, github_url);
+    let mut page = DocPage::from_doc(doc, &store, body_html, github_url);
+    page.types = doc_types(&store);
+    page.repo_name = state.repo_name.clone();
+    page.branch = state.branch.clone();
     Html(page.render().unwrap_or_default()).into_response()
 }

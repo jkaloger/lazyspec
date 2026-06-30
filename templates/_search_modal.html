@@ -1,0 +1,52 @@
+<div class="search-modal" hidden data-search-modal>
+<div class="search-backdrop" data-search-close></div>
+<div class="search-panel">
+<input type="search" name="q" placeholder="search documents"
+  hx-get="/search" hx-target="#search-results" hx-swap="innerHTML"
+  hx-trigger="input changed delay:200ms, search" data-search-input>
+<div id="search-results" class="search-results-pane"></div>
+</div>
+</div>
+<script>
+(function () {
+  var modal = document.querySelector('[data-search-modal]');
+  if (!modal) return;
+  var input = modal.querySelector('[data-search-input]');
+
+  function open() {
+    modal.removeAttribute('hidden');
+    if (input) input.focus();
+  }
+  function close() {
+    modal.setAttribute('hidden', '');
+  }
+  function isTyping(el) {
+    if (!el) return false;
+    var tag = el.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+  }
+
+  document.querySelectorAll('[data-open-search]').forEach(function (btn) {
+    btn.addEventListener('click', open);
+  });
+  modal.querySelectorAll('[data-search-close]').forEach(function (el) {
+    el.addEventListener('click', close);
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+      close();
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+      e.preventDefault();
+      open();
+      return;
+    }
+    if (e.key === '/' && !isTyping(document.activeElement)) {
+      e.preventDefault();
+      open();
+    }
+  });
+})();
+</script>

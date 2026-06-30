@@ -1,0 +1,6 @@
+<nav class="app-sidebar">
+<a class="nav-item" href="/">All documents</a>
+<a class="nav-item" href="/graph">Graph</a>
+{% for t in types %}<a class="nav-item" href="/?type={{ t }}">{{ t }}</a>
+{% endfor %}
+</nav>

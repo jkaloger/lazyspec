@@ -26,6 +26,8 @@ fn state(store: Arc<Store>) -> AppState {
         config: Arc::new(lazyspec::engine::config::Config::default()),
         coords: None,
         issue_map: Arc::new(IssueMap::default()),
+        repo_name: "testrepo".into(),
+        branch: Some("main".into()),
     }
 }
 
@@ -733,4 +735,130 @@ async fn graph_page_head_links_stylesheet() {
         body.contains(STYLESHEET_LINK),
         "graph page head must link the stylesheet:\n{body}"
     );
+}
+
+// --- App chrome: header, sidebar, search modal (ITERATION-245) ----------------
+
+/// All three top-level pages must carry the shared shell chrome.
+#[tokio::test]
+async fn all_pages_carry_header_sidebar_and_search_modal() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    for uri in ["/", "/graph", "/doc/RFC-001"] {
+        let (status, body) = get(store(&fixture), uri).await;
+        assert_eq!(status, StatusCode::OK, "page {uri} not OK");
+        assert!(
+            body.contains("class=\"app-header\""),
+            "{uri} missing app-header:\n{body}"
+        );
+        assert!(
+            body.contains("class=\"app-sidebar\""),
+            "{uri} missing app-sidebar:\n{body}"
+        );
+        assert!(
+            body.contains("data-search-modal"),
+            "{uri} missing search modal:\n{body}"
+        );
+        assert!(
+            body.contains("class=\"search-trigger\""),
+            "{uri} missing search trigger:\n{body}"
+        );
+    }
+}
+
+/// The header repo chip shows repo and branch from AppState, joined by a `·`.
+#[tokio::test]
+async fn header_chip_shows_repo_and_branch() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    let (status, body) = get(store(&fixture), "/").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("testrepo"), "missing repo name:\n{body}");
+    assert!(body.contains("· main"), "missing branch chip:\n{body}");
+}
+
+/// The sidebar lists each distinct doc-type as a `/?type=...` link.
+#[tokio::test]
+async fn sidebar_lists_doc_type_links() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+    fixture.write_story("STORY-001-beta.md", "Beta story", "draft", None);
+
+    let (status, body) = get(store(&fixture), "/").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("href=\"/?type=rfc\""),
+        "missing rfc type link:\n{body}"
+    );
+    assert!(
+        body.contains("href=\"/?type=story\""),
+        "missing story type link:\n{body}"
+    );
+    assert!(
+        body.contains("href=\"/graph\""),
+        "missing graph link:\n{body}"
+    );
+}
+
+/// `GET /?type=rfc` filters the list to only rfc rows.
+#[tokio::test]
+async fn list_page_type_param_filters_to_type() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+    fixture.write_story("STORY-001-beta.md", "Beta story", "draft", None);
+
+    let (status, body) = get(store(&fixture), "/?type=rfc").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("RFC-001"), "rfc should appear:\n{body}");
+    assert!(
+        body.contains("data-doc-type=\"rfc\""),
+        "rfc group should appear:\n{body}"
+    );
+    assert!(
+        !body.contains("STORY-001"),
+        "story should be filtered out:\n{body}"
+    );
+    assert!(
+        !body.contains("data-doc-type=\"story\""),
+        "story group should be filtered out:\n{body}"
+    );
+}
+
+/// The doc page renders each tag as a `/?tag=...` filter link.
+#[tokio::test]
+async fn doc_page_tags_are_filter_links() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-050-tagged.md",
+        "---\ntitle: \"Tagged RFC\"\ntype: rfc\nstatus: draft\nauthor: \"t\"\ndate: 2026-01-01\ntags: [web]\n---\n\nbody\n",
+    );
+
+    let (status, body) = get(store(&fixture), "/doc/RFC-050").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("<a class=\"tag\" href=\"/?tag=web\">web</a>"),
+        "tag should be a filter link:\n{body}"
+    );
+}
+
+/// The doc/graph back-link carries the styled `back-link` class.
+#[tokio::test]
+async fn back_link_is_styled() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    for uri in ["/graph", "/doc/RFC-001"] {
+        let (status, body) = get(store(&fixture), uri).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("class=\"back-link\""),
+            "{uri} missing styled back-link:\n{body}"
+        );
+    }
 }

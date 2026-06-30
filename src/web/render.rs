@@ -35,6 +35,10 @@ pub struct ListPage {
     pub statuses: Vec<FilterOption>,
     pub tags: Vec<FilterOption>,
     pub list: String,
+    /// Distinct doc-types for the sidebar type links.
+    pub types: Vec<String>,
+    pub repo_name: String,
+    pub branch: Option<String>,
 }
 
 /// The swappable list fragment: documents grouped by type. Returned both inside
@@ -94,6 +98,10 @@ pub struct DocPage {
     /// The outbound "edit on GitHub" deep-link, or `None` when no link could be
     /// resolved (unresolvable coords, or a backend with no stable URL).
     pub github_url: Option<String>,
+    /// Shell fields, set by the route after `from_doc`.
+    pub types: Vec<String>,
+    pub repo_name: String,
+    pub branch: Option<String>,
 }
 
 impl DocPage {
@@ -146,6 +154,9 @@ impl DocPage {
             children,
             body_html,
             github_url,
+            types: Vec::new(),
+            repo_name: String::new(),
+            branch: None,
         }
     }
 }
@@ -232,6 +243,10 @@ impl GraphTreeNode {
 #[template(path = "graph_page.html")]
 pub struct GraphPage {
     pub roots: Vec<GraphTreeNode>,
+    /// Distinct doc-types for the sidebar type links.
+    pub types: Vec<String>,
+    pub repo_name: String,
+    pub branch: Option<String>,
 }
 
 /// Render a markdown `body` to an HTML string via `pulldown-cmark`. Callers must

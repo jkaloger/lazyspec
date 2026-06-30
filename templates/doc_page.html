@@ -3,13 +3,18 @@
 <head>
 <meta charset="utf-8">
 <title>{{ id }} - {{ title }}</title>
+<script src="https://unpkg.com/htmx.org@1.9.12"></script>
 <link rel="preload" href="/static/fonts/archivo-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/static/fonts/ibm-plex-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/lazyspec.css">
 </head>
-<body>
-<a href="/">&larr; all documents</a>
-<main class="doc-grid" data-id="{{ id }}">
+<body data-nav="doc">
+{% include "_header.html" %}
+<div class="app-shell">
+{% include "_sidebar.html" %}
+<main>
+<a class="back-link" href="/">&larr; all documents</a>
+<div class="doc-grid" data-id="{{ id }}">
 <h1>{{ title }}</h1>
 <dl class="doc-frontmatter">
 <dt>id</dt><dd class="doc-id">{{ id }}</dd>
@@ -17,7 +22,7 @@
 <dt>status</dt><dd class="doc-status" data-status="{{ status }}"><span class="status-swatch"></span>{{ status }}</dd>
 <dt>author</dt><dd class="doc-author">{{ author }}</dd>
 <dt>date</dt><dd class="doc-date">{{ date }}</dd>
-{% if !tags.is_empty() %}<dt>tags</dt><dd class="doc-tags">{% for tag in tags %}<span class="tag">{{ tag }}</span>{% if !loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
+{% if !tags.is_empty() %}<dt>tags</dt><dd class="doc-tags">{% for tag in tags %}<a class="tag" href="/?tag={{ tag }}">{{ tag }}</a>{% if !loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
 {% if !relations.is_empty() %}<dt>relations</dt><dd class="doc-relations">{% for rel in relations %}<span class="relation">{{ rel.rel_type }}: <a href="/doc/{{ rel.target }}">{{ rel.target }}</a></span>{% if !loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
 {% match parent %}{% when Some with (p) %}<dt>parent</dt><dd class="doc-parent"><a href="/doc/{{ p.id }}">{{ p.title }}</a></dd>{% when None %}{% endmatch %}
 {% if !children.is_empty() %}<dt>children</dt><dd class="doc-children"><ul>{% for child in children %}<li><a href="/doc/{{ child.id }}">{{ child.title }}</a></li>{% endfor %}</ul></dd>{% endif %}
@@ -26,6 +31,9 @@
 <article class="doc-body">
 {{ body_html|safe }}
 </article>
+</div>
 </main>
+</div>
+{% include "_search_modal.html" %}
 </body>
 </html>

@@ -668,3 +668,187 @@ ul.search-results .doc-status {
   padding-inline: var(--page-pad);
   color: var(--ink-faint);
 }
+
+/* App chrome: header, sidebar, search modal (ITERATION-245). Accent is the
+   single interactive axis: only active/hover nav, tag hover, back-link hover
+   and search focus take it. Everything square. */
+
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: var(--rule-w) solid var(--rule);
+  background: var(--surface-raised);
+  border-radius: var(--radius);
+}
+
+.repo-chip {
+  font-family: var(--font-mono);
+  font-size: var(--t-label-size);
+  letter-spacing: var(--t-label-tracking);
+  color: var(--ink-muted);
+}
+
+.search-trigger {
+  margin-inline: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-3);
+  border: var(--rule-w) solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: var(--t-meta-size);
+  cursor: pointer;
+}
+
+.search-trigger:hover,
+.search-trigger:focus {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.search-trigger kbd {
+  font-family: var(--font-mono);
+  font-size: var(--t-label-size);
+  padding: 0 var(--sp-1);
+  border: var(--rule-w) solid var(--rule);
+  border-radius: var(--radius);
+  color: var(--ink-faint);
+}
+
+.app-shell {
+  display: flex;
+  align-items: flex-start;
+}
+
+.app-sidebar {
+  flex: 0 0 auto;
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  padding: var(--sp-3) 0;
+  border-right: var(--rule-w) solid var(--rule);
+}
+
+.app-sidebar .nav-item {
+  display: block;
+  padding: var(--sp-1) var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: var(--t-label-size);
+  letter-spacing: var(--t-label-tracking);
+  color: var(--ink-muted);
+  text-decoration: none;
+}
+
+.app-sidebar .nav-item:hover {
+  color: var(--accent);
+}
+
+body[data-nav="all"] .app-sidebar a[href="/"],
+body[data-nav="graph"] .app-sidebar a[href="/graph"] {
+  color: var(--accent);
+  background: var(--accent-weak);
+}
+
+.app-shell > main {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: var(--sp-4) var(--page-pad);
+}
+
+.back-link {
+  font-family: var(--font-mono);
+  font-size: var(--t-meta-size);
+  color: var(--ink-muted);
+  text-decoration: none;
+}
+
+.back-link:hover {
+  color: var(--accent);
+}
+
+a.tag {
+  font-family: var(--font-mono);
+  font-size: var(--t-label-size);
+  letter-spacing: var(--t-label-tracking);
+  color: var(--ink-muted);
+  text-decoration: none;
+}
+
+a.tag:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.search-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.search-modal[hidden] {
+  display: none;
+}
+
+.search-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.search-panel {
+  position: relative;
+  z-index: 1;
+  margin-top: 12vh;
+  width: 560px;
+  max-width: 90%;
+  padding: var(--sp-3);
+  border: var(--rule-w) solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+}
+
+.search-panel input[type="search"] {
+  width: 100%;
+  padding: var(--sp-2);
+  border: var(--rule-w) solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--t-body-size);
+}
+
+.search-panel input[type="search"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.search-results-pane {
+  margin-top: var(--sp-2);
+}
+
+@media (max-width: 768px) {
+  .app-shell {
+    flex-direction: column;
+  }
+  .app-sidebar {
+    position: static;
+    min-width: 0;
+    width: 100%;
+    border-right: none;
+    border-bottom: var(--rule-w) solid var(--rule);
+  }
+  .search-panel {
+    width: 92%;
+  }
+}

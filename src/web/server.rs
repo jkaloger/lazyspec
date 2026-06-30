@@ -25,6 +25,10 @@ pub struct AppState {
     pub config: Arc<crate::engine::config::Config>,
     pub coords: Option<RepoCoords>,
     pub issue_map: Arc<IssueMap>,
+    /// The store root directory name, shown in the header repo chip.
+    pub repo_name: String,
+    /// The current git branch, shown in the header chip after the separator.
+    pub branch: Option<String>,
 }
 
 /// Resolve the port to bind: the explicit `--port` value, else [`DEFAULT_PORT`].

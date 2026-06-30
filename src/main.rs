@@ -581,11 +581,19 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("lazyspec serve: repo coordinates unresolved (no origin remote or [web] override); GitHub deep-links disabled");
             }
             let issue_map = std::sync::Arc::new(IssueMap::load(&cwd).unwrap_or_default());
+            let repo_name = store
+                .root()
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let branch = lazyspec::engine::git_status::query_git_branch(store.root());
             let state = lazyspec::web::server::AppState {
                 store,
                 config: std::sync::Arc::new(config),
                 coords,
                 issue_map,
+                repo_name,
+                branch,
             };
             lazyspec::web::serve(state, port)?;
         }

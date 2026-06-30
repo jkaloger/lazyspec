@@ -3,17 +3,25 @@
 <head>
 <meta charset="utf-8">
 <title>lazyspec graph</title>
+<script src="https://unpkg.com/htmx.org@1.9.12"></script>
 <link rel="preload" href="/static/fonts/archivo-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/static/fonts/ibm-plex-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/lazyspec.css">
 </head>
-<body>
-<a href="/">&larr; all documents</a>
+<body data-nav="graph">
+{% include "_header.html" %}
+<div class="app-shell">
+{% include "_sidebar.html" %}
+<main>
+<a class="back-link" href="/">&larr; all documents</a>
 <h1>lazyspec graph</h1>
 {% if roots.is_empty() %}<p class="graph-empty">No documents.</p>{% else %}
 <ul class="graph-tree">
 {% for node in roots %}{{ node.render().unwrap()|safe }}{% endfor %}
 </ul>
 {% endif %}
+</main>
+</div>
+{% include "_search_modal.html" %}
 </body>
 </html>

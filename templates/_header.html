@@ -1,0 +1,4 @@
+<header class="app-header">
+<span class="repo-chip">{{ repo_name }}{% match branch %}{% when Some with (b) %} · {{ b }}{% when None %}{% endmatch %}</span>
+<button class="search-trigger" data-open-search type="button">search <kbd>/</kbd></button>
+</header>
