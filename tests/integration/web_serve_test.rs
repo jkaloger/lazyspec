@@ -610,6 +610,109 @@ async fn graph_status_carries_data_status_and_swatch() {
     );
 }
 
+// --- GET /graph?pivot= : pivot picker parity with TUI (ITERATION-246) ---------
+
+/// A graph fixture spanning two doc-types and one tagged story, enough to
+/// exercise the All / type / tag pivots.
+fn pivot_fixture() -> TestFixture {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-base.md", "Base", "draft");
+    // A tagged story under the RFC so the tag pivot can re-root on it.
+    fixture.write_doc(
+        "docs/stories/STORY-001-tagged.md",
+        "---\ntitle: \"Tagged\"\ntype: story\nstatus: draft\nauthor: \"t\"\ndate: 2026-01-01\ntags:\n- alpha\nrelated:\n- implements: RFC-001\n---\n",
+    );
+    fixture.write_iteration("ITERATION-001-leaf.md", "Leaf", "draft", Some("STORY-001"));
+    fixture
+}
+
+#[tokio::test]
+async fn graph_pivot_picker_lists_all_plus_types_and_tags() {
+    let fixture = pivot_fixture();
+    let (status, body) = get(store(&fixture), "/graph").await;
+
+    assert_eq!(status, StatusCode::OK);
+    // The All row points back at the bare graph route.
+    assert!(
+        body.contains("href=\"/graph\""),
+        "pivot picker must offer an All row:\n{body}"
+    );
+    // At least one doc-type pivot.
+    assert!(
+        body.contains("href=\"/graph?pivot=type:rfc\""),
+        "pivot picker must offer a type row:\n{body}"
+    );
+    // At least one tag pivot.
+    assert!(
+        body.contains("href=\"/graph?pivot=tag:alpha\""),
+        "pivot picker must offer a tag row:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn graph_pivot_type_reroots_on_that_type() {
+    let fixture = pivot_fixture();
+    let (status, body) = get(store(&fixture), "/graph?pivot=type:rfc").await;
+
+    assert_eq!(status, StatusCode::OK);
+    // RFC-001 is the only rfc, so it is the sole root; its descendants follow.
+    let ids = graph_ids_in_order(&body);
+    assert_eq!(
+        ids.first().map(String::as_str),
+        Some("RFC-001"),
+        "type:rfc pivot must root on the rfc:\n{body}"
+    );
+
+    // Now anchor on story: the rfc ancestor is pruned, the story becomes a root.
+    let (_s, body) = get(store(&fixture), "/graph?pivot=type:story").await;
+    let ids = graph_ids_in_order(&body);
+    assert!(
+        !ids.contains(&"RFC-001".to_string()),
+        "type:story pivot prunes the ancestor rfc:\n{body}"
+    );
+    assert_eq!(
+        ids.first().map(String::as_str),
+        Some("STORY-001"),
+        "type:story pivot roots on the story:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn graph_pivot_tag_reroots_on_tagged_docs() {
+    let fixture = pivot_fixture();
+    let (status, body) = get(store(&fixture), "/graph?pivot=tag:alpha").await;
+
+    assert_eq!(status, StatusCode::OK);
+    let ids = graph_ids_in_order(&body);
+    // The tagged story re-roots; its untagged ancestor rfc is pruned.
+    assert_eq!(
+        ids,
+        vec!["STORY-001".to_string(), "ITERATION-001".to_string()],
+        "tag:alpha pivot keeps the tagged story and its descendant only:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn graph_pivot_marks_active_row() {
+    let fixture = pivot_fixture();
+
+    // Default view: the All row is active.
+    let (_s, body) = get(store(&fixture), "/graph").await;
+    assert!(
+        body.contains("class=\"graph-pivot-row is-active\" href=\"/graph\""),
+        "All row must be active on the default graph view:\n{body}"
+    );
+
+    // Anchored view: the matching type row is active, carrying the marker.
+    let (_s, body) = get(store(&fixture), "/graph?pivot=type:rfc").await;
+    assert!(
+        body.contains(
+            "href=\"/graph?pivot=type:rfc\" data-pivot-kind=\"type\" data-active=\"true\""
+        ),
+        "the selected pivot row must carry the active marker:\n{body}"
+    );
+}
+
 #[test]
 fn default_port_is_8787() {
     assert_eq!(DEFAULT_PORT, 8787);

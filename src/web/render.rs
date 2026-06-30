@@ -237,12 +237,25 @@ impl GraphTreeNode {
     }
 }
 
+/// One row in the graph pivot picker: a label, the `/graph?pivot=...` href that
+/// selects it, whether it is the current selection, and its `kind`
+/// (`all`/`type`/`tag`) for any per-kind styling. Mirrors the TUI `GraphAnchor`.
+pub struct PivotRow {
+    pub label: String,
+    pub href: String,
+    pub active: bool,
+    pub kind: String,
+}
+
 /// The `/graph` page: the relationship forest rendered as a topologically-sorted
 /// nested `<ul>` tree, ordered by `GraphSort::default()` (RFC-052 / STORY-179).
+/// The left pivot picker re-roots the forest (parity with the TUI pivot panel).
 #[derive(Template)]
 #[template(path = "graph_page.html")]
 pub struct GraphPage {
     pub roots: Vec<GraphTreeNode>,
+    /// Pivot picker rows in TUI flat order: All, types…, tags…
+    pub pivots: Vec<PivotRow>,
     /// Distinct doc-types for the sidebar type links.
     pub types: Vec<String>,
     pub repo_name: String,

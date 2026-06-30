@@ -1,7 +1,7 @@
 ---
 title: Web graph view pivot picker (parity with TUI)
 type: iteration
-status: draft
+status: in-progress
 author: agent
 date: 2026-07-01
 tags: []

@@ -852,3 +852,81 @@ a.tag:hover {
     width: 92%;
   }
 }
+
+/* ── Graph pivot picker ──────────────────────────────────────────────────────
+   The left re-root column on the graph page (parity with the TUI pivot panel),
+   distinct from the global nav sidebar. A sticky mono list with a hairline
+   divider; accent is reserved for the active row and hover only. Square, flat,
+   no card. */
+
+.graph-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-6);
+}
+
+.graph-pivot {
+  flex: 0 0 auto;
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 140px;
+  padding-right: var(--sp-4);
+  border-right: var(--rule-w) solid var(--rule);
+}
+
+.graph-pivot-row {
+  display: block;
+  padding: var(--sp-1) var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: var(--t-label-size);
+  line-height: var(--t-label-lh);
+  letter-spacing: var(--t-label-tracking);
+  color: var(--ink-muted);
+  text-decoration: none;
+  border-radius: 0;
+}
+
+.graph-pivot-row:hover {
+  color: var(--accent);
+}
+
+.graph-pivot-row.is-active {
+  color: var(--accent);
+  background: var(--accent-weak);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.graph-tree-pane {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Inside the pivot layout the tree pane owns the width, so drop the tree's own
+   centering and left gutter. */
+.graph-tree-pane .graph-tree {
+  max-width: none;
+  margin-inline: 0;
+  padding-left: 0;
+}
+
+@media (max-width: 768px) {
+  .graph-layout {
+    flex-direction: column;
+    gap: var(--sp-3);
+  }
+  .graph-pivot {
+    position: static;
+    min-width: 0;
+    width: 100%;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: var(--sp-1) var(--sp-2);
+    padding-right: 0;
+    padding-bottom: var(--sp-3);
+    border-right: none;
+    border-bottom: var(--rule-w) solid var(--rule);
+  }
+}

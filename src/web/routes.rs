@@ -10,7 +10,7 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 
-use crate::engine::context::resolve_forest;
+use crate::engine::context::{resolve_forest, resolve_forest_by_tag};
 use crate::engine::document::{DocType, Status};
 use crate::engine::fs::RealFileSystem;
 use crate::engine::github_url::github_url;
@@ -18,7 +18,7 @@ use crate::engine::graph::{flatten_forest, GraphSort};
 use crate::engine::store::{Filter, Store};
 use crate::web::render::{
     markdown_to_html, DocGroup, DocPage, DocRow, FilterOption, GraphPage, GraphTreeNode,
-    ListFragment, ListPage, NotFoundPage, SearchFragment,
+    ListFragment, ListPage, NotFoundPage, PivotRow, SearchFragment,
 };
 use crate::web::server::AppState;
 
@@ -39,6 +39,15 @@ pub struct ListQuery {
 
 fn empty_to_none(s: Option<String>) -> Option<String> {
     s.filter(|v| !v.is_empty())
+}
+
+/// Query parameters for `GET /graph`. `pivot` selects the forest re-root:
+/// absent/empty = the whole-store forest (All), `type:{t}` re-roots on a
+/// doc-type, `tag:{t}` re-roots on a tag. Mirrors the TUI `GraphAnchor`.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct GraphQuery {
+    #[serde(default)]
+    pub pivot: Option<String>,
 }
 
 /// Query parameters for `GET /search`. An absent or empty `q` is valid and
@@ -98,6 +107,18 @@ fn doc_types(store: &Store) -> Vec<String> {
     let mut set = std::collections::BTreeSet::new();
     for doc in store.all_docs() {
         set.insert(doc.doc_type.to_string());
+    }
+    set.into_iter().collect()
+}
+
+/// Collect the distinct tags present across all documents, sorted, for the
+/// graph pivot picker's tag rows.
+fn doc_tags(store: &Store) -> Vec<String> {
+    let mut set = std::collections::BTreeSet::new();
+    for doc in store.all_docs() {
+        for tag in &doc.tags {
+            set.insert(tag.clone());
+        }
     }
     set.into_iter().collect()
 }
@@ -178,14 +199,53 @@ pub async fn search(
 /// interactive sort control). Reuses the engine's `resolve_forest` +
 /// `flatten_forest` ordering, so diamonds (shared node re-emitted without its
 /// subtree) and cycles (back-edge dropped, every node once) match the TUI.
-pub async fn graph(State(state): State<AppState>) -> Html<String> {
+pub async fn graph(State(state): State<AppState>, Query(query): Query<GraphQuery>) -> Html<String> {
     let store = state.store;
-    let forest = resolve_forest(&store, None);
+    let pivot = empty_to_none(query.pivot);
+
+    // Re-root the forest per the pivot prefix, reusing the engine's anchor
+    // logic. `type:`/`tag:` select a re-rooted forest; anything else (or absent)
+    // is the whole-store All view.
+    let forest = match pivot.as_deref() {
+        Some(p) if p.starts_with("type:") => resolve_forest(&store, Some(&p["type:".len()..])),
+        Some(p) if p.starts_with("tag:") => resolve_forest_by_tag(&store, &p["tag:".len()..]),
+        _ => resolve_forest(&store, None),
+    };
     let flat = flatten_forest(&forest, &store, &GraphSort::default());
     let roots = GraphTreeNode::nest(&flat);
+
+    // Pivot rows in the TUI's flat order: All, then each doc-type, then each tag.
+    // The row whose href-pivot matches the current selection is marked active.
+    let active = pivot.as_deref();
+    let mut pivots = vec![PivotRow {
+        label: "All".to_string(),
+        href: "/graph".to_string(),
+        active: active.is_none(),
+        kind: "all".to_string(),
+    }];
+    for t in doc_types(&store) {
+        let value = format!("type:{t}");
+        pivots.push(PivotRow {
+            active: active == Some(value.as_str()),
+            href: format!("/graph?pivot={value}"),
+            label: t,
+            kind: "type".to_string(),
+        });
+    }
+    for tag in doc_tags(&store) {
+        let value = format!("tag:{tag}");
+        pivots.push(PivotRow {
+            active: active == Some(value.as_str()),
+            href: format!("/graph?pivot={value}"),
+            label: tag,
+            kind: "tag".to_string(),
+        });
+    }
+
     Html(
         GraphPage {
             roots,
+            pivots,
             types: doc_types(&store),
             repo_name: state.repo_name.clone(),
             branch: state.branch.clone(),

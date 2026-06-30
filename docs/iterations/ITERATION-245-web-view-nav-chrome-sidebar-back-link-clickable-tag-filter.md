@@ -1,7 +1,7 @@
 ---
 title: 'Web view app shell: sidebar + header, back-link, clickable tag filter'
 type: iteration
-status: in-progress
+status: complete
 author: agent
 date: 2026-07-01
 tags: []
