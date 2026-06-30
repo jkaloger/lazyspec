@@ -305,6 +305,47 @@ async fn list_rows_link_to_doc_pages() {
     );
 }
 
+#[tokio::test]
+async fn list_and_search_fragment_rows_are_byte_identical() {
+    // AC6 row-parity: list_row.html is the shared partial for both the grouped
+    // list and the search fragment, so a doc's rendered <li> must be identical
+    // across the two surfaces (no layout shift on an HTMX swap).
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-parity.md",
+        "---\ntitle: \"Parity term doc\"\ntype: rfc\nstatus: in-progress\nauthor: \"t\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+
+    let (list_status, list_body) = get(store(&fixture), "/").await;
+    let (search_status, search_body) = get(store(&fixture), "/search?q=parity").await;
+
+    assert_eq!(list_status, StatusCode::OK);
+    assert_eq!(search_status, StatusCode::OK);
+    assert!(
+        !search_body.contains("<!DOCTYPE html>"),
+        "search must return a fragment:\n{search_body}"
+    );
+
+    let list_row = row_for(&list_body, "RFC-001");
+    let search_row = row_for(&search_body, "RFC-001");
+    assert_eq!(
+        list_row, search_row,
+        "list and search rows must be byte-identical for swap parity"
+    );
+}
+
+/// Extract the full `<li ...>...</li>` row for a given `data-id` from a list or
+/// search fragment. Used to assert byte-identical row markup across surfaces.
+fn row_for(body: &str, id: &str) -> String {
+    let needle = format!("<li data-id=\"{id}\"");
+    let start = body
+        .find(&needle)
+        .unwrap_or_else(|| panic!("no row for {id} in:\n{body}"));
+    let rest = &body[start..];
+    let end = rest.find("</li>").expect("row must be closed") + "</li>".len();
+    rest[..end].to_string()
+}
+
 /// Extract `data-id` values in document order from a list/search fragment, which
 /// equals the row render order.
 fn ids_in_order(body: &str) -> Vec<String> {
@@ -541,6 +582,29 @@ async fn graph_cycle_terminates_each_node_once() {
         body.matches("data-id=\"RFC-002\"").count(),
         1,
         "RFC-002 drawn once:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn graph_status_carries_data_status_and_swatch() {
+    // ITERATION-244: graph status reuses the doc-page swatch treatment, so each
+    // graph node's status must carry data-status plus a leading status-swatch
+    // span (the hooks the shared per-status color rules key off).
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-base.md", "Base", "in-progress");
+
+    let (status, body) = get(store(&fixture), "/graph").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("class=\"graph-status\" data-status=\"in-progress\""),
+        "graph status must carry data-status for the swatch legend:\n{body}"
+    );
+    assert!(
+        body.contains(
+            "class=\"graph-status\" data-status=\"in-progress\"><span class=\"status-swatch\">"
+        ),
+        "graph status must lead with a status-swatch span:\n{body}"
     );
 }
 

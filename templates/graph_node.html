@@ -1,7 +1,7 @@
 <li data-id="{{ id }}" data-depth="{{ depth }}">
 <a href="/doc/{{ id }}">{{ title }}</a>
 <span class="graph-type">{{ doc_type }}</span>
-<span class="graph-status">{{ status }}</span>
+<span class="graph-status" data-status="{{ status }}"><span class="status-swatch"></span>{{ status }}</span>
 {% if !related.is_empty() %}<span class="graph-related">{% for r in related %}&#x2504;&#x25b7; <a href="/doc/{{ r }}">{{ r }}</a>{% if !loop.last %} {% endif %}{% endfor %}</span>{% endif %}
 {% if !children.is_empty() %}<ul>{% for child in children %}{{ child.render().unwrap()|safe }}{% endfor %}</ul>{% endif %}
 </li>

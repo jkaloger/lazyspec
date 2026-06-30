@@ -248,37 +248,49 @@ code,
   background: var(--ink-faint);
 }
 
-.doc-status[data-status="draft"] .status-swatch {
+/* Status hues are defined once here and shared by the document page
+   (.doc-status) and the graph node (.graph-status) so both surfaces read the
+   state identically without duplicating color values. */
+.doc-status[data-status="draft"] .status-swatch,
+.graph-status[data-status="draft"] .status-swatch {
   background: var(--st-draft);
 }
-.doc-status[data-status="review"] .status-swatch {
+.doc-status[data-status="review"] .status-swatch,
+.graph-status[data-status="review"] .status-swatch {
   background: var(--st-review);
 }
-.doc-status[data-status="accepted"] .status-swatch {
+.doc-status[data-status="accepted"] .status-swatch,
+.graph-status[data-status="accepted"] .status-swatch {
   background: var(--st-accepted);
 }
-.doc-status[data-status="complete"] .status-swatch {
+.doc-status[data-status="complete"] .status-swatch,
+.graph-status[data-status="complete"] .status-swatch {
   background: var(--st-complete);
 }
 
 /* in-progress reads hollow (ring) against complete's solid fill, so the two
    share a hue but stay distinct without relying on color alone. */
-.doc-status[data-status="in-progress"] .status-swatch {
+.doc-status[data-status="in-progress"] .status-swatch,
+.graph-status[data-status="in-progress"] .status-swatch {
   background: transparent;
   box-shadow: inset 0 0 0 var(--rule-w) var(--st-progress);
 }
 
 /* Terminal-dead states read without hue: struck label, faded swatch. */
 .doc-status[data-status="rejected"],
-.doc-status[data-status="superseded"] {
+.doc-status[data-status="superseded"],
+.graph-status[data-status="rejected"],
+.graph-status[data-status="superseded"] {
   color: var(--ink-faint);
   text-decoration: line-through;
 }
-.doc-status[data-status="rejected"] .status-swatch {
+.doc-status[data-status="rejected"] .status-swatch,
+.graph-status[data-status="rejected"] .status-swatch {
   background: var(--st-rejected);
   opacity: 0.6;
 }
-.doc-status[data-status="superseded"] .status-swatch {
+.doc-status[data-status="superseded"] .status-swatch,
+.graph-status[data-status="superseded"] .status-swatch {
   background: var(--st-superseded);
   opacity: 0.6;
 }
@@ -403,4 +415,252 @@ code,
     padding-bottom: var(--sp-4);
     border-bottom: var(--rule-w) solid var(--rule);
   }
+}
+
+/* ── List, search, filter ────────────────────────────────────────────────── */
+
+/* The list title doubles as the page masthead, set off by a strong rule so the
+   search and filter controls below read as a distinct band. */
+body > h1 {
+  max-width: var(--page-max);
+  margin-inline: auto;
+  padding: var(--sp-8) var(--page-pad) var(--sp-3);
+  font-size: var(--t-display-size);
+  line-height: var(--t-display-lh);
+  letter-spacing: var(--t-display-tracking);
+  font-weight: 600;
+  border-bottom: var(--rule-w) solid var(--rule-strong);
+}
+
+/* Search is a flat field: square, hairline-ruled, accent only on the focus
+   ring. It sits on the raised surface to lift it a hair off the page. */
+input[type="search"] {
+  display: block;
+  max-width: var(--page-max);
+  width: 100%;
+  margin-inline: auto;
+  margin-top: var(--sp-4);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--surface-raised);
+  border: var(--rule-w) solid var(--rule);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--t-meta-size);
+}
+
+input[type="search"]::placeholder {
+  color: var(--ink-faint);
+}
+
+/* Filters are bare mono labels, not boxed selects: each select carries only a
+   hairline underline so the row reads as a caption strip, not a form. */
+#filters {
+  display: flex;
+  gap: var(--sp-6);
+  max-width: var(--page-max);
+  margin-inline: auto;
+  padding: var(--sp-3) var(--page-pad);
+}
+
+#filters label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: var(--t-label-size);
+  line-height: var(--t-label-lh);
+  letter-spacing: var(--t-label-tracking);
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+#filters select {
+  appearance: none;
+  background: none;
+  border: none;
+  border-bottom: var(--rule-w) solid var(--rule);
+  padding: var(--sp-1) 0;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--t-label-size);
+  letter-spacing: var(--t-label-tracking);
+}
+
+#doc-list {
+  max-width: var(--page-max);
+  margin-inline: auto;
+  padding: var(--sp-4) var(--page-pad) var(--sp-8);
+}
+
+/* Per-type grouping is a small mono caption, never a colored heading. */
+.doc-group + .doc-group {
+  margin-top: var(--sp-6);
+}
+
+.doc-group h2 {
+  font-family: var(--font-mono);
+  font-size: var(--t-label-size);
+  line-height: var(--t-label-lh);
+  letter-spacing: var(--t-label-tracking);
+  text-transform: uppercase;
+  font-weight: 400;
+  color: var(--ink-muted);
+  padding-bottom: var(--sp-1);
+}
+
+/* Rows are a tabular list, not cards: hairline dividers and whitespace do the
+   grouping. The same selector covers the grouped list (.doc-group ul) and the
+   flat search results (ul.search-results) so an HTMX swap between them causes
+   no layout shift (AC6 row-parity). */
+.doc-group ul,
+ul.search-results {
+  list-style: none;
+  padding: 0;
+}
+
+.doc-group ul > li,
+ul.search-results > li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-1);
+  border-top: var(--rule-w) solid var(--rule);
+  transition: background var(--motion-hover) var(--motion-hover-ease);
+}
+
+.doc-group ul > li:last-child,
+ul.search-results > li:last-child {
+  border-bottom: var(--rule-w) solid var(--rule);
+}
+
+/* Wayfinding affordance: the whole row washes accent on hover. */
+.doc-group ul > li:hover,
+ul.search-results > li:hover {
+  background: var(--accent-weak);
+}
+
+.doc-group ul > li > a,
+ul.search-results > li > a {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  flex: 1;
+  min-width: 0;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+/* Fixed mono gutter keeps ids column-aligned down the list. */
+.doc-id {
+  flex: none;
+  width: var(--col-meta);
+  font-family: var(--font-mono);
+  font-size: var(--t-meta-size);
+  font-variant-numeric: tabular-nums lining-nums;
+  color: var(--ink-muted);
+}
+
+.doc-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The row's .doc-status reuses the swatch hues but lays out as a compact,
+   right-aligned micro-label (the .doc-status flex base lives on the doc page). */
+.doc-group ul .doc-status,
+ul.search-results .doc-status {
+  flex: none;
+  margin-left: auto;
+  font-size: var(--t-label-size);
+}
+
+.search-empty {
+  max-width: var(--page-max);
+  margin-inline: auto;
+  color: var(--ink-faint);
+}
+
+/* ── Graph tree ──────────────────────────────────────────────────────────── */
+
+.graph-tree {
+  max-width: var(--page-max);
+  margin-inline: auto;
+  padding: var(--sp-4) var(--page-pad) var(--sp-8);
+  list-style: none;
+}
+
+/* Each nesting level indents by one step and draws a vertical guide hairline on
+   its left edge, so depth is legible structurally rather than by color. */
+.graph-tree ul {
+  list-style: none;
+  margin-left: var(--sp-4);
+  padding-left: var(--sp-4);
+  border-left: var(--rule-w) solid var(--rule);
+}
+
+.graph-tree li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: var(--sp-1) 0;
+}
+
+.graph-tree li > a {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-underline-offset: 2px;
+  transition: color var(--motion-hover) var(--motion-hover-ease);
+}
+
+.graph-tree li > a:hover {
+  color: var(--accent);
+}
+
+/* Type is a neutral mono label: it classifies, it does not signal state, so it
+   never takes accent or a status hue. */
+.graph-type {
+  font-family: var(--font-mono);
+  font-size: var(--t-label-size);
+  letter-spacing: var(--t-label-tracking);
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+/* Status reuses the doc-page micro-label + swatch treatment (hues defined once
+   alongside .doc-status above). */
+.graph-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: var(--t-label-size);
+  letter-spacing: var(--t-label-tracking);
+  text-transform: uppercase;
+}
+
+/* Relation targets are mono ids; the dotted-arrow glyph is faint and the link
+   itself carries the accent underline as the only wayfinding cue. */
+.graph-related {
+  font-family: var(--font-mono);
+  font-size: var(--t-meta-size);
+  color: var(--ink-faint);
+}
+
+.graph-related a {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-underline-offset: 2px;
+}
+
+.graph-empty {
+  max-width: var(--page-max);
+  margin-inline: auto;
+  padding-inline: var(--page-pad);
+  color: var(--ink-faint);
 }
