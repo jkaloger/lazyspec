@@ -32,28 +32,30 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
+
+      - name: Cache Nix store
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
         with:
-          targets: ${{ matrix.target }}
+          primary-key: nix-${{ matrix.target }}-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nix-${{ matrix.target }}-
 
       - name: Build CLI
-        run: cargo build --release --target ${{ matrix.target }}
+        run: nix build .#default
 
       - name: Archive CLI binary
         run: |
           tag="${GITHUB_REF_NAME}"
+          cp -L result/bin/lazyspec ./lazyspec
+          chmod +w ./lazyspec
           archive="lazyspec-${tag}-${{ matrix.target }}.tar.gz"
-          tar -czf "${archive}" -C "target/${{ matrix.target }}/release" lazyspec
+          tar -czf "${archive}" lazyspec
           echo "cli_archive=${archive}" >> "$GITHUB_ENV"
-
-      - name: Install Tauri CLI
-        if: matrix.app
-        run: cargo install tauri-cli --version "^2.0" --locked
 
       - name: Build macOS app
         if: matrix.app
-        run: cargo tauri build --features app
+        run: nix develop --command cargo tauri build --features app
 
       - name: Archive macOS app
         if: matrix.app
