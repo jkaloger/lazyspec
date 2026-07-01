@@ -42,7 +42,7 @@ pub fn build_state(root: &Path) -> anyhow::Result<crate::web::server::AppState> 
 
     let fs = crate::engine::fs::RealFileSystem;
     let config = Config::load(root, &fs)?;
-    let store = Arc::new(Store::load(root, &config)?);
+    let store = Store::load(root, &config)?;
     let coords = crate::engine::github_url::resolve_repo_coords(&config, root);
     let issue_map = Arc::new(IssueMap::load(root).unwrap_or_default());
     let repo_name = store
@@ -52,7 +52,7 @@ pub fn build_state(root: &Path) -> anyhow::Result<crate::web::server::AppState> 
         .unwrap_or_default();
     let branch = crate::engine::git_status::query_git_branch(store.root());
     Ok(crate::web::server::AppState {
-        store,
+        store: crate::web::server::SharedStore::new(store),
         config: Arc::new(config),
         coords,
         issue_map,
@@ -274,7 +274,7 @@ mod tests {
             "repo_name should be derived from the chosen folder name, as the serve arm does"
         );
         assert_eq!(
-            state.store.root().file_name(),
+            state.store.snapshot().root().file_name(),
             Some(std::ffi::OsStr::new("my-project")),
             "the store should be rooted at the chosen folder"
         );

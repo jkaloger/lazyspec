@@ -2,7 +2,7 @@
 //! it to loopback. Imports only from [`crate::engine`].
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use axum::routing::get;
 use axum::Router;
@@ -15,13 +15,47 @@ use crate::web::{assets, routes};
 /// The default loopback port for `lazyspec serve` (RFC-052 / STORY-176).
 pub const DEFAULT_PORT: u16 = 8787;
 
+/// A swappable holder for the router's shared [`Store`]. The inner `Arc<Store>`
+/// is the current live store; the reload loop replaces it wholesale (see
+/// [`SharedStore::swap`]) while requests read a cheap per-request snapshot via
+/// [`SharedStore::snapshot`].
+///
+/// A `RwLock<Arc<Store>>` (rather than a bare `Arc<Store>`) gives interior
+/// mutability without a new crate: `arc-swap` is not vendored and crates.io is
+/// off the sandbox network. The lock is held only long enough to clone the inner
+/// `Arc` (a refcount bump) and is released before the request does any work, so
+/// no lock is ever held across a request and a swap is visible only to
+/// subsequent requests.
+#[derive(Clone)]
+pub struct SharedStore(Arc<RwLock<Arc<Store>>>);
+
+impl SharedStore {
+    /// Wrap an initial store as the shared, swappable holder.
+    pub fn new(store: Store) -> Self {
+        SharedStore(Arc::new(RwLock::new(Arc::new(store))))
+    }
+
+    /// Clone the current inner `Arc<Store>` and release the read lock
+    /// immediately, giving the caller a consistent snapshot for the whole
+    /// request with no lock held across it.
+    pub fn snapshot(&self) -> Arc<Store> {
+        Arc::clone(&self.0.read().expect("store lock poisoned"))
+    }
+
+    /// Atomically replace the inner store. Visible only to snapshots taken after
+    /// this returns; in-flight requests keep the snapshot they already cloned.
+    pub fn swap(&self, store: Store) {
+        *self.0.write().expect("store lock poisoned") = Arc::new(store);
+    }
+}
+
 /// Shared, read-only application state behind the router. Carries the loaded
 /// store plus the GitHub deep-link inputs resolved once at startup: the repo
 /// `coords` (`None` when unresolvable, which disables deep-links) and the
 /// `issue_map` used to construct issue/milestone URLs.
 #[derive(Clone)]
 pub struct AppState {
-    pub store: Arc<Store>,
+    pub store: SharedStore,
     pub config: Arc<crate::engine::config::Config>,
     pub coords: Option<RepoCoords>,
     pub issue_map: Arc<IssueMap>,

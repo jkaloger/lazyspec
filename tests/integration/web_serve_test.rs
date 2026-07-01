@@ -10,19 +10,19 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use lazyspec::engine::issue_map::IssueMap;
 use lazyspec::engine::store::Store;
-use lazyspec::web::server::{router, AppState, DEFAULT_PORT};
+use lazyspec::web::server::{router, AppState, SharedStore, DEFAULT_PORT};
 use tower::ServiceExt;
 
 use crate::common::TestFixture;
 
-fn store(fixture: &TestFixture) -> Arc<Store> {
-    Arc::new(fixture.store())
+fn store(fixture: &TestFixture) -> Store {
+    fixture.store()
 }
 
 /// Build app state with deep-links disabled (no coords) for the skeleton tests.
-fn state(store: Arc<Store>) -> AppState {
+fn state(store: Store) -> AppState {
     AppState {
-        store,
+        store: SharedStore::new(store),
         config: Arc::new(lazyspec::engine::config::Config::default()),
         coords: None,
         issue_map: Arc::new(IssueMap::default()),
@@ -31,7 +31,7 @@ fn state(store: Arc<Store>) -> AppState {
     }
 }
 
-async fn get(store: Arc<Store>, uri: &str) -> (StatusCode, String) {
+async fn get(store: Store, uri: &str) -> (StatusCode, String) {
     let app = router(state(store));
     let response = app
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())

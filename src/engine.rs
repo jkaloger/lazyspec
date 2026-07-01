@@ -35,3 +35,4 @@ pub mod store_dispatch;
 pub mod symbols;
 pub mod template;
 pub mod validation;
+pub mod watch;

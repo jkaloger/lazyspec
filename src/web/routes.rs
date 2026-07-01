@@ -220,7 +220,7 @@ pub async fn list_page(
     State(state): State<AppState>,
     Query(query): Query<ListQuery>,
 ) -> Html<String> {
-    let store = state.store;
+    let store = state.store.snapshot();
     let active_type = empty_to_none(query.r#type.clone());
     let active_tag = empty_to_none(query.tag.clone());
     let filter = filter_from_query(query);
@@ -251,7 +251,7 @@ pub async fn list_fragment(
     State(state): State<AppState>,
     Query(query): Query<ListQuery>,
 ) -> Html<String> {
-    let store = state.store;
+    let store = state.store.snapshot();
     let filter = filter_from_query(query);
     let groups = build_groups(&store, &filter);
     let fragment = ListFragment { groups };
@@ -266,7 +266,7 @@ pub async fn search(
     State(state): State<AppState>,
     Query(query): Query<SearchQuery>,
 ) -> Html<String> {
-    let store = state.store;
+    let store = state.store.snapshot();
     let Some(q) = empty_to_none(query.q) else {
         let groups = build_groups(&store, &Filter::default());
         return Html(ListFragment { groups }.render().unwrap_or_default());
@@ -300,7 +300,7 @@ pub async fn search(
 /// `flatten_forest` ordering, so diamonds (shared node re-emitted without its
 /// subtree) and cycles (back-edge dropped, every node once) match the TUI.
 pub async fn graph(State(state): State<AppState>, Query(query): Query<GraphQuery>) -> Html<String> {
-    let store = state.store;
+    let store = state.store.snapshot();
     let pivot = empty_to_none(query.pivot);
 
     // Re-root the forest per the pivot prefix, reusing the engine's anchor
@@ -330,7 +330,7 @@ pub async fn graph(State(state): State<AppState>, Query(query): Query<GraphQuery
 /// to HTML with `@ref` directives expanded inline. Unknown ids yield a handled
 /// 404 with the not-found page, never a 500.
 pub async fn doc_page(State(state): State<AppState>, AxumPath(id): AxumPath<String>) -> Response {
-    let store = state.store;
+    let store = state.store.snapshot();
     // Resolve id -> document. Try a literal path first, then shorthand,
     // mirroring the engine resolution that backs `show` without importing cli.
     let doc = store

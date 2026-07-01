@@ -8,5 +8,6 @@ pub mod assets;
 pub mod render;
 pub mod routes;
 pub mod server;
+pub mod watch;
 
 pub use server::serve;
