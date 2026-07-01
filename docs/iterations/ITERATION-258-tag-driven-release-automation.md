@@ -1,7 +1,7 @@
 ---
 title: release-plz version bump + crates.io publish
 type: iteration
-status: in-progress
+status: complete
 author: unknown
 date: 2026-07-01
 tags: []
