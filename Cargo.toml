@@ -44,6 +44,10 @@ askama = { version = "0.14", optional = true }
 # Native macOS shell (RFC-054). Optional and gated behind the `app` feature so
 # default/`web`/`cli`/`tui` builds pull no Tauri/wry/webview.
 tauri = { version = "2.11.4", optional = true }
+# The native folder picker and rejection dialog for project selection
+# (RFC-054 / STORY-186). File dialogs are not in tauri core in v2; they live in
+# this plugin. Optional and gated behind `app` like the rest of the Tauri stack.
+tauri-plugin-dialog = { version = "2", optional = true }
 # `tower` drives the axum `Router` (a `tower::Service`) from the protocol bridge;
 # it is a real dependency of the `app` bridge, not just a dev-only test aid.
 tower = { version = "0.5", features = ["util"], optional = true }
@@ -66,7 +70,7 @@ web = ["dep:tokio", "dep:axum", "dep:askama"]
 # pulls the axum router + templates; adds Tauri and the tower service driver.
 # Present only when built with `--features app`; default/`web`/`cli`/`tui`
 # builds gain no Tauri.
-app = ["web", "dep:tauri", "dep:tower", "dep:http", "dep:tauri-build"]
+app = ["web", "dep:tauri", "dep:tauri-plugin-dialog", "dep:tower", "dep:http", "dep:tauri-build"]
 # Exposes test-only fixtures (e.g. `Config::default()`) to the integration test
 # crates, which compile against the non-test build of the library. The binary
 # never enables this, so the production load path carries no default config.

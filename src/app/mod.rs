@@ -22,6 +22,7 @@
 //! library-side means the future entry (bin or `main.rs` branch) is a one-line
 //! call and the choice is not locked in here.
 
+pub mod project;
 pub mod protocol;
 
 #[cfg(feature = "app")]
@@ -29,13 +30,11 @@ use std::sync::Arc;
 
 #[cfg(feature = "app")]
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+#[cfg(feature = "app")]
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 #[cfg(feature = "app")]
-use crate::engine::config::Config;
-#[cfg(feature = "app")]
-use crate::engine::issue_map::IssueMap;
-#[cfg(feature = "app")]
-use crate::engine::store::Store;
+use crate::app::project::{run_picker_loop, PickOutcome};
 #[cfg(feature = "app")]
 use crate::web::server::{router, AppState};
 
@@ -46,49 +45,19 @@ use crate::web::server::{router, AppState};
 #[cfg(feature = "app")]
 const SCHEME: &str = "lazyspec";
 
-/// Build the shared [`AppState`] for a project root, mirroring how
-/// `lazyspec serve` constructs it in `main.rs` (STORY-185 AC8): load the store
-/// into an `Arc<Store>`, resolve GitHub deep-link coords (deep-links disabled
-/// when unresolvable), load the issue map, and derive the header repo/branch
-/// chips. No socket is involved.
-#[cfg(feature = "app")]
-fn build_state(root: &std::path::Path) -> anyhow::Result<AppState> {
-    let fs = crate::engine::fs::RealFileSystem;
-    let config = Config::load(root, &fs)?;
-    let store = Arc::new(Store::load(root, &config)?);
-    let coords = crate::engine::github_url::resolve_repo_coords(&config, root);
-    let issue_map = Arc::new(IssueMap::load(root).unwrap_or_default());
-    let repo_name = store
-        .root()
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let branch = crate::engine::git_status::query_git_branch(store.root());
-    Ok(AppState {
-        store,
-        config: Arc::new(config),
-        coords,
-        issue_map,
-        repo_name,
-        branch,
-    })
-}
-
 /// Entry point for the native app (RFC-054 `app::run`).
 ///
-/// Loads a **hardcoded** project path (STORY-185 out-of-scope: picker/recents
-/// arrive in STORY-186), builds the router state, and starts Tauri. An
-/// app-owned multi-thread tokio runtime services the custom-scheme protocol
+/// Drives the launch-time folder picker (STORY-186): the native macOS picker
+/// opens before any window, an invalid choice is rejected in plain language and
+/// re-prompted, and only a valid `.lazyspec/` project proceeds to build the
+/// router state and open the window. Cancelling the picker exits cleanly.
+///
+/// An app-owned multi-thread tokio runtime services the custom-scheme protocol
 /// handler; the handler adapts each webview `http::Request` through the axum
 /// `Router` and returns the `http::Response`, so no route is reimplemented and
 /// no port is bound.
 #[cfg(feature = "app")]
 pub fn run() -> anyhow::Result<()> {
-    // Hardcoded per STORY-185 (folder picker is STORY-186). The current working
-    // directory is the lazyspec project to render.
-    let root = std::env::current_dir()?;
-    let state = build_state(&root)?;
-
     // The app owns its tokio runtime, distinct from Tauri's AppKit event loop
     // (AC7). The protocol handler blocks on this runtime to service each
     // request; building the Router per request is cheap (it is a clone-able
@@ -99,6 +68,7 @@ pub fn run() -> anyhow::Result<()> {
     let runtime = Arc::new(runtime);
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .register_asynchronous_uri_scheme_protocol(SCHEME, move |ctx, request, responder| {
             // Clone the shared `AppState` (Arc-backed) and rebuild the router as a
             // fresh `tower::Service` per request. `respond` may be called from any
@@ -112,7 +82,44 @@ pub fn run() -> anyhow::Result<()> {
             });
         })
         .setup(move |app| {
+            let handle = app.handle().clone();
+
+            // Drive the picker before any window is created: pick -> validate ->
+            // re-prompt on failure (STORY-186). `blocking_*` dialogs run the
+            // native picker/alert synchronously; the loop logic itself lives in
+            // `project::run_picker_loop` and is unit-tested without Tauri.
+            let outcome = run_picker_loop(
+                || {
+                    handle
+                        .dialog()
+                        .file()
+                        .set_title("Open a lazyspec project")
+                        .blocking_pick_folder()
+                        .and_then(|p| p.into_path().ok())
+                },
+                |message| {
+                    handle
+                        .dialog()
+                        .message(message)
+                        .kind(MessageDialogKind::Warning)
+                        .title("Not a lazyspec project")
+                        .blocking_show();
+                },
+            );
+
+            let root = match outcome {
+                PickOutcome::Selected(root) => root,
+                // Clean exit: the user dismissed the picker without choosing a
+                // project. Never open a window.
+                PickOutcome::Cancelled => {
+                    app.handle().exit(0);
+                    return Ok(());
+                }
+            };
+
+            let state = project::build_state(&root)?;
             app.manage(state);
+
             let url = WebviewUrl::CustomProtocol(
                 format!("{SCHEME}://localhost/")
                     .parse()
