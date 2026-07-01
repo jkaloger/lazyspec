@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "lazyspec",
+  "identifier": "com.lazyspec.app",
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "build": {},
+  "bundle": {
+    "active": false
+  }
+}
