@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            arch: aarch64
+            app: true
+          - os: macos-13
+            target: x86_64-apple-darwin
+            arch: x86_64
+            app: true
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            app: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
+
+      - name: Cache Nix store
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-${{ matrix.target }}-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nix-${{ matrix.target }}-
+
+      - name: Build CLI
+        run: nix build .#default
+
+      - name: Archive CLI binary
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          cp -L result/bin/lazyspec ./lazyspec
+          chmod +w ./lazyspec
+          archive="lazyspec-${tag}-${{ matrix.target }}.tar.gz"
+          tar -czf "${archive}" lazyspec
+          echo "cli_archive=${archive}" >> "$GITHUB_ENV"
+
+      - name: Build macOS app
+        if: matrix.app
+        run: nix develop --command cargo tauri build --features app
+
+      - name: Archive macOS app
+        if: matrix.app
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          archive="lazyspec-${tag}-${{ matrix.arch }}-app.zip"
+          (cd target/release/bundle/macos && zip -r -y "${OLDPWD}/${archive}" lazyspec.app)
+          echo "app_archive=${archive}" >> "$GITHUB_ENV"
+
+      - name: Upload CLI archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cli-${{ matrix.target }}
+          path: ${{ env.cli_archive }}
+          if-no-files-found: error
+
+      - name: Upload app archive
+        if: matrix.app
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: app-${{ matrix.arch }}
+          path: ${{ env.app_archive }}
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release and upload assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${GITHUB_REF_NAME}" --generate-notes artifacts/*

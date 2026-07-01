@@ -1,0 +1,3 @@
+[workspace]
+git_release_enable = false
+git_tag_name = "v{{ version }}"
