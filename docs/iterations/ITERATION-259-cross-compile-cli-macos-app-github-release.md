@@ -1,7 +1,7 @@
 ---
 title: Cross-compile CLI + macOS .app + GitHub Release
 type: iteration
-status: accepted
+status: in-progress
 author: unknown
 date: 2026-07-01
 tags: []
@@ -42,4 +42,4 @@ CONVENTION.md engine/CLI/TUI layering -- N/A, no `src/` touched.
 
 ## Verification
 
-Push a test tag on a throwaway branch/fork (or `act`/local dry-run of the matrix step), confirm 4 artifacts (3 CLI archives + 1 `.app` zip) attach to one GH Release, notes are GitHub's auto-generated PR list.
+Push a test tag on a throwaway branch/fork (or `act`/local dry-run of the matrix step), confirm 5 artifacts (3 CLI archives + 2 `.app` zips, one per macOS arch) attach to one GH Release, notes are GitHub's auto-generated PR list.
