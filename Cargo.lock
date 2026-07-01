@@ -2457,6 +2457,7 @@ dependencies = [
  "console",
  "crossbeam-channel",
  "crossterm 0.28.1",
+ "dirs",
  "http",
  "image",
  "indicatif",

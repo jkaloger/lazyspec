@@ -54,6 +54,12 @@ tower = { version = "0.5", features = ["util"], optional = true }
 # The `http` request/response types the bridge converts between; shared with
 # axum and tauri (both on http 1.x).
 http = { version = "1", optional = true }
+# Platform config-dir resolution for the recents file (RFC-054 / STORY-186):
+# `~/Library/Application Support/lazyspec/` on macOS, resolved portably rather
+# than hardcoded. Already in the lock as a transitive tauri dep; promoted to a
+# direct optional dep under `app`. The recents file itself is (de)serialized
+# with the existing top-level `serde_json`, so no new serde dep is needed.
+dirs = { version = "6", optional = true }
 
 [build-dependencies]
 # Only pulled for the `app` feature; runs Tauri's codegen for the bundle context.
@@ -70,7 +76,7 @@ web = ["dep:tokio", "dep:axum", "dep:askama"]
 # pulls the axum router + templates; adds Tauri and the tower service driver.
 # Present only when built with `--features app`; default/`web`/`cli`/`tui`
 # builds gain no Tauri.
-app = ["web", "dep:tauri", "dep:tauri-plugin-dialog", "dep:tower", "dep:http", "dep:tauri-build"]
+app = ["web", "dep:tauri", "dep:tauri-plugin-dialog", "dep:tower", "dep:http", "dep:tauri-build", "dep:dirs"]
 # Exposes test-only fixtures (e.g. `Config::default()`) to the integration test
 # crates, which compile against the non-test build of the library. The binary
 # never enables this, so the production load path carries no default config.

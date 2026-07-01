@@ -133,6 +133,124 @@ pub fn run_picker_loop(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Recents (STORY-186 "Recents persist across restarts in the platform config
+// dir"): an ordered, deduped, most-recently-used-first list of project roots.
+//
+// The list logic is deliberately pure — ordering ([`prepend_recent`]) and the
+// on-disk representation ([`parse_recents`]/[`serialize_recents`]) take and
+// return plain values so they are unit-tested under `cargo test --features web`
+// without touching the filesystem or Tauri. The thin I/O wrappers that resolve
+// the platform config dir and read/write the file are gated on `app` (they pull
+// `dirs`) and layer over these pure seams.
+// ---------------------------------------------------------------------------
+
+/// The file name of the recents list inside the app config directory. Only the
+/// `app`-gated I/O wrappers reference it; the pure list logic is file-agnostic.
+#[cfg(feature = "app")]
+const RECENTS_FILE: &str = "recents.json";
+
+/// The maximum number of remembered projects. Older entries beyond this are
+/// dropped so the File > recents submenu stays bounded.
+const MAX_RECENTS: usize = 20;
+
+/// Return a new recents list with `path` moved to the front (most-recent-first),
+/// removing any prior occurrence so the list stays deduped, and truncated to
+/// [`MAX_RECENTS`]. Pure: no I/O, so the MRU/dedup rule is unit-tested directly.
+///
+/// Paths are compared verbatim (as stored). Callers pass an already-validated,
+/// picker-supplied path; normalization is not attempted here because the picker
+/// yields absolute paths and inventing a canonicalization rule would be an
+/// untested guess.
+pub fn prepend_recent(existing: &[PathBuf], path: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::with_capacity(existing.len() + 1);
+    out.push(path.to_path_buf());
+    for p in existing {
+        if p.as_path() != path {
+            out.push(p.clone());
+        }
+    }
+    out.truncate(MAX_RECENTS);
+    out
+}
+
+/// Parse the recents file contents into an ordered list of paths. Tolerant by
+/// design (STORY-186 "tolerate a missing/corrupt file as empty recents"): any
+/// parse failure yields an empty list rather than an error, so a corrupt file
+/// never blocks launch. Pure over the raw string.
+pub fn parse_recents(contents: &str) -> Vec<PathBuf> {
+    serde_json::from_str::<Vec<PathBuf>>(contents).unwrap_or_default()
+}
+
+/// Serialize a recents list to the on-disk string form. Pure counterpart to
+/// [`parse_recents`]; the two round-trip.
+pub fn serialize_recents(recents: &[PathBuf]) -> String {
+    serde_json::to_string_pretty(recents).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Resolve the app config directory (`~/Library/Application Support/lazyspec/`
+/// on macOS) via the `dirs` crate — never a hardcoded home path (STORY-186).
+/// Returns `None` when the platform config dir cannot be resolved, in which case
+/// callers treat recents as empty and non-persistent rather than failing.
+#[cfg(feature = "app")]
+pub fn config_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("lazyspec"))
+}
+
+/// The full path to the recents file under [`config_dir`].
+#[cfg(feature = "app")]
+pub fn recents_path() -> Option<PathBuf> {
+    config_dir().map(|d| d.join(RECENTS_FILE))
+}
+
+/// Load the recents list from disk, tolerating a missing or corrupt file as an
+/// empty list (STORY-186). Never errors: a bad recents file must not block
+/// launch.
+#[cfg(feature = "app")]
+pub fn load_recents() -> Vec<PathBuf> {
+    let Some(path) = recents_path() else {
+        return Vec::new();
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => parse_recents(&contents),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Record `path` as the most-recent project: load the current list, move `path`
+/// to the front (deduped, bounded), and write it back. Invoked on every
+/// successful open — launch-open and switches (STORY-186 "added to recents").
+/// Creates the config dir if needed. Write failures are surfaced to the caller
+/// but are non-fatal to opening (the caller logs and proceeds).
+#[cfg(feature = "app")]
+pub fn record_recent(path: &Path) -> anyhow::Result<()> {
+    let Some(file) = recents_path() else {
+        anyhow::bail!("could not resolve the platform config directory for recents");
+    };
+    let updated = prepend_recent(&load_recents(), path);
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&file, serialize_recents(&updated))?;
+    Ok(())
+}
+
+/// Pick the project to reopen on launch (STORY-186 "Remembered project reopens"
+/// / "…is now missing/moved"): the most-recent recents entry that still passes
+/// [`validate_project_root`]. Entries that no longer exist or are no longer
+/// lazyspec projects are skipped, so a stale head never opens a broken view; the
+/// caller falls through to the picker when this returns `None`.
+///
+/// Pure over the supplied list (validation only touches the filesystem via
+/// [`validate_project_root`]), so it is unit-testable with real temp dirs and no
+/// Tauri.
+pub fn most_recent_valid(recents: &[PathBuf]) -> Option<PathBuf> {
+    recents
+        .iter()
+        .find(|p| validate_project_root(p).is_ok())
+        .cloned()
+}
+
 #[cfg(all(test, feature = "web"))]
 mod tests {
     use super::*;
@@ -275,5 +393,98 @@ mod tests {
             "an invalid pick followed by a dismiss must cancel, never select the invalid path"
         );
         assert_eq!(notifications.borrow().len(), 1);
+    }
+
+    fn p(s: &str) -> PathBuf {
+        PathBuf::from(s)
+    }
+
+    #[test]
+    fn prepend_puts_a_new_path_at_the_front() {
+        let existing = vec![p("/a"), p("/b")];
+
+        let out = prepend_recent(&existing, &p("/c"));
+
+        assert_eq!(out, vec![p("/c"), p("/a"), p("/b")]);
+    }
+
+    #[test]
+    fn prepend_moves_an_existing_path_to_the_front_without_duplicating() {
+        let existing = vec![p("/a"), p("/b"), p("/c")];
+
+        let out = prepend_recent(&existing, &p("/b"));
+
+        assert_eq!(
+            out,
+            vec![p("/b"), p("/a"), p("/c")],
+            "reopening a remembered project should promote it to MRU, not duplicate it"
+        );
+    }
+
+    #[test]
+    fn prepend_bounds_the_list_to_the_maximum() {
+        let existing: Vec<PathBuf> = (0..MAX_RECENTS).map(|i| p(&format!("/p{i}"))).collect();
+
+        let out = prepend_recent(&existing, &p("/new"));
+
+        assert_eq!(out.len(), MAX_RECENTS);
+        assert_eq!(out[0], p("/new"));
+        assert!(
+            !out.contains(&p(&format!("/p{}", MAX_RECENTS - 1))),
+            "the oldest entry should be evicted once the list is full"
+        );
+    }
+
+    #[test]
+    fn parse_tolerates_a_corrupt_file_as_empty() {
+        assert!(parse_recents("this is not json").is_empty());
+        assert!(parse_recents("").is_empty());
+        assert!(parse_recents("{\"not\": \"an array\"}").is_empty());
+    }
+
+    #[test]
+    fn parse_and_serialize_round_trip() {
+        let recents = vec![p("/one"), p("/two/three")];
+
+        let restored = parse_recents(&serialize_recents(&recents));
+
+        assert_eq!(restored, recents);
+    }
+
+    #[test]
+    fn most_recent_valid_picks_the_first_entry_that_is_a_real_project() {
+        let missing = temp_dir();
+        let missing_path = missing.path().join("gone");
+
+        let valid = temp_dir();
+        std::fs::create_dir(valid.path().join(".lazyspec")).unwrap();
+
+        let recents = vec![missing_path, valid.path().to_path_buf()];
+
+        assert_eq!(
+            most_recent_valid(&recents),
+            Some(valid.path().to_path_buf()),
+            "a stale head should be skipped in favour of the next valid entry"
+        );
+    }
+
+    #[test]
+    fn most_recent_valid_returns_none_when_no_entry_is_valid() {
+        let missing = temp_dir();
+        let recents = vec![
+            missing.path().join("gone"),
+            missing.path().join("also-gone"),
+        ];
+
+        assert_eq!(
+            most_recent_valid(&recents),
+            None,
+            "with no valid entry the caller must fall through to the picker"
+        );
+    }
+
+    #[test]
+    fn most_recent_valid_on_an_empty_list_is_none() {
+        assert_eq!(most_recent_valid(&[]), None);
     }
 }
