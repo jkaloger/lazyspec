@@ -7,6 +7,7 @@ license = "MIT"
 repository = "https://github.com/jkaloger/lazyspec"
 homepage = "https://github.com/jkaloger/lazyspec"
 readme = "README.md"
+default-run = "lazyspec"
 
 [[bin]]
 name = "lazyspec-app"
@@ -46,45 +47,21 @@ tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"], optional = true }
 axum = { version = "0.8", optional = true }
 askama = { version = "0.14", optional = true }
-# Native macOS shell (RFC-054). Optional and gated behind the `app` feature so
-# default/`web`/`cli`/`tui` builds pull no Tauri/wry/webview.
 tauri = { version = "2.11.4", optional = true }
-# The native folder picker and rejection dialog for project selection
-# (RFC-054 / STORY-186). File dialogs are not in tauri core in v2; they live in
-# this plugin. Optional and gated behind `app` like the rest of the Tauri stack.
 tauri-plugin-dialog = { version = "2", optional = true }
-# `tower` drives the axum `Router` (a `tower::Service`) from the protocol bridge;
-# it is a real dependency of the `app` bridge, not just a dev-only test aid.
 tower = { version = "0.5", features = ["util"], optional = true }
-# The `http` request/response types the bridge converts between; shared with
-# axum and tauri (both on http 1.x).
 http = { version = "1", optional = true }
-# Platform config-dir resolution for the recents file (RFC-054 / STORY-186):
-# `~/Library/Application Support/lazyspec/` on macOS, resolved portably rather
-# than hardcoded. Already in the lock as a transitive tauri dep; promoted to a
-# direct optional dep under `app`. The recents file itself is (de)serialized
-# with the existing top-level `serde_json`, so no new serde dep is needed.
 dirs = { version = "6", optional = true }
 
 [build-dependencies]
-# Only pulled for the `app` feature; runs Tauri's codegen for the bundle context.
 tauri-build = { version = "2", optional = true }
 
 [features]
 default = []
 agent = []
 metrics = []
-# Read-only web view (RFC-052). Gates the entire `src/web/` module and its async
-# stack so default builds link no tokio/axum/askama and expose no `serve` command.
 web = ["dep:tokio", "dep:axum", "dep:askama"]
-# Native macOS desktop shell (RFC-054 / STORY-185). Implies `web` so the app
-# pulls the axum router + templates; adds Tauri and the tower service driver.
-# Present only when built with `--features app`; default/`web`/`cli`/`tui`
-# builds gain no Tauri.
 app = ["web", "dep:tauri", "dep:tauri-plugin-dialog", "dep:tower", "dep:http", "dep:tauri-build", "dep:dirs"]
-# Exposes test-only fixtures (e.g. `Config::default()`) to the integration test
-# crates, which compile against the non-test build of the library. The binary
-# never enables this, so the production load path carries no default config.
 test-support = []
 
 [profile.dev]
@@ -94,14 +71,7 @@ debug = "line-tables-only"
 debug = "line-tables-only"
 
 [dev-dependencies]
-# Self-reference so integration tests link the library with test-only fixtures.
 lazyspec = { path = ".", features = ["test-support"] }
-# Web-view tests (gated `#[cfg(feature = "web")]`) drive the axum Router directly
-# via `tower::ServiceExt::oneshot` to avoid real-network flakiness. Dev-only;
-# never enters the library or binary build.
 tower = { version = "0.5", features = ["util"] }
-# The `app` protocol-bridge unit tests convert `http` requests/responses; the
-# `app` feature ships `http` as a real dep, but the bridge adapter is unit-tested
-# under the `web`+test build (no Tauri needed), so `http` is a dev-dep too.
 http = { version = "1" }
 
