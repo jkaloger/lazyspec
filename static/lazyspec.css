@@ -833,6 +833,14 @@ ul.search-results .doc-tags {
   z-index: 50;
 }
 
+/* In the Tauri macOS webview the traffic lights float over the header
+   (Overlay title bar). Reserve their width so the hamburger clears them.
+   The `data-tauri` flag is set by the head script only inside the webview,
+   so plain-browser serving is unaffected. */
+html[data-tauri] .app-header {
+  padding-left: 78px;
+}
+
 .repo-chip {
   font-family: var(--font-mono);
   font-size: var(--t-label-size);

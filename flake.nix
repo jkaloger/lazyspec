@@ -96,6 +96,8 @@
             pkgs.ripgrep
             pkgs.cargo-sweep
             pkgs.llvmPackages.lld
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+            pkgs.cargo-tauri
           ];
         };
       }

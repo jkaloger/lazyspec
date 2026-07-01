@@ -191,10 +191,17 @@ pub fn run() -> anyhow::Result<()> {
                     .parse()
                     .expect("static scheme URL is valid"),
             );
-            WebviewWindowBuilder::new(app, MAIN_WINDOW, url)
+            let builder = WebviewWindowBuilder::new(app, MAIN_WINDOW, url)
                 .title("lazyspec")
-                .inner_size(1100.0, 800.0)
-                .build()?;
+                .inner_size(1100.0, 800.0);
+            // On macOS, float the traffic lights over the app chrome (Slack-style)
+            // and hide the title text. The web header reserves left padding via
+            // the `data-tauri` document flag so nothing sits under the controls.
+            #[cfg(target_os = "macos")]
+            let builder = builder
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true);
+            builder.build()?;
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -8,6 +8,11 @@ repository = "https://github.com/jkaloger/lazyspec"
 homepage = "https://github.com/jkaloger/lazyspec"
 readme = "README.md"
 
+[[bin]]
+name = "lazyspec-app"
+path = "src/bin/lazyspec-app.rs"
+required-features = ["app"]
+
 [dependencies]
 ratatui = "0.30"
 crossterm = "0.28"
