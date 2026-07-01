@@ -1,7 +1,7 @@
 ---
 title: Cross-compile CLI + macOS .app + GitHub Release
 type: iteration
-status: in-progress
+status: complete
 author: unknown
 date: 2026-07-01
 tags: []

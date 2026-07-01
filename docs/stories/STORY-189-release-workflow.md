@@ -1,7 +1,7 @@
 ---
 title: Release workflow
 type: story
-status: accepted
+status: complete
 author: unknown
 date: 2026-07-01
 tags: []
