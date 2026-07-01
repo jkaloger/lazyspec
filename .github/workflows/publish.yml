@@ -10,6 +10,7 @@ jobs:
   publish-release:
     name: Publish release
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: write
       pull-requests: read
@@ -31,7 +32,7 @@ jobs:
         # persist the devShell's cargo dir to $GITHUB_PATH instead.
         run: nix develop --command sh -c 'dirname $(command -v cargo)' >> "$GITHUB_PATH"
       - name: Run release-plz
-        uses: release-plz/action@975e932b313daccbd2db607a53c63c9c5300279b # v0.5.130
+        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
         with:
           command: release
         env:
@@ -63,7 +64,7 @@ jobs:
         # persist the devShell's cargo dir to $GITHUB_PATH instead.
         run: nix develop --command sh -c 'dirname $(command -v cargo)' >> "$GITHUB_PATH"
       - name: Run release-plz
-        uses: release-plz/action@975e932b313daccbd2db607a53c63c9c5300279b # v0.5.130
+        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
         with:
           command: release-pr
         env:
