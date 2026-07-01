@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>lazyspec graph</title>
+<script src="https://unpkg.com/htmx.org@1.9.12"></script>
+<link rel="preload" href="/static/fonts/archivo-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/ibm-plex-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
+<script>(function(){try{if(localStorage.getItem('ls-sidebar')==='collapsed'){document.documentElement.setAttribute('data-sidebar-init','collapsed');}if(window.__TAURI_INTERNALS__){document.documentElement.setAttribute('data-tauri','');}}catch(e){}})();</script>
+<link rel="stylesheet" href="/static/lazyspec.css">
+</head>
+<body data-nav="graph">
+{% include "_header.html" %}
+<div class="app-shell">
+{% include "_sidebar.html" %}
+<main>
+<a class="back-link" href="/">&larr; all documents</a>
+<h1>lazyspec graph</h1>
+{% if roots.is_empty() %}<p class="graph-empty">No documents.</p>{% else %}
+<ul class="graph-tree">
+{% for node in roots %}{{ node.render().unwrap()|safe }}{% endfor %}
+</ul>
+{% endif %}
+</main>
+</div>
+{% include "_search_modal.html" %}
+</body>
+</html>

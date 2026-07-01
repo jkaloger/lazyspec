@@ -1,0 +1,5 @@
+{% if rows.is_empty() %}<p class="search-empty">No results.</p>
+{% else %}<ul class="search-results">
+{% for doc in rows %}{% include "list_row.html" %}
+{% endfor %}</ul>
+{% endif %}

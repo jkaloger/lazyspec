@@ -154,6 +154,7 @@ fn config_with_parent_status_gate() -> Config {
         coordination: None,
         agents: Default::default(),
         skills: Default::default(),
+        web: None,
     }
 }
 

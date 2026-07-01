@@ -1,0 +1,31 @@
+<header class="app-header" data-tauri-drag-region>
+  <button
+    class="drawer-toggle"
+    type="button"
+    data-drawer-toggle
+    aria-label="Open navigation"
+  >
+    <svg
+      class="nav-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.75"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M4 6l16 0" />
+      <path d="M4 12l16 0" />
+      <path d="M4 18l16 0" />
+    </svg>
+  </button>
+  <span class="repo-chip"
+    >{{ repo_name }}{% match branch %}{% when Some with (b) %} · {{ b }}{% when
+    None %}{% endmatch %}</span
+  >
+  <button class="search-trigger" data-open-search type="button">
+    search <kbd>/</kbd>
+  </button>
+</header>

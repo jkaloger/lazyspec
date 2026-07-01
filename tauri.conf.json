@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "lazyspec",
+  "mainBinaryName": "lazyspec-app",
+  "identifier": "com.lazyspec.app",
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "build": {},
+  "bundle": {
+    "active": true,
+    "targets": "app",
+    "icon": ["icons/icon.png"],
+    "macOS": {
+      "signingIdentity": null
+    }
+  }
+}

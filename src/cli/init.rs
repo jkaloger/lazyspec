@@ -35,6 +35,7 @@ pub fn starter_config() -> Config {
         coordination: None,
         agents: Default::default(),
         skills: Default::default(),
+        web: None,
     }
 }
 

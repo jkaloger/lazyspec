@@ -7,6 +7,12 @@ license = "MIT"
 repository = "https://github.com/jkaloger/lazyspec"
 homepage = "https://github.com/jkaloger/lazyspec"
 readme = "README.md"
+default-run = "lazyspec"
+
+[[bin]]
+name = "lazyspec-app"
+path = "src/bin/lazyspec-app.rs"
+required-features = ["app"]
 
 [dependencies]
 ratatui = "0.30"
@@ -38,14 +44,24 @@ pulldown-cmark = "0.13"
 indicatif = "0.17"
 textwrap = "0.16"
 tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"], optional = true }
+axum = { version = "0.8", optional = true }
+askama = { version = "0.14", optional = true }
+tauri = { version = "2.11.4", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tower = { version = "0.5", features = ["util"], optional = true }
+http = { version = "1", optional = true }
+dirs = { version = "6", optional = true }
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true }
 
 [features]
 default = []
 agent = []
 metrics = []
-# Exposes test-only fixtures (e.g. `Config::default()`) to the integration test
-# crates, which compile against the non-test build of the library. The binary
-# never enables this, so the production load path carries no default config.
+web = ["dep:tokio", "dep:axum", "dep:askama"]
+app = ["web", "dep:tauri", "dep:tauri-plugin-dialog", "dep:tower", "dep:http", "dep:tauri-build", "dep:dirs"]
 test-support = []
 
 [profile.dev]
@@ -55,5 +71,7 @@ debug = "line-tables-only"
 debug = "line-tables-only"
 
 [dev-dependencies]
-# Self-reference so integration tests link the library with test-only fixtures.
 lazyspec = { path = ".", features = ["test-support"] }
+tower = { version = "0.5", features = ["util"] }
+http = { version = "1" }
+

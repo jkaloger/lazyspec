@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ id }} - {{ title }}</title>
+<script src="https://unpkg.com/htmx.org@1.9.12"></script>
+<link rel="preload" href="/static/fonts/archivo-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/ibm-plex-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
+<script>(function(){try{if(localStorage.getItem('ls-sidebar')==='collapsed'){document.documentElement.setAttribute('data-sidebar-init','collapsed');}if(window.__TAURI_INTERNALS__){document.documentElement.setAttribute('data-tauri','');}}catch(e){}})();</script>
+<link rel="stylesheet" href="/static/lazyspec.css">
+</head>
+<body data-nav="doc">
+{% include "_header.html" %}
+<div class="app-shell">
+{% include "_sidebar.html" %}
+<main>
+<a class="back-link" href="/">&larr; all documents</a>
+<div class="doc-grid" data-id="{{ id }}">
+<h1>{{ title }}</h1>
+<dl class="doc-frontmatter">
+<dt>id</dt><dd class="doc-id">{{ id }}</dd>
+<dt>type</dt><dd class="doc-type">{{ doc_type }}</dd>
+<dt>status</dt><dd class="doc-status" data-status="{{ status }}"><span class="status-swatch"></span>{{ status }}</dd>
+<dt>author</dt><dd class="doc-author">{{ author }}</dd>
+<dt>date</dt><dd class="doc-date">{{ date }}</dd>
+{% if !tags.is_empty() %}<dt>tags</dt><dd class="doc-tags">{% for tag in tags %}<a class="tag tag--h{{ tag.hue }}" href="/?tag={{ tag.name }}">{{ tag.name }}</a>{% if !loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
+{% if !relations.is_empty() %}<dt>relations</dt><dd class="doc-relations">{% for rel in relations %}<span class="relation">{{ rel.rel_type }}: <a href="/doc/{{ rel.target }}">{{ rel.target }}</a></span>{% if !loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
+{% match parent %}{% when Some with (p) %}<dt>parent</dt><dd class="doc-parent"><a href="/doc/{{ p.id }}">{{ p.title }}</a></dd>{% when None %}{% endmatch %}
+{% if !children.is_empty() %}<dt>children</dt><dd class="doc-children"><ul>{% for child in children %}<li><a href="/doc/{{ child.id }}">{{ child.title }}</a></li>{% endfor %}</ul></dd>{% endif %}
+{% match github_url %}{% when Some with (url) %}<dt>github</dt><dd class="doc-github"><a class="edit-on-github" href="{{ url }}">edit on GitHub</a></dd>{% when None %}{% endmatch %}
+</dl>
+<article class="doc-body">
+{{ body_html|safe }}
+</article>
+{% if !ancestors.is_empty() || !descendants.is_empty() || !related.is_empty() %}
+<section class="doc-context" aria-label="context">
+<h2>context</h2>
+{% if !ancestors.is_empty() %}
+<div class="context-group" data-direction="ancestors">
+<span class="context-label">implements</span>
+<ul>{% for e in ancestors %}<li class="context-entry"><a href="/doc/{{ e.id }}">{{ e.id }}</a> <span class="context-type">{{ e.doc_type }}</span> <span class="context-status" data-status="{{ e.status }}"><span class="status-swatch"></span>{{ e.status }}</span> <span class="context-title">{{ e.title }}</span></li>{% endfor %}</ul>
+</div>
+{% endif %}
+{% if !descendants.is_empty() %}
+<div class="context-group" data-direction="descendants">
+<span class="context-label">implemented by</span>
+<ul>{% for e in descendants %}<li class="context-entry"><a href="/doc/{{ e.id }}">{{ e.id }}</a> <span class="context-type">{{ e.doc_type }}</span> <span class="context-status" data-status="{{ e.status }}"><span class="status-swatch"></span>{{ e.status }}</span> <span class="context-title">{{ e.title }}</span></li>{% endfor %}</ul>
+</div>
+{% endif %}
+{% if !related.is_empty() %}
+<div class="context-group" data-direction="related">
+<span class="context-label">related</span>
+<ul>{% for e in related %}<li class="context-entry"><a href="/doc/{{ e.id }}">{{ e.id }}</a> <span class="context-type">{{ e.doc_type }}</span> <span class="context-status" data-status="{{ e.status }}"><span class="status-swatch"></span>{{ e.status }}</span> <span class="context-title">{{ e.title }}</span></li>{% endfor %}</ul>
+</div>
+{% endif %}
+</section>
+{% endif %}
+</div>
+</main>
+</div>
+{% include "_search_modal.html" %}
+</body>
+</html>

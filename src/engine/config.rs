@@ -485,6 +485,10 @@ pub struct Config {
     pub agents: AgentsConfig,
     #[serde(default)]
     pub skills: SkillsConfig,
+    /// The optional `[web]` repo-coordinate overrides (RFC-052). `None` when the
+    /// table is absent.
+    #[serde(skip)]
+    pub web: Option<WebConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -549,6 +553,21 @@ pub struct GithubConfig {
     pub cache_ttl: u64,
 }
 
+/// The optional `[web]` table (RFC-052): overrides for the GitHub repo
+/// coordinates the read-only web view deep-links against. Each field overrides
+/// the value otherwise inferred from the `origin` remote (owner/repo) or the
+/// current branch. All optional and independently overriding -- absence of the
+/// whole table is fine and falls back to `origin`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WebConfig {
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+}
+
 /// The global `[agents]` block. `interactive` is the optional `bash -lc` shell
 /// command for terminal handover (e.g. `claude "$LAZYSPEC_PROMPT"`). Zero-defaults
 /// (ADR-015): absent -> None -> interactive run mode is unavailable and not offered.
@@ -599,6 +618,8 @@ struct RawConfig {
     agents: Option<AgentsConfig>,
     #[serde(default)]
     skills: Option<SkillsConfig>,
+    #[serde(default)]
+    web: Option<WebConfig>,
 }
 
 /// The canonical starter document types. The engine carries no built-in types in
@@ -724,6 +745,7 @@ impl Default for Config {
             coordination: None,
             agents: AgentsConfig::default(),
             skills: SkillsConfig::default(),
+            web: None,
         }
     }
 }
@@ -863,6 +885,7 @@ impl Config {
             coordination: raw.coordination,
             agents: raw.agents.unwrap_or_default(),
             skills: raw.skills.unwrap_or_default(),
+            web: raw.web,
         })
     }
 
@@ -1971,6 +1994,46 @@ name = "related-to"
         // Unknown keyword errors, naming it.
         let err = config.resolve_relationship("frobs").unwrap_err();
         assert!(err.to_string().contains("frobs"));
+    }
+
+    #[test]
+    fn web_config_parses_owner_repo_branch() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[web]
+owner = "acme"
+repo = "widgets"
+branch = "main"
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        let web = config.web.unwrap();
+        assert_eq!(web.owner.as_deref(), Some("acme"));
+        assert_eq!(web.repo.as_deref(), Some("widgets"));
+        assert_eq!(web.branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn web_config_partial_table_leaves_others_none() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[web]
+branch = "release"
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        let web = config.web.unwrap();
+        assert!(web.owner.is_none());
+        assert!(web.repo.is_none());
+        assert_eq!(web.branch.as_deref(), Some("release"));
+    }
+
+    #[test]
+    fn web_config_absent_is_none() {
+        let config = Config::parse(TYPES).unwrap();
+        assert!(config.web.is_none());
     }
 
     #[test]

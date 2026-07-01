@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Not found - {{ id }}</title>
+    <link
+      rel="preload"
+      href="/static/fonts/archivo-latin.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link
+      rel="preload"
+      href="/static/fonts/ibm-plex-mono-latin.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link rel="stylesheet" href="/static/lazyspec.css" />
+  </head>
+  <body>
+    <a href="/">&larr; all documents</a>
+    <h1>Document not found</h1>
+    <p>No document matches the id <code class="doc-id">{{ id }}</code>.</p>
+  </body>
+</html>

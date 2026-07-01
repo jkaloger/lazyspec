@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>lazyspec</title>
+<script src="https://unpkg.com/htmx.org@1.9.12"></script>
+<link rel="preload" href="/static/fonts/archivo-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/ibm-plex-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
+<script>(function(){try{if(localStorage.getItem('ls-sidebar')==='collapsed'){document.documentElement.setAttribute('data-sidebar-init','collapsed');}if(window.__TAURI_INTERNALS__){document.documentElement.setAttribute('data-tauri','');}}catch(e){}})();</script>
+<link rel="stylesheet" href="/static/lazyspec.css">
+</head>
+<body data-nav="all">
+{% include "_header.html" %}
+<div class="app-shell">
+{% include "_sidebar.html" %}
+<main>
+<h1>lazyspec documents</h1>
+<form id="filters" hx-get="/fragment/list" hx-target="#doc-list" hx-swap="innerHTML" hx-trigger="change">
+  <label>status
+    <select name="status">
+      <option value="">all</option>
+      {% for s in statuses %}<option value="{{ s.value }}">{{ s.value }}</option>
+      {% endfor %}
+    </select>
+  </label>
+</form>
+<div id="doc-list">
+{{ list|safe }}
+</div>
+</main>
+</div>
+{% include "_search_modal.html" %}
+</body>
+</html>

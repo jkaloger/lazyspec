@@ -8,3 +8,4 @@ result
 .direnv
 .local
 .pre-commit-config.yaml
+gen/
