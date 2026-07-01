@@ -1,7 +1,7 @@
 ---
 title: App live reload via a web-reachable file watcher
 type: story
-status: accepted
+status: in-progress
 author: unknown
 date: 2026-07-01
 tags: []
