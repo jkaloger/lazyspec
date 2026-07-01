@@ -1,7 +1,7 @@
 ---
 title: Native app project selection and recents
 type: story
-status: accepted
+status: in-progress
 author: unknown
 date: 2026-07-01
 tags: []
