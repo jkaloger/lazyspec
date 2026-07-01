@@ -1,7 +1,7 @@
 ---
 title: 'App in-process protocol bridge: Tauri custom scheme over the web router'
 type: story
-status: accepted
+status: in-progress
 author: unknown
 date: 2026-07-01
 tags: []
