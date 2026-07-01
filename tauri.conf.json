@@ -10,6 +10,11 @@
   },
   "build": {},
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": "app",
+    "icon": ["icons/icon.png"],
+    "macOS": {
+      "signingIdentity": null
+    }
   }
 }

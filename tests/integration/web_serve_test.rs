@@ -833,6 +833,66 @@ async fn stylesheet_route_returns_200_text_css() {
     );
 }
 
+/// AC3 embedded-asset guard (RFC-054 / STORY-188): the stylesheet must resolve
+/// from bytes baked into the binary at compile time (`include_str!` in
+/// `src/web/assets.rs`), never from a runtime filesystem path. The unsigned
+/// `.app` bundle ships no external asset dir, so a regression that reintroduced a
+/// runtime path read would 404 (or panic) in the packaged app while still passing
+/// under `cargo test` from the repo root.
+///
+/// This proves the no-runtime-path property behaviorally: it serves the
+/// stylesheet with the process CWD moved into an empty temp dir that contains no
+/// `static/` directory. An `include_str!`-embedded stylesheet is unaffected; a
+/// runtime `static/lazyspec.css` read would fail. Serialized against every other
+/// CWD-touching test via a shared mutex, and the CWD is always restored, so the
+/// parallel suite stays deterministic.
+static CWD_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[tokio::test(flavor = "current_thread")]
+async fn stylesheet_serves_embedded_bytes_with_no_runtime_asset_path() {
+    let _lock = CWD_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+    let app = router(state(store(&fixture)));
+
+    // An empty dir with no `static/` -- a runtime path read for the CSS would fail
+    // here; an embedded (`include_str!`) stylesheet is indifferent to the CWD.
+    let empty = tempfile::tempdir().unwrap();
+    let original = std::env::current_dir().unwrap();
+    std::env::set_current_dir(empty.path()).unwrap();
+
+    let result = app
+        .oneshot(
+            Request::builder()
+                .uri("/static/lazyspec.css")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    std::env::set_current_dir(&original).unwrap();
+
+    let response = result.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "embedded stylesheet must serve regardless of CWD (no runtime asset path)"
+    );
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(!body.is_empty(), "embedded stylesheet must be non-empty");
+    // Stable markers from static/lazyspec.css, proving the real embedded content.
+    assert!(
+        body.contains(":root"),
+        "embedded CSS must carry the :root block:\n{body}"
+    );
+    assert!(
+        body.contains("--accent"),
+        "embedded CSS must carry the --accent token:\n{body}"
+    );
+}
+
 /// Fonts are a SANDBOX BLOCKER: the woff2 binaries cannot be fetched (network is
 /// restricted to github.com, no Google Fonts CDN; git object writes to github are
 /// also blocked), so no font is embedded yet and `src/web/assets.rs` 404s every
