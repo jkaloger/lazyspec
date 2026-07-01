@@ -97,6 +97,39 @@ impl SharedState {
     }
 }
 
+/// The app-side owner of the live-reload [`WatchHandle`](crate::web::watch::WatchHandle),
+/// held so a project switch can stop the old watch and install a new one
+/// (STORY-187 AC5, STORY-186 "Switch re-points the watcher"). Managed on the
+/// Tauri app alongside [`SharedState`] so [`repoint_watcher`] can reach it from
+/// any `AppHandle`.
+///
+/// Replace semantics: [`WatchGuard::replace`] drops any previous handle before
+/// storing the new one, and dropping the previous handle is what stops its
+/// watcher (see [`WatchHandle`](crate::web::watch::WatchHandle) — there is no
+/// explicit `stop()`; drop is the stop). This is the single stop/replace seam the
+/// switch uses, mirroring how `serve` holds one handle for its lifetime.
+#[cfg(feature = "app")]
+#[derive(Clone)]
+pub struct WatchGuard(Arc<std::sync::Mutex<Option<crate::web::watch::WatchHandle>>>);
+
+#[cfg(feature = "app")]
+impl WatchGuard {
+    fn new() -> Self {
+        Self(Arc::new(std::sync::Mutex::new(None)))
+    }
+
+    /// Install `handle` as the current watch, dropping (and thereby stopping) any
+    /// previously held one first. The old handle is dropped only after the lock
+    /// releases so its worker teardown never runs under the guard's lock.
+    fn replace(&self, handle: crate::web::watch::WatchHandle) {
+        let previous = {
+            let mut slot = self.0.lock().expect("watch guard lock poisoned");
+            slot.replace(handle)
+        };
+        drop(previous);
+    }
+}
+
 /// Entry point for the native app (RFC-054 `app::run`).
 ///
 /// Launch decision (STORY-186): reopen the most-recent remembered project that
@@ -205,6 +238,7 @@ fn pick_project(handle: &AppHandle) -> PickOutcome {
 fn open_project(handle: &AppHandle, root: &Path) -> anyhow::Result<()> {
     let state = project::build_state(root)?;
     handle.manage(SharedState::new(state));
+    handle.manage(WatchGuard::new());
 
     if let Err(e) = project::record_recent(root) {
         eprintln!("lazyspec: could not record recent project: {e}");
@@ -212,8 +246,8 @@ fn open_project(handle: &AppHandle, root: &Path) -> anyhow::Result<()> {
     install_menu(handle)?;
 
     // Watcher re-point seam (ITERATION-254 task 7 / STORY-187): the launch open
-    // establishes the initial watch root. Authored in ITERATION-255.
-    repoint_watcher(root);
+    // establishes the initial watch root over the just-managed router state.
+    repoint_watcher(handle, root);
     Ok(())
 }
 
@@ -235,9 +269,10 @@ fn switch_project(handle: &AppHandle, root: &Path) -> anyhow::Result<()> {
         webview.reload()?;
     }
 
-    // Watcher re-point seam (task 7): point the (future) watcher at the new root
-    // so subsequent live-reload observes the new project's files.
-    repoint_watcher(root);
+    // Watcher re-point seam (STORY-187 AC5): stop the previous watch and start a
+    // new one over the just-swapped router state so subsequent live-reload
+    // observes the new project's files, not the old one's.
+    repoint_watcher(handle, root);
 
     if let Err(e) = project::record_recent(root) {
         eprintln!("lazyspec: could not record recent project: {e}");
@@ -246,18 +281,29 @@ fn switch_project(handle: &AppHandle, root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Watcher re-point seam (ITERATION-254 task 7, STORY-187 / ITERATION-255).
+/// Re-point the live-reload watcher at `root` (STORY-187 AC5, ITERATION-256
+/// task 2). The single call site that hands the current project root to the
+/// `web::watch` loop on launch and on every switch.
 ///
-/// This is the single documented call site that hands the new project root to
-/// the file watcher on launch and on every switch. The watcher itself is **not**
-/// authored here (that is ITERATION-255); until it lands this is a deliberate
-/// no-op stub. When the watcher arrives it takes over this body without any
-/// call-site churn — the launch open and [`switch_project`] already invoke it
-/// with the correct root.
+/// Starts a fresh [`web::watch`](crate::web::watch::watch) over `root`'s watch
+/// set, targeting the currently-managed router state's [`SharedStore`] — the
+/// exact store the protocol handler reads — so a reload's atomic swap is visible
+/// to subsequent webview requests. Installing it via [`WatchGuard::replace`]
+/// drops the previous handle, which stops the previous project's watcher (drop is
+/// the stop; see [`WatchHandle`](crate::web::watch::WatchHandle)). Called after
+/// the caller has managed/replaced the [`SharedState`], so the snapshot here is
+/// the new project's state.
+///
+/// A watcher that fails to start is non-fatal: the project stays open and served,
+/// just without live reload, matching serve's stance and the failed-reload
+/// resilience principle (STORY-187 AC6). The error is logged and swallowed.
 #[cfg(feature = "app")]
-fn repoint_watcher(_root: &Path) {
-    // Intentionally empty: the `notify` watcher and `Arc<Store>` live swap are
-    // ITERATION-255. See RFC-054 §"Store loading and freshness".
+fn repoint_watcher(handle: &AppHandle, root: &Path) {
+    let shared = handle.state::<SharedState>().snapshot();
+    match crate::web::watch::watch(root, &shared.config, shared.store.clone()) {
+        Ok(watch_handle) => handle.state::<WatchGuard>().replace(watch_handle),
+        Err(e) => eprintln!("lazyspec: live reload disabled (watch failed to start: {e})"),
+    }
 }
 
 /// Handle a File-menu event: **Open Project…** drives the picker then switches;

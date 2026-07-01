@@ -45,11 +45,22 @@ pub fn reload_and_swap(root: &Path, config: &Config, shared: &SharedStore) -> bo
     }
 }
 
-/// A running watch loop. Holds the live `notify` watcher and the worker thread's
-/// join handle; dropping it stops the watcher (which drops the event sender and
-/// lets the worker thread finish). Owned by the caller so lifetime is explicit.
+/// A running watch loop, and the single stop/replace seam both hosted `serve`
+/// and the app's project switch use (ITERATION-256 task 3). Holds the live
+/// `notify` watcher (boxed so the watcher backend is an implementation detail)
+/// and the worker thread's join handle.
+///
+/// **Stop semantics:** dropping the handle drops the watcher — which drops the
+/// event sender — so the worker's `for event in rx` loop ends and the thread
+/// finishes. There is no explicit `stop()`; `drop(handle)` is the stop.
+///
+/// **Replace semantics:** to re-point at a new root, the owner drops the old
+/// handle and calls [`watch`] again against the new root's [`SharedStore`]. The
+/// app shell holds the handle in a slot it overwrites on switch (see
+/// `crate::app::switch_project`); `serve` holds a single handle for the server's
+/// lifetime.
 pub struct WatchHandle {
-    _watcher: notify::RecommendedWatcher,
+    _watcher: Box<dyn Watcher + Send>,
     _worker: JoinHandle<()>,
 }
 
@@ -59,14 +70,38 @@ pub struct WatchHandle {
 /// forwards events on a channel to a dedicated worker thread; the worker runs
 /// [`reload_and_swap`] on each relevant event. The watcher and worker are owned
 /// by the returned [`WatchHandle`] (web owns its own thread, per RFC-054).
+///
+/// Uses `notify`'s platform-recommended backend (FSEvents on macOS). Tests that
+/// must assert live event delivery use [`watch_with`] with a `PollWatcher`,
+/// because FSEvents is unavailable under sandboxed/emulated environments (per
+/// `notify`'s own docs); the reload/swap wiring exercised is identical.
 pub fn watch(root: &Path, config: &Config, shared: SharedStore) -> notify::Result<WatchHandle> {
+    watch_with(root, config, shared, notify::recommended_watcher)
+}
+
+/// [`watch`] parameterized over how the `notify::Watcher` is constructed, so a
+/// test can inject a `PollWatcher` where the recommended (FSEvents) backend is
+/// unavailable. The watch-set registration, event-forwarding channel, worker
+/// loop, and [`reload_and_swap`] call are identical to [`watch`]; only the
+/// watcher backend differs. Not part of the public seam — `watch` is.
+pub(crate) fn watch_with<W, F>(
+    root: &Path,
+    config: &Config,
+    shared: SharedStore,
+    make_watcher: F,
+) -> notify::Result<WatchHandle>
+where
+    W: Watcher + Send + 'static,
+    F: FnOnce(Box<dyn FnMut(notify::Result<notify::Event>) + Send + 'static>) -> notify::Result<W>,
+{
     let (tx, rx) = std::sync::mpsc::channel::<notify::Event>();
 
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+    let handler = move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res {
             let _ = tx.send(event);
         }
-    })?;
+    };
+    let mut watcher = make_watcher(Box::new(handler))?;
     for path in crate::engine::watch::watch_paths(root, config) {
         watcher.watch(&path, RecursiveMode::NonRecursive)?;
     }
@@ -82,7 +117,7 @@ pub fn watch(root: &Path, config: &Config, shared: SharedStore) -> notify::Resul
     });
 
     Ok(WatchHandle {
-        _watcher: watcher,
+        _watcher: Box::new(watcher),
         _worker: worker,
     })
 }
@@ -208,5 +243,112 @@ mod tests {
 
         let handle = watch(root, &config, shared).expect("watch should start");
         drop(handle);
+    }
+
+    // Build a `PollWatcher` with a short poll interval. The recommended (FSEvents)
+    // backend is unavailable under the sandbox (per `notify`'s own docs), so the
+    // live-delivery tests inject a poll watcher through `watch_with`; the reload/
+    // swap wiring under test is identical to production `watch`.
+    fn start_poll_watch(root: &Path, config: &Config, shared: SharedStore) -> WatchHandle {
+        let poll_config =
+            notify::Config::default().with_poll_interval(std::time::Duration::from_millis(50));
+        watch_with(root, config, shared, move |handler| {
+            notify::PollWatcher::new(handler, poll_config)
+        })
+        .expect("poll watch should start")
+    }
+
+    // Poll `shared` until it holds `expected` docs or `timeout` elapses, returning
+    // the final observed count. Filesystem-event delivery is asynchronous, so the
+    // live-watch tests below assert against this bounded wait rather than a fixed
+    // sleep.
+    fn wait_for_doc_count(
+        shared: &SharedStore,
+        expected: usize,
+        timeout: std::time::Duration,
+    ) -> usize {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let count = shared.snapshot().all_docs().len();
+            if count == expected || std::time::Instant::now() >= deadline {
+                return count;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    // AC7 (hosted serve path, driven at the web layer): with a live `watch` over a
+    // served root, creating a doc under `docs/` swaps the shared store so the next
+    // snapshot (what the next request would read) reflects the edit.
+    #[test]
+    fn live_watch_reflects_edit_under_served_root_on_next_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let config = write_project(root);
+        write_doc(root, "DOC-001-alpha.md", "Alpha");
+
+        let shared = SharedStore::new(Store::load(root, &config).unwrap());
+        let _handle = start_poll_watch(root, &config, shared.clone());
+        assert_eq!(shared.snapshot().all_docs().len(), 1);
+
+        write_doc(root, "DOC-002-beta.md", "Beta");
+
+        let count = wait_for_doc_count(&shared, 2, std::time::Duration::from_secs(5));
+        assert_eq!(
+            count, 2,
+            "an edit under the served root must be reflected on the next snapshot"
+        );
+    }
+
+    // AC5 (switch re-points the watcher, driven at the web layer): after replacing
+    // the watch handle to point at a new root, edits to the new root drive reloads
+    // of its store while edits to the old root no longer do. Modelling the switch
+    // as "drop the old handle, start a new one over a fresh SharedStore" mirrors
+    // what the app shell does on `switch_project`.
+    #[test]
+    fn switch_repoints_watch_to_new_root_and_drops_old() {
+        let tmp_a = TempDir::new().unwrap();
+        let root_a = tmp_a.path();
+        let config_a = write_project(root_a);
+        write_doc(root_a, "DOC-001-a.md", "A one");
+
+        let shared_a = SharedStore::new(Store::load(root_a, &config_a).unwrap());
+        let handle_a = start_poll_watch(root_a, &config_a, shared_a.clone());
+
+        let tmp_b = TempDir::new().unwrap();
+        let root_b = tmp_b.path();
+        let config_b = write_project(root_b);
+        write_doc(root_b, "DOC-001-b.md", "B one");
+
+        // Switch: build fresh state for B and re-point the watch. Dropping the old
+        // handle stops A's watcher.
+        let shared_b = SharedStore::new(Store::load(root_b, &config_b).unwrap());
+        drop(handle_a);
+        let _handle_b = start_poll_watch(root_b, &config_b, shared_b.clone());
+
+        assert_eq!(shared_b.snapshot().all_docs().len(), 1);
+
+        // An edit under the NEW root drives a reload of B's store.
+        write_doc(root_b, "DOC-002-b.md", "B two");
+        let b_count = wait_for_doc_count(&shared_b, 2, std::time::Duration::from_secs(5));
+        assert_eq!(
+            b_count, 2,
+            "edits to the new root must drive reloads after the switch"
+        );
+
+        // An edit under the OLD root must NOT drive a reload: A's handle is dropped,
+        // so A's SharedStore stays at its pre-switch snapshot. Give the (now-stopped)
+        // watcher ample time to prove no swap fires.
+        let a_before = shared_a.snapshot().all_docs().len();
+        write_doc(root_a, "DOC-002-a.md", "A two");
+        let a_after = wait_for_doc_count(
+            &shared_a,
+            a_before + 1,
+            std::time::Duration::from_millis(500),
+        );
+        assert_eq!(
+            a_after, a_before,
+            "edits to the old root must not drive reloads after the watch is re-pointed"
+        );
     }
 }
