@@ -1,7 +1,7 @@
 ---
 title: GitHub issue-type/tag classification config schema
 type: story
-status: accepted
+status: in-progress
 author: jkaloger
 date: 2026-07-02
 tags: []

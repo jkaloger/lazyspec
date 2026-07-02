@@ -630,6 +630,8 @@ mod tests {
             lifecycle: Default::default(),
             attributes: Default::default(),
             label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
         };
         let mut config = Config::default();
         config.documents.types = vec![
@@ -1256,6 +1258,8 @@ mod tests {
             lifecycle: Default::default(),
             attributes: Default::default(),
             label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
         };
         let mut config = Config::default();
         config.documents.types = vec![
@@ -1615,6 +1619,8 @@ mod tests {
             lifecycle: Default::default(),
             attributes: Default::default(),
             label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
         };
         let story_type = TypeDef {
             name: "story".to_string(),
@@ -1633,6 +1639,8 @@ mod tests {
             lifecycle: Default::default(),
             attributes: Default::default(),
             label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
         };
 
         let mut config = Config::default();
@@ -2135,6 +2143,8 @@ mod tests {
             lifecycle: Default::default(),
             attributes: Default::default(),
             label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
         };
         let story_type = TypeDef {
             name: "story".to_string(),
@@ -2153,6 +2163,8 @@ mod tests {
             lifecycle: Default::default(),
             attributes: Default::default(),
             label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
         };
 
         let mut config = Config::default();

@@ -268,6 +268,16 @@ pub struct TypeDef {
     /// stores.
     #[serde(default, rename = "github_label")]
     pub label_override: Option<String>,
+    /// A GitHub label naming this type as a classification signal, distinct
+    /// from `label_override`'s identity label. Schema only for now -- no
+    /// resolver or matching logic reads this field yet.
+    #[serde(default)]
+    pub github_issue_tag: Option<String>,
+    /// A GitHub native issue type naming this type as a classification
+    /// signal. Schema only for now -- no resolver, discovery, or write logic
+    /// reads this field yet.
+    #[serde(default)]
+    pub github_issue_type: Option<String>,
 }
 
 /// One entry in the `[[relationships]]` block: a relationship name and its
@@ -648,6 +658,8 @@ pub fn starter_types() -> Vec<TypeDef> {
         lifecycle: default_lifecycle(),
         attributes: Vec::new(),
         label_override: None,
+        github_issue_tag: None,
+        github_issue_type: None,
     };
     vec![
         simple("rfc", "rfcs", "docs/rfcs", "RFC", "●"),
@@ -678,6 +690,8 @@ pub fn starter_types() -> Vec<TypeDef> {
             lifecycle: default_lifecycle(),
             attributes: Vec::new(),
             label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
         },
         TypeDef {
             name: "dictum".to_string(),
@@ -696,6 +710,8 @@ pub fn starter_types() -> Vec<TypeDef> {
             lifecycle: default_lifecycle(),
             attributes: Vec::new(),
             label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
         },
     ]
 }
@@ -1032,6 +1048,8 @@ impl TypeDef {
             lifecycle: Lifecycle::default(),
             attributes: Vec::new(),
             label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
         }
     }
 }
@@ -2147,5 +2165,69 @@ github_label = "Ticket"
         let config = Config::parse(TYPES).unwrap();
         let td = config.type_by_name("rfc").unwrap();
         assert_eq!(td.label_override, None);
+    }
+
+    #[test]
+    fn toml_github_issue_tag_and_type_keys_parse_into_type_def() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[[types]]
+name = "ticket"
+plural = "tickets"
+dir = "docs/tickets"
+prefix = "TICKET"
+github_issue_tag = "Bug"
+github_issue_type = "Bug"
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        let td = config.type_by_name("ticket").unwrap();
+        assert_eq!(td.github_issue_tag, Some("Bug".to_string()));
+        assert_eq!(td.github_issue_type, Some("Bug".to_string()));
+    }
+
+    #[test]
+    fn toml_without_github_issue_tag_and_type_keys_leaves_both_none() {
+        let config = Config::parse(TYPES).unwrap();
+        let td = config.type_by_name("rfc").unwrap();
+        assert_eq!(td.github_issue_tag, None);
+        assert_eq!(td.github_issue_type, None);
+    }
+
+    #[test]
+    fn type_def_json_surfaces_github_issue_tag_and_type_as_null_when_absent() {
+        let config = Config::parse(TYPES).unwrap();
+        let td = config.type_by_name("rfc").unwrap();
+        let json = serde_json::to_value(td).unwrap();
+        assert_eq!(json["github_issue_tag"], serde_json::Value::Null);
+        assert_eq!(json["github_issue_type"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn type_def_json_surfaces_github_issue_tag_and_type_when_set() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[[types]]
+name = "ticket"
+plural = "tickets"
+dir = "docs/tickets"
+prefix = "TICKET"
+github_issue_tag = "Bug"
+github_issue_type = "Bug"
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        let td = config.type_by_name("ticket").unwrap();
+        let json = serde_json::to_value(td).unwrap();
+        assert_eq!(
+            json["github_issue_tag"],
+            serde_json::Value::String("Bug".to_string())
+        );
+        assert_eq!(
+            json["github_issue_type"],
+            serde_json::Value::String("Bug".to_string())
+        );
     }
 }

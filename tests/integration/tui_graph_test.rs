@@ -411,6 +411,8 @@ fn custom_types_populate_doc_types_and_icons() {
             lifecycle: Default::default(),
             attributes: Default::default(),
             label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
         },
         TypeDef {
             name: "task".into(),
@@ -429,6 +431,8 @@ fn custom_types_populate_doc_types_and_icons() {
             lifecycle: Default::default(),
             attributes: Default::default(),
             label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
         },
     ];
     let store = Store::load(fixture.root(), &config).unwrap();

@@ -845,6 +845,8 @@ Body.
             lifecycle: Default::default(),
             attributes: attrs,
             label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
         }
     }
 

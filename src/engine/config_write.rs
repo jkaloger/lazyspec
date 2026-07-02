@@ -980,6 +980,8 @@ require_parent_status = "accepted"
                 lifecycle: Default::default(),
                 attributes: Default::default(),
                 label_override: None,
+                github_issue_tag: None,
+                github_issue_type: None,
             });
             c
         };
@@ -1068,6 +1070,8 @@ name = "related-to"
                 lifecycle: Default::default(),
                 attributes: Default::default(),
                 label_override: None,
+                github_issue_tag: None,
+                github_issue_type: None,
             });
             c.rules.clear();
             c

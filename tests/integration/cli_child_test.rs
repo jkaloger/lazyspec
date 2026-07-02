@@ -179,6 +179,8 @@ fn create_with_parent_cross_store_rejected_before_mutation() {
         lifecycle: Default::default(),
         attributes: Default::default(),
         label_override: None,
+        github_issue_tag: None,
+        github_issue_type: None,
     };
     config.documents.types.push(issue_type);
     let store = fixture.store();
