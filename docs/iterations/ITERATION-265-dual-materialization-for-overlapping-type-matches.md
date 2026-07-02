@@ -1,7 +1,7 @@
 ---
 title: Dual materialization for overlapping type matches
 type: iteration
-status: in-progress
+status: complete
 author: jkaloger
 date: 2026-07-03
 tags: []

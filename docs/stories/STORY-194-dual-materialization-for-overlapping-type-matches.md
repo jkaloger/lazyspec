@@ -1,7 +1,7 @@
 ---
 title: Dual materialization for overlapping type matches
 type: story
-status: accepted
+status: complete
 author: jkaloger
 date: 2026-07-02
 tags: []
