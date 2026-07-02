@@ -274,8 +274,9 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
                 .documents
                 .types
                 .iter()
-                .map(|t| (t.name.clone(), t.github_label()))
+                .map(issue_body::TypeMatchRule::from)
                 .collect(),
+            issue_type: remote_issue.issue_type.clone(),
             default_type: type_def.name.clone(),
             attr_defs: type_def.attributes.clone(),
         };
@@ -961,8 +962,9 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> DocumentStore for GithubIssue
                 .documents
                 .types
                 .iter()
-                .map(|t| (t.name.clone(), t.github_label()))
+                .map(issue_body::TypeMatchRule::from)
                 .collect(),
+            issue_type: remote_issue.issue_type.clone(),
             default_type: type_def.name.clone(),
             attr_defs: type_def.attributes.clone(),
         };
@@ -1098,8 +1100,9 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> DocumentStore for GithubIssue
                 .documents
                 .types
                 .iter()
-                .map(|t| (t.name.clone(), t.github_label()))
+                .map(issue_body::TypeMatchRule::from)
                 .collect(),
+            issue_type: remote_issue.issue_type.clone(),
             default_type: type_def.name.clone(),
             attr_defs: type_def.attributes.clone(),
         };

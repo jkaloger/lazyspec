@@ -649,11 +649,11 @@ fn refresh_github_cache(cwd: &std::path::Path, config: &Config) {
 
     let mut map_changed = false;
     for type_def in &gh_types {
-        let all_type_names: Vec<String> = config
+        let all_type_rules: Vec<lazyspec::engine::issue_body::TypeMatchRule> = config
             .documents
             .types
             .iter()
-            .map(|t| t.name.clone())
+            .map(lazyspec::engine::issue_body::TypeMatchRule::from)
             .collect();
         let result = cache.refresh_stale(
             cwd,
@@ -663,7 +663,7 @@ fn refresh_github_cache(cwd: &std::path::Path, config: &Config) {
             &repo,
             &mut issue_map,
             ttl,
-            &all_type_names,
+            &all_type_rules,
             config,
         );
         for warning in &result.warnings {

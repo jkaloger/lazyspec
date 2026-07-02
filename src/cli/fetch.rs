@@ -3,6 +3,7 @@ use crate::engine::config::{Config, StoreBackend, TypeDef};
 use crate::engine::gh::{GhGraphql, GhIssueReader, GhIssueWriter, GhMilestoneApi};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::github::resolve_repo;
+use crate::engine::issue_body::TypeMatchRule;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store_dispatch::GithubIssuesStore;
@@ -114,11 +115,11 @@ pub fn run(
         let mut issue_map = IssueMap::load(root)?;
         let cache = IssueCache::new(root);
 
-        let all_type_names: Vec<String> = config
+        let all_type_rules: Vec<TypeMatchRule> = config
             .documents
             .types
             .iter()
-            .map(|t| t.name.clone())
+            .map(TypeMatchRule::from)
             .collect();
 
         for type_name in &gh_to_fetch {
@@ -133,7 +134,7 @@ pub fn run(
                 gh,
                 &repo,
                 &mut issue_map,
-                &all_type_names,
+                &all_type_rules,
                 config,
             )?;
 

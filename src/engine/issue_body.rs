@@ -2,23 +2,56 @@ use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use regex::Regex;
 
-use crate::engine::config::AttrDef;
+use crate::engine::config::{AttrDef, TypeDef};
 use crate::engine::document::{
     self, coerce_attr, deserialize_naive_date, AttrValue, DocMeta, DocType, Relation, Status,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// One document type's resolved classification rule against a GitHub issue.
+///
+/// - `name` is the lazyspec type name (the resulting `DocType` on a match).
+/// - `label` is the type's `github_label()` (its `label_override` or the default
+///   `lazyspec:{name}`), checked when neither `tag` nor `issue_type` is set.
+/// - `tag` is an arbitrary GitHub label naming this type; when set, the `label`
+///   check is skipped and this label is checked instead.
+/// - `issue_type` is a native GitHub issue type naming this type.
+///
+/// When both `tag` and `issue_type` are set they are AND-combined. See
+/// [`extract_type_and_tags`] for the full match semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeMatchRule {
+    pub name: String,
+    pub label: String,
+    pub tag: Option<String>,
+    pub issue_type: Option<String>,
+}
+
+impl From<&TypeDef> for TypeMatchRule {
+    fn from(type_def: &TypeDef) -> Self {
+        TypeMatchRule {
+            name: type_def.name.clone(),
+            label: type_def.github_label(),
+            tag: type_def.github_issue_tag.clone(),
+            issue_type: type_def.github_issue_type.clone(),
+        }
+    }
+}
+
 /// Fields that come from GitHub Issue primitives rather than the issue body.
 pub struct IssueContext {
     pub title: String,
     pub labels: Vec<String>,
     pub is_open: bool,
-    /// Known document types as `(type_name, resolved_label)` pairs, where the
-    /// resolved label is the type's `github_label()` (its `label_override` or the
-    /// default `lazyspec:{name}`). A GitHub label is recognized as a type when it
-    /// exactly matches (case-insensitive) one of these resolved labels.
-    pub known_types: Vec<(String, String)>,
+    /// Known document types as resolved [`TypeMatchRule`]s. Each type's rule is
+    /// evaluated independently against the issue's labels and native issue type
+    /// to decide whether the issue belongs to that type.
+    pub known_types: Vec<TypeMatchRule>,
+    /// The issue's own native GitHub issue type, distinct from a classification
+    /// rule's `issue_type`. Used to evaluate rules configured with a
+    /// `github_issue_type`.
+    pub issue_type: Option<String>,
     pub default_type: String,
     /// Declared attribute schema for the document's type, used to coerce the
     /// `attributes:` block in the HTML comment back into typed [`AttrValue`]s.
@@ -96,7 +129,12 @@ pub fn deserialize(issue_body: &str, ctx: &IssueContext) -> Result<(DocMeta, Str
         .map(parse_relation)
         .collect::<Result<Vec<_>>>()?;
 
-    let (doc_type, tags) = extract_type_and_tags(&ctx.labels, &ctx.known_types, &ctx.default_type);
+    let (doc_type, tags) = extract_type_and_tags(
+        &ctx.labels,
+        &ctx.known_types,
+        ctx.issue_type.as_deref(),
+        &ctx.default_type,
+    );
 
     let status = reconstruct_status(ctx.is_open, parsed.status.as_deref());
 
@@ -165,36 +203,71 @@ fn reconstruct_status(is_open: bool, frontmatter_status: Option<&str>) -> Status
     }
 }
 
-/// Extract doc_type and tags from GitHub labels.
+/// Extract doc_type and tags by evaluating each known type's [`TypeMatchRule`]
+/// against the issue's labels and native issue type.
 ///
-/// Each label is matched (case-insensitive) against the resolved GitHub label of
-/// every known type (`known_types` carries `(type_name, resolved_label)` pairs).
-/// The first label matching a known type's resolved label becomes the doc_type;
-/// any label matching a known type's resolved label is consumed (never carried
-/// as a tag). Every other label becomes a tag. With no match, `default_type` is
-/// used.
+/// Every rule is evaluated independently -- there is no first-hit short circuit.
+/// A rule is satisfied when:
+/// - neither `tag` nor `issue_type` is set: a label case-insensitively equals
+///   `rule.label`;
+/// - only `tag` is set: a label case-insensitively equals `rule.tag` (the
+///   `label` check is skipped);
+/// - only `issue_type` is set: `issue_native_type` equals `rule.issue_type`;
+/// - both are set: both the tag-label match and the issue-type match hold (AND).
+///
+/// The first satisfied rule (in `known_types` order) wins the returned
+/// `DocType`; with no satisfied rule, `default_type` is used. A label that any
+/// rule uses to classify (its `label` when unqualified, or its `tag` when set)
+/// is never carried as a tag, regardless of whether that rule's overall match
+/// succeeded. Every other label becomes a tag.
 pub(crate) fn extract_type_and_tags(
     labels: &[String],
-    known_types: &[(String, String)],
+    known_types: &[TypeMatchRule],
+    issue_native_type: Option<&str>,
     default_type: &str,
 ) -> (DocType, Vec<String>) {
-    let mut doc_type: Option<DocType> = None;
-    let mut tags = Vec::new();
+    let has_label = |value: &str| {
+        let lower = value.to_lowercase();
+        labels.iter().any(|l| l.to_lowercase() == lower)
+    };
 
-    for label in labels {
-        let lower = label.to_lowercase();
-        let matched = known_types
-            .iter()
-            .find(|(_, resolved_label)| resolved_label.to_lowercase() == lower);
-        match matched {
-            Some((type_name, _)) => {
-                if doc_type.is_none() {
-                    doc_type = Some(DocType::new(type_name));
-                }
-            }
-            None => tags.push(label.clone()),
+    // Single pass over the rules couples doc_type resolution with tag exclusion:
+    // both are derived here so a short-circuit that stopped once doc_type is found
+    // would also stop excluding later rules' classifying labels.
+    let mut doc_type: Option<DocType> = None;
+    let mut classifying_labels: Vec<String> = Vec::new();
+    for rule in known_types {
+        // The label value a rule classifies on: its `tag` when set, else its
+        // `label` (an `issue_type`-only rule classifies on no label). Such a
+        // label is never carried as a tag.
+        let classifying = match (&rule.tag, &rule.issue_type) {
+            (Some(tag), _) => Some(tag.to_lowercase()),
+            (None, None) => Some(rule.label.to_lowercase()),
+            (None, Some(_)) => None,
+        };
+        if let Some(ref classifying) = classifying {
+            classifying_labels.push(classifying.clone());
+        }
+
+        let satisfied = match (&rule.tag, &rule.issue_type) {
+            (None, None) => has_label(&rule.label),
+            (Some(tag), None) => has_label(tag),
+            (None, Some(it)) => issue_native_type == Some(it.as_str()),
+            (Some(tag), Some(it)) => has_label(tag) && issue_native_type == Some(it.as_str()),
+        };
+        if satisfied && doc_type.is_none() {
+            doc_type = Some(DocType::new(&rule.name));
         }
     }
+
+    let tags = labels
+        .iter()
+        .filter(|label| {
+            let lower = label.to_lowercase();
+            !classifying_labels.iter().any(|c| c == &lower)
+        })
+        .cloned()
+        .collect();
 
     (doc_type.unwrap_or_else(|| DocType::new(default_type)), tags)
 }
@@ -262,22 +335,29 @@ mod tests {
         }
     }
 
-    /// The default known types as `(name, resolved_label)` pairs, each using the
-    /// default `lazyspec:{name}` label (no override).
-    fn default_known_types() -> Vec<(String, String)> {
+    /// A label-only match rule using the default `lazyspec:{name}` label.
+    fn label_rule(name: &str) -> TypeMatchRule {
+        TypeMatchRule {
+            name: name.to_string(),
+            label: format!("lazyspec:{name}"),
+            tag: None,
+            issue_type: None,
+        }
+    }
+
+    /// The default known types as label-only rules, each using the default
+    /// `lazyspec:{name}` label (no override).
+    fn default_known_types() -> Vec<TypeMatchRule> {
         ["rfc", "story", "iteration", "adr", "spec"]
             .iter()
-            .map(|name| (name.to_string(), format!("lazyspec:{name}")))
+            .map(|name| label_rule(name))
             .collect()
     }
 
-    /// Build `(name, resolved_label)` pairs from bare names, each using the
-    /// default `lazyspec:{name}` label.
-    fn known_pairs(names: &[&str]) -> Vec<(String, String)> {
-        names
-            .iter()
-            .map(|name| (name.to_string(), format!("lazyspec:{name}")))
-            .collect()
+    /// Build label-only rules from bare names, each using the default
+    /// `lazyspec:{name}` label.
+    fn known_pairs(names: &[&str]) -> Vec<TypeMatchRule> {
+        names.iter().map(|name| label_rule(name)).collect()
     }
 
     fn sample_context() -> IssueContext {
@@ -286,6 +366,7 @@ mod tests {
             labels: vec!["lazyspec:rfc".to_string(), "performance".to_string()],
             is_open: true,
             known_types: default_known_types(),
+            issue_type: None,
             default_type: "spec".to_string(),
             attr_defs: vec![],
         }
@@ -395,7 +476,7 @@ mod tests {
     #[test]
     fn extract_type_and_tags_finds_type() {
         let labels = vec!["lazyspec:rfc".to_string(), "cache".to_string()];
-        let (dt, tags) = extract_type_and_tags(&labels, &default_known_types(), "spec");
+        let (dt, tags) = extract_type_and_tags(&labels, &default_known_types(), None, "spec");
         assert_eq!(dt.as_str(), "rfc");
         assert_eq!(tags, vec!["cache"]);
     }
@@ -403,7 +484,7 @@ mod tests {
     #[test]
     fn extract_type_and_tags_defaults_to_configured_type() {
         let labels = vec!["random-label".to_string()];
-        let (dt, tags) = extract_type_and_tags(&labels, &default_known_types(), "testgh");
+        let (dt, tags) = extract_type_and_tags(&labels, &default_known_types(), None, "testgh");
         assert_eq!(dt.as_str(), "testgh");
         assert_eq!(tags, vec!["random-label"]);
     }
@@ -413,8 +494,13 @@ mod tests {
     #[test]
     fn extract_type_and_tags_recognizes_custom_label() {
         let labels = vec!["Ticket".to_string(), "cache".to_string()];
-        let known = vec![("ticket".to_string(), "Ticket".to_string())];
-        let (dt, tags) = extract_type_and_tags(&labels, &known, "spec");
+        let known = vec![TypeMatchRule {
+            name: "ticket".to_string(),
+            label: "Ticket".to_string(),
+            tag: None,
+            issue_type: None,
+        }];
+        let (dt, tags) = extract_type_and_tags(&labels, &known, None, "spec");
         assert_eq!(dt.as_str(), "ticket");
         assert_eq!(tags, vec!["cache"]);
     }
@@ -470,6 +556,7 @@ mod tests {
             labels: vec!["lazyspec:rfc".to_string(), "performance".to_string()],
             is_open: false,
             known_types: default_known_types(),
+            issue_type: None,
             default_type: "spec".to_string(),
             attr_defs: vec![],
         };
@@ -595,7 +682,7 @@ mod tests {
             "lazyspec:unknown".to_string(),
             "team-alpha".to_string(),
         ];
-        let (dt, tags) = extract_type_and_tags(&labels, &default_known_types(), "spec");
+        let (dt, tags) = extract_type_and_tags(&labels, &default_known_types(), None, "spec");
         assert_eq!(dt.as_str(), "iteration");
         // Matching is now exact against each known type's resolved label, not a
         // `lazyspec:` prefix strip. `lazyspec:unknown` matches no known type, so
@@ -685,7 +772,7 @@ mod tests {
     fn custom_type_recognized_when_in_known_types() {
         let labels = vec!["lazyspec:task".to_string(), "team-beta".to_string()];
         let known = known_pairs(&["task", "rfc", "story"]);
-        let (dt, tags) = extract_type_and_tags(&labels, &known, "spec");
+        let (dt, tags) = extract_type_and_tags(&labels, &known, None, "spec");
         assert_eq!(dt.as_str(), "task");
         assert_eq!(tags, vec!["team-beta"]);
     }
@@ -769,9 +856,109 @@ mod tests {
     fn custom_type_defaults_to_configured_type_when_not_in_known_types() {
         let labels = vec!["lazyspec:task".to_string(), "team-beta".to_string()];
         let known = known_pairs(&["rfc", "story"]);
-        let (dt, tags) = extract_type_and_tags(&labels, &known, "testgh");
+        let (dt, tags) = extract_type_and_tags(&labels, &known, None, "testgh");
         assert_eq!(dt.as_str(), "testgh");
         // `lazyspec:task` is not a recognized type here, so it survives as a tag.
         assert_eq!(tags, vec!["lazyspec:task", "team-beta"]);
+    }
+
+    // AC1: a rule with neither tag nor issue_type matches by its label, exactly
+    // as before ITERATION-261/263.
+    #[test]
+    fn extract_type_and_tags_label_only_rule_matches_by_label() {
+        let labels = vec!["lazyspec:bug".to_string(), "cache".to_string()];
+        let known = vec![label_rule("bug")];
+        let (dt, tags) = extract_type_and_tags(&labels, &known, None, "spec");
+        assert_eq!(dt.as_str(), "bug");
+        assert_eq!(tags, vec!["cache"]);
+    }
+
+    // AC2: a rule with only `tag` set matches on that plain label even when the
+    // issue carries no `lazyspec:{name}` label at all -- the label check is
+    // skipped, not additionally required.
+    #[test]
+    fn extract_type_and_tags_tag_only_rule_matches_without_lazyspec_label() {
+        let labels = vec!["needs-triage".to_string(), "cache".to_string()];
+        let known = vec![TypeMatchRule {
+            name: "bug".to_string(),
+            label: "lazyspec:bug".to_string(),
+            tag: Some("needs-triage".to_string()),
+            issue_type: None,
+        }];
+        let (dt, tags) = extract_type_and_tags(&labels, &known, None, "spec");
+        assert_eq!(dt.as_str(), "bug");
+        assert_eq!(tags, vec!["cache"]);
+    }
+
+    // AC3: a rule with only `issue_type` set matches on the issue's native type
+    // even when the issue carries no matching label of any kind.
+    #[test]
+    fn extract_type_and_tags_issue_type_only_rule_matches_without_any_label() {
+        let labels = vec!["cache".to_string()];
+        let known = vec![TypeMatchRule {
+            name: "bug".to_string(),
+            label: "lazyspec:bug".to_string(),
+            tag: None,
+            issue_type: Some("Bug".to_string()),
+        }];
+        let (dt, tags) = extract_type_and_tags(&labels, &known, Some("Bug"), "spec");
+        assert_eq!(dt.as_str(), "bug");
+        assert_eq!(tags, vec!["cache"]);
+    }
+
+    // AC4: a rule with both `tag` and `issue_type` set is an AND, not an OR --
+    // satisfying only one half does not match; satisfying both does.
+    #[test]
+    fn extract_type_and_tags_tag_and_issue_type_both_required_and_not_or() {
+        let rule = TypeMatchRule {
+            name: "bug".to_string(),
+            label: "lazyspec:bug".to_string(),
+            tag: Some("hot".to_string()),
+            issue_type: Some("Bug".to_string()),
+        };
+        let known = vec![rule];
+
+        // Only the tag holds (native type differs) -> no match, falls back.
+        let (dt, _) = extract_type_and_tags(&["hot".to_string()], &known, Some("Task"), "spec");
+        assert_eq!(dt.as_str(), "spec", "tag alone must not match");
+
+        // Only the issue_type holds (tag label absent) -> no match, falls back.
+        let (dt, _) = extract_type_and_tags(&["cache".to_string()], &known, Some("Bug"), "spec");
+        assert_eq!(dt.as_str(), "spec", "issue_type alone must not match");
+
+        // Both hold -> match.
+        let (dt, _) = extract_type_and_tags(&["hot".to_string()], &known, Some("Bug"), "spec");
+        assert_eq!(dt.as_str(), "bug", "tag AND issue_type must match");
+    }
+
+    // AC5: every rule is evaluated independently with no first-hit short circuit.
+    // Two rules both match the issue; the first wins the doc_type, but the second
+    // rule's classification label ("hot") must still be consumed (never carried as
+    // a tag). doc_type resolution and classifying-label exclusion share a single
+    // loop, so a regression that short-circuited that loop once doc_type is found
+    // would leave "hot" in the returned tags and this assertion would fail.
+    #[test]
+    fn extract_type_and_tags_evaluates_every_rule_independently_no_short_circuit() {
+        let labels = vec![
+            "lazyspec:story".to_string(),
+            "hot".to_string(),
+            "other".to_string(),
+        ];
+        let known = vec![
+            label_rule("story"),
+            TypeMatchRule {
+                name: "urgent".to_string(),
+                label: "lazyspec:urgent".to_string(),
+                tag: Some("hot".to_string()),
+                issue_type: None,
+            },
+        ];
+        let (dt, tags) = extract_type_and_tags(&labels, &known, None, "spec");
+        assert_eq!(dt.as_str(), "story", "first satisfied rule wins doc_type");
+        assert_eq!(
+            tags,
+            vec!["other"],
+            "second rule's tag label must be consumed, proving it was evaluated"
+        );
     }
 }
