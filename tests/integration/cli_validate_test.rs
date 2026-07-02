@@ -299,6 +299,7 @@ fn singleton_type(name: &str, dir: &str, prefix: &str) -> TypeDef {
         authorship: Default::default(),
         lifecycle: Default::default(),
         attributes: Default::default(),
+        label_override: None,
     }
 }
 
@@ -319,6 +320,7 @@ fn child_type(name: &str, dir: &str, prefix: &str, parent: &str) -> TypeDef {
         authorship: Default::default(),
         lifecycle: Default::default(),
         attributes: Default::default(),
+        label_override: None,
     }
 }
 
@@ -476,6 +478,7 @@ fn parent_type_references_non_singleton_error() {
         authorship: Default::default(),
         lifecycle: Default::default(),
         attributes: Default::default(),
+        label_override: None,
     };
     let config = config_with_extra_types(vec![
         non_singleton_parent,

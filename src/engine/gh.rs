@@ -1162,6 +1162,7 @@ pub mod test_support {
         pub last_edit_body: RefCell<Option<String>>,
         pub last_edit_labels_remove: RefCell<Vec<String>>,
         pub last_create_body: RefCell<Option<String>>,
+        pub last_create_labels: RefCell<Vec<String>>,
         pub create_titles: RefCell<Vec<String>>,
         pub next_issue_number: Cell<u64>,
         pub graphql_responses: RefCell<Vec<serde_json::Value>>,
@@ -1198,6 +1199,7 @@ pub mod test_support {
                 last_edit_body: RefCell::new(None),
                 last_edit_labels_remove: RefCell::new(vec![]),
                 last_create_body: RefCell::new(None),
+                last_create_labels: RefCell::new(vec![]),
                 create_titles: RefCell::new(vec![]),
                 next_issue_number: Cell::new(1),
                 graphql_responses: RefCell::new(vec![]),
@@ -1304,6 +1306,7 @@ pub mod test_support {
             labels: &[String],
         ) -> Result<GhIssue> {
             *self.last_create_body.borrow_mut() = Some(body.to_string());
+            *self.last_create_labels.borrow_mut() = labels.to_vec();
             self.create_titles.borrow_mut().push(title.to_string());
             if let Some(ref issue) = self.create_result {
                 return Ok(issue.clone());

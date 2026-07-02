@@ -629,6 +629,7 @@ mod tests {
             authorship: Default::default(),
             lifecycle: Default::default(),
             attributes: Default::default(),
+            label_override: None,
         };
         let mut config = Config::default();
         config.documents.types = vec![
@@ -1254,6 +1255,7 @@ mod tests {
             authorship: Default::default(),
             lifecycle: Default::default(),
             attributes: Default::default(),
+            label_override: None,
         };
         let mut config = Config::default();
         config.documents.types = vec![
@@ -1612,6 +1614,7 @@ mod tests {
             authorship: Default::default(),
             lifecycle: Default::default(),
             attributes: Default::default(),
+            label_override: None,
         };
         let story_type = TypeDef {
             name: "story".to_string(),
@@ -1629,6 +1632,7 @@ mod tests {
             authorship: Default::default(),
             lifecycle: Default::default(),
             attributes: Default::default(),
+            label_override: None,
         };
 
         let mut config = Config::default();
@@ -2130,6 +2134,7 @@ mod tests {
             authorship: Default::default(),
             lifecycle: Default::default(),
             attributes: Default::default(),
+            label_override: None,
         };
         let story_type = TypeDef {
             name: "story".to_string(),
@@ -2147,6 +2152,7 @@ mod tests {
             authorship: Default::default(),
             lifecycle: Default::default(),
             attributes: Default::default(),
+            label_override: None,
         };
 
         let mut config = Config::default();

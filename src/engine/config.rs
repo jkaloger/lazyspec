@@ -263,6 +263,11 @@ pub struct TypeDef {
     pub lifecycle: Lifecycle,
     #[serde(default)]
     pub attributes: Vec<AttrDef>,
+    /// Overrides the default `lazyspec:{name}` GitHub label used to identify
+    /// this type's issues, for `github-issues`-backed types. Unused by other
+    /// stores.
+    #[serde(default, rename = "github_label")]
+    pub label_override: Option<String>,
 }
 
 /// One entry in the `[[relationships]]` block: a relationship name and its
@@ -642,6 +647,7 @@ pub fn starter_types() -> Vec<TypeDef> {
         authorship: Authorship::default(),
         lifecycle: default_lifecycle(),
         attributes: Vec::new(),
+        label_override: None,
     };
     vec![
         simple("rfc", "rfcs", "docs/rfcs", "RFC", "●"),
@@ -671,6 +677,7 @@ pub fn starter_types() -> Vec<TypeDef> {
             authorship: Authorship::default(),
             lifecycle: default_lifecycle(),
             attributes: Vec::new(),
+            label_override: None,
         },
         TypeDef {
             name: "dictum".to_string(),
@@ -688,6 +695,7 @@ pub fn starter_types() -> Vec<TypeDef> {
             authorship: Authorship::default(),
             lifecycle: default_lifecycle(),
             attributes: Vec::new(),
+            label_override: None,
         },
     ]
 }
@@ -994,6 +1002,14 @@ impl TypeDef {
     pub fn accepts_status(&self, status: &Status) -> bool {
         self.lifecycle.states.iter().any(|s| s == status.as_str())
     }
+
+    /// The GitHub label identifying this type's issues: the configured
+    /// `label_override` if set, else the default `lazyspec:{name}`.
+    pub fn github_label(&self) -> String {
+        self.label_override
+            .clone()
+            .unwrap_or_else(|| crate::engine::gh::type_label(&self.name))
+    }
 }
 
 #[cfg(test)]
@@ -1015,6 +1031,7 @@ impl TypeDef {
             authorship: Authorship::default(),
             lifecycle: Lifecycle::default(),
             attributes: Vec::new(),
+            label_override: None,
         }
     }
 }
@@ -2090,5 +2107,45 @@ name = "mentions"
             2,
             "skip_serializing_if must omit absent traversal: {emitted}"
         );
+    }
+
+    #[test]
+    fn github_label_returns_override_verbatim_when_set() {
+        let mut td = TypeDef::test_fixture("story", StoreBackend::GithubIssues);
+        td.label_override = Some("Ticket".to_string());
+
+        assert_eq!(td.github_label(), "Ticket");
+    }
+
+    #[test]
+    fn github_label_falls_back_to_type_label_when_unset() {
+        let td = TypeDef::test_fixture("story", StoreBackend::GithubIssues);
+
+        assert_eq!(td.github_label(), "lazyspec:story");
+    }
+
+    #[test]
+    fn toml_github_label_key_parses_into_label_override() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[[types]]
+name = "ticket"
+plural = "tickets"
+dir = "docs/tickets"
+prefix = "TICKET"
+github_label = "Ticket"
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        let td = config.type_by_name("ticket").unwrap();
+        assert_eq!(td.label_override, Some("Ticket".to_string()));
+    }
+
+    #[test]
+    fn toml_without_github_label_key_leaves_label_override_none() {
+        let config = Config::parse(TYPES).unwrap();
+        let td = config.type_by_name("rfc").unwrap();
+        assert_eq!(td.label_override, None);
     }
 }

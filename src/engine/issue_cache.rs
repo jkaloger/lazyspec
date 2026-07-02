@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{AttrDef, Config, TypeDef};
-use crate::engine::document::{AttrValue, DocMeta, DocType, Relation, RelationType, Status};
-use crate::engine::gh::{type_label, GhGraphql, GhIssue, GhIssueReader};
+use crate::engine::document::{AttrValue, DocMeta, Relation, RelationType, Status};
+use crate::engine::gh::{GhGraphql, GhIssue, GhIssueReader};
 use crate::engine::gh_schema;
 use crate::engine::gh_subissue;
 use crate::engine::issue_body::{self, IssueContext};
@@ -158,7 +158,7 @@ impl IssueCache {
             };
         }
 
-        let label = type_label(&type_def.name);
+        let label = type_def.github_label();
         let labels = vec![label];
         let fields = vec![
             "id".into(),
@@ -175,6 +175,8 @@ impl IssueCache {
         let milestone_rel = config
             .relationship_by_github_native("milestone")
             .map(|r| r.name.as_str());
+
+        let known_type_labels = resolve_known_type_labels(known_types, config);
 
         let issues = match gh.issue_list(repo, &labels, &fields, None) {
             Ok(issues) => issues,
@@ -201,7 +203,7 @@ impl IssueCache {
             let (meta, body) = parse_issue(
                 issue,
                 &type_def.name,
-                known_types,
+                &known_type_labels,
                 &type_def.attributes,
                 milestone_rel,
                 issue_map,
@@ -310,7 +312,7 @@ impl IssueCache {
         known_types: &[String],
         config: &Config,
     ) -> anyhow::Result<FetchResult> {
-        let label = type_label(&type_def.name);
+        let label = type_def.github_label();
         let labels = vec![label];
         const FETCH_LIMIT: u64 = 500;
 
@@ -348,11 +350,12 @@ impl IssueCache {
         let milestone_rel = config
             .relationship_by_github_native("milestone")
             .map(|r| r.name.as_str());
+        let known_type_labels = resolve_known_type_labels(known_types, config);
         for issue in &issues {
             let (meta, body) = parse_issue(
                 issue,
                 &type_def.name,
-                known_types,
+                &known_type_labels,
                 &type_def.attributes,
                 milestone_rel,
                 issue_map,
@@ -550,10 +553,27 @@ fn parse_created_date(created_at: &str) -> chrono::NaiveDate {
         .unwrap_or_else(|_| Utc::now().date_naive())
 }
 
+/// Pair each known type name with its resolved GitHub label (`github_label()`),
+/// so the read-side label matching can compare issue labels against custom
+/// `label_override`s, not just the default `lazyspec:{name}`. A name absent from
+/// the config falls back to the default label.
+fn resolve_known_type_labels(known_types: &[String], config: &Config) -> Vec<(String, String)> {
+    known_types
+        .iter()
+        .map(|name| {
+            let label = config
+                .type_by_name(name)
+                .map(|t| t.github_label())
+                .unwrap_or_else(|| crate::engine::gh::type_label(name));
+            (name.clone(), label)
+        })
+        .collect()
+}
+
 fn parse_issue(
     issue: &GhIssue,
     type_name: &str,
-    known_types: &[String],
+    known_types: &[(String, String)],
     attr_defs: &[AttrDef],
     milestone_rel: Option<&str>,
     issue_map: &IssueMap,
@@ -586,19 +606,16 @@ fn parse_issue(
         Status::new("complete")
     };
 
+    let (doc_type, tags) = issue_body::extract_type_and_tags(&ctx.labels, known_types, type_name);
+
     let mut meta = DocMeta {
         path: PathBuf::new(),
         title: issue.title.clone(),
-        doc_type: DocType::new(type_name),
+        doc_type,
         status,
         author: author.clone(),
         date: parse_created_date(&issue.created_at),
-        tags: issue
-            .labels
-            .iter()
-            .filter(|l| !l.name.starts_with("lazyspec:"))
-            .map(|l| l.name.clone())
-            .collect(),
+        tags,
         provenance: vec![],
         related: vec![],
         validate_ignore: false,
@@ -687,6 +704,7 @@ fn build_cache_content(meta: &DocMeta, body: &str) -> String {
 mod tests {
     use super::*;
     use crate::engine::config::{NumberingStrategy, StoreBackend};
+    use crate::engine::document::DocType;
     use crate::engine::gh::{GhAuthor, GhGraphql, GhIssueReader, GhLabel, GqlVar};
     use anyhow::Result;
     use std::cell::RefCell;
@@ -716,6 +734,7 @@ mod tests {
             authorship: Default::default(),
             lifecycle: Default::default(),
             attributes: Default::default(),
+            label_override: None,
         }
     }
 
@@ -1185,7 +1204,6 @@ mod tests {
 
         // Verify Store::load can find the documents
         use crate::engine::config::{Config, GithubConfig};
-        use crate::engine::document::DocType;
         use crate::engine::store::Store;
         let mut config = Config::default();
         config.documents.types = vec![story_type_def()];
@@ -1407,6 +1425,71 @@ mod tests {
         assert!(issue_map.get("STORY-999").is_none());
     }
 
+    // Custom `label_override`: an issue whose only type label is "Ticket" (no
+    // `lazyspec:` prefix) resolves to that type on read, and the custom label is
+    // not carried as a tag.
+    #[test]
+    fn parse_issue_recognizes_custom_label_type() {
+        let issue = make_gh_issue(
+            5,
+            "Ticketed work",
+            "<!-- lazyspec\n---\ndate: 2026-03-27\n---\n-->\n\nbody",
+            &["Ticket", "team-x"],
+        );
+        let known_types = vec![("ticket".to_string(), "Ticket".to_string())];
+        let (meta, _) = parse_issue(
+            &issue,
+            "ticket",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+        );
+        assert_eq!(meta.doc_type.as_str(), "ticket");
+        assert_eq!(meta.tags, vec!["team-x"]);
+    }
+
+    // Regression: a type with no override still resolves via its default
+    // `lazyspec:{name}` label, unchanged from before.
+    #[test]
+    fn parse_issue_recognizes_default_label_type() {
+        let issue = make_gh_issue(
+            6,
+            "Default labelled",
+            "<!-- lazyspec\n---\ndate: 2026-03-27\n---\n-->\n\nbody",
+            &["lazyspec:story", "team-y"],
+        );
+        let known_types = vec![("story".to_string(), "lazyspec:story".to_string())];
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+        );
+        assert_eq!(meta.doc_type.as_str(), "story");
+        assert_eq!(meta.tags, vec!["team-y"]);
+    }
+
+    // Fallback path (no lazyspec comment): a custom label is excluded from tags,
+    // just like the default-prefixed case.
+    #[test]
+    fn parse_issue_fallback_excludes_custom_label_from_tags() {
+        let issue = make_gh_issue(7, "Plain ticket", "Just a plain body", &["Ticket", "extra"]);
+        let known_types = vec![("ticket".to_string(), "Ticket".to_string())];
+        let (meta, _) = parse_issue(
+            &issue,
+            "ticket",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+        );
+        assert_eq!(meta.doc_type.as_str(), "ticket");
+        assert_eq!(meta.tags, vec!["extra"]);
+    }
+
     fn make_gh_issue_with_author(
         number: u64,
         title: &str,
@@ -1430,7 +1513,7 @@ mod tests {
             &["lazyspec:story"],
             Some("jkaloger"),
         );
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![("story".to_string(), "lazyspec:story".to_string())];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1451,7 +1534,7 @@ mod tests {
             &["lazyspec:story"],
             None,
         );
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![("story".to_string(), "lazyspec:story".to_string())];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1473,7 +1556,7 @@ mod tests {
             &["lazyspec:story"],
             Some("octocat"),
         );
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![("story".to_string(), "lazyspec:story".to_string())];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1495,7 +1578,7 @@ mod tests {
             &["lazyspec:story"],
             Some("jkaloger"),
         );
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![("story".to_string(), "lazyspec:story".to_string())];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1547,7 +1630,7 @@ mod tests {
     fn parse_issue_uses_created_at_for_date() {
         let mut issue = make_gh_issue(1, "Test issue", "Just a plain body", &["lazyspec:story"]);
         issue.created_at = "2025-06-15T09:30:00Z".to_string();
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![("story".to_string(), "lazyspec:story".to_string())];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1566,7 +1649,7 @@ mod tests {
     fn parse_issue_falls_back_to_today_on_bad_created_at() {
         let mut issue = make_gh_issue(2, "Test issue", "Just a plain body", &["lazyspec:story"]);
         issue.created_at = "not-a-date".to_string();
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![("story".to_string(), "lazyspec:story".to_string())];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1582,7 +1665,7 @@ mod tests {
     fn parse_issue_falls_back_to_today_on_empty_created_at() {
         let mut issue = make_gh_issue(3, "Test issue", "Just a plain body", &["lazyspec:story"]);
         issue.created_at = String::new();
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![("story".to_string(), "lazyspec:story".to_string())];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1605,7 +1688,7 @@ mod tests {
             &["lazyspec:story"],
         );
         issue.issue_type = Some("Bug".to_string());
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![("story".to_string(), "lazyspec:story".to_string())];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1630,7 +1713,7 @@ mod tests {
             &["lazyspec:story"],
         );
         assert!(issue.issue_type.is_none());
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![("story".to_string(), "lazyspec:story".to_string())];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1652,7 +1735,7 @@ mod tests {
             &["lazyspec:story"],
         );
         issue.issue_type = Some("Bug".to_string());
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![("story".to_string(), "lazyspec:story".to_string())];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1673,7 +1756,7 @@ mod tests {
     fn parse_issue_fallback_body_surfaces_issue_type() {
         let mut issue = make_gh_issue(4, "Plain issue", "Just a plain body", &["lazyspec:story"]);
         issue.issue_type = Some("Task".to_string());
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![("story".to_string(), "lazyspec:story".to_string())];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1754,7 +1837,7 @@ mod tests {
         let mut map = IssueMap::default();
         map.insert_kind("MILESTONE-2", 7, "", "", EntryKind::Milestone);
 
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![("story".to_string(), "lazyspec:story".to_string())];
         let (meta, _) = parse_issue(&issue, "story", &known_types, &[], Some("targets"), &map);
 
         let targets: Vec<(&str, &str)> = meta
@@ -1773,7 +1856,7 @@ mod tests {
 
         let mut issue = make_gh_issue(3, "Test issue", "body", &["lazyspec:story"]);
         issue.milestone = Some(GhIssueMilestone { number: 7 });
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![("story".to_string(), "lazyspec:story".to_string())];
 
         // Milestone #7 maps to no doc -> skipped even with a configured rel.
         let empty = IssueMap::default();

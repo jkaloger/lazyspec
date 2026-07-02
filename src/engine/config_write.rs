@@ -979,6 +979,7 @@ require_parent_status = "accepted"
                 authorship: Default::default(),
                 lifecycle: Default::default(),
                 attributes: Default::default(),
+                label_override: None,
             });
             c
         };
@@ -1066,6 +1067,7 @@ name = "related-to"
                 authorship: Default::default(),
                 lifecycle: Default::default(),
                 attributes: Default::default(),
+                label_override: None,
             });
             c.rules.clear();
             c

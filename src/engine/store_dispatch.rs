@@ -274,7 +274,7 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
                 .documents
                 .types
                 .iter()
-                .map(|t| t.name.clone())
+                .map(|t| (t.name.clone(), t.github_label()))
                 .collect(),
             default_type: type_def.name.clone(),
             attr_defs: type_def.attributes.clone(),
@@ -492,7 +492,7 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
             .unwrap_or_default();
 
         let issue_body = issue_body::serialize(meta, &body);
-        let label = gh::type_label(&type_def.name);
+        let label = type_def.github_label();
         let color = gh::deterministic_color(&type_def.name);
         let description = format!("lazyspec document type: {}", type_def.name);
         self.client
@@ -894,7 +894,7 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> DocumentStore for GithubIssue
         };
 
         let issue_body = issue_body::serialize(&placeholder_meta, body);
-        let label = gh::type_label(&type_def.name);
+        let label = type_def.github_label();
         let color = gh::deterministic_color(&type_def.name);
         let description = format!("lazyspec document type: {}", type_def.name);
         self.client
@@ -961,7 +961,7 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> DocumentStore for GithubIssue
                 .documents
                 .types
                 .iter()
-                .map(|t| t.name.clone())
+                .map(|t| (t.name.clone(), t.github_label()))
                 .collect(),
             default_type: type_def.name.clone(),
             attr_defs: type_def.attributes.clone(),
@@ -1098,7 +1098,7 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> DocumentStore for GithubIssue
                 .documents
                 .types
                 .iter()
-                .map(|t| t.name.clone())
+                .map(|t| (t.name.clone(), t.github_label()))
                 .collect(),
             default_type: type_def.name.clone(),
             attr_defs: type_def.attributes.clone(),
@@ -1128,7 +1128,7 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> DocumentStore for GithubIssue
         let (issue_number, remote_issue) = self.check_lock(doc_id)?;
 
         let deleted_title = format!("[DELETED] {}", remote_issue.title);
-        let label = gh::type_label(&type_def.name);
+        let label = type_def.github_label();
         self.client.issue_edit(
             &self.repo,
             issue_number,
@@ -1897,6 +1897,7 @@ mod tests {
             authorship: Default::default(),
             lifecycle: Default::default(),
             attributes: Default::default(),
+            label_override: None,
         }
     }
 
@@ -2043,6 +2044,28 @@ mod tests {
     }
 
     #[test]
+    fn github_issues_create_uses_label_override() {
+        let root = tmp_root("gh_create_label_override");
+        let mut gh_store = GithubIssuesStore {
+            client: MockGhClient::new(),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: IssueMap::load(&root).unwrap(),
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let mut td = test_type_def(StoreBackend::GithubIssues);
+        td.label_override = Some("Ticket".to_string());
+        gh_store.create(&td, "custom", "author", "").unwrap();
+
+        assert_eq!(
+            *gh_store.client.last_create_labels.borrow(),
+            vec!["Ticket".to_string()]
+        );
+    }
+
+    #[test]
     fn github_issues_create_persists_issue_map() {
         let root = tmp_root("gh_create_persist");
         let mut gh_store = GithubIssuesStore {
@@ -2109,6 +2132,7 @@ mod tests {
             authorship: Default::default(),
             lifecycle: Default::default(),
             attributes: Default::default(),
+            label_override: None,
         };
 
         let result = gh_store.create(&td, "test prefix", "author", "").unwrap();

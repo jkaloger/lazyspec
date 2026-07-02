@@ -844,6 +844,7 @@ Body.
             authorship: Default::default(),
             lifecycle: Default::default(),
             attributes: attrs,
+            label_override: None,
         }
     }
 

@@ -1,7 +1,7 @@
 ---
 title: Custom GitHub label per document type
 type: story
-status: accepted
+status: in-progress
 author: jkaloger
 date: 2026-07-02
 tags: []

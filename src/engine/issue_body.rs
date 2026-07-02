@@ -14,7 +14,11 @@ pub struct IssueContext {
     pub title: String,
     pub labels: Vec<String>,
     pub is_open: bool,
-    pub known_types: Vec<String>,
+    /// Known document types as `(type_name, resolved_label)` pairs, where the
+    /// resolved label is the type's `github_label()` (its `label_override` or the
+    /// default `lazyspec:{name}`). A GitHub label is recognized as a type when it
+    /// exactly matches (case-insensitive) one of these resolved labels.
+    pub known_types: Vec<(String, String)>,
     pub default_type: String,
     /// Declared attribute schema for the document's type, used to coerce the
     /// `attributes:` block in the HTML comment back into typed [`AttrValue`]s.
@@ -92,8 +96,7 @@ pub fn deserialize(issue_body: &str, ctx: &IssueContext) -> Result<(DocMeta, Str
         .map(parse_relation)
         .collect::<Result<Vec<_>>>()?;
 
-    let known_type_refs: Vec<&str> = ctx.known_types.iter().map(|s| s.as_str()).collect();
-    let (doc_type, tags) = extract_type_and_tags(&ctx.labels, &known_type_refs, &ctx.default_type);
+    let (doc_type, tags) = extract_type_and_tags(&ctx.labels, &ctx.known_types, &ctx.default_type);
 
     let status = reconstruct_status(ctx.is_open, parsed.status.as_deref());
 
@@ -164,11 +167,15 @@ fn reconstruct_status(is_open: bool, frontmatter_status: Option<&str>) -> Status
 
 /// Extract doc_type and tags from GitHub labels.
 ///
-/// The first label matching a known doc type is used as the type; all remaining
-/// labels become tags.
-fn extract_type_and_tags(
+/// Each label is matched (case-insensitive) against the resolved GitHub label of
+/// every known type (`known_types` carries `(type_name, resolved_label)` pairs).
+/// The first label matching a known type's resolved label becomes the doc_type;
+/// any label matching a known type's resolved label is consumed (never carried
+/// as a tag). Every other label becomes a tag. With no match, `default_type` is
+/// used.
+pub(crate) fn extract_type_and_tags(
     labels: &[String],
-    known_types: &[&str],
+    known_types: &[(String, String)],
     default_type: &str,
 ) -> (DocType, Vec<String>) {
     let mut doc_type: Option<DocType> = None;
@@ -176,13 +183,16 @@ fn extract_type_and_tags(
 
     for label in labels {
         let lower = label.to_lowercase();
-        if let Some(suffix) = lower.strip_prefix("lazyspec:") {
-            if doc_type.is_none() && known_types.iter().any(|t| t.to_lowercase() == suffix) {
-                doc_type = Some(DocType::new(suffix));
+        let matched = known_types
+            .iter()
+            .find(|(_, resolved_label)| resolved_label.to_lowercase() == lower);
+        match matched {
+            Some((type_name, _)) => {
+                if doc_type.is_none() {
+                    doc_type = Some(DocType::new(type_name));
+                }
             }
-            // lazyspec:-prefixed labels are never added to tags
-        } else {
-            tags.push(label.clone());
+            None => tags.push(label.clone()),
         }
     }
 
@@ -252,14 +262,22 @@ mod tests {
         }
     }
 
-    fn default_known_types() -> Vec<String> {
-        vec![
-            "rfc".to_string(),
-            "story".to_string(),
-            "iteration".to_string(),
-            "adr".to_string(),
-            "spec".to_string(),
-        ]
+    /// The default known types as `(name, resolved_label)` pairs, each using the
+    /// default `lazyspec:{name}` label (no override).
+    fn default_known_types() -> Vec<(String, String)> {
+        ["rfc", "story", "iteration", "adr", "spec"]
+            .iter()
+            .map(|name| (name.to_string(), format!("lazyspec:{name}")))
+            .collect()
+    }
+
+    /// Build `(name, resolved_label)` pairs from bare names, each using the
+    /// default `lazyspec:{name}` label.
+    fn known_pairs(names: &[&str]) -> Vec<(String, String)> {
+        names
+            .iter()
+            .map(|name| (name.to_string(), format!("lazyspec:{name}")))
+            .collect()
     }
 
     fn sample_context() -> IssueContext {
@@ -377,9 +395,7 @@ mod tests {
     #[test]
     fn extract_type_and_tags_finds_type() {
         let labels = vec!["lazyspec:rfc".to_string(), "cache".to_string()];
-        let types = default_known_types();
-        let known: Vec<&str> = types.iter().map(|s| s.as_str()).collect();
-        let (dt, tags) = extract_type_and_tags(&labels, &known, "spec");
+        let (dt, tags) = extract_type_and_tags(&labels, &default_known_types(), "spec");
         assert_eq!(dt.as_str(), "rfc");
         assert_eq!(tags, vec!["cache"]);
     }
@@ -387,11 +403,20 @@ mod tests {
     #[test]
     fn extract_type_and_tags_defaults_to_configured_type() {
         let labels = vec!["random-label".to_string()];
-        let types = default_known_types();
-        let known: Vec<&str> = types.iter().map(|s| s.as_str()).collect();
-        let (dt, tags) = extract_type_and_tags(&labels, &known, "testgh");
+        let (dt, tags) = extract_type_and_tags(&labels, &default_known_types(), "testgh");
         assert_eq!(dt.as_str(), "testgh");
         assert_eq!(tags, vec!["random-label"]);
+    }
+
+    // A type whose resolved label is a custom override (no `lazyspec:` prefix) is
+    // recognized on read by exact-matching that label.
+    #[test]
+    fn extract_type_and_tags_recognizes_custom_label() {
+        let labels = vec!["Ticket".to_string(), "cache".to_string()];
+        let known = vec![("ticket".to_string(), "Ticket".to_string())];
+        let (dt, tags) = extract_type_and_tags(&labels, &known, "spec");
+        assert_eq!(dt.as_str(), "ticket");
+        assert_eq!(tags, vec!["cache"]);
     }
 
     // AC3: typed attributes survive serialize -> deserialize through the HTML comment.
@@ -570,11 +595,12 @@ mod tests {
             "lazyspec:unknown".to_string(),
             "team-alpha".to_string(),
         ];
-        let types = default_known_types();
-        let known: Vec<&str> = types.iter().map(|s| s.as_str()).collect();
-        let (dt, tags) = extract_type_and_tags(&labels, &known, "spec");
+        let (dt, tags) = extract_type_and_tags(&labels, &default_known_types(), "spec");
         assert_eq!(dt.as_str(), "iteration");
-        assert_eq!(tags, vec!["team-alpha"]);
+        // Matching is now exact against each known type's resolved label, not a
+        // `lazyspec:` prefix strip. `lazyspec:unknown` matches no known type, so
+        // it becomes an ordinary tag (previously it was silently dropped).
+        assert_eq!(tags, vec!["lazyspec:unknown", "team-alpha"]);
     }
 
     // --- Round-trip fidelity tests ---
@@ -658,7 +684,7 @@ mod tests {
     #[test]
     fn custom_type_recognized_when_in_known_types() {
         let labels = vec!["lazyspec:task".to_string(), "team-beta".to_string()];
-        let known = vec!["task", "rfc", "story"];
+        let known = known_pairs(&["task", "rfc", "story"]);
         let (dt, tags) = extract_type_and_tags(&labels, &known, "spec");
         assert_eq!(dt.as_str(), "task");
         assert_eq!(tags, vec!["team-beta"]);
@@ -742,9 +768,10 @@ mod tests {
     #[test]
     fn custom_type_defaults_to_configured_type_when_not_in_known_types() {
         let labels = vec!["lazyspec:task".to_string(), "team-beta".to_string()];
-        let known = vec!["rfc", "story"];
+        let known = known_pairs(&["rfc", "story"]);
         let (dt, tags) = extract_type_and_tags(&labels, &known, "testgh");
         assert_eq!(dt.as_str(), "testgh");
-        assert_eq!(tags, vec!["team-beta"]);
+        // `lazyspec:task` is not a recognized type here, so it survives as a tag.
+        assert_eq!(tags, vec!["lazyspec:task", "team-beta"]);
     }
 }

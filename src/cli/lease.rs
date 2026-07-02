@@ -376,6 +376,7 @@ mod tests {
                         authorship: Default::default(),
                         lifecycle: Default::default(),
                         attributes: Default::default(),
+                        label_override: None,
                     },
                     TypeDef {
                         name: "story".to_string(),
@@ -393,6 +394,7 @@ mod tests {
                         authorship: Default::default(),
                         lifecycle: Default::default(),
                         attributes: Default::default(),
+                        label_override: None,
                     },
                     TypeDef {
                         name: "bug".to_string(),
@@ -410,6 +412,7 @@ mod tests {
                         authorship: Default::default(),
                         lifecycle: Default::default(),
                         attributes: Default::default(),
+                        label_override: None,
                     },
                 ],
                 naming: Naming {

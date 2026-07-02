@@ -410,6 +410,7 @@ fn custom_types_populate_doc_types_and_icons() {
             authorship: Default::default(),
             lifecycle: Default::default(),
             attributes: Default::default(),
+            label_override: None,
         },
         TypeDef {
             name: "task".into(),
@@ -427,6 +428,7 @@ fn custom_types_populate_doc_types_and_icons() {
             authorship: Default::default(),
             lifecycle: Default::default(),
             attributes: Default::default(),
+            label_override: None,
         },
     ];
     let store = Store::load(fixture.root(), &config).unwrap();

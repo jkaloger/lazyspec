@@ -3,7 +3,7 @@ use crate::engine::config::{
     DocumentConfig, FilesystemConfig, Naming, Templates, UiConfig,
 };
 use crate::engine::fs_ops::default_template;
-use crate::engine::gh::{deterministic_color, type_label, GhCli, GhError, GhIssueWriter};
+use crate::engine::gh::{deterministic_color, GhCli, GhError, GhIssueWriter};
 use crate::engine::github::resolve_repo;
 use anyhow::{bail, Result};
 use std::fs;
@@ -82,7 +82,10 @@ fn ensure_github_labels(config: &Config, root: &Path) {
 
     let client = GhCli::new();
     for type_name in &gh_types {
-        let label = type_label(type_name);
+        let label = match config.type_by_name(type_name) {
+            Some(type_def) => type_def.github_label(),
+            None => continue,
+        };
         let color = deterministic_color(type_name);
         let description = format!("lazyspec document type: {}", type_name);
         match client.label_ensure(&repo, &label, &description, &color) {

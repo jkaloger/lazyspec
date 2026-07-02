@@ -105,6 +105,7 @@ mod tests {
             authorship: Default::default(),
             lifecycle: Default::default(),
             attributes: Default::default(),
+            label_override: None,
         }
     }
 

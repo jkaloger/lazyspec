@@ -548,6 +548,25 @@ gh auth refresh -s project
 Without it, schema-snapshot refreshes degrade gracefully -- they emit a warning
 and keep serving the last cached snapshot, so offline validation still works.
 
+By default, a `github-issues`-backed type's issues are created, filtered, and
+tagged with the label `lazyspec:{name}`. A type's `github_label` field
+replaces that label with a literal string of your choosing:
+
+```toml
+[[types]]
+name = "ticket"
+plural = "tickets"
+dir = "docs/tickets"
+prefix = "TICKET"
+store = "github-issues"
+github_label = "Ticket"
+```
+
+With this set, `ticket` issues use the label `Ticket` instead of the default
+`lazyspec:ticket`. Omitting `github_label` leaves existing configs and their
+default labels unchanged. It only affects `github-issues`-backed types; setting
+it on any other `store` is inert.
+
 #### `github-milestones` store
 
 Types stored as `--store github-milestones` map each document to a GitHub

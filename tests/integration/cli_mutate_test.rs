@@ -29,6 +29,7 @@ fn milestones_fixture() -> (TestFixture, Config) {
         authorship: Default::default(),
         lifecycle: Default::default(),
         attributes: Default::default(),
+        label_override: None,
     }];
     config.documents.github = None;
 
