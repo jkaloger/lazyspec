@@ -812,6 +812,32 @@ mod tests {
         }
     }
 
+    // A second github-issues TypeDef, distinct prefix/name/dir from
+    // story_type_def(), used to prove two types can independently match the
+    // same underlying GitHub issue number without colliding (RFC-055).
+    fn ticket_type_def() -> TypeDef {
+        TypeDef {
+            name: "ticket".to_string(),
+            plural: "tickets".to_string(),
+            dir: "docs/ticket".to_string(),
+            prefix: "TICKET".to_string(),
+            icon: None,
+            numbering: NumberingStrategy::default(),
+            subdirectory: false,
+            store: StoreBackend::GithubIssues,
+            singleton: false,
+            parent_type: None,
+            agents: Vec::new(),
+            intent: None,
+            authorship: Default::default(),
+            lifecycle: Default::default(),
+            attributes: Default::default(),
+            label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
+        }
+    }
+
     fn story_match_rule() -> TypeMatchRule {
         TypeMatchRule {
             name: "story".to_string(),
@@ -1521,6 +1547,202 @@ mod tests {
         };
         let docs = store.list(&filter);
         assert_eq!(docs.len(), 3);
+    }
+
+    // AC (STORY-194): two github-issues types with distinct prefix/name/dir can
+    // both independently match the same underlying GitHub issue number. Each
+    // fetch_all call is scoped entirely to its own TypeDef -- doc id via
+    // type_def.make_id, cache dir via type_def.name -- so both materialize
+    // side by side under the same root and shared IssueMap without colliding.
+    #[test]
+    fn test_fetch_all_dual_materializes_overlapping_issue_across_types() {
+        let (cache, tmp) = make_cache();
+        let story_type = story_type_def();
+        let ticket_type = ticket_type_def();
+
+        // MockReader::issue_list ignores the label filter and always returns
+        // this same issue #42 -- standing in for both types' discovery
+        // independently surfacing the same GitHub issue.
+        let gh = MockReader::new(vec![make_gh_issue(42, "Some Issue", "Body", &[])])
+            .with_graphql_responses(vec![
+                empty_issue_types_response(),
+                empty_issue_types_response(),
+            ]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+
+        cache
+            .fetch_all(
+                tmp.path(),
+                &story_type,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        cache
+            .fetch_all(
+                tmp.path(),
+                &ticket_type,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &[ticket_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        let story_path = tmp.path().join(".lazyspec/cache/story/STORY-42.md");
+        let ticket_path = tmp.path().join(".lazyspec/cache/ticket/TICKET-42.md");
+        assert!(story_path.exists(), "story cache file should exist");
+        assert!(ticket_path.exists(), "ticket cache file should exist");
+
+        let story_content = std::fs::read_to_string(&story_path).unwrap();
+        let ticket_content = std::fs::read_to_string(&ticket_path).unwrap();
+        assert!(
+            story_content.contains("type: story"),
+            "story doc should carry its own type, not ticket's: {}",
+            story_content
+        );
+        assert!(
+            ticket_content.contains("type: ticket"),
+            "ticket doc should carry its own type, not story's: {}",
+            ticket_content
+        );
+
+        assert_eq!(issue_map.get("STORY-42").unwrap().issue_number, 42);
+        assert_eq!(issue_map.get("TICKET-42").unwrap().issue_number, 42);
+    }
+
+    // AC (STORY-194): refresh_stale for one type never touches another type's
+    // cache dir, cache.lock entry, or issue-map row, even when both types
+    // resolved the same GitHub issue number during their own fetch_all.
+    #[test]
+    fn test_refresh_stale_isolates_overlapping_issue_across_types() {
+        let (cache, tmp) = make_cache();
+        let story_type = story_type_def();
+        let ticket_type = ticket_type_def();
+        let ttl = Duration::seconds(60);
+
+        // Arrange: seed both types' caches for the same issue #42 via fetch_all,
+        // exactly as their independent discovery would.
+        let seed_gh = MockReader::new(vec![make_gh_issue(42, "Some Issue", "Body v1", &[])])
+            .with_graphql_responses(vec![
+                empty_issue_types_response(),
+                empty_issue_types_response(),
+            ]);
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        cache
+            .fetch_all(
+                tmp.path(),
+                &story_type,
+                &seed_gh,
+                &seed_gh,
+                "owner/repo",
+                &mut issue_map,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+        cache
+            .fetch_all(
+                tmp.path(),
+                &ticket_type,
+                &seed_gh,
+                &seed_gh,
+                "owner/repo",
+                &mut issue_map,
+                &[ticket_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        backdate_all(&cache, &["STORY-42", "TICKET-42"]);
+
+        let ticket_path = tmp.path().join(".lazyspec/cache/ticket/TICKET-42.md");
+        let ticket_content_before = std::fs::read_to_string(&ticket_path).unwrap();
+        let ticket_lock_before = cache.load_lock().get("TICKET-42").unwrap().to_string();
+
+        // Act: refresh only the story type, with a changed upstream body so a
+        // real write happens (not a no-op "unchanged" skip).
+        let story_refresh_gh =
+            MockReader::new(vec![make_gh_issue(42, "Some Issue", "Body v2", &[])])
+                .with_graphql_responses(vec![empty_issue_types_response()]);
+        let story_result = cache.refresh_stale(
+            tmp.path(),
+            &story_type,
+            &story_refresh_gh,
+            &story_refresh_gh,
+            "owner/repo",
+            &mut issue_map,
+            ttl,
+            &[story_match_rule()],
+            &Config::default(),
+        );
+
+        assert_eq!(story_result.refreshed, 1);
+        assert!(
+            cache.is_fresh("STORY-42", ttl),
+            "story entry should be refreshed and fresh"
+        );
+
+        // Assert: the story-only refresh left ticket's cache file, lock entry,
+        // and issue-map row completely untouched.
+        let ticket_content_after = std::fs::read_to_string(&ticket_path).unwrap();
+        let ticket_lock_after = cache.load_lock().get("TICKET-42").unwrap().to_string();
+        assert_eq!(
+            ticket_content_before, ticket_content_after,
+            "ticket cache content must be untouched by a story-only refresh"
+        );
+        assert_eq!(
+            ticket_lock_before, ticket_lock_after,
+            "ticket lock entry must be untouched by a story-only refresh"
+        );
+        assert!(
+            !cache.is_fresh("TICKET-42", ttl),
+            "ticket entry remains stale since only story was refreshed"
+        );
+        assert_eq!(issue_map.get("TICKET-42").unwrap().issue_number, 42);
+
+        // Act again, the other way around: refresh only ticket now, and
+        // confirm story (already refreshed above) is left alone this time.
+        let story_path = tmp.path().join(".lazyspec/cache/story/STORY-42.md");
+        let story_content_before = std::fs::read_to_string(&story_path).unwrap();
+        let story_lock_before = cache.load_lock().get("STORY-42").unwrap().to_string();
+
+        let ticket_refresh_gh =
+            MockReader::new(vec![make_gh_issue(42, "Some Issue", "Body v3", &[])])
+                .with_graphql_responses(vec![empty_issue_types_response()]);
+        let ticket_result = cache.refresh_stale(
+            tmp.path(),
+            &ticket_type,
+            &ticket_refresh_gh,
+            &ticket_refresh_gh,
+            "owner/repo",
+            &mut issue_map,
+            ttl,
+            &[ticket_match_rule()],
+            &Config::default(),
+        );
+
+        assert_eq!(ticket_result.refreshed, 1);
+        assert!(cache.is_fresh("TICKET-42", ttl));
+
+        let story_content_after = std::fs::read_to_string(&story_path).unwrap();
+        let story_lock_after = cache.load_lock().get("STORY-42").unwrap().to_string();
+        assert_eq!(
+            story_content_before, story_content_after,
+            "story cache content must be untouched by a ticket-only refresh"
+        );
+        assert_eq!(
+            story_lock_before, story_lock_after,
+            "story lock entry must be untouched by a ticket-only refresh"
+        );
     }
 
     #[test]
