@@ -1,7 +1,7 @@
 ---
 title: Push native issue type on lazyspec-created GitHub issues
 type: story
-status: accepted
+status: complete
 author: jkaloger
 date: 2026-07-02
 tags: []

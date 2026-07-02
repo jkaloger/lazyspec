@@ -900,9 +900,39 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> DocumentStore for GithubIssue
         let description = format!("lazyspec document type: {}", type_def.name);
         self.client
             .label_ensure(&self.repo, &label, &description, &color)?;
+
+        // Resolve the native issue-type offline before any remote write, so an
+        // unresolvable name aborts before `issue_create` fires.
+        let resolved_issue_type_id: Option<String> = match type_def.github_issue_type.as_deref() {
+            Some(name) => {
+                let snapshot = GhSchemaSnapshot::load(&self.root);
+                let id = snapshot.issue_type_id(name).ok_or_else(|| {
+                    if snapshot.issue_types.is_empty() {
+                        let (owner, _) = split_owner_repo(&self.repo)
+                            .unwrap_or((self.repo.as_str(), ""));
+                        anyhow::anyhow!(
+                            "native issue types require an organization-owned repository; '{}' has none",
+                            owner
+                        )
+                    } else {
+                        anyhow::anyhow!(
+                            "invalid issue_type '{}': not a known GitHub issue type",
+                            name
+                        )
+                    }
+                })?;
+                Some(id.to_string())
+            }
+            None => None,
+        };
+
         let issue = self
             .client
             .issue_create(&self.repo, title, &issue_body, &[label])?;
+
+        if let Some(resolved_id) = resolved_issue_type_id.as_deref() {
+            self.push_issue_type(issue.number, Some(resolved_id))?;
+        }
 
         // Use the GitHub issue number as the document number.
         let issue_num_str = issue.number.to_string();
@@ -4268,6 +4298,197 @@ mod tests {
         let (yaml, _) = crate::engine::document::split_frontmatter(&cache_content).unwrap();
         let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed["type"].as_str().unwrap(), "story");
+    }
+
+    // --- STORY-195 / ITERATION-266: push native issue type on create ---
+
+    // AC1: `github_issue_type` configured + resolvable -> create succeeds and
+    // pushes exactly one updateIssue mutation carrying the resolved id.
+    #[test]
+    fn github_create_pushes_configured_issue_type() {
+        let root = tmp_root("gh_create_issue_type_push");
+        write_bug_snapshot(&root);
+        let td = TypeDef {
+            github_issue_type: Some("Bug".to_string()),
+            ..test_type_def(StoreBackend::GithubIssues)
+        };
+
+        let mut gh_store = GithubIssuesStore {
+            client: MockGhClient::new().with_graphql_responses(vec![
+                issue_node_id_response(),
+                serde_json::json!({"data": {"updateIssue": {"issue": {"id": "I_node1"}}}}),
+            ]),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: IssueMap::load(&root).unwrap(),
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let result = gh_store
+            .create(&td, "my title", "author", "body text")
+            .unwrap();
+        assert_eq!(result.id, "RFC-1");
+
+        let calls = gh_store.client.graphql_calls.borrow();
+        let mutations: Vec<_> = calls
+            .iter()
+            .filter(|(q, _)| q.contains("updateIssue"))
+            .collect();
+        assert_eq!(mutations.len(), 1, "exactly one updateIssue mutation");
+        let (_, vars) = mutations[0];
+        assert!(
+            vars.contains(&("issueTypeId".to_string(), GqlVar::Str("IT_bug".to_string()))),
+            "mutation must carry resolved issueTypeId=IT_bug, got: {:?}",
+            vars
+        );
+    }
+
+    // AC2: `github_issue_type` unset -> zero GraphQL calls, no push at all, and
+    // plain create behavior is unchanged.
+    #[test]
+    fn github_create_without_issue_type_makes_no_push_call() {
+        let root = tmp_root("gh_create_issue_type_absent");
+        let td = test_type_def(StoreBackend::GithubIssues);
+        assert_eq!(td.github_issue_type, None);
+
+        let mut gh_store = GithubIssuesStore {
+            client: MockGhClient::new(),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: IssueMap::load(&root).unwrap(),
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let result = gh_store
+            .create(&td, "my title", "author", "body text")
+            .unwrap();
+        assert_eq!(result.id, "RFC-1");
+        assert_eq!(gh_store.client.create_titles.borrow().len(), 1);
+        assert!(
+            gh_store.client.graphql_calls.borrow().is_empty(),
+            "no issue_type configured -> zero GraphQL calls"
+        );
+    }
+
+    // AC3: `github_issue_type` configured but unresolvable -> create fails
+    // before `issue_create` fires, mirroring `update`'s two rejection message
+    // shapes (name absent from a populated schema; empty schema on a
+    // user-owned repo).
+    #[test]
+    fn github_create_unresolvable_issue_type_fails_before_create() {
+        // Shape 1: populated schema, name not present.
+        let root = tmp_root("gh_create_issue_type_invalid");
+        write_bug_snapshot(&root);
+        let td = TypeDef {
+            github_issue_type: Some("Nonsense".to_string()),
+            ..test_type_def(StoreBackend::GithubIssues)
+        };
+        let mut gh_store = GithubIssuesStore {
+            client: MockGhClient::new(),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: IssueMap::load(&root).unwrap(),
+            issue_cache: IssueCache::new(&root),
+        };
+        let err = gh_store
+            .create(&td, "my title", "author", "body text")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Nonsense"),
+            "error must name the invalid value, got: {err}"
+        );
+        assert!(
+            gh_store.client.create_titles.borrow().is_empty(),
+            "issue_create must never fire when the type is unresolvable"
+        );
+        assert!(
+            gh_store.client.graphql_calls.borrow().is_empty(),
+            "zero GraphQL calls on invalid issue_type"
+        );
+
+        // Shape 2: empty schema (user-owned repo) -> org-only message.
+        let root2 = tmp_root("gh_create_issue_type_user_account");
+        GhSchemaSnapshot {
+            issue_types: vec![],
+            ..Default::default()
+        }
+        .save(&root2)
+        .unwrap();
+        let td2 = TypeDef {
+            github_issue_type: Some("Bug".to_string()),
+            ..test_type_def(StoreBackend::GithubIssues)
+        };
+        let mut gh_store2 = GithubIssuesStore {
+            client: MockGhClient::new(),
+            root: root2.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: IssueMap::load(&root2).unwrap(),
+            issue_cache: IssueCache::new(&root2),
+        };
+        let err2 = gh_store2
+            .create(&td2, "my title", "author", "body text")
+            .unwrap_err();
+        assert!(
+            err2.to_string().contains("require an organization"),
+            "error must name the org-only constraint, got: {err2}"
+        );
+        assert!(
+            gh_store2.client.create_titles.borrow().is_empty(),
+            "issue_create must never fire when the type is unresolvable"
+        );
+    }
+
+    // AC4: `create_child_subissue` delegates to `create` with zero new logic,
+    // so a configured `github_issue_type` on the child's TypeDef is pushed too.
+    #[test]
+    fn create_child_subissue_pushes_configured_issue_type() {
+        let root = tmp_root("create_child_issue_type");
+        write_bug_snapshot(&root);
+        let td = TypeDef {
+            github_issue_type: Some("Bug".to_string()),
+            ..test_type_def(StoreBackend::GithubIssues)
+        };
+
+        let mut store = GithubIssuesStore {
+            client: MockGhClient::new().with_graphql_responses(vec![
+                issue_node_id_response(),
+                serde_json::json!({"data": {"updateIssue": {"issue": {"id": "I_node1"}}}}),
+                serde_json::json!({"data": {"node": {"subIssues": {"nodes": []}}}}),
+                serde_json::json!({"data": {}}),
+            ]),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: IssueMap::load(&root).unwrap(),
+            issue_cache: IssueCache::new(&root),
+        };
+        store.issue_map.insert("RFC-1", 1, "ts", "I_parent");
+        store.issue_map.save(&root).unwrap();
+
+        store
+            .create_child_subissue(&td, "RFC-1", "Child", "author", "")
+            .unwrap();
+
+        let calls = store.client.graphql_calls.borrow();
+        let mutations: Vec<_> = calls
+            .iter()
+            .filter(|(q, _)| q.contains("updateIssue"))
+            .collect();
+        assert_eq!(
+            mutations.len(),
+            1,
+            "exactly one updateIssue mutation for the child"
+        );
+        let (_, vars) = mutations[0];
+        assert!(
+            vars.contains(&("issueTypeId".to_string(), GqlVar::Str("IT_bug".to_string()))),
+            "child updateIssue must carry resolved issueTypeId=IT_bug, got: {:?}",
+            vars
+        );
     }
 
     // --- Subdir sub-issue materialization (ITERATION-214) ---
