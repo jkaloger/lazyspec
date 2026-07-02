@@ -1,7 +1,7 @@
 ---
 title: Document github_issue_tag and github_issue_type in README
 type: story
-status: accepted
+status: in-progress
 author: jkaloger
 date: 2026-07-02
 tags: []

@@ -548,6 +548,41 @@ gh auth refresh -s project
 Without it, schema-snapshot refreshes degrade gracefully -- they emit a warning
 and keep serving the last cached snapshot, so offline validation still works.
 
+A `[[types]]` entry may also declare `github_issue_tag` and/or
+`github_issue_type` to control which issues classify as that type,
+independent of (or instead of) the default `lazyspec:{type}` label:
+
+```toml
+[[types]]
+name = "feature"
+prefix = "FEAT"
+store = "github-issues"
+github_issue_tag = "customer-facing"
+github_issue_type = "Feature"
+```
+
+- Neither set: unchanged default -- an issue matches when it carries the
+  `lazyspec:{type}` label.
+- Only `github_issue_tag` set: matches every issue carrying that tag; the
+  `lazyspec:{type}` label is not checked.
+- Only `github_issue_type` set: matches every issue whose native GitHub
+  Issue Type equals that value; the label is not checked.
+- Both set: an issue must carry the tag **and** have the native issue type --
+  AND, not OR.
+
+Because these are independent per-type rules, two types may legitimately
+match the same issue (e.g. both set `github_issue_type = "Feature"`). `fetch`
+then materializes one document per matching type from that single issue --
+same issue number, separate cache entries under each type's own prefix and
+numbering. Both documents stay independently `update`-able; each write goes
+to the same issue, so whichever update runs last wins on any field the two
+types share.
+
+`create` on a type with `github_issue_type` set also pushes that value onto
+the new issue's native issue type field (needs the `project` scope described
+above); `create` with `github_issue_tag` set applies that value as a label
+the same way the default `lazyspec:{type}` label is applied today.
+
 By default, a `github-issues`-backed type's issues are created, filtered, and
 tagged with the label `lazyspec:{name}`. A type's `github_label` field
 replaces that label with a literal string of your choosing:
