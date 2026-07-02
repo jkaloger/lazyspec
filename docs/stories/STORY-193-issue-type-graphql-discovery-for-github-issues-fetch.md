@@ -1,7 +1,7 @@
 ---
 title: Issue-type GraphQL discovery for github-issues fetch
 type: story
-status: accepted
+status: complete
 author: jkaloger
 date: 2026-07-02
 tags: []

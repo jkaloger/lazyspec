@@ -1,7 +1,7 @@
 ---
 title: Issue-type GraphQL discovery for github-issues fetch
 type: iteration
-status: in-progress
+status: complete
 author: jkaloger
 date: 2026-07-03
 tags: []
