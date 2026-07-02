@@ -1,7 +1,7 @@
 ---
 title: Per-type match-rule plumbing for issue classification
 type: story
-status: accepted
+status: complete
 author: jkaloger
 date: 2026-07-02
 tags: []

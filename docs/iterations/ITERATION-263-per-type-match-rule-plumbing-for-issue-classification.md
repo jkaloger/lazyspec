@@ -1,7 +1,7 @@
 ---
 title: Per-type match-rule plumbing for issue classification
 type: iteration
-status: in-progress
+status: complete
 author: jkaloger
 date: 2026-07-03
 tags: []
