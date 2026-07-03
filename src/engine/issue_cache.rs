@@ -506,7 +506,7 @@ fn discover_issues(
             })
         }
         (Some(tag), Some(issue_type)) => {
-            let rest = gh.issue_list(repo, &[tag.clone()], fields, limit)?;
+            let rest = gh.issue_list(repo, std::slice::from_ref(tag), fields, limit)?;
             let numbers = search_issue_numbers_by_type(gh_graphql, repo, issue_type)?;
             let search_truncated = numbers.len() == ISSUE_TYPE_SEARCH_PAGE_SIZE;
             let keep: std::collections::HashSet<u64> = numbers.into_iter().collect();
