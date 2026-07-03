@@ -3,6 +3,7 @@ use crate::engine::document::split_frontmatter;
 use crate::engine::gh::GhCli;
 use crate::engine::git_ref::GitCli;
 use crate::engine::git_ref_store::GitRefStore;
+use crate::engine::issue_body::TypeMatchRule;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
@@ -523,11 +524,11 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                         .iter()
                         .filter(|t| t.store == StoreBackend::GithubMilestones)
                         .collect();
-                    let all_type_names: Vec<String> = poll_config
+                    let all_type_rules: Vec<TypeMatchRule> = poll_config
                         .documents
                         .types
                         .iter()
-                        .map(|t| t.name.clone())
+                        .map(TypeMatchRule::from)
                         .collect();
                     let client = GhCli::new();
                     let mut guard = poll_store.lock().unwrap();
@@ -565,7 +566,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                             &client,
                             &store.repo,
                             &mut store.issue_map,
-                            &all_type_names,
+                            &all_type_rules,
                             &poll_config,
                         ) {
                             Ok(result) => {

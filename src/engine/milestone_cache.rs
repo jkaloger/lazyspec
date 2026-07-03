@@ -105,6 +105,9 @@ mod tests {
             authorship: Default::default(),
             lifecycle: Default::default(),
             attributes: Default::default(),
+            label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
         }
     }
 

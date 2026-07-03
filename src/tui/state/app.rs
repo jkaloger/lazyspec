@@ -2644,6 +2644,9 @@ impl App {
                     authorship: Default::default(),
                     lifecycle: crate::engine::config::default_lifecycle(),
                     attributes: Vec::new(),
+                    label_override: None,
+                    github_issue_tag: None,
+                    github_issue_type: None,
                 });
                 self.settings_entry = self.settings_buffer.documents.types.len() - 1;
             }

@@ -4,11 +4,13 @@ use std::path::{Path, PathBuf};
 
 use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{AttrDef, Config, TypeDef};
-use crate::engine::document::{AttrValue, DocMeta, DocType, Relation, RelationType, Status};
-use crate::engine::gh::{type_label, GhGraphql, GhIssue, GhIssueReader};
+use crate::engine::document::{AttrValue, DocMeta, Relation, RelationType, Status};
+use crate::engine::gh::{
+    search_issue_numbers_by_type, GhGraphql, GhIssue, GhIssueReader, ISSUE_TYPE_SEARCH_PAGE_SIZE,
+};
 use crate::engine::gh_schema;
 use crate::engine::gh_subissue;
-use crate::engine::issue_body::{self, IssueContext};
+use crate::engine::issue_body::{self, IssueContext, TypeMatchRule};
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store;
 use crate::engine::store_dispatch;
@@ -137,7 +139,7 @@ impl IssueCache {
         repo: &str,
         issue_map: &mut IssueMap,
         ttl: Duration,
-        known_types: &[String],
+        known_types: &[TypeMatchRule],
         config: &Config,
     ) -> RefreshResult {
         let cached_ids = self.list_cached(&type_def.name);
@@ -158,8 +160,6 @@ impl IssueCache {
             };
         }
 
-        let label = type_label(&type_def.name);
-        let labels = vec![label];
         let fields = vec![
             "id".into(),
             "number".into(),
@@ -176,8 +176,12 @@ impl IssueCache {
             .relationship_by_github_native("milestone")
             .map(|r| r.name.as_str());
 
-        let issues = match gh.issue_list(repo, &labels, &fields, None) {
-            Ok(issues) => issues,
+        let rule = TypeMatchRule::from(type_def);
+        let Discovery {
+            issues,
+            search_truncated,
+        } = match discover_issues(gh, gh_graphql, repo, &rule, &fields, None) {
+            Ok(d) => d,
             Err(e) => {
                 return RefreshResult {
                     refreshed: 0,
@@ -235,6 +239,9 @@ impl IssueCache {
         let _ = lock.save(&self.root);
 
         let mut warnings = write_warnings;
+        if search_truncated {
+            warnings.push(search_truncation_warning(&type_def.name));
+        }
         warnings.extend(self.refresh_schema_snapshot(gh_graphql, repo));
 
         RefreshResult {
@@ -307,14 +314,16 @@ impl IssueCache {
         gh_graphql: &dyn GhGraphql,
         repo: &str,
         issue_map: &mut IssueMap,
-        known_types: &[String],
+        known_types: &[TypeMatchRule],
         config: &Config,
     ) -> anyhow::Result<FetchResult> {
-        let label = type_label(&type_def.name);
-        let labels = vec![label];
         const FETCH_LIMIT: u64 = 500;
 
-        let issues = gh.issue_list(repo, &labels, &[], Some(FETCH_LIMIT))?;
+        let rule = TypeMatchRule::from(type_def);
+        let Discovery {
+            issues,
+            search_truncated,
+        } = discover_issues(gh, gh_graphql, repo, &rule, &[], Some(FETCH_LIMIT))?;
 
         let mut warnings: Vec<RefreshWarning> = Vec::new();
         if issues.len() as u64 == FETCH_LIMIT {
@@ -324,6 +333,9 @@ impl IssueCache {
                     FETCH_LIMIT, type_def.name
                 ),
             });
+        }
+        if search_truncated {
+            warnings.push(search_truncation_warning(&type_def.name));
         }
 
         let previously_cached: std::collections::HashSet<String> =
@@ -448,6 +460,80 @@ impl IssueCache {
     }
 }
 
+/// Outcome of a type's discovery step. `search_truncated` is true when the
+/// GraphQL issue-type search returned a full page, signalling that candidates
+/// beyond the first page were dropped.
+struct Discovery {
+    issues: Vec<GhIssue>,
+    search_truncated: bool,
+}
+
+/// Resolve the candidate issues for a type's discovery step from its
+/// [`TypeMatchRule`]. Three branches keyed on `tag`/`issue_type`:
+///
+/// - no `issue_type`: REST-only, filtering on `tag` when set else `label`;
+/// - `issue_type` only: GraphQL issue-type search, each number resolved to a
+///   full issue via `issue_view` -- no REST list call is made;
+/// - both `tag` and `issue_type`: the REST list on `tag` INTERSECTED with the
+///   search result set by issue number (AND, per RFC-055 -- never a union).
+fn discover_issues(
+    gh: &dyn GhIssueReader,
+    gh_graphql: &dyn GhGraphql,
+    repo: &str,
+    rule: &TypeMatchRule,
+    fields: &[String],
+    limit: Option<u64>,
+) -> anyhow::Result<Discovery> {
+    match (&rule.tag, &rule.issue_type) {
+        (_, None) => {
+            let label = rule.tag.clone().unwrap_or_else(|| rule.label.clone());
+            let issues = gh.issue_list(repo, &[label], fields, limit)?;
+            Ok(Discovery {
+                issues,
+                search_truncated: false,
+            })
+        }
+        (None, Some(issue_type)) => {
+            let numbers = search_issue_numbers_by_type(gh_graphql, repo, issue_type)?;
+            let search_truncated = numbers.len() == ISSUE_TYPE_SEARCH_PAGE_SIZE;
+            let issues = numbers
+                .into_iter()
+                .map(|n| gh.issue_view(repo, n))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok(Discovery {
+                issues,
+                search_truncated,
+            })
+        }
+        (Some(tag), Some(issue_type)) => {
+            let rest = gh.issue_list(repo, std::slice::from_ref(tag), fields, limit)?;
+            let numbers = search_issue_numbers_by_type(gh_graphql, repo, issue_type)?;
+            let search_truncated = numbers.len() == ISSUE_TYPE_SEARCH_PAGE_SIZE;
+            let keep: std::collections::HashSet<u64> = numbers.into_iter().collect();
+            let issues = rest
+                .into_iter()
+                .filter(|i| keep.contains(&i.number))
+                .collect();
+            Ok(Discovery {
+                issues,
+                search_truncated,
+            })
+        }
+    }
+}
+
+/// Warning emitted when a type's issue-type search filled its first page, so
+/// candidates beyond it were not discovered. Mirrors the REST `FETCH_LIMIT`
+/// truncation warning.
+fn search_truncation_warning(type_name: &str) -> RefreshWarning {
+    RefreshWarning {
+        message: format!(
+            "issue-type search for type '{}' returned exactly {} issues; there may be more",
+            type_name, ISSUE_TYPE_SEARCH_PAGE_SIZE
+        ),
+    }
+}
+
 /// Query each fetched issue's native sub-issues and resolve the ordered child
 /// node ids back to fetched doc ids. Returns only parents that have at least one
 /// resolvable child; child node ids not present in `node_to_doc` are dropped (no
@@ -553,7 +639,7 @@ fn parse_created_date(created_at: &str) -> chrono::NaiveDate {
 fn parse_issue(
     issue: &GhIssue,
     type_name: &str,
-    known_types: &[String],
+    known_types: &[TypeMatchRule],
     attr_defs: &[AttrDef],
     milestone_rel: Option<&str>,
     issue_map: &IssueMap,
@@ -563,6 +649,7 @@ fn parse_issue(
         labels: issue.labels.iter().map(|l| l.name.clone()).collect(),
         is_open: issue.state.eq_ignore_ascii_case("open"),
         known_types: known_types.to_vec(),
+        issue_type: issue.issue_type.clone(),
         default_type: type_name.to_string(),
         attr_defs: attr_defs.to_vec(),
     };
@@ -586,19 +673,21 @@ fn parse_issue(
         Status::new("complete")
     };
 
+    let (doc_type, tags) = issue_body::extract_type_and_tags(
+        &ctx.labels,
+        known_types,
+        issue.issue_type.as_deref(),
+        type_name,
+    );
+
     let mut meta = DocMeta {
         path: PathBuf::new(),
         title: issue.title.clone(),
-        doc_type: DocType::new(type_name),
+        doc_type,
         status,
         author: author.clone(),
         date: parse_created_date(&issue.created_at),
-        tags: issue
-            .labels
-            .iter()
-            .filter(|l| !l.name.starts_with("lazyspec:"))
-            .map(|l| l.name.clone())
-            .collect(),
+        tags,
         provenance: vec![],
         related: vec![],
         validate_ignore: false,
@@ -687,6 +776,7 @@ fn build_cache_content(meta: &DocMeta, body: &str) -> String {
 mod tests {
     use super::*;
     use crate::engine::config::{NumberingStrategy, StoreBackend};
+    use crate::engine::document::DocType;
     use crate::engine::gh::{GhAuthor, GhGraphql, GhIssueReader, GhLabel, GqlVar};
     use anyhow::Result;
     use std::cell::RefCell;
@@ -716,6 +806,53 @@ mod tests {
             authorship: Default::default(),
             lifecycle: Default::default(),
             attributes: Default::default(),
+            label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
+        }
+    }
+
+    // A second github-issues TypeDef, distinct prefix/name/dir from
+    // story_type_def(), used to prove two types can independently match the
+    // same underlying GitHub issue number without colliding (RFC-055).
+    fn ticket_type_def() -> TypeDef {
+        TypeDef {
+            name: "ticket".to_string(),
+            plural: "tickets".to_string(),
+            dir: "docs/ticket".to_string(),
+            prefix: "TICKET".to_string(),
+            icon: None,
+            numbering: NumberingStrategy::default(),
+            subdirectory: false,
+            store: StoreBackend::GithubIssues,
+            singleton: false,
+            parent_type: None,
+            agents: Vec::new(),
+            intent: None,
+            authorship: Default::default(),
+            lifecycle: Default::default(),
+            attributes: Default::default(),
+            label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
+        }
+    }
+
+    fn story_match_rule() -> TypeMatchRule {
+        TypeMatchRule {
+            name: "story".to_string(),
+            label: "lazyspec:story".to_string(),
+            tag: None,
+            issue_type: None,
+        }
+    }
+
+    fn ticket_match_rule() -> TypeMatchRule {
+        TypeMatchRule {
+            name: "ticket".to_string(),
+            label: "Ticket".to_string(),
+            tag: None,
+            issue_type: None,
         }
     }
 
@@ -752,8 +889,11 @@ mod tests {
         issues: Vec<GhIssue>,
         fail: bool,
         list_call_count: AtomicUsize,
+        list_labels: RefCell<Vec<Vec<String>>>,
         graphql_responses: RefCell<Vec<serde_json::Value>>,
         graphql_call_count: AtomicUsize,
+        view_issues: Vec<GhIssue>,
+        view_call_count: AtomicUsize,
     }
 
     impl MockReader {
@@ -762,19 +902,17 @@ mod tests {
                 issues,
                 fail: false,
                 list_call_count: AtomicUsize::new(0),
+                list_labels: RefCell::new(vec![]),
                 graphql_responses: RefCell::new(vec![]),
                 graphql_call_count: AtomicUsize::new(0),
+                view_issues: vec![],
+                view_call_count: AtomicUsize::new(0),
             }
         }
 
         fn failing() -> Self {
-            Self {
-                issues: vec![],
-                fail: true,
-                list_call_count: AtomicUsize::new(0),
-                graphql_responses: RefCell::new(vec![]),
-                graphql_call_count: AtomicUsize::new(0),
-            }
+            let me = Self::new(vec![]);
+            Self { fail: true, ..me }
         }
 
         fn with_graphql_responses(self, responses: Vec<serde_json::Value>) -> Self {
@@ -782,12 +920,25 @@ mod tests {
             self
         }
 
+        fn with_view_issues(mut self, issues: Vec<GhIssue>) -> Self {
+            self.view_issues = issues;
+            self
+        }
+
         fn call_count(&self) -> usize {
             self.list_call_count.load(Ordering::SeqCst)
         }
 
+        fn recorded_list_labels(&self) -> Vec<Vec<String>> {
+            self.list_labels.borrow().clone()
+        }
+
         fn graphql_call_count(&self) -> usize {
             self.graphql_call_count.load(Ordering::SeqCst)
+        }
+
+        fn view_call_count(&self) -> usize {
+            self.view_call_count.load(Ordering::SeqCst)
         }
     }
 
@@ -833,19 +984,24 @@ mod tests {
         fn issue_list(
             &self,
             _repo: &str,
-            _labels: &[String],
+            labels: &[String],
             _json_fields: &[String],
             _limit: Option<u64>,
         ) -> Result<Vec<GhIssue>> {
             self.list_call_count.fetch_add(1, Ordering::SeqCst);
+            self.list_labels.borrow_mut().push(labels.to_vec());
             if self.fail {
                 anyhow::bail!("API unreachable");
             }
             Ok(self.issues.clone())
         }
 
-        fn issue_view(&self, _repo: &str, _number: u64) -> Result<GhIssue> {
-            unimplemented!()
+        fn issue_view(&self, _repo: &str, number: u64) -> Result<GhIssue> {
+            self.view_call_count.fetch_add(1, Ordering::SeqCst);
+            if let Some(issue) = self.view_issues.iter().find(|i| i.number == number) {
+                return Ok(issue.clone());
+            }
+            Ok(make_gh_issue(number, "Viewed", "Viewed body", &[]))
         }
 
         fn issue_comments(
@@ -957,7 +1113,7 @@ mod tests {
         .with_graphql_responses(vec![empty_issue_types_response()]);
 
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![story_match_rule()];
         let result = cache.refresh_stale(
             tmp.path(),
             &type_def,
@@ -1025,7 +1181,7 @@ mod tests {
             "octo-org/repo",
             &mut issue_map,
             ttl,
-            &["story".to_string()],
+            &[story_match_rule()],
             &Config::default(),
         );
         assert!(
@@ -1054,7 +1210,7 @@ mod tests {
 
         let gh = MockReader::new(vec![]);
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![story_match_rule()];
         let result = cache.refresh_stale(
             tmp.path(),
             &type_def,
@@ -1091,7 +1247,7 @@ mod tests {
 
         let gh = MockReader::failing();
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![story_match_rule()];
         let result = cache.refresh_stale(
             tmp.path(),
             &type_def,
@@ -1120,6 +1276,197 @@ mod tests {
         );
     }
 
+    // AC: a type configured with only `github_issue_type` refreshes its stale
+    // entries by discovering candidates via the GraphQL issue-type search resolved
+    // through `issue_view`, making zero REST `issue_list` calls.
+    #[test]
+    fn refresh_stale_issue_type_only_discovers_via_search_not_rest_list() {
+        let (cache, tmp) = make_cache();
+        let type_def = story_type_def_signals(None, Some("Bug"));
+        let ttl = Duration::seconds(60);
+
+        cache.write("STORY-10", "story", "old 10");
+        cache.write("STORY-11", "story", "old 11");
+        backdate_all(&cache, &["STORY-10", "STORY-11"]);
+
+        // First graphql response is the issue-type search; second is the schema
+        // snapshot refresh that runs at the end of refresh_stale.
+        let gh = MockReader::new(vec![])
+            .with_view_issues(vec![
+                make_gh_issue(10, "STORY-001", "Body 10", &[]),
+                make_gh_issue(11, "STORY-002", "Body 11", &[]),
+            ])
+            .with_graphql_responses(vec![
+                search_response(&[10, 11]),
+                empty_issue_types_response(),
+            ]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let result = cache.refresh_stale(
+            tmp.path(),
+            &type_def,
+            &gh,
+            &gh,
+            "owner/repo",
+            &mut issue_map,
+            ttl,
+            &[story_match_rule()],
+            &Config::default(),
+        );
+
+        assert_eq!(
+            gh.call_count(),
+            0,
+            "issue_type-only refresh must make zero REST issue_list calls"
+        );
+        assert_eq!(
+            gh.view_call_count(),
+            2,
+            "each search hit is resolved via issue_view"
+        );
+        assert_eq!(result.refreshed, 2);
+        assert!(
+            result.warnings.is_empty(),
+            "warnings: {:?}",
+            result.warnings
+        );
+        assert!(cache.is_fresh("STORY-10", ttl));
+        assert!(cache.is_fresh("STORY-11", ttl));
+        assert_eq!(issue_map.get("STORY-10").unwrap().issue_number, 10);
+        assert_eq!(issue_map.get("STORY-11").unwrap().issue_number, 11);
+    }
+
+    // AC: with both `tag` and `issue_type` set, refresh_stale refreshes only the
+    // AND of the REST-list and search result sets -- an issue in only one is
+    // dropped from discovery and left stale.
+    #[test]
+    fn refresh_stale_both_signals_keeps_only_intersection() {
+        let (cache, tmp) = make_cache();
+        let type_def = story_type_def_signals(Some("Ticket"), Some("Bug"));
+        let ttl = Duration::seconds(60);
+
+        cache.write("STORY-10", "story", "old 10");
+        cache.write("STORY-11", "story", "old 11");
+        cache.write("STORY-12", "story", "old 12");
+        backdate_all(&cache, &["STORY-10", "STORY-11", "STORY-12"]);
+
+        // REST returns 10,11,12; search returns 11,12,99. Intersection: 11,12.
+        let gh = MockReader::new(vec![
+            make_gh_issue(10, "STORY-010", "Body 10", &["Ticket"]),
+            make_gh_issue(11, "STORY-011", "Body 11", &["Ticket"]),
+            make_gh_issue(12, "STORY-012", "Body 12", &["Ticket"]),
+        ])
+        .with_graphql_responses(vec![
+            search_response(&[11, 12, 99]),
+            empty_issue_types_response(),
+        ]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let result = cache.refresh_stale(
+            tmp.path(),
+            &type_def,
+            &gh,
+            &gh,
+            "owner/repo",
+            &mut issue_map,
+            ttl,
+            &[story_match_rule()],
+            &Config::default(),
+        );
+
+        assert_eq!(
+            result.refreshed, 2,
+            "only the REST/search intersection is refreshed"
+        );
+        assert_eq!(
+            gh.view_call_count(),
+            0,
+            "both-signals refresh reuses REST data, never re-fetches via issue_view"
+        );
+        assert!(cache.is_fresh("STORY-11", ttl));
+        assert!(cache.is_fresh("STORY-12", ttl));
+        assert!(
+            !cache.is_fresh("STORY-10", ttl),
+            "REST-only issue is dropped from discovery and left stale"
+        );
+    }
+
+    // AC: a full first page from the issue-type search (exactly PAGE_SIZE numbers)
+    // surfaces the truncation warning through refresh_stale's own warnings.
+    #[test]
+    fn refresh_stale_warns_when_issue_type_search_fills_first_page() {
+        let (cache, tmp) = make_cache();
+        let type_def = story_type_def_signals(None, Some("Bug"));
+        let ttl = Duration::seconds(60);
+
+        // A stale entry so refresh proceeds past the all-fresh short-circuit.
+        cache.write("STORY-1", "story", "old 1");
+        backdate_all(&cache, &["STORY-1"]);
+
+        let full_page: Vec<u64> = (1..=ISSUE_TYPE_SEARCH_PAGE_SIZE as u64).collect();
+        let gh = MockReader::new(vec![]).with_graphql_responses(vec![
+            search_response(&full_page),
+            empty_issue_types_response(),
+        ]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let result = cache.refresh_stale(
+            tmp.path(),
+            &type_def,
+            &gh,
+            &gh,
+            "owner/repo",
+            &mut issue_map,
+            ttl,
+            &[story_match_rule()],
+            &Config::default(),
+        );
+
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("returned exactly 100")),
+            "full-page search should surface a truncation warning via refresh: {:?}",
+            result.warnings
+        );
+    }
+
+    // AC: the tag-only discovery branch filters `issue_list` by the configured
+    // `github_issue_tag` (not the plain type-name label) and issues no GraphQL
+    // issue-type search.
+    #[test]
+    fn discover_issues_tag_only_lists_by_tag_and_skips_search() {
+        let gh = MockReader::new(vec![make_gh_issue(1, "STORY-001", "Body", &["Ticket"])]);
+        let rule = TypeMatchRule {
+            name: "story".to_string(),
+            label: "lazyspec:story".to_string(),
+            tag: Some("Ticket".to_string()),
+            issue_type: None,
+        };
+        let fields = vec!["number".to_string()];
+
+        let discovery = discover_issues(&gh, &gh, "owner/repo", &rule, &fields, None).unwrap();
+
+        assert_eq!(
+            gh.call_count(),
+            1,
+            "tag-only discovery uses exactly one REST issue_list call"
+        );
+        assert_eq!(
+            gh.graphql_call_count(),
+            0,
+            "tag-only discovery makes no GraphQL issue-type search"
+        );
+        assert_eq!(
+            gh.recorded_list_labels(),
+            vec![vec!["Ticket".to_string()]],
+            "issue_list must be filtered by the configured tag, not the type-name label"
+        );
+        assert!(!discovery.search_truncated);
+        assert_eq!(discovery.issues.len(), 1);
+    }
+
     // --- fetch_all tests ---
 
     #[test]
@@ -1142,7 +1489,7 @@ mod tests {
                 &gh,
                 "owner/repo",
                 &mut issue_map,
-                &["story".to_string()],
+                &[story_match_rule()],
                 &Config::default(),
             )
             .unwrap();
@@ -1185,7 +1532,6 @@ mod tests {
 
         // Verify Store::load can find the documents
         use crate::engine::config::{Config, GithubConfig};
-        use crate::engine::document::DocType;
         use crate::engine::store::Store;
         let mut config = Config::default();
         config.documents.types = vec![story_type_def()];
@@ -1201,6 +1547,202 @@ mod tests {
         };
         let docs = store.list(&filter);
         assert_eq!(docs.len(), 3);
+    }
+
+    // AC (STORY-194): two github-issues types with distinct prefix/name/dir can
+    // both independently match the same underlying GitHub issue number. Each
+    // fetch_all call is scoped entirely to its own TypeDef -- doc id via
+    // type_def.make_id, cache dir via type_def.name -- so both materialize
+    // side by side under the same root and shared IssueMap without colliding.
+    #[test]
+    fn test_fetch_all_dual_materializes_overlapping_issue_across_types() {
+        let (cache, tmp) = make_cache();
+        let story_type = story_type_def();
+        let ticket_type = ticket_type_def();
+
+        // MockReader::issue_list ignores the label filter and always returns
+        // this same issue #42 -- standing in for both types' discovery
+        // independently surfacing the same GitHub issue.
+        let gh = MockReader::new(vec![make_gh_issue(42, "Some Issue", "Body", &[])])
+            .with_graphql_responses(vec![
+                empty_issue_types_response(),
+                empty_issue_types_response(),
+            ]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+
+        cache
+            .fetch_all(
+                tmp.path(),
+                &story_type,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        cache
+            .fetch_all(
+                tmp.path(),
+                &ticket_type,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &[ticket_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        let story_path = tmp.path().join(".lazyspec/cache/story/STORY-42.md");
+        let ticket_path = tmp.path().join(".lazyspec/cache/ticket/TICKET-42.md");
+        assert!(story_path.exists(), "story cache file should exist");
+        assert!(ticket_path.exists(), "ticket cache file should exist");
+
+        let story_content = std::fs::read_to_string(&story_path).unwrap();
+        let ticket_content = std::fs::read_to_string(&ticket_path).unwrap();
+        assert!(
+            story_content.contains("type: story"),
+            "story doc should carry its own type, not ticket's: {}",
+            story_content
+        );
+        assert!(
+            ticket_content.contains("type: ticket"),
+            "ticket doc should carry its own type, not story's: {}",
+            ticket_content
+        );
+
+        assert_eq!(issue_map.get("STORY-42").unwrap().issue_number, 42);
+        assert_eq!(issue_map.get("TICKET-42").unwrap().issue_number, 42);
+    }
+
+    // AC (STORY-194): refresh_stale for one type never touches another type's
+    // cache dir, cache.lock entry, or issue-map row, even when both types
+    // resolved the same GitHub issue number during their own fetch_all.
+    #[test]
+    fn test_refresh_stale_isolates_overlapping_issue_across_types() {
+        let (cache, tmp) = make_cache();
+        let story_type = story_type_def();
+        let ticket_type = ticket_type_def();
+        let ttl = Duration::seconds(60);
+
+        // Arrange: seed both types' caches for the same issue #42 via fetch_all,
+        // exactly as their independent discovery would.
+        let seed_gh = MockReader::new(vec![make_gh_issue(42, "Some Issue", "Body v1", &[])])
+            .with_graphql_responses(vec![
+                empty_issue_types_response(),
+                empty_issue_types_response(),
+            ]);
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        cache
+            .fetch_all(
+                tmp.path(),
+                &story_type,
+                &seed_gh,
+                &seed_gh,
+                "owner/repo",
+                &mut issue_map,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+        cache
+            .fetch_all(
+                tmp.path(),
+                &ticket_type,
+                &seed_gh,
+                &seed_gh,
+                "owner/repo",
+                &mut issue_map,
+                &[ticket_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        backdate_all(&cache, &["STORY-42", "TICKET-42"]);
+
+        let ticket_path = tmp.path().join(".lazyspec/cache/ticket/TICKET-42.md");
+        let ticket_content_before = std::fs::read_to_string(&ticket_path).unwrap();
+        let ticket_lock_before = cache.load_lock().get("TICKET-42").unwrap().to_string();
+
+        // Act: refresh only the story type, with a changed upstream body so a
+        // real write happens (not a no-op "unchanged" skip).
+        let story_refresh_gh =
+            MockReader::new(vec![make_gh_issue(42, "Some Issue", "Body v2", &[])])
+                .with_graphql_responses(vec![empty_issue_types_response()]);
+        let story_result = cache.refresh_stale(
+            tmp.path(),
+            &story_type,
+            &story_refresh_gh,
+            &story_refresh_gh,
+            "owner/repo",
+            &mut issue_map,
+            ttl,
+            &[story_match_rule()],
+            &Config::default(),
+        );
+
+        assert_eq!(story_result.refreshed, 1);
+        assert!(
+            cache.is_fresh("STORY-42", ttl),
+            "story entry should be refreshed and fresh"
+        );
+
+        // Assert: the story-only refresh left ticket's cache file, lock entry,
+        // and issue-map row completely untouched.
+        let ticket_content_after = std::fs::read_to_string(&ticket_path).unwrap();
+        let ticket_lock_after = cache.load_lock().get("TICKET-42").unwrap().to_string();
+        assert_eq!(
+            ticket_content_before, ticket_content_after,
+            "ticket cache content must be untouched by a story-only refresh"
+        );
+        assert_eq!(
+            ticket_lock_before, ticket_lock_after,
+            "ticket lock entry must be untouched by a story-only refresh"
+        );
+        assert!(
+            !cache.is_fresh("TICKET-42", ttl),
+            "ticket entry remains stale since only story was refreshed"
+        );
+        assert_eq!(issue_map.get("TICKET-42").unwrap().issue_number, 42);
+
+        // Act again, the other way around: refresh only ticket now, and
+        // confirm story (already refreshed above) is left alone this time.
+        let story_path = tmp.path().join(".lazyspec/cache/story/STORY-42.md");
+        let story_content_before = std::fs::read_to_string(&story_path).unwrap();
+        let story_lock_before = cache.load_lock().get("STORY-42").unwrap().to_string();
+
+        let ticket_refresh_gh =
+            MockReader::new(vec![make_gh_issue(42, "Some Issue", "Body v3", &[])])
+                .with_graphql_responses(vec![empty_issue_types_response()]);
+        let ticket_result = cache.refresh_stale(
+            tmp.path(),
+            &ticket_type,
+            &ticket_refresh_gh,
+            &ticket_refresh_gh,
+            "owner/repo",
+            &mut issue_map,
+            ttl,
+            &[ticket_match_rule()],
+            &Config::default(),
+        );
+
+        assert_eq!(ticket_result.refreshed, 1);
+        assert!(cache.is_fresh("TICKET-42", ttl));
+
+        let story_content_after = std::fs::read_to_string(&story_path).unwrap();
+        let story_lock_after = cache.load_lock().get("STORY-42").unwrap().to_string();
+        assert_eq!(
+            story_content_before, story_content_after,
+            "story cache content must be untouched by a ticket-only refresh"
+        );
+        assert_eq!(
+            story_lock_before, story_lock_after,
+            "story lock entry must be untouched by a ticket-only refresh"
+        );
     }
 
     #[test]
@@ -1226,7 +1768,7 @@ mod tests {
                 &gh,
                 "owner/repo",
                 &mut issue_map,
-                &["story".to_string()],
+                &[story_match_rule()],
                 &Config::default(),
             )
             .unwrap();
@@ -1262,7 +1804,7 @@ mod tests {
                 &initial_gh,
                 "owner/repo",
                 &mut issue_map,
-                &["story".to_string()],
+                &[story_match_rule()],
                 &Config::default(),
             )
             .unwrap();
@@ -1285,7 +1827,7 @@ mod tests {
                 &updated_gh,
                 "owner/repo",
                 &mut issue_map,
-                &["story".to_string()],
+                &[story_match_rule()],
                 &Config::default(),
             )
             .unwrap();
@@ -1333,7 +1875,7 @@ mod tests {
                 &gh,
                 "owner/repo",
                 &mut issue_map,
-                &["story".to_string()],
+                &[story_match_rule()],
                 &Config::default(),
             )
             .unwrap();
@@ -1380,7 +1922,7 @@ mod tests {
                 &gh,
                 "owner/repo",
                 &mut issue_map,
-                &["story".to_string()],
+                &[story_match_rule()],
                 &Config::default(),
             )
             .unwrap();
@@ -1407,6 +1949,250 @@ mod tests {
         assert!(issue_map.get("STORY-999").is_none());
     }
 
+    fn story_type_def_signals(tag: Option<&str>, issue_type: Option<&str>) -> TypeDef {
+        TypeDef {
+            github_issue_tag: tag.map(|s| s.to_string()),
+            github_issue_type: issue_type.map(|s| s.to_string()),
+            ..story_type_def()
+        }
+    }
+
+    fn search_response(numbers: &[u64]) -> serde_json::Value {
+        let nodes: Vec<serde_json::Value> = numbers
+            .iter()
+            .map(|n| serde_json::json!({ "number": n }))
+            .collect();
+        serde_json::json!({ "data": { "search": { "nodes": nodes } } })
+    }
+
+    // AC: a type configured with only `github_issue_type` discovers candidates via
+    // the GraphQL issue-type search resolved through `issue_view`, making zero REST
+    // `issue_list` calls.
+    #[test]
+    fn fetch_all_issue_type_only_discovers_via_search_not_rest_list() {
+        let (cache, tmp) = make_cache();
+        let type_def = story_type_def_signals(None, Some("Bug"));
+
+        let gh = MockReader::new(vec![])
+            .with_view_issues(vec![
+                make_gh_issue(10, "STORY-001", "Body 10", &[]),
+                make_gh_issue(11, "STORY-002", "Body 11", &[]),
+            ])
+            .with_graphql_responses(vec![search_response(&[10, 11])]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let result = cache
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            gh.call_count(),
+            0,
+            "issue_type-only discovery must make zero REST issue_list calls"
+        );
+        assert_eq!(
+            gh.view_call_count(),
+            2,
+            "each search hit is resolved via issue_view"
+        );
+        assert_eq!(result.fetched, 2);
+
+        let cache_dir = tmp.path().join(".lazyspec/cache/story");
+        assert!(cache_dir.join("STORY-10.md").exists());
+        assert!(cache_dir.join("STORY-11.md").exists());
+    }
+
+    // AC: with both `tag` and `issue_type` set the candidate set is the AND of the
+    // REST-list result and the search result -- an issue in only one is dropped.
+    #[test]
+    fn fetch_all_both_signals_keeps_only_intersection() {
+        let (cache, tmp) = make_cache();
+        let type_def = story_type_def_signals(Some("Ticket"), Some("Bug"));
+
+        // REST returns 10, 11, 12; search returns 11, 12, 99. Intersection: 11, 12.
+        let gh = MockReader::new(vec![
+            make_gh_issue(10, "STORY-010", "Body 10", &["Ticket"]),
+            make_gh_issue(11, "STORY-011", "Body 11", &["Ticket"]),
+            make_gh_issue(12, "STORY-012", "Body 12", &["Ticket"]),
+        ])
+        .with_graphql_responses(vec![search_response(&[11, 12, 99])]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let result = cache
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            result.fetched, 2,
+            "only the REST/search intersection survives"
+        );
+        assert_eq!(
+            gh.view_call_count(),
+            0,
+            "both-signals intersection reuses REST data, never re-fetches via issue_view"
+        );
+        let cache_dir = tmp.path().join(".lazyspec/cache/story");
+        assert!(cache_dir.join("STORY-11.md").exists());
+        assert!(cache_dir.join("STORY-12.md").exists());
+        assert!(
+            !cache_dir.join("STORY-10.md").exists(),
+            "REST-only issue must be dropped"
+        );
+        assert!(
+            !cache_dir.join("STORY-99.md").exists(),
+            "search-only issue must be dropped"
+        );
+    }
+
+    // AC: a full first page from the issue-type search (exactly PAGE_SIZE numbers)
+    // surfaces a truncation warning mirroring the REST FETCH_LIMIT warning.
+    #[test]
+    fn fetch_all_warns_when_issue_type_search_fills_first_page() {
+        let (cache, tmp) = make_cache();
+        let type_def = story_type_def_signals(None, Some("Bug"));
+
+        let full_page: Vec<u64> = (1..=ISSUE_TYPE_SEARCH_PAGE_SIZE as u64).collect();
+        let gh = MockReader::new(vec![]).with_graphql_responses(vec![search_response(&full_page)]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let result = cache
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("returned exactly 100")),
+            "full-page search should warn about truncation: {:?}",
+            result.warnings
+        );
+    }
+
+    // AC: a partial page from the issue-type search does not warn about truncation.
+    #[test]
+    fn fetch_all_no_truncation_warning_when_search_below_page_size() {
+        let (cache, tmp) = make_cache();
+        let type_def = story_type_def_signals(None, Some("Bug"));
+
+        let gh = MockReader::new(vec![]).with_graphql_responses(vec![search_response(&[1, 2, 3])]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let result = cache
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("returned exactly")),
+            "partial-page search must not warn about truncation: {:?}",
+            result.warnings
+        );
+    }
+
+    // Custom `label_override`: an issue whose only type label is "Ticket" (no
+    // `lazyspec:` prefix) resolves to that type on read, and the custom label is
+    // not carried as a tag.
+    #[test]
+    fn parse_issue_recognizes_custom_label_type() {
+        let issue = make_gh_issue(
+            5,
+            "Ticketed work",
+            "<!-- lazyspec\n---\ndate: 2026-03-27\n---\n-->\n\nbody",
+            &["Ticket", "team-x"],
+        );
+        let known_types = vec![ticket_match_rule()];
+        let (meta, _) = parse_issue(
+            &issue,
+            "ticket",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+        );
+        assert_eq!(meta.doc_type.as_str(), "ticket");
+        assert_eq!(meta.tags, vec!["team-x"]);
+    }
+
+    // Regression: a type with no override still resolves via its default
+    // `lazyspec:{name}` label, unchanged from before.
+    #[test]
+    fn parse_issue_recognizes_default_label_type() {
+        let issue = make_gh_issue(
+            6,
+            "Default labelled",
+            "<!-- lazyspec\n---\ndate: 2026-03-27\n---\n-->\n\nbody",
+            &["lazyspec:story", "team-y"],
+        );
+        let known_types = vec![story_match_rule()];
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+        );
+        assert_eq!(meta.doc_type.as_str(), "story");
+        assert_eq!(meta.tags, vec!["team-y"]);
+    }
+
+    // Fallback path (no lazyspec comment): a custom label is excluded from tags,
+    // just like the default-prefixed case.
+    #[test]
+    fn parse_issue_fallback_excludes_custom_label_from_tags() {
+        let issue = make_gh_issue(7, "Plain ticket", "Just a plain body", &["Ticket", "extra"]);
+        let known_types = vec![ticket_match_rule()];
+        let (meta, _) = parse_issue(
+            &issue,
+            "ticket",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+        );
+        assert_eq!(meta.doc_type.as_str(), "ticket");
+        assert_eq!(meta.tags, vec!["extra"]);
+    }
+
     fn make_gh_issue_with_author(
         number: u64,
         title: &str,
@@ -1430,7 +2216,7 @@ mod tests {
             &["lazyspec:story"],
             Some("jkaloger"),
         );
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![story_match_rule()];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1451,7 +2237,7 @@ mod tests {
             &["lazyspec:story"],
             None,
         );
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![story_match_rule()];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1473,7 +2259,7 @@ mod tests {
             &["lazyspec:story"],
             Some("octocat"),
         );
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![story_match_rule()];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1495,7 +2281,7 @@ mod tests {
             &["lazyspec:story"],
             Some("jkaloger"),
         );
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![story_match_rule()];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1529,7 +2315,7 @@ mod tests {
                 &gh,
                 "owner/repo",
                 &mut issue_map,
-                &["story".to_string()],
+                &[story_match_rule()],
                 &Config::default(),
             )
             .unwrap();
@@ -1547,7 +2333,7 @@ mod tests {
     fn parse_issue_uses_created_at_for_date() {
         let mut issue = make_gh_issue(1, "Test issue", "Just a plain body", &["lazyspec:story"]);
         issue.created_at = "2025-06-15T09:30:00Z".to_string();
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![story_match_rule()];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1566,7 +2352,7 @@ mod tests {
     fn parse_issue_falls_back_to_today_on_bad_created_at() {
         let mut issue = make_gh_issue(2, "Test issue", "Just a plain body", &["lazyspec:story"]);
         issue.created_at = "not-a-date".to_string();
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![story_match_rule()];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1582,7 +2368,7 @@ mod tests {
     fn parse_issue_falls_back_to_today_on_empty_created_at() {
         let mut issue = make_gh_issue(3, "Test issue", "Just a plain body", &["lazyspec:story"]);
         issue.created_at = String::new();
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![story_match_rule()];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1605,7 +2391,7 @@ mod tests {
             &["lazyspec:story"],
         );
         issue.issue_type = Some("Bug".to_string());
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![story_match_rule()];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1630,7 +2416,7 @@ mod tests {
             &["lazyspec:story"],
         );
         assert!(issue.issue_type.is_none());
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![story_match_rule()];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1652,7 +2438,7 @@ mod tests {
             &["lazyspec:story"],
         );
         issue.issue_type = Some("Bug".to_string());
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![story_match_rule()];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1673,7 +2459,7 @@ mod tests {
     fn parse_issue_fallback_body_surfaces_issue_type() {
         let mut issue = make_gh_issue(4, "Plain issue", "Just a plain body", &["lazyspec:story"]);
         issue.issue_type = Some("Task".to_string());
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![story_match_rule()];
         let (meta, _) = parse_issue(
             &issue,
             "story",
@@ -1727,7 +2513,7 @@ mod tests {
                 &gh,
                 "owner/repo",
                 &mut issue_map,
-                &["story".to_string()],
+                &[story_match_rule()],
                 &config,
             )
             .unwrap();
@@ -1754,7 +2540,7 @@ mod tests {
         let mut map = IssueMap::default();
         map.insert_kind("MILESTONE-2", 7, "", "", EntryKind::Milestone);
 
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![story_match_rule()];
         let (meta, _) = parse_issue(&issue, "story", &known_types, &[], Some("targets"), &map);
 
         let targets: Vec<(&str, &str)> = meta
@@ -1773,7 +2559,7 @@ mod tests {
 
         let mut issue = make_gh_issue(3, "Test issue", "body", &["lazyspec:story"]);
         issue.milestone = Some(GhIssueMilestone { number: 7 });
-        let known_types = vec!["story".to_string()];
+        let known_types = vec![story_match_rule()];
 
         // Milestone #7 maps to no doc -> skipped even with a configured rel.
         let empty = IssueMap::default();
@@ -2132,7 +2918,7 @@ mod tests {
                 &gh,
                 "owner/repo",
                 &mut issue_map,
-                &["story".to_string()],
+                &[story_match_rule()],
                 &Config::default(),
             )
             .unwrap();
@@ -2278,7 +3064,7 @@ mod tests {
                 gh,
                 "owner/repo",
                 issue_map,
-                &["story".to_string()],
+                &[story_match_rule()],
                 &Config::default(),
             )
             .unwrap()

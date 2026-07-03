@@ -781,6 +781,46 @@ fn parse_issue_type_name(resp: &serde_json::Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Page size of [`ISSUE_TYPE_SEARCH_QUERY`] (`search(... first:)`). Kept in sync
+/// with the literal in that query by hand; used to detect a truncated result.
+pub const ISSUE_TYPE_SEARCH_PAGE_SIZE: usize = 100;
+
+const ISSUE_TYPE_SEARCH_QUERY: &str =
+    "query($searchQuery: String!) { search(query: $searchQuery, type: ISSUE, first: 100) { nodes { ... on Issue { number } } } }";
+
+/// Extract issue numbers from an [`ISSUE_TYPE_SEARCH_QUERY`] response. Defensive
+/// like [`parse_project_item_fields`]: a missing or malformed `nodes` array
+/// yields an empty vec rather than erroring.
+fn parse_search_issue_numbers(resp: &serde_json::Value) -> Vec<u64> {
+    resp.pointer("/data/search/nodes")
+        .and_then(|v| v.as_array())
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter_map(|n| n.pointer("/number").and_then(|v| v.as_u64()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Discover the issue numbers in `repo` classified under the native GitHub issue
+/// type `issue_type`, via the GraphQL `search` API (there is no REST list filter
+/// for issue type). Capped at [`ISSUE_TYPE_SEARCH_PAGE_SIZE`]; callers detect a
+/// full page as a truncated result. A free function over the generic
+/// [`GhGraphql::graphql`] seam, mirroring `issue_view`'s ad hoc GraphQL use.
+pub fn search_issue_numbers_by_type(
+    gh_graphql: &dyn GhGraphql,
+    repo: &str,
+    issue_type: &str,
+) -> Result<Vec<u64>> {
+    let search_query = format!("repo:{} is:issue type:\"{}\"", repo, issue_type);
+    let resp = gh_graphql.graphql(
+        ISSUE_TYPE_SEARCH_QUERY,
+        &[("searchQuery", GqlVar::Str(search_query))],
+    )?;
+    Ok(parse_search_issue_numbers(&resp))
+}
+
 impl GhIssueWriter for GhCli {
     fn issue_create(
         &self,
@@ -1162,6 +1202,7 @@ pub mod test_support {
         pub last_edit_body: RefCell<Option<String>>,
         pub last_edit_labels_remove: RefCell<Vec<String>>,
         pub last_create_body: RefCell<Option<String>>,
+        pub last_create_labels: RefCell<Vec<String>>,
         pub create_titles: RefCell<Vec<String>>,
         pub next_issue_number: Cell<u64>,
         pub graphql_responses: RefCell<Vec<serde_json::Value>>,
@@ -1198,6 +1239,7 @@ pub mod test_support {
                 last_edit_body: RefCell::new(None),
                 last_edit_labels_remove: RefCell::new(vec![]),
                 last_create_body: RefCell::new(None),
+                last_create_labels: RefCell::new(vec![]),
                 create_titles: RefCell::new(vec![]),
                 next_issue_number: Cell::new(1),
                 graphql_responses: RefCell::new(vec![]),
@@ -1304,6 +1346,7 @@ pub mod test_support {
             labels: &[String],
         ) -> Result<GhIssue> {
             *self.last_create_body.borrow_mut() = Some(body.to_string());
+            *self.last_create_labels.borrow_mut() = labels.to_vec();
             self.create_titles.borrow_mut().push(title.to_string());
             if let Some(ref issue) = self.create_result {
                 return Ok(issue.clone());
@@ -2367,6 +2410,39 @@ mod tests {
         assert_eq!(
             status.value,
             GhFieldValueRepr::OptionName("In Progress".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_search_issue_numbers_extracts_numbers_in_order() {
+        let resp = serde_json::json!({
+            "data": {"search": {"nodes": [{"number": 42}, {"number": 7}]}}
+        });
+        assert_eq!(parse_search_issue_numbers(&resp), vec![42, 7]);
+    }
+
+    #[test]
+    fn parse_search_issue_numbers_missing_or_malformed_nodes_is_empty() {
+        let missing = serde_json::json!({"data": {"search": {}}});
+        assert!(parse_search_issue_numbers(&missing).is_empty());
+        let malformed = serde_json::json!({"data": {"search": {"nodes": "nope"}}});
+        assert!(parse_search_issue_numbers(&malformed).is_empty());
+    }
+
+    #[test]
+    fn search_issue_numbers_by_type_sends_repo_and_type_qualified_query() {
+        let client = MockGhClient::new().with_graphql_responses(vec![serde_json::json!({
+            "data": {"search": {"nodes": [{"number": 1}, {"number": 2}]}}
+        })]);
+        let numbers = search_issue_numbers_by_type(&client, "owner/repo", "Bug").unwrap();
+        assert_eq!(numbers, vec![1, 2]);
+        let calls = client.graphql_calls.borrow();
+        assert_eq!(
+            calls[0].1,
+            vec![(
+                "searchQuery".to_string(),
+                GqlVar::Str("repo:owner/repo is:issue type:\"Bug\"".to_string())
+            )]
         );
     }
 

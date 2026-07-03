@@ -1,6 +1,7 @@
 use crate::engine::config::Config;
 use crate::engine::gh::{AuthStatus, GhAuth, GhGraphql, GhIssueReader};
 use crate::engine::github::resolve_repo;
+use crate::engine::issue_body::TypeMatchRule;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use anyhow::{bail, Context, Result};
@@ -44,11 +45,11 @@ pub fn run(
             .type_by_name(type_name)
             .ok_or_else(|| anyhow::anyhow!("type '{}' not found in config", type_name))?;
 
-        let all_type_names: Vec<String> = config
+        let all_type_rules: Vec<TypeMatchRule> = config
             .documents
             .types
             .iter()
-            .map(|t| t.name.clone())
+            .map(TypeMatchRule::from)
             .collect();
         let result = cache.fetch_all(
             root,
@@ -57,7 +58,7 @@ pub fn run(
             gh,
             &repo,
             &mut issue_map,
-            &all_type_names,
+            &all_type_rules,
             config,
         )?;
 

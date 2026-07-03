@@ -25,6 +25,9 @@ fn milestones_only_config() -> Config {
         authorship: Default::default(),
         lifecycle: Default::default(),
         attributes: Default::default(),
+        label_override: None,
+        github_issue_tag: None,
+        github_issue_type: None,
     }];
     config.documents.github = None;
     config
@@ -47,6 +50,9 @@ fn singleton_type(name: &str, dir: &str, prefix: &str) -> TypeDef {
         authorship: Default::default(),
         lifecycle: Default::default(),
         attributes: Default::default(),
+        label_override: None,
+        github_issue_tag: None,
+        github_issue_type: None,
     }
 }
 

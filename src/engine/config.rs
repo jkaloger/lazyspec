@@ -263,6 +263,21 @@ pub struct TypeDef {
     pub lifecycle: Lifecycle,
     #[serde(default)]
     pub attributes: Vec<AttrDef>,
+    /// Overrides the default `lazyspec:{name}` GitHub label used to identify
+    /// this type's issues, for `github-issues`-backed types. Unused by other
+    /// stores.
+    #[serde(default, rename = "github_label")]
+    pub label_override: Option<String>,
+    /// A GitHub label naming this type as a classification signal, distinct
+    /// from `label_override`'s identity label. Schema only for now -- no
+    /// resolver or matching logic reads this field yet.
+    #[serde(default)]
+    pub github_issue_tag: Option<String>,
+    /// A GitHub native issue type naming this type as a classification
+    /// signal. Schema only for now -- no resolver, discovery, or write logic
+    /// reads this field yet.
+    #[serde(default)]
+    pub github_issue_type: Option<String>,
 }
 
 /// One entry in the `[[relationships]]` block: a relationship name and its
@@ -642,6 +657,9 @@ pub fn starter_types() -> Vec<TypeDef> {
         authorship: Authorship::default(),
         lifecycle: default_lifecycle(),
         attributes: Vec::new(),
+        label_override: None,
+        github_issue_tag: None,
+        github_issue_type: None,
     };
     vec![
         simple("rfc", "rfcs", "docs/rfcs", "RFC", "●"),
@@ -671,6 +689,9 @@ pub fn starter_types() -> Vec<TypeDef> {
             authorship: Authorship::default(),
             lifecycle: default_lifecycle(),
             attributes: Vec::new(),
+            label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
         },
         TypeDef {
             name: "dictum".to_string(),
@@ -688,6 +709,9 @@ pub fn starter_types() -> Vec<TypeDef> {
             authorship: Authorship::default(),
             lifecycle: default_lifecycle(),
             attributes: Vec::new(),
+            label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
         },
     ]
 }
@@ -994,6 +1018,14 @@ impl TypeDef {
     pub fn accepts_status(&self, status: &Status) -> bool {
         self.lifecycle.states.iter().any(|s| s == status.as_str())
     }
+
+    /// The GitHub label identifying this type's issues: the configured
+    /// `label_override` if set, else the default `lazyspec:{name}`.
+    pub fn github_label(&self) -> String {
+        self.label_override
+            .clone()
+            .unwrap_or_else(|| crate::engine::gh::type_label(&self.name))
+    }
 }
 
 #[cfg(test)]
@@ -1015,6 +1047,9 @@ impl TypeDef {
             authorship: Authorship::default(),
             lifecycle: Lifecycle::default(),
             attributes: Vec::new(),
+            label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
         }
     }
 }
@@ -2089,6 +2124,110 @@ name = "mentions"
             emitted.matches("traversal =").count(),
             2,
             "skip_serializing_if must omit absent traversal: {emitted}"
+        );
+    }
+
+    #[test]
+    fn github_label_returns_override_verbatim_when_set() {
+        let mut td = TypeDef::test_fixture("story", StoreBackend::GithubIssues);
+        td.label_override = Some("Ticket".to_string());
+
+        assert_eq!(td.github_label(), "Ticket");
+    }
+
+    #[test]
+    fn github_label_falls_back_to_type_label_when_unset() {
+        let td = TypeDef::test_fixture("story", StoreBackend::GithubIssues);
+
+        assert_eq!(td.github_label(), "lazyspec:story");
+    }
+
+    #[test]
+    fn toml_github_label_key_parses_into_label_override() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[[types]]
+name = "ticket"
+plural = "tickets"
+dir = "docs/tickets"
+prefix = "TICKET"
+github_label = "Ticket"
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        let td = config.type_by_name("ticket").unwrap();
+        assert_eq!(td.label_override, Some("Ticket".to_string()));
+    }
+
+    #[test]
+    fn toml_without_github_label_key_leaves_label_override_none() {
+        let config = Config::parse(TYPES).unwrap();
+        let td = config.type_by_name("rfc").unwrap();
+        assert_eq!(td.label_override, None);
+    }
+
+    #[test]
+    fn toml_github_issue_tag_and_type_keys_parse_into_type_def() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[[types]]
+name = "ticket"
+plural = "tickets"
+dir = "docs/tickets"
+prefix = "TICKET"
+github_issue_tag = "Bug"
+github_issue_type = "Bug"
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        let td = config.type_by_name("ticket").unwrap();
+        assert_eq!(td.github_issue_tag, Some("Bug".to_string()));
+        assert_eq!(td.github_issue_type, Some("Bug".to_string()));
+    }
+
+    #[test]
+    fn toml_without_github_issue_tag_and_type_keys_leaves_both_none() {
+        let config = Config::parse(TYPES).unwrap();
+        let td = config.type_by_name("rfc").unwrap();
+        assert_eq!(td.github_issue_tag, None);
+        assert_eq!(td.github_issue_type, None);
+    }
+
+    #[test]
+    fn type_def_json_surfaces_github_issue_tag_and_type_as_null_when_absent() {
+        let config = Config::parse(TYPES).unwrap();
+        let td = config.type_by_name("rfc").unwrap();
+        let json = serde_json::to_value(td).unwrap();
+        assert_eq!(json["github_issue_tag"], serde_json::Value::Null);
+        assert_eq!(json["github_issue_type"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn type_def_json_surfaces_github_issue_tag_and_type_when_set() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[[types]]
+name = "ticket"
+plural = "tickets"
+dir = "docs/tickets"
+prefix = "TICKET"
+github_issue_tag = "Bug"
+github_issue_type = "Bug"
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        let td = config.type_by_name("ticket").unwrap();
+        let json = serde_json::to_value(td).unwrap();
+        assert_eq!(
+            json["github_issue_tag"],
+            serde_json::Value::String("Bug".to_string())
+        );
+        assert_eq!(
+            json["github_issue_type"],
+            serde_json::Value::String("Bug".to_string())
         );
     }
 }

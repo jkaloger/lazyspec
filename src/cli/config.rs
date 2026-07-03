@@ -118,6 +118,9 @@ pub fn run_add_type(
             .unwrap_or_default(),
         lifecycle: Lifecycle::default(),
         attributes: Vec::new(),
+        label_override: None,
+        github_issue_tag: None,
+        github_issue_type: None,
     });
 
     let out = write_config_in_place(&src, &config)?;
