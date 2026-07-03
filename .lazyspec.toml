@@ -88,6 +88,7 @@ icon = "🎫"
 store = "github-issues"
 subdirectory = true
 intent = "A GitHub issue authored as structured markdown"
+github_label = "Ticket"
 
 [[types.attributes]]
 name = "priority"
