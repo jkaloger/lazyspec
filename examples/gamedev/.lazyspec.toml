@@ -1,0 +1,160 @@
+[agents]
+# The build agent runs delta ready->building->playtest, then halts for the
+# human feel verdict. Swap for your coding agent of choice.
+interactive = 'claude -p "$LAZYSPEC_PROMPT"'
+
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+# ── DURABLE: coding principles the build agent must obey ─────────────
+
+[[types]]
+name = "convention"
+plural = "convention"
+dir = "docs/convention"
+prefix = "CONVENTION"
+icon = "📜"
+singleton = true
+authorship = "assisted"
+intent = "Durable coding principles and engineering standards the build agent must follow. Read before any delta is built; the tiebreaker when principles conflict."
+lifecycle = { states = ["draft", "accepted", "superseded"], edges = [
+  { from = "draft", to = "accepted" },
+  { from = "*", to = "superseded" },
+] }
+
+[[types]]
+name = "principle"
+plural = "principles"
+dir = "docs/convention"
+prefix = "PRINCIPLE"
+icon = "⚖"
+parent_type = "convention"
+authorship = "assisted"
+intent = "A single coding principle elaborating the convention -- an idiom, an architectural boundary, a standard the agent applies while building."
+lifecycle = { states = ["draft", "review", "accepted"], edges = [
+  { from = "draft", to = "review" },
+  { from = "review", to = "accepted" },
+] }
+
+# ── DURABLE: the soul of the game and the why of its architecture ────
+
+[[types]]
+name = "pillars"
+plural = "pillars"
+dir = "docs/pillars"
+prefix = "PILLAR"
+icon = "🎯"
+singleton = true
+authorship = "assisted"          # human owns the vision; agent may draft candidates
+intent = "The 3-5 experience goals that define the game. Every delta must serve an accepted pillar; anything that serves no pillar is cut. The scope-creep spine."
+lifecycle = { states = ["draft", "accepted", "superseded"], edges = [
+  { from = "draft", to = "accepted" },
+  { from = "*", to = "superseded" },
+] }
+
+[[types]]
+name = "adr"
+plural = "adrs"
+dir = "docs/adrs"
+prefix = "ADR"
+icon = "■"
+authorship = "assisted"
+intent = "Architecture decision record: the rationale behind a structural choice (ECS layout, tick model, system boundaries). Records the WHY, since code shows the WHAT. Superseded rather than edited when the decision changes."
+lifecycle = { states = ["draft", "review", "accepted", "rejected", "superseded"], edges = [
+  { from = "draft", to = "review" },
+  { from = "review", to = "accepted" },
+  { from = "review", to = "rejected" },
+  { from = "*", to = "superseded" },
+] }
+
+# ── DISPOSABLE: work, consumed then archived ────────────────────────
+
+[[types]]
+name = "prototype"
+plural = "prototypes"
+dir = "docs/prototypes"
+prefix = "PROTO"
+icon = "🔬"                       # throwaway build to answer a question; verdict in body
+authorship = "generated"
+intent = "Throwaway build to de-risk an unknown before committing -- fun-risk (does it feel good?) or tech-risk (does this architecture hold up?). Output is a verdict, not shippable code."
+lifecycle = { states = ["draft", "in-progress", "concluded", "superseded"], edges = [
+  { from = "draft", to = "in-progress" },
+  { from = "in-progress", to = "concluded" },
+  { from = "*", to = "superseded" },
+] }
+
+[[types.attributes]]
+name = "risk"
+kind = "enum"
+values = ["fun", "tech"]
+required = true
+
+[[types]]
+name = "delta"
+plural = "deltas"
+dir = "docs/deltas"
+prefix = "DELTA"
+icon = "◆"
+agents = ["build"]               # build agent runs ready->building->playtest, then halts
+authorship = "generated"
+intent = "A unit of shippable change the build agent executes -- a feature or a fix. Serves a pillar, tagged by system. Big features break into child deltas. Not done until it passes the human playtest."
+lifecycle = { states = ["draft", "ready", "building", "playtest", "done", "rejected", "superseded"], edges = [
+  { from = "draft", to = "ready" },
+  { from = "ready", to = "building" },
+  { from = "building", to = "playtest" },
+  { from = "playtest", to = "done" },        # feels right
+  { from = "playtest", to = "building" },     # not fun -> back to code  ← the game-specific edge
+  { from = "playtest", to = "draft" },        # feel fundamentally wrong -> redesign
+  { from = "*", to = "rejected" },
+  { from = "*", to = "superseded" },
+] }
+
+[[types.attributes]]
+name = "system"
+kind = "string"
+required = true
+
+# ── FULL RELATIONSHIP SPINE ─────────────────────────────────────────
+
+[[relationships]]
+name = "serves"                  # delta -> pillar (traceability + the scope gate)
+inverse = "served-by"
+traversal = "chain"
+
+[[relationships]]
+name = "part-of"                 # child delta -> parent delta (recursive breakdown)
+inverse = "has-part"
+traversal = "chain"
+
+[[relationships]]
+name = "informs"                 # prototype -> delta/adr (verdict feeds the work)
+inverse = "informed-by"
+
+[[relationships]]
+name = "governs"                 # adr -> delta (find affected work before changing a decision)
+inverse = "governed-by"
+
+[[relationships]]
+name = "blocks"
+inverse = "blocked-by"
+
+[[relationships]]
+name = "supersedes"
+inverse = "superseded-by"
+
+# ── THE SCOPE-CREEP GATE ────────────────────────────────────────────
+
+[[rules]]
+shape = "parent-child"
+name = "deltas-serve-pillars"
+child = "delta"
+parent = "pillars"
+severity = "error"
+require_parent_status = "accepted"   # can't build toward an unratified experience goal
+
+[[rules]]
+shape = "parent-child"
+name = "principles-need-convention"
+child = "principle"
+parent = "convention"
+severity = "warning"
