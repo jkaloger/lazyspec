@@ -1,6 +1,6 @@
 [agents]
-# The build agent runs delta ready->building->playtest, then halts for the
-# human feel verdict. Swap for your coding agent of choice.
+# The build agent executes iterations (ready->building->done). Fun is judged
+# at the delta's playtest gate, by you. Swap for your coding agent of choice.
 interactive = 'claude -p "$LAZYSPEC_PROMPT"'
 
 [naming]
@@ -95,16 +95,15 @@ plural = "deltas"
 dir = "docs/deltas"
 prefix = "DELTA"
 icon = "◆"
-agents = ["build"]               # build agent runs ready->building->playtest, then halts
 authorship = "generated"
-intent = "A unit of shippable change the build agent executes -- a feature or a fix. Serves a pillar, tagged by system. Big features break into child deltas. Not done until it passes the human playtest."
-lifecycle = { states = ["draft", "ready", "building", "playtest", "done", "rejected", "superseded"], edges = [
-  { from = "draft", to = "ready" },
-  { from = "ready", to = "building" },
-  { from = "building", to = "playtest" },
-  { from = "playtest", to = "done" },        # feels right
-  { from = "playtest", to = "building" },     # not fun -> back to code  ← the game-specific edge
-  { from = "playtest", to = "draft" },        # feel fundamentally wrong -> redesign
+intent = "A unit of shippable change -- a feature or a fix. Says WHAT and WHY. Serves a pillar, tagged by system. Broken into iterations for the build agent to execute. Not done until it passes the human playtest (fun is judged here, not in iterations)."
+lifecycle = { states = ["draft", "ready", "in-progress", "playtest", "done", "rejected", "superseded"], edges = [
+  { from = "draft", to = "ready" },             # broken into iterations
+  { from = "ready", to = "in-progress" },        # iterations executing
+  { from = "in-progress", to = "playtest" },     # all iterations done, tests green
+  { from = "playtest", to = "done" },            # feels right
+  { from = "playtest", to = "in-progress" },     # not fun -> more iterations  ← the game-specific edge
+  { from = "playtest", to = "draft" },           # feel fundamentally wrong -> redesign
   { from = "*", to = "rejected" },
   { from = "*", to = "superseded" },
 ] }
@@ -114,6 +113,25 @@ name = "system"
 kind = "string"
 required = true
 
+[[types]]
+name = "iteration"
+plural = "iterations"
+dir = "docs/iterations"
+prefix = "ITER"
+icon = "▸"
+agents = ["build"]               # the build agent executes iterations, one session each
+authorship = "generated"
+intent = "A single agent-executable unit of work: a detailed build plan implementing part of a delta or prototype. Usually several iterations per parent. Says HOW. Correctness-complete when its tests pass; fun is judged at the delta, never here."
+lifecycle = { states = ["draft", "ready", "building", "done", "blocked", "rejected", "superseded"], edges = [
+  { from = "draft", to = "ready" },
+  { from = "ready", to = "building" },
+  { from = "building", to = "done" },            # tests green
+  { from = "building", to = "blocked" },         # dependency or unknown surfaced
+  { from = "blocked", to = "building" },
+  { from = "*", to = "rejected" },
+  { from = "*", to = "superseded" },
+] }
+
 # ── FULL RELATIONSHIP SPINE ─────────────────────────────────────────
 
 [[relationships]]
@@ -122,8 +140,8 @@ inverse = "served-by"
 traversal = "chain"
 
 [[relationships]]
-name = "part-of"                 # child delta -> parent delta (recursive breakdown)
-inverse = "has-part"
+name = "implements"              # iteration -> delta or prototype (the executable breakdown)
+inverse = "implemented-by"
 traversal = "chain"
 
 [[relationships]]
@@ -158,3 +176,13 @@ name = "principles-need-convention"
 child = "principle"
 parent = "convention"
 severity = "warning"
+
+# An iteration must implement something (a delta or prototype); no orphan work.
+# relation-existence checks that *any* relation exists -- in practice the
+# `implements` link -- so an iteration can never float free of its parent.
+[[rules]]
+shape = "relation-existence"
+name = "iterations-implement-work"
+type = "iteration"
+require = "any-relation"
+severity = "error"
