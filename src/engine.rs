@@ -4,6 +4,7 @@ pub mod agent_interactive;
 pub mod cache;
 pub mod cache_lock;
 pub mod certification;
+pub mod clickup;
 pub mod config;
 pub mod config_write;
 pub mod context;
