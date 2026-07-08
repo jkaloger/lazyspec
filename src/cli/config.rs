@@ -121,6 +121,7 @@ pub fn run_add_type(
         label_override: None,
         github_issue_tag: None,
         github_issue_type: None,
+        clickup_list_id: None,
     });
 
     let out = write_config_in_place(&src, &config)?;
@@ -218,6 +219,7 @@ fn parse_store(value: &str) -> Result<StoreBackend> {
         "github-milestones" => Ok(StoreBackend::GithubMilestones),
         "github-projects" => Ok(StoreBackend::GithubProjects),
         "git-ref" => Ok(StoreBackend::GitRef),
+        "clickup-tasks" => Ok(StoreBackend::ClickupTasks),
         other => bail!("unknown store backend \"{}\"", other),
     }
 }

@@ -88,6 +88,44 @@ impl DocumentStore for UnavailableStore {
     }
 }
 
+/// ClickUp-backed store, registered under [`StoreBackend::ClickupTasks`]. The
+/// read path (fetch + materialize) lives in
+/// [`clickup_cache`](crate::engine::clickup_cache); this struct carries the
+/// boxed client, credential, and bindings the *write* path (create/update/
+/// delete = archive) will use in later RFC-056 stories. Until those land, the
+/// write methods fail loudly rather than silently no-op.
+pub struct ClickupTasksStore {
+    #[allow(dead_code)]
+    pub client: Box<dyn crate::engine::clickup::ClickupClient>,
+    #[allow(dead_code)]
+    pub root: PathBuf,
+    #[allow(dead_code)]
+    pub config: Config,
+    #[allow(dead_code)]
+    pub token: Option<crate::engine::credentials::Token>,
+}
+
+impl ClickupTasksStore {
+    const WRITE_UNIMPLEMENTED: &'static str =
+        "clickup-tasks write path is not implemented yet (RFC-056 story 5); \
+         this iteration delivers the read-only fetch path only";
+}
+
+impl DocumentStore for ClickupTasksStore {
+    fn create(&mut self, _: &TypeDef, _: &str, _: &str, _: &str) -> Result<CreatedDoc> {
+        bail!("{}", Self::WRITE_UNIMPLEMENTED)
+    }
+    fn update(&mut self, _: &TypeDef, _: &str, _: &[(&str, &str)]) -> Result<()> {
+        bail!("{}", Self::WRITE_UNIMPLEMENTED)
+    }
+    fn delete(&mut self, _: &TypeDef, _: &str) -> Result<()> {
+        bail!("{}", Self::WRITE_UNIMPLEMENTED)
+    }
+    fn set_provenance(&mut self, _: &TypeDef, _: &str, _: &[String]) -> Result<()> {
+        bail!("{}", Self::WRITE_UNIMPLEMENTED)
+    }
+}
+
 impl DocumentStore for FilesystemStore {
     fn create(
         &mut self,
@@ -2067,6 +2105,22 @@ pub fn build_registry(root: &std::path::Path, config: &Config) -> DocumentStoreR
         }),
     );
 
+    // ClickUp is registered the new way (the first backend to do so): a boxed
+    // trait object keyed by [`StoreBackend`], no generic param. The read path is
+    // inline in `cli::fetch`; the write path is a later RFC-056 story, so the
+    // write methods currently fail loudly. The token stays unloaded here to keep
+    // `build_registry` free of keychain I/O on every command; the write path
+    // will load it when it lands.
+    registry.register(
+        StoreBackend::ClickupTasks,
+        Box::new(ClickupTasksStore {
+            client: Box::new(crate::engine::clickup::ClickupHttpClient::new()),
+            root: root.to_path_buf(),
+            config: config.clone(),
+            token: None,
+        }),
+    );
+
     registry
 }
 
@@ -2102,6 +2156,7 @@ mod tests {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            clickup_list_id: None,
         }
     }
 
@@ -2339,6 +2394,7 @@ mod tests {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            clickup_list_id: None,
         };
 
         let result = gh_store.create(&td, "test prefix", "author", "").unwrap();

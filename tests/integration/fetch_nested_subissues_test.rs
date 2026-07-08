@@ -275,7 +275,17 @@ fn body_with_implements(target: &str) -> String {
 fn run_fetch(root: &std::path::Path, config: &Config, gh: &NestingGh) -> Result<()> {
     // git_ref_ops is unused for github-issues-only configs but the signature
     // requires a GitRefOps; GitCli is never called here.
-    lazyspec::cli::fetch::run(root, config, gh, &GitCli, "origin", None, true)
+    lazyspec::cli::fetch::run(
+        root,
+        config,
+        gh,
+        &GitCli,
+        &lazyspec::engine::clickup::ClickupHttpClient::new(),
+        None,
+        "origin",
+        None,
+        true,
+    )
 }
 
 fn story_doc<'a>(store: &'a Store, id: &str) -> &'a lazyspec::engine::document::DocMeta {

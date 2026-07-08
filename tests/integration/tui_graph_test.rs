@@ -413,6 +413,7 @@ fn custom_types_populate_doc_types_and_icons() {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            clickup_list_id: None,
         },
         TypeDef {
             name: "task".into(),
@@ -433,6 +434,7 @@ fn custom_types_populate_doc_types_and_icons() {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            clickup_list_id: None,
         },
     ];
     let store = Store::load(fixture.root(), &config).unwrap();

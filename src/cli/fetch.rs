@@ -1,20 +1,27 @@
 use crate::engine::cache_lock::CacheLock;
+use crate::engine::clickup::ClickupClient;
+use crate::engine::clickup_cache;
 use crate::engine::config::{Config, StoreBackend, TypeDef};
+use crate::engine::credentials::Token;
 use crate::engine::gh::{GhGraphql, GhIssueReader, GhIssueWriter, GhMilestoneApi};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::github::resolve_repo;
 use crate::engine::issue_body::TypeMatchRule;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
+use crate::engine::task_map::TaskMap;
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::path::Path;
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     root: &Path,
     config: &Config,
     gh: &(impl GhIssueReader + GhIssueWriter + GhGraphql + GhMilestoneApi),
     git_ref_ops: &dyn GitRefOps,
+    clickup: &dyn ClickupClient,
+    clickup_token: Option<&Token>,
     remote: &str,
     type_filter: Option<&str>,
     json: bool,
@@ -43,7 +50,19 @@ pub fn run(
         .map(|t| t.name.as_str())
         .collect();
 
-    if gh_types.is_empty() && milestone_types.is_empty() && git_ref_types.is_empty() {
+    let clickup_types: Vec<&str> = config
+        .documents
+        .types
+        .iter()
+        .filter(|t| t.store == StoreBackend::ClickupTasks)
+        .map(|t| t.name.as_str())
+        .collect();
+
+    if gh_types.is_empty()
+        && milestone_types.is_empty()
+        && git_ref_types.is_empty()
+        && clickup_types.is_empty()
+    {
         if json {
             println!("{{\"error\":\"no fetchable types configured\"}}");
         } else {
@@ -56,9 +75,10 @@ pub fn run(
         if !gh_types.contains(&filter)
             && !milestone_types.contains(&filter)
             && !git_ref_types.contains(&filter)
+            && !clickup_types.contains(&filter)
         {
             bail!(
-                "type '{}' is not a github-issues, github-milestones, or git-ref type",
+                "type '{}' is not a github-issues, github-milestones, git-ref, or clickup-tasks type",
                 filter
             );
         }
@@ -162,6 +182,36 @@ pub fn run(
     for type_name in &gitref_to_fetch {
         let summary = fetch_git_ref_type(root, git_ref_ops, remote, type_name)?;
         summaries.push(summary);
+    }
+
+    let clickup_to_fetch = filter_types(clickup_types, type_filter);
+
+    if !clickup_to_fetch.is_empty() {
+        let token = clickup_token.ok_or_else(|| {
+            anyhow::anyhow!(
+                "no ClickUp token found; run `lazyspec setup clickup` before fetching \
+                 clickup-tasks types"
+            )
+        })?;
+        let mut task_map = TaskMap::load(root)?;
+
+        for type_name in &clickup_to_fetch {
+            let type_def = config
+                .type_by_name(type_name)
+                .ok_or_else(|| anyhow::anyhow!("type '{}' not found in config", type_name))?;
+
+            let result =
+                clickup_cache::fetch_tasks(root, type_def, clickup, token.expose(), &mut task_map)?;
+
+            summaries.push(TypeSummary {
+                type_name: type_name.to_string(),
+                fetched: result.fetched,
+                new: result.new,
+                removed: result.removed,
+            });
+        }
+
+        task_map.save(root)?;
     }
 
     if json {
@@ -373,6 +423,7 @@ mod tests {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            clickup_list_id: None,
         };
 
         // A realistic cache file: no `id:` in frontmatter (mirrors what

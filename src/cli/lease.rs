@@ -379,6 +379,7 @@ mod tests {
                         label_override: None,
                         github_issue_tag: None,
                         github_issue_type: None,
+                        clickup_list_id: None,
                     },
                     TypeDef {
                         name: "story".to_string(),
@@ -399,6 +400,7 @@ mod tests {
                         label_override: None,
                         github_issue_tag: None,
                         github_issue_type: None,
+                        clickup_list_id: None,
                     },
                     TypeDef {
                         name: "bug".to_string(),
@@ -419,6 +421,7 @@ mod tests {
                         label_override: None,
                         github_issue_tag: None,
                         github_issue_type: None,
+                        clickup_list_id: None,
                     },
                 ],
                 naming: Naming {

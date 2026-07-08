@@ -170,6 +170,7 @@ fn ticket_type() -> TypeDef {
         label_override: None,
         github_issue_tag: None,
         github_issue_type: None,
+        clickup_list_id: None,
     }
 }
 
@@ -234,7 +235,18 @@ fn fresh_fetch_surfaces_issue_milestone_as_targets_relation() {
 
     // Fresh root: the issue-map starts empty, so the milestone must be fetched
     // and mapped before the issue for the forward relation to resolve.
-    lazyspec::cli::fetch::run(root, &config(), &gh, &GitCli, "origin", None, true).unwrap();
+    lazyspec::cli::fetch::run(
+        root,
+        &config(),
+        &gh,
+        &GitCli,
+        &lazyspec::engine::clickup::ClickupHttpClient::new(),
+        None,
+        "origin",
+        None,
+        true,
+    )
+    .unwrap();
 
     let ticket = std::fs::read_to_string(root.join(".lazyspec/cache/ticket/TICKET-64.md"))
         .expect("TICKET-64 cache doc written");

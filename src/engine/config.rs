@@ -136,6 +136,8 @@ pub enum StoreBackend {
     GithubProjects,
     #[serde(rename = "git-ref")]
     GitRef,
+    #[serde(rename = "clickup-tasks")]
+    ClickupTasks,
 }
 
 impl fmt::Display for StoreBackend {
@@ -146,6 +148,7 @@ impl fmt::Display for StoreBackend {
             StoreBackend::GithubMilestones => write!(f, "github-milestones"),
             StoreBackend::GithubProjects => write!(f, "github-projects"),
             StoreBackend::GitRef => write!(f, "git-ref"),
+            StoreBackend::ClickupTasks => write!(f, "clickup-tasks"),
         }
     }
 }
@@ -278,6 +281,11 @@ pub struct TypeDef {
     /// reads this field yet.
     #[serde(default)]
     pub github_issue_type: Option<String>,
+    /// The ClickUp List id this type binds to, for `clickup-tasks`-backed types.
+    /// Each such type materializes exactly one bound List's tasks. Unused by
+    /// other stores.
+    #[serde(default)]
+    pub clickup_list_id: Option<String>,
 }
 
 /// One entry in the `[[relationships]]` block: a relationship name and its
@@ -660,6 +668,7 @@ pub fn starter_types() -> Vec<TypeDef> {
         label_override: None,
         github_issue_tag: None,
         github_issue_type: None,
+        clickup_list_id: None,
     };
     vec![
         simple("rfc", "rfcs", "docs/rfcs", "RFC", "●"),
@@ -692,6 +701,7 @@ pub fn starter_types() -> Vec<TypeDef> {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            clickup_list_id: None,
         },
         TypeDef {
             name: "dictum".to_string(),
@@ -712,6 +722,7 @@ pub fn starter_types() -> Vec<TypeDef> {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            clickup_list_id: None,
         },
     ]
 }
@@ -1050,6 +1061,7 @@ impl TypeDef {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            clickup_list_id: None,
         }
     }
 }

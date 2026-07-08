@@ -518,7 +518,7 @@ lazyspec config --json                      # print the resolved config as JSON
 lazyspec config add-type spike spikes docs/spikes SPIKE \
   --icon "◆" --parent-type rfc --intent "throwaway exploration" \
   --authorship generated
-# also accepts --singleton, --store <filesystem|github-issues|github-milestones|github-projects|git-ref>,
+# also accepts --singleton, --store <filesystem|github-issues|github-milestones|github-projects|git-ref|clickup-tasks>,
 # --numbering <incremental|sqids|reserved>
 
 # Replace a type's lifecycle (states + edges; `*` matches any source state)
@@ -644,6 +644,43 @@ appears in logs, error messages, or `--json` output.
 > The token is a bearer credential (full account access, no expiry). The
 > credential store is global, not per-repo, and is read only from the OS
 > keychain or your home directory -- never from the repository.
+
+#### `clickup-tasks` store
+
+Types stored as `--store clickup-tasks` bind to exactly one ClickUp List via a
+per-type `clickup_list_id` and materialize that List's tasks as read-only
+documents, in the same cache shape as `github-issues` docs
+(`.lazyspec/cache/<type>/<ID>.md`):
+
+```toml
+[[types]]
+name = "task"
+plural = "tasks"
+dir = "docs/tasks"
+prefix = "TASK"
+store = "clickup-tasks"
+clickup_list_id = "901234567890"
+```
+
+`lazyspec fetch` (optionally `--type <name>`) pulls the bound List's tasks
+(`GET /list/{id}/task`, paginated) using the token from `setup clickup`, and
+writes one cache doc per task. The mapping:
+
+- doc `status` is the **raw ClickUp status string** verbatim -- no local status
+  mapping table;
+- `priority` (the ClickUp priority name), `estimate` (`time_estimate`, ms), and
+  `due` (`due_date`, epoch ms) are read from ClickUp's **native task fields**,
+  not a body blob;
+- body comes from the task's `markdown_description` (falling back to
+  `text_content`);
+- a task that leaves the List (including one ClickUp archived) drops out of the
+  cache on the next fetch.
+
+Fetched docs behave identically to `github-issues` docs under `status --json`
+and `show <ID> --json`. A doc-id -> task-id map is kept at
+`.lazyspec/task-map.json`. Running `fetch` for a `clickup-tasks` type without a
+stored token fails with a clear "run `lazyspec setup clickup`" error. Writing
+back to ClickUp (`create`/`update`/`advance`/`delete`) is not yet supported.
 
 #### `github-milestones` store
 

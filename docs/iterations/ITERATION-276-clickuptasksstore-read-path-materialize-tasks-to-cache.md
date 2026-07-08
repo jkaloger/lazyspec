@@ -1,7 +1,7 @@
 ---
 title: 'ClickupTasksStore read path: materialize tasks to cache'
 type: iteration
-status: draft
+status: complete
 author: unknown
 date: 2026-07-05
 tags: []

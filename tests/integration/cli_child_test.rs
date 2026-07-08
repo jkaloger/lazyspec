@@ -181,6 +181,7 @@ fn create_with_parent_cross_store_rejected_before_mutation() {
         label_override: None,
         github_issue_tag: None,
         github_issue_type: None,
+        clickup_list_id: None,
     };
     config.documents.types.push(issue_type);
     let store = fixture.store();

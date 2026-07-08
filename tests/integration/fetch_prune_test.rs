@@ -204,7 +204,17 @@ fn make_clone_b(bare: &Path) -> TempDir {
 
 fn run_fetch(root: &Path, config: &Config) -> Result<()> {
     let gh = NoopGh;
-    lazyspec::cli::fetch::run(root, config, &gh, &GitCli, "origin", None, true)
+    lazyspec::cli::fetch::run(
+        root,
+        config,
+        &gh,
+        &GitCli,
+        &lazyspec::engine::clickup::ClickupHttpClient::new(),
+        None,
+        "origin",
+        None,
+        true,
+    )
 }
 
 #[test]

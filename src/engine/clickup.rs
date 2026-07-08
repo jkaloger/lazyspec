@@ -140,13 +140,128 @@ fn parse_u64_header(headers: &HeaderMap, name: &str) -> Option<u64> {
         .and_then(|s| s.trim().parse::<u64>().ok())
 }
 
-/// Validates a ClickUp personal token and, more broadly, the transport a
-/// backend needs. `auth_status` is the only method this iteration delivers; the
-/// store CRUD methods land in later RFC-056 stories.
+/// A task's status, as ClickUp nests it under `status.status`. Only the raw
+/// status string is read -- it maps verbatim onto the lazyspec doc `status`,
+/// with no local mapping table.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ClickupTaskStatus {
+    pub status: String,
+}
+
+/// A task's priority, read as the nested object ClickUp returns
+/// (`{"priority":"normal","color":..,"id":"3","orderindex":"3"}`). Only the
+/// `priority` name is read; the bare-integer *write* shape is a later story.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ClickupPriority {
+    pub priority: String,
+}
+
+/// A ClickUp tag, of which only the name is materialized.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ClickupTag {
+    #[serde(default)]
+    pub name: String,
+}
+
+/// The task creator, surfaced as the doc author.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ClickupCreator {
+    #[serde(default)]
+    pub username: String,
+}
+
+/// A custom-field value on a task, keyed by its ClickUp uuid. Decoded so the
+/// task body parses cleanly; relation decoding off these values is a later
+/// RFC-056 story (ITERATION-275), so `value` is retained raw for now.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ClickupCustomField {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub value: Option<serde_json::Value>,
+}
+
+/// A ClickUp task in its *read* shape (`GET /list/{id}/task` and `GET /task`).
+///
+/// The epoch/duration fields (`due_date`/`start_date`/`time_estimate`/
+/// `date_updated`/`date_created`) arrive as epoch-millisecond *strings* on read
+/// (e.g. `"1748541600000"`) but as integers on write; [`de_opt_epoch_ms`]
+/// accepts either so the same struct can round-trip. `priority` is the nested
+/// read object, not the bare write integer.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ClickupTask {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    pub status: ClickupTaskStatus,
+    #[serde(default)]
+    pub priority: Option<ClickupPriority>,
+    #[serde(default, deserialize_with = "de_opt_epoch_ms")]
+    pub due_date: Option<i64>,
+    #[serde(default, deserialize_with = "de_opt_epoch_ms")]
+    pub start_date: Option<i64>,
+    #[serde(default, deserialize_with = "de_opt_epoch_ms")]
+    pub time_estimate: Option<i64>,
+    #[serde(default, deserialize_with = "de_opt_epoch_ms")]
+    pub date_updated: Option<i64>,
+    #[serde(default, deserialize_with = "de_opt_epoch_ms")]
+    pub date_created: Option<i64>,
+    #[serde(default)]
+    pub markdown_description: String,
+    #[serde(default)]
+    pub text_content: String,
+    #[serde(default)]
+    pub custom_item_id: Option<i64>,
+    #[serde(default)]
+    pub tags: Vec<ClickupTag>,
+    #[serde(default)]
+    pub creator: Option<ClickupCreator>,
+    #[serde(default)]
+    pub custom_fields: Vec<ClickupCustomField>,
+}
+
+/// One page of `GET /list/{id}/task`. `last_page` is ClickUp's own signal that
+/// pagination is exhausted; the real client stops paging on it.
+#[derive(Debug, Deserialize)]
+struct TaskListEnvelope {
+    #[serde(default)]
+    tasks: Vec<ClickupTask>,
+    #[serde(default)]
+    last_page: bool,
+}
+
+/// Deserialize an optional epoch-millisecond field that ClickUp may send as a
+/// string, an integer, or `null`/absent. Every epoch/duration field on read is a
+/// string; accepting the integer form too lets the same struct decode the write
+/// shape without a second type.
+fn de_opt_epoch_ms<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => s.trim().parse::<i64>().ok(),
+        Some(serde_json::Value::Number(n)) => n.as_i64(),
+        Some(_) => None,
+    })
+}
+
+/// Validates a ClickUp personal token and fetches the tasks a bound List
+/// contains. `auth_status` and `task_list` are the methods the read path needs;
+/// the store CRUD methods land in later RFC-056 stories.
 pub trait ClickupClient {
     /// Validates `token` against `GET /user`. On success returns the token
     /// owner's identity; on failure returns a classified [`ClickupError`].
     fn auth_status(&self, token: &str) -> Result<ClickupUser, ClickupError>;
+
+    /// Fetches every task in the List `list_id` (`GET /list/{id}/task`),
+    /// following pagination internally so callers receive the full set. Closed
+    /// tasks and subtasks are included; archived tasks are excluded by the API,
+    /// so they drop out of the returned set (and thus out of the cache on the
+    /// next fetch).
+    fn task_list(&self, token: &str, list_id: &str) -> Result<Vec<ClickupTask>, ClickupError>;
 }
 
 /// reqwest-backed [`ClickupClient`]. Sends the personal token in a raw
@@ -191,6 +306,32 @@ impl ClickupClient for ClickupHttpClient {
 
         Err(classify_status(status.as_u16(), response.headers()))
     }
+
+    fn task_list(&self, token: &str, list_id: &str) -> Result<Vec<ClickupTask>, ClickupError> {
+        let mut all = Vec::new();
+        let mut page: u32 = 0;
+        loop {
+            let url = format!(
+                "{}/list/{}/task?page={}&include_closed=true&subtasks=true",
+                self.base_url, list_id, page
+            );
+            let response = self.http.get(&url).header(AUTHORIZATION, token).send()?;
+
+            let status = response.status();
+            if !status.is_success() {
+                return Err(classify_status(status.as_u16(), response.headers()));
+            }
+
+            let envelope: TaskListEnvelope = response.json()?;
+            let count = envelope.tasks.len();
+            all.extend(envelope.tasks);
+            if envelope.last_page || count == 0 {
+                break;
+            }
+            page += 1;
+        }
+        Ok(all)
+    }
 }
 
 /// In-memory [`ClickupClient`] returning a scripted outcome, for downstream
@@ -198,27 +339,57 @@ impl ClickupClient for ClickupHttpClient {
 /// in `gh.rs`.
 #[cfg(any(test, feature = "test-support"))]
 pub struct FakeClickupClient {
-    outcome: Result<ClickupUser, ClickupError>,
+    auth: Result<ClickupUser, ClickupError>,
+    tasks: Result<Vec<ClickupTask>, ClickupError>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl FakeClickupClient {
-    /// A client whose token validates to `user`.
+    /// A client whose token validates to `user` and whose bound List is empty.
     pub fn valid(user: ClickupUser) -> Self {
-        FakeClickupClient { outcome: Ok(user) }
+        FakeClickupClient {
+            auth: Ok(user),
+            tasks: Ok(Vec::new()),
+        }
     }
 
     /// A client whose token is rejected as invalid (HTTP 401).
     pub fn invalid_token() -> Self {
         FakeClickupClient {
-            outcome: Err(ClickupError::InvalidToken { status: 401 }),
+            auth: Err(ClickupError::InvalidToken { status: 401 }),
+            tasks: Err(ClickupError::InvalidToken { status: 401 }),
         }
     }
 
-    /// A client scripted to return an arbitrary error.
+    /// A client whose `auth_status` returns an arbitrary error.
     pub fn failing(error: ClickupError) -> Self {
         FakeClickupClient {
-            outcome: Err(error),
+            auth: Err(error.clone()),
+            tasks: Err(error),
+        }
+    }
+
+    /// A client whose bound List returns `tasks` (and whose token validates).
+    pub fn with_tasks(tasks: Vec<ClickupTask>) -> Self {
+        FakeClickupClient {
+            auth: Ok(ClickupUser {
+                id: 1,
+                username: "fake".to_string(),
+                email: "fake@example.com".to_string(),
+            }),
+            tasks: Ok(tasks),
+        }
+    }
+
+    /// A client whose `task_list` returns an arbitrary error.
+    pub fn failing_tasks(error: ClickupError) -> Self {
+        FakeClickupClient {
+            auth: Ok(ClickupUser {
+                id: 1,
+                username: "fake".to_string(),
+                email: "fake@example.com".to_string(),
+            }),
+            tasks: Err(error),
         }
     }
 }
@@ -226,7 +397,11 @@ impl FakeClickupClient {
 #[cfg(any(test, feature = "test-support"))]
 impl ClickupClient for FakeClickupClient {
     fn auth_status(&self, _token: &str) -> Result<ClickupUser, ClickupError> {
-        self.outcome.clone()
+        self.auth.clone()
+    }
+
+    fn task_list(&self, _token: &str, _list_id: &str) -> Result<Vec<ClickupTask>, ClickupError> {
+        self.tasks.clone()
     }
 }
 
@@ -375,6 +550,100 @@ mod tests {
         let client = FakeClickupClient::failing(ClickupError::Timeout);
         assert_eq!(
             client.auth_status("pk_x").unwrap_err(),
+            ClickupError::Timeout
+        );
+    }
+
+    #[test]
+    fn deserializes_task_with_epoch_ms_strings_and_priority_object() {
+        // The read shape: status/priority nested objects, epoch fields as *strings*.
+        let body = r##"{
+            "id": "86abc123",
+            "name": "Wire the reader",
+            "status": {"status": "in progress", "color": "#000", "type": "custom", "orderindex": 1},
+            "priority": {"priority": "high", "color": "#f00", "id": "2", "orderindex": "2"},
+            "due_date": "1748541600000",
+            "start_date": "1748500000000",
+            "time_estimate": "3600000",
+            "date_updated": "1774587145901",
+            "date_created": "1700000000000",
+            "markdown_description": "# Body\ncontent",
+            "text_content": "Body content",
+            "custom_item_id": 1018,
+            "tags": [{"name": "backend"}],
+            "creator": {"username": "Jack"},
+            "custom_fields": [{"id": "uuid-1", "name": "relations", "value": "x"}]
+        }"##;
+        let task: ClickupTask = serde_json::from_str(body).unwrap();
+        assert_eq!(task.id, "86abc123");
+        assert_eq!(task.name, "Wire the reader");
+        assert_eq!(task.status.status, "in progress");
+        assert_eq!(task.priority.as_ref().unwrap().priority, "high");
+        assert_eq!(task.due_date, Some(1_748_541_600_000));
+        assert_eq!(task.start_date, Some(1_748_500_000_000));
+        assert_eq!(task.time_estimate, Some(3_600_000));
+        assert_eq!(task.date_updated, Some(1_774_587_145_901));
+        assert_eq!(task.date_created, Some(1_700_000_000_000));
+        assert_eq!(task.markdown_description, "# Body\ncontent");
+        assert_eq!(task.custom_item_id, Some(1018));
+        assert_eq!(task.tags[0].name, "backend");
+        assert_eq!(task.creator.as_ref().unwrap().username, "Jack");
+        assert_eq!(task.custom_fields[0].id, "uuid-1");
+    }
+
+    #[test]
+    fn deserializes_task_with_integer_epoch_fields() {
+        // The write shape uses integers; the same struct must still decode them.
+        let body = r#"{
+            "id": "1",
+            "name": "n",
+            "status": {"status": "open"},
+            "due_date": 1748541600000,
+            "time_estimate": 3600000
+        }"#;
+        let task: ClickupTask = serde_json::from_str(body).unwrap();
+        assert_eq!(task.due_date, Some(1_748_541_600_000));
+        assert_eq!(task.time_estimate, Some(3_600_000));
+    }
+
+    #[test]
+    fn deserializes_task_with_null_and_absent_optional_fields() {
+        let body = r#"{
+            "id": "1",
+            "name": "n",
+            "status": {"status": "open"},
+            "priority": null,
+            "due_date": null
+        }"#;
+        let task: ClickupTask = serde_json::from_str(body).unwrap();
+        assert_eq!(task.priority, None);
+        assert_eq!(task.due_date, None);
+        assert_eq!(task.start_date, None);
+        assert_eq!(task.time_estimate, None);
+    }
+
+    #[test]
+    fn deserializes_task_list_envelope_and_last_page_flag() {
+        let body =
+            r#"{"tasks":[{"id":"1","name":"a","status":{"status":"open"}}],"last_page":true}"#;
+        let envelope: TaskListEnvelope = serde_json::from_str(body).unwrap();
+        assert_eq!(envelope.tasks.len(), 1);
+        assert!(envelope.last_page);
+    }
+
+    #[test]
+    fn fake_with_tasks_returns_scripted_tasks() {
+        let task: ClickupTask =
+            serde_json::from_str(r#"{"id":"7","name":"t","status":{"status":"open"}}"#).unwrap();
+        let client = FakeClickupClient::with_tasks(vec![task.clone()]);
+        assert_eq!(client.task_list("pk", "list1").unwrap(), vec![task]);
+    }
+
+    #[test]
+    fn fake_failing_tasks_returns_scripted_error() {
+        let client = FakeClickupClient::failing_tasks(ClickupError::Timeout);
+        assert_eq!(
+            client.task_list("pk", "list1").unwrap_err(),
             ClickupError::Timeout
         );
     }
