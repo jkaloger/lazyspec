@@ -398,6 +398,13 @@ pub trait ClickupClient {
     /// the optimistic-lock check that rejects a stale write before it can clobber
     /// a concurrent external change (RFC-056 §Caching/id-mapping).
     fn get_task(&self, token: &str, task_id: &str) -> Result<ClickupTask, ClickupError>;
+
+    /// Archives the task `task_id` -- ClickUp's soft delete -- via
+    /// `PUT /task/{id}` with `{"archived": true}` (RFC-056 §Design). An archived
+    /// task drops out of `task_list` fetches, so the doc leaves the cache and the
+    /// `TaskMap` on the next sync, but the task stays recoverable in ClickUp.
+    /// lazyspec never hard-deletes: `DELETE /task/{id}` is not called anywhere.
+    fn archive_task(&self, token: &str, task_id: &str) -> Result<(), ClickupError>;
 }
 
 /// reqwest-backed [`ClickupClient`]. Sends the personal token in a raw
@@ -547,6 +554,25 @@ impl ClickupClient for ClickupHttpClient {
         let task: ClickupTask = response.json()?;
         Ok(task)
     }
+
+    fn archive_task(&self, token: &str, task_id: &str) -> Result<(), ClickupError> {
+        // Archive rides the same `PUT /task/{id}` endpoint as an edit, sending
+        // only `{"archived": true}`; the DELETE endpoint (a hard delete) is never
+        // used. The echoed task body is ignored -- only the status matters.
+        let url = format!("{}/task/{}", self.base_url, task_id);
+        let response = self
+            .http
+            .put(&url)
+            .header(AUTHORIZATION, token)
+            .json(&serde_json::json!({ "archived": true }))
+            .send()?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(classify_status(status.as_u16(), response.headers()));
+        }
+        Ok(())
+    }
 }
 
 /// In-memory [`ClickupClient`] returning a scripted outcome, for downstream
@@ -577,6 +603,12 @@ pub struct FakeClickupClient {
     /// Every `get_task` call recorded as `task_id`, shared the same way so a
     /// store test can assert the pre-write optimistic-lock fetch happened.
     view_calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    /// The outcome `archive_task` returns -- ClickUp's soft delete. Defaults to
+    /// `Ok(())` on a valid client so a delete succeeds unless scripted to fail.
+    archived: Result<(), ClickupError>,
+    /// Every `archive_task` call recorded as `task_id`, shared the same way so a
+    /// store delete test can assert exactly one archive fired for the mapped task.
+    archive_calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -593,6 +625,8 @@ impl FakeClickupClient {
             create_calls: Default::default(),
             update_calls: Default::default(),
             view_calls: Default::default(),
+            archived: Ok(()),
+            archive_calls: Default::default(),
         }
     }
 
@@ -608,6 +642,8 @@ impl FakeClickupClient {
             create_calls: Default::default(),
             update_calls: Default::default(),
             view_calls: Default::default(),
+            archived: Err(ClickupError::InvalidToken { status: 401 }),
+            archive_calls: Default::default(),
         }
     }
 
@@ -619,10 +655,12 @@ impl FakeClickupClient {
             statuses: Err(error.clone()),
             created: Err(error.clone()),
             updated: Err(error.clone()),
-            viewed: Err(error),
+            viewed: Err(error.clone()),
             create_calls: Default::default(),
             update_calls: Default::default(),
             view_calls: Default::default(),
+            archived: Err(error),
+            archive_calls: Default::default(),
         }
     }
 
@@ -638,6 +676,8 @@ impl FakeClickupClient {
             create_calls: Default::default(),
             update_calls: Default::default(),
             view_calls: Default::default(),
+            archived: Ok(()),
+            archive_calls: Default::default(),
         }
     }
 
@@ -653,6 +693,8 @@ impl FakeClickupClient {
             create_calls: Default::default(),
             update_calls: Default::default(),
             view_calls: Default::default(),
+            archived: Ok(()),
+            archive_calls: Default::default(),
         }
     }
 
@@ -715,6 +757,21 @@ impl FakeClickupClient {
     /// `update_task` followed.
     pub fn view_calls(&self) -> std::rc::Rc<std::cell::RefCell<Vec<String>>> {
         std::rc::Rc::clone(&self.view_calls)
+    }
+
+    /// Makes `archive_task` (the delete path) return an arbitrary error
+    /// (builder-style), for asserting a failed archive surfaces as a store error.
+    pub fn failing_archive(mut self, error: ClickupError) -> Self {
+        self.archived = Err(error);
+        self
+    }
+
+    /// A shared handle to the recorded `archive_task` calls (each `task_id`), read
+    /// back the same way as [`Self::view_calls`]. A store delete test asserts
+    /// exactly one archive fired for the resolved task -- and, on error, that the
+    /// cache/map were left intact for the next sync to reconcile.
+    pub fn archive_calls(&self) -> std::rc::Rc<std::cell::RefCell<Vec<String>>> {
+        std::rc::Rc::clone(&self.archive_calls)
     }
 
     /// Overrides the bound List's status set (builder-style), for lifecycle
@@ -816,6 +873,11 @@ impl ClickupClient for FakeClickupClient {
     fn get_task(&self, _token: &str, task_id: &str) -> Result<ClickupTask, ClickupError> {
         self.view_calls.borrow_mut().push(task_id.to_string());
         self.viewed.clone()
+    }
+
+    fn archive_task(&self, _token: &str, task_id: &str) -> Result<(), ClickupError> {
+        self.archive_calls.borrow_mut().push(task_id.to_string());
+        self.archived.clone()
     }
 }
 
@@ -1273,5 +1335,27 @@ mod tests {
         let client = FakeClickupClient::valid(user(1));
         let err = client.get_task("pk_x", "90abc").unwrap_err();
         assert!(matches!(err, ClickupError::Transport(_)));
+    }
+
+    #[test]
+    fn fake_archive_task_records_id_and_succeeds_by_default() {
+        // A valid client archives (soft-deletes) successfully; the call is
+        // recorded by task id so a store delete test can assert it fired once.
+        let client = FakeClickupClient::valid(user(1));
+        let calls = client.archive_calls();
+
+        client.archive_task("pk_x", "90abc").unwrap();
+
+        let recorded = calls.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0], "90abc");
+    }
+
+    #[test]
+    fn fake_failing_archive_returns_scripted_error() {
+        let client = FakeClickupClient::valid(user(1))
+            .failing_archive(ClickupError::Upstream { status: 500 });
+        let err = client.archive_task("pk_x", "90abc").unwrap_err();
+        assert_eq!(err, ClickupError::Upstream { status: 500 });
     }
 }

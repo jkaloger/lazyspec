@@ -1,7 +1,7 @@
 ---
 title: 'ClickUp write-through: delete archives task'
 type: iteration
-status: draft
+status: complete
 author: unknown
 date: 2026-07-08
 tags: []

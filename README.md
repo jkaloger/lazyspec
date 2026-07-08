@@ -714,8 +714,17 @@ re-materialized into the cache and the `updated_at` baseline bumped. Because a
 `clickup-tasks` type carries no local lifecycle edges (its `states` mirror the
 List's status set), lazyspec applies **no local transition gate** for these docs
 -- unlike filesystem/GitHub types, any status in the List's set is accepted and
-ClickUp enforces its own transition rules, rejecting an illegal target. The
-remaining write path (`delete`) is not yet supported.
+ClickUp enforces its own transition rules, rejecting an illegal target.
+
+`delete` on a `clickup-tasks` doc **archives** the ClickUp task rather than
+hard-deleting it: lazyspec resolves the task id from `.lazyspec/task-map.json`
+and sends `PUT /task/{id}` with `{"archived": true}` (the `DELETE /task/{id}`
+hard-delete endpoint is never used). An archived task drops out of
+`task_list` fetches, so the doc leaves the local cache and the task map on the
+next `fetch` -- `delete` does not evict them eagerly -- while the task itself
+stays recoverable in ClickUp. Like the other writes it loads the token from
+`setup clickup` and fails with the same "run `lazyspec setup clickup`" error when
+none is stored, and errors on a doc with no task-map entry.
 
 Both `update` and `advance` are guarded by an **optimistic lock** on the
 `task-map.json` `updated_at` baseline. Before the `PUT`, lazyspec re-fetches the

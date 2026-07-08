@@ -266,8 +266,33 @@ impl DocumentStore for ClickupTasksStore {
 
         Ok(())
     }
-    fn delete(&mut self, _: &TypeDef, _: &str) -> Result<()> {
-        bail!("{}", Self::WRITE_UNIMPLEMENTED)
+    /// Delete a ClickUp-backed doc by *archiving* its task (RFC-056 §Design):
+    /// resolve the task id from the [`TaskMap`] and `PUT /task/{id}` with
+    /// `{"archived": true}` -- never a hard delete. The cache file and the
+    /// `TaskMap` entry are deliberately *not* evicted here: an archived task
+    /// drops out of `task_list`, so the next `fetch` (which owns the whole type
+    /// dir) removes the doc from the cache and the map. Eagerly deleting them now
+    /// would only race that authoritative sync.
+    fn delete(&mut self, _type_def: &TypeDef, doc_id: &str) -> Result<()> {
+        let token = self
+            .token
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("{}", Self::NO_TOKEN))?;
+
+        let task_map = TaskMap::load(&self.root)?;
+        let task_id = task_map
+            .get(doc_id)
+            .map(|e| e.task_id.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} is not mapped to a ClickUp task; run `lazyspec fetch` before deleting",
+                    doc_id
+                )
+            })?;
+
+        self.client.archive_task(token.expose(), &task_id)?;
+
+        Ok(())
     }
     fn set_provenance(&mut self, _: &TypeDef, _: &str, _: &[String]) -> Result<()> {
         bail!("{}", Self::WRITE_UNIMPLEMENTED)
@@ -2884,6 +2909,139 @@ mod tests {
 
         assert!(view_calls.borrow().is_empty(), "no baseline -> no GET");
         assert_eq!(update_calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn clickup_delete_archives_task_and_leaves_cache_and_map_for_sync() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_delete_archive");
+        let td = clickup_type_def(Some("list123"));
+
+        // An existing mapped, cached doc (from an earlier fetch/create).
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1774587145901");
+        map.save(&root).unwrap();
+        let cache = root.join(".lazyspec/cache/task/TASK-90abc.md");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, "---\ntitle: My task\n---\nbody\n").unwrap();
+
+        let fake = FakeClickupClient::valid(clickup_user());
+        let archive_calls = fake.archive_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        store.delete(&td, "TASK-90abc").unwrap();
+
+        // Exactly one archive (PUT /task/{id} {"archived":true}) for the resolved
+        // task id; there is no hard-delete method on the client to call.
+        let recorded = archive_calls.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0], "90abc");
+
+        // Archive is not an eager local eviction: the cache file and the map
+        // entry remain, and the next `fetch` (task gone from the list) removes
+        // them (RFC-056 §Design).
+        assert!(
+            cache.exists(),
+            "archive must not eagerly delete the cache file"
+        );
+        let map = TaskMap::load(&root).unwrap();
+        assert!(
+            map.get("TASK-90abc").is_some(),
+            "archive must not eagerly drop the TaskMap entry"
+        );
+    }
+
+    #[test]
+    fn clickup_delete_without_token_errors() {
+        use crate::engine::clickup::FakeClickupClient;
+
+        let root = tmp_root("clickup_delete_no_token");
+        let td = clickup_type_def(Some("list123"));
+        let fake = FakeClickupClient::valid(clickup_user());
+        let archive_calls = fake.archive_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root,
+            config: Config::default(),
+            token: None,
+        };
+
+        let err = store.delete(&td, "TASK-90abc").unwrap_err();
+        assert!(err.to_string().contains("setup clickup"), "got: {err}");
+        assert!(
+            archive_calls.borrow().is_empty(),
+            "a missing token must not archive"
+        );
+    }
+
+    #[test]
+    fn clickup_delete_unmapped_doc_errors() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_delete_unmapped");
+        let td = clickup_type_def(Some("list123"));
+        let fake = FakeClickupClient::valid(clickup_user());
+        let archive_calls = fake.archive_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root,
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        let err = store.delete(&td, "TASK-missing").unwrap_err();
+        assert!(
+            err.to_string().contains("not mapped to a ClickUp task"),
+            "got: {err}"
+        );
+        assert!(
+            archive_calls.borrow().is_empty(),
+            "an unmapped doc must not archive"
+        );
+    }
+
+    #[test]
+    fn clickup_delete_surfaces_archive_error() {
+        use crate::engine::clickup::{ClickupError, FakeClickupClient};
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_delete_archive_err");
+        let td = clickup_type_def(Some("list123"));
+
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1774587145901");
+        map.save(&root).unwrap();
+
+        let fake = FakeClickupClient::valid(clickup_user())
+            .failing_archive(ClickupError::Upstream { status: 500 });
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        let err = store.delete(&td, "TASK-90abc").unwrap_err();
+        assert!(
+            err.to_string().contains("ClickUp server error"),
+            "got: {err}"
+        );
+
+        // A failed archive left the local state intact for a retry.
+        let map = TaskMap::load(&root).unwrap();
+        assert!(map.get("TASK-90abc").is_some());
     }
 
     #[test]
