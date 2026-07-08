@@ -766,8 +766,23 @@ stored directly in the text field, so relations to any store -- e.g. a
 filesystem RFC -- are representable, unlike a ClickUp relationship-type field
 whose values are only task ids). Every other mapped custom field becomes a
 non-native `attributes` entry under its configured name; custom fields the map
-does not name are ignored. (Writing relations back to ClickUp via `link` is a
-later story; this is the read/decode path.)
+does not name are ignored.
+
+`link`/`unlink` on a `clickup-tasks` doc **write relations back**, closing the
+round-trip: after the edge is mirrored into the cache frontmatter, lazyspec
+serializes the doc's **complete** relation set into the same
+`- implements: RFC-056` YAML block and writes it to the configured `relations`
+text field (`POST /task/{id}/field/{field_id}` with `{"value": "<block>"}`) --
+a **full replace**, not an add/remove diff, so `unlink` clears the dropped edge
+by re-writing the remaining set (an emptied set writes the empty string). What
+`link` writes is exactly what `fetch` decodes, so relations survive a
+write-then-fetch cycle. This uses the configured text custom field, **not**
+ClickUp's native dependency/linked-task API (whose values are task ids only,
+which cannot represent a cross-store target). The field id resolves from the
+reserved `relations` key of `clickup_custom_field_map`; a `clickup-tasks` type
+without that entry raises a clear config error up front rather than failing
+mid-write, and the write loads the token from `setup clickup` (same
+"run `lazyspec setup clickup`" error when none is stored).
 
 #### `github-milestones` store
 

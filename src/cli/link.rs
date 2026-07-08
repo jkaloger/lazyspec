@@ -1,7 +1,10 @@
 use crate::cli::resolve::{resolve_to_id, resolve_to_path};
 use crate::engine::cache_lock::CacheLock;
-use crate::engine::config::{Config, StoreBackend};
-use crate::engine::document::{rewrite_frontmatter, RelationType};
+use crate::engine::clickup::{ClickupClient, ClickupHttpClient};
+use crate::engine::clickup_cache;
+use crate::engine::config::{Config, StoreBackend, CLICKUP_RELATIONS_FIELD};
+use crate::engine::credentials::{CredentialStore, LayeredCredentialStore, Token};
+use crate::engine::document::{rewrite_frontmatter, DocMeta, RelationType};
 use crate::engine::fs::FileSystem;
 use crate::engine::gh::{GhCli, GhGraphql, GhIssueReader, GhIssueWriter, GhMilestoneApi, GqlVar};
 use crate::engine::git_ref::{GitCli, GitRefOps};
@@ -9,6 +12,7 @@ use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::{board_number, GithubIssuesStore, GithubProjectsStore};
+use crate::engine::task_map::TaskMap;
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 
@@ -136,6 +140,20 @@ fn link_inner<
     })?;
 
     push_if_git_ref_backed(root, &resolved_from, Some(config))?;
+
+    // ClickUp-backed docs persist relations by serializing the doc's complete
+    // relation set (now mirrored into the cache above) into the configured text
+    // custom field -- a full replace, the same after-mirror posture git-ref
+    // takes. Production factories are hardcoded here just as git-ref hardcodes
+    // `GitCli`; the fake-injectable seam lives in `push_if_clickup_backed`.
+    push_if_clickup_backed(
+        root,
+        &resolved_from,
+        Some(config),
+        ClickupHttpClient::new,
+        || LayeredCredentialStore::global().load_clickup_token(),
+    )?;
+
     Ok(LinkOutcome {
         source: resolved_from,
         rel_type: RelationType::new(&rel_str),
@@ -457,11 +475,128 @@ fn unlink_inner<
     })?;
 
     push_if_git_ref_backed(root, &resolved_from, Some(config))?;
+
+    // Unlink is the same full-replace write as link: the edge was dropped from
+    // the cache above, so re-serializing the doc's remaining relations and
+    // replacing the field value drops it on ClickUp too.
+    push_if_clickup_backed(
+        root,
+        &resolved_from,
+        Some(config),
+        ClickupHttpClient::new,
+        || LayeredCredentialStore::global().load_clickup_token(),
+    )?;
+
     Ok(LinkOutcome {
         source: resolved_from,
         rel_type: RelationType::new(&rel_str),
         target: to_id,
     })
+}
+
+/// Persist a ClickUp-backed doc's relations by writing the configured text
+/// custom field (RFC-056 §Relations). A no-op unless `doc_path` is a cache doc
+/// whose type is [`StoreBackend::ClickupTasks`].
+///
+/// The write is a *full replace*: the doc's complete relation set -- read from
+/// the cache frontmatter the caller mirrored just above -- is serialized into
+/// the YAML relations block ([`clickup_cache::encode_relations_block`], the
+/// inverse of the read decode so the two round-trip) and written to the field
+/// via `POST /task/{id}/field/{field_id}`. No add/rem diffing: link and unlink
+/// both re-serialize and replace the whole block.
+///
+/// The field id resolves through the type's `clickup_custom_field_map` under the
+/// reserved [`CLICKUP_RELATIONS_FIELD`] key ([`TypeDef::clickup_field_id`], the
+/// name->uuid write direction). A type with no such entry raises a clear config
+/// error up front rather than failing mid-write. The token is loaded lazily
+/// (only for a clickup-backed doc, so an ordinary link never touches the
+/// keychain), mirroring the create/update/delete write paths.
+///
+/// `clickup_factory`/`token_loader` are injected so a test drives this with a
+/// [`FakeClickupClient`](crate::engine::clickup::FakeClickupClient) and a
+/// scripted token; production passes [`ClickupHttpClient::new`] and the global
+/// credential store.
+fn push_if_clickup_backed<C: ClickupClient>(
+    root: &Path,
+    doc_path: &Path,
+    config: Option<&Config>,
+    clickup_factory: impl FnOnce() -> C,
+    token_loader: impl FnOnce() -> Result<Option<Token>>,
+) -> Result<()> {
+    let config = match config {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+
+    if !doc_path.starts_with(".lazyspec/cache/") {
+        return Ok(());
+    }
+
+    let type_name = doc_path
+        .components()
+        .nth(2)
+        .and_then(|c| c.as_os_str().to_str())
+        .ok_or_else(|| {
+            anyhow!(
+                "cannot determine type from cache path: {}",
+                doc_path.display()
+            )
+        })?;
+
+    let type_def = config
+        .type_by_name(type_name)
+        .ok_or_else(|| anyhow!("unknown type '{}' from cache path", type_name))?;
+
+    if type_def.store != StoreBackend::ClickupTasks {
+        return Ok(());
+    }
+
+    // A clickup-tasks type must map the reserved relations key to a pre-created
+    // text custom field id; without it there is nowhere to persist relations.
+    let field_id = type_def
+        .clickup_field_id(CLICKUP_RELATIONS_FIELD)
+        .ok_or_else(|| {
+            anyhow!(
+                "type '{}' is clickup-tasks but has no '{}' entry in \
+                 clickup_custom_field_map; add the ClickUp text custom field id to \
+                 persist relations",
+                type_name,
+                CLICKUP_RELATIONS_FIELD
+            )
+        })?
+        .to_string();
+
+    let doc_id = crate::engine::store::extract_id_from_name(
+        doc_path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
+    );
+
+    let task_map = TaskMap::load(root)?;
+    let task_id = task_map
+        .get(&doc_id)
+        .map(|e| e.task_id.clone())
+        .ok_or_else(|| {
+            anyhow!(
+                "{} is not mapped to a ClickUp task; run `lazyspec fetch` before linking",
+                doc_id
+            )
+        })?;
+
+    // Full replace: serialize the doc's complete relation set from the cache
+    // (mirrored by the caller just above), not a diff of the single edge.
+    let content = std::fs::read_to_string(root.join(doc_path))?;
+    let meta = DocMeta::parse(&content)?;
+    let value = clickup_cache::encode_relations_block(&meta.related);
+
+    let token = token_loader()?.ok_or_else(|| {
+        anyhow!(
+            "no ClickUp token found; run `lazyspec setup clickup` before linking \
+             clickup-tasks documents"
+        )
+    })?;
+
+    let client = clickup_factory();
+    client.set_custom_field(token.expose(), &task_id, &field_id, &value)?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2421,5 +2556,279 @@ mod tests {
         let doc_path = std::path::Path::new(".lazyspec/cache/note/NOTE-001-my-note.md");
         let result = push_if_git_ref_backed(&root, doc_path, None);
         assert!(result.is_ok());
+    }
+
+    // --- ITERATION-278: persist clickup relations via the link custom-field write ---
+
+    use crate::engine::clickup::{ClickupUser, FakeClickupClient};
+    use crate::engine::config::CLICKUP_RELATIONS_FIELD;
+    use crate::engine::credentials::Token;
+
+    fn clickup_user() -> ClickupUser {
+        ClickupUser {
+            id: 1,
+            username: "jack".to_string(),
+            email: "jack@example.com".to_string(),
+        }
+    }
+
+    /// A config with one clickup-tasks type (`task`, prefix `TASK`) whose custom
+    /// field map names the reserved relations key to a text field uuid.
+    fn clickup_rel_config(with_field_map: bool) -> Config {
+        let mut td = TypeDef::test_fixture("task", StoreBackend::ClickupTasks);
+        td.prefix = "TASK".to_string();
+        td.clickup_list_id = Some("list123".to_string());
+        if with_field_map {
+            let mut map = std::collections::HashMap::new();
+            map.insert(CLICKUP_RELATIONS_FIELD.to_string(), "uuid-rel".to_string());
+            td.clickup_custom_field_map = Some(map);
+        }
+        let mut config = Config::default();
+        config.documents.types = vec![td];
+        config
+    }
+
+    /// Write a clickup cache doc carrying a `related:` block, mirroring the state
+    /// `link_inner` leaves before the field push runs.
+    fn write_clickup_cache_doc(root: &std::path::Path, doc_id: &str, related: &[(&str, &str)]) {
+        let dir = root.join(".lazyspec/cache/task");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut content = String::from(
+            "---\ntitle: A task\ntype: task\nstatus: open\nauthor: clickup\ndate: 2026-03-27\ntags: []\n",
+        );
+        if !related.is_empty() {
+            content.push_str("related:\n");
+            for (rel, target) in related {
+                content.push_str(&format!("- {}: {}\n", rel, target));
+            }
+        }
+        content.push_str("---\nbody\n");
+        std::fs::write(dir.join(format!("{}.md", doc_id)), content).unwrap();
+    }
+
+    fn seed_task_map(root: &std::path::Path, doc_id: &str, task_id: &str) {
+        let mut map = TaskMap::load(root).unwrap();
+        map.insert(doc_id, task_id, "1774587145901");
+        map.save(root).unwrap();
+    }
+
+    // AC1: a clickup-tasks doc's relations persist by serializing the full set
+    // into the configured text custom field via the ClickUp API (fake records
+    // the set), targeting the field id resolved from clickup_custom_field_map.
+    #[test]
+    fn push_clickup_writes_serialized_relations_to_configured_field() {
+        let root = tmp_root("clickup_link_set");
+        let config = clickup_rel_config(true);
+        write_clickup_cache_doc(&root, "TASK-1", &[("implements", "RFC-056")]);
+        seed_task_map(&root, "TASK-1", "task-a");
+
+        let client = FakeClickupClient::valid(clickup_user());
+        let calls = client.set_field_calls();
+        let doc_path = std::path::Path::new(".lazyspec/cache/task/TASK-1.md");
+
+        push_if_clickup_backed(
+            &root,
+            doc_path,
+            Some(&config),
+            || client,
+            || Ok(Some(Token::new("pk_test"))),
+        )
+        .unwrap();
+
+        let recorded = calls.borrow();
+        assert_eq!(recorded.len(), 1);
+        // Targets the field id resolved via clickup_field_id (name -> uuid).
+        assert_eq!(recorded[0].0, "task-a");
+        assert_eq!(recorded[0].1, "uuid-rel");
+        // The serialized YAML relations block, the same shape 275 parses.
+        assert_eq!(recorded[0].2, "- implements: RFC-056");
+    }
+
+    // ROUND-TRIP: the block 278 writes decodes back to the original relations via
+    // the 275 read direction (clickup_cache::task_to_doc over the custom field).
+    #[test]
+    fn clickup_relation_write_round_trips_through_read_decode() {
+        let root = tmp_root("clickup_link_roundtrip");
+        let config = clickup_rel_config(true);
+        write_clickup_cache_doc(
+            &root,
+            "TASK-1",
+            &[("implements", "RFC-056"), ("blocks", "RFC-010")],
+        );
+        seed_task_map(&root, "TASK-1", "task-a");
+
+        let client = FakeClickupClient::valid(clickup_user());
+        let calls = client.set_field_calls();
+        let doc_path = std::path::Path::new(".lazyspec/cache/task/TASK-1.md");
+        push_if_clickup_backed(
+            &root,
+            doc_path,
+            Some(&config),
+            || client,
+            || Ok(Some(Token::new("pk_test"))),
+        )
+        .unwrap();
+
+        let written_block = calls.borrow()[0].2.clone();
+
+        // Feed the written block back through the read path: a task whose relations
+        // field holds exactly what 278 wrote must decode to the original relations.
+        let td = &config.documents.types[0];
+        let task_json = serde_json::json!({
+            "id": "task-a",
+            "name": "A task",
+            "status": {"status": "open"},
+            "custom_fields": [
+                {"id": "uuid-rel", "name": "relations", "value": written_block}
+            ]
+        });
+        let task: crate::engine::clickup::ClickupTask = serde_json::from_value(task_json).unwrap();
+        let (meta, _) = crate::engine::clickup_cache::task_to_doc(&task, td, "TASK-1");
+
+        assert_eq!(meta.related.len(), 2);
+        assert_eq!(meta.related[0].rel_type, RelationType::new("implements"));
+        assert_eq!(meta.related[0].target, "RFC-056");
+        assert_eq!(meta.related[1].rel_type, RelationType::new("blocks"));
+        assert_eq!(meta.related[1].target, "RFC-010");
+    }
+
+    // Unlink is the same full-replace write: an emptied cache `related` set
+    // serializes to the empty string, clearing the field on ClickUp.
+    #[test]
+    fn push_clickup_clears_field_when_no_relations_remain() {
+        let root = tmp_root("clickup_unlink_clear");
+        let config = clickup_rel_config(true);
+        write_clickup_cache_doc(&root, "TASK-1", &[]);
+        seed_task_map(&root, "TASK-1", "task-a");
+
+        let client = FakeClickupClient::valid(clickup_user());
+        let calls = client.set_field_calls();
+        let doc_path = std::path::Path::new(".lazyspec/cache/task/TASK-1.md");
+        push_if_clickup_backed(
+            &root,
+            doc_path,
+            Some(&config),
+            || client,
+            || Ok(Some(Token::new("pk_test"))),
+        )
+        .unwrap();
+
+        let recorded = calls.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].2, "");
+    }
+
+    // A clickup-tasks type with no relations entry in its custom-field map raises
+    // a clear config error up front, not a mid-write failure -- and never calls
+    // the client.
+    #[test]
+    fn push_clickup_missing_field_map_entry_errors() {
+        let root = tmp_root("clickup_link_nofieldmap");
+        let config = clickup_rel_config(false);
+        write_clickup_cache_doc(&root, "TASK-1", &[("implements", "RFC-056")]);
+        seed_task_map(&root, "TASK-1", "task-a");
+
+        let client = FakeClickupClient::valid(clickup_user());
+        let calls = client.set_field_calls();
+        let doc_path = std::path::Path::new(".lazyspec/cache/task/TASK-1.md");
+        let err = push_if_clickup_backed(
+            &root,
+            doc_path,
+            Some(&config),
+            || client,
+            || Ok(Some(Token::new("pk_test"))),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("clickup_custom_field_map"),
+            "got: {err}"
+        );
+        assert!(
+            calls.borrow().is_empty(),
+            "no field write on a config error"
+        );
+    }
+
+    // A missing token surfaces a clear `setup clickup` error, not a transport
+    // failure, and performs no field write.
+    #[test]
+    fn push_clickup_missing_token_errors() {
+        let root = tmp_root("clickup_link_notoken");
+        let config = clickup_rel_config(true);
+        write_clickup_cache_doc(&root, "TASK-1", &[("implements", "RFC-056")]);
+        seed_task_map(&root, "TASK-1", "task-a");
+
+        let client = FakeClickupClient::valid(clickup_user());
+        let calls = client.set_field_calls();
+        let doc_path = std::path::Path::new(".lazyspec/cache/task/TASK-1.md");
+        let err = push_if_clickup_backed(&root, doc_path, Some(&config), || client, || Ok(None))
+            .unwrap_err();
+
+        assert!(err.to_string().contains("setup clickup"), "got: {err}");
+        assert!(calls.borrow().is_empty(), "no field write without a token");
+    }
+
+    // A doc not mapped to a ClickUp task cannot be persisted; the error points at
+    // `fetch` and no field write fires.
+    #[test]
+    fn push_clickup_unmapped_doc_errors() {
+        let root = tmp_root("clickup_link_unmapped");
+        let config = clickup_rel_config(true);
+        write_clickup_cache_doc(&root, "TASK-1", &[("implements", "RFC-056")]);
+        // No task map entry seeded.
+
+        let client = FakeClickupClient::valid(clickup_user());
+        let calls = client.set_field_calls();
+        let doc_path = std::path::Path::new(".lazyspec/cache/task/TASK-1.md");
+        let err = push_if_clickup_backed(
+            &root,
+            doc_path,
+            Some(&config),
+            || client,
+            || Ok(Some(Token::new("pk_test"))),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("not mapped"), "got: {err}");
+        assert!(calls.borrow().is_empty());
+    }
+
+    // A non-clickup type is a no-op: the field write never fires and the token
+    // loader is never consulted (an ordinary link never touches the keychain).
+    #[test]
+    fn push_clickup_skips_non_clickup_type() {
+        let root = tmp_root("clickup_link_skip_type");
+        let config = gh_config_with_rfc_type();
+        let client = FakeClickupClient::valid(clickup_user());
+        let calls = client.set_field_calls();
+        let doc_path = std::path::Path::new(".lazyspec/cache/rfc/RFC-001-my-rfc.md");
+        push_if_clickup_backed(
+            &root,
+            doc_path,
+            Some(&config),
+            || client,
+            || panic!("token loader must not run for a non-clickup doc"),
+        )
+        .unwrap();
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn push_clickup_skips_non_cache_path() {
+        let root = tmp_root("clickup_link_skip_noncache");
+        let config = clickup_rel_config(true);
+        let client = FakeClickupClient::valid(clickup_user());
+        let calls = client.set_field_calls();
+        let doc_path = std::path::Path::new("docs/task/TASK-1.md");
+        push_if_clickup_backed(
+            &root,
+            doc_path,
+            Some(&config),
+            || client,
+            || panic!("token loader must not run for a non-cache doc"),
+        )
+        .unwrap();
+        assert!(calls.borrow().is_empty());
     }
 }

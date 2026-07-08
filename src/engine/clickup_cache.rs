@@ -270,6 +270,22 @@ fn decode_relations_block(text: &str) -> Vec<Relation> {
         .collect()
 }
 
+/// Serialize a doc's relations into the YAML relations block the read path
+/// ([`decode_relations_block`]) parses -- a sequence of single-key
+/// `- <rel-type>: <target>` mappings, the same shape `issue_body::serialize`
+/// embeds in a GitHub issue body. This is the *write* direction of the relation
+/// round-trip (RFC-056 §Relations): the whole block replaces the configured text
+/// custom field's value on every link/unlink (a full replace, no add/rem diff),
+/// so an empty relation set serializes to the empty string -- which
+/// [`decode_relations_block`] decodes back to no relations, closing the loop.
+pub(crate) fn encode_relations_block(related: &[Relation]) -> String {
+    related
+        .iter()
+        .map(|rel| format!("- {}: {}", rel.rel_type, rel.target))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Coerce a ClickUp custom-field JSON value into an [`AttrValue`] for a
 /// non-native attribute. Scalars map to their typed variant; `null` yields
 /// `None` (the attribute is absent); a composite value falls back to its JSON
@@ -919,5 +935,46 @@ mod tests {
         assert_eq!(meta.related.len(), 1);
         assert_eq!(meta.related[0].rel_type, RelationType::new("implements"));
         assert_eq!(meta.related[0].target, "RFC-056");
+    }
+
+    // --- ITERATION-278: encode relations block (write direction) ---
+
+    fn rel(rel_type: &str, target: &str) -> Relation {
+        Relation {
+            rel_type: RelationType::new(rel_type),
+            target: target.to_string(),
+        }
+    }
+
+    #[test]
+    fn encode_relations_block_emits_single_key_mapping_lines() {
+        let block =
+            encode_relations_block(&[rel("implements", "RFC-056"), rel("blocks", "RFC-010")]);
+        assert_eq!(block, "- implements: RFC-056\n- blocks: RFC-010");
+    }
+
+    #[test]
+    fn encode_empty_relations_yields_empty_string() {
+        assert_eq!(encode_relations_block(&[]), "");
+    }
+
+    #[test]
+    fn encode_then_decode_round_trips_relations() {
+        // ROUND-TRIP AC: relations serialized by the 278 write direction decode
+        // back to the same set via the 275 read direction (decode_relations_block).
+        let original = vec![
+            rel("implements", "RFC-056"),
+            rel("blocks", "RFC-010"),
+            rel("relates-to", "STORY-200"),
+        ];
+        let block = encode_relations_block(&original);
+        let decoded = decode_relations_block(&block);
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn encode_then_decode_empty_round_trips_to_no_relations() {
+        let block = encode_relations_block(&[]);
+        assert!(decode_relations_block(&block).is_empty());
     }
 }

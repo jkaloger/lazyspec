@@ -406,6 +406,20 @@ pub trait ClickupClient {
     /// `TaskMap` on the next sync, but the task stays recoverable in ClickUp.
     /// lazyspec never hard-deletes: `DELETE /task/{id}` is not called anywhere.
     fn archive_task(&self, token: &str, task_id: &str) -> Result<(), ClickupError>;
+
+    /// Sets a task's custom field value (`POST /task/{id}/field/{field_id}`) with
+    /// `{"value": <value>}` (RFC-056 §Relations). This is a *full replace* of the
+    /// field's stored value, not an add/remove diff: the relation write path
+    /// serializes a doc's complete relation set into the configured text custom
+    /// field and writes the whole block on every link/unlink. One custom field per
+    /// request (ClickUp offers no batch on this endpoint).
+    fn set_custom_field(
+        &self,
+        token: &str,
+        task_id: &str,
+        field_id: &str,
+        value: &str,
+    ) -> Result<(), ClickupError>;
 }
 
 /// reqwest-backed [`ClickupClient`]. Sends the personal token in a raw
@@ -574,6 +588,28 @@ impl ClickupClient for ClickupHttpClient {
         }
         Ok(())
     }
+
+    fn set_custom_field(
+        &self,
+        token: &str,
+        task_id: &str,
+        field_id: &str,
+        value: &str,
+    ) -> Result<(), ClickupError> {
+        let url = format!("{}/task/{}/field/{}", self.base_url, task_id, field_id);
+        let response = self
+            .http
+            .post(&url)
+            .header(AUTHORIZATION, token)
+            .json(&serde_json::json!({ "value": value }))
+            .send()?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(classify_status(status.as_u16(), response.headers()));
+        }
+        Ok(())
+    }
 }
 
 /// In-memory [`ClickupClient`] returning a scripted outcome, for downstream
@@ -610,6 +646,14 @@ pub struct FakeClickupClient {
     /// Every `archive_task` call recorded as `task_id`, shared the same way so a
     /// store delete test can assert exactly one archive fired for the mapped task.
     archive_calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    /// The outcome `set_custom_field` returns -- the relation-persist write.
+    /// Defaults to `Ok(())` on a valid client so a link succeeds unless scripted
+    /// to fail.
+    set_field: Result<(), ClickupError>,
+    /// Every `set_custom_field` call recorded as `(task_id, field_id, value)`,
+    /// shared behind an `Rc` so a link test can read back the serialized relations
+    /// block the write path built and the field id it targeted.
+    set_field_calls: std::rc::Rc<std::cell::RefCell<Vec<(String, String, String)>>>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -628,6 +672,8 @@ impl FakeClickupClient {
             view_calls: Default::default(),
             archived: Ok(()),
             archive_calls: Default::default(),
+            set_field: Ok(()),
+            set_field_calls: Default::default(),
         }
     }
 
@@ -645,6 +691,8 @@ impl FakeClickupClient {
             view_calls: Default::default(),
             archived: Err(ClickupError::InvalidToken { status: 401 }),
             archive_calls: Default::default(),
+            set_field: Err(ClickupError::InvalidToken { status: 401 }),
+            set_field_calls: Default::default(),
         }
     }
 
@@ -660,8 +708,10 @@ impl FakeClickupClient {
             create_calls: Default::default(),
             update_calls: Default::default(),
             view_calls: Default::default(),
-            archived: Err(error),
+            archived: Err(error.clone()),
             archive_calls: Default::default(),
+            set_field: Err(error),
+            set_field_calls: Default::default(),
         }
     }
 
@@ -679,6 +729,8 @@ impl FakeClickupClient {
             view_calls: Default::default(),
             archived: Ok(()),
             archive_calls: Default::default(),
+            set_field: Ok(()),
+            set_field_calls: Default::default(),
         }
     }
 
@@ -696,6 +748,8 @@ impl FakeClickupClient {
             view_calls: Default::default(),
             archived: Ok(()),
             archive_calls: Default::default(),
+            set_field: Ok(()),
+            set_field_calls: Default::default(),
         }
     }
 
@@ -773,6 +827,23 @@ impl FakeClickupClient {
     /// cache/map were left intact for the next sync to reconcile.
     pub fn archive_calls(&self) -> std::rc::Rc<std::cell::RefCell<Vec<String>>> {
         std::rc::Rc::clone(&self.archive_calls)
+    }
+
+    /// Makes `set_custom_field` (the relation-persist write) return an arbitrary
+    /// error (builder-style), for asserting a failed field write surfaces as a
+    /// link error and leaves the cache to reconcile on the next sync.
+    pub fn failing_set_field(mut self, error: ClickupError) -> Self {
+        self.set_field = Err(error);
+        self
+    }
+
+    /// A shared handle to the recorded `set_custom_field` calls (`(task_id,
+    /// field_id, value)`). Clone it before boxing the client, then read back the
+    /// serialized relations block and the field id the relation write targeted.
+    pub fn set_field_calls(
+        &self,
+    ) -> std::rc::Rc<std::cell::RefCell<Vec<(String, String, String)>>> {
+        std::rc::Rc::clone(&self.set_field_calls)
     }
 
     /// Overrides the bound List's status set (builder-style), for lifecycle
@@ -879,6 +950,21 @@ impl ClickupClient for FakeClickupClient {
     fn archive_task(&self, _token: &str, task_id: &str) -> Result<(), ClickupError> {
         self.archive_calls.borrow_mut().push(task_id.to_string());
         self.archived.clone()
+    }
+
+    fn set_custom_field(
+        &self,
+        _token: &str,
+        task_id: &str,
+        field_id: &str,
+        value: &str,
+    ) -> Result<(), ClickupError> {
+        self.set_field_calls.borrow_mut().push((
+            task_id.to_string(),
+            field_id.to_string(),
+            value.to_string(),
+        ));
+        self.set_field.clone()
     }
 }
 
@@ -1357,6 +1443,35 @@ mod tests {
         let client = FakeClickupClient::valid(user(1))
             .failing_archive(ClickupError::Upstream { status: 500 });
         let err = client.archive_task("pk_x", "90abc").unwrap_err();
+        assert_eq!(err, ClickupError::Upstream { status: 500 });
+    }
+
+    #[test]
+    fn fake_set_custom_field_records_call_and_succeeds_by_default() {
+        // A valid client persists the field successfully; the call is recorded as
+        // (task_id, field_id, value) so a link test can read back the serialized
+        // relations block and the field id the write targeted.
+        let client = FakeClickupClient::valid(user(1));
+        let calls = client.set_field_calls();
+
+        client
+            .set_custom_field("pk_x", "90abc", "uuid-rel", "- implements: RFC-056")
+            .unwrap();
+
+        let recorded = calls.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "90abc");
+        assert_eq!(recorded[0].1, "uuid-rel");
+        assert_eq!(recorded[0].2, "- implements: RFC-056");
+    }
+
+    #[test]
+    fn fake_failing_set_field_returns_scripted_error() {
+        let client = FakeClickupClient::valid(user(1))
+            .failing_set_field(ClickupError::Upstream { status: 500 });
+        let err = client
+            .set_custom_field("pk_x", "90abc", "uuid-rel", "v")
+            .unwrap_err();
         assert_eq!(err, ClickupError::Upstream { status: 500 });
     }
 }

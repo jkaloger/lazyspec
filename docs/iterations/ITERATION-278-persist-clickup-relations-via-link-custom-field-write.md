@@ -1,7 +1,7 @@
 ---
 title: Persist ClickUp relations via link custom-field write
 type: iteration
-status: draft
+status: complete
 author: unknown
 date: 2026-07-05
 tags: []
