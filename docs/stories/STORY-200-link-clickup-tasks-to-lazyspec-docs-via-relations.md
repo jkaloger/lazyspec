@@ -1,7 +1,7 @@
 ---
 title: Link ClickUp tasks to lazyspec docs via relations
 type: story
-status: accepted
+status: in-progress
 author: unknown
 date: 2026-07-05
 tags: []
