@@ -1,7 +1,7 @@
 ---
 title: Decode ClickUp custom-field relations on read
 type: iteration
-status: draft
+status: complete
 author: unknown
 date: 2026-07-05
 tags: []

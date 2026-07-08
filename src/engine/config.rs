@@ -286,7 +286,23 @@ pub struct TypeDef {
     /// other stores.
     #[serde(default)]
     pub clickup_list_id: Option<String>,
+    /// Maps a lazyspec name to the ClickUp custom-field uuid that holds it, for
+    /// anything with no native ClickUp field (RFC-056 §Field mapping). The
+    /// reserved key [`CLICKUP_RELATIONS_FIELD`] names the *text* field carrying
+    /// the serialized relations block; every other key names a non-native
+    /// attribute. Read via [`TypeDef::clickup_field_id`] (name -> uuid, the write
+    /// direction) and [`TypeDef::clickup_field_name`] (uuid -> name, the decode
+    /// direction). Unused by other stores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clickup_custom_field_map: Option<HashMap<String, String>>,
 }
+
+/// The reserved [`TypeDef::clickup_custom_field_map`] key naming the ClickUp
+/// *text* custom field that holds a task's serialized lazyspec relations block
+/// (the `issue_body.rs` YAML `- implements: RFC-056` shape). Relations round-trip
+/// through one text field, not a relationship-type field (RFC-056 §Relations), so
+/// one reserved key names it; any other map key names a non-native attribute.
+pub const CLICKUP_RELATIONS_FIELD: &str = "relations";
 
 /// One entry in the `[[relationships]]` block: a relationship name and its
 /// optional inverse keyword. A relationship with no `inverse` is symmetric
@@ -669,6 +685,7 @@ pub fn starter_types() -> Vec<TypeDef> {
         github_issue_tag: None,
         github_issue_type: None,
         clickup_list_id: None,
+        clickup_custom_field_map: None,
     };
     vec![
         simple("rfc", "rfcs", "docs/rfcs", "RFC", "●"),
@@ -702,6 +719,7 @@ pub fn starter_types() -> Vec<TypeDef> {
             github_issue_tag: None,
             github_issue_type: None,
             clickup_list_id: None,
+            clickup_custom_field_map: None,
         },
         TypeDef {
             name: "dictum".to_string(),
@@ -723,6 +741,7 @@ pub fn starter_types() -> Vec<TypeDef> {
             github_issue_tag: None,
             github_issue_type: None,
             clickup_list_id: None,
+            clickup_custom_field_map: None,
         },
     ]
 }
@@ -1037,6 +1056,27 @@ impl TypeDef {
             .clone()
             .unwrap_or_else(|| crate::engine::gh::type_label(&self.name))
     }
+
+    /// Resolve a lazyspec name to the ClickUp custom-field uuid holding it (the
+    /// *write* direction). `None` when no `clickup_custom_field_map` is
+    /// configured or the name is unmapped.
+    pub fn clickup_field_id(&self, name: &str) -> Option<&str> {
+        self.clickup_custom_field_map
+            .as_ref()?
+            .get(name)
+            .map(String::as_str)
+    }
+
+    /// Resolve a ClickUp custom-field uuid back to the lazyspec name it holds
+    /// (the *decode* direction). `None` when no `clickup_custom_field_map` is
+    /// configured or no mapping points at that uuid.
+    pub fn clickup_field_name(&self, field_id: &str) -> Option<&str> {
+        self.clickup_custom_field_map
+            .as_ref()?
+            .iter()
+            .find(|(_, uuid)| uuid.as_str() == field_id)
+            .map(|(name, _)| name.as_str())
+    }
 }
 
 #[cfg(test)]
@@ -1062,6 +1102,7 @@ impl TypeDef {
             github_issue_tag: None,
             github_issue_type: None,
             clickup_list_id: None,
+            clickup_custom_field_map: None,
         }
     }
 }
@@ -2177,6 +2218,45 @@ github_label = "Ticket"
         let config = Config::parse(TYPES).unwrap();
         let td = config.type_by_name("rfc").unwrap();
         assert_eq!(td.label_override, None);
+    }
+
+    #[test]
+    fn toml_clickup_custom_field_map_parses_and_round_trips() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[[types]]
+name = "task"
+plural = "tasks"
+dir = "docs/tasks"
+prefix = "TASK"
+store = "clickup-tasks"
+clickup_list_id = "list123"
+
+[types.clickup_custom_field_map]
+relations = "uuid-rel"
+owner = "uuid-owner"
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        let td = config.type_by_name("task").unwrap();
+        assert_eq!(td.clickup_field_id("relations"), Some("uuid-rel"));
+        assert_eq!(td.clickup_field_id("owner"), Some("uuid-owner"));
+        assert_eq!(td.clickup_field_name("uuid-rel"), Some("relations"));
+
+        // The map survives the config_write round-trip (to_toml -> parse).
+        let emitted = config.to_toml().unwrap();
+        let reparsed = Config::parse(&emitted).unwrap();
+        let td = reparsed.type_by_name("task").unwrap();
+        assert_eq!(td.clickup_field_id("relations"), Some("uuid-rel"));
+        assert_eq!(td.clickup_field_id("owner"), Some("uuid-owner"));
+    }
+
+    #[test]
+    fn toml_without_clickup_custom_field_map_leaves_it_none() {
+        let config = Config::parse(TYPES).unwrap();
+        let td = config.type_by_name("rfc").unwrap();
+        assert!(td.clickup_custom_field_map.is_none());
     }
 
     #[test]

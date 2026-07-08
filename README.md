@@ -737,6 +737,38 @@ clobbers a concurrent change. When the baseline matches, the write proceeds and 
 advances to the returned task's fresh `date_updated`. The conflict surfaces
 through the normal `--json` error path.
 
+Anything with **no native ClickUp field** -- relations and non-native attributes
+-- rides a ClickUp *custom field*, mapped by a per-type
+`clickup_custom_field_map` (lazyspec name -> ClickUp custom-field uuid):
+
+```toml
+[[types]]
+name = "task"
+plural = "tasks"
+dir = "docs/tasks"
+prefix = "TASK"
+store = "clickup-tasks"
+clickup_list_id = "901234567890"
+
+[types.clickup_custom_field_map]
+# the reserved `relations` key names the *text* field holding the serialized
+# relations block; every other key names a non-native attribute
+relations = "b8c9d0e1-2f34-5678-9abc-def012345678"
+owner = "a1b2c3d4-5e6f-7890-1234-567890abcdef"
+```
+
+On `fetch`, each task's custom fields are decoded against this map. The field
+mapped from the reserved **`relations`** key is read as a serialized relations
+block (the same `- implements: RFC-056` YAML shape GitHub-issue bodies embed);
+its entries become the doc's `related` relations, resolving **identically to a
+filesystem doc's** under `context --json` (the targets are lazyspec doc ids
+stored directly in the text field, so relations to any store -- e.g. a
+filesystem RFC -- are representable, unlike a ClickUp relationship-type field
+whose values are only task ids). Every other mapped custom field becomes a
+non-native `attributes` entry under its configured name; custom fields the map
+does not name are ignored. (Writing relations back to ClickUp via `link` is a
+later story; this is the read/decode path.)
+
 #### `github-milestones` store
 
 Types stored as `--store github-milestones` map each document to a GitHub

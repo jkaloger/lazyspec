@@ -640,6 +640,7 @@ mod tests {
             github_issue_tag: None,
             github_issue_type: None,
             clickup_list_id: None,
+            clickup_custom_field_map: None,
         };
         let mut config = Config::default();
         config.documents.types = vec![
@@ -1269,6 +1270,7 @@ mod tests {
             github_issue_tag: None,
             github_issue_type: None,
             clickup_list_id: None,
+            clickup_custom_field_map: None,
         };
         let mut config = Config::default();
         config.documents.types = vec![
@@ -1631,6 +1633,7 @@ mod tests {
             github_issue_tag: None,
             github_issue_type: None,
             clickup_list_id: None,
+            clickup_custom_field_map: None,
         };
         let story_type = TypeDef {
             name: "story".to_string(),
@@ -1652,6 +1655,7 @@ mod tests {
             github_issue_tag: None,
             github_issue_type: None,
             clickup_list_id: None,
+            clickup_custom_field_map: None,
         };
 
         let mut config = Config::default();
@@ -2165,6 +2169,7 @@ mod tests {
             github_issue_tag: None,
             github_issue_type: None,
             clickup_list_id: None,
+            clickup_custom_field_map: None,
         };
         let story_type = TypeDef {
             name: "story".to_string(),
@@ -2186,6 +2191,7 @@ mod tests {
             github_issue_tag: None,
             github_issue_type: None,
             clickup_list_id: None,
+            clickup_custom_field_map: None,
         };
 
         let mut config = Config::default();

@@ -474,6 +474,7 @@ mod tests {
             github_issue_tag: None,
             github_issue_type: None,
             clickup_list_id: None,
+            clickup_custom_field_map: None,
         };
 
         // A realistic cache file: no `id:` in frontmatter (mirrors what

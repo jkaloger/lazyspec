@@ -29,6 +29,7 @@ fn milestones_only_config() -> Config {
         github_issue_tag: None,
         github_issue_type: None,
         clickup_list_id: None,
+        clickup_custom_field_map: None,
     }];
     config.documents.github = None;
     config
@@ -55,6 +56,7 @@ fn singleton_type(name: &str, dir: &str, prefix: &str) -> TypeDef {
         github_issue_tag: None,
         github_issue_type: None,
         clickup_list_id: None,
+        clickup_custom_field_map: None,
     }
 }
 

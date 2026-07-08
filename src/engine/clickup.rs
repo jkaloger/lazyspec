@@ -191,9 +191,10 @@ pub struct ClickupCreator {
     pub username: String,
 }
 
-/// A custom-field value on a task, keyed by its ClickUp uuid. Decoded so the
-/// task body parses cleanly; relation decoding off these values is a later
-/// RFC-056 story (ITERATION-275), so `value` is retained raw for now.
+/// A custom-field value on a task, keyed by its ClickUp uuid. `value` is kept as
+/// a raw JSON value because ClickUp returns different shapes per field type; the
+/// read path decodes it against the type's `clickup_custom_field_map`
+/// (`clickup_cache::task_to_doc`) into relations or non-native attributes.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ClickupCustomField {
     pub id: String,

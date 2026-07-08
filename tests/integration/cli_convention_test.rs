@@ -28,6 +28,7 @@ fn convention_config(fixture: &TestFixture) -> Config {
         github_issue_tag: None,
         github_issue_type: None,
         clickup_list_id: None,
+        clickup_custom_field_map: None,
     });
     config.documents.types.push(TypeDef {
         name: "dictum".to_string(),
@@ -49,6 +50,7 @@ fn convention_config(fixture: &TestFixture) -> Config {
         github_issue_tag: None,
         github_issue_type: None,
         clickup_list_id: None,
+        clickup_custom_field_map: None,
     });
     config
 }

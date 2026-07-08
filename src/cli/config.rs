@@ -122,6 +122,7 @@ pub fn run_add_type(
         github_issue_tag: None,
         github_issue_type: None,
         clickup_list_id: None,
+        clickup_custom_field_map: None,
     });
 
     let out = write_config_in_place(&src, &config)?;

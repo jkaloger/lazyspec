@@ -17,8 +17,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
 use crate::engine::clickup::{ClickupClient, ClickupStatus, ClickupTask, TaskCreate, TaskUpdate};
-use crate::engine::config::{Lifecycle, TypeDef};
-use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
+use crate::engine::config::{Lifecycle, TypeDef, CLICKUP_RELATIONS_FIELD};
+use crate::engine::document::{self, AttrValue, DocMeta, DocType, Relation, Status};
 use crate::engine::store_dispatch::write_cache_file;
 use crate::engine::task_map::TaskMap;
 
@@ -158,6 +158,15 @@ fn list_cached_ids(cache_dir: &Path) -> HashSet<String> {
 /// the priority name, `estimate` the `time_estimate` in ms, `due` the `due_date`
 /// epoch ms. The body prefers `markdown_description`, falling back to
 /// `text_content`.
+///
+/// Anything with no native ClickUp home is decoded off the task's custom fields
+/// through the type's `clickup_custom_field_map` (RFC-056 §Field mapping): the
+/// field mapped from the reserved [`CLICKUP_RELATIONS_FIELD`] key holds a
+/// serialized relations block (`- implements: RFC-056`) whose entries become
+/// `DocMeta.related` -- targets are lazyspec doc ids stored directly, so they
+/// resolve identically to a filesystem doc's relations; every other mapped field
+/// becomes a `DocMeta.attributes` entry under its configured name. Custom fields
+/// the map does not name are ignored.
 pub(crate) fn task_to_doc(task: &ClickupTask, type_def: &TypeDef, id: &str) -> (DocMeta, String) {
     let author = task
         .creator
@@ -186,6 +195,8 @@ pub(crate) fn task_to_doc(task: &ClickupTask, type_def: &TypeDef, id: &str) -> (
         attributes.insert("due".to_string(), AttrValue::Int(due));
     }
 
+    let related = decode_custom_fields(task, type_def, &mut attributes);
+
     let body = if !task.markdown_description.trim().is_empty() {
         task.markdown_description.clone()
     } else {
@@ -201,7 +212,7 @@ pub(crate) fn task_to_doc(task: &ClickupTask, type_def: &TypeDef, id: &str) -> (
         date,
         tags: task.tags.iter().map(|t| t.name.clone()).collect(),
         provenance: vec![],
-        related: vec![],
+        related,
         validate_ignore: false,
         virtual_doc: false,
         id: id.to_string(),
@@ -209,6 +220,74 @@ pub(crate) fn task_to_doc(task: &ClickupTask, type_def: &TypeDef, id: &str) -> (
     };
 
     (meta, body)
+}
+
+/// Decode a task's custom fields against the type's `clickup_custom_field_map`
+/// (RFC-056 §Field mapping), the *read* direction of the resolver. Each custom
+/// field whose uuid the map names is dispatched by its configured name: the
+/// reserved [`CLICKUP_RELATIONS_FIELD`] name yields the decoded relations
+/// (returned); any other name inserts a non-native attribute into `attributes`.
+/// Unmapped fields and unparseable values are skipped -- a malformed relations
+/// blob or an odd custom-field payload never fails the materialize.
+fn decode_custom_fields(
+    task: &ClickupTask,
+    type_def: &TypeDef,
+    attributes: &mut std::collections::BTreeMap<String, AttrValue>,
+) -> Vec<Relation> {
+    let mut related = Vec::new();
+    for field in &task.custom_fields {
+        let Some(name) = type_def.clickup_field_name(&field.id) else {
+            continue;
+        };
+        let Some(value) = &field.value else { continue };
+        if name == CLICKUP_RELATIONS_FIELD {
+            if let Some(text) = value.as_str() {
+                related.extend(decode_relations_block(text));
+            }
+        } else if let Some(attr) = json_value_to_attr(value) {
+            attributes.insert(name.to_string(), attr);
+        }
+    }
+    related
+}
+
+/// Parse a serialized relations block (the `issue_body.rs` YAML shape, a
+/// sequence of single-key `- <rel-type>: <target>` mappings) into [`Relation`]s.
+/// Reuses [`document::parse_relation`] so a ClickUp-decoded relation is shaped
+/// identically to one read from a filesystem doc's frontmatter. A blank blob or
+/// a parse failure yields no relations rather than an error.
+fn decode_relations_block(text: &str) -> Vec<Relation> {
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+    let entries: Vec<serde_yaml::Value> = match serde_yaml::from_str(text) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    entries
+        .iter()
+        .filter_map(|entry| document::parse_relation(entry).ok())
+        .collect()
+}
+
+/// Coerce a ClickUp custom-field JSON value into an [`AttrValue`] for a
+/// non-native attribute. Scalars map to their typed variant; `null` yields
+/// `None` (the attribute is absent); a composite value falls back to its JSON
+/// text so the attribute still carries something rather than being dropped.
+fn json_value_to_attr(value: &serde_json::Value) -> Option<AttrValue> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => Some(AttrValue::Str(s.clone())),
+        serde_json::Value::Bool(b) => Some(AttrValue::Bool(*b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Some(AttrValue::Int(i))
+            } else {
+                n.as_f64().map(AttrValue::Float)
+            }
+        }
+        other => Some(AttrValue::Str(other.to_string())),
+    }
 }
 
 /// Map a lazyspec doc's title, body, status and native attributes to a ClickUp
@@ -314,12 +393,25 @@ mod tests {
     use super::*;
     use crate::engine::clickup::FakeClickupClient;
     use crate::engine::config::{StoreBackend, TypeDef};
+    use crate::engine::document::RelationType;
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     fn clickup_type() -> TypeDef {
         let mut td = TypeDef::test_fixture("task", StoreBackend::ClickupTasks);
         td.prefix = "TASK".to_string();
         td.clickup_list_id = Some("list123".to_string());
+        td
+    }
+
+    /// A ClickUp type whose custom-field map names a relations text field
+    /// (uuid `uuid-rel`) and a non-native `owner` attribute (uuid `uuid-owner`).
+    fn clickup_type_with_field_map() -> TypeDef {
+        let mut td = clickup_type();
+        let mut map = HashMap::new();
+        map.insert(CLICKUP_RELATIONS_FIELD.to_string(), "uuid-rel".to_string());
+        map.insert("owner".to_string(), "uuid-owner".to_string());
+        td.clickup_custom_field_map = Some(map);
         td
     }
 
@@ -622,5 +714,210 @@ mod tests {
             err.to_string().contains("fetching ClickUp tasks"),
             "got: {err}"
         );
+    }
+
+    // --- ITERATION-275: decode custom-field relations + non-native attrs ---
+
+    #[test]
+    fn resolver_resolves_field_map_by_name_and_by_id() {
+        // AC: clickup_custom_field_map resolves a relation name and an attr name
+        // both by name (name -> uuid, write direction) and by id (uuid -> name,
+        // decode direction).
+        let td = clickup_type_with_field_map();
+        // Forward: name -> uuid.
+        assert_eq!(
+            td.clickup_field_id(CLICKUP_RELATIONS_FIELD),
+            Some("uuid-rel")
+        );
+        assert_eq!(td.clickup_field_id("owner"), Some("uuid-owner"));
+        assert_eq!(td.clickup_field_id("unmapped"), None);
+        // Reverse: uuid -> name.
+        assert_eq!(
+            td.clickup_field_name("uuid-rel"),
+            Some(CLICKUP_RELATIONS_FIELD)
+        );
+        assert_eq!(td.clickup_field_name("uuid-owner"), Some("owner"));
+        assert_eq!(td.clickup_field_name("uuid-nope"), None);
+    }
+
+    #[test]
+    fn resolver_returns_none_when_no_field_map_configured() {
+        let td = clickup_type();
+        assert_eq!(td.clickup_field_id(CLICKUP_RELATIONS_FIELD), None);
+        assert_eq!(td.clickup_field_name("uuid-rel"), None);
+    }
+
+    #[test]
+    fn decodes_relation_from_configured_text_field_into_docmeta() {
+        // AC: a ClickUp doc whose configured relation custom field holds
+        // `implements: RFC-056` yields a related entry {implements, RFC-056} in
+        // the same shape a filesystem doc's relation has.
+        let td = clickup_type_with_field_map();
+        let task = task_from_json(
+            r#"{
+                "id": "86abc",
+                "name": "T",
+                "status": {"status": "open"},
+                "custom_fields": [
+                    {"id": "uuid-rel", "name": "relations", "value": "- implements: RFC-056"}
+                ]
+            }"#,
+        );
+        let (meta, _) = task_to_doc(&task, &td, "TASK-86abc");
+        assert_eq!(meta.related.len(), 1);
+        assert_eq!(meta.related[0].rel_type, RelationType::new("implements"));
+        assert_eq!(meta.related[0].target, "RFC-056");
+    }
+
+    #[test]
+    fn decodes_multiple_relations_from_block() {
+        let td = clickup_type_with_field_map();
+        let task = task_from_json(
+            r#"{
+                "id": "1",
+                "name": "T",
+                "status": {"status": "open"},
+                "custom_fields": [
+                    {"id": "uuid-rel", "name": "relations", "value": "- implements: RFC-056\n- blocks: RFC-010"}
+                ]
+            }"#,
+        );
+        let (meta, _) = task_to_doc(&task, &td, "TASK-1");
+        assert_eq!(meta.related.len(), 2);
+        assert_eq!(meta.related[0].rel_type, RelationType::new("implements"));
+        assert_eq!(meta.related[0].target, "RFC-056");
+        assert_eq!(meta.related[1].rel_type, RelationType::new("blocks"));
+        assert_eq!(meta.related[1].target, "RFC-010");
+    }
+
+    #[test]
+    fn decodes_non_native_attr_by_configured_name() {
+        // A custom field the map names (not the relations key) becomes a
+        // non-native attribute under its configured name.
+        let td = clickup_type_with_field_map();
+        let task = task_from_json(
+            r#"{
+                "id": "1",
+                "name": "T",
+                "status": {"status": "open"},
+                "custom_fields": [
+                    {"id": "uuid-owner", "name": "owner", "value": "jkaloger"}
+                ]
+            }"#,
+        );
+        let (meta, _) = task_to_doc(&task, &td, "TASK-1");
+        assert_eq!(
+            meta.attributes.get("owner"),
+            Some(&AttrValue::Str("jkaloger".to_string()))
+        );
+        // The relations field is absent, so no relations are decoded.
+        assert!(meta.related.is_empty());
+    }
+
+    #[test]
+    fn unmapped_custom_field_is_ignored() {
+        let td = clickup_type_with_field_map();
+        let task = task_from_json(
+            r#"{
+                "id": "1",
+                "name": "T",
+                "status": {"status": "open"},
+                "custom_fields": [
+                    {"id": "uuid-unknown", "name": "sprint", "value": "S1"}
+                ]
+            }"#,
+        );
+        let (meta, _) = task_to_doc(&task, &td, "TASK-1");
+        assert!(meta.related.is_empty());
+        assert!(!meta.attributes.contains_key("sprint"));
+    }
+
+    #[test]
+    fn no_field_map_leaves_relations_and_custom_attrs_empty() {
+        // Without a configured map, custom fields are inert -- the read path (276)
+        // is not regressed.
+        let td = clickup_type();
+        let task = task_from_json(
+            r#"{
+                "id": "1",
+                "name": "T",
+                "status": {"status": "open"},
+                "custom_fields": [
+                    {"id": "uuid-rel", "name": "relations", "value": "- implements: RFC-056"}
+                ]
+            }"#,
+        );
+        let (meta, _) = task_to_doc(&task, &td, "TASK-1");
+        assert!(meta.related.is_empty());
+    }
+
+    #[test]
+    fn malformed_relations_blob_yields_no_relations() {
+        // A garbled field value must not fail the materialize; it decodes to no
+        // relations.
+        let td = clickup_type_with_field_map();
+        let task = task_from_json(
+            r#"{
+                "id": "1",
+                "name": "T",
+                "status": {"status": "open"},
+                "custom_fields": [
+                    {"id": "uuid-rel", "name": "relations", "value": "not: a: valid: block"}
+                ]
+            }"#,
+        );
+        let (meta, _) = task_to_doc(&task, &td, "TASK-1");
+        assert!(meta.related.is_empty());
+    }
+
+    #[test]
+    fn null_relation_field_value_yields_no_relations() {
+        let td = clickup_type_with_field_map();
+        let task = task_from_json(
+            r#"{
+                "id": "1",
+                "name": "T",
+                "status": {"status": "open"},
+                "custom_fields": [{"id": "uuid-rel", "name": "relations", "value": null}]
+            }"#,
+        );
+        let (meta, _) = task_to_doc(&task, &td, "TASK-1");
+        assert!(meta.related.is_empty());
+    }
+
+    #[test]
+    fn fetch_materializes_relations_into_cache_frontmatter() {
+        // End-to-end: the decoded relations land in the cache doc's `related:`
+        // block and round-trip through DocMeta::parse the same as a filesystem
+        // doc -- so `context --json` resolves them identically.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let td = clickup_type_with_field_map();
+
+        let task = task_from_json(
+            r#"{
+                "id": "86abc",
+                "name": "Wire the reader",
+                "status": {"status": "open"},
+                "custom_fields": [
+                    {"id": "uuid-rel", "name": "relations", "value": "- implements: RFC-056"},
+                    {"id": "uuid-owner", "name": "owner", "value": "jkaloger"}
+                ]
+            }"#,
+        );
+        let client = FakeClickupClient::with_tasks(vec![task]);
+        let mut task_map = TaskMap::load(root).unwrap();
+        fetch_tasks(root, &td, &client, "pk_x", &mut task_map).unwrap();
+
+        let content =
+            std::fs::read_to_string(root.join(".lazyspec/cache/task/TASK-86abc.md")).unwrap();
+        assert!(content.contains("related:"), "got:\n{content}");
+        assert!(content.contains("implements: RFC-056"), "got:\n{content}");
+        assert!(content.contains("owner: jkaloger"), "got:\n{content}");
+
+        let meta = DocMeta::parse(&content).unwrap();
+        assert_eq!(meta.related.len(), 1);
+        assert_eq!(meta.related[0].rel_type, RelationType::new("implements"));
+        assert_eq!(meta.related[0].target, "RFC-056");
     }
 }
