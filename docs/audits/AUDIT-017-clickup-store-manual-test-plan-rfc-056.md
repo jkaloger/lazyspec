@@ -1,11 +1,12 @@
 ---
-title: "ClickUp store manual test plan (RFC-056)"
+title: ClickUp store manual test plan (RFC-056)
 type: audit
 status: draft
-author: "jkaloger"
+author: jkaloger
 date: 2026-07-08
 tags: []
-related: []
+related:
+- related-to: RFC-056
 ---
 
 ## Intent
