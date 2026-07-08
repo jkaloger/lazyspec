@@ -53,6 +53,7 @@ tower = { version = "0.5", features = ["util"], optional = true }
 http = { version = "1", optional = true }
 dirs = { version = "6", optional = true }
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls"] }
+keyring = { version = "4.1.4", features = ["apple-native-keyring-store"] }
 
 [build-dependencies]
 tauri-build = { version = "2", optional = true }

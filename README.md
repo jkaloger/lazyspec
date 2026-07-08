@@ -283,6 +283,8 @@ All document management is available as subcommands. Most accept `--json` for ma
 | `provenance list [id]`                                          | List citations for a document, or for all documents grouped by id                               |
 | `reservations list`                                             | Show all reservation refs on the remote                                                         |
 | `reservations prune [--dry-run]`                                | Remove refs for documents that already exist locally                                            |
+| `setup`                                                         | Validate GitHub auth and fetch issues for `github-issues` types                                 |
+| `setup clickup [--token pk_...]`                                | Validate a ClickUp personal API token and store it globally (see [ClickUp store auth](#clickup-store-auth)) |
 
 #### Relationship Keywords
 
@@ -601,6 +603,47 @@ With this set, `ticket` issues use the label `Ticket` instead of the default
 `lazyspec:ticket`. Omitting `github_label` leaves existing configs and their
 default labels unchanged. It only affects `github-issues`-backed types; setting
 it on any other `store` is inert.
+
+#### ClickUp store auth
+
+ClickUp has no `gh`-style CLI to piggyback on, so lazyspec owns its own
+credential store. Authenticate with a ClickUp personal API token (the `pk_`
+prefixed value from ClickUp's *Settings -> Apps*):
+
+```sh
+# prompt for the token without echoing it
+lazyspec setup clickup
+
+# or pass it non-interactively (scripts/CI)
+lazyspec setup clickup --token pk_XXXXXXXX
+
+# machine-readable result (never contains the token)
+lazyspec setup clickup --token pk_XXXXXXXX --json
+```
+
+`setup clickup` validates the token against ClickUp's `/user` endpoint **before**
+writing anything -- an invalid or revoked token fails with a clear error and
+leaves any previously stored credential untouched.
+
+On success the token is stored **keychain-first**:
+
+- **Default -- the OS keychain** (macOS Keychain, Windows Credential Manager,
+  Linux Secret Service), via the `keyring` crate. The token is encrypted at rest
+  by the OS and unlocked by your login session.
+- **Fallback -- a plaintext file**, used only when no keychain backend is
+  reachable (headless boxes, CI). The fallback is loud, never silent: lazyspec
+  prints a warning and writes the token to a global, never-committed
+  `~/.lazyspec/credentials.toml` under `[clickup] api_token`, creating the
+  directory `0700` and the file `0600`. A credential file found with looser
+  permissions on read is loudly warned about and tightened back to `0600`.
+
+Reads follow the same precedence: the keychain first, then the global file --
+never the repository. The token is a redacted value everywhere -- it never
+appears in logs, error messages, or `--json` output.
+
+> The token is a bearer credential (full account access, no expiry). The
+> credential store is global, not per-repo, and is read only from the OS
+> keychain or your home directory -- never from the repository.
 
 #### `github-milestones` store
 

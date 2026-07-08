@@ -8,6 +8,7 @@ pub mod clickup;
 pub mod config;
 pub mod config_write;
 pub mod context;
+pub mod credentials;
 pub mod document;
 pub mod fs;
 pub mod fs_ops;

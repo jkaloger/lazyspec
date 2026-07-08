@@ -28,6 +28,7 @@ pub mod validate;
 use crate::cli::config::ConfigCommand;
 use crate::cli::provenance::ProvenanceCommand;
 use crate::cli::reservations::ReservationsCommand;
+use crate::cli::setup::SetupCommand;
 use crate::cli::skills::SkillsCommand;
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -279,8 +280,12 @@ pub enum Commands {
         #[arg(long = "type")]
         doc_type: Option<String>,
     },
-    /// Set up github-issues backend (validate auth, fetch issues)
-    Setup,
+    /// Set up a store backend. Bare `setup` runs github-issues auth + fetch;
+    /// `setup clickup` captures and stores a ClickUp personal API token.
+    Setup {
+        #[command(subcommand)]
+        command: Option<SetupCommand>,
+    },
     /// Show convention and dictum content
     Convention {
         /// Show only the convention preamble (no dictum)
