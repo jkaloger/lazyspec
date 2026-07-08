@@ -1,7 +1,7 @@
 ---
 title: ClickUp API client + reqwest transport + token validation
 type: iteration
-status: in-progress
+status: complete
 author: unknown
 date: 2026-07-05
 tags: []
