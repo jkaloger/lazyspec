@@ -695,7 +695,18 @@ from the title and `markdown_content` from the body; ClickUp assigns the List's
 default status), then mirrors the created task into the local cache and records
 it in `.lazyspec/task-map.json`. It uses the token from `setup clickup` and
 fails with the same "run `lazyspec setup clickup`" error when none is stored.
-The remaining write paths (`update`/`advance`/`delete`) are not yet supported.
+
+`lazyspec update <doc> [--title ...] [--body ...] [--attr priority=... --attr
+due=... --attr estimate=...]` on a `clickup-tasks` doc also writes through: it
+resolves the task id from `.lazyspec/task-map.json`, PUTs the changed fields to
+ClickUp (`PUT /task/{id}`) as a partial edit -- `title` -> `name`, `body` ->
+`markdown_content`, and `priority`/`estimate`/`due` -> ClickUp's **native task
+fields** (priority name -> `1..4`, `estimate` -> `time_estimate` ms, `due` ->
+`due_date` epoch ms) -- then re-materializes the returned task into the cache and
+bumps the `task-map.json` `updated_at` baseline, so a subsequent read reflects
+the new native values (the round-trip). Like `create` it loads the token from
+`setup clickup`. Status changes are pushed via `advance` (not `update`), and the
+remaining write paths (`advance`/`delete`) are not yet supported.
 
 #### `github-milestones` store
 

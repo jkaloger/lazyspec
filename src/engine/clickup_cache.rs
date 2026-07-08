@@ -16,7 +16,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
-use crate::engine::clickup::{ClickupClient, ClickupStatus, ClickupTask, TaskCreate};
+use crate::engine::clickup::{ClickupClient, ClickupStatus, ClickupTask, TaskCreate, TaskUpdate};
 use crate::engine::config::{Lifecycle, TypeDef};
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
 use crate::engine::store_dispatch::write_cache_file;
@@ -261,6 +261,39 @@ pub(crate) fn build_task_create(
     }
 }
 
+/// Map a lazyspec `update`'s `(key, value)` changes to a ClickUp [`TaskUpdate`]
+/// payload -- the *edit* write direction (RFC-056 §Field mapping). Only the keys
+/// with a ClickUp *native* home are mapped; a key absent from `updates` stays
+/// `None` so the `PUT /task/{id}` leaves that field untouched (a partial edit,
+/// never a blanket overwrite):
+///
+/// - `title` -> `name`;
+/// - `body`  -> `markdown_content`;
+/// - `priority` -> the priority *name* mapped to the bare integer
+///   (`urgent=1 high=2 normal=3 low=4`); an unrecognized name drops the field;
+/// - `due` -> `due_date`, `estimate` -> `time_estimate` (integer epoch-ms /
+///   duration-ms; an unparseable value drops the field).
+///
+/// `status` is deliberately *not* mapped here: a ClickUp status change is pushed
+/// via `advance` (ITERATION-272), and the derived lifecycle carries no edges so
+/// the CLI rejects a `--status` update before it reaches this mapper. Any other
+/// key (a non-native attribute or a relation) has no native field and routes to
+/// a custom field in a later RFC-056 story; it is ignored here.
+pub(crate) fn build_task_update(updates: &[(&str, &str)]) -> TaskUpdate {
+    let mut payload = TaskUpdate::default();
+    for &(key, value) in updates {
+        match key {
+            "title" => payload.name = Some(value.to_string()),
+            "body" => payload.markdown_content = Some(value.to_string()),
+            "priority" => payload.priority = priority_name_to_int(value),
+            "due" => payload.due_date = value.trim().parse::<i64>().ok(),
+            "estimate" => payload.time_estimate = value.trim().parse::<i64>().ok(),
+            _ => {}
+        }
+    }
+    payload
+}
+
 /// Map a ClickUp priority *name* to the bare integer the write API expects
 /// (`urgent=1 high=2 normal=3 low=4`, case-insensitive). Returns `None` for an
 /// unrecognized name so the caller omits the field rather than sending a guess.
@@ -500,6 +533,57 @@ mod tests {
         assert_eq!(payload.priority, Some(2));
         assert_eq!(payload.due_date, Some(1_748_541_600_000));
         assert_eq!(payload.time_estimate, Some(3_600_000));
+    }
+
+    #[test]
+    fn build_task_update_maps_native_field_changes_to_partial_edit() {
+        // The edit write mapping: title/body/native attrs to the partial shape.
+        let updates = [
+            ("title", "New title"),
+            ("body", "new body"),
+            ("priority", "high"),
+            ("due", "1748541600000"),
+            ("estimate", "3600000"),
+        ];
+        let payload = build_task_update(&updates);
+        assert_eq!(payload.name, Some("New title".to_string()));
+        assert_eq!(payload.markdown_content, Some("new body".to_string()));
+        assert_eq!(payload.priority, Some(2));
+        assert_eq!(payload.due_date, Some(1_748_541_600_000));
+        assert_eq!(payload.time_estimate, Some(3_600_000));
+        assert_eq!(payload.start_date, None);
+    }
+
+    #[test]
+    fn build_task_update_omits_untouched_fields() {
+        // Only priority changed: every other field stays None so the PUT leaves
+        // the task's name/body/due/estimate untouched.
+        let payload = build_task_update(&[("priority", "urgent")]);
+        assert_eq!(payload.priority, Some(1));
+        assert_eq!(payload.name, None);
+        assert_eq!(payload.markdown_content, None);
+        assert_eq!(payload.due_date, None);
+        assert_eq!(payload.time_estimate, None);
+    }
+
+    #[test]
+    fn build_task_update_drops_unrecognized_priority_and_unparseable_numbers() {
+        let payload = build_task_update(&[
+            ("priority", "bogus"),
+            ("due", "not-a-number"),
+            ("estimate", "also-bad"),
+        ]);
+        assert_eq!(payload.priority, None);
+        assert_eq!(payload.due_date, None);
+        assert_eq!(payload.time_estimate, None);
+    }
+
+    #[test]
+    fn build_task_update_ignores_status_and_non_native_keys() {
+        // Status is pushed via advance (272); a non-native attr routes to a
+        // custom field in a later story. Neither has a native field here.
+        let payload = build_task_update(&[("status", "in progress"), ("owner", "jkaloger")]);
+        assert_eq!(payload, TaskUpdate::default());
     }
 
     #[test]

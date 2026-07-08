@@ -170,8 +170,50 @@ impl DocumentStore for ClickupTasksStore {
         Ok(CreatedDoc { path: relative, id })
     }
 
-    fn update(&mut self, _: &TypeDef, _: &str, _: &[(&str, &str)]) -> Result<()> {
-        bail!("{}", Self::WRITE_UNIMPLEMENTED)
+    /// Edit the bound ClickUp task from a doc's `update` and re-materialize the
+    /// change into the cache -- the native-field round-trip (RFC-056 §Field
+    /// mapping). Resolve the task id from the [`TaskMap`], map the changed
+    /// fields to a partial [`TaskUpdate`], `PUT /task/{id}`, then rewrite the
+    /// cache file and `TaskMap.updated_at` from the *returned* task so a
+    /// subsequent read reflects the new native values. Status is not pushed here
+    /// (that is `advance`, ITERATION-272).
+    fn update(&mut self, type_def: &TypeDef, doc_id: &str, updates: &[(&str, &str)]) -> Result<()> {
+        let token = self
+            .token
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("{}", Self::NO_TOKEN))?;
+
+        let mut task_map = TaskMap::load(&self.root)?;
+        let task_id = task_map
+            .get(doc_id)
+            .map(|e| e.task_id.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} is not mapped to a ClickUp task; run `lazyspec fetch` before updating",
+                    doc_id
+                )
+            })?;
+
+        let payload = clickup_cache::build_task_update(updates);
+        let task = self
+            .client
+            .update_task(token.expose(), &task_id, &payload)?;
+
+        // Re-materialize from the task ClickUp echoed back: the round-trip AC
+        // wants the cache (and a subsequent read) to reflect the updated native
+        // fields, and this keeps the same doc id.
+        let id = doc_id.to_string();
+        let (meta, doc_body) = clickup_cache::task_to_doc(&task, type_def, &id);
+        write_cache_file(&self.root, type_def, &meta, &doc_body)?;
+
+        let updated_at = task
+            .date_updated
+            .map(|ms| ms.to_string())
+            .unwrap_or_default();
+        task_map.insert(&id, &task.id, updated_at);
+        task_map.save(&self.root)?;
+
+        Ok(())
     }
     fn delete(&mut self, _: &TypeDef, _: &str) -> Result<()> {
         bail!("{}", Self::WRITE_UNIMPLEMENTED)
@@ -2377,6 +2419,132 @@ mod tests {
 
         let err = store.create(&td, "t", "a", "b").unwrap_err();
         assert!(err.to_string().contains("clickup_list_id"), "got: {err}");
+    }
+
+    #[test]
+    fn clickup_update_puts_native_fields_and_round_trips_through_cache() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_update_roundtrip");
+        let td = clickup_type_def(Some("list123"));
+
+        // The doc is already mapped to a ClickUp task (an earlier fetch/create),
+        // with a stale lock baseline the edit must bump.
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1700000000000");
+        map.save(&root).unwrap();
+
+        // ClickUp echoes the *updated* task: new priority/estimate/due and a
+        // fresh date_updated. The round-trip reads these back out of the cache.
+        let updated = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "Renamed task",
+                "status": {"status": "in progress"},
+                "priority": {"priority": "high"},
+                "due_date": "1748541600000",
+                "time_estimate": "3600000",
+                "date_updated": "1774587145901",
+                "markdown_description": "edited body",
+                "creator": {"username": "Jack"}
+            }"#,
+        );
+        let fake = FakeClickupClient::valid(clickup_user()).with_updated_task(updated);
+        let calls = fake.update_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        store
+            .update(
+                &td,
+                "TASK-90abc",
+                &[
+                    ("title", "Renamed task"),
+                    ("body", "edited body"),
+                    ("priority", "high"),
+                    ("due", "1748541600000"),
+                    ("estimate", "3600000"),
+                ],
+            )
+            .unwrap();
+
+        // Exactly one PUT, to the resolved task id, with the mapped native shape.
+        let recorded = calls.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "90abc");
+        let payload = &recorded[0].1;
+        assert_eq!(payload.name, Some("Renamed task".to_string()));
+        assert_eq!(payload.markdown_content, Some("edited body".to_string()));
+        assert_eq!(payload.priority, Some(2));
+        assert_eq!(payload.due_date, Some(1_748_541_600_000));
+        assert_eq!(payload.time_estimate, Some(3_600_000));
+
+        // Round-trip: the cache now reflects the updated native field values.
+        let cache = root.join(".lazyspec/cache/task/TASK-90abc.md");
+        let content = std::fs::read_to_string(&cache).unwrap();
+        assert!(content.contains("title: Renamed task"), "got:\n{content}");
+        assert!(content.contains("priority: high"), "got:\n{content}");
+        assert!(content.contains("estimate: 3600000"), "got:\n{content}");
+        assert!(content.contains("due: 1748541600000"), "got:\n{content}");
+        assert!(content.contains("edited body"), "got:\n{content}");
+
+        // The lock baseline is bumped to the returned task's date_updated.
+        let map = TaskMap::load(&root).unwrap();
+        let entry = map.get("TASK-90abc").unwrap();
+        assert_eq!(entry.task_id, "90abc");
+        assert_eq!(entry.updated_at, "1774587145901");
+    }
+
+    #[test]
+    fn clickup_update_without_token_errors() {
+        use crate::engine::clickup::FakeClickupClient;
+
+        let root = tmp_root("clickup_update_no_token");
+        let td = clickup_type_def(Some("list123"));
+        let fake = FakeClickupClient::valid(clickup_user());
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root,
+            config: Config::default(),
+            token: None,
+        };
+
+        let err = store
+            .update(&td, "TASK-90abc", &[("priority", "high")])
+            .unwrap_err();
+        assert!(err.to_string().contains("setup clickup"), "got: {err}");
+    }
+
+    #[test]
+    fn clickup_update_unmapped_doc_errors() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_update_unmapped");
+        let td = clickup_type_def(Some("list123"));
+        let fake = FakeClickupClient::valid(clickup_user());
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root,
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        let err = store
+            .update(&td, "TASK-missing", &[("priority", "high")])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not mapped to a ClickUp task"),
+            "got: {err}"
+        );
     }
 
     #[test]

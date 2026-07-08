@@ -311,11 +311,38 @@ pub struct TaskCreate {
     pub time_estimate: Option<i64>,
 }
 
+/// The *write* shape of an edit, sent as the JSON body of `PUT /task/{id}`.
+///
+/// Distinct from [`TaskCreate`] because an edit is a *partial* update: every
+/// field is optional, `name` included, so a field the caller did not change is
+/// omitted from the payload and ClickUp leaves it untouched. Sending an empty
+/// `name` on a create is fine (the task starts named), but an edit that omitted
+/// no field would blank the task's name -- hence the separate all-optional
+/// shape. Field asymmetry with the read [`ClickupTask`] is the same as
+/// `TaskCreate` (RFC-056 §Field mapping): `markdown_content` (not
+/// `markdown_description`), a bare-integer `priority`, integer epoch/duration
+/// fields.
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+pub struct TaskUpdate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub markdown_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_date: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_date: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_estimate: Option<i64>,
+}
+
 /// Validates a ClickUp personal token and fetches the tasks a bound List
 /// contains. `auth_status` and `task_list` are the read path's methods;
-/// `list_statuses` feeds the sync-time lifecycle derivation; `create_task` is
-/// the first write method (RFC-056 story 5); the remaining store CRUD methods
-/// land in later RFC-056 stories.
+/// `list_statuses` feeds the sync-time lifecycle derivation; `create_task` and
+/// `update_task` are the create/edit write methods (RFC-056 story 5); the
+/// remaining store CRUD methods land in later RFC-056 stories.
 pub trait ClickupClient {
     /// Validates `token` against `GET /user`. On success returns the token
     /// owner's identity; on failure returns a classified [`ClickupError`].
@@ -344,6 +371,18 @@ pub trait ClickupClient {
         token: &str,
         list_id: &str,
         payload: &TaskCreate,
+    ) -> Result<ClickupTask, ClickupError>;
+
+    /// Edits the task `task_id` (`PUT /task/{id}`) from the partial write-shape
+    /// `payload`, returning the updated task as ClickUp echoes it (with a fresh
+    /// `date_updated` and the new field values). The store re-materializes that
+    /// response into the cache and task map, so a subsequent read reflects the
+    /// change (the native-field round-trip).
+    fn update_task(
+        &self,
+        token: &str,
+        task_id: &str,
+        payload: &TaskUpdate,
     ) -> Result<ClickupTask, ClickupError>;
 }
 
@@ -456,6 +495,30 @@ impl ClickupClient for ClickupHttpClient {
         let task: ClickupTask = response.json()?;
         Ok(task)
     }
+
+    fn update_task(
+        &self,
+        token: &str,
+        task_id: &str,
+        payload: &TaskUpdate,
+    ) -> Result<ClickupTask, ClickupError> {
+        let url = format!("{}/task/{}", self.base_url, task_id);
+        let response = self
+            .http
+            .put(&url)
+            .header(AUTHORIZATION, token)
+            .json(payload)
+            .send()?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(classify_status(status.as_u16(), response.headers()));
+        }
+
+        // Edit echoes the updated task object at the top level (no envelope).
+        let task: ClickupTask = response.json()?;
+        Ok(task)
+    }
 }
 
 /// In-memory [`ClickupClient`] returning a scripted outcome, for downstream
@@ -469,10 +532,16 @@ pub struct FakeClickupClient {
     /// The task `create_task` returns; defaults to an error so an unscripted
     /// create fails loudly rather than fabricating a task.
     created: Result<ClickupTask, ClickupError>,
+    /// The task `update_task` returns; defaults to an error so an unscripted
+    /// edit fails loudly rather than fabricating a task.
+    updated: Result<ClickupTask, ClickupError>,
     /// Every `create_task` call recorded as `(list_id, payload)`. Shared behind
     /// an `Rc` so a test can hold the handle after the client is boxed into a
     /// store and still read back the payload the store built.
     create_calls: std::rc::Rc<std::cell::RefCell<Vec<(String, TaskCreate)>>>,
+    /// Every `update_task` call recorded as `(task_id, payload)`, shared the
+    /// same way so a store test can read back the edit payload it built.
+    update_calls: std::rc::Rc<std::cell::RefCell<Vec<(String, TaskUpdate)>>>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -484,7 +553,9 @@ impl FakeClickupClient {
             tasks: Ok(Vec::new()),
             statuses: Ok(Vec::new()),
             created: no_create_scripted(),
+            updated: no_update_scripted(),
             create_calls: Default::default(),
+            update_calls: Default::default(),
         }
     }
 
@@ -495,7 +566,9 @@ impl FakeClickupClient {
             tasks: Err(ClickupError::InvalidToken { status: 401 }),
             statuses: Err(ClickupError::InvalidToken { status: 401 }),
             created: Err(ClickupError::InvalidToken { status: 401 }),
+            updated: Err(ClickupError::InvalidToken { status: 401 }),
             create_calls: Default::default(),
+            update_calls: Default::default(),
         }
     }
 
@@ -505,8 +578,10 @@ impl FakeClickupClient {
             auth: Err(error.clone()),
             tasks: Err(error.clone()),
             statuses: Err(error.clone()),
-            created: Err(error),
+            created: Err(error.clone()),
+            updated: Err(error),
             create_calls: Default::default(),
+            update_calls: Default::default(),
         }
     }
 
@@ -517,7 +592,9 @@ impl FakeClickupClient {
             tasks: Ok(tasks),
             statuses: Ok(Vec::new()),
             created: no_create_scripted(),
+            updated: no_update_scripted(),
             create_calls: Default::default(),
+            update_calls: Default::default(),
         }
     }
 
@@ -528,7 +605,9 @@ impl FakeClickupClient {
             tasks: Err(error),
             statuses: Ok(Vec::new()),
             created: no_create_scripted(),
+            updated: no_update_scripted(),
             create_calls: Default::default(),
+            update_calls: Default::default(),
         }
     }
 
@@ -552,6 +631,25 @@ impl FakeClickupClient {
         std::rc::Rc::clone(&self.create_calls)
     }
 
+    /// Scripts `update_task` to return `task` (builder-style). The default
+    /// (unset) update errors, so an edit test must opt in to a scripted task.
+    pub fn with_updated_task(mut self, task: ClickupTask) -> Self {
+        self.updated = Ok(task);
+        self
+    }
+
+    /// Makes `update_task` return an arbitrary error (builder-style).
+    pub fn failing_update(mut self, error: ClickupError) -> Self {
+        self.updated = Err(error);
+        self
+    }
+
+    /// A shared handle to the recorded `update_task` calls (`(task_id,
+    /// payload)`), read back the same way as [`Self::create_calls`].
+    pub fn update_calls(&self) -> std::rc::Rc<std::cell::RefCell<Vec<(String, TaskUpdate)>>> {
+        std::rc::Rc::clone(&self.update_calls)
+    }
+
     /// Overrides the bound List's status set (builder-style), for lifecycle
     /// derivation tests.
     pub fn with_statuses(mut self, statuses: Vec<ClickupStatus>) -> Self {
@@ -573,6 +671,16 @@ impl FakeClickupClient {
 fn no_create_scripted() -> Result<ClickupTask, ClickupError> {
     Err(ClickupError::Transport(
         "FakeClickupClient::create_task called without a scripted task".to_string(),
+    ))
+}
+
+/// The default `update_task` outcome for a fake not scripted with
+/// [`FakeClickupClient::with_updated_task`]: a loud error, never a fabricated
+/// task, so an edit test that forgot to script a response fails clearly.
+#[cfg(any(test, feature = "test-support"))]
+fn no_update_scripted() -> Result<ClickupTask, ClickupError> {
+    Err(ClickupError::Transport(
+        "FakeClickupClient::update_task called without a scripted task".to_string(),
     ))
 }
 
@@ -613,6 +721,18 @@ impl ClickupClient for FakeClickupClient {
             .borrow_mut()
             .push((list_id.to_string(), payload.clone()));
         self.created.clone()
+    }
+
+    fn update_task(
+        &self,
+        _token: &str,
+        task_id: &str,
+        payload: &TaskUpdate,
+    ) -> Result<ClickupTask, ClickupError> {
+        self.update_calls
+            .borrow_mut()
+            .push((task_id.to_string(), payload.clone()));
+        self.updated.clone()
     }
 }
 
@@ -970,6 +1090,65 @@ mod tests {
         let client = FakeClickupClient::valid(user(1));
         let err = client
             .create_task("pk_x", "list1", &TaskCreate::default())
+            .unwrap_err();
+        assert!(matches!(err, ClickupError::Transport(_)));
+    }
+
+    #[test]
+    fn task_update_serializes_only_present_fields() {
+        // A partial edit: `name` is omitted (unchanged), so ClickUp leaves the
+        // task's name alone rather than blanking it; priority is a bare int.
+        let payload = TaskUpdate {
+            name: None,
+            markdown_content: Some("new body".to_string()),
+            priority: Some(2),
+            due_date: Some(1_748_541_600_000),
+            start_date: None,
+            time_estimate: Some(3_600_000),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["markdown_content"], "new body");
+        assert_eq!(json["priority"], 2);
+        assert_eq!(json["due_date"], 1_748_541_600_000i64);
+        assert_eq!(json["time_estimate"], 3_600_000i64);
+        assert!(json.get("name").is_none());
+        assert!(json.get("start_date").is_none());
+    }
+
+    #[test]
+    fn task_update_default_serializes_to_empty_object() {
+        let json = serde_json::to_value(TaskUpdate::default()).unwrap();
+        assert_eq!(json, serde_json::json!({}));
+    }
+
+    #[test]
+    fn fake_update_task_records_payload_and_returns_scripted_task() {
+        let updated: ClickupTask = serde_json::from_str(
+            r#"{"id":"90abc","name":"n","status":{"status":"open"},"date_updated":"1774587145901"}"#,
+        )
+        .unwrap();
+        let client = FakeClickupClient::valid(user(1)).with_updated_task(updated.clone());
+        let calls = client.update_calls();
+
+        let payload = TaskUpdate {
+            markdown_content: Some("body".to_string()),
+            priority: Some(2),
+            ..Default::default()
+        };
+        let result = client.update_task("pk_x", "90abc", &payload).unwrap();
+
+        assert_eq!(result, updated);
+        let recorded = calls.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "90abc");
+        assert_eq!(recorded[0].1, payload);
+    }
+
+    #[test]
+    fn fake_update_task_without_scripted_task_errors() {
+        let client = FakeClickupClient::valid(user(1));
+        let err = client
+            .update_task("pk_x", "90abc", &TaskUpdate::default())
             .unwrap_err();
         assert!(matches!(err, ClickupError::Transport(_)));
     }

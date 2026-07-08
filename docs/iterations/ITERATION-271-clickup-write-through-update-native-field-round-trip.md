@@ -1,7 +1,7 @@
 ---
 title: 'ClickUp write-through: update + native field round-trip'
 type: iteration
-status: draft
+status: complete
 author: unknown
 date: 2026-07-05
 tags: []
