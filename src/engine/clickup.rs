@@ -391,6 +391,13 @@ pub trait ClickupClient {
         task_id: &str,
         payload: &TaskUpdate,
     ) -> Result<ClickupTask, ClickupError>;
+
+    /// Fetches a single task (`GET /task/{id}`) in its read shape. The write
+    /// path calls this *before* a `PUT` to read ClickUp's current
+    /// `date_updated` and compare it against the `TaskMap`'s recorded baseline:
+    /// the optimistic-lock check that rejects a stale write before it can clobber
+    /// a concurrent external change (RFC-056 §Caching/id-mapping).
+    fn get_task(&self, token: &str, task_id: &str) -> Result<ClickupTask, ClickupError>;
 }
 
 /// reqwest-backed [`ClickupClient`]. Sends the personal token in a raw
@@ -526,6 +533,20 @@ impl ClickupClient for ClickupHttpClient {
         let task: ClickupTask = response.json()?;
         Ok(task)
     }
+
+    fn get_task(&self, token: &str, task_id: &str) -> Result<ClickupTask, ClickupError> {
+        let url = format!("{}/task/{}", self.base_url, task_id);
+        let response = self.http.get(&url).header(AUTHORIZATION, token).send()?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(classify_status(status.as_u16(), response.headers()));
+        }
+
+        // A single-task GET echoes the task object at the top level (no envelope).
+        let task: ClickupTask = response.json()?;
+        Ok(task)
+    }
 }
 
 /// In-memory [`ClickupClient`] returning a scripted outcome, for downstream
@@ -542,6 +563,10 @@ pub struct FakeClickupClient {
     /// The task `update_task` returns; defaults to an error so an unscripted
     /// edit fails loudly rather than fabricating a task.
     updated: Result<ClickupTask, ClickupError>,
+    /// The task `get_task` returns -- the remote state the optimistic-lock check
+    /// reads before a write. Defaults to an error so a write test that reaches
+    /// the pre-write fetch without scripting a remote task fails loudly.
+    viewed: Result<ClickupTask, ClickupError>,
     /// Every `create_task` call recorded as `(list_id, payload)`. Shared behind
     /// an `Rc` so a test can hold the handle after the client is boxed into a
     /// store and still read back the payload the store built.
@@ -549,6 +574,9 @@ pub struct FakeClickupClient {
     /// Every `update_task` call recorded as `(task_id, payload)`, shared the
     /// same way so a store test can read back the edit payload it built.
     update_calls: std::rc::Rc<std::cell::RefCell<Vec<(String, TaskUpdate)>>>,
+    /// Every `get_task` call recorded as `task_id`, shared the same way so a
+    /// store test can assert the pre-write optimistic-lock fetch happened.
+    view_calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -561,8 +589,10 @@ impl FakeClickupClient {
             statuses: Ok(Vec::new()),
             created: no_create_scripted(),
             updated: no_update_scripted(),
+            viewed: no_view_scripted(),
             create_calls: Default::default(),
             update_calls: Default::default(),
+            view_calls: Default::default(),
         }
     }
 
@@ -574,8 +604,10 @@ impl FakeClickupClient {
             statuses: Err(ClickupError::InvalidToken { status: 401 }),
             created: Err(ClickupError::InvalidToken { status: 401 }),
             updated: Err(ClickupError::InvalidToken { status: 401 }),
+            viewed: Err(ClickupError::InvalidToken { status: 401 }),
             create_calls: Default::default(),
             update_calls: Default::default(),
+            view_calls: Default::default(),
         }
     }
 
@@ -586,9 +618,11 @@ impl FakeClickupClient {
             tasks: Err(error.clone()),
             statuses: Err(error.clone()),
             created: Err(error.clone()),
-            updated: Err(error),
+            updated: Err(error.clone()),
+            viewed: Err(error),
             create_calls: Default::default(),
             update_calls: Default::default(),
+            view_calls: Default::default(),
         }
     }
 
@@ -600,8 +634,10 @@ impl FakeClickupClient {
             statuses: Ok(Vec::new()),
             created: no_create_scripted(),
             updated: no_update_scripted(),
+            viewed: no_view_scripted(),
             create_calls: Default::default(),
             update_calls: Default::default(),
+            view_calls: Default::default(),
         }
     }
 
@@ -613,8 +649,10 @@ impl FakeClickupClient {
             statuses: Ok(Vec::new()),
             created: no_create_scripted(),
             updated: no_update_scripted(),
+            viewed: no_view_scripted(),
             create_calls: Default::default(),
             update_calls: Default::default(),
+            view_calls: Default::default(),
         }
     }
 
@@ -657,6 +695,28 @@ impl FakeClickupClient {
         std::rc::Rc::clone(&self.update_calls)
     }
 
+    /// Scripts `get_task` to return `task` (builder-style) -- the remote state
+    /// the optimistic-lock check reads before a write. Its `date_updated` is what
+    /// the check compares against the stored baseline.
+    pub fn with_viewed_task(mut self, task: ClickupTask) -> Self {
+        self.viewed = Ok(task);
+        self
+    }
+
+    /// Makes `get_task` return an arbitrary error (builder-style).
+    pub fn failing_view(mut self, error: ClickupError) -> Self {
+        self.viewed = Err(error);
+        self
+    }
+
+    /// A shared handle to the recorded `get_task` calls (each `task_id`), read
+    /// back the same way as [`Self::update_calls`]. A store test asserts the
+    /// pre-write optimistic-lock fetch fired -- and, on conflict, that no
+    /// `update_task` followed.
+    pub fn view_calls(&self) -> std::rc::Rc<std::cell::RefCell<Vec<String>>> {
+        std::rc::Rc::clone(&self.view_calls)
+    }
+
     /// Overrides the bound List's status set (builder-style), for lifecycle
     /// derivation tests.
     pub fn with_statuses(mut self, statuses: Vec<ClickupStatus>) -> Self {
@@ -688,6 +748,17 @@ fn no_create_scripted() -> Result<ClickupTask, ClickupError> {
 fn no_update_scripted() -> Result<ClickupTask, ClickupError> {
     Err(ClickupError::Transport(
         "FakeClickupClient::update_task called without a scripted task".to_string(),
+    ))
+}
+
+/// The default `get_task` outcome for a fake not scripted with
+/// [`FakeClickupClient::with_viewed_task`]: a loud error, never a fabricated
+/// task, so a write test whose path reaches the pre-write optimistic-lock fetch
+/// without scripting a remote state fails clearly.
+#[cfg(any(test, feature = "test-support"))]
+fn no_view_scripted() -> Result<ClickupTask, ClickupError> {
+    Err(ClickupError::Transport(
+        "FakeClickupClient::get_task called without a scripted task".to_string(),
     ))
 }
 
@@ -740,6 +811,11 @@ impl ClickupClient for FakeClickupClient {
             .borrow_mut()
             .push((task_id.to_string(), payload.clone()));
         self.updated.clone()
+    }
+
+    fn get_task(&self, _token: &str, task_id: &str) -> Result<ClickupTask, ClickupError> {
+        self.view_calls.borrow_mut().push(task_id.to_string());
+        self.viewed.clone()
     }
 }
 
@@ -1172,6 +1248,30 @@ mod tests {
         let err = client
             .update_task("pk_x", "90abc", &TaskUpdate::default())
             .unwrap_err();
+        assert!(matches!(err, ClickupError::Transport(_)));
+    }
+
+    #[test]
+    fn fake_get_task_records_id_and_returns_scripted_task() {
+        let viewed: ClickupTask = serde_json::from_str(
+            r#"{"id":"90abc","name":"n","status":{"status":"open"},"date_updated":"1774587145901"}"#,
+        )
+        .unwrap();
+        let client = FakeClickupClient::valid(user(1)).with_viewed_task(viewed.clone());
+        let calls = client.view_calls();
+
+        let result = client.get_task("pk_x", "90abc").unwrap();
+
+        assert_eq!(result, viewed);
+        let recorded = calls.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0], "90abc");
+    }
+
+    #[test]
+    fn fake_get_task_without_scripted_task_errors() {
+        let client = FakeClickupClient::valid(user(1));
+        let err = client.get_task("pk_x", "90abc").unwrap_err();
         assert!(matches!(err, ClickupError::Transport(_)));
     }
 }

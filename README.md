@@ -717,6 +717,17 @@ List's status set), lazyspec applies **no local transition gate** for these docs
 ClickUp enforces its own transition rules, rejecting an illegal target. The
 remaining write path (`delete`) is not yet supported.
 
+Both `update` and `advance` are guarded by an **optimistic lock** on the
+`task-map.json` `updated_at` baseline. Before the `PUT`, lazyspec re-fetches the
+task (`GET /task/{id}`) and compares ClickUp's current `date_updated` (epoch ms,
+compared as an integer) against the recorded baseline. If the remote is newer --
+an external change landed since your last fetch -- the write is **rejected with a
+conflict error** ("`<doc>` changed on ClickUp since your last fetch; run
+`lazyspec fetch` and retry") and no `PUT` is sent, so a stale local doc never
+clobbers a concurrent change. When the baseline matches, the write proceeds and the baseline
+advances to the returned task's fresh `date_updated`. The conflict surfaces
+through the normal `--json` error path.
+
 #### `github-milestones` store
 
 Types stored as `--store github-milestones` map each document to a GitHub

@@ -114,6 +114,50 @@ impl ClickupTasksStore {
     const NO_TOKEN: &'static str =
         "no ClickUp token found; run `lazyspec setup clickup` before creating \
          clickup-tasks documents";
+
+    /// Optimistic-lock pre-write check (RFC-056 §Caching/id-mapping).
+    ///
+    /// Before a `PUT` (update or advance), re-fetch the task (`GET /task/{id}`)
+    /// and compare ClickUp's current `date_updated` against the `TaskMap`
+    /// baseline recorded at the last create/fetch/write. If the remote is
+    /// *newer*, an external change landed since we synced -- proceeding would
+    /// clobber it -- so reject with a conflict error and perform no write. The
+    /// comparison is on integer epoch-ms, never string equality: ClickUp returns
+    /// `date_updated` as an epoch-ms string (`"1774587145901"`), so a raw string
+    /// compare would misorder unequal-length values.
+    ///
+    /// An empty or unparseable baseline means there is no timestamp to race
+    /// against (e.g. a create whose echo carried no `date_updated`); the check is
+    /// skipped and the write proceeds, matching the GitHub store's "just pushed
+    /// -> accept remote" posture.
+    fn check_optimistic_lock(
+        &self,
+        token: &str,
+        doc_id: &str,
+        task_id: &str,
+        baseline: &str,
+    ) -> Result<()> {
+        let Ok(local_ms) = baseline.trim().parse::<i64>() else {
+            return Ok(());
+        };
+
+        let remote = self.client.get_task(token, task_id)?;
+        let remote_ms = remote.date_updated.unwrap_or(0);
+
+        if remote_ms > local_ms {
+            bail!(
+                "{} changed on ClickUp since your last fetch; \
+                 run `lazyspec fetch` and retry.\n  \
+                 Local baseline: {}\n  \
+                 Remote updated: {}",
+                doc_id,
+                local_ms,
+                remote_ms,
+            );
+        }
+
+        Ok(())
+    }
 }
 
 impl DocumentStore for ClickupTasksStore {
@@ -186,15 +230,20 @@ impl DocumentStore for ClickupTasksStore {
             .ok_or_else(|| anyhow::anyhow!("{}", Self::NO_TOKEN))?;
 
         let mut task_map = TaskMap::load(&self.root)?;
-        let task_id = task_map
+        let (task_id, baseline) = task_map
             .get(doc_id)
-            .map(|e| e.task_id.clone())
+            .map(|e| (e.task_id.clone(), e.updated_at.clone()))
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "{} is not mapped to a ClickUp task; run `lazyspec fetch` before updating",
                     doc_id
                 )
             })?;
+
+        // Optimistic lock: reject before the PUT if ClickUp has moved on since
+        // our recorded baseline, so a stale local doc never clobbers a concurrent
+        // external change. Applies equally to an `advance` (a status-only update).
+        self.check_optimistic_lock(token.expose(), doc_id, &task_id, &baseline)?;
 
         let payload = clickup_cache::build_task_update(updates);
         let task = self
@@ -2452,7 +2501,19 @@ mod tests {
                 "creator": {"username": "Jack"}
             }"#,
         );
-        let fake = FakeClickupClient::valid(clickup_user()).with_updated_task(updated);
+        // The pre-write optimistic-lock fetch sees the same date_updated the
+        // baseline recorded (no external change), so the write proceeds.
+        let remote_unchanged = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "My task",
+                "status": {"status": "open"},
+                "date_updated": "1700000000000"
+            }"#,
+        );
+        let fake = FakeClickupClient::valid(clickup_user())
+            .with_viewed_task(remote_unchanged)
+            .with_updated_task(updated);
         let calls = fake.update_calls();
 
         let mut store = ClickupTasksStore {
@@ -2527,7 +2588,19 @@ mod tests {
                 "creator": {"username": "Jack"}
             }"#,
         );
-        let fake = FakeClickupClient::valid(clickup_user()).with_updated_task(advanced);
+        // The pre-write optimistic-lock fetch matches the baseline, so the
+        // status push proceeds.
+        let remote_unchanged = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "My task",
+                "status": {"status": "open"},
+                "date_updated": "1700000000000"
+            }"#,
+        );
+        let fake = FakeClickupClient::valid(clickup_user())
+            .with_viewed_task(remote_unchanged)
+            .with_updated_task(advanced);
         let calls = fake.update_calls();
 
         let mut store = ClickupTasksStore {
@@ -2610,6 +2683,207 @@ mod tests {
             err.to_string().contains("not mapped to a ClickUp task"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn clickup_update_rejects_stale_write_and_performs_no_put() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_update_stale_conflict");
+        let td = clickup_type_def(Some("list123"));
+
+        // The doc's recorded baseline lags behind ClickUp: an external change
+        // advanced the task's date_updated after our last fetch.
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1700000000000");
+        map.save(&root).unwrap();
+
+        // The pre-write fetch sees a *newer* date_updated than the baseline.
+        let remote_changed = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "Changed elsewhere",
+                "status": {"status": "in progress"},
+                "date_updated": "1774587145901"
+            }"#,
+        );
+        // No update_task is scripted: if the store reached the PUT it would fail
+        // for a different reason, but the conflict must stop it before that.
+        let fake = FakeClickupClient::valid(clickup_user()).with_viewed_task(remote_changed);
+        let update_calls = fake.update_calls();
+        let view_calls = fake.view_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        let err = store
+            .update(&td, "TASK-90abc", &[("title", "My local edit")])
+            .unwrap_err();
+
+        // The error names the conflict and points at the recovery path.
+        let msg = err.to_string();
+        assert!(msg.contains("changed on ClickUp"), "got: {msg}");
+        assert!(msg.contains("lazyspec fetch"), "got: {msg}");
+
+        // No clobber: the pre-write fetch fired, but no PUT followed.
+        assert_eq!(view_calls.borrow().len(), 1, "expected exactly one GET");
+        assert!(
+            update_calls.borrow().is_empty(),
+            "a conflicting write must not PUT"
+        );
+
+        // The recorded baseline is left untouched -- nothing was overwritten.
+        let map = TaskMap::load(&root).unwrap();
+        assert_eq!(map.get("TASK-90abc").unwrap().updated_at, "1700000000000");
+    }
+
+    #[test]
+    fn clickup_advance_rejects_stale_write_and_performs_no_put() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_advance_stale_conflict");
+        let td = clickup_type_def(Some("list123"));
+
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1700000000000");
+        map.save(&root).unwrap();
+
+        let remote_changed = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "Changed elsewhere",
+                "status": {"status": "review"},
+                "date_updated": "1774587145901"
+            }"#,
+        );
+        let fake = FakeClickupClient::valid(clickup_user()).with_viewed_task(remote_changed);
+        let update_calls = fake.update_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        // An advance routes through update; the optimistic lock guards it too.
+        let err = store
+            .update(&td, "TASK-90abc", &[("status", "in progress")])
+            .unwrap_err();
+
+        assert!(err.to_string().contains("changed on ClickUp"), "got: {err}");
+        assert!(
+            update_calls.borrow().is_empty(),
+            "a conflicting advance must not PUT the status"
+        );
+    }
+
+    #[test]
+    fn clickup_update_proceeds_when_remote_matches_baseline() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_update_lock_ok");
+        let td = clickup_type_def(Some("list123"));
+
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1700000000000");
+        map.save(&root).unwrap();
+
+        // Remote date_updated equals the baseline: no external change, so the
+        // write is allowed through and the PUT fires.
+        let remote_unchanged = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "My task",
+                "status": {"status": "open"},
+                "date_updated": "1700000000000"
+            }"#,
+        );
+        let updated = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "Edited",
+                "status": {"status": "open"},
+                "date_updated": "1774587145901",
+                "markdown_description": "new body"
+            }"#,
+        );
+        let fake = FakeClickupClient::valid(clickup_user())
+            .with_viewed_task(remote_unchanged)
+            .with_updated_task(updated);
+        let update_calls = fake.update_calls();
+        let view_calls = fake.view_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        store
+            .update(&td, "TASK-90abc", &[("body", "new body")])
+            .unwrap();
+
+        // The lock check fetched, then the write proceeded with a single PUT.
+        assert_eq!(view_calls.borrow().len(), 1);
+        assert_eq!(update_calls.borrow().len(), 1);
+
+        // The baseline advanced to the returned task's fresh date_updated.
+        let map = TaskMap::load(&root).unwrap();
+        assert_eq!(map.get("TASK-90abc").unwrap().updated_at, "1774587145901");
+    }
+
+    #[test]
+    fn clickup_update_empty_baseline_skips_lock_check_and_writes() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_update_no_baseline");
+        let td = clickup_type_def(Some("list123"));
+
+        // No baseline timestamp (e.g. a create whose echo carried no
+        // date_updated): there is nothing to race against, so the lock is skipped
+        // and no pre-write GET is issued.
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "");
+        map.save(&root).unwrap();
+
+        let updated = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "Edited",
+                "status": {"status": "open"},
+                "date_updated": "1774587145901",
+                "markdown_description": "new body"
+            }"#,
+        );
+        // get_task is intentionally left unscripted (it would error if called),
+        // proving the empty baseline short-circuits before the fetch.
+        let fake = FakeClickupClient::valid(clickup_user()).with_updated_task(updated);
+        let update_calls = fake.update_calls();
+        let view_calls = fake.view_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        store
+            .update(&td, "TASK-90abc", &[("body", "new body")])
+            .unwrap();
+
+        assert!(view_calls.borrow().is_empty(), "no baseline -> no GET");
+        assert_eq!(update_calls.borrow().len(), 1);
     }
 
     #[test]
