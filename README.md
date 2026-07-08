@@ -687,8 +687,15 @@ type; each `fetch` re-derives it from the live List.
 Fetched docs behave identically to `github-issues` docs under `status --json`
 and `show <ID> --json`. A doc-id -> task-id map is kept at
 `.lazyspec/task-map.json`. Running `fetch` for a `clickup-tasks` type without a
-stored token fails with a clear "run `lazyspec setup clickup`" error. Writing
-back to ClickUp (`create`/`update`/`advance`/`delete`) is not yet supported.
+stored token fails with a clear "run `lazyspec setup clickup`" error.
+
+`lazyspec create <type> <title> [--body ...]` on a `clickup-tasks` type writes
+through: it POSTs a new task to the bound List (`POST /list/{id}/task`, `name`
+from the title and `markdown_content` from the body; ClickUp assigns the List's
+default status), then mirrors the created task into the local cache and records
+it in `.lazyspec/task-map.json`. It uses the token from `setup clickup` and
+fails with the same "run `lazyspec setup clickup`" error when none is stored.
+The remaining write paths (`update`/`advance`/`delete`) are not yet supported.
 
 #### `github-milestones` store
 

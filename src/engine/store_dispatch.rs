@@ -5,6 +5,7 @@ use anyhow::{bail, Result};
 use chrono::Local;
 use serde::Serialize;
 
+use crate::engine::clickup_cache;
 use crate::engine::config::{Config, StoreBackend, TypeDef};
 use crate::engine::document::{compose_frontmatter, AttrValue, DocMeta, DocType, Status};
 use crate::engine::gh::{self, GhClient, GhGraphql, GhMilestoneClient, GhProjectsClient, GqlVar};
@@ -13,6 +14,7 @@ use crate::engine::issue_body;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::{self, Store};
+use crate::engine::task_map::TaskMap;
 use crate::engine::template;
 
 #[derive(Serialize)]
@@ -95,26 +97,79 @@ impl DocumentStore for UnavailableStore {
 /// delete = archive) will use in later RFC-056 stories. Until those land, the
 /// write methods fail loudly rather than silently no-op.
 pub struct ClickupTasksStore {
-    #[allow(dead_code)]
     pub client: Box<dyn crate::engine::clickup::ClickupClient>,
-    #[allow(dead_code)]
     pub root: PathBuf,
     #[allow(dead_code)]
     pub config: Config,
-    #[allow(dead_code)]
+    /// The ClickUp token the write path authenticates with. The registry leaves
+    /// this `None` (so building the registry never touches the keychain); the
+    /// CLI create branch loads it before dispatching a write.
     pub token: Option<crate::engine::credentials::Token>,
 }
 
 impl ClickupTasksStore {
     const WRITE_UNIMPLEMENTED: &'static str =
-        "clickup-tasks write path is not implemented yet (RFC-056 story 5); \
-         this iteration delivers the read-only fetch path only";
+        "this clickup-tasks write path is not implemented yet (later RFC-056 story)";
+
+    const NO_TOKEN: &'static str =
+        "no ClickUp token found; run `lazyspec setup clickup` before creating \
+         clickup-tasks documents";
 }
 
 impl DocumentStore for ClickupTasksStore {
-    fn create(&mut self, _: &TypeDef, _: &str, _: &str, _: &str) -> Result<CreatedDoc> {
-        bail!("{}", Self::WRITE_UNIMPLEMENTED)
+    /// Create a task in the bound ClickUp List and mirror it into the local
+    /// cache. Mirrors [`GithubIssuesStore::create`]: POST the remote task, use
+    /// its returned id to form the doc id, materialize the echoed task into a
+    /// cache file (reusing the read path's [`clickup_cache::task_to_doc`]), and
+    /// record it in the [`TaskMap`] (with `date_updated` as the optimistic-lock
+    /// baseline for later writes).
+    fn create(
+        &mut self,
+        type_def: &TypeDef,
+        title: &str,
+        _author: &str,
+        body: &str,
+    ) -> Result<CreatedDoc> {
+        let token = self
+            .token
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("{}", Self::NO_TOKEN))?;
+        let list_id = type_def.clickup_list_id.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "type '{}' is clickup-tasks but has no clickup_list_id configured",
+                type_def.name
+            )
+        })?;
+
+        // A create carries no attributes or status yet, so only name + body are
+        // sent; ClickUp assigns the List's default status.
+        let payload = clickup_cache::build_task_create(title, body, None, &BTreeMap::new());
+        let task = self.client.create_task(token.expose(), list_id, &payload)?;
+
+        let id = type_def.make_id(&task.id);
+        let (meta, doc_body) = clickup_cache::task_to_doc(&task, type_def, &id);
+        write_cache_file(&self.root, type_def, &meta, &doc_body)?;
+
+        let updated_at = task
+            .date_updated
+            .map(|ms| ms.to_string())
+            .unwrap_or_default();
+        let mut task_map = TaskMap::load(&self.root)?;
+        task_map.insert(&id, &task.id, updated_at);
+        task_map.save(&self.root)?;
+
+        let cache_path = self
+            .root
+            .join(".lazyspec/cache")
+            .join(&type_def.name)
+            .join(format!("{}.md", id));
+        let relative = cache_path
+            .strip_prefix(&self.root)
+            .unwrap_or(&cache_path)
+            .to_path_buf();
+        Ok(CreatedDoc { path: relative, id })
     }
+
     fn update(&mut self, _: &TypeDef, _: &str, _: &[(&str, &str)]) -> Result<()> {
         bail!("{}", Self::WRITE_UNIMPLEMENTED)
     }
@@ -2205,6 +2260,123 @@ mod tests {
 
         fs_store.delete(&td, &created.id).unwrap();
         assert!(!root.join(&created.path).exists());
+    }
+
+    fn clickup_type_def(list_id: Option<&str>) -> TypeDef {
+        let mut td = test_type_def(StoreBackend::ClickupTasks);
+        td.name = "task".to_string();
+        td.prefix = "TASK".to_string();
+        td.clickup_list_id = list_id.map(|s| s.to_string());
+        td
+    }
+
+    fn clickup_user() -> crate::engine::clickup::ClickupUser {
+        crate::engine::clickup::ClickupUser {
+            id: 1,
+            username: "Jack".to_string(),
+            email: String::new(),
+        }
+    }
+
+    fn scripted_task(json: &str) -> crate::engine::clickup::ClickupTask {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn clickup_create_posts_task_and_mirrors_to_cache_and_map() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_create");
+        let td = clickup_type_def(Some("list123"));
+
+        let created = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "My task",
+                "status": {"status": "open"},
+                "date_updated": "1774587145901",
+                "markdown_description": "the body",
+                "creator": {"username": "Jack"}
+            }"#,
+        );
+        let fake = FakeClickupClient::valid(clickup_user()).with_created_task(created);
+        let calls = fake.create_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        let result = store
+            .create(&td, "My task", "ignored-author", "the body")
+            .unwrap();
+
+        // Doc id is the type prefix + the returned ClickUp task id.
+        assert_eq!(result.id, "TASK-90abc");
+
+        // The echoed task is materialized into a cache file, github-issues shape.
+        let cache = root.join(".lazyspec/cache/task/TASK-90abc.md");
+        let content = std::fs::read_to_string(&cache).unwrap();
+        assert!(content.contains("title: My task"), "got:\n{content}");
+        assert!(content.contains("status: open"), "got:\n{content}");
+        assert!(content.contains("the body"), "got:\n{content}");
+
+        // The task map records the task id + date_updated (the lock baseline).
+        let map = TaskMap::load(&root).unwrap();
+        let entry = map.get("TASK-90abc").unwrap();
+        assert_eq!(entry.task_id, "90abc");
+        assert_eq!(entry.updated_at, "1774587145901");
+
+        // Exactly one POST, to the bound List, with the mapped payload.
+        let recorded = calls.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "list123");
+        assert_eq!(recorded[0].1.name, "My task");
+        assert_eq!(recorded[0].1.markdown_content, Some("the body".to_string()));
+        // A create sends no status; ClickUp assigns the List default.
+        assert_eq!(recorded[0].1.status, None);
+    }
+
+    #[test]
+    fn clickup_create_without_token_errors() {
+        use crate::engine::clickup::FakeClickupClient;
+
+        let root = tmp_root("clickup_create_no_token");
+        let td = clickup_type_def(Some("list123"));
+        let fake = FakeClickupClient::valid(clickup_user());
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root,
+            config: Config::default(),
+            token: None,
+        };
+
+        let err = store.create(&td, "t", "a", "b").unwrap_err();
+        assert!(err.to_string().contains("setup clickup"), "got: {err}");
+    }
+
+    #[test]
+    fn clickup_create_without_list_id_errors() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_create_no_list");
+        let td = clickup_type_def(None);
+        let fake = FakeClickupClient::valid(clickup_user());
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root,
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        let err = store.create(&td, "t", "a", "b").unwrap_err();
+        assert!(err.to_string().contains("clickup_list_id"), "got: {err}");
     }
 
     #[test]

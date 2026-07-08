@@ -16,7 +16,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
-use crate::engine::clickup::{ClickupClient, ClickupStatus, ClickupTask};
+use crate::engine::clickup::{ClickupClient, ClickupStatus, ClickupTask, TaskCreate};
 use crate::engine::config::{Lifecycle, TypeDef};
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
 use crate::engine::store_dispatch::write_cache_file;
@@ -158,7 +158,7 @@ fn list_cached_ids(cache_dir: &Path) -> HashSet<String> {
 /// the priority name, `estimate` the `time_estimate` in ms, `due` the `due_date`
 /// epoch ms. The body prefers `markdown_description`, falling back to
 /// `text_content`.
-fn task_to_doc(task: &ClickupTask, type_def: &TypeDef, id: &str) -> (DocMeta, String) {
+pub(crate) fn task_to_doc(task: &ClickupTask, type_def: &TypeDef, id: &str) -> (DocMeta, String) {
     let author = task
         .creator
         .as_ref()
@@ -209,6 +209,69 @@ fn task_to_doc(task: &ClickupTask, type_def: &TypeDef, id: &str) -> (DocMeta, St
     };
 
     (meta, body)
+}
+
+/// Map a lazyspec doc's title, body, status and native attributes to a ClickUp
+/// [`TaskCreate`] payload -- the *write* direction, asymmetric with the read
+/// mapping in [`task_to_doc`] (RFC-056 §Field mapping):
+///
+/// - `name` <- title (always sent);
+/// - `markdown_content` <- body, omitted when the body is blank so ClickUp does
+///   not clobber a task with an empty description;
+/// - `status` <- the raw status string, omitted (`None`) when the caller has no
+///   status to push, so ClickUp assigns the List's default;
+/// - `priority` <- the priority *name* mapped to ClickUp's bare integer
+///   (`urgent=1 high=2 normal=3 low=4`); an unrecognized name is dropped;
+/// - `due_date`/`time_estimate` <- the integer epoch-ms / duration-ms attributes.
+///
+/// A `create` has no attributes yet (its signature carries only title/author/
+/// body), so it passes an empty map and only `name`/`markdown_content` are sent;
+/// the attribute mapping is exercised by the write path directly.
+pub(crate) fn build_task_create(
+    title: &str,
+    body: &str,
+    status: Option<&str>,
+    attributes: &std::collections::BTreeMap<String, AttrValue>,
+) -> TaskCreate {
+    let priority = match attributes.get("priority") {
+        Some(AttrValue::Str(name)) => priority_name_to_int(name),
+        _ => None,
+    };
+    let due_date = match attributes.get("due") {
+        Some(AttrValue::Int(ms)) => Some(*ms),
+        _ => None,
+    };
+    let time_estimate = match attributes.get("estimate") {
+        Some(AttrValue::Int(ms)) => Some(*ms),
+        _ => None,
+    };
+
+    TaskCreate {
+        name: title.to_string(),
+        markdown_content: if body.trim().is_empty() {
+            None
+        } else {
+            Some(body.to_string())
+        },
+        status: status.map(|s| s.to_string()),
+        priority,
+        due_date,
+        start_date: None,
+        time_estimate,
+    }
+}
+
+/// Map a ClickUp priority *name* to the bare integer the write API expects
+/// (`urgent=1 high=2 normal=3 low=4`, case-insensitive). Returns `None` for an
+/// unrecognized name so the caller omits the field rather than sending a guess.
+fn priority_name_to_int(name: &str) -> Option<i64> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "urgent" => Some(1),
+        "high" => Some(2),
+        "normal" => Some(3),
+        "low" => Some(4),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -403,6 +466,48 @@ mod tests {
             err.to_string().contains("fetching ClickUp list statuses"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn build_task_create_maps_title_and_body_only_for_a_bare_create() {
+        // A create carries no attributes and no status; only name + body are sent.
+        let payload = build_task_create("My task", "the body", None, &Default::default());
+        assert_eq!(payload.name, "My task");
+        assert_eq!(payload.markdown_content, Some("the body".to_string()));
+        assert_eq!(payload.status, None);
+        assert_eq!(payload.priority, None);
+        assert_eq!(payload.due_date, None);
+        assert_eq!(payload.time_estimate, None);
+    }
+
+    #[test]
+    fn build_task_create_omits_markdown_content_when_body_blank() {
+        let payload = build_task_create("t", "   ", None, &Default::default());
+        assert_eq!(payload.markdown_content, None);
+    }
+
+    #[test]
+    fn build_task_create_maps_native_attributes_to_write_shape() {
+        // The asymmetric write mapping: priority name -> bare int, epoch/duration
+        // attributes -> integer fields, raw status string passed through.
+        let mut attrs = std::collections::BTreeMap::new();
+        attrs.insert("priority".to_string(), AttrValue::Str("high".to_string()));
+        attrs.insert("due".to_string(), AttrValue::Int(1_748_541_600_000));
+        attrs.insert("estimate".to_string(), AttrValue::Int(3_600_000));
+
+        let payload = build_task_create("t", "b", Some("in progress"), &attrs);
+        assert_eq!(payload.status, Some("in progress".to_string()));
+        assert_eq!(payload.priority, Some(2));
+        assert_eq!(payload.due_date, Some(1_748_541_600_000));
+        assert_eq!(payload.time_estimate, Some(3_600_000));
+    }
+
+    #[test]
+    fn build_task_create_drops_unrecognized_priority_name() {
+        let mut attrs = std::collections::BTreeMap::new();
+        attrs.insert("priority".to_string(), AttrValue::Str("bogus".to_string()));
+        let payload = build_task_create("t", "b", None, &attrs);
+        assert_eq!(payload.priority, None);
     }
 
     #[test]
