@@ -6,7 +6,6 @@ use crate::engine::github::resolve_repo;
 use crate::engine::issue_body::TypeMatchRule;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
-use crate::engine::store_dispatch::GithubIssuesStore;
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::path::Path;
@@ -145,16 +144,7 @@ pub fn run(
             // Inject each board's per-item project field values as namespaced
             // `PROJECT-n.<field>` attributes on member docs. Best-effort: a
             // GraphQL failure warns and the cached doc keeps its other fields.
-            let gh_store = GithubIssuesStore {
-                client: gh,
-                root: root.to_path_buf(),
-                repo: repo.clone(),
-                config: config.clone(),
-                issue_map,
-                issue_cache: IssueCache::new(root),
-            };
-            inject_project_fields_into_cache(&gh_store, type_def);
-            issue_map = gh_store.issue_map;
+            inject_project_fields_into_cache(root, gh, &repo, &issue_map, config, type_def);
 
             summaries.push(TypeSummary {
                 type_name: type_name.to_string(),
@@ -202,11 +192,15 @@ pub fn run(
 /// For every cached doc of `type_def`, read its board memberships and inject the
 /// per-item project field values as `PROJECT-n.<field>` attributes, rewriting the
 /// cache file. Best-effort: a per-doc failure warns and the rest still process.
-fn inject_project_fields_into_cache<G: GhIssueReader + GhIssueWriter + GhGraphql>(
-    gh_store: &GithubIssuesStore<G>,
+fn inject_project_fields_into_cache(
+    root: &Path,
+    client: &dyn GhGraphql,
+    repo: &str,
+    issue_map: &IssueMap,
+    config: &Config,
     type_def: &TypeDef,
 ) {
-    let cache_dir = gh_store.root.join(".lazyspec/cache").join(&type_def.name);
+    let cache_dir = root.join(".lazyspec/cache").join(&type_def.name);
     let entries = match std::fs::read_dir(&cache_dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -233,7 +227,9 @@ fn inject_project_fields_into_cache<G: GhIssueReader + GhIssueWriter + GhGraphql
                 meta.id = crate::engine::store::extract_id_from_name(stem);
             }
         }
-        if let Err(e) = gh_store.inject_project_fields(&mut meta) {
+        if let Err(e) = crate::engine::store_dispatch::inject_project_fields_for_meta(
+            client, repo, issue_map, config, &mut meta,
+        ) {
             eprintln!(
                 "warning: could not read project fields for {}: {}",
                 meta.id, e
@@ -241,7 +237,7 @@ fn inject_project_fields_into_cache<G: GhIssueReader + GhIssueWriter + GhGraphql
             continue;
         }
         if let Err(e) =
-            crate::engine::store_dispatch::write_cache_file(&gh_store.root, type_def, &meta, &body)
+            crate::engine::store_dispatch::write_cache_file(root, type_def, &meta, &body)
         {
             eprintln!("warning: could not rewrite cache for {}: {}", meta.id, e);
         }
@@ -419,16 +415,7 @@ body text\n";
         // The derived id (STORY-7) must map to a node id for the lookup to succeed.
         issue_map.insert("STORY-7", 7, "", "I_issue7");
 
-        let gh_store = GithubIssuesStore {
-            client,
-            root: root.to_path_buf(),
-            repo: "owner/repo".to_string(),
-            config,
-            issue_map,
-            issue_cache: IssueCache::new(root),
-        };
-
-        inject_project_fields_into_cache(&gh_store, &td);
+        inject_project_fields_into_cache(root, &client, "owner/repo", &issue_map, &config, &td);
 
         // Proves write_cache_file did NOT bail on empty id AND the id was derived
         // correctly (STORY-7 mapped to the node with the project field).

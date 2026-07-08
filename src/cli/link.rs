@@ -46,7 +46,11 @@ pub fn link_with_config(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn link_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi, P: GhGraphql>(
+fn link_inner<
+    G: GhIssueReader + GhIssueWriter + GhGraphql + Send + 'static,
+    M: GhMilestoneApi,
+    P: GhGraphql + 'static,
+>(
     root: &Path,
     store: &Store,
     from: &str,
@@ -205,7 +209,7 @@ const PROJECT_ITEM_FOR_ISSUE_QUERY: &str = "query($id: ID!) { node(id: $id) { ..
 /// Returns `true` when a native membership mutation was actually performed (so
 /// the caller routes the cache mirror through the conflict-free resync), `false`
 /// for the ordinary-relationship no-op.
-fn apply_native_membership<P: GhGraphql>(
+fn apply_native_membership<P: GhGraphql + 'static>(
     root: &Path,
     config: &Config,
     rel_str: &str,
@@ -241,9 +245,8 @@ fn apply_native_membership<P: GhGraphql>(
         .filter(|n| !n.is_empty())
         .ok_or_else(|| anyhow!("source '{}' has no GitHub issue node id", source_id))?;
 
-    let client = projects_factory();
     let store = GithubProjectsStore {
-        client,
+        client: Box::new(projects_factory()),
         root: root.to_path_buf(),
         repo: repo.clone(),
         config: config.clone(),
@@ -375,7 +378,11 @@ pub fn unlink_with_config(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn unlink_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi, P: GhGraphql>(
+fn unlink_inner<
+    G: GhIssueReader + GhIssueWriter + GhGraphql + Send + 'static,
+    M: GhMilestoneApi,
+    P: GhGraphql + 'static,
+>(
     root: &Path,
     store: &Store,
     from: &str,
@@ -458,7 +465,7 @@ fn unlink_inner<G: GhIssueReader + GhIssueWriter + GhGraphql, M: GhMilestoneApi,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn push_if_github_backed<G: GhIssueReader + GhIssueWriter + GhGraphql>(
+fn push_if_github_backed<G: GhIssueReader + GhIssueWriter + GhGraphql + Send + 'static>(
     root: &Path,
     doc_path: &Path,
     config: Option<&Config>,
@@ -516,7 +523,7 @@ fn push_if_github_backed<G: GhIssueReader + GhIssueWriter + GhGraphql>(
     );
 
     let mut gh_store = GithubIssuesStore {
-        client: client_factory(),
+        client: Box::new(client_factory()),
         root: root.to_path_buf(),
         repo: repo.clone(),
         config: config.clone(),
@@ -1875,11 +1882,13 @@ mod tests {
         let fs = RealFileSystem;
         let remote_body = make_issue_body("agent-7", "2026-03-27", "REMOTE PROSE LINE");
 
-        let recorder = std::rc::Rc::new(MockGhClient::new().with_view_issue(rfc_view_issue(
-            42,
-            "2026-03-27T10:00:00Z",
-            &remote_body,
-        )));
+        let recorder = std::sync::Arc::new(std::sync::Mutex::new(
+            MockGhClient::new().with_view_issue(rfc_view_issue(
+                42,
+                "2026-03-27T10:00:00Z",
+                &remote_body,
+            )),
+        ));
 
         link_inner(
             &root,
@@ -1895,7 +1904,8 @@ mod tests {
         )
         .unwrap();
 
-        let pushed = recorder.last_edit_body.borrow();
+        let guard = recorder.lock().unwrap();
+        let pushed = guard.last_edit_body.borrow();
         let pushed = pushed.as_ref().expect("issue_edit should have been called");
         assert!(
             pushed.contains("REMOTE PROSE LINE"),
@@ -1966,11 +1976,13 @@ mod tests {
             crate::engine::issue_body::serialize(&doc, "RFC body text.")
         };
 
-        let recorder = std::rc::Rc::new(MockGhClient::new().with_view_issue(rfc_view_issue(
-            42,
-            "2026-03-27T10:00:00Z",
-            &second_body,
-        )));
+        let recorder = std::sync::Arc::new(std::sync::Mutex::new(
+            MockGhClient::new().with_view_issue(rfc_view_issue(
+                42,
+                "2026-03-27T10:00:00Z",
+                &second_body,
+            )),
+        ));
         let store = Store::load(&root, &config).unwrap();
         link_inner(
             &root,
@@ -1988,9 +2000,9 @@ mod tests {
 
         // No issue_edit recorded on the second call: dedup short-circuited.
         assert!(
-            recorder.last_edit_body.borrow().is_none(),
+            recorder.lock().unwrap().last_edit_body.borrow().is_none(),
             "second link must record no issue_edit, got: {:?}",
-            recorder.last_edit_body.borrow()
+            recorder.lock().unwrap().last_edit_body.borrow()
         );
 
         // Exactly one relation in the cache.
@@ -2086,11 +2098,13 @@ mod tests {
             crate::engine::issue_body::serialize(&doc, "REMOTE PROSE LINE")
         };
 
-        let recorder = std::rc::Rc::new(MockGhClient::new().with_view_issue(rfc_view_issue(
-            42,
-            "2026-06-26T11:00:00Z",
-            &remote_body,
-        )));
+        let recorder = std::sync::Arc::new(std::sync::Mutex::new(
+            MockGhClient::new().with_view_issue(rfc_view_issue(
+                42,
+                "2026-06-26T11:00:00Z",
+                &remote_body,
+            )),
+        ));
 
         unlink_inner(
             &root,
@@ -2106,7 +2120,8 @@ mod tests {
         )
         .expect("ordinary unlink must not abort on an out-of-band updated_at bump");
 
-        let pushed = recorder.last_edit_body.borrow();
+        let guard = recorder.lock().unwrap();
+        let pushed = guard.last_edit_body.borrow();
         let pushed = pushed.as_ref().expect("issue_edit should have been called");
         assert!(
             !pushed.contains("- implements: STORY-001"),

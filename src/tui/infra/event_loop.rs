@@ -60,7 +60,7 @@ fn try_push_gh_edit(
     root: &Path,
     relative: &Path,
     config: &Config,
-    shared_store: &Arc<Mutex<GithubIssuesStore<GhCli>>>,
+    shared_store: &Arc<Mutex<GithubIssuesStore>>,
 ) -> Result<(), String> {
     let content = std::fs::read_to_string(root.join(relative))
         .map_err(|e| format!("failed to read edited file: {e}"))?;
@@ -109,7 +109,7 @@ fn try_push_git_ref_edit(root: &Path, relative: &Path, config: &Config) -> Resul
     }
 
     let mut git_store = GitRefStore {
-        git: GitCli,
+        git: Box::new(GitCli),
         root: root.to_path_buf(),
         config: config.clone(),
         reserved_number: None,
@@ -371,25 +371,24 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     let (tx, rx) = crossbeam_channel::unbounded();
     app.event_tx = tx.clone();
 
-    let shared_gh_store: Option<Arc<Mutex<GithubIssuesStore<GhCli>>>> =
-        if has_pollable_gh_types(&config) {
-            let gh_config = config.documents.github.as_ref();
-            let repo = gh_config.and_then(|g| g.repo.clone());
-            repo.map(|repo| {
-                let root = app.store.root();
-                Arc::new(Mutex::new(GithubIssuesStore {
-                    client: GhCli::new(),
-                    root: root.to_path_buf(),
-                    repo,
-                    config: config.clone(),
-                    issue_map: IssueMap::load(root)
-                        .unwrap_or_else(|_| serde_json::from_str("{}").unwrap()),
-                    issue_cache: IssueCache::new(root),
-                }))
-            })
-        } else {
-            None
-        };
+    let shared_gh_store: Option<Arc<Mutex<GithubIssuesStore>>> = if has_pollable_gh_types(&config) {
+        let gh_config = config.documents.github.as_ref();
+        let repo = gh_config.and_then(|g| g.repo.clone());
+        repo.map(|repo| {
+            let root = app.store.root();
+            Arc::new(Mutex::new(GithubIssuesStore {
+                client: Box::new(GhCli::new()),
+                root: root.to_path_buf(),
+                repo,
+                config: config.clone(),
+                issue_map: IssueMap::load(root)
+                    .unwrap_or_else(|_| serde_json::from_str("{}").unwrap()),
+                issue_cache: IssueCache::new(root),
+            }))
+        })
+    } else {
+        None
+    };
 
     let cache_ttl = config
         .documents

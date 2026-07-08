@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
@@ -7,10 +7,8 @@ use serde::Serialize;
 
 use crate::engine::config::{Config, StoreBackend, TypeDef};
 use crate::engine::document::{compose_frontmatter, AttrValue, DocMeta, DocType, Status};
-use crate::engine::gh::{self, GhGraphql, GhIssueReader, GhIssueWriter, GqlVar};
+use crate::engine::gh::{self, GhClient, GhGraphql, GhMilestoneClient, GhProjectsClient, GqlVar};
 use crate::engine::gh_schema::{try_org_then_user, GhSchemaSnapshot};
-use crate::engine::git_ref::GitRefOps;
-use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::issue_body;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
@@ -41,7 +39,7 @@ pub struct CreatedDoc {
     pub id: String,
 }
 
-pub trait DocumentStore {
+pub trait DocumentStore: gh::AsAny {
     fn create(
         &mut self,
         type_def: &TypeDef,
@@ -65,6 +63,29 @@ pub trait DocumentStore {
 pub struct FilesystemStore {
     pub root: PathBuf,
     pub config: Config,
+}
+
+/// A store placeholder registered for a backend that the current config cannot
+/// serve (e.g. a GitHub backend with no `[github]` config). Every operation
+/// fails with `message`, so a misconfigured type still errors clearly at
+/// dispatch time rather than silently or with a generic "not registered".
+struct UnavailableStore {
+    message: String,
+}
+
+impl DocumentStore for UnavailableStore {
+    fn create(&mut self, _: &TypeDef, _: &str, _: &str, _: &str) -> Result<CreatedDoc> {
+        bail!("{}", self.message)
+    }
+    fn update(&mut self, _: &TypeDef, _: &str, _: &[(&str, &str)]) -> Result<()> {
+        bail!("{}", self.message)
+    }
+    fn delete(&mut self, _: &TypeDef, _: &str) -> Result<()> {
+        bail!("{}", self.message)
+    }
+    fn set_provenance(&mut self, _: &TypeDef, _: &str, _: &[String]) -> Result<()> {
+        bail!("{}", self.message)
+    }
 }
 
 impl DocumentStore for FilesystemStore {
@@ -147,8 +168,59 @@ impl DocumentStore for FilesystemStore {
     }
 }
 
-pub struct GithubIssuesStore<G: GhIssueReader + GhIssueWriter + GhGraphql> {
-    pub client: G,
+/// The Projects v2 board numbers a doc is a member of, read from its `related`
+/// relations whose relationship declares `github_native = "membership"`.
+/// Targets are board doc ids (`PROJECT-n`).
+fn membership_board_numbers(config: &Config, meta: &DocMeta) -> Vec<u64> {
+    meta.related
+        .iter()
+        .filter(|r| {
+            config
+                .relationship_by_name(&r.rel_type.to_string())
+                .and_then(|rel| rel.github_native.as_deref())
+                == Some("membership")
+        })
+        .filter_map(|r| board_number(&r.target).ok())
+        .collect()
+}
+
+/// Read the per-item project field values for `meta` across every board it is a
+/// member of and inject them into `meta.attributes` keyed
+/// `PROJECT-{number}.{field_name}`. Standalone (no store) so read-path callers
+/// that only hold a borrowed graphql client (e.g. the fetch loop) can inject
+/// without owning a client. A missing node id or zero memberships is a no-op.
+pub fn inject_project_fields_for_meta(
+    client: &dyn GhGraphql,
+    repo: &str,
+    issue_map: &IssueMap,
+    config: &Config,
+    meta: &mut DocMeta,
+) -> Result<()> {
+    let boards = membership_board_numbers(config, meta);
+    if boards.is_empty() {
+        return Ok(());
+    }
+    let Some(node_id) = issue_map
+        .get(&meta.id)
+        .map(|e| e.node_id.clone())
+        .filter(|n| !n.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let values = client.project_item_fields(repo, &node_id)?;
+    for v in &values {
+        if !boards.contains(&v.project_number) {
+            continue;
+        }
+        let key = format!("PROJECT-{}.{}", v.project_number, v.field_name);
+        meta.attributes.insert(key, gh::gh_field_to_attr(&v.value));
+    }
+    Ok(())
+}
+
+pub struct GithubIssuesStore {
+    pub client: Box<dyn GhClient>,
     pub root: PathBuf,
     pub repo: String,
     pub config: Config,
@@ -156,7 +228,16 @@ pub struct GithubIssuesStore<G: GhIssueReader + GhIssueWriter + GhGraphql> {
     pub issue_cache: IssueCache,
 }
 
-impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
+impl GithubIssuesStore {
+    /// Downcast the boxed client to a concrete mock for test assertions.
+    #[cfg(test)]
+    fn mock(&self) -> &crate::engine::gh::test_support::MockGhClient {
+        (*self.client)
+            .as_any()
+            .downcast_ref::<crate::engine::gh::test_support::MockGhClient>()
+            .expect("client is a MockGhClient")
+    }
+
     /// Push the current cache file content to GitHub.
     ///
     /// Reads the cache file for `doc_id`, parses its frontmatter and body,
@@ -522,44 +603,13 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
     /// are coerced [`AttrValue`]s (never `Raw`); the board number namespaces the
     /// key so the same field name on two boards cannot collide.
     pub fn inject_project_fields(&self, meta: &mut DocMeta) -> Result<()> {
-        let boards = self.membership_board_numbers(meta);
-        if boards.is_empty() {
-            return Ok(());
-        }
-        let Some(node_id) = self
-            .issue_map
-            .get(&meta.id)
-            .map(|e| e.node_id.clone())
-            .filter(|n| !n.is_empty())
-        else {
-            return Ok(());
-        };
-
-        let values = self.client.project_item_fields(&self.repo, &node_id)?;
-        for v in &values {
-            if !boards.contains(&v.project_number) {
-                continue;
-            }
-            let key = format!("PROJECT-{}.{}", v.project_number, v.field_name);
-            meta.attributes.insert(key, gh::gh_field_to_attr(&v.value));
-        }
-        Ok(())
-    }
-
-    /// The Projects v2 board numbers this doc is a member of, read from its
-    /// `related` relations whose relationship declares `github_native =
-    /// "membership"`. Targets are board doc ids (`PROJECT-n`).
-    fn membership_board_numbers(&self, meta: &DocMeta) -> Vec<u64> {
-        meta.related
-            .iter()
-            .filter(|r| {
-                self.config
-                    .relationship_by_name(&r.rel_type.to_string())
-                    .and_then(|rel| rel.github_native.as_deref())
-                    == Some("membership")
-            })
-            .filter_map(|r| board_number(&r.target).ok())
-            .collect()
+        inject_project_fields_for_meta(
+            self.client.as_graphql(),
+            &self.repo,
+            &self.issue_map,
+            &self.config,
+            meta,
+        )
     }
 
     /// Write (or clear) one `PROJECT-{number}.{field}` project field for the
@@ -678,7 +728,7 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
             return Ok(id);
         }
         let owner = owner_of(&self.repo)?;
-        resolve_project_id_live(&self.client, owner, project_number)
+        resolve_project_id_live(self.client.as_graphql(), owner, project_number)
     }
 
     /// The project item id for the issue (`content_node_id`) on the board with
@@ -716,7 +766,11 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
     ) -> Result<MaterializeResult> {
         let result = self.materialize_subdir(type_def, parent_doc_id)?;
         let plan = result.to_plan(type_def);
-        crate::engine::gh_subissue::reconcile_subissues(&self.client, &self.repo, &plan)?;
+        crate::engine::gh_subissue::reconcile_subissues(
+            self.client.as_graphql(),
+            &self.repo,
+            &plan,
+        )?;
         Ok(result)
     }
 
@@ -767,7 +821,11 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
                 order_index: 0,
             }],
         };
-        crate::engine::gh_subissue::reconcile_subissues(&self.client, &self.repo, &plan)?;
+        crate::engine::gh_subissue::reconcile_subissues(
+            self.client.as_graphql(),
+            &self.repo,
+            &plan,
+        )?;
 
         Ok(created)
     }
@@ -846,7 +904,7 @@ const PROJECT_ITEM_ID_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on Is
 /// Live org-then-user resolve of a Projects v2 board number to its node id.
 /// Used by the issue store's field-write path when the issue map has no cached
 /// board binding.
-fn resolve_project_id_live<G: GhGraphql>(client: &G, owner: &str, number: u64) -> Result<String> {
+fn resolve_project_id_live(client: &dyn GhGraphql, owner: &str, number: u64) -> Result<String> {
     let (_kind, id_node) = try_org_then_user(
         client,
         PROJECT_NODE_ID_ORG_QUERY,
@@ -865,7 +923,7 @@ fn resolve_project_id_live<G: GhGraphql>(client: &G, owner: &str, number: u64) -
         .ok_or_else(|| anyhow::anyhow!("Projects v2 board #{} not found under '{}'", number, owner))
 }
 
-impl<G: GhIssueReader + GhIssueWriter + GhGraphql> DocumentStore for GithubIssuesStore<G> {
+impl DocumentStore for GithubIssuesStore {
     fn create(
         &mut self,
         type_def: &TypeDef,
@@ -1221,15 +1279,24 @@ pub fn percent_complete(open: u64, closed: u64) -> Option<u8> {
 /// github-issues backend. Write policy is last-write-wins + refresh: pushes
 /// happen unconditionally, then the milestone is re-read into the cache; there
 /// is no optimistic lock.
-pub struct GithubMilestonesStore<M: gh::GhMilestoneApi> {
-    pub client: M,
+pub struct GithubMilestonesStore {
+    pub client: Box<dyn GhMilestoneClient>,
     pub root: PathBuf,
     pub repo: String,
     pub config: Config,
     pub issue_map: IssueMap,
 }
 
-impl<M: gh::GhMilestoneApi> GithubMilestonesStore<M> {
+impl GithubMilestonesStore {
+    /// Downcast the boxed client to a concrete mock for test assertions.
+    #[cfg(test)]
+    fn mock(&self) -> &crate::engine::gh::test_support::MockGhMilestoneClient {
+        (*self.client)
+            .as_any()
+            .downcast_ref::<crate::engine::gh::test_support::MockGhMilestoneClient>()
+            .expect("client is a MockGhMilestoneClient")
+    }
+
     fn resolve_number(&self, doc_id: &str) -> Result<u64> {
         self.issue_map
             .get(doc_id)
@@ -1279,7 +1346,7 @@ impl<M: gh::GhMilestoneApi> GithubMilestonesStore<M> {
     }
 }
 
-impl<M: gh::GhMilestoneApi> DocumentStore for GithubMilestonesStore<M> {
+impl DocumentStore for GithubMilestonesStore {
     fn create(
         &mut self,
         type_def: &TypeDef,
@@ -1420,7 +1487,7 @@ const CREATE_PROJECT_V2_MUTATION: &str = "mutation($ownerId: ID!, $title: String
 /// Resolve an owner login to its GraphQL node id, trying the organization root
 /// first then the user root (mirrors [`resolve_project_id_live`]). The
 /// `createProjectV2` mutation needs the owner's *node id*, not the login.
-fn resolve_owner_node_id<G: GhGraphql>(client: &G, owner: &str) -> Result<String> {
+fn resolve_owner_node_id(client: &dyn GhGraphql, owner: &str) -> Result<String> {
     let (_kind, id_node) = try_org_then_user(
         client,
         OWNER_NODE_ID_ORG_QUERY,
@@ -1484,15 +1551,24 @@ pub fn board_number(doc_id: &str) -> Result<u64> {
 /// `update`/`set_provenance` resolve the board node id without mutating the
 /// board. The owner type (org vs user) is auto-detected by trying the
 /// organization root first, then falling back to the user root.
-pub struct GithubProjectsStore<G: GhGraphql> {
-    pub client: G,
+pub struct GithubProjectsStore {
+    pub client: Box<dyn GhProjectsClient>,
     pub root: PathBuf,
     pub repo: String,
     pub config: Config,
     pub issue_map: IssueMap,
 }
 
-impl<G: GhGraphql> GithubProjectsStore<G> {
+impl GithubProjectsStore {
+    /// Downcast the boxed client to a concrete mock for test assertions.
+    #[cfg(test)]
+    fn mock(&self) -> &crate::engine::gh::test_support::MockGhClient {
+        (*self.client)
+            .as_any()
+            .downcast_ref::<crate::engine::gh::test_support::MockGhClient>()
+            .expect("client is a MockGhClient")
+    }
+
     /// Resolve a Projects v2 board number to its GraphQL node id. Tries the
     /// organization root first, then the user root. A board number that exists
     /// under neither (both `projectV2` null) is a not-found error. NEVER issues a
@@ -1570,7 +1646,7 @@ impl<G: GhGraphql> GithubProjectsStore<G> {
     }
 }
 
-impl<G: GhGraphql> DocumentStore for GithubProjectsStore<G> {
+impl DocumentStore for GithubProjectsStore {
     fn create(
         &mut self,
         type_def: &TypeDef,
@@ -1579,7 +1655,7 @@ impl<G: GhGraphql> DocumentStore for GithubProjectsStore<G> {
         _body: &str,
     ) -> Result<CreatedDoc> {
         let owner = owner_of(&self.repo)?.to_string();
-        let owner_id = resolve_owner_node_id(&self.client, &owner)?;
+        let owner_id = resolve_owner_node_id(self.client.as_graphql(), &owner)?;
 
         let resp = self.client.graphql(
             CREATE_PROJECT_V2_MUTATION,
@@ -1852,54 +1928,146 @@ fn render_cache_content(meta: &DocMeta, body: &str) -> Result<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn dispatch_for_type<
-    'a,
-    G: GhIssueReader + GhIssueWriter + GhGraphql,
-    R: GitRefOps,
-    M: gh::GhMilestoneApi,
-    P: GhGraphql,
->(
-    type_def: &TypeDef,
-    fs_store: &'a mut FilesystemStore,
-    gh_store: Option<&'a mut GithubIssuesStore<G>>,
-    git_ref_store: Option<&'a mut GitRefStore<R>>,
-    milestone_store: Option<&'a mut GithubMilestonesStore<M>>,
-    projects_store: Option<&'a mut GithubProjectsStore<P>>,
-) -> Result<&'a mut dyn DocumentStore> {
-    match type_def.store {
-        StoreBackend::Filesystem => Ok(fs_store as &mut dyn DocumentStore),
-        StoreBackend::GithubIssues => match gh_store {
-            Some(s) => Ok(s as &mut dyn DocumentStore),
-            None => bail!(
-                "type '{}' uses {} store but no GitHub backend is configured",
-                type_def.name,
-                type_def.store
-            ),
-        },
-        StoreBackend::GithubMilestones => match milestone_store {
-            Some(s) => Ok(s as &mut dyn DocumentStore),
-            None => bail!(
-                "type '{}' uses {} store but no GitHub milestones backend is configured",
-                type_def.name,
-                type_def.store
-            ),
-        },
-        StoreBackend::GithubProjects => match projects_store {
-            Some(s) => Ok(s as &mut dyn DocumentStore),
-            None => bail!(
-                "type '{}' uses {} store but no GitHub projects backend is configured",
-                type_def.name,
-                type_def.store
-            ),
-        },
-        StoreBackend::GitRef => match git_ref_store {
-            Some(s) => Ok(s as &mut dyn DocumentStore),
-            None => bail!(
-                "type '{}' uses git-ref store but no git-ref backend is configured",
-                type_def.name,
-            ),
-        },
+/// A non-generic lookup from a [`StoreBackend`] to the [`DocumentStore`] that
+/// serves it.
+///
+/// This replaces the former `dispatch_for_type` closed generic match, which was
+/// generic over one client type parameter per backend (`G`, `R`, `M`, `P`).
+/// That shape forced every new backend to add another generic parameter and
+/// forced every construction site to name all of them. The registry erases the
+/// concrete client type behind `&mut dyn DocumentStore`, so backends register
+/// by [`StoreBackend`] key and a new backend (e.g. `ClickupTasks`) is added by
+/// registering it, not by growing a generic signature.
+///
+/// The registry owns each backend's store as a boxed trait object. A new
+/// backend (e.g. `ClickupTasks`) is added by registering it in
+/// [`build_registry`], not by growing a generic signature or adding an `if`
+/// branch to every command. Lookup is keyed on [`TypeDef::store`].
+#[derive(Default)]
+pub struct DocumentStoreRegistry {
+    stores: HashMap<StoreBackend, Box<dyn DocumentStore>>,
+}
+
+impl DocumentStoreRegistry {
+    pub fn new() -> Self {
+        Self {
+            stores: HashMap::new(),
+        }
     }
+
+    /// Register the store serving `backend`. A later registration for the same
+    /// backend replaces the earlier one.
+    pub fn register(&mut self, backend: StoreBackend, store: Box<dyn DocumentStore>) {
+        self.stores.insert(backend, store);
+    }
+
+    /// Resolve the store for `type_def`'s backend, or error if no store is
+    /// registered for it.
+    pub fn for_type(&mut self, type_def: &TypeDef) -> Result<&mut dyn DocumentStore> {
+        match self.stores.get_mut(&type_def.store) {
+            Some(store) => Ok(store.as_mut()),
+            None => bail!(
+                "type '{}' uses {} store but no {} backend is registered",
+                type_def.name,
+                type_def.store,
+                type_def.store
+            ),
+        }
+    }
+
+    /// The store registered for `backend`, if any. Primarily for tests that
+    /// assert routing did not touch another backend.
+    #[cfg(test)]
+    pub fn get(&self, backend: StoreBackend) -> Option<&dyn DocumentStore> {
+        self.stores.get(&backend).map(|s| s.as_ref())
+    }
+}
+
+/// Build the production store registry for `root`/`config`: one boxed
+/// [`DocumentStore`] per backend the config can serve. The GitHub backends are
+/// registered only when `[github]` and a repo are configured; the git-ref store
+/// is registered with no reserved number (number reservation is a create-time
+/// concern handled by the caller). This is the single place a new backend is
+/// wired into production `update`/`delete`/`set_provenance` dispatch.
+pub fn build_registry(root: &std::path::Path, config: &Config) -> DocumentStoreRegistry {
+    let mut registry = DocumentStoreRegistry::new();
+
+    registry.register(
+        StoreBackend::Filesystem,
+        Box::new(FilesystemStore {
+            root: root.to_path_buf(),
+            config: config.clone(),
+        }),
+    );
+
+    let github = config.documents.github.as_ref();
+    match github.and_then(|g| g.repo.clone()) {
+        Some(repo) => {
+            let issue_map = IssueMap::load(root).unwrap_or_default();
+            registry.register(
+                StoreBackend::GithubIssues,
+                Box::new(GithubIssuesStore {
+                    client: Box::new(gh::GhCli::new()),
+                    root: root.to_path_buf(),
+                    repo: repo.clone(),
+                    config: config.clone(),
+                    issue_map: issue_map.clone(),
+                    issue_cache: IssueCache::new(root),
+                }),
+            );
+            registry.register(
+                StoreBackend::GithubMilestones,
+                Box::new(GithubMilestonesStore {
+                    client: Box::new(gh::GhCli::new()),
+                    root: root.to_path_buf(),
+                    repo: repo.clone(),
+                    config: config.clone(),
+                    issue_map: issue_map.clone(),
+                }),
+            );
+            registry.register(
+                StoreBackend::GithubProjects,
+                Box::new(GithubProjectsStore {
+                    client: Box::new(gh::GhCli::new()),
+                    root: root.to_path_buf(),
+                    repo,
+                    config: config.clone(),
+                    issue_map,
+                }),
+            );
+        }
+        // No usable GitHub config: register each GitHub backend as a store that
+        // fails on use with the same message the inline dispatch produced, so a
+        // GitHub-backed type still errors clearly (rather than a generic
+        // "backend not registered") without eagerly failing unrelated types.
+        None => {
+            let reason = if github.is_none() {
+                "no [github] config found"
+            } else {
+                "no github.repo configured"
+            };
+            for backend in [
+                StoreBackend::GithubIssues,
+                StoreBackend::GithubMilestones,
+                StoreBackend::GithubProjects,
+            ] {
+                let message = format!("type uses {} store but {}", backend, reason);
+                registry.register(backend, Box::new(UnavailableStore { message }));
+            }
+        }
+    }
+
+    registry.register(
+        StoreBackend::GitRef,
+        Box::new(crate::engine::git_ref_store::GitRefStore {
+            git: Box::new(crate::engine::git_ref::GitCli),
+            root: root.to_path_buf(),
+            config: config.clone(),
+            reserved_number: None,
+        }),
+    );
+
+    registry
 }
 
 #[cfg(test)]
@@ -1908,9 +2076,10 @@ mod tests {
     use crate::engine::config::{Config, NumberingStrategy, StoreBackend, TypeDef};
     use crate::engine::gh::{
         test_support::{MockGhClient, MockGhMilestoneClient},
-        GhIssue, GhLabel, GhMilestoneApi,
+        GhIssue, GhLabel,
     };
     use crate::engine::git_ref::test_support::MockGitRefClient;
+    use crate::engine::git_ref_store::GitRefStore;
     use crate::engine::issue_map::IssueMap;
 
     fn test_type_def(store: StoreBackend) -> TypeDef {
@@ -2008,7 +2177,7 @@ mod tests {
     fn github_issues_create_produces_cache_file() {
         let root = tmp_root("gh_create");
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2029,7 +2198,7 @@ mod tests {
         assert!(root.join(&result.path).exists());
 
         // Issue body sent to GH should NOT contain author: in lazyspec comment
-        let create_body = gh_store.client.last_create_body.borrow();
+        let create_body = gh_store.mock().last_create_body.borrow();
         let create_body_str = create_body
             .as_deref()
             .expect("issue_create should have been called");
@@ -2059,7 +2228,7 @@ mod tests {
     fn github_issues_create_updates_issue_map() {
         let root = tmp_root("gh_create_map");
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2082,7 +2251,7 @@ mod tests {
     fn github_issues_create_uses_label_override() {
         let root = tmp_root("gh_create_label_override");
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2095,7 +2264,7 @@ mod tests {
         gh_store.create(&td, "custom", "author", "").unwrap();
 
         assert_eq!(
-            *gh_store.client.last_create_labels.borrow(),
+            *gh_store.mock().last_create_labels.borrow(),
             vec!["Ticket".to_string()]
         );
     }
@@ -2104,7 +2273,7 @@ mod tests {
     fn github_issues_create_persists_issue_map() {
         let root = tmp_root("gh_create_persist");
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2123,7 +2292,7 @@ mod tests {
     fn github_issues_create_increments_id() {
         let root = tmp_root("gh_create_incr");
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2143,7 +2312,7 @@ mod tests {
     fn github_issues_create_uses_prefix_not_name() {
         let root = tmp_root("gh_create_prefix");
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2224,7 +2393,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2238,7 +2407,7 @@ mod tests {
             .unwrap();
 
         // Re-serialized body sent to GH should not contain author:
-        let captured = gh_store.client.last_edit_body.borrow();
+        let captured = gh_store.mock().last_edit_body.borrow();
         let body_str = captured
             .as_deref()
             .expect("issue_edit should have been called with body");
@@ -2276,7 +2445,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2344,7 +2513,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2359,7 +2528,7 @@ mod tests {
 
         // The body was re-mirrored (issue_edit ran).
         assert!(
-            gh_store.client.last_edit_body.borrow().is_some(),
+            gh_store.mock().last_edit_body.borrow().is_some(),
             "issue_edit should have been called"
         );
 
@@ -2397,7 +2566,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2409,8 +2578,8 @@ mod tests {
         gh_store
             .update(&td, "RFC-001", &[("status", "complete")])
             .unwrap();
-        assert!(gh_store.client.closed.get());
-        assert!(!gh_store.client.reopened.get());
+        assert!(gh_store.mock().closed.get());
+        assert!(!gh_store.mock().reopened.get());
     }
 
     #[test]
@@ -2440,7 +2609,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2452,15 +2621,15 @@ mod tests {
         gh_store
             .update(&td, "RFC-001", &[("status", "draft")])
             .unwrap();
-        assert!(gh_store.client.reopened.get());
-        assert!(!gh_store.client.closed.get());
+        assert!(gh_store.mock().reopened.get());
+        assert!(!gh_store.mock().closed.get());
     }
 
     #[test]
     fn github_issues_update_not_in_map() {
         let root = tmp_root("gh_update_nomap");
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2502,7 +2671,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2513,10 +2682,10 @@ mod tests {
         let td = test_type_def(StoreBackend::GithubIssues);
         gh_store.delete(&td, "RFC-001").unwrap();
 
-        assert!(gh_store.client.closed.get());
-        let title = gh_store.client.last_edit_title.borrow();
+        assert!(gh_store.mock().closed.get());
+        let title = gh_store.mock().last_edit_title.borrow();
         assert_eq!(title.as_deref(), Some("[DELETED] My RFC"));
-        let labels_remove = gh_store.client.last_edit_labels_remove.borrow();
+        let labels_remove = gh_store.mock().last_edit_labels_remove.borrow();
         assert_eq!(*labels_remove, vec!["lazyspec:rfc".to_string()]);
         assert!(gh_store.issue_map.get("RFC-001").is_none());
     }
@@ -2544,7 +2713,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2556,14 +2725,14 @@ mod tests {
         let err = gh_store.delete(&td, "RFC-001").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("has been modified on GitHub"), "got: {}", msg);
-        assert!(!gh_store.client.closed.get());
+        assert!(!gh_store.mock().closed.get());
     }
 
     #[test]
     fn github_issues_delete_not_in_map() {
         let root = tmp_root("gh_delete_nomap");
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2605,7 +2774,7 @@ mod tests {
         assert!(cache_file.exists());
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2621,9 +2790,9 @@ mod tests {
     fn milestone_store(
         root: &std::path::Path,
         client: MockGhMilestoneClient,
-    ) -> GithubMilestonesStore<MockGhMilestoneClient> {
+    ) -> GithubMilestonesStore {
         GithubMilestonesStore {
-            client,
+            client: Box::new(client),
             root: root.to_path_buf(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2644,8 +2813,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(created.id, td.make_id(1));
-        assert_eq!(store.client.create_calls.get(), 1);
-        let ms = &store.client.milestones.borrow()[0];
+        assert_eq!(store.mock().create_calls.get(), 1);
+        let ms = &store.mock().milestones.borrow()[0];
         assert_eq!(ms.title, "v1.0");
         assert_eq!(ms.description, "first release");
 
@@ -2704,7 +2873,7 @@ mod tests {
             )
             .unwrap();
 
-        let edit = store.client.last_edit.borrow();
+        let edit = store.mock().last_edit.borrow();
         let edit = edit.as_ref().unwrap();
         assert_eq!(edit.title.as_deref(), Some("v2.0"));
         assert_eq!(edit.description.as_deref(), Some("new desc"));
@@ -2747,7 +2916,7 @@ mod tests {
             .update(&td, &created.id, &[("status", "complete")])
             .unwrap();
 
-        let edit = store.client.last_edit.borrow();
+        let edit = store.mock().last_edit.borrow();
         assert_eq!(edit.as_ref().unwrap().state.as_deref(), Some("closed"));
 
         let cache = std::fs::read_to_string(root.join(&created.path)).unwrap();
@@ -2774,7 +2943,7 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("percent_complete"), "{err}");
         // No edit was issued.
-        assert!(store.client.last_edit.borrow().is_none());
+        assert!(store.mock().last_edit.borrow().is_none());
     }
 
     #[test]
@@ -2786,7 +2955,7 @@ mod tests {
 
         store.delete(&td, &created.id).unwrap();
 
-        assert!(store.client.milestones.borrow().is_empty());
+        assert!(store.mock().milestones.borrow().is_empty());
         assert!(store.issue_map.get(&created.id).is_none());
         assert!(!root.join(&created.path).exists());
     }
@@ -2795,22 +2964,17 @@ mod tests {
     #[test]
     fn dispatch_routes_to_github_milestones() {
         let root = tmp_root("dispatch_ms");
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config: Config::default(),
         };
-        let mut ms_store = milestone_store(&root, MockGhMilestoneClient::new());
+        let ms_store = milestone_store(&root, MockGhMilestoneClient::new());
 
         let td = test_type_def(StoreBackend::GithubMilestones);
-        let store = dispatch_for_type::<MockGhClient, MockGitRefClient, _, MockGhClient>(
-            &td,
-            &mut fs_store,
-            None,
-            None,
-            Some(&mut ms_store),
-            None,
-        )
-        .unwrap();
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        registry.register(StoreBackend::GithubMilestones, Box::new(ms_store));
+        let store = registry.for_type(&td).unwrap();
         let result = store.create(&td, "dispatched", "author", "");
         assert!(result.is_ok());
     }
@@ -2818,23 +2982,20 @@ mod tests {
     #[test]
     fn dispatch_github_milestones_without_backend_errors() {
         let root = tmp_root("dispatch_no_ms");
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config: Config::default(),
         };
         let td = test_type_def(StoreBackend::GithubMilestones);
-        let result = dispatch_for_type::<
-            MockGhClient,
-            MockGitRefClient,
-            MockGhMilestoneClient,
-            MockGhClient,
-        >(&td, &mut fs_store, None, None, None, None);
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        let result = registry.for_type(&td);
         assert!(result.is_err());
         assert!(result
             .err()
             .unwrap()
             .to_string()
-            .contains("GitHub milestones backend"));
+            .contains("github-milestones backend"));
     }
 
     #[test]
@@ -2842,19 +3003,15 @@ mod tests {
         let root = tmp_root("dispatch_fs");
         let config = Config::default();
 
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config,
         };
 
         let td = test_type_def(StoreBackend::Filesystem);
-        let store = dispatch_for_type::<
-            MockGhClient,
-            MockGitRefClient,
-            MockGhMilestoneClient,
-            MockGhClient,
-        >(&td, &mut fs_store, None, None, None, None)
-        .unwrap();
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        let store = registry.for_type(&td).unwrap();
 
         // Should succeed (routed to filesystem)
         let result = store.create(&td, "dispatched", "author", "");
@@ -2866,13 +3023,13 @@ mod tests {
         let root = tmp_root("dispatch_gh");
         let config = Config::default();
 
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config,
         };
 
-        let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+        let gh_store = GithubIssuesStore {
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2881,15 +3038,10 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
-        let store = dispatch_for_type::<_, MockGitRefClient, MockGhMilestoneClient, MockGhClient>(
-            &td,
-            &mut fs_store,
-            Some(&mut gh_store),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        registry.register(StoreBackend::GithubIssues, Box::new(gh_store));
+        let store = registry.for_type(&td).unwrap();
 
         let result = store.create(&td, "dispatched", "author", "");
         assert!(result.is_ok());
@@ -2922,7 +3074,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2935,7 +3087,7 @@ mod tests {
             .update(&td, "RFC-001", &[("body", "new content")])
             .unwrap();
 
-        let captured = gh_store.client.last_edit_body.borrow();
+        let captured = gh_store.mock().last_edit_body.borrow();
         let body_str = captured
             .as_deref()
             .expect("issue_edit should have been called with body");
@@ -2990,7 +3142,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -3003,13 +3155,13 @@ mod tests {
             .update(&td, "RFC-001", &[("body", "new"), ("status", "complete")])
             .unwrap();
 
-        let captured = gh_store.client.last_edit_body.borrow();
+        let captured = gh_store.mock().last_edit_body.borrow();
         let body_str = captured
             .as_deref()
             .expect("issue_edit should have been called with body");
         assert!(body_str.contains("new"), "body should contain updated text");
         assert!(
-            gh_store.client.closed.get(),
+            gh_store.mock().closed.get(),
             "issue should be closed for status=complete"
         );
     }
@@ -3041,7 +3193,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -3089,7 +3241,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -3102,7 +3254,7 @@ mod tests {
             .merge_relation_to_remote(&td, "RFC-001", "implements", "STORY-001", true)
             .expect("merge must not reject on a stale updated_at");
 
-        let pushed = gh_store.client.last_edit_body.borrow();
+        let pushed = gh_store.mock().last_edit_body.borrow();
         let pushed = pushed.as_ref().expect("issue_edit should run");
         assert!(pushed.contains("REMOTE PROSE LINE"), "got:\n{pushed}");
         assert!(pushed.contains("- implements: STORY-001"), "got:\n{pushed}");
@@ -3163,7 +3315,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -3177,7 +3329,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            gh_store.client.last_edit_body.borrow().is_none(),
+            gh_store.mock().last_edit_body.borrow().is_none(),
             "already-present relation must not trigger an issue_edit"
         );
     }
@@ -3222,24 +3374,21 @@ mod tests {
         let root = tmp_root("dispatch_no_gh");
         let config = Config::default();
 
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config,
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
-        let result = dispatch_for_type::<
-            MockGhClient,
-            MockGitRefClient,
-            MockGhMilestoneClient,
-            MockGhClient,
-        >(&td, &mut fs_store, None, None, None, None);
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        let result = registry.for_type(&td);
         assert!(result.is_err());
         assert!(result
             .err()
             .unwrap()
             .to_string()
-            .contains("no GitHub backend"));
+            .contains("no github-issues backend"));
     }
 
     #[test]
@@ -3247,7 +3396,7 @@ mod tests {
         let root = tmp_root("dispatch_gitref");
         let config = Config::default();
 
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config,
         };
@@ -3255,23 +3404,18 @@ mod tests {
         let mock = MockGitRefClient::new()
             .with_list_result(Ok(vec![]))
             .with_create_ref_commit_result(Ok("abc123".into()));
-        let mut git_ref_store = GitRefStore {
-            git: mock,
+        let git_ref_store = GitRefStore {
+            git: Box::new(mock),
             root: root.clone(),
             config: Config::default(),
             reserved_number: None,
         };
 
         let td = test_type_def(StoreBackend::GitRef);
-        let store = dispatch_for_type::<MockGhClient, _, MockGhMilestoneClient, MockGhClient>(
-            &td,
-            &mut fs_store,
-            None,
-            Some(&mut git_ref_store),
-            None,
-            None,
-        )
-        .unwrap();
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        registry.register(StoreBackend::GitRef, Box::new(git_ref_store));
+        let store = registry.for_type(&td).unwrap();
 
         let result = store.create(&td, "dispatched", "author", "");
         assert!(result.is_ok());
@@ -3282,34 +3426,43 @@ mod tests {
         let root = tmp_root("dispatch_fs_ignores_gitref");
         let config = Config::default();
 
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config,
         };
 
         let mock = MockGitRefClient::new();
-        let mut git_ref_store = GitRefStore {
-            git: mock,
+        let git_ref_store = GitRefStore {
+            git: Box::new(mock),
             root: root.clone(),
             config: Config::default(),
             reserved_number: None,
         };
 
         let td = test_type_def(StoreBackend::Filesystem);
-        let store = dispatch_for_type::<MockGhClient, _, MockGhMilestoneClient, MockGhClient>(
-            &td,
-            &mut fs_store,
-            None,
-            Some(&mut git_ref_store),
-            None,
-            None,
-        )
-        .unwrap();
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        registry.register(StoreBackend::GitRef, Box::new(git_ref_store));
+        let store = registry.for_type(&td).unwrap();
 
         let result = store.create(&td, "dispatched", "author", "");
         assert!(result.is_ok());
+        // The git-ref store is owned by the registry; downcast it back to assert
+        // routing to the filesystem type never touched it.
+        let git_ref_store = registry
+            .get(StoreBackend::GitRef)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<GitRefStore>()
+            .unwrap();
         assert!(
-            git_ref_store.git.calls.borrow().is_empty(),
+            (*git_ref_store.git)
+                .as_any()
+                .downcast_ref::<MockGitRefClient>()
+                .unwrap()
+                .calls
+                .borrow()
+                .is_empty(),
             "GitRefStore should not have been invoked for a Filesystem type"
         );
     }
@@ -3319,18 +3472,15 @@ mod tests {
         let root = tmp_root("dispatch_no_gitref");
         let config = Config::default();
 
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config,
         };
 
         let td = test_type_def(StoreBackend::GitRef);
-        let result = dispatch_for_type::<
-            MockGhClient,
-            MockGitRefClient,
-            MockGhMilestoneClient,
-            MockGhClient,
-        >(&td, &mut fs_store, None, None, None, None);
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        let result = registry.for_type(&td);
         assert!(result.is_err());
         assert!(result
             .err()
@@ -3587,7 +3737,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -3598,7 +3748,7 @@ mod tests {
         let td = test_type_def(StoreBackend::GithubIssues);
         gh_store.push_cache(&td, "RFC-001").unwrap();
 
-        let captured = gh_store.client.last_edit_body.borrow();
+        let captured = gh_store.mock().last_edit_body.borrow();
         let body_str = captured
             .as_deref()
             .expect("issue_edit should have been called");
@@ -3648,7 +3798,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -3661,7 +3811,7 @@ mod tests {
             .set_provenance(&td, "RFC-001", &["A".to_string()])
             .unwrap();
 
-        let captured = gh_store.client.last_edit_body.borrow();
+        let captured = gh_store.mock().last_edit_body.borrow();
         let body_str = captured
             .as_deref()
             .expect("issue_edit should have been called");
@@ -3710,7 +3860,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -3721,7 +3871,7 @@ mod tests {
         let td = test_type_def(StoreBackend::GithubIssues);
         gh_store.set_provenance(&td, "RFC-001", &[]).unwrap();
 
-        let captured = gh_store.client.last_edit_body.borrow();
+        let captured = gh_store.mock().last_edit_body.borrow();
         let body_str = captured
             .as_deref()
             .expect("issue_edit should have been called");
@@ -3931,7 +4081,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -3961,7 +4111,7 @@ mod tests {
             .unwrap();
 
         // Remote body carries the attributes block (clobber-protection sink).
-        let captured = gh_store.client.last_edit_body.borrow();
+        let captured = gh_store.mock().last_edit_body.borrow();
         let body_str = captured.as_deref().expect("issue_edit called");
         assert!(body_str.contains("attributes:"), "got: {body_str}");
         assert!(body_str.contains("owner: jkaloger"));
@@ -4013,7 +4163,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -4035,7 +4185,7 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("estimate"), "got: {err}");
         assert!(
-            gh_store.client.last_edit_body.borrow().is_none(),
+            gh_store.mock().last_edit_body.borrow().is_none(),
             "no remote issue_edit should have fired"
         );
     }
@@ -4085,7 +4235,7 @@ mod tests {
     fn issue_type_store(
         root: &std::path::Path,
         graphql: Vec<serde_json::Value>,
-    ) -> GithubIssuesStore<MockGhClient> {
+    ) -> GithubIssuesStore {
         let view_issue = gh_view_issue_with_lazyspec_body(42, vec!["lazyspec:story"]);
         let client = MockGhClient::new()
             .with_view_issue(view_issue)
@@ -4093,7 +4243,7 @@ mod tests {
         let mut map = IssueMap::load(root).unwrap();
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
         GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.to_path_buf(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -4134,7 +4284,7 @@ mod tests {
             .update(&td, "RFC-001", &[("issue_type", "Bug")])
             .unwrap();
 
-        let calls = gh_store.client.graphql_calls.borrow();
+        let calls = gh_store.mock().graphql_calls.borrow();
         let mutations: Vec<_> = calls
             .iter()
             .filter(|(q, _)| q.contains("updateIssue"))
@@ -4148,7 +4298,7 @@ mod tests {
         );
 
         // The issue-body HTML comment must NOT carry issue_type.
-        let body = gh_store.client.last_edit_body.borrow();
+        let body = gh_store.mock().last_edit_body.borrow();
         let body_str = body.as_deref().expect("issue_edit called");
         assert!(
             !body_str.contains("issue_type"),
@@ -4174,7 +4324,7 @@ mod tests {
             .update(&td, "RFC-001", &[("issue_type", "")])
             .unwrap();
 
-        let calls = gh_store.client.graphql_calls.borrow();
+        let calls = gh_store.mock().graphql_calls.borrow();
         let mutation = calls
             .iter()
             .find(|(q, _)| q.contains("updateIssue"))
@@ -4208,11 +4358,11 @@ mod tests {
             "error must name the invalid value, got: {err}"
         );
         assert!(
-            gh_store.client.graphql_calls.borrow().is_empty(),
+            gh_store.mock().graphql_calls.borrow().is_empty(),
             "zero graphql mutations on invalid issue_type"
         );
         assert!(
-            gh_store.client.last_edit_body.borrow().is_none(),
+            gh_store.mock().last_edit_body.borrow().is_none(),
             "no issue_edit on invalid issue_type"
         );
     }
@@ -4240,7 +4390,7 @@ mod tests {
             "error must name the org-only constraint, got: {err}"
         );
         let mutations = gh_store
-            .client
+            .mock()
             .graphql_calls
             .borrow()
             .iter()
@@ -4248,7 +4398,7 @@ mod tests {
             .count();
         assert_eq!(mutations, 0, "no updateIssue mutation on user account");
         assert!(
-            gh_store.client.last_edit_body.borrow().is_none(),
+            gh_store.mock().last_edit_body.borrow().is_none(),
             "no issue_edit on user account"
         );
     }
@@ -4288,7 +4438,7 @@ mod tests {
 
         // No label add/remove recorded.
         assert!(
-            gh_store.client.last_edit_labels_remove.borrow().is_empty(),
+            gh_store.mock().last_edit_labels_remove.borrow().is_empty(),
             "issue_type write must not remove labels"
         );
 
@@ -4314,10 +4464,10 @@ mod tests {
         };
 
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new().with_graphql_responses(vec![
+            client: Box::new(MockGhClient::new().with_graphql_responses(vec![
                 issue_node_id_response(),
                 serde_json::json!({"data": {"updateIssue": {"issue": {"id": "I_node1"}}}}),
-            ]),
+            ])),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -4330,7 +4480,7 @@ mod tests {
             .unwrap();
         assert_eq!(result.id, "RFC-1");
 
-        let calls = gh_store.client.graphql_calls.borrow();
+        let calls = gh_store.mock().graphql_calls.borrow();
         let mutations: Vec<_> = calls
             .iter()
             .filter(|(q, _)| q.contains("updateIssue"))
@@ -4353,7 +4503,7 @@ mod tests {
         assert_eq!(td.github_issue_type, None);
 
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -4365,9 +4515,9 @@ mod tests {
             .create(&td, "my title", "author", "body text")
             .unwrap();
         assert_eq!(result.id, "RFC-1");
-        assert_eq!(gh_store.client.create_titles.borrow().len(), 1);
+        assert_eq!(gh_store.mock().create_titles.borrow().len(), 1);
         assert!(
-            gh_store.client.graphql_calls.borrow().is_empty(),
+            gh_store.mock().graphql_calls.borrow().is_empty(),
             "no issue_type configured -> zero GraphQL calls"
         );
     }
@@ -4386,7 +4536,7 @@ mod tests {
             ..test_type_def(StoreBackend::GithubIssues)
         };
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -4401,11 +4551,11 @@ mod tests {
             "error must name the invalid value, got: {err}"
         );
         assert!(
-            gh_store.client.create_titles.borrow().is_empty(),
+            gh_store.mock().create_titles.borrow().is_empty(),
             "issue_create must never fire when the type is unresolvable"
         );
         assert!(
-            gh_store.client.graphql_calls.borrow().is_empty(),
+            gh_store.mock().graphql_calls.borrow().is_empty(),
             "zero GraphQL calls on invalid issue_type"
         );
 
@@ -4422,7 +4572,7 @@ mod tests {
             ..test_type_def(StoreBackend::GithubIssues)
         };
         let mut gh_store2 = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root2.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -4437,7 +4587,7 @@ mod tests {
             "error must name the org-only constraint, got: {err2}"
         );
         assert!(
-            gh_store2.client.create_titles.borrow().is_empty(),
+            gh_store2.mock().create_titles.borrow().is_empty(),
             "issue_create must never fire when the type is unresolvable"
         );
     }
@@ -4454,12 +4604,12 @@ mod tests {
         };
 
         let mut store = GithubIssuesStore {
-            client: MockGhClient::new().with_graphql_responses(vec![
+            client: Box::new(MockGhClient::new().with_graphql_responses(vec![
                 issue_node_id_response(),
                 serde_json::json!({"data": {"updateIssue": {"issue": {"id": "I_node1"}}}}),
                 serde_json::json!({"data": {"node": {"subIssues": {"nodes": []}}}}),
                 serde_json::json!({"data": {}}),
-            ]),
+            ])),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -4473,7 +4623,7 @@ mod tests {
             .create_child_subissue(&td, "RFC-1", "Child", "author", "")
             .unwrap();
 
-        let calls = store.client.graphql_calls.borrow();
+        let calls = store.mock().graphql_calls.borrow();
         let mutations: Vec<_> = calls
             .iter()
             .filter(|(q, _)| q.contains("updateIssue"))
@@ -4518,7 +4668,7 @@ mod tests {
         std::fs::write(path, content).unwrap();
     }
 
-    fn subdir_gh_store(root: &std::path::Path, td: &TypeDef) -> GithubIssuesStore<MockGhClient> {
+    fn subdir_gh_store(root: &std::path::Path, td: &TypeDef) -> GithubIssuesStore {
         // The subIssues read (empty) followed by enough generic mutation-OK
         // responses for the add/reprioritize calls the reconcile may issue.
         let mut responses = vec![serde_json::json!({
@@ -4526,7 +4676,7 @@ mod tests {
         })];
         responses.extend(std::iter::repeat_with(|| serde_json::json!({"data": {}})).take(8));
         GithubIssuesStore {
-            client: MockGhClient::new().with_graphql_responses(responses),
+            client: Box::new(MockGhClient::new().with_graphql_responses(responses)),
             root: root.to_path_buf(),
             repo: "owner/repo".to_string(),
             config: subdir_config(td),
@@ -4555,7 +4705,7 @@ mod tests {
         assert!(store.issue_map.get("02-second").is_some());
 
         assert_eq!(
-            store.client.create_titles.borrow().len(),
+            store.mock().create_titles.borrow().len(),
             3,
             "parent + 2 children = 3 issue_create calls"
         );
@@ -4600,7 +4750,7 @@ mod tests {
         let result = store.sync_subissues(&td, "STORY-300").unwrap();
 
         let parent_node = result.parent_node.clone();
-        let calls = store.client.graphql_calls.borrow();
+        let calls = store.mock().graphql_calls.borrow();
         let adds: Vec<_> = calls
             .iter()
             .filter(|(q, _)| q.contains("addSubIssue"))
@@ -4652,7 +4802,7 @@ mod tests {
 
         assert_eq!(result.children.len(), 1, "one CLI-authored child");
         let child_node = result.children[0].node_id.clone();
-        let calls = store.client.graphql_calls.borrow();
+        let calls = store.mock().graphql_calls.borrow();
         let adds: Vec<_> = calls
             .iter()
             .filter(|(q, _)| q.contains("addSubIssue"))
@@ -4682,7 +4832,7 @@ mod tests {
         let result = store.sync_subissues(&td, "STORY-400").unwrap();
 
         // Child routed to GraphQL addSubIssue.
-        let calls = store.client.graphql_calls.borrow();
+        let calls = store.mock().graphql_calls.borrow();
         let adds: Vec<_> = calls
             .iter()
             .filter(|(q, _)| q.contains("addSubIssue"))
@@ -4704,7 +4854,7 @@ mod tests {
         );
 
         // implements lives in the parent issue body produced by issue_body::serialize.
-        let parent_body = store.client.last_create_body.borrow();
+        let parent_body = store.mock().last_create_body.borrow();
         // last_create_body holds the most recent create (the child). Verify the
         // parent's body directly via the serializer instead.
         drop(parent_body);
@@ -4753,11 +4903,11 @@ mod tests {
             .unwrap();
 
         // A real child issue was created.
-        assert_eq!(store.client.create_titles.borrow().len(), 1);
+        assert_eq!(store.mock().create_titles.borrow().len(), 1);
         let child_node = store.issue_map.get(&created.id).unwrap().node_id.clone();
         assert!(!child_node.is_empty());
 
-        let calls = store.client.graphql_calls.borrow();
+        let calls = store.mock().graphql_calls.borrow();
         let adds: Vec<_> = calls
             .iter()
             .filter(|(q, _)| q.contains("addSubIssue"))
@@ -4803,9 +4953,9 @@ mod tests {
     fn projects_store(
         root: &std::path::Path,
         graphql: Vec<serde_json::Value>,
-    ) -> GithubProjectsStore<MockGhClient> {
+    ) -> GithubProjectsStore {
         GithubProjectsStore {
-            client: MockGhClient::new().with_graphql_responses(graphql),
+            client: Box::new(MockGhClient::new().with_graphql_responses(graphql)),
             root: root.to_path_buf(),
             repo: "my-org/repo".to_string(),
             config: Config::default(),
@@ -4867,7 +5017,7 @@ mod tests {
         let created = store.create(&td, "My Board", "", "").unwrap();
         assert_eq!(created.id, "PROJECT-42");
 
-        let calls = store.client.graphql_calls.borrow();
+        let calls = store.mock().graphql_calls.borrow();
         // First call resolves the owner node id via the organization root.
         assert!(
             calls[0].0.contains("organization") && calls[0].0.contains("id"),
@@ -4936,13 +5086,13 @@ mod tests {
         let td = projects_type_def();
         store.create(&td, "My Board", "", "").unwrap();
 
-        let calls_before = store.client.graphql_calls.borrow().len();
+        let calls_before = store.mock().graphql_calls.borrow().len();
         let entry = store.issue_map.get("PROJECT-42").unwrap();
         assert_eq!(entry.node_id, "PVT_42");
         // The binding came from the create response; the issue map read does not
         // touch graphql.
         assert_eq!(
-            store.client.graphql_calls.borrow().len(),
+            store.mock().graphql_calls.borrow().len(),
             calls_before,
             "reading the cached binding must not issue graphql"
         );
@@ -4966,7 +5116,7 @@ mod tests {
         let created = store.create(&td, "User Board", "", "").unwrap();
         assert_eq!(created.id, "PROJECT-7");
 
-        let calls = store.client.graphql_calls.borrow();
+        let calls = store.mock().graphql_calls.borrow();
         assert!(
             calls[0].0.contains("organization"),
             "first owner query is the organization root"
@@ -4994,7 +5144,7 @@ mod tests {
 
         store.set_provenance(&td, "PROJECT-7", &[]).unwrap();
 
-        let calls = store.client.graphql_calls.borrow();
+        let calls = store.mock().graphql_calls.borrow();
         assert_eq!(calls.len(), 1, "one org query, nothing else");
         assert!(
             calls[0].0.contains("organization") && calls[0].0.contains("projectV2"),
@@ -5023,7 +5173,7 @@ mod tests {
         let err = store.resolve_board("my-org", 99).unwrap_err();
         assert!(err.to_string().contains("not found"), "got: {err}");
 
-        let calls = store.client.graphql_calls.borrow();
+        let calls = store.mock().graphql_calls.borrow();
         assert!(
             !calls
                 .iter()
@@ -5048,45 +5198,37 @@ mod tests {
     #[test]
     fn dispatch_routes_to_github_projects() {
         let root = tmp_root("dispatch_proj");
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config: Config::default(),
         };
-        let mut proj_store = projects_store(&root, vec![org_board_response("PVT_x")]);
+        let proj_store = projects_store(&root, vec![org_board_response("PVT_x")]);
 
         let td = projects_type_def();
-        let store = dispatch_for_type::<MockGhClient, MockGitRefClient, MockGhMilestoneClient, _>(
-            &td,
-            &mut fs_store,
-            None,
-            None,
-            None,
-            Some(&mut proj_store),
-        )
-        .unwrap();
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        registry.register(StoreBackend::GithubProjects, Box::new(proj_store));
+        let store = registry.for_type(&td).unwrap();
         assert!(store.update(&td, "PROJECT-1", &[]).is_ok());
     }
 
     #[test]
     fn dispatch_github_projects_without_backend_errors() {
         let root = tmp_root("dispatch_no_proj");
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config: Config::default(),
         };
         let td = projects_type_def();
-        let result = dispatch_for_type::<
-            MockGhClient,
-            MockGitRefClient,
-            MockGhMilestoneClient,
-            MockGhClient,
-        >(&td, &mut fs_store, None, None, None, None);
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        let result = registry.for_type(&td);
         assert!(result.is_err());
         assert!(result
             .err()
             .unwrap()
             .to_string()
-            .contains("GitHub projects backend"));
+            .contains("github-projects backend"));
     }
 
     #[test]
@@ -5103,7 +5245,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -5164,12 +5306,9 @@ mod tests {
         }
     }
 
-    fn issues_store_with(
-        root: &std::path::Path,
-        client: MockGhClient,
-    ) -> GithubIssuesStore<MockGhClient> {
+    fn issues_store_with(root: &std::path::Path, client: MockGhClient) -> GithubIssuesStore {
         GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.to_path_buf(),
             repo: "my-org/repo".to_string(),
             config: membership_relationship_config(),
@@ -5303,10 +5442,7 @@ mod tests {
         ]}}}})
     }
 
-    fn update_doc_with_attr(
-        value: &str,
-        root: &std::path::Path,
-    ) -> GithubIssuesStore<MockGhClient> {
+    fn update_doc_with_attr(value: &str, root: &std::path::Path) -> GithubIssuesStore {
         write_status_snapshot(root);
         // Responses: project node-id resolve (org), then item-id lookup.
         let client = MockGhClient::new().with_graphql_responses(vec![
@@ -5354,7 +5490,7 @@ mod tests {
         let root = tmp_root("iter217_write_select");
         let store = update_doc_with_attr("In Progress", &root);
 
-        let updates = store.client.field_updates.borrow();
+        let updates = store.mock().field_updates.borrow();
         assert_eq!(updates.len(), 1, "one field update");
         let (project_id, item_id, field_id, value) = &updates[0];
         assert_eq!(project_id, "PVT_board1");
@@ -5366,7 +5502,7 @@ mod tests {
             json,
             serde_json::json!({"singleSelectOptionId": "opt_inprog"})
         );
-        assert!(store.client.field_clears.borrow().is_empty());
+        assert!(store.mock().field_clears.borrow().is_empty());
     }
 
     // AC4: iteration write records exactly {iterationId}.
@@ -5424,7 +5560,7 @@ mod tests {
             .update(&td, "STORY-7", &[("PROJECT-1.Sprint", "Sprint 4")])
             .unwrap();
 
-        let updates = store.client.field_updates.borrow();
+        let updates = store.mock().field_updates.borrow();
         assert_eq!(updates.len(), 1);
         let json = serde_json::to_value(&updates[0].3).unwrap();
         assert_eq!(json, serde_json::json!({"iterationId": "iter_4"}));
@@ -5438,10 +5574,10 @@ mod tests {
         let store = update_doc_with_attr("", &root);
 
         assert!(
-            store.client.field_updates.borrow().is_empty(),
+            store.mock().field_updates.borrow().is_empty(),
             "no update mutation on clear"
         );
-        let clears = store.client.field_clears.borrow();
+        let clears = store.mock().field_clears.borrow();
         assert_eq!(clears.len(), 1, "one clear mutation");
         assert_eq!(
             clears[0],
@@ -5525,7 +5661,7 @@ mod tests {
             let key = format!("PROJECT-1.{}", field);
             store.update(&td, "STORY-7", &[(&key, raw)]).unwrap();
 
-            let updates = store.client.field_updates.borrow();
+            let updates = store.mock().field_updates.borrow();
             assert_eq!(updates.len(), 1, "{}: one update", data_type);
             let json = serde_json::to_value(&updates[0].3).unwrap();
             assert_eq!(json, expected, "{} value object", data_type);
@@ -5571,11 +5707,11 @@ mod tests {
             .update(&td, "STORY-7", &[("PROJECT-1.Status", "Frozen")])
             .unwrap_err();
         assert!(err.to_string().contains("unknown option"), "got: {}", err);
-        assert!(store.client.field_updates.borrow().is_empty());
-        assert!(store.client.field_clears.borrow().is_empty());
+        assert!(store.mock().field_updates.borrow().is_empty());
+        assert!(store.mock().field_clears.borrow().is_empty());
         // Only the check_lock issue_view read happened; no project/item graphql.
         assert!(
-            store.client.graphql_calls.borrow().is_empty(),
+            store.mock().graphql_calls.borrow().is_empty(),
             "no project/item graphql lookups before offline reject"
         );
     }

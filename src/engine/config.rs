@@ -123,7 +123,7 @@ pub struct CoordinationConfig {
     pub max_clock_skew: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub enum StoreBackend {
     #[default]
     #[serde(rename = "filesystem")]

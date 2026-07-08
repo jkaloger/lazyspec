@@ -542,6 +542,54 @@ impl<T: GhGraphql + ?Sized> GhGraphql for &T {
     }
 }
 
+/// Upcast to `dyn Any` so a boxed store client can be downcast back to its
+/// concrete type (used by tests to inspect a mock's captured state after it has
+/// been moved behind a `Box<dyn GhClient>` etc.). Blanket-implemented for every
+/// `'static` type, so no client needs to implement it by hand.
+pub trait AsAny {
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+impl<T: std::any::Any> AsAny for T {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// The full GitHub-issues client seam as a single object-safe trait, so
+/// `GithubIssuesStore` can hold a `Box<dyn GhClient>` instead of being generic
+/// over its client type. Blanket-implemented for anything that satisfies the
+/// three underlying seams.
+pub trait GhClient: GhIssueReader + GhIssueWriter + GhGraphql + AsAny + Send {
+    /// View this client as `&dyn GhGraphql` for helpers that take the graphql
+    /// seam directly (trait-object upcasting is not relied on).
+    fn as_graphql(&self) -> &dyn GhGraphql;
+}
+
+impl<T: GhIssueReader + GhIssueWriter + GhGraphql + AsAny + Send> GhClient for T {
+    fn as_graphql(&self) -> &dyn GhGraphql {
+        self
+    }
+}
+
+/// The milestone client seam as an object-safe trait for
+/// `GithubMilestonesStore`'s boxed client.
+pub trait GhMilestoneClient: GhMilestoneApi + AsAny {}
+
+impl<T: GhMilestoneApi + AsAny> GhMilestoneClient for T {}
+
+/// The graphql client seam as an object-safe trait for `GithubProjectsStore`'s
+/// boxed client.
+pub trait GhProjectsClient: GhGraphql + AsAny {
+    fn as_graphql(&self) -> &dyn GhGraphql;
+}
+
+impl<T: GhGraphql + AsAny> GhProjectsClient for T {
+    fn as_graphql(&self) -> &dyn GhGraphql {
+        self
+    }
+}
+
 const PROJECT_ITEM_FIELDS_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on Issue { projectItems(first: 50) { nodes { project { number } fieldValues(first: 50) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldIterationValue { title field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } } } } } } } }";
 
 const UPDATE_PROJECT_FIELD_MUTATION: &str = "mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) { updateProjectV2ItemFieldValue(input: {projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: __VALUE__}) { projectV2Item { id } } }";
@@ -1713,6 +1761,120 @@ pub mod test_support {
             field_id: &str,
         ) -> Result<()> {
             (**self).clear_project_field(project_id, item_id, field_id)
+        }
+    }
+
+    // Delegating impls over `Arc<Mutex<MockGhClient>>` so a shared handle can be
+    // moved into an `FnOnce` factory that produces a `Send` client (required by
+    // `GhClient`, since `GithubIssuesStore` is shared across threads by the TUI),
+    // while the original handle stays inspectable after. `Rc` cannot be used here
+    // because it is not `Send`; `Mutex` also makes the handle `Sync`.
+    impl GhIssueReader for std::sync::Arc<std::sync::Mutex<MockGhClient>> {
+        fn issue_list(
+            &self,
+            repo: &str,
+            labels: &[String],
+            json_fields: &[String],
+            limit: Option<u64>,
+        ) -> Result<Vec<GhIssue>> {
+            self.lock()
+                .unwrap()
+                .issue_list(repo, labels, json_fields, limit)
+        }
+        fn issue_view(&self, repo: &str, number: u64) -> Result<GhIssue> {
+            self.lock().unwrap().issue_view(repo, number)
+        }
+        fn issue_comments(&self, repo: &str, number: u64) -> Result<Vec<GhComment>> {
+            self.lock().unwrap().issue_comments(repo, number)
+        }
+    }
+
+    impl GhIssueWriter for std::sync::Arc<std::sync::Mutex<MockGhClient>> {
+        fn issue_create(
+            &self,
+            repo: &str,
+            title: &str,
+            body: &str,
+            labels: &[String],
+        ) -> Result<GhIssue> {
+            self.lock().unwrap().issue_create(repo, title, body, labels)
+        }
+        fn issue_edit(
+            &self,
+            repo: &str,
+            number: u64,
+            title: Option<&str>,
+            body: Option<&str>,
+            labels_add: &[String],
+            labels_remove: &[String],
+        ) -> Result<()> {
+            self.lock()
+                .unwrap()
+                .issue_edit(repo, number, title, body, labels_add, labels_remove)
+        }
+        fn issue_close(&self, repo: &str, number: u64) -> Result<()> {
+            self.lock().unwrap().issue_close(repo, number)
+        }
+        fn issue_reopen(&self, repo: &str, number: u64) -> Result<()> {
+            self.lock().unwrap().issue_reopen(repo, number)
+        }
+        fn label_create(
+            &self,
+            repo: &str,
+            name: &str,
+            description: &str,
+            color: &str,
+        ) -> Result<()> {
+            self.lock()
+                .unwrap()
+                .label_create(repo, name, description, color)
+        }
+        fn label_ensure(
+            &self,
+            repo: &str,
+            name: &str,
+            description: &str,
+            color: &str,
+        ) -> Result<()> {
+            self.lock()
+                .unwrap()
+                .label_ensure(repo, name, description, color)
+        }
+    }
+
+    impl GhGraphql for std::sync::Arc<std::sync::Mutex<MockGhClient>> {
+        fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+            self.lock().unwrap().graphql(query, vars)
+        }
+        fn project_item_fields(
+            &self,
+            repo: &str,
+            content_node_id: &str,
+        ) -> Result<Vec<ProjectFieldValue>> {
+            self.lock()
+                .unwrap()
+                .project_item_fields(repo, content_node_id)
+        }
+        fn update_project_v2_item_field_value(
+            &self,
+            project_id: &str,
+            item_id: &str,
+            field_id: &str,
+            value: &GhFieldValueInput,
+        ) -> Result<()> {
+            self.lock()
+                .unwrap()
+                .update_project_v2_item_field_value(project_id, item_id, field_id, value)
+        }
+        fn clear_project_field(
+            &self,
+            project_id: &str,
+            item_id: &str,
+            field_id: &str,
+        ) -> Result<()> {
+            self.lock()
+                .unwrap()
+                .clear_project_field(project_id, item_id, field_id)
         }
     }
 

@@ -1,7 +1,7 @@
 ---
 title: 'Dispatch registry refactor: boxed store clients'
 type: iteration
-status: draft
+status: complete
 author: unknown
 date: 2026-07-05
 tags: []

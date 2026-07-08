@@ -126,7 +126,7 @@ pub fn run_with_body(
             )
         })?;
         let mut store = GithubIssuesStore {
-            client: GhCli::new(),
+            client: Box::new(GhCli::new()),
             root: root.to_path_buf(),
             repo: repo.clone(),
             config: config.clone(),
@@ -151,7 +151,7 @@ pub fn run_with_body(
             )
         })?;
         let mut store = GithubMilestonesStore {
-            client: GhCli::new(),
+            client: Box::new(GhCli::new()),
             root: root.to_path_buf(),
             repo: repo.clone(),
             config: config.clone(),
@@ -175,7 +175,7 @@ pub fn run_with_body(
             )
         })?;
         let mut store = crate::engine::store_dispatch::GithubProjectsStore {
-            client: GhCli::new(),
+            client: Box::new(GhCli::new()),
             root: root.to_path_buf(),
             repo: repo.clone(),
             config: config.clone(),
@@ -201,7 +201,7 @@ pub fn run_with_body(
             None
         };
         let mut store = GitRefStore {
-            git: GitCli,
+            git: Box::new(GitCli),
             root: root.to_path_buf(),
             config: config.clone(),
             reserved_number,
@@ -295,7 +295,7 @@ fn create_with_parent(
             )
         })?;
         let mut gh_store = GithubIssuesStore {
-            client: GhCli::new(),
+            client: Box::new(GhCli::new()),
             root: root.to_path_buf(),
             repo: repo.clone(),
             config: config.clone(),

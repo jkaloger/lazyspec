@@ -219,7 +219,7 @@ fn fetch_prunes_deleted_remote_doc_refs() {
 
     // Clone A creates ITERATION-001 (pushes ref to bare remote).
     let mut store_a = GitRefStore {
-        git: GitCli,
+        git: Box::new(GitCli),
         root: fixture_a.root().to_path_buf(),
         config: config.clone(),
         reserved_number: Some(1),
@@ -282,7 +282,7 @@ fn update_rolls_back_on_push_rejection_then_recovers_after_fetch() {
 
     // Bootstrap: A creates ITERATION-001 (status=draft) and pushes it.
     let mut store_a = GitRefStore {
-        git: GitCli,
+        git: Box::new(GitCli),
         root: fixture_a.root().to_path_buf(),
         config: config.clone(),
         reserved_number: Some(1),
@@ -334,7 +334,7 @@ fn update_rolls_back_on_push_rejection_then_recovers_after_fetch() {
     // The Task 2 rollback should restore B's local ref to draft, and the
     // cache file + cache.lock save are skipped, so they stay at draft.
     let mut store_b = GitRefStore {
-        git: GitCli,
+        git: Box::new(GitCli),
         root: clone_b.path().to_path_buf(),
         config: config.clone(),
         reserved_number: None,
@@ -437,7 +437,7 @@ fn fetch_prunes_deleted_remote_lease_refs_so_claim_succeeds() {
     // Bootstrap: clone A creates ITERATION-001 doc so a lease can target it.
     {
         let mut store_a = GitRefStore {
-            git: GitCli,
+            git: Box::new(GitCli),
             root: fixture_a.root().to_path_buf(),
             config: config.clone(),
             reserved_number: Some(1),

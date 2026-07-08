@@ -42,6 +42,12 @@ pub trait GitRefOps {
     fn read_commit_timestamp(&self, root: &Path, sha: &str) -> Result<DateTime<Utc>>;
 }
 
+/// The git-ref client seam as an object-safe trait for `GitRefStore`'s boxed
+/// client. Blanket-implemented for anything that satisfies [`GitRefOps`].
+pub trait GitRefClient: GitRefOps + crate::engine::gh::AsAny {}
+
+impl<T: GitRefOps + crate::engine::gh::AsAny> GitRefClient for T {}
+
 pub struct GitCli;
 
 impl GitCli {
