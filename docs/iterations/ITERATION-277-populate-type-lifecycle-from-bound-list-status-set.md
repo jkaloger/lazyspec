@@ -1,7 +1,7 @@
 ---
 title: Populate type lifecycle from bound List status set
 type: iteration
-status: draft
+status: complete
 author: unknown
 date: 2026-07-05
 tags: []

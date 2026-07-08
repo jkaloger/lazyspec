@@ -676,6 +676,14 @@ writes one cache doc per task. The mapping:
 - a task that leaves the List (including one ClickUp archived) drops out of the
   cache on the next fetch.
 
+`fetch` also **populates the type's `lifecycle` from the bound List's status
+set** at sync time: the `states` are the List's status names in ClickUp workflow
+order (by `orderindex`), written back into `.lazyspec.toml` (in place, preserving
+comments). No `edges` are derived -- ClickUp enforces its own transition rules,
+so the lifecycle carries no local gating (the same empty-edge posture the
+`ticket` type takes). The lifecycle is never hand-authored for a `clickup-tasks`
+type; each `fetch` re-derives it from the live List.
+
 Fetched docs behave identically to `github-issues` docs under `status --json`
 and `show <ID> --json`. A doc-id -> task-id map is kept at
 `.lazyspec/task-map.json`. Running `fetch` for a `clickup-tasks` type without a

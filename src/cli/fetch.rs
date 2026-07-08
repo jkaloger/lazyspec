@@ -1,7 +1,8 @@
 use crate::engine::cache_lock::CacheLock;
 use crate::engine::clickup::ClickupClient;
 use crate::engine::clickup_cache;
-use crate::engine::config::{Config, StoreBackend, TypeDef};
+use crate::engine::config::{Config, Lifecycle, StoreBackend, TypeDef};
+use crate::engine::config_write::write_config_in_place;
 use crate::engine::credentials::Token;
 use crate::engine::gh::{GhGraphql, GhIssueReader, GhIssueWriter, GhMilestoneApi};
 use crate::engine::git_ref::GitRefOps;
@@ -194,6 +195,7 @@ pub fn run(
             )
         })?;
         let mut task_map = TaskMap::load(root)?;
+        let mut lifecycles: Vec<(String, Lifecycle)> = Vec::new();
 
         for type_name in &clickup_to_fetch {
             let type_def = config
@@ -202,6 +204,18 @@ pub fn run(
 
             let result =
                 clickup_cache::fetch_tasks(root, type_def, clickup, token.expose(), &mut task_map)?;
+
+            // Populate the type's effective lifecycle from the bound List's status
+            // set at sync time (RFC-056 §Status handling). fetch_tasks already
+            // validated clickup_list_id, so it is present here.
+            let list_id = type_def.clickup_list_id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "type '{}' is clickup-tasks but has no clickup_list_id configured",
+                    type_name
+                )
+            })?;
+            let lifecycle = clickup_cache::fetch_lifecycle(clickup, token.expose(), list_id)?;
+            lifecycles.push((type_name.to_string(), lifecycle));
 
             summaries.push(TypeSummary {
                 type_name: type_name.to_string(),
@@ -212,6 +226,7 @@ pub fn run(
         }
 
         task_map.save(root)?;
+        persist_clickup_lifecycles(root, &lifecycles)?;
     }
 
     if json {
@@ -292,6 +307,41 @@ fn inject_project_fields_into_cache(
             eprintln!("warning: could not rewrite cache for {}: {}", meta.id, e);
         }
     }
+}
+
+/// Write each `(type, lifecycle)` derived from a bound List's status set back
+/// into `.lazyspec.toml`, so the type's effective lifecycle reflects the live
+/// List. Rewrites the config in place (preserving decor/comments) only when a
+/// lifecycle actually changed, so an unchanged sync leaves the file untouched.
+fn persist_clickup_lifecycles(root: &Path, lifecycles: &[(String, Lifecycle)]) -> Result<()> {
+    if lifecycles.is_empty() {
+        return Ok(());
+    }
+    let path = root.join(".lazyspec.toml");
+    let src =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let mut config = Config::parse(&src)?;
+
+    let mut changed = false;
+    for (type_name, lifecycle) in lifecycles {
+        if let Some(type_def) = config
+            .documents
+            .types
+            .iter_mut()
+            .find(|t| &t.name == type_name)
+        {
+            if &type_def.lifecycle != lifecycle {
+                type_def.lifecycle = lifecycle.clone();
+                changed = true;
+            }
+        }
+    }
+
+    if changed {
+        let out = write_config_in_place(&src, &config)?;
+        std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn filter_types<'a>(all: Vec<&'a str>, filter: Option<&'a str>) -> Vec<&'a str> {
@@ -475,6 +525,70 @@ body text\n";
             rewritten.contains("PROJECT-1.Status: In Progress"),
             "expected injected project field, got:\n{rewritten}"
         );
+    }
+
+    const CLICKUP_CONFIG_SRC: &str = r#"[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[templates]
+dir = ".lazyspec/templates"
+
+# task type follows
+[[types]]
+name = "task"
+plural = "tasks"
+dir = "docs/tasks"
+prefix = "TASK"
+store = "clickup-tasks"
+clickup_list_id = "list123"
+lifecycle = { states = ["stale"], edges = [] }
+
+[[relationships]]
+name = "related-to"
+"#;
+
+    #[test]
+    fn persist_clickup_lifecycles_writes_derived_states_into_config() {
+        use crate::engine::config::Lifecycle;
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".lazyspec.toml"), CLICKUP_CONFIG_SRC).unwrap();
+
+        let lifecycle = Lifecycle {
+            states: vec![
+                "to do".to_string(),
+                "in progress".to_string(),
+                "done".to_string(),
+            ],
+            edges: vec![],
+        };
+        persist_clickup_lifecycles(root, &[("task".to_string(), lifecycle)]).unwrap();
+
+        let out = std::fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
+        // The comment (decor) survives the in-place rewrite.
+        assert!(out.contains("# task type follows"), "got:\n{out}");
+        let config = Config::parse(&out).unwrap();
+        let td = config.type_by_name("task").unwrap();
+        assert_eq!(td.lifecycle.states, vec!["to do", "in progress", "done"]);
+        assert!(td.lifecycle.edges.is_empty());
+    }
+
+    #[test]
+    fn persist_clickup_lifecycles_leaves_config_untouched_when_unchanged() {
+        use crate::engine::config::Lifecycle;
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".lazyspec.toml"), CLICKUP_CONFIG_SRC).unwrap();
+
+        // A lifecycle equal to what the config already declares must not rewrite.
+        let lifecycle = Lifecycle {
+            states: vec!["stale".to_string()],
+            edges: vec![],
+        };
+        persist_clickup_lifecycles(root, &[("task".to_string(), lifecycle)]).unwrap();
+
+        let out = std::fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
+        assert_eq!(out, CLICKUP_CONFIG_SRC);
     }
 
     #[test]

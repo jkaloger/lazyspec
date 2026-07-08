@@ -16,8 +16,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
-use crate::engine::clickup::{ClickupClient, ClickupTask};
-use crate::engine::config::TypeDef;
+use crate::engine::clickup::{ClickupClient, ClickupStatus, ClickupTask};
+use crate::engine::config::{Lifecycle, TypeDef};
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
 use crate::engine::store_dispatch::write_cache_file;
 use crate::engine::task_map::TaskMap;
@@ -102,6 +102,34 @@ pub fn fetch_tasks(
         new: new_count,
         removed: removed.len(),
     })
+}
+
+/// Fetch the bound List's status workflow and derive the type's effective
+/// [`Lifecycle`] from it (RFC-056 §Status handling). Called at sync time so the
+/// lifecycle always reflects the live List, never a hardcoded config value.
+pub fn fetch_lifecycle(
+    client: &dyn ClickupClient,
+    token: &str,
+    list_id: &str,
+) -> Result<Lifecycle> {
+    let statuses = client
+        .list_statuses(token, list_id)
+        .with_context(|| format!("fetching ClickUp list statuses for list {}", list_id))?;
+    Ok(derive_lifecycle(&statuses))
+}
+
+/// Derive a type's effective [`Lifecycle`] from a bound List's status set: the
+/// states are the status names in ClickUp workflow order (ascending
+/// `orderindex`), and there are no edges. ClickUp enforces its own transition
+/// rules, so lazyspec adds no local edges or gating -- the same empty-edge
+/// posture the `ticket` type takes.
+pub fn derive_lifecycle(statuses: &[ClickupStatus]) -> Lifecycle {
+    let mut ordered: Vec<&ClickupStatus> = statuses.iter().collect();
+    ordered.sort_by_key(|s| s.orderindex);
+    Lifecycle {
+        states: ordered.into_iter().map(|s| s.status.clone()).collect(),
+        edges: Vec::new(),
+    }
 }
 
 /// The lazyspec doc ids currently cached for a type: the `.md` filename stems
@@ -323,6 +351,58 @@ mod tests {
         let mut task_map = TaskMap::load(root).unwrap();
         let err = fetch_tasks(root, &td, &client, "pk_x", &mut task_map).unwrap_err();
         assert!(err.to_string().contains("clickup_list_id"), "got: {err}");
+    }
+
+    fn status(name: &str, orderindex: i64, ty: &str) -> ClickupStatus {
+        ClickupStatus {
+            status: name.to_string(),
+            orderindex,
+            status_type: ty.to_string(),
+        }
+    }
+
+    #[test]
+    fn derive_lifecycle_states_follow_orderindex_with_no_edges() {
+        // Deliberately out of order to prove the derivation sorts by orderindex.
+        let statuses = vec![
+            status("done", 2, "closed"),
+            status("to do", 0, "open"),
+            status("in progress", 1, "custom"),
+        ];
+        let lifecycle = derive_lifecycle(&statuses);
+        assert_eq!(lifecycle.states, vec!["to do", "in progress", "done"]);
+        // No local edges or gating -- ClickUp owns the transition rules.
+        assert!(lifecycle.edges.is_empty());
+    }
+
+    #[test]
+    fn derive_lifecycle_empty_when_list_has_no_statuses() {
+        let lifecycle = derive_lifecycle(&[]);
+        assert!(lifecycle.states.is_empty());
+        assert!(lifecycle.edges.is_empty());
+    }
+
+    #[test]
+    fn fetch_lifecycle_derives_from_client_status_set() {
+        let client = FakeClickupClient::with_tasks(vec![]).with_statuses(vec![
+            status("open", 0, "open"),
+            status("closed", 1, "closed"),
+        ]);
+        let lifecycle = fetch_lifecycle(&client, "pk_x", "list123").unwrap();
+        assert_eq!(lifecycle.states, vec!["open", "closed"]);
+        assert!(lifecycle.edges.is_empty());
+    }
+
+    #[test]
+    fn fetch_lifecycle_propagates_client_error() {
+        use crate::engine::clickup::ClickupError;
+        let client = FakeClickupClient::with_tasks(vec![])
+            .failing_statuses(ClickupError::InvalidToken { status: 401 });
+        let err = fetch_lifecycle(&client, "pk_x", "list123").unwrap_err();
+        assert!(
+            err.to_string().contains("fetching ClickUp list statuses"),
+            "got: {err}"
+        );
     }
 
     #[test]

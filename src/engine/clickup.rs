@@ -148,6 +148,27 @@ pub struct ClickupTaskStatus {
     pub status: String,
 }
 
+/// One status in a List's workflow, from `GET /list/{id}`'s `statuses` array.
+/// `orderindex` is the position ClickUp assigns the status in the workflow;
+/// sorting by it reconstructs the workflow order. `status_type` is ClickUp's own
+/// kind (`open`/`custom`/`closed`/`done`); it is retained for later stories but
+/// the lifecycle derivation reads only the name and order.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ClickupStatus {
+    pub status: String,
+    #[serde(default, deserialize_with = "de_i64_flex")]
+    pub orderindex: i64,
+    #[serde(default, rename = "type")]
+    pub status_type: String,
+}
+
+/// The `GET /list/{id}` response, of which only the `statuses` array is read.
+#[derive(Debug, Deserialize)]
+struct ListEnvelope {
+    #[serde(default)]
+    statuses: Vec<ClickupStatus>,
+}
+
 /// A task's priority, read as the nested object ClickUp returns
 /// (`{"priority":"normal","color":..,"id":"3","orderindex":"3"}`). Only the
 /// `priority` name is read; the bare-integer *write* shape is a later story.
@@ -248,9 +269,25 @@ where
     })
 }
 
+/// Deserialize an `i64` ClickUp may send as either a JSON number or a numeric
+/// string. `orderindex` on a List status is a number, but ClickUp sends the same
+/// field as a string elsewhere; accepting both keeps the decode robust.
+fn de_i64_flex<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0),
+        Some(serde_json::Value::String(s)) => s.trim().parse::<i64>().unwrap_or(0),
+        _ => 0,
+    })
+}
+
 /// Validates a ClickUp personal token and fetches the tasks a bound List
-/// contains. `auth_status` and `task_list` are the methods the read path needs;
-/// the store CRUD methods land in later RFC-056 stories.
+/// contains. `auth_status` and `task_list` are the read path's methods;
+/// `list_statuses` feeds the sync-time lifecycle derivation; the store CRUD
+/// methods land in later RFC-056 stories.
 pub trait ClickupClient {
     /// Validates `token` against `GET /user`. On success returns the token
     /// owner's identity; on failure returns a classified [`ClickupError`].
@@ -262,6 +299,13 @@ pub trait ClickupClient {
     /// so they drop out of the returned set (and thus out of the cache on the
     /// next fetch).
     fn task_list(&self, token: &str, list_id: &str) -> Result<Vec<ClickupTask>, ClickupError>;
+
+    /// Fetches the bound List's status workflow (`GET /list/{id}`), returning its
+    /// `statuses` array. The type's effective lifecycle states are derived from
+    /// this set at sync time; ClickUp owns the transition rules, so no edges are
+    /// derived.
+    fn list_statuses(&self, token: &str, list_id: &str)
+        -> Result<Vec<ClickupStatus>, ClickupError>;
 }
 
 /// reqwest-backed [`ClickupClient`]. Sends the personal token in a raw
@@ -332,6 +376,23 @@ impl ClickupClient for ClickupHttpClient {
         }
         Ok(all)
     }
+
+    fn list_statuses(
+        &self,
+        token: &str,
+        list_id: &str,
+    ) -> Result<Vec<ClickupStatus>, ClickupError> {
+        let url = format!("{}/list/{}", self.base_url, list_id);
+        let response = self.http.get(&url).header(AUTHORIZATION, token).send()?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(classify_status(status.as_u16(), response.headers()));
+        }
+
+        let envelope: ListEnvelope = response.json()?;
+        Ok(envelope.statuses)
+    }
 }
 
 /// In-memory [`ClickupClient`] returning a scripted outcome, for downstream
@@ -341,6 +402,7 @@ impl ClickupClient for ClickupHttpClient {
 pub struct FakeClickupClient {
     auth: Result<ClickupUser, ClickupError>,
     tasks: Result<Vec<ClickupTask>, ClickupError>,
+    statuses: Result<Vec<ClickupStatus>, ClickupError>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -350,6 +412,7 @@ impl FakeClickupClient {
         FakeClickupClient {
             auth: Ok(user),
             tasks: Ok(Vec::new()),
+            statuses: Ok(Vec::new()),
         }
     }
 
@@ -358,39 +421,57 @@ impl FakeClickupClient {
         FakeClickupClient {
             auth: Err(ClickupError::InvalidToken { status: 401 }),
             tasks: Err(ClickupError::InvalidToken { status: 401 }),
+            statuses: Err(ClickupError::InvalidToken { status: 401 }),
         }
     }
 
-    /// A client whose `auth_status` returns an arbitrary error.
+    /// A client whose every method returns an arbitrary error.
     pub fn failing(error: ClickupError) -> Self {
         FakeClickupClient {
             auth: Err(error.clone()),
-            tasks: Err(error),
+            tasks: Err(error.clone()),
+            statuses: Err(error),
         }
     }
 
     /// A client whose bound List returns `tasks` (and whose token validates).
     pub fn with_tasks(tasks: Vec<ClickupTask>) -> Self {
         FakeClickupClient {
-            auth: Ok(ClickupUser {
-                id: 1,
-                username: "fake".to_string(),
-                email: "fake@example.com".to_string(),
-            }),
+            auth: Ok(fake_user()),
             tasks: Ok(tasks),
+            statuses: Ok(Vec::new()),
         }
     }
 
     /// A client whose `task_list` returns an arbitrary error.
     pub fn failing_tasks(error: ClickupError) -> Self {
         FakeClickupClient {
-            auth: Ok(ClickupUser {
-                id: 1,
-                username: "fake".to_string(),
-                email: "fake@example.com".to_string(),
-            }),
+            auth: Ok(fake_user()),
             tasks: Err(error),
+            statuses: Ok(Vec::new()),
         }
+    }
+
+    /// Overrides the bound List's status set (builder-style), for lifecycle
+    /// derivation tests.
+    pub fn with_statuses(mut self, statuses: Vec<ClickupStatus>) -> Self {
+        self.statuses = Ok(statuses);
+        self
+    }
+
+    /// Makes `list_statuses` return an arbitrary error (builder-style).
+    pub fn failing_statuses(mut self, error: ClickupError) -> Self {
+        self.statuses = Err(error);
+        self
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn fake_user() -> ClickupUser {
+    ClickupUser {
+        id: 1,
+        username: "fake".to_string(),
+        email: "fake@example.com".to_string(),
     }
 }
 
@@ -402,6 +483,14 @@ impl ClickupClient for FakeClickupClient {
 
     fn task_list(&self, _token: &str, _list_id: &str) -> Result<Vec<ClickupTask>, ClickupError> {
         self.tasks.clone()
+    }
+
+    fn list_statuses(
+        &self,
+        _token: &str,
+        _list_id: &str,
+    ) -> Result<Vec<ClickupStatus>, ClickupError> {
+        self.statuses.clone()
     }
 }
 
@@ -644,6 +733,56 @@ mod tests {
         let client = FakeClickupClient::failing_tasks(ClickupError::Timeout);
         assert_eq!(
             client.task_list("pk", "list1").unwrap_err(),
+            ClickupError::Timeout
+        );
+    }
+
+    #[test]
+    fn deserializes_list_envelope_statuses_with_orderindex_and_type() {
+        // The `GET /list/{id}` shape: a `statuses` array carrying name, orderindex
+        // (a number here), and ClickUp's status `type`.
+        let body = r##"{
+            "id": "901234567890",
+            "name": "Sprint",
+            "statuses": [
+                {"status": "to do", "orderindex": 0, "type": "open", "color": "#d3d3d3"},
+                {"status": "in progress", "orderindex": 1, "type": "custom", "color": "#f00"},
+                {"status": "done", "orderindex": 2, "type": "closed", "color": "#0f0"}
+            ]
+        }"##;
+        let envelope: ListEnvelope = serde_json::from_str(body).unwrap();
+        assert_eq!(envelope.statuses.len(), 3);
+        assert_eq!(envelope.statuses[0].status, "to do");
+        assert_eq!(envelope.statuses[0].orderindex, 0);
+        assert_eq!(envelope.statuses[0].status_type, "open");
+        assert_eq!(envelope.statuses[2].status, "done");
+        assert_eq!(envelope.statuses[2].status_type, "closed");
+    }
+
+    #[test]
+    fn deserializes_list_status_with_string_orderindex() {
+        // ClickUp sends orderindex as a string in some responses; accept both.
+        let body = r#"{"status": "review", "orderindex": "3", "type": "custom"}"#;
+        let status: ClickupStatus = serde_json::from_str(body).unwrap();
+        assert_eq!(status.orderindex, 3);
+    }
+
+    #[test]
+    fn fake_with_statuses_returns_scripted_statuses() {
+        let statuses = vec![ClickupStatus {
+            status: "open".to_string(),
+            orderindex: 0,
+            status_type: "open".to_string(),
+        }];
+        let client = FakeClickupClient::with_tasks(vec![]).with_statuses(statuses.clone());
+        assert_eq!(client.list_statuses("pk", "list1").unwrap(), statuses);
+    }
+
+    #[test]
+    fn fake_failing_statuses_returns_scripted_error() {
+        let client = FakeClickupClient::with_tasks(vec![]).failing_statuses(ClickupError::Timeout);
+        assert_eq!(
+            client.list_statuses("pk", "list1").unwrap_err(),
             ClickupError::Timeout
         );
     }
