@@ -1,4 +1,7 @@
+use crate::engine::clickup::ClickupClient;
+use crate::engine::clickup_cache;
 use crate::engine::config::{Config, StoreBackend};
+use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::document::split_frontmatter;
 use crate::engine::gh::GhCli;
 use crate::engine::git_ref::GitCli;
@@ -8,6 +11,7 @@ use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
+use crate::engine::task_map::TaskMap;
 use crate::tui::content;
 use crate::tui::infra::{perf_log, terminal_caps};
 use crate::tui::state::App;
@@ -120,15 +124,67 @@ fn try_push_git_ref_edit(root: &Path, relative: &Path, config: &Config) -> Resul
 }
 
 // Whether the background poll should run for this project: true when any type is
-// backed by a GitHub store the poll refreshes (issues or milestones). Milestone-
-// only projects still need the poll so a milestone created after launch appears
-// live in the list.
-fn has_pollable_gh_types(config: &Config) -> bool {
-    config
+// backed by a store the poll refreshes (github issues/milestones OR clickup
+// tasks). Milestone-only and clickup-only projects still need the poll so a
+// milestone/task created after launch appears live in the list.
+fn has_pollable_types(config: &Config) -> bool {
+    config.documents.types.iter().any(|t| {
+        t.store == StoreBackend::GithubIssues
+            || t.store == StoreBackend::GithubMilestones
+            || t.store == StoreBackend::ClickupTasks
+    })
+}
+
+// ClickUp arm of the background poll: refresh every clickup-tasks type's cache
+// against its live List, returning the warnings to surface (empty on full
+// success). Kept a free function in the TUI layer so the network/token I/O
+// stays out of the engine `Store::load` (DICTUM-003), and so it is unit-testable
+// against a fake `ClickupClient` without a running event loop.
+//
+// `token: None` means no ClickUp credential was found -- skip with a single
+// warning and make NO client call, so a project that also polls github still
+// refreshes its github types. A per-type fetch error warns and continues; the
+// loop never crashes, mirroring the github arm's error posture.
+fn refresh_clickup_cache(
+    root: &Path,
+    config: &Config,
+    token: Option<&str>,
+    client: &dyn ClickupClient,
+) -> Vec<String> {
+    let Some(token) = token else {
+        return vec!["clickup poll skipped: no ClickUp token found".to_string()];
+    };
+
+    let mut warnings: Vec<String> = Vec::new();
+    let mut task_map = match TaskMap::load(root) {
+        Ok(map) => map,
+        Err(e) => {
+            warnings.push(format!(
+                "clickup poll skipped: failed to load task map: {e}"
+            ));
+            return warnings;
+        }
+    };
+
+    for type_def in config
         .documents
         .types
         .iter()
-        .any(|t| t.store == StoreBackend::GithubIssues || t.store == StoreBackend::GithubMilestones)
+        .filter(|t| t.store == StoreBackend::ClickupTasks)
+    {
+        if let Err(e) = clickup_cache::fetch_tasks(root, type_def, client, token, &mut task_map) {
+            warnings.push(format!(
+                "clickup cache refresh failed for {}: {}",
+                type_def.name, e
+            ));
+        }
+    }
+
+    if let Err(e) = task_map.save(root) {
+        warnings.push(format!("clickup task map save failed: {e}"));
+    }
+
+    warnings
 }
 
 // Rebuild the watcher over the current config's watch set. `notify` has no
@@ -371,7 +427,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     let (tx, rx) = crossbeam_channel::unbounded();
     app.event_tx = tx.clone();
 
-    let shared_gh_store: Option<Arc<Mutex<GithubIssuesStore>>> = if has_pollable_gh_types(&config) {
+    let shared_gh_store: Option<Arc<Mutex<GithubIssuesStore>>> = if has_pollable_types(&config) {
         let gh_config = config.documents.github.as_ref();
         let repo = gh_config.and_then(|g| g.repo.clone());
         repo.map(|repo| {
@@ -396,7 +452,10 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         .as_ref()
         .map(|g| g.cache_ttl)
         .unwrap_or(60);
-    let mut next_poll = if shared_gh_store.is_some() {
+    // Schedule polling whenever the project has any pollable type, independent of
+    // whether a github store was built: a clickup-only project has no github repo
+    // (shared_gh_store == None) but must still poll to refresh its task cache.
+    let mut next_poll = if has_pollable_types(&config) {
         Some(Instant::now())
     } else {
         None
@@ -501,89 +560,130 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             app.gh_issue_map_stale = false;
         }
 
-        if let (Some(deadline), Some(ref shared_store)) = (next_poll, &shared_gh_store) {
+        if let Some(deadline) = next_poll {
             if Instant::now() >= deadline && !refresh_in_flight.load(Ordering::Relaxed) {
-                refresh_in_flight.store(true, Ordering::Relaxed);
+                // Always advance the deadline, even when there is no work this
+                // poll, so the trigger keeps firing for later refreshes.
                 next_poll = Some(Instant::now() + Duration::from_secs(cache_ttl));
-                let poll_tx = tx.clone();
-                let poll_root = root.clone();
-                let poll_config = config.clone();
-                let poll_flag = refresh_in_flight.clone();
-                let poll_store = Arc::clone(shared_store);
-                std::thread::spawn(move || {
-                    let gh_types: Vec<_> = poll_config
-                        .documents
-                        .types
-                        .iter()
-                        .filter(|t| t.store == StoreBackend::GithubIssues)
-                        .collect();
-                    let milestone_types: Vec<_> = poll_config
-                        .documents
-                        .types
-                        .iter()
-                        .filter(|t| t.store == StoreBackend::GithubMilestones)
-                        .collect();
-                    let all_type_rules: Vec<TypeMatchRule> = poll_config
-                        .documents
-                        .types
-                        .iter()
-                        .map(TypeMatchRule::from)
-                        .collect();
-                    let client = GhCli::new();
-                    let mut guard = poll_store.lock().unwrap();
-                    let store = &mut *guard;
-                    let mut warnings: Vec<String> = Vec::new();
-                    // Milestones MUST be fetched before issues: an issue's native
-                    // milestone is surfaced as a forward `targets: MILESTONE-n`
-                    // relation by resolving the milestone number through the
-                    // issue-map, so the milestone has to be mapped first or the
-                    // lookup silently drops the relation on a fresh poll.
-                    for type_def in &milestone_types {
-                        match crate::engine::milestone_cache::fetch_milestones(
-                            &poll_root,
-                            type_def,
-                            &client,
-                            &store.repo,
-                            &mut store.issue_map,
-                        ) {
-                            Ok(result) => {
-                                warnings.extend(result.warnings.into_iter().map(|w| w.message));
+                // Spawn ONE poll thread whenever there is ANY work: a github store
+                // to refresh, or at least one clickup-tasks type. A project with
+                // neither (no gh store AND no clickup types) skips the spawn and
+                // just rides the advanced deadline above.
+                let has_clickup_types = config
+                    .documents
+                    .types
+                    .iter()
+                    .any(|t| t.store == StoreBackend::ClickupTasks);
+                if shared_gh_store.is_some() || has_clickup_types {
+                    refresh_in_flight.store(true, Ordering::Relaxed);
+                    let poll_tx = tx.clone();
+                    let poll_root = root.clone();
+                    let poll_config = config.clone();
+                    let poll_flag = refresh_in_flight.clone();
+                    let poll_store = shared_gh_store.clone();
+                    std::thread::spawn(move || {
+                        let mut warnings: Vec<String> = Vec::new();
+
+                        // GitHub arm: only when a github store was built. A
+                        // clickup-only project has none here, so this is skipped
+                        // and only the clickup arm below runs.
+                        if let Some(poll_store) = poll_store {
+                            let gh_types: Vec<_> = poll_config
+                                .documents
+                                .types
+                                .iter()
+                                .filter(|t| t.store == StoreBackend::GithubIssues)
+                                .collect();
+                            let milestone_types: Vec<_> = poll_config
+                                .documents
+                                .types
+                                .iter()
+                                .filter(|t| t.store == StoreBackend::GithubMilestones)
+                                .collect();
+                            let all_type_rules: Vec<TypeMatchRule> = poll_config
+                                .documents
+                                .types
+                                .iter()
+                                .map(TypeMatchRule::from)
+                                .collect();
+                            let client = GhCli::new();
+                            let mut guard = poll_store.lock().unwrap();
+                            let store = &mut *guard;
+                            // Milestones MUST be fetched before issues: an issue's native
+                            // milestone is surfaced as a forward `targets: MILESTONE-n`
+                            // relation by resolving the milestone number through the
+                            // issue-map, so the milestone has to be mapped first or the
+                            // lookup silently drops the relation on a fresh poll.
+                            for type_def in &milestone_types {
+                                match crate::engine::milestone_cache::fetch_milestones(
+                                    &poll_root,
+                                    type_def,
+                                    &client,
+                                    &store.repo,
+                                    &mut store.issue_map,
+                                ) {
+                                    Ok(result) => {
+                                        warnings
+                                            .extend(result.warnings.into_iter().map(|w| w.message));
+                                    }
+                                    Err(e) => {
+                                        warnings.push(format!(
+                                            "milestone cache refresh failed for {}: {}",
+                                            type_def.name, e
+                                        ));
+                                    }
+                                }
                             }
-                            Err(e) => {
-                                warnings.push(format!(
-                                    "milestone cache refresh failed for {}: {}",
-                                    type_def.name, e
-                                ));
+                            for type_def in &gh_types {
+                                match store.issue_cache.fetch_all(
+                                    &poll_root,
+                                    type_def,
+                                    &client,
+                                    &client,
+                                    &store.repo,
+                                    &mut store.issue_map,
+                                    &all_type_rules,
+                                    &poll_config,
+                                ) {
+                                    Ok(result) => {
+                                        warnings
+                                            .extend(result.warnings.into_iter().map(|w| w.message));
+                                    }
+                                    Err(e) => {
+                                        warnings.push(format!(
+                                            "cache refresh failed for {}: {}",
+                                            type_def.name, e
+                                        ));
+                                    }
+                                }
                             }
+                            let _ = store.issue_map.save(&poll_root);
                         }
-                    }
-                    for type_def in &gh_types {
-                        match store.issue_cache.fetch_all(
-                            &poll_root,
-                            type_def,
-                            &client,
-                            &client,
-                            &store.repo,
-                            &mut store.issue_map,
-                            &all_type_rules,
-                            &poll_config,
-                        ) {
-                            Ok(result) => {
-                                warnings.extend(result.warnings.into_iter().map(|w| w.message));
-                            }
-                            Err(e) => {
-                                warnings.push(format!(
-                                    "cache refresh failed for {}: {}",
-                                    type_def.name, e
-                                ));
-                            }
+
+                        // ClickUp arm: independent of the github store. Load the
+                        // token once (only when clickup types exist, mirroring the
+                        // fetch CLI) and refresh each clickup-tasks type's cache.
+                        // Cache refresh ONLY -- lifecycle persist is deferred so the
+                        // poll never rewrites `.lazyspec.toml` mid-session.
+                        if has_clickup_types {
+                            let client = crate::engine::clickup::ClickupHttpClient::new();
+                            let token = LayeredCredentialStore::global()
+                                .load_clickup_token()
+                                .ok()
+                                .flatten();
+                            let clickup_warnings = refresh_clickup_cache(
+                                &poll_root,
+                                &poll_config,
+                                token.as_ref().map(|t| t.expose()),
+                                &client,
+                            );
+                            warnings.extend(clickup_warnings);
                         }
-                    }
-                    let _ = store.issue_map.save(&poll_root);
-                    drop(guard);
-                    poll_flag.store(false, Ordering::Relaxed);
-                    let _ = poll_tx.send(AppEvent::CacheRefresh { warnings });
-                });
+
+                        poll_flag.store(false, Ordering::Relaxed);
+                        let _ = poll_tx.send(AppEvent::CacheRefresh { warnings });
+                    });
+                }
             }
         }
 
@@ -747,10 +847,20 @@ mod tests {
             StoreBackend::GithubMilestones,
         )];
 
-        assert!(has_pollable_gh_types(&config));
+        assert!(has_pollable_types(&config));
     }
 
-    // Gate: a project with no GitHub-backed types must not poll.
+    // Gate: a clickup-only project must poll too, so tasks created after launch
+    // appear live without a manual fetch — same parity as github types.
+    #[test]
+    fn clickup_only_project_is_pollable() {
+        let mut config = Config::default();
+        config.documents.types = vec![TypeDef::test_fixture("task", StoreBackend::ClickupTasks)];
+
+        assert!(has_pollable_types(&config));
+    }
+
+    // Gate: a project with no pollable types must not poll.
     #[test]
     fn project_without_gh_types_is_not_pollable() {
         let mut config = Config::default();
@@ -759,7 +869,7 @@ mod tests {
             TypeDef::test_fixture("note", StoreBackend::Filesystem),
         ];
 
-        assert!(!has_pollable_gh_types(&config));
+        assert!(!has_pollable_types(&config));
     }
 
     // Build an App over `root` with the given config, using a deterministic
@@ -952,6 +1062,138 @@ mod tests {
         assert!(
             !app.config_reload_request,
             "an md-only FileChange must not request a reload"
+        );
+    }
+
+    // --- ITERATION-280: clickup arm of the background poll ---
+
+    use crate::engine::clickup::{
+        ClickupError, ClickupStatus, ClickupTask, ClickupUser, TaskCreate, TaskUpdate,
+    };
+    use std::cell::Cell;
+
+    // A fake `ClickupClient` at the trait seam (DICTUM-002). Only `task_list` is
+    // exercised by the poll arm; it records that it was called so a test can
+    // assert the token-absent path never reaches the client. Every other method
+    // is unreachable here and loudly `unimplemented!()`.
+    struct FakeClickup {
+        tasks: Vec<ClickupTask>,
+        task_list_called: Cell<bool>,
+    }
+
+    impl FakeClickup {
+        fn new(tasks: Vec<ClickupTask>) -> Self {
+            FakeClickup {
+                tasks,
+                task_list_called: Cell::new(false),
+            }
+        }
+    }
+
+    impl ClickupClient for FakeClickup {
+        fn auth_status(&self, _token: &str) -> Result<ClickupUser, ClickupError> {
+            unimplemented!()
+        }
+        fn task_list(
+            &self,
+            _token: &str,
+            _list_id: &str,
+        ) -> Result<Vec<ClickupTask>, ClickupError> {
+            self.task_list_called.set(true);
+            Ok(self.tasks.clone())
+        }
+        fn list_statuses(
+            &self,
+            _token: &str,
+            _list_id: &str,
+        ) -> Result<Vec<ClickupStatus>, ClickupError> {
+            unimplemented!()
+        }
+        fn create_task(
+            &self,
+            _token: &str,
+            _list_id: &str,
+            _payload: &TaskCreate,
+        ) -> Result<ClickupTask, ClickupError> {
+            unimplemented!()
+        }
+        fn update_task(
+            &self,
+            _token: &str,
+            _task_id: &str,
+            _payload: &TaskUpdate,
+        ) -> Result<ClickupTask, ClickupError> {
+            unimplemented!()
+        }
+        fn get_task(&self, _token: &str, _task_id: &str) -> Result<ClickupTask, ClickupError> {
+            unimplemented!()
+        }
+        fn archive_task(&self, _token: &str, _task_id: &str) -> Result<(), ClickupError> {
+            unimplemented!()
+        }
+        fn set_custom_field(
+            &self,
+            _token: &str,
+            _task_id: &str,
+            _field_id: &str,
+            _value: &str,
+        ) -> Result<(), ClickupError> {
+            unimplemented!()
+        }
+    }
+
+    fn clickup_config() -> Config {
+        let mut td = TypeDef::test_fixture("task", StoreBackend::ClickupTasks);
+        td.prefix = "TASK".to_string();
+        td.clickup_list_id = Some("list123".to_string());
+        let mut config = Config::default();
+        config.documents.types = vec![td];
+        config
+    }
+
+    // Token-absent: the arm returns exactly one skip warning and makes NO client
+    // call, so a project that also polls github still refreshes without a panic.
+    #[test]
+    fn clickup_poll_token_absent_warns_without_panic() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let config = clickup_config();
+        let fake = FakeClickup::new(vec![]);
+
+        let warnings = refresh_clickup_cache(root, &config, None, &fake);
+
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(
+            warnings[0].contains("no ClickUp token"),
+            "got: {}",
+            warnings[0]
+        );
+        assert!(
+            !fake.task_list_called.get(),
+            "client must not be called when the token is absent"
+        );
+    }
+
+    // Happy path: a present token refreshes each clickup-tasks type's cache from
+    // the live List, materializing the cache doc with no warnings.
+    #[test]
+    fn clickup_poll_refreshes_cache_when_token_present() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let config = clickup_config();
+
+        let task: ClickupTask =
+            serde_json::from_str(r#"{"id":"86abc","name":"Live task","status":{"status":"open"}}"#)
+                .unwrap();
+        let fake = FakeClickup::new(vec![task]);
+
+        let warnings = refresh_clickup_cache(root, &config, Some("pk_x"), &fake);
+
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+        assert!(fake.task_list_called.get(), "client should be called");
+        assert!(
+            root.join(".lazyspec/cache/task/TASK-86abc.md").exists(),
+            "the live task should be materialized into the cache"
         );
     }
 }
