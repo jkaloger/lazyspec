@@ -705,8 +705,17 @@ fields** (priority name -> `1..4`, `estimate` -> `time_estimate` ms, `due` ->
 `due_date` epoch ms) -- then re-materializes the returned task into the cache and
 bumps the `task-map.json` `updated_at` baseline, so a subsequent read reflects
 the new native values (the round-trip). Like `create` it loads the token from
-`setup clickup`. Status changes are pushed via `advance` (not `update`), and the
-remaining write paths (`advance`/`delete`) are not yet supported.
+`setup clickup`.
+
+`advance` (moving a doc's `status`, e.g. `lazyspec update <doc> --status "in
+progress"`) also writes through: the **raw ClickUp status string** is PUT to the
+task (`PUT /task/{id}` with `status`) verbatim, then the returned task is
+re-materialized into the cache and the `updated_at` baseline bumped. Because a
+`clickup-tasks` type carries no local lifecycle edges (its `states` mirror the
+List's status set), lazyspec applies **no local transition gate** for these docs
+-- unlike filesystem/GitHub types, any status in the List's set is accepted and
+ClickUp enforces its own transition rules, rejecting an illegal target. The
+remaining write path (`delete`) is not yet supported.
 
 #### `github-milestones` store
 

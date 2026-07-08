@@ -322,12 +322,19 @@ pub struct TaskCreate {
 /// `TaskCreate` (RFC-056 §Field mapping): `markdown_content` (not
 /// `markdown_description`), a bare-integer `priority`, integer epoch/duration
 /// fields.
+///
+/// `status` is the raw ClickUp status string, pushed verbatim on `advance`
+/// (RFC-056 §Status handling). lazyspec derives no local transition edges for a
+/// ClickUp-backed type, so it does not gate the move -- ClickUp enforces its own
+/// transition rules and rejects an illegal target.
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
 pub struct TaskUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub markdown_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1101,6 +1108,7 @@ mod tests {
         let payload = TaskUpdate {
             name: None,
             markdown_content: Some("new body".to_string()),
+            status: None,
             priority: Some(2),
             due_date: Some(1_748_541_600_000),
             start_date: None,
@@ -1112,7 +1120,21 @@ mod tests {
         assert_eq!(json["due_date"], 1_748_541_600_000i64);
         assert_eq!(json["time_estimate"], 3_600_000i64);
         assert!(json.get("name").is_none());
+        assert!(json.get("status").is_none());
         assert!(json.get("start_date").is_none());
+    }
+
+    #[test]
+    fn task_update_serializes_status_verbatim_under_status_key() {
+        // An advance is a status-only PUT: the raw ClickUp string rides the
+        // `status` wire field, everything else omitted.
+        let payload = TaskUpdate {
+            status: Some("in progress".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["status"], "in progress");
+        assert_eq!(json, serde_json::json!({"status": "in progress"}));
     }
 
     #[test]

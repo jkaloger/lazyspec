@@ -175,8 +175,10 @@ impl DocumentStore for ClickupTasksStore {
     /// mapping). Resolve the task id from the [`TaskMap`], map the changed
     /// fields to a partial [`TaskUpdate`], `PUT /task/{id}`, then rewrite the
     /// cache file and `TaskMap.updated_at` from the *returned* task so a
-    /// subsequent read reflects the new native values. Status is not pushed here
-    /// (that is `advance`, ITERATION-272).
+    /// subsequent read reflects the new native values. A `status` change (an
+    /// `advance`) rides the same path: it maps to the payload's raw status
+    /// string, is `PUT` verbatim, and re-materializes from ClickUp's echo
+    /// (RFC-056 §Status handling); lazyspec applies no local transition gate.
     fn update(&mut self, type_def: &TypeDef, doc_id: &str, updates: &[(&str, &str)]) -> Result<()> {
         let token = self
             .token
@@ -2493,6 +2495,69 @@ mod tests {
         assert!(content.contains("estimate: 3600000"), "got:\n{content}");
         assert!(content.contains("due: 1748541600000"), "got:\n{content}");
         assert!(content.contains("edited body"), "got:\n{content}");
+
+        // The lock baseline is bumped to the returned task's date_updated.
+        let map = TaskMap::load(&root).unwrap();
+        let entry = map.get("TASK-90abc").unwrap();
+        assert_eq!(entry.task_id, "90abc");
+        assert_eq!(entry.updated_at, "1774587145901");
+    }
+
+    #[test]
+    fn clickup_advance_puts_raw_status_and_round_trips_through_cache() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_advance_status");
+        let td = clickup_type_def(Some("list123"));
+
+        // An existing mapped doc at "open" with a stale lock baseline.
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1700000000000");
+        map.save(&root).unwrap();
+
+        // ClickUp echoes the task at its new status with a fresh date_updated.
+        let advanced = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "My task",
+                "status": {"status": "in progress"},
+                "date_updated": "1774587145901",
+                "markdown_description": "the body",
+                "creator": {"username": "Jack"}
+            }"#,
+        );
+        let fake = FakeClickupClient::valid(clickup_user()).with_updated_task(advanced);
+        let calls = fake.update_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        // An advance is a status-only update; the CLI's local gate is bypassed
+        // for clickup-tasks, so the store simply pushes the raw string.
+        store
+            .update(&td, "TASK-90abc", &[("status", "in progress")])
+            .unwrap();
+
+        // Exactly one PUT, to the resolved task id, carrying the raw status only.
+        let recorded = calls.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "90abc");
+        let payload = &recorded[0].1;
+        assert_eq!(payload.status, Some("in progress".to_string()));
+        // A status-only advance touches no native field.
+        assert_eq!(payload.name, None);
+        assert_eq!(payload.markdown_content, None);
+        assert_eq!(payload.priority, None);
+
+        // Round-trip: the cache now reflects the new raw status verbatim.
+        let cache = root.join(".lazyspec/cache/task/TASK-90abc.md");
+        let content = std::fs::read_to_string(&cache).unwrap();
+        assert!(content.contains("status: in progress"), "got:\n{content}");
 
         // The lock baseline is bumped to the returned task's date_updated.
         let map = TaskMap::load(&root).unwrap();

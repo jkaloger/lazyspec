@@ -269,22 +269,24 @@ pub(crate) fn build_task_create(
 ///
 /// - `title` -> `name`;
 /// - `body`  -> `markdown_content`;
+/// - `status` -> `status`, the raw ClickUp status string pushed verbatim on an
+///   `advance` (RFC-056 §Status handling). lazyspec derives no local transition
+///   edges for a ClickUp-backed type, so the CLI does not gate the move; ClickUp
+///   validates the target and rejects an illegal one;
 /// - `priority` -> the priority *name* mapped to the bare integer
 ///   (`urgent=1 high=2 normal=3 low=4`); an unrecognized name drops the field;
 /// - `due` -> `due_date`, `estimate` -> `time_estimate` (integer epoch-ms /
 ///   duration-ms; an unparseable value drops the field).
 ///
-/// `status` is deliberately *not* mapped here: a ClickUp status change is pushed
-/// via `advance` (ITERATION-272), and the derived lifecycle carries no edges so
-/// the CLI rejects a `--status` update before it reaches this mapper. Any other
-/// key (a non-native attribute or a relation) has no native field and routes to
-/// a custom field in a later RFC-056 story; it is ignored here.
+/// Any other key (a non-native attribute or a relation) has no native field and
+/// routes to a custom field in a later RFC-056 story; it is ignored here.
 pub(crate) fn build_task_update(updates: &[(&str, &str)]) -> TaskUpdate {
     let mut payload = TaskUpdate::default();
     for &(key, value) in updates {
         match key {
             "title" => payload.name = Some(value.to_string()),
             "body" => payload.markdown_content = Some(value.to_string()),
+            "status" => payload.status = Some(value.to_string()),
             "priority" => payload.priority = priority_name_to_int(value),
             "due" => payload.due_date = value.trim().parse::<i64>().ok(),
             "estimate" => payload.time_estimate = value.trim().parse::<i64>().ok(),
@@ -579,10 +581,22 @@ mod tests {
     }
 
     #[test]
-    fn build_task_update_ignores_status_and_non_native_keys() {
-        // Status is pushed via advance (272); a non-native attr routes to a
-        // custom field in a later story. Neither has a native field here.
-        let payload = build_task_update(&[("status", "in progress"), ("owner", "jkaloger")]);
+    fn build_task_update_maps_status_verbatim() {
+        // Advance pushes the raw ClickUp status string through the edit payload;
+        // lazyspec does not gate or map it (RFC-056 §Status handling).
+        let payload = build_task_update(&[("status", "in progress")]);
+        assert_eq!(payload.status, Some("in progress".to_string()));
+        // No other field is touched by a status-only advance.
+        assert_eq!(payload.name, None);
+        assert_eq!(payload.markdown_content, None);
+        assert_eq!(payload.priority, None);
+    }
+
+    #[test]
+    fn build_task_update_ignores_non_native_keys() {
+        // A non-native attr routes to a custom field in a later story; it has no
+        // native field here.
+        let payload = build_task_update(&[("owner", "jkaloger")]);
         assert_eq!(payload, TaskUpdate::default());
     }
 
