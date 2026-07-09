@@ -2284,15 +2284,38 @@ pub fn build_registry(root: &std::path::Path, config: &Config) -> DocumentStoreR
     // write methods currently fail loudly. The token stays unloaded here to keep
     // `build_registry` free of keychain I/O on every command; the write path
     // will load it when it lands.
-    registry.register(
-        StoreBackend::ClickupTasks,
-        Box::new(ClickupTasksStore {
-            client: Box::new(crate::engine::clickup::ClickupHttpClient::new()),
-            root: root.to_path_buf(),
-            config: config.clone(),
-            token: None,
-        }),
-    );
+    //
+    // Only register the real store when a clickup-tasks type actually exists:
+    // `ClickupHttpClient::new()` eagerly builds a reqwest client (system CA
+    // load), so registering it unconditionally would touch the network stack on
+    // every command and panic in CA-less environments. Mirrors the poll seam's
+    // `has_clickup_types` gate in `tui::infra::event_loop`.
+    let has_clickup_types = config
+        .documents
+        .types
+        .iter()
+        .any(|t| t.store == StoreBackend::ClickupTasks);
+    if has_clickup_types {
+        registry.register(
+            StoreBackend::ClickupTasks,
+            Box::new(ClickupTasksStore {
+                client: Box::new(crate::engine::clickup::ClickupHttpClient::new()),
+                root: root.to_path_buf(),
+                config: config.clone(),
+                token: None,
+            }),
+        );
+    } else {
+        registry.register(
+            StoreBackend::ClickupTasks,
+            Box::new(UnavailableStore {
+                message: format!(
+                    "type uses {} store but no clickup-tasks type is configured",
+                    StoreBackend::ClickupTasks
+                ),
+            }),
+        );
+    }
 
     registry
 }
@@ -3891,6 +3914,27 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("github-milestones backend"));
+    }
+
+    // A project with no clickup-tasks type must not construct a real
+    // ClickupHttpClient (eager reqwest client -> system CA load -> panics in
+    // CA-less/hermetic environments). build_registry registers an
+    // UnavailableStore instead, which errors loudly only on use.
+    #[test]
+    fn build_registry_without_clickup_type_registers_unavailable() {
+        let root = tmp_root("registry_no_clickup");
+        let config = Config::default();
+        let mut registry = build_registry(&root, &config);
+
+        let td = test_type_def(StoreBackend::ClickupTasks);
+        let store = registry.for_type(&td).unwrap();
+        let result = store.create(&td, "x", "author", "");
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("no clickup-tasks type is configured"));
     }
 
     #[test]
