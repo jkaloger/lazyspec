@@ -37,6 +37,7 @@ pub mod status_colors;
 pub mod store;
 pub mod store_dispatch;
 pub mod symbols;
+pub mod sync;
 pub mod task_map;
 pub mod template;
 pub mod validation;

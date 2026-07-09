@@ -542,6 +542,52 @@ impl<T: GhGraphql + ?Sized> GhGraphql for &T {
     }
 }
 
+impl<T: GhMilestoneApi + ?Sized> GhMilestoneApi for &T {
+    fn milestone_list(&self, repo: &str) -> Result<Vec<GhMilestone>> {
+        (**self).milestone_list(repo)
+    }
+
+    fn milestone_view(&self, repo: &str, number: u64) -> Result<GhMilestone> {
+        (**self).milestone_view(repo, number)
+    }
+
+    fn milestone_create(
+        &self,
+        repo: &str,
+        title: &str,
+        description: &str,
+        due_on: Option<&str>,
+        state: &str,
+    ) -> Result<GhMilestone> {
+        (**self).milestone_create(repo, title, description, due_on, state)
+    }
+
+    fn milestone_edit(
+        &self,
+        repo: &str,
+        number: u64,
+        title: Option<&str>,
+        description: Option<&str>,
+        due_on: Option<&str>,
+        state: Option<&str>,
+    ) -> Result<GhMilestone> {
+        (**self).milestone_edit(repo, number, title, description, due_on, state)
+    }
+
+    fn milestone_delete(&self, repo: &str, number: u64) -> Result<()> {
+        (**self).milestone_delete(repo, number)
+    }
+
+    fn issue_set_milestone(
+        &self,
+        repo: &str,
+        issue_number: u64,
+        milestone: Option<u64>,
+    ) -> Result<()> {
+        (**self).issue_set_milestone(repo, issue_number, milestone)
+    }
+}
+
 /// Upcast to `dyn Any` so a boxed store client can be downcast back to its
 /// concrete type (used by tests to inspect a mock's captured state after it has
 /// been moved behind a `Box<dyn GhClient>` etc.). Blanket-implemented for every

@@ -1,4 +1,3 @@
-use crate::engine::cache_lock::CacheLock;
 use crate::engine::clickup::ClickupClient;
 use crate::engine::clickup_cache;
 use crate::engine::config::{Config, Lifecycle, StoreBackend, TypeDef};
@@ -13,7 +12,6 @@ use crate::engine::issue_map::IssueMap;
 use crate::engine::status_colors::StatusColors;
 use crate::engine::task_map::TaskMap;
 use anyhow::{bail, Context, Result};
-use std::collections::HashSet;
 use std::path::Path;
 
 #[allow(clippy::too_many_arguments)]
@@ -357,78 +355,22 @@ fn filter_types<'a>(all: Vec<&'a str>, filter: Option<&'a str>) -> Vec<&'a str> 
     }
 }
 
+// The git-ref fetch logic now lives in `engine::sync::GitRefSync` /
+// `engine::sync::fetch_git_ref` (RFC-057, ITERATION-285). This thin adapter maps
+// its counts back to the CLI-private `TypeSummary`; it disappears when the CLI
+// migrates onto `sync_all` in ITERATION-286.
 fn fetch_git_ref_type(
     root: &Path,
     git_ref_ops: &dyn GitRefOps,
     remote: &str,
     type_name: &str,
 ) -> Result<TypeSummary> {
-    let ref_pattern = format!("refs/lazyspec/{}/*", type_name);
-    git_ref_ops.fetch_refs(root, remote, &ref_pattern)?;
-
-    let ref_prefix = format!("refs/lazyspec/{}/", type_name);
-    let current_refs = git_ref_ops.list_refs(root, &ref_prefix)?;
-
-    let mut cache_lock = CacheLock::load(root)?;
-
-    let mut fetched = 0;
-    let mut new_count = 0;
-
-    let current_ref_keys: HashSet<String> = current_refs
-        .iter()
-        .map(|(refname, _)| {
-            let id = refname.strip_prefix(&ref_prefix).unwrap_or(refname);
-            format!("{}/{}", type_name, id)
-        })
-        .collect();
-
-    let cache_dir = root.join(format!(".lazyspec/cache/{}", type_name));
-
-    for (refname, sha) in &current_refs {
-        let id = refname.strip_prefix(&ref_prefix).unwrap_or(refname);
-        let doc_key = format!("{}/{}", type_name, id);
-
-        let cached_sha = cache_lock.get(&doc_key);
-        if cached_sha == Some(sha.as_str()) {
-            continue;
-        }
-
-        let is_new = cached_sha.is_none();
-
-        let content = git_ref_ops.read_ref_blob(root, sha, "doc.md")?;
-
-        std::fs::create_dir_all(&cache_dir)?;
-        let cache_file = cache_dir.join(format!("{}.md", id));
-        std::fs::write(&cache_file, &content)?;
-
-        cache_lock.set(&doc_key, sha);
-        fetched += 1;
-        if is_new {
-            new_count += 1;
-        }
-    }
-
-    let existing_keys = cache_lock.keys_for_type(type_name);
-    let mut removed = 0;
-    for key in existing_keys {
-        if !current_ref_keys.contains(&key) {
-            let id = key.strip_prefix(&format!("{}/", type_name)).unwrap_or(&key);
-            let cache_file = cache_dir.join(format!("{}.md", id));
-            if cache_file.exists() {
-                std::fs::remove_file(&cache_file)?;
-            }
-            cache_lock.remove(&key);
-            removed += 1;
-        }
-    }
-
-    cache_lock.save(root)?;
-
+    let counts = crate::engine::sync::fetch_git_ref(root, git_ref_ops, remote, type_name)?;
     Ok(TypeSummary {
         type_name: type_name.to_string(),
-        fetched,
-        new: new_count,
-        removed,
+        fetched: counts.fetched,
+        new: counts.new,
+        removed: counts.removed,
     })
 }
 
@@ -442,6 +384,7 @@ struct TypeSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::cache_lock::CacheLock;
     use crate::engine::config::{NumberingStrategy, StoreBackend, TypeDef};
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use tempfile::TempDir;
