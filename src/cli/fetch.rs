@@ -1,15 +1,17 @@
 use crate::engine::clickup::ClickupClient;
-use crate::engine::clickup_cache;
-use crate::engine::config::{Config, Lifecycle, StoreBackend, TypeDef};
+use crate::engine::config::{Config, Lifecycle, StoreBackend};
 use crate::engine::config_write::write_config_in_place;
 use crate::engine::credentials::Token;
 use crate::engine::gh::{GhGraphql, GhIssueReader, GhIssueWriter, GhMilestoneApi};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::github::resolve_repo;
 use crate::engine::issue_body::TypeMatchRule;
-use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::status_colors::StatusColors;
+use crate::engine::sync::{
+    sync_all, ClickupMaps, ClickupSync, GhIssueSync, GhMaps, GhMilestoneSync, GitRefSync,
+    SyncContext, Syncers,
+};
 use crate::engine::task_map::TaskMap;
 use anyhow::{bail, Context, Result};
 use std::path::Path;
@@ -84,232 +86,178 @@ pub fn run(
         }
     }
 
-    let mut summaries = Vec::new();
+    // Which backends this run actually touches, after the `--type` filter. The
+    // per-backend syncer (and the client/token it needs) is built only when its
+    // backend has a type to fetch, so a github-only project never resolves a
+    // ClickUp token and vice versa.
+    let fetch_milestones = filter_types(milestone_types.clone(), type_filter);
+    let fetch_gh = filter_types(gh_types.clone(), type_filter);
+    let fetch_gitref = filter_types(git_ref_types.clone(), type_filter);
+    let fetch_clickup = filter_types(clickup_types.clone(), type_filter);
 
-    // Milestones MUST be fetched before issues: an issue's native milestone is
-    // surfaced as a forward `targets: MILESTONE-n` relation by resolving the
-    // milestone number through the issue-map, so the milestone has to be mapped
-    // first or the lookup silently drops the relation on a fresh fetch.
-    let milestones_to_fetch = filter_types(milestone_types, type_filter);
+    let gh_fetch = !fetch_milestones.is_empty() || !fetch_gh.is_empty();
+    let clickup_fetch = !fetch_clickup.is_empty();
 
-    if !milestones_to_fetch.is_empty() {
-        let repo = resolve_repo(config, root).context(
+    // Token-absent / repo-unresolvable are hard errors raised HERE, before
+    // sync_all writes any cache -- distinct from a per-type `SyncOutcome.error`.
+    let repo = if gh_fetch {
+        Some(resolve_repo(config, root).context(
             "Could not determine GitHub repo. Set [documents.github].repo in .lazyspec.toml",
-        )?;
-        let mut issue_map = IssueMap::load(root)?;
+        )?)
+    } else {
+        None
+    };
+    let clickup_token = if clickup_fetch {
+        Some(
+            clickup_token
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no ClickUp token found; run `lazyspec setup clickup` before fetching \
+                         clickup-tasks types"
+                    )
+                })?
+                .expose()
+                .to_string(),
+        )
+    } else {
+        None
+    };
 
-        for type_name in &milestones_to_fetch {
-            let type_def = config
-                .type_by_name(type_name)
-                .ok_or_else(|| anyhow::anyhow!("type '{}' not found in config", type_name))?;
-            let result = crate::engine::milestone_cache::fetch_milestones(
-                root,
-                type_def,
+    let type_rules: Vec<TypeMatchRule> = config
+        .documents
+        .types
+        .iter()
+        .map(TypeMatchRule::from)
+        .collect();
+
+    // Run-local sidecar maps, loaded only for the backends we touch and lent to
+    // the syncers through the borrowed `SyncContext`; saved after `sync_all`.
+    let mut issue_map = if gh_fetch {
+        Some(IssueMap::load(root)?)
+    } else {
+        None
+    };
+    let mut task_map = if clickup_fetch {
+        Some(TaskMap::load(root)?)
+    } else {
+        None
+    };
+    let mut status_colors = if clickup_fetch {
+        Some(StatusColors::load(root)?)
+    } else {
+        None
+    };
+
+    let outcomes = {
+        let mut ctx = SyncContext {
+            gh: issue_map.as_mut().map(|m| GhMaps { issue_map: m }),
+            clickup: match (task_map.as_mut(), status_colors.as_mut()) {
+                (Some(t), Some(s)) => Some(ClickupMaps {
+                    task_map: t,
+                    status_colors: s,
+                }),
+                _ => None,
+            },
+        };
+
+        let mut syncers = Syncers::default();
+        if !fetch_milestones.is_empty() {
+            syncers.milestone = Some(GhMilestoneSync {
                 gh,
-                &repo,
-                &mut issue_map,
-            )?;
-
-            for w in &result.warnings {
-                eprintln!("warning: {}", w.message);
-            }
-
-            summaries.push(TypeSummary {
-                type_name: type_name.to_string(),
-                fetched: result.fetched,
-                new: result.new,
-                removed: result.removed,
+                repo: repo
+                    .clone()
+                    .expect("repo resolved when a milestone type fetches"),
+            });
+        }
+        if !fetch_gh.is_empty() {
+            syncers.issue = Some(GhIssueSync {
+                reader: gh,
+                graphql: gh,
+                repo: repo
+                    .clone()
+                    .expect("repo resolved when an issue type fetches"),
+                type_rules,
+            });
+        }
+        if !fetch_gitref.is_empty() {
+            syncers.git_ref = Some(GitRefSync {
+                ops: git_ref_ops,
+                remote: remote.to_string(),
+            });
+        }
+        if clickup_fetch {
+            syncers.clickup = Some(ClickupSync {
+                client: clickup,
+                token: clickup_token
+                    .clone()
+                    .expect("token present when a clickup type fetches"),
             });
         }
 
-        issue_map.save(root)?;
-    }
+        sync_all(root, config, &mut ctx, &mut syncers, type_filter)
+    };
 
-    let gh_to_fetch = filter_types(gh_types, type_filter);
-
-    if !gh_to_fetch.is_empty() {
-        let repo = resolve_repo(config, root).context(
-            "Could not determine GitHub repo. Set [documents.github].repo in .lazyspec.toml",
-        )?;
-        let mut issue_map = IssueMap::load(root)?;
-        let cache = IssueCache::new(root);
-
-        let all_type_rules: Vec<TypeMatchRule> = config
-            .documents
-            .types
-            .iter()
-            .map(TypeMatchRule::from)
-            .collect();
-
-        for type_name in &gh_to_fetch {
-            let type_def = config
-                .type_by_name(type_name)
-                .ok_or_else(|| anyhow::anyhow!("type '{}' not found in config", type_name))?;
-
-            let result = cache.fetch_all(
-                root,
-                type_def,
-                gh,
-                gh,
-                &repo,
-                &mut issue_map,
-                &all_type_rules,
-                config,
-            )?;
-
-            for w in &result.warnings {
-                eprintln!("warning: {}", w.message);
-            }
-
-            // Inject each board's per-item project field values as namespaced
-            // `PROJECT-n.<field>` attributes on member docs. Best-effort: a
-            // GraphQL failure warns and the cached doc keeps its other fields.
-            inject_project_fields_into_cache(root, gh, &repo, &issue_map, config, type_def);
-
-            summaries.push(TypeSummary {
-                type_name: type_name.to_string(),
-                fetched: result.fetched,
-                new: result.new,
-                removed: result.removed,
-            });
+    for o in &outcomes {
+        for w in &o.warnings {
+            eprintln!("warning: {}", w);
         }
-
-        issue_map.save(root)?;
-    }
-
-    let gitref_to_fetch = filter_types(git_ref_types, type_filter);
-
-    for type_name in &gitref_to_fetch {
-        let summary = fetch_git_ref_type(root, git_ref_ops, remote, type_name)?;
-        summaries.push(summary);
-    }
-
-    let clickup_to_fetch = filter_types(clickup_types, type_filter);
-
-    if !clickup_to_fetch.is_empty() {
-        let token = clickup_token.ok_or_else(|| {
-            anyhow::anyhow!(
-                "no ClickUp token found; run `lazyspec setup clickup` before fetching \
-                 clickup-tasks types"
-            )
-        })?;
-        let mut task_map = TaskMap::load(root)?;
-        let mut status_colors = StatusColors::load(root)?;
-        let mut lifecycles: Vec<(String, Lifecycle)> = Vec::new();
-
-        for type_name in &clickup_to_fetch {
-            let type_def = config
-                .type_by_name(type_name)
-                .ok_or_else(|| anyhow::anyhow!("type '{}' not found in config", type_name))?;
-
-            let result =
-                clickup_cache::fetch_tasks(root, type_def, clickup, token.expose(), &mut task_map)?;
-
-            // Populate the type's effective lifecycle from the bound List's status
-            // set at sync time (RFC-056 §Status handling). fetch_tasks already
-            // validated clickup_list_id, so it is present here.
-            let list_id = type_def.clickup_list_id.as_deref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "type '{}' is clickup-tasks but has no clickup_list_id configured",
-                    type_name
-                )
-            })?;
-            let (lifecycle, colors) =
-                clickup_cache::fetch_lifecycle_and_colors(clickup, token.expose(), list_id)?;
-            lifecycles.push((type_name.to_string(), lifecycle));
-            status_colors.set_type(*type_name, colors);
-
-            summaries.push(TypeSummary {
-                type_name: type_name.to_string(),
-                fetched: result.fetched,
-                new: result.new,
-                removed: result.removed,
-            });
-        }
-
-        task_map.save(root)?;
-        status_colors.save(root)?;
-        persist_clickup_lifecycles(root, &lifecycles)?;
     }
 
     if json {
-        let json_out: Vec<serde_json::Value> = summaries
+        let json_out: Vec<serde_json::Value> = outcomes
             .iter()
-            .map(|s| {
-                serde_json::json!({
-                    "type": s.type_name,
-                    "fetched": s.fetched,
-                    "new": s.new,
-                    "removed": s.removed,
-                })
+            .map(|o| {
+                let mut entry = serde_json::json!({
+                    "type": o.type_name,
+                    "fetched": o.fetched,
+                    "new": o.new,
+                    "removed": o.removed,
+                });
+                if let Some(err) = &o.error {
+                    entry["error"] = serde_json::Value::String(err.clone());
+                }
+                entry
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&json_out)?);
     } else {
-        for s in &summaries {
-            println!(
-                "{}: fetched {}, {} new, {} removed",
-                s.type_name, s.fetched, s.new, s.removed
-            );
+        for o in &outcomes {
+            match &o.error {
+                Some(err) => eprintln!("error: {}: {}", o.type_name, err),
+                None => println!(
+                    "{}: fetched {}, {} new, {} removed",
+                    o.type_name, o.fetched, o.new, o.removed
+                ),
+            }
         }
+    }
+
+    // Persist every cache that succeeded, even when another type failed: the run
+    // continued through every type, so there is no partial state to withhold.
+    if let Some(m) = &issue_map {
+        m.save(root)?;
+    }
+    if let Some(m) = &task_map {
+        m.save(root)?;
+    }
+    if let Some(c) = &status_colors {
+        c.save(root)?;
+    }
+
+    let lifecycles: Vec<(String, Lifecycle)> = outcomes
+        .iter()
+        .filter_map(|o| o.lifecycle.clone().map(|l| (o.type_name.clone(), l)))
+        .collect();
+    persist_clickup_lifecycles(root, &lifecycles)?;
+
+    // Continue-then-exit-non-zero: a per-type failure fails the run, but only
+    // after every other type refreshed and its cache was saved. A warnings-only
+    // run has no `error` and exits zero.
+    if outcomes.iter().any(|o| o.error.is_some()) {
+        bail!("fetch failed for one or more types");
     }
 
     Ok(())
-}
-
-/// For every cached doc of `type_def`, read its board memberships and inject the
-/// per-item project field values as `PROJECT-n.<field>` attributes, rewriting the
-/// cache file. Best-effort: a per-doc failure warns and the rest still process.
-fn inject_project_fields_into_cache(
-    root: &Path,
-    client: &dyn GhGraphql,
-    repo: &str,
-    issue_map: &IssueMap,
-    config: &Config,
-    type_def: &TypeDef,
-) {
-    let cache_dir = root.join(".lazyspec/cache").join(&type_def.name);
-    let entries = match std::fs::read_dir(&cache_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("md") {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let (Ok(mut meta), Ok(body)) = (
-            crate::engine::document::DocMeta::parse(&content),
-            crate::engine::document::DocMeta::extract_body(&content),
-        ) else {
-            continue;
-        };
-        // github-issues cache files carry no `id:` in their frontmatter, so the
-        // canonical doc id is the filename stem. Derive it when missing so the
-        // issue-map lookup resolves and write_cache_file does not bail on empty id.
-        if meta.id.is_empty() {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                meta.id = crate::engine::store::extract_id_from_name(stem);
-            }
-        }
-        if let Err(e) = crate::engine::store_dispatch::inject_project_fields_for_meta(
-            client, repo, issue_map, config, &mut meta,
-        ) {
-            eprintln!(
-                "warning: could not read project fields for {}: {}",
-                meta.id, e
-            );
-            continue;
-        }
-        if let Err(e) =
-            crate::engine::store_dispatch::write_cache_file(root, type_def, &meta, &body)
-        {
-            eprintln!("warning: could not rewrite cache for {}: {}", meta.id, e);
-        }
-    }
 }
 
 /// Write each `(type, lifecycle)` derived from a bound List's status set back
@@ -355,126 +303,17 @@ fn filter_types<'a>(all: Vec<&'a str>, filter: Option<&'a str>) -> Vec<&'a str> 
     }
 }
 
-// The git-ref fetch logic now lives in `engine::sync::GitRefSync` /
-// `engine::sync::fetch_git_ref` (RFC-057, ITERATION-285). This thin adapter maps
-// its counts back to the CLI-private `TypeSummary`; it disappears when the CLI
-// migrates onto `sync_all` in ITERATION-286.
-fn fetch_git_ref_type(
-    root: &Path,
-    git_ref_ops: &dyn GitRefOps,
-    remote: &str,
-    type_name: &str,
-) -> Result<TypeSummary> {
-    let counts = crate::engine::sync::fetch_git_ref(root, git_ref_ops, remote, type_name)?;
-    Ok(TypeSummary {
-        type_name: type_name.to_string(),
-        fetched: counts.fetched,
-        new: counts.new,
-        removed: counts.removed,
-    })
-}
-
-struct TypeSummary {
-    type_name: String,
-    fetched: usize,
-    new: usize,
-    removed: usize,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::cache_lock::CacheLock;
+    use crate::engine::clickup::{ClickupUser, FakeClickupClient};
     use crate::engine::config::{NumberingStrategy, StoreBackend, TypeDef};
+    use crate::engine::gh::{
+        GhComment, GhFieldValueInput, GhIssue, GhMilestone, GqlVar, ProjectFieldValue,
+    };
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use tempfile::TempDir;
-
-    // ITERATION-226 task 3: github-issues cache files carry no `id:` in their
-    // frontmatter, so DocMeta::parse yields meta.id == "". The fix derives the id
-    // from the filename stem before injection so write_cache_file does not bail on
-    // "refusing cache write for empty doc id" and PROJECT-n fields are injected.
-    #[test]
-    fn inject_project_fields_derives_id_from_filename_when_frontmatter_lacks_id() {
-        use crate::engine::config::{Config, RelationshipDef};
-        use crate::engine::gh::test_support::MockGhClient;
-        use crate::engine::gh::{GhFieldKind, GhFieldValueRepr, ProjectFieldValue};
-
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-
-        let td = TypeDef {
-            name: "story".to_string(),
-            plural: "stories".to_string(),
-            dir: "docs/stories".to_string(),
-            prefix: "STORY".to_string(),
-            icon: None,
-            numbering: NumberingStrategy::Incremental,
-            subdirectory: false,
-            store: StoreBackend::GithubIssues,
-            singleton: false,
-            parent_type: None,
-            agents: Vec::new(),
-            intent: None,
-            authorship: Default::default(),
-            lifecycle: Default::default(),
-            attributes: Default::default(),
-            label_override: None,
-            github_issue_tag: None,
-            github_issue_type: None,
-            clickup_list_id: None,
-            clickup_custom_field_map: None,
-        };
-
-        // A realistic cache file: no `id:` in frontmatter (mirrors what
-        // render_cache_content emits), with a membership relation to PROJECT-1.
-        let cache_dir = root.join(".lazyspec/cache/story");
-        std::fs::create_dir_all(&cache_dir).unwrap();
-        let cache_content = "---\n\
-title: A Story\n\
-type: story\n\
-status: draft\n\
-author: github\n\
-date: 2026-06-26\n\
-tags: []\n\
-provenance: []\n\
-related:\n\
-- member-of: PROJECT-1\n\
-attributes: {}\n\
----\n\
-body text\n";
-        std::fs::write(cache_dir.join("STORY-7.md"), cache_content).unwrap();
-
-        let config = Config {
-            relationships: vec![RelationshipDef {
-                name: "member-of".to_string(),
-                inverse: Some("has-member".to_string()),
-                github_native: Some("membership".to_string()),
-                traversal: None,
-            }],
-            ..Default::default()
-        };
-
-        let client = MockGhClient::new().with_project_field_values(vec![ProjectFieldValue {
-            project_number: 1,
-            field_name: "Status".into(),
-            kind: GhFieldKind::SingleSelect,
-            value: GhFieldValueRepr::OptionName("In Progress".into()),
-        }]);
-
-        let mut issue_map = IssueMap::load(root).unwrap();
-        // The derived id (STORY-7) must map to a node id for the lookup to succeed.
-        issue_map.insert("STORY-7", 7, "", "I_issue7");
-
-        inject_project_fields_into_cache(root, &client, "owner/repo", &issue_map, &config, &td);
-
-        // Proves write_cache_file did NOT bail on empty id AND the id was derived
-        // correctly (STORY-7 mapped to the node with the project field).
-        let rewritten = std::fs::read_to_string(cache_dir.join("STORY-7.md")).unwrap();
-        assert!(
-            rewritten.contains("PROJECT-1.Status: In Progress"),
-            "expected injected project field, got:\n{rewritten}"
-        );
-    }
 
     const CLICKUP_CONFIG_SRC: &str = r#"[naming]
 pattern = "{type}-{n:03}-{title}.md"
@@ -540,6 +379,10 @@ name = "related-to"
         assert_eq!(out, CLICKUP_CONFIG_SRC);
     }
 
+    // The git-ref fetch logic lives in `engine::sync::fetch_git_ref` since
+    // ITERATION-285; `GitRefSync` (driven by `sync_all`) is the CLI's only caller.
+    // These exercise that relocated fn directly to keep its cache/lock mechanics
+    // covered from the surface that depends on it.
     #[test]
     fn fetch_git_ref_writes_cache_and_updates_lock() {
         let tmp = TempDir::new().unwrap();
@@ -560,11 +403,12 @@ name = "related-to"
             .with_read_blob_result(Ok("# Iteration 42\ncontent".to_string()))
             .with_read_blob_result(Ok("# Iteration 43\ncontent".to_string()));
 
-        let summary = fetch_git_ref_type(root, &mock, "origin", "iteration").unwrap();
+        let counts =
+            crate::engine::sync::fetch_git_ref(root, &mock, "origin", "iteration").unwrap();
 
-        assert_eq!(summary.fetched, 2);
-        assert_eq!(summary.new, 2);
-        assert_eq!(summary.removed, 0);
+        assert_eq!(counts.fetched, 2);
+        assert_eq!(counts.new, 2);
+        assert_eq!(counts.removed, 0);
 
         let cache_file_42 = root.join(".lazyspec/cache/iteration/ITERATION-042.md");
         assert!(cache_file_42.exists());
@@ -603,11 +447,12 @@ name = "related-to"
             .with_fetch_result(Ok(()))
             .with_list_result(Ok(vec![]));
 
-        let summary = fetch_git_ref_type(root, &mock, "origin", "iteration").unwrap();
+        let counts =
+            crate::engine::sync::fetch_git_ref(root, &mock, "origin", "iteration").unwrap();
 
-        assert_eq!(summary.fetched, 0);
-        assert_eq!(summary.new, 0);
-        assert_eq!(summary.removed, 1);
+        assert_eq!(counts.fetched, 0);
+        assert_eq!(counts.new, 0);
+        assert_eq!(counts.removed, 1);
 
         assert!(!cache_dir.join("ITERATION-042.md").exists());
 
@@ -624,11 +469,12 @@ name = "related-to"
             .with_fetch_result(Ok(()))
             .with_list_result(Ok(vec![]));
 
-        let summary = fetch_git_ref_type(root, &mock, "origin", "iteration").unwrap();
+        let counts =
+            crate::engine::sync::fetch_git_ref(root, &mock, "origin", "iteration").unwrap();
 
-        assert_eq!(summary.fetched, 0);
-        assert_eq!(summary.new, 0);
-        assert_eq!(summary.removed, 0);
+        assert_eq!(counts.fetched, 0);
+        assert_eq!(counts.new, 0);
+        assert_eq!(counts.removed, 0);
 
         let lock = CacheLock::load(root).unwrap();
         assert!(lock.keys_for_type("iteration").is_empty());
@@ -654,11 +500,12 @@ name = "related-to"
                 "abc123".to_string(),
             )]));
 
-        let summary = fetch_git_ref_type(root, &mock, "origin", "iteration").unwrap();
+        let counts =
+            crate::engine::sync::fetch_git_ref(root, &mock, "origin", "iteration").unwrap();
 
-        assert_eq!(summary.fetched, 0);
-        assert_eq!(summary.new, 0);
-        assert_eq!(summary.removed, 0);
+        assert_eq!(counts.fetched, 0);
+        assert_eq!(counts.new, 0);
+        assert_eq!(counts.removed, 0);
 
         // read_ref_blob should not have been called
         let calls = mock.calls.borrow();
@@ -686,11 +533,12 @@ name = "related-to"
             )]))
             .with_read_blob_result(Ok("updated content".to_string()));
 
-        let summary = fetch_git_ref_type(root, &mock, "origin", "iteration").unwrap();
+        let counts =
+            crate::engine::sync::fetch_git_ref(root, &mock, "origin", "iteration").unwrap();
 
-        assert_eq!(summary.fetched, 1);
-        assert_eq!(summary.new, 0); // existing doc updated, not new
-        assert_eq!(summary.removed, 0);
+        assert_eq!(counts.fetched, 1);
+        assert_eq!(counts.new, 0); // existing doc updated, not new
+        assert_eq!(counts.removed, 0);
 
         assert_eq!(
             std::fs::read_to_string(cache_dir.join("ITERATION-042.md")).unwrap(),
@@ -699,5 +547,228 @@ name = "related-to"
 
         let lock = CacheLock::load(root).unwrap();
         assert_eq!(lock.get("iteration/ITERATION-042"), Some("newsha"));
+    }
+
+    fn git_ref_type(name: &str, prefix: &str) -> TypeDef {
+        TypeDef {
+            name: name.to_string(),
+            plural: format!("{}s", name),
+            dir: format!("docs/{}", name),
+            prefix: prefix.to_string(),
+            icon: None,
+            numbering: NumberingStrategy::Incremental,
+            subdirectory: false,
+            store: StoreBackend::GitRef,
+            singleton: false,
+            parent_type: None,
+            agents: Vec::new(),
+            intent: None,
+            authorship: Default::default(),
+            lifecycle: Default::default(),
+            attributes: Default::default(),
+            label_override: None,
+            github_issue_tag: None,
+            github_issue_type: None,
+            clickup_list_id: None,
+            clickup_custom_field_map: None,
+        }
+    }
+
+    fn fake_clickup() -> FakeClickupClient {
+        FakeClickupClient::valid(ClickupUser {
+            id: 1,
+            username: "fake".to_string(),
+            email: "fake@example.com".to_string(),
+        })
+    }
+
+    // AC (STORY-202): all types succeed -> every cache persisted, exit zero.
+    #[test]
+    fn run_persists_all_git_ref_caches_and_exits_ok_when_every_type_succeeds() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        let mut config = Config::default();
+        config.documents.types = vec![git_ref_type("alpha", "ALPHA"), git_ref_type("beta", "BETA")];
+
+        let mock = MockGitRefClient::new()
+            .with_fetch_result(Ok(()))
+            .with_list_result(Ok(vec![(
+                "refs/lazyspec/alpha/ALPHA-1".to_string(),
+                "sha1".to_string(),
+            )]))
+            .with_read_blob_result(Ok("# alpha".to_string()))
+            .with_fetch_result(Ok(()))
+            .with_list_result(Ok(vec![(
+                "refs/lazyspec/beta/BETA-1".to_string(),
+                "sha2".to_string(),
+            )]))
+            .with_read_blob_result(Ok("# beta".to_string()));
+
+        let gh = StubGh;
+        let clickup = fake_clickup();
+
+        let result = run(
+            root, &config, &gh, &mock, &clickup, None, "origin", None, false,
+        );
+        assert!(
+            result.is_ok(),
+            "all-succeed fetch must exit zero: {result:?}"
+        );
+
+        assert!(root.join(".lazyspec/cache/alpha/ALPHA-1.md").exists());
+        assert!(root.join(".lazyspec/cache/beta/BETA-1.md").exists());
+        let lock = CacheLock::load(root).unwrap();
+        assert_eq!(lock.get("alpha/ALPHA-1"), Some("sha1"));
+        assert_eq!(lock.get("beta/BETA-1"), Some("sha2"));
+    }
+
+    // AC (STORY-202): one type fails -> the rest still refresh, successes are
+    // persisted, and the process exits non-zero.
+    #[test]
+    fn run_continues_past_a_failing_type_persists_successes_and_exits_non_zero() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        let mut config = Config::default();
+        config.documents.types = vec![git_ref_type("alpha", "ALPHA"), git_ref_type("beta", "BETA")];
+
+        // alpha fetches cleanly; beta's fetch fails. sync_all fetches types in
+        // config order, so alpha is fully written before beta errors.
+        let mock = MockGitRefClient::new()
+            .with_fetch_result(Ok(()))
+            .with_list_result(Ok(vec![(
+                "refs/lazyspec/alpha/ALPHA-1".to_string(),
+                "sha1".to_string(),
+            )]))
+            .with_read_blob_result(Ok("# alpha".to_string()))
+            .with_fetch_result(Err(anyhow::anyhow!("beta remote unreachable")));
+
+        let gh = StubGh;
+        let clickup = fake_clickup();
+
+        let result = run(
+            root, &config, &gh, &mock, &clickup, None, "origin", None, false,
+        );
+        assert!(
+            result.is_err(),
+            "a failing type must make fetch exit non-zero"
+        );
+
+        // The type that succeeded is still persisted despite beta's failure.
+        assert!(root.join(".lazyspec/cache/alpha/ALPHA-1.md").exists());
+        assert_eq!(
+            CacheLock::load(root).unwrap().get("alpha/ALPHA-1"),
+            Some("sha1")
+        );
+    }
+
+    /// Satisfies `run`'s combined GitHub trait bound so the git-ref-only fetch
+    /// tests can call it; the GitHub path is never entered, so every method
+    /// panics if reached.
+    struct StubGh;
+
+    impl GhIssueReader for StubGh {
+        fn issue_list(
+            &self,
+            _: &str,
+            _: &[String],
+            _: &[String],
+            _: Option<u64>,
+        ) -> Result<Vec<GhIssue>> {
+            unimplemented!("StubGh is unused in git-ref-only fetch tests")
+        }
+        fn issue_view(&self, _: &str, _: u64) -> Result<GhIssue> {
+            unimplemented!()
+        }
+        fn issue_comments(&self, _: &str, _: u64) -> Result<Vec<GhComment>> {
+            unimplemented!()
+        }
+    }
+
+    impl GhIssueWriter for StubGh {
+        fn issue_create(&self, _: &str, _: &str, _: &str, _: &[String]) -> Result<GhIssue> {
+            unimplemented!()
+        }
+        fn issue_edit(
+            &self,
+            _: &str,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &[String],
+            _: &[String],
+        ) -> Result<()> {
+            unimplemented!()
+        }
+        fn issue_close(&self, _: &str, _: u64) -> Result<()> {
+            unimplemented!()
+        }
+        fn issue_reopen(&self, _: &str, _: u64) -> Result<()> {
+            unimplemented!()
+        }
+        fn label_create(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn label_ensure(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
+    impl GhGraphql for StubGh {
+        fn graphql(&self, _: &str, _: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+            unimplemented!()
+        }
+        fn project_item_fields(&self, _: &str, _: &str) -> Result<Vec<ProjectFieldValue>> {
+            unimplemented!()
+        }
+        fn update_project_v2_item_field_value(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &GhFieldValueInput,
+        ) -> Result<()> {
+            unimplemented!()
+        }
+        fn clear_project_field(&self, _: &str, _: &str, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
+    impl GhMilestoneApi for StubGh {
+        fn milestone_list(&self, _: &str) -> Result<Vec<GhMilestone>> {
+            unimplemented!()
+        }
+        fn milestone_view(&self, _: &str, _: u64) -> Result<GhMilestone> {
+            unimplemented!()
+        }
+        fn milestone_create(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: &str,
+        ) -> Result<GhMilestone> {
+            unimplemented!()
+        }
+        fn milestone_edit(
+            &self,
+            _: &str,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<GhMilestone> {
+            unimplemented!()
+        }
+        fn milestone_delete(&self, _: &str, _: u64) -> Result<()> {
+            unimplemented!()
+        }
+        fn issue_set_milestone(&self, _: &str, _: u64, _: Option<u64>) -> Result<()> {
+            unimplemented!()
+        }
     }
 }

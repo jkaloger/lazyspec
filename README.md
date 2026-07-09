@@ -846,6 +846,26 @@ token explicitly:
 GH_TOKEN="$(gh auth token)" lazyspec fetch
 ```
 
+#### `fetch` output and exit status
+
+`lazyspec fetch [--type <name>] [--json]` refreshes every configured remote type
+(`github-issues`, `github-milestones`, `git-ref`, `clickup-tasks`) in one engine
+pass; `--type <name>` narrows it to a single type.
+
+The run is **continue-then-exit-non-zero**: if one type's fetch fails, the
+remaining types still refresh, everything that succeeded is still written to the
+cache, the failing type's error is reported, and the process exits **non-zero**
+(it no longer aborts on the first failure). A missing ClickUp token or an
+unresolvable GitHub repo is a *hard error raised before any type is fetched* --
+nothing is written -- and is distinct from a per-type failure. A best-effort
+`warning` (for example a project-field injection that could not read) is printed
+but is not a failure: absent any real error, the run exits **zero**.
+
+`--json` prints an array of one entry per type. A type that succeeded keeps the
+exact `{type, fetched, new, removed}` shape; a type that failed adds an
+`"error": "<message>"` field to its entry. The process exits non-zero whenever
+any entry carries an `error`.
+
 ### Custom Types
 
 Each document type is declared with a `[[types]]` block. This lets you rename the
