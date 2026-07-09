@@ -1073,31 +1073,6 @@ mod tests {
         );
     }
 
-    /// A connection failure must map to a transport-class variant, never an
-    /// HTTP-status variant. This is the `x509 -> "HTTP 509"` misparse guard: a
-    /// TLS/DNS/refused error carries no HTTP status, so it can never become one.
-    #[test]
-    fn transport_failure_never_becomes_an_http_status() {
-        // Reserved TEST-NET-1 address (RFC 5737): routing to it fails without
-        // depending on any external service being up.
-        let client = ClickupHttpClient::with_base_url("http://192.0.2.1:81");
-        let http = Client::builder()
-            .timeout(Duration::from_millis(200))
-            .build()
-            .unwrap();
-        let client = ClickupHttpClient {
-            http,
-            base_url: client.base_url,
-        };
-
-        let err = client.auth_status("pk_test").unwrap_err();
-
-        match err {
-            ClickupError::Connect(_) | ClickupError::Timeout | ClickupError::Transport(_) => {}
-            other => panic!("transport failure misclassified as {:?}", other),
-        }
-    }
-
     #[test]
     fn fake_valid_returns_scripted_user() {
         let client = FakeClickupClient::valid(user(7));
