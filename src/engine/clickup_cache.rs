@@ -10,7 +10,7 @@
 //! fields, not a body blob. The write path and relation decoding are later
 //! stories and live elsewhere.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -104,18 +104,19 @@ pub fn fetch_tasks(
     })
 }
 
-/// Fetch the bound List's status workflow and derive the type's effective
-/// [`Lifecycle`] from it (RFC-056 §Status handling). Called at sync time so the
-/// lifecycle always reflects the live List, never a hardcoded config value.
-pub fn fetch_lifecycle(
+/// Fetch the bound List's status workflow once and derive both the type's
+/// effective [`Lifecycle`] (RFC-056 §Status handling) and the per-status colour
+/// map from it. Called at sync time so both always reflect the live List --
+/// a single `list_statuses` call, never a second round-trip for colours.
+pub fn fetch_lifecycle_and_colors(
     client: &dyn ClickupClient,
     token: &str,
     list_id: &str,
-) -> Result<Lifecycle> {
+) -> Result<(Lifecycle, HashMap<String, String>)> {
     let statuses = client
         .list_statuses(token, list_id)
         .with_context(|| format!("fetching ClickUp list statuses for list {}", list_id))?;
-    Ok(derive_lifecycle(&statuses))
+    Ok((derive_lifecycle(&statuses), derive_status_colors(&statuses)))
 }
 
 /// Derive a type's effective [`Lifecycle`] from a bound List's status set: the
@@ -130,6 +131,17 @@ pub fn derive_lifecycle(statuses: &[ClickupStatus]) -> Lifecycle {
         states: ordered.into_iter().map(|s| s.status.clone()).collect(),
         edges: Vec::new(),
     }
+}
+
+/// Derive a status-name -> colour map from a bound List's status set. A status
+/// with an empty colour is omitted, so a later `get` miss lets the renderer
+/// fall back to its default rather than painting with an empty string.
+pub fn derive_status_colors(statuses: &[ClickupStatus]) -> HashMap<String, String> {
+    statuses
+        .iter()
+        .filter(|s| !s.color.is_empty())
+        .map(|s| (s.status.clone(), s.color.clone()))
+        .collect()
 }
 
 /// The lazyspec doc ids currently cached for a type: the `.md` filename stems
@@ -560,10 +572,15 @@ mod tests {
     }
 
     fn status(name: &str, orderindex: i64, ty: &str) -> ClickupStatus {
+        colored_status(name, orderindex, ty, "")
+    }
+
+    fn colored_status(name: &str, orderindex: i64, ty: &str, color: &str) -> ClickupStatus {
         ClickupStatus {
             status: name.to_string(),
             orderindex,
             status_type: ty.to_string(),
+            color: color.to_string(),
         }
     }
 
@@ -589,22 +606,52 @@ mod tests {
     }
 
     #[test]
-    fn fetch_lifecycle_derives_from_client_status_set() {
-        let client = FakeClickupClient::with_tasks(vec![]).with_statuses(vec![
-            status("open", 0, "open"),
-            status("closed", 1, "closed"),
-        ]);
-        let lifecycle = fetch_lifecycle(&client, "pk_x", "list123").unwrap();
-        assert_eq!(lifecycle.states, vec!["open", "closed"]);
-        assert!(lifecycle.edges.is_empty());
+    fn derive_status_colors_maps_name_to_hex() {
+        let statuses = vec![
+            colored_status("to do", 0, "open", "#d3d3d3"),
+            colored_status("in progress", 1, "custom", "#5f55ee"),
+            colored_status("done", 2, "closed", "#008844"),
+        ];
+        let colors = derive_status_colors(&statuses);
+        assert_eq!(colors.len(), 3);
+        assert_eq!(colors.get("to do").map(String::as_str), Some("#d3d3d3"));
+        assert_eq!(
+            colors.get("in progress").map(String::as_str),
+            Some("#5f55ee")
+        );
+        assert_eq!(colors.get("done").map(String::as_str), Some("#008844"));
     }
 
     #[test]
-    fn fetch_lifecycle_propagates_client_error() {
+    fn derive_status_colors_skips_empty_color() {
+        let statuses = vec![
+            colored_status("open", 0, "open", "#d3d3d3"),
+            status("no colour", 1, "custom"),
+        ];
+        let colors = derive_status_colors(&statuses);
+        assert_eq!(colors.len(), 1);
+        assert!(!colors.contains_key("no colour"));
+    }
+
+    #[test]
+    fn fetch_lifecycle_and_colors_returns_both_from_one_fetch() {
+        let client = FakeClickupClient::with_tasks(vec![]).with_statuses(vec![
+            colored_status("open", 0, "open", "#d3d3d3"),
+            colored_status("closed", 1, "closed", "#008844"),
+        ]);
+        let (lifecycle, colors) = fetch_lifecycle_and_colors(&client, "pk_x", "list123").unwrap();
+        assert_eq!(lifecycle.states, vec!["open", "closed"]);
+        assert!(lifecycle.edges.is_empty());
+        assert_eq!(colors.get("open").map(String::as_str), Some("#d3d3d3"));
+        assert_eq!(colors.get("closed").map(String::as_str), Some("#008844"));
+    }
+
+    #[test]
+    fn fetch_lifecycle_and_colors_propagates_client_error() {
         use crate::engine::clickup::ClickupError;
         let client = FakeClickupClient::with_tasks(vec![])
             .failing_statuses(ClickupError::InvalidToken { status: 401 });
-        let err = fetch_lifecycle(&client, "pk_x", "list123").unwrap_err();
+        let err = fetch_lifecycle_and_colors(&client, "pk_x", "list123").unwrap_err();
         assert!(
             err.to_string().contains("fetching ClickUp list statuses"),
             "got: {err}"

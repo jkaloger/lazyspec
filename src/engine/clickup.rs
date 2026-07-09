@@ -160,6 +160,8 @@ pub struct ClickupStatus {
     pub orderindex: i64,
     #[serde(default, rename = "type")]
     pub status_type: String,
+    #[serde(default)]
+    pub color: String,
 }
 
 /// The `GET /list/{id}` response, of which only the `statuses` array is read.
@@ -1232,8 +1234,10 @@ mod tests {
         assert_eq!(envelope.statuses[0].status, "to do");
         assert_eq!(envelope.statuses[0].orderindex, 0);
         assert_eq!(envelope.statuses[0].status_type, "open");
+        assert_eq!(envelope.statuses[0].color, "#d3d3d3");
         assert_eq!(envelope.statuses[2].status, "done");
         assert_eq!(envelope.statuses[2].status_type, "closed");
+        assert_eq!(envelope.statuses[2].color, "#0f0");
     }
 
     #[test]
@@ -1242,6 +1246,7 @@ mod tests {
         let body = r#"{"status": "review", "orderindex": "3", "type": "custom"}"#;
         let status: ClickupStatus = serde_json::from_str(body).unwrap();
         assert_eq!(status.orderindex, 3);
+        assert_eq!(status.color, "");
     }
 
     #[test]
@@ -1250,6 +1255,7 @@ mod tests {
             status: "open".to_string(),
             orderindex: 0,
             status_type: "open".to_string(),
+            color: String::new(),
         }];
         let client = FakeClickupClient::with_tasks(vec![]).with_statuses(statuses.clone());
         assert_eq!(client.list_statuses("pk", "list1").unwrap(), statuses);

@@ -10,6 +10,7 @@ use crate::engine::github::resolve_repo;
 use crate::engine::issue_body::TypeMatchRule;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
+use crate::engine::status_colors::StatusColors;
 use crate::engine::task_map::TaskMap;
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
@@ -195,6 +196,7 @@ pub fn run(
             )
         })?;
         let mut task_map = TaskMap::load(root)?;
+        let mut status_colors = StatusColors::load(root)?;
         let mut lifecycles: Vec<(String, Lifecycle)> = Vec::new();
 
         for type_name in &clickup_to_fetch {
@@ -214,8 +216,10 @@ pub fn run(
                     type_name
                 )
             })?;
-            let lifecycle = clickup_cache::fetch_lifecycle(clickup, token.expose(), list_id)?;
+            let (lifecycle, colors) =
+                clickup_cache::fetch_lifecycle_and_colors(clickup, token.expose(), list_id)?;
             lifecycles.push((type_name.to_string(), lifecycle));
+            status_colors.set_type(*type_name, colors);
 
             summaries.push(TypeSummary {
                 type_name: type_name.to_string(),
@@ -226,6 +230,7 @@ pub fn run(
         }
 
         task_map.save(root)?;
+        status_colors.save(root)?;
         persist_clickup_lifecycles(root, &lifecycles)?;
     }
 

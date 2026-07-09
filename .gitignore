@@ -5,6 +5,7 @@
 .lazyspec/cache.lock
 .lazyspec/issue-map.json
 .lazyspec/task-map.json
+.lazyspec/status-colors.json
 result
 .direnv
 .local
