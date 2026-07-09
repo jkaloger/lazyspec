@@ -10,7 +10,7 @@ use crate::engine::issue_body::TypeMatchRule;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
-use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
+use crate::engine::store_dispatch::{ClickupTasksStore, DocumentStore, GithubIssuesStore};
 use crate::engine::task_map::TaskMap;
 use crate::tui::content;
 use crate::tui::infra::{perf_log, terminal_caps};
@@ -120,6 +120,73 @@ fn try_push_git_ref_edit(root: &Path, relative: &Path, config: &Config) -> Resul
     };
     git_store
         .update(type_def, &doc_id, &[])
+        .map_err(|e| e.to_string())
+}
+
+// Push a clickup-tasks doc's edited body back to ClickUp after an external-editor
+// save -- the third backend arm alongside `try_push_gh_edit`/`try_push_git_ref_edit`
+// (RFC-056 write-through). Early-returns `Ok(())` for any non-clickup type, so the
+// caller spawns it unconditionally and the gating stays internal.
+//
+// Production wiring; delegates to `try_push_clickup_edit_with` with the real HTTP
+// client and the global credential store. Token/network I/O lives here in the TUI
+// layer, never in engine `Store::load` (DICTUM-003).
+fn try_push_clickup_edit(root: &Path, relative: &Path, config: &Config) -> Result<(), String> {
+    try_push_clickup_edit_with(
+        root,
+        relative,
+        config,
+        crate::engine::clickup::ClickupHttpClient::new,
+        || LayeredCredentialStore::global().load_clickup_token(),
+    )
+}
+
+// The `try_push_clickup_edit` body with the client factory and token loader
+// injected, so a test drives the `ClickupClient` seam with a `FakeClickupClient`
+// and a scripted token (DICTUM-002) without a keychain or the network.
+fn try_push_clickup_edit_with<C: ClickupClient + 'static>(
+    root: &Path,
+    relative: &Path,
+    config: &Config,
+    client_factory: impl FnOnce() -> C,
+    token_loader: impl FnOnce() -> anyhow::Result<Option<crate::engine::credentials::Token>>,
+) -> Result<(), String> {
+    let content = std::fs::read_to_string(root.join(relative))
+        .map_err(|e| format!("failed to read edited file: {e}"))?;
+
+    let (_yaml, body) =
+        split_frontmatter(&content).map_err(|e| format!("failed to parse edited file: {e}"))?;
+
+    let store = Store::load(root, config).map_err(|e| e.to_string())?;
+    let doc = store
+        .get(relative)
+        .ok_or_else(|| "document not found in store".to_string())?;
+    let doc_id = doc.id.clone();
+    let type_name = doc.doc_type.as_str().to_string();
+
+    let type_def = config
+        .type_by_name(&type_name)
+        .ok_or_else(|| format!("type '{}' not found in config", type_name))?;
+
+    if type_def.store != StoreBackend::ClickupTasks {
+        return Ok(());
+    }
+
+    let token = token_loader().map_err(|e| e.to_string())?.ok_or_else(|| {
+        "no ClickUp token found; run `lazyspec setup clickup` before editing \
+         clickup-tasks documents"
+            .to_string()
+    })?;
+
+    let body_trimmed = body.trim();
+    let mut clickup_store = ClickupTasksStore {
+        client: Box::new(client_factory()),
+        root: root.to_path_buf(),
+        config: config.clone(),
+        token: Some(token),
+    };
+    clickup_store
+        .update(type_def, &doc_id, &[("body", body_trimmed)])
         .map_err(|e| e.to_string())
 }
 
@@ -733,6 +800,19 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                         }
                     });
                 }
+                {
+                    let push_root = root.clone();
+                    let push_relative = relative.to_path_buf();
+                    let push_config = config.clone();
+                    let push_tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let result =
+                            try_push_clickup_edit(&push_root, &push_relative, &push_config);
+                        if let Err(msg) = result {
+                            let _ = push_tx.send(AppEvent::GhPushResult(Err(msg)));
+                        }
+                    });
+                }
             }
             app.refresh_validation(&config);
         }
@@ -1194,6 +1274,162 @@ mod tests {
         assert!(
             root.join(".lazyspec/cache/task/TASK-86abc.md").exists(),
             "the live task should be materialized into the cache"
+        );
+    }
+
+    // --- ITERATION-282: clickup arm of the editor-save push-back ---
+
+    use crate::engine::clickup::FakeClickupClient;
+    use crate::engine::credentials::Token;
+
+    // Materialize a clickup cache doc (+ task-map baseline) as an earlier fetch
+    // would, so `Store::load` resolves the doc and the write path has a mapped
+    // task to PUT against. Returns the cache doc's root-relative path. The body is
+    // seeded as "old body" so a test can rewrite it to simulate an editor save.
+    fn materialize_clickup_doc(root: &Path, config: &Config) -> std::path::PathBuf {
+        let type_def = &config.documents.types[0];
+        let task: ClickupTask = serde_json::from_str(
+            r#"{"id":"86abc","name":"Task","status":{"status":"open"},"date_updated":"1700000000000","markdown_description":"old body"}"#,
+        )
+        .unwrap();
+        let mut task_map = TaskMap::load(root).unwrap();
+        clickup_cache::fetch_tasks(
+            root,
+            type_def,
+            &FakeClickup::new(vec![task]),
+            "pk_x",
+            &mut task_map,
+        )
+        .unwrap();
+        task_map.save(root).unwrap();
+        std::path::PathBuf::from(".lazyspec/cache/task/TASK-86abc.md")
+    }
+
+    // A non-clickup type is a no-op: the helper returns Ok(()) and never builds a
+    // client, so an ordinary filesystem-doc edit never touches ClickUp.
+    #[test]
+    fn clickup_edit_noop_for_non_clickup_type() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let config = Config::default();
+
+        std::fs::create_dir_all(root.join("docs/rfcs")).unwrap();
+        let relative = Path::new("docs/rfcs/RFC-001-first.md");
+        std::fs::write(
+            root.join(relative),
+            concat!(
+                "---\n",
+                "title: \"First RFC\"\n",
+                "type: rfc\n",
+                "status: draft\n",
+                "author: \"test\"\n",
+                "date: 2026-01-01\n",
+                "tags: []\n",
+                "---\n",
+                "Body of first RFC.\n",
+            ),
+        )
+        .unwrap();
+
+        let built = Cell::new(false);
+        let result = try_push_clickup_edit_with(
+            root,
+            relative,
+            &config,
+            || {
+                built.set(true);
+                FakeClickupClient::with_tasks(vec![])
+            },
+            || Ok(Some(Token::new("pk_x"))),
+        );
+
+        assert!(result.is_ok(), "got: {result:?}");
+        assert!(
+            !built.get(),
+            "a non-clickup type must return before building a client"
+        );
+    }
+
+    // Happy path: editing a clickup-tasks doc PUTs the edited body to the mapped
+    // task via the injected client seam.
+    #[test]
+    fn clickup_edit_pushes_body_via_client() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let config = clickup_config();
+
+        let relative = materialize_clickup_doc(root, &config);
+
+        // Simulate the external-editor save: change the body on disk.
+        let content = std::fs::read_to_string(root.join(&relative)).unwrap();
+        std::fs::write(
+            root.join(&relative),
+            content.replace("old body", "edited from tui"),
+        )
+        .unwrap();
+
+        // ClickUp echoes the edited task; the pre-write lock fetch matches the
+        // recorded baseline, so the write proceeds.
+        let echo: ClickupTask = serde_json::from_str(
+            r#"{"id":"86abc","name":"Task","status":{"status":"open"},"date_updated":"1774587145901","markdown_description":"edited from tui"}"#,
+        )
+        .unwrap();
+        let remote_unchanged: ClickupTask = serde_json::from_str(
+            r#"{"id":"86abc","name":"Task","status":{"status":"open"},"date_updated":"1700000000000"}"#,
+        )
+        .unwrap();
+        let fake = FakeClickupClient::with_tasks(vec![])
+            .with_viewed_task(remote_unchanged)
+            .with_updated_task(echo);
+        let update_calls = fake.update_calls();
+
+        let result = try_push_clickup_edit_with(
+            root,
+            &relative,
+            &config,
+            move || fake,
+            || Ok(Some(Token::new("pk_x"))),
+        );
+
+        assert!(result.is_ok(), "got: {result:?}");
+        let recorded = update_calls.borrow();
+        assert_eq!(recorded.len(), 1, "exactly one PUT");
+        assert_eq!(recorded[0].0, "86abc", "to the mapped task id");
+        assert_eq!(
+            recorded[0].1.markdown_content,
+            Some("edited from tui".to_string()),
+            "the edited body is pushed"
+        );
+    }
+
+    // Token absent: the helper errors with a one-line warning and never builds a
+    // client, so a clickup edit with no credential fails loud without a network
+    // call.
+    #[test]
+    fn clickup_edit_token_absent_errs_without_client() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let config = clickup_config();
+
+        let relative = materialize_clickup_doc(root, &config);
+
+        let built = Cell::new(false);
+        let result = try_push_clickup_edit_with(
+            root,
+            &relative,
+            &config,
+            || {
+                built.set(true);
+                FakeClickupClient::with_tasks(vec![])
+            },
+            || Ok(None),
+        );
+
+        let err = result.unwrap_err();
+        assert!(err.contains("no ClickUp token"), "got: {err}");
+        assert!(
+            !built.get(),
+            "no client must be built when the token is absent"
         );
     }
 }
