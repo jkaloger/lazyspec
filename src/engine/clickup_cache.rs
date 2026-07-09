@@ -120,7 +120,8 @@ pub fn fetch_lifecycle_and_colors(
 }
 
 /// Derive a type's effective [`Lifecycle`] from a bound List's status set: the
-/// states are the status names in ClickUp workflow order (ascending
+/// states are the status names lowercased (the form task payloads carry, vs the
+/// display casing `list_statuses` returns) in ClickUp workflow order (ascending
 /// `orderindex`), and there are no edges. ClickUp enforces its own transition
 /// rules, so lazyspec adds no local edges or gating -- the same empty-edge
 /// posture the `ticket` type takes.
@@ -128,19 +129,24 @@ pub fn derive_lifecycle(statuses: &[ClickupStatus]) -> Lifecycle {
     let mut ordered: Vec<&ClickupStatus> = statuses.iter().collect();
     ordered.sort_by_key(|s| s.orderindex);
     Lifecycle {
-        states: ordered.into_iter().map(|s| s.status.clone()).collect(),
+        states: ordered
+            .into_iter()
+            .map(|s| s.status.to_lowercase())
+            .collect(),
         edges: Vec::new(),
     }
 }
 
-/// Derive a status-name -> colour map from a bound List's status set. A status
-/// with an empty colour is omitted, so a later `get` miss lets the renderer
-/// fall back to its default rather than painting with an empty string.
+/// Derive a status-name -> colour map from a bound List's status set. Keys are
+/// lowercased to match the form task payloads carry, so the case-sensitive
+/// colour lookup hits. A status with an empty colour is omitted, so a later
+/// `get` miss lets the renderer fall back to its default rather than painting
+/// with an empty string.
 pub fn derive_status_colors(statuses: &[ClickupStatus]) -> HashMap<String, String> {
     statuses
         .iter()
         .filter(|s| !s.color.is_empty())
-        .map(|s| (s.status.clone(), s.color.clone()))
+        .map(|s| (s.status.to_lowercase(), s.color.clone()))
         .collect()
 }
 
@@ -599,6 +605,16 @@ mod tests {
     }
 
     #[test]
+    fn derive_lifecycle_lowercases_status_names() {
+        // The list_statuses API returns display casing ("Closed") while task
+        // payloads carry the lowercased form ("closed"); the lifecycle must use
+        // the task-payload form so doc statuses match the derived states.
+        let statuses = vec![status("Closed", 1, "closed"), status("To Do", 0, "open")];
+        let lifecycle = derive_lifecycle(&statuses);
+        assert_eq!(lifecycle.states, vec!["to do", "closed"]);
+    }
+
+    #[test]
     fn derive_lifecycle_empty_when_list_has_no_statuses() {
         let lifecycle = derive_lifecycle(&[]);
         assert!(lifecycle.states.is_empty());
@@ -620,6 +636,16 @@ mod tests {
             Some("#5f55ee")
         );
         assert_eq!(colors.get("done").map(String::as_str), Some("#008844"));
+    }
+
+    #[test]
+    fn derive_status_colors_lowercases_status_names() {
+        // Colour keys must match the lowercased status in task payloads, or the
+        // case-sensitive StatusColors lookup misses ("Closed" vs "closed").
+        let statuses = vec![colored_status("Closed", 0, "closed", "#008844")];
+        let colors = derive_status_colors(&statuses);
+        assert_eq!(colors.get("closed").map(String::as_str), Some("#008844"));
+        assert!(!colors.contains_key("Closed"));
     }
 
     #[test]
