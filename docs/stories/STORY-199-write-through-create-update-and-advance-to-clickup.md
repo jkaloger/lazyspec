@@ -1,7 +1,7 @@
 ---
 title: Write through create, update and advance to ClickUp
 type: story
-status: in-progress
+status: complete
 author: unknown
 date: 2026-07-05
 tags: []

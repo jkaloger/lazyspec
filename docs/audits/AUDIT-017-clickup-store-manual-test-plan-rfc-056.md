@@ -1,7 +1,7 @@
 ---
 title: ClickUp store manual test plan (RFC-056)
 type: audit
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-07-08
 tags: []

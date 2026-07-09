@@ -4,6 +4,7 @@
 .lazyspec/cache/
 .lazyspec/cache.lock
 .lazyspec/issue-map.json
+.lazyspec/task-map.json
 result
 .direnv
 .local

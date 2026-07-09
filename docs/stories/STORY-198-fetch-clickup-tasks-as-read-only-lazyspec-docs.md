@@ -1,7 +1,7 @@
 ---
 title: Fetch ClickUp tasks as read-only lazyspec docs
 type: story
-status: in-progress
+status: complete
 author: unknown
 date: 2026-07-05
 tags: []
