@@ -209,7 +209,7 @@ fn run_fetch(root: &Path, config: &Config) -> Result<()> {
         config,
         &gh,
         &GitCli,
-        &lazyspec::engine::clickup::ClickupHttpClient::new(),
+        &lazyspec::engine::clickup::FakeClickupClient::with_tasks(vec![]),
         None,
         "origin",
         None,

@@ -280,7 +280,7 @@ fn run_fetch(root: &std::path::Path, config: &Config, gh: &NestingGh) -> Result<
         config,
         gh,
         &GitCli,
-        &lazyspec::engine::clickup::ClickupHttpClient::new(),
+        &lazyspec::engine::clickup::FakeClickupClient::with_tasks(vec![]),
         None,
         "origin",
         None,
