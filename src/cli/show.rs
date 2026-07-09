@@ -7,6 +7,7 @@ use crate::engine::fs::FileSystem;
 use crate::engine::gh::GhIssueReader;
 use crate::engine::github::resolve_repo;
 use crate::engine::issue_map::IssueMap;
+use crate::engine::status_colors::StatusColors;
 use crate::engine::store::{ResolveError, Store};
 use anyhow::Result;
 use console::colors_enabled;
@@ -108,13 +109,14 @@ pub fn run(
         }
     };
 
+    let colors = StatusColors::load(store.root()).unwrap_or_default();
     println!("{}", title_box(&doc.title));
     println!(
         "{} {}  {} {}  {} {}",
         dim("Type:"),
         bold(&doc.doc_type.to_string()),
         dim("Status:"),
-        styled_status(&doc.status),
+        styled_status(&colors, doc.doc_type.as_str(), &doc.status),
         dim("Author:"),
         bold(&doc.author),
     );

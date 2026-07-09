@@ -17,6 +17,7 @@ use crate::engine::config::{
 };
 use crate::engine::document::{DocMeta, Status};
 use crate::engine::git_status::GitFileStatus;
+use crate::engine::status_colors::StatusColors;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
 use crate::tui::state::{
@@ -520,6 +521,8 @@ fn doc_row_cells(
     dim: bool,
     is_gh: bool,
     is_stale: bool,
+    type_name: &str,
+    colors: &StatusColors,
 ) -> Vec<Cell<'static>> {
     let dim_style = Style::default().fg(Color::DarkGray);
     let normal_style = Style::default();
@@ -551,7 +554,7 @@ fn doc_row_cells(
     let status_style = if dim {
         dim_style
     } else {
-        Style::default().fg(status_color(status))
+        Style::default().fg(status_color(colors, type_name, status))
     };
     let status_cell = if is_stale {
         let stale_style = if dim {
@@ -618,11 +621,13 @@ fn doc_row_cells_expanded(
     is_gh: bool,
     is_stale: bool,
     widths: DocCellWidths,
+    type_name: &str,
+    colors: &StatusColors,
 ) -> Vec<Cell<'static>> {
     // Reuse the single-line cell builder, then replace title and provenance
     // cells with wrapped multi-line versions.
     let mut cells = doc_row_cells(
-        id, title, status, tags, provenance, is_virtual, dim, is_gh, is_stale,
+        id, title, status, tags, provenance, is_virtual, dim, is_gh, is_stale, type_name, colors,
     );
 
     let dim_style = Style::default().fg(Color::DarkGray);
@@ -658,6 +663,7 @@ fn doc_row_for_node(
     dim: bool,
     config: &Config,
     area_width: u16,
+    colors: &StatusColors,
 ) -> Row<'static> {
     let tree_text = if node.depth > 0 {
         let leading = "   ".repeat(node.depth - 1);
@@ -720,6 +726,8 @@ fn doc_row_for_node(
             is_gh,
             is_stale,
             widths,
+            node.doc_type.as_str(),
+            colors,
         ));
     } else {
         cells.extend(doc_row_cells(
@@ -732,6 +740,8 @@ fn doc_row_for_node(
             dim,
             is_gh,
             is_stale,
+            node.doc_type.as_str(),
+            colors,
         ));
     }
 
@@ -815,7 +825,13 @@ pub fn draw_graph_pivot_panel(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
-pub fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect, config: &Config) {
+pub fn draw_doc_list(
+    f: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    config: &Config,
+    colors: &StatusColors,
+) {
     // Reserve 2 rows for the border and 1 for the header (matches draw_graph).
     app.doc_list_height = area.height.saturating_sub(3) as usize;
     let relations_focused = app.preview_tab == PreviewTab::Relations;
@@ -826,7 +842,7 @@ pub fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect, config: &Config) 
         .doc_tree
         .iter()
         .enumerate()
-        .map(|(i, node)| doc_row_for_node(app, node, i, dim, config, area_width))
+        .map(|(i, node)| doc_row_for_node(app, node, i, dim, config, area_width, colors))
         .collect();
 
     let widths = doc_table_widths(area.width);
@@ -867,7 +883,7 @@ pub fn draw_doc_list(f: &mut Frame, app: &mut App, area: Rect, config: &Config) 
     }
 }
 
-pub fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
+pub fn draw_preview(f: &mut Frame, app: &mut App, area: Rect, colors: &StatusColors) {
     let preview_title = if app.preview_tab == PreviewTab::Preview {
         Line::from(vec![
             Span::styled(
@@ -906,12 +922,18 @@ pub fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
 
     let doc = app.selected_doc_meta().cloned();
     match app.preview_tab {
-        PreviewTab::Preview => render_document_preview(f, app, area, block, doc.as_ref()),
-        PreviewTab::Relations => render_relationship_sections(f, app, area, block, doc.as_ref()),
+        PreviewTab::Preview => render_document_preview(f, app, area, block, doc.as_ref(), colors),
+        PreviewTab::Relations => {
+            render_relationship_sections(f, app, area, block, doc.as_ref(), colors)
+        }
     }
 }
 
-pub(super) fn build_preview_header_lines(doc: &DocMeta, expanding: bool) -> Vec<Line<'static>> {
+pub(super) fn build_preview_header_lines(
+    doc: &DocMeta,
+    expanding: bool,
+    colors: &StatusColors,
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = vec![
         Line::from(Span::styled(
             format!(" {}", doc.title),
@@ -928,7 +950,7 @@ pub(super) fn build_preview_header_lines(doc: &DocMeta, expanding: bool) -> Vec<
             Span::raw("  Status: "),
             Span::styled(
                 format!("{}", doc.status),
-                Style::default().fg(status_color(&doc.status)),
+                Style::default().fg(status_color(colors, doc.doc_type.as_str(), &doc.status)),
             ),
             Span::raw("  Author: "),
             Span::raw(doc.author.clone()),
@@ -979,6 +1001,7 @@ pub fn render_document_preview(
     area: Rect,
     block: Block,
     doc: Option<&DocMeta>,
+    colors: &StatusColors,
 ) {
     let Some(doc) = doc else {
         let paragraph = Paragraph::new(" No document selected.")
@@ -995,7 +1018,7 @@ pub fn render_document_preview(
         .unwrap_or_default();
 
     let expanding = app.expansion_in_flight.as_ref() == Some(&doc.path);
-    let header_lines = build_preview_header_lines(doc, expanding);
+    let header_lines = build_preview_header_lines(doc, expanding, colors);
     let mut lines = header_lines.clone();
 
     let body_hash = crate::engine::cache::DiskCache::body_hash(&body);
@@ -1047,6 +1070,7 @@ pub fn render_relationship_sections(
     area: Rect,
     block: Block,
     doc: Option<&DocMeta>,
+    colors: &StatusColors,
 ) {
     let Some(doc) = doc else {
         let paragraph = Paragraph::new(" No document selected.")
@@ -1087,7 +1111,7 @@ pub fn render_relationship_sections(
                     target_doc.title.clone(),
                     format!("{}", target_doc.doc_type),
                     format!("{}", target_doc.status),
-                    status_color(&target_doc.status),
+                    status_color(colors, target_doc.doc_type.as_str(), &target_doc.status),
                 )
             } else {
                 let name = display_name(path);
@@ -1152,7 +1176,7 @@ pub fn render_relationship_sections(
     }
 }
 
-pub fn render_fullscreen_document(f: &mut Frame, app: &mut App) {
+pub fn render_fullscreen_document(f: &mut Frame, app: &mut App, colors: &StatusColors) {
     let area = f.area();
     app.fullscreen_height = area.height.saturating_sub(2) as usize;
 
@@ -1175,7 +1199,7 @@ pub fn render_fullscreen_document(f: &mut Frame, app: &mut App) {
         Span::raw(" | "),
         Span::styled(
             format!("{}", doc.status),
-            Style::default().fg(status_color(&doc.status)),
+            Style::default().fg(status_color(colors, doc.doc_type.as_str(), &doc.status)),
         ),
         Span::raw(format!(" | {} | {} ", doc.doc_type, doc.author)),
         Span::styled("[Esc] back", Style::default().fg(Color::DarkGray)),
@@ -1244,7 +1268,13 @@ pub fn render_fullscreen_document(f: &mut Frame, app: &mut App) {
     }
 }
 
-pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect, config: &Config) {
+pub fn render_filter_panel(
+    f: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    config: &Config,
+    colors: &StatusColors,
+) {
     let main = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
@@ -1342,6 +1372,8 @@ pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect, config: &Co
                 dim,
                 is_gh,
                 is_stale,
+                doc.doc_type.as_str(),
+                colors,
             ));
             let style = if dim {
                 Style::default().fg(Color::DarkGray)
@@ -1424,9 +1456,11 @@ pub fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect, config: &Co
         .title(preview_title);
 
     match app.preview_tab {
-        PreviewTab::Preview => render_document_preview(f, app, right[1], block, doc.as_ref()),
+        PreviewTab::Preview => {
+            render_document_preview(f, app, right[1], block, doc.as_ref(), colors)
+        }
         PreviewTab::Relations => {
-            render_relationship_sections(f, app, right[1], block, doc.as_ref())
+            render_relationship_sections(f, app, right[1], block, doc.as_ref(), colors)
         }
     }
 }
@@ -1571,7 +1605,11 @@ pub(super) fn graph_node_spans(
     // render these are their own columns; the doc cell carries only tree+title.
     spans.push(Span::styled(
         format!(" {}", node.status),
-        Style::default().fg(status_color(&node.status)),
+        Style::default().fg(status_color(
+            &StatusColors::default(),
+            node.doc_type.as_str(),
+            &node.status,
+        )),
     ));
 
     for related_id in &node.related {
@@ -1699,7 +1737,13 @@ fn attr_value_display(v: &crate::engine::document::AttrValue) -> String {
 /// truncated past that.
 const GRAPH_ID_COLS: u16 = 16;
 
-pub fn draw_graph(f: &mut Frame, app: &mut App, area: Rect, config: &Config) {
+pub fn draw_graph(
+    f: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    config: &Config,
+    colors: &StatusColors,
+) {
     let layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
@@ -1772,7 +1816,7 @@ pub fn draw_graph(f: &mut Frame, app: &mut App, area: Rect, config: &Config) {
             for col in columns {
                 let text = graph_column_cell(node, col);
                 let style = if col == "status" {
-                    Style::default().fg(status_color(&node.status))
+                    Style::default().fg(status_color(colors, node.doc_type.as_str(), &node.status))
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
@@ -2689,6 +2733,7 @@ pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn doc_row_cells_for_test(
     id: &str,
     title: &str,
@@ -2697,9 +2742,11 @@ pub(super) fn doc_row_cells_for_test(
     provenance: &[String],
     is_virtual: bool,
     dim: bool,
+    type_name: &str,
+    colors: &StatusColors,
 ) -> Vec<Cell<'static>> {
     doc_row_cells(
-        id, title, status, tags, provenance, is_virtual, dim, false, false,
+        id, title, status, tags, provenance, is_virtual, dim, false, false, type_name, colors,
     )
 }
 
@@ -2714,9 +2761,11 @@ pub(super) fn doc_row_cells_gh_for_test(
     is_virtual: bool,
     dim: bool,
     is_gh: bool,
+    type_name: &str,
+    colors: &StatusColors,
 ) -> Vec<Cell<'static>> {
     doc_row_cells(
-        id, title, status, tags, provenance, is_virtual, dim, is_gh, false,
+        id, title, status, tags, provenance, is_virtual, dim, is_gh, false, type_name, colors,
     )
 }
 
@@ -2787,6 +2836,8 @@ mod tests {
             &provenance,
             false,
             false,
+            "rfc",
+            &StatusColors::default(),
         );
         assert_eq!(cells.len(), 5);
         let dbg = cell_text(&cells[4]);
@@ -2807,6 +2858,8 @@ mod tests {
             &[],
             false,
             false,
+            "rfc",
+            &StatusColors::default(),
         );
         let dbg = cell_text(&cells[4]);
         assert!(
@@ -2832,6 +2885,53 @@ mod tests {
             text.ends_with('…'),
             "overflowing provenance should end with ellipsis, got: {}",
             text
+        );
+    }
+
+    #[test]
+    fn doc_row_cells_status_uses_derived_colour_on_cache_hit() {
+        let mut colors = StatusColors::default();
+        colors.set_type(
+            "rfc",
+            std::collections::HashMap::from([("draft".to_string(), "#d33d44".to_string())]),
+        );
+        let cells = doc_row_cells_for_test(
+            "RFC-001",
+            "Title",
+            &Status::new("draft"),
+            &[],
+            &[],
+            false,
+            false,
+            "rfc",
+            &colors,
+        );
+        let dbg = cell_text(&cells[2]);
+        assert!(
+            dbg.contains("Rgb(211, 61, 68)"),
+            "status cell fg should be the derived Rgb colour, got: {}",
+            dbg
+        );
+    }
+
+    #[test]
+    fn doc_row_cells_status_falls_back_with_empty_cache() {
+        let cells = doc_row_cells_for_test(
+            "RFC-001",
+            "Title",
+            &Status::new("draft"),
+            &[],
+            &[],
+            false,
+            false,
+            "rfc",
+            &StatusColors::default(),
+        );
+        let dbg = cell_text(&cells[2]);
+        assert!(
+            dbg.contains("Yellow") || dbg.contains("yellow"),
+            "status cell fg should keep the hardcoded draft colour, got: {}",
+            dbg
         );
     }
 
@@ -2866,7 +2966,7 @@ mod tests {
     fn preview_header_includes_provenance_when_present() {
         let mut doc = fixture_doc_meta();
         doc.provenance = vec!["X".to_string(), "Y".to_string()];
-        let lines = build_preview_header_lines(&doc, false);
+        let lines = build_preview_header_lines(&doc, false, &StatusColors::default());
         let prov_line = lines
             .iter()
             .find(|l| line_text(l).contains("Provenance:"))
@@ -3052,6 +3152,8 @@ mod tests {
             false,
             false,
             widths_for_test(80, 12, 20),
+            "rfc",
+            &StatusColors::default(),
         );
         let dbg = format!("{:?}", cells[3]);
         for tag in &tags {
@@ -3072,7 +3174,7 @@ mod tests {
     #[test]
     fn preview_header_omits_provenance_when_empty() {
         let doc = fixture_doc_meta();
-        let lines = build_preview_header_lines(&doc, false);
+        let lines = build_preview_header_lines(&doc, false, &StatusColors::default());
         for line in &lines {
             assert!(
                 !line_text(line).contains("Provenance:"),

@@ -1,6 +1,7 @@
 use crate::cli::json::doc_to_json_with_family;
 use crate::cli::style::{bold, dim, styled_status};
 use crate::engine::document::DocMeta;
+use crate::engine::status_colors::StatusColors;
 use crate::engine::store::Store;
 use anyhow::Result;
 use console::colors_enabled;
@@ -80,7 +81,7 @@ pub fn run_forest_json(store: &Store, anchor: Option<&str>) -> Result<String> {
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
-fn mini_card(doc: &DocMeta, marker: bool) -> String {
+fn mini_card(colors: &StatusColors, doc: &DocMeta, marker: bool) -> String {
     let title = &doc.title;
     let doc_type = format!("{}", doc.doc_type).to_lowercase();
     let shorthand = doc.id.to_uppercase();
@@ -116,7 +117,12 @@ fn mini_card(doc: &DocMeta, marker: bool) -> String {
     let pad1 = " ".repeat(content_width - 1 - title.len());
     let mid1 = format!("\u{2502} {}{}\u{2502}{}", bold(title), pad1, styled_marker);
     let pad2 = " ".repeat(content_width - 1 - line2_plain.len());
-    let line2_styled = format!("{} {} [{}]", shorthand, doc_type, styled_status(status));
+    let line2_styled = format!(
+        "{} {} [{}]",
+        shorthand,
+        doc_type,
+        styled_status(colors, doc.doc_type.as_str(), status)
+    );
     let mid2 = format!("\u{2502} {}{}\u{2502}", line2_styled, pad2);
     let bot = format!("\u{2570}{}\u{256f}", "\u{2500}".repeat(content_width));
     format!("{}\n{}\n{}\n{}", top, mid1, mid2, bot)
@@ -133,16 +139,21 @@ fn chain_connector() -> String {
 /// Render the backward node set as the vertical stack of mini-cards used for a
 /// single-parent (linear) chain. Each card is separated by `chain_connector()`
 /// and each card's forward children are listed below it.
-fn render_stack(resolved: &ResolvedContext, store: &Store, output: &mut String) {
+fn render_stack(
+    resolved: &ResolvedContext,
+    store: &Store,
+    colors: &StatusColors,
+    output: &mut String,
+) {
     for (i, node) in resolved.nodes.iter().enumerate() {
         let doc = node.doc;
         if i > 0 {
             output.push_str(&chain_connector());
             output.push('\n');
         }
-        output.push_str(&mini_card(doc, doc.path == resolved.target.path));
+        output.push_str(&mini_card(colors, doc, doc.path == resolved.target.path));
         output.push('\n');
-        push_card_children(store, &doc.path, "", output);
+        push_card_children(store, colors, &doc.path, "", output);
     }
 }
 
@@ -151,7 +162,12 @@ fn render_stack(resolved: &ResolvedContext, store: &Store, output: &mut String) 
 /// descend with increasing indentation. A node reached more than once (a
 /// diamond) is drawn fully on first visit; later encounters emit a one-line
 /// shorthand reference and do not recurse, so each node is drawn exactly once.
-fn render_tree(resolved: &ResolvedContext, store: &Store, output: &mut String) {
+fn render_tree(
+    resolved: &ResolvedContext,
+    store: &Store,
+    colors: &StatusColors,
+    output: &mut String,
+) {
     // child adjacency: parent path -> child paths (a child is a node whose
     // `parents` contains the parent's path).
     let mut children: HashMap<&PathBuf, Vec<&PathBuf>> = HashMap::new();
@@ -177,7 +193,7 @@ fn render_tree(resolved: &ResolvedContext, store: &Store, output: &mut String) {
     let mut drawn: HashSet<PathBuf> = HashSet::new();
     for root in roots {
         render_tree_node(
-            root, 0, resolved, store, &children, &by_path, &mut drawn, output,
+            root, 0, resolved, store, colors, &children, &by_path, &mut drawn, output,
         );
     }
 
@@ -188,7 +204,7 @@ fn render_tree(resolved: &ResolvedContext, store: &Store, output: &mut String) {
     for node in &resolved.nodes {
         if !drawn.contains(&node.doc.path) {
             render_tree_node(
-                node, 0, resolved, store, &children, &by_path, &mut drawn, output,
+                node, 0, resolved, store, colors, &children, &by_path, &mut drawn, output,
             );
         }
     }
@@ -200,6 +216,7 @@ fn render_tree_node(
     depth: usize,
     resolved: &ResolvedContext,
     store: &Store,
+    colors: &StatusColors,
     children: &HashMap<&PathBuf, Vec<&PathBuf>>,
     by_path: &HashMap<&PathBuf, &ContextNode>,
     drawn: &mut HashSet<PathBuf>,
@@ -219,13 +236,13 @@ fn render_tree_node(
     }
     drawn.insert(doc.path.clone());
 
-    let card = mini_card(doc, doc.path == resolved.target.path);
+    let card = mini_card(colors, doc, doc.path == resolved.target.path);
     for line in card.lines() {
         output.push_str(&indent);
         output.push_str(line);
         output.push('\n');
     }
-    push_card_children(store, &doc.path, &indent, output);
+    push_card_children(store, colors, &doc.path, &indent, output);
 
     if let Some(kids) = children.get(&doc.path) {
         for child_path in kids {
@@ -235,6 +252,7 @@ fn render_tree_node(
                     depth + 1,
                     resolved,
                     store,
+                    colors,
                     children,
                     by_path,
                     drawn,
@@ -247,7 +265,13 @@ fn render_tree_node(
 
 /// Emit the forward (`implements`-pointing) children of `path` as `├─`/`└─`
 /// lines, each prefixed by `indent`. Shared by the stack and tree renders.
-fn push_card_children(store: &Store, path: &Path, indent: &str, output: &mut String) {
+fn push_card_children(
+    store: &Store,
+    colors: &StatusColors,
+    path: &Path,
+    indent: &str,
+    output: &mut String,
+) {
     let child_paths = store.children_of(path);
     if child_paths.is_empty() {
         return;
@@ -262,7 +286,7 @@ fn push_card_children(store: &Store, path: &Path, indent: &str, output: &mut Str
         let shorthand = child.id.to_uppercase();
         let title = &child.title;
         let status_display = if colors_enabled() {
-            styled_status(&child.status)
+            styled_status(colors, child.doc_type.as_str(), &child.status)
         } else {
             format!("{}", child.status)
         };
@@ -295,20 +319,22 @@ pub fn run_forest_human(store: &Store, anchor: Option<&str>) -> Result<String> {
         forward: Vec::new(),
         related: Vec::new(),
     };
+    let colors = StatusColors::load(store.root()).unwrap_or_default();
     let mut output = String::new();
-    render_tree(&resolved, store, &mut output);
+    render_tree(&resolved, store, &colors, &mut output);
     Ok(output)
 }
 
 pub fn run_human(store: &Store, id: &str, depth: usize) -> Result<String> {
     let resolved = resolve_chain(store, id, depth)?;
+    let colors = StatusColors::load(store.root()).unwrap_or_default();
     let mut output = String::new();
 
     let linear = resolved.nodes.iter().all(|n| n.parents.len() <= 1);
     if linear {
-        render_stack(&resolved, store, &mut output);
+        render_stack(&resolved, store, &colors, &mut output);
     } else {
-        render_tree(&resolved, store, &mut output);
+        render_tree(&resolved, store, &colors, &mut output);
     }
 
     if !resolved.forward.is_empty() {
@@ -323,7 +349,7 @@ pub fn run_human(store: &Store, id: &str, depth: usize) -> Result<String> {
             let shorthand = f.doc.id.to_uppercase();
             let title = &f.doc.title;
             let status_display = if colors_enabled() {
-                styled_status(&f.doc.status)
+                styled_status(&colors, f.doc.doc_type.as_str(), &f.doc.status)
             } else {
                 format!("{}", f.doc.status)
             };
@@ -347,7 +373,7 @@ pub fn run_human(store: &Store, id: &str, depth: usize) -> Result<String> {
         for rel in &resolved.related {
             let shorthand = rel.doc.id.to_uppercase();
             let status_display = if colors_enabled() {
-                styled_status(&rel.doc.status)
+                styled_status(&colors, rel.doc.doc_type.as_str(), &rel.doc.status)
             } else {
                 format!("{}", rel.doc.status)
             };

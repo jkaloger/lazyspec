@@ -8,6 +8,7 @@ use ratatui::{
 
 use crate::engine::document::Status;
 use crate::engine::git_status::GitFileStatus;
+use crate::engine::status_colors::StatusColors;
 use crate::tui::state::{App, FormField};
 
 use super::colors::status_color;
@@ -493,8 +494,14 @@ pub fn draw_settings_variant_picker(f: &mut Frame, app: &App) {
     f.render_widget(hint, rows[1]);
 }
 
-pub fn draw_status_picker(f: &mut Frame, app: &App) {
+pub fn draw_status_picker(f: &mut Frame, app: &App, colors: &StatusColors) {
     let area = f.area();
+
+    let type_name = app
+        .store
+        .get(&app.status_picker.doc_path)
+        .map(|d| d.doc_type.as_str())
+        .unwrap_or("");
 
     let statuses: Vec<Status> = app
         .status_picker
@@ -522,7 +529,7 @@ pub fn draw_status_picker(f: &mut Frame, app: &App) {
             } else {
                 "  "
             };
-            let mut style = Style::default().fg(status_color(status));
+            let mut style = Style::default().fg(status_color(colors, type_name, status));
             if i == app.status_picker.selected {
                 style = style.add_modifier(Modifier::BOLD);
             }
@@ -922,7 +929,7 @@ pub fn draw_warnings_panel(f: &mut Frame, app: &App) {
     f.render_stateful_widget(list, popup_area, &mut state);
 }
 
-pub fn draw_search_overlay(f: &mut Frame, app: &App) {
+pub fn draw_search_overlay(f: &mut Frame, app: &App, colors: &StatusColors) {
     let area = f.area();
 
     let layout = Layout::default()
@@ -953,7 +960,7 @@ pub fn draw_search_overlay(f: &mut Frame, app: &App) {
                 Some(d) => (
                     d.title.as_str(),
                     format!("{}", d.status),
-                    status_color(&d.status),
+                    status_color(colors, d.doc_type.as_str(), &d.status),
                 ),
                 None => ("?", "?".to_string(), Color::White),
             };

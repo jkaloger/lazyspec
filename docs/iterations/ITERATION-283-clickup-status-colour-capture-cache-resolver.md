@@ -1,7 +1,7 @@
 ---
 title: 'ClickUp status colour: capture, cache, resolver'
 type: iteration
-status: in-progress
+status: complete
 author: jkaloger
 date: 2026-07-09
 tags: []

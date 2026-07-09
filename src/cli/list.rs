@@ -1,6 +1,7 @@
 use crate::cli::json::doc_to_json_with_family;
 use crate::cli::style::{dim, doc_card};
 use crate::engine::document::DocMeta;
+use crate::engine::status_colors::StatusColors;
 use crate::engine::store::{Filter, Store};
 
 fn build_filter(doc_type: Option<&str>, status: Option<&str>) -> Filter {
@@ -19,8 +20,9 @@ pub fn run(store: &Store, doc_type: Option<&str>, status: Option<&str>, json: bo
         let output = json_output(&docs, store);
         println!("{}", output);
     } else {
+        let colors = StatusColors::load(store.root()).unwrap_or_default();
         for doc in docs {
-            let card = doc_card(&doc.title, &doc.doc_type, &doc.status, &doc.path);
+            let card = doc_card(&colors, &doc.title, &doc.doc_type, &doc.status, &doc.path);
             if let Some(parent_path) = store.parent_of(&doc.path) {
                 let parent_title = store
                     .get(parent_path)

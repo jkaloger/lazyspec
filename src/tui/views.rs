@@ -20,6 +20,7 @@ use ratatui::{
 use std::sync::atomic::Ordering;
 
 use crate::engine::config::{Config, StoreBackend};
+use crate::engine::status_colors::StatusColors;
 use crate::tui::state::{App, ViewMode};
 use status_bar::draw_status_bar;
 
@@ -63,8 +64,9 @@ pub fn sync_indicator_text(elapsed_secs: u64, cache_ttl: u64) -> (String, Color)
 
 pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
     app.git_status_cache.refresh();
+    let status_colors = StatusColors::load(app.store.root()).unwrap_or_default();
     if app.fullscreen_doc {
-        render_fullscreen_document(f, app);
+        render_fullscreen_document(f, app, &status_colors);
         if app.show_warnings {
             draw_warnings_panel(f, app);
         }
@@ -98,10 +100,10 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(0), Constraint::Length(1)])
                 .split(f.area());
-            draw_search_overlay(f, app);
+            draw_search_overlay(f, app, &status_colors);
             draw_status_bar(f, app, areas[1], &app.status_bar_components);
         } else {
-            draw_search_overlay(f, app);
+            draw_search_overlay(f, app, &status_colors);
         }
         if app.show_warnings {
             draw_warnings_panel(f, app);
@@ -189,21 +191,21 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
             draw_type_panel(f, app, main[0]);
 
             if is_singleton {
-                draw_preview(f, app, main[1]);
+                draw_preview(f, app, main[1], &status_colors);
             } else {
                 let right = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
                     .split(main[1]);
 
-                draw_doc_list(f, app, right[0], config);
-                draw_preview(f, app, right[1]);
+                draw_doc_list(f, app, right[0], config, &status_colors);
+                draw_preview(f, app, right[1], &status_colors);
             }
         }
-        ViewMode::Filters => render_filter_panel(f, app, outer[1], config),
+        ViewMode::Filters => render_filter_panel(f, app, outer[1], config, &status_colors),
         #[cfg(feature = "metrics")]
         ViewMode::Metrics => draw_metrics_skeleton(f, outer[1]),
-        ViewMode::Graph => draw_graph(f, app, outer[1], config),
+        ViewMode::Graph => draw_graph(f, app, outer[1], config, &status_colors),
         ViewMode::Settings => draw_settings(f, app, outer[1], &app.settings_buffer),
         #[cfg(feature = "agent")]
         ViewMode::Agents => draw_agents_screen(f, app, outer[1]),
@@ -242,7 +244,7 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
     }
 
     if app.status_picker.active {
-        draw_status_picker(f, app);
+        draw_status_picker(f, app, &status_colors);
     }
 
     if app.link_editor.active {
@@ -274,6 +276,7 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
 #[cfg(test)]
 mod tests {
     use crate::engine::document::Status;
+    use crate::engine::status_colors::StatusColors;
     use ratatui::style::Color;
     use std::path::Path;
 
@@ -324,6 +327,8 @@ mod tests {
             &[],
             false,
             false,
+            "rfc",
+            &StatusColors::default(),
         );
 
         assert_eq!(cells.len(), 5);
@@ -380,6 +385,8 @@ mod tests {
             &[],
             true,
             false,
+            "rfc",
+            &StatusColors::default(),
         );
 
         assert_eq!(cells.len(), 5);
@@ -411,6 +418,8 @@ mod tests {
             &[],
             false,
             false,
+            "rfc",
+            &StatusColors::default(),
         );
 
         let tags_dbg = cell_debug(&cells[3]);
@@ -447,6 +456,8 @@ mod tests {
             false,
             false,
             true,
+            "issue",
+            &StatusColors::default(),
         );
 
         assert_eq!(cells.len(), 5);
@@ -474,6 +485,8 @@ mod tests {
             false,
             false,
             false,
+            "rfc",
+            &StatusColors::default(),
         );
 
         let id_dbg = cell_debug(&cells[0]);
@@ -495,6 +508,8 @@ mod tests {
             false,
             true,
             true,
+            "issue",
+            &StatusColors::default(),
         );
 
         let id_dbg = cell_debug(&cells[0]);
@@ -522,6 +537,8 @@ mod tests {
             &[],
             false,
             true,
+            "rfc",
+            &StatusColors::default(),
         );
 
         for (i, cell) in cells.iter().enumerate() {
