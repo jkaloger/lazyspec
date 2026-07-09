@@ -1,13 +1,10 @@
 use crate::cli::resolve::resolve_shorthand_or_path;
-use crate::engine::config::{Config, StoreBackend};
+use crate::engine::clickup::ClickupHttpClient;
+use crate::engine::config::{Config, StoreBackend, TypeDef};
+use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::fs_ops;
-use crate::engine::gh::GhCli;
-use crate::engine::git_ref::GitCli;
-use crate::engine::git_ref_store::GitRefStore;
-use crate::engine::issue_cache::IssueCache;
-use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
-use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore, GithubMilestonesStore};
+use crate::engine::store_dispatch::{ClickupTasksStore, DocumentStore};
 use anyhow::{anyhow, bail, Result};
 use std::path::Path;
 
@@ -35,6 +32,37 @@ pub fn parse_attr_pairs(raw: &[String]) -> Result<Vec<(String, String)>> {
         .collect()
 }
 
+/// Gate a `--status` change against the type's local lifecycle before it reaches
+/// the backend.
+///
+/// Filesystem- and GitHub-backed types own their transition DAG locally: a
+/// target must be an out-edge of the current status (or a no-op to the same
+/// status). ClickUp-backed types carry no local edges -- their lifecycle states
+/// mirror the bound List's status set and ClickUp enforces its own transition
+/// rules (RFC-056 §Status handling) -- so lazyspec applies no gate and lets the
+/// raw status string through; ClickUp validates and rejects an illegal target.
+fn gate_status_transition(type_def: &TypeDef, current: &str, target: &str) -> Result<()> {
+    if type_def.store == StoreBackend::ClickupTasks {
+        return Ok(());
+    }
+    if current != target && !type_def.lifecycle.has_edge(current, target) {
+        let allowed = type_def.lifecycle.targets_from(current);
+        let allowed = if allowed.is_empty() {
+            "(none)".to_string()
+        } else {
+            allowed.join(", ")
+        };
+        bail!(
+            "invalid transition for type \"{}\": no edge from \"{}\" to \"{}\" (allowed targets: {})",
+            type_def.name,
+            current,
+            target,
+            allowed
+        );
+    }
+    Ok(())
+}
+
 pub fn run(root: &Path, store: &Store, doc_path: &str, updates: &[(&str, &str)]) -> Result<()> {
     run_with_config(root, store, doc_path, updates, None)
 }
@@ -51,98 +79,40 @@ pub fn run_with_config(
         let type_name = doc.doc_type.as_str();
         if let Some(type_def) = config.type_by_name(type_name) {
             if let Some((_, target)) = updates.iter().find(|(k, _)| *k == "status") {
-                let current = doc.status.as_str();
-                if current != *target && !type_def.lifecycle.has_edge(current, target) {
-                    let allowed = type_def.lifecycle.targets_from(current);
-                    let allowed = if allowed.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        allowed.join(", ")
+                gate_status_transition(type_def, doc.status.as_str(), target)?;
+            }
+            // Non-filesystem backends dispatch through the store registry; a new
+            // backend routes here by being registered in `build_registry`, not by
+            // adding another branch. Filesystem keeps its dedicated `fs_ops` path
+            // (it edits the document in place by its original path, not by id).
+            if type_def.store != StoreBackend::Filesystem {
+                // ClickUp authenticates per write: the registry leaves its token
+                // unloaded (to keep registry construction free of keychain I/O),
+                // so the write path loads the global credential here -- mirroring
+                // the create path -- and dispatches against a token-bearing store.
+                // A registry-built (token: None) ClickUp store would fail the
+                // write on missing auth.
+                if type_def.store == StoreBackend::ClickupTasks {
+                    let token = LayeredCredentialStore::global()
+                        .load_clickup_token()?
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "no ClickUp token found; run `lazyspec setup clickup` before \
+                                 updating clickup-tasks documents"
+                            )
+                        })?;
+                    let mut store = ClickupTasksStore {
+                        client: Box::new(ClickupHttpClient::new()),
+                        root: root.to_path_buf(),
+                        config: config.clone(),
+                        token: Some(token),
                     };
-                    bail!(
-                        "invalid transition for type \"{}\": no edge from \"{}\" to \"{}\" (allowed targets: {})",
-                        type_name,
-                        current,
-                        target,
-                        allowed
-                    );
+                    return store.update(type_def, &doc.id, updates);
                 }
-            }
-            if type_def.store == StoreBackend::GithubIssues {
-                let gh_config = config.documents.github.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "type '{}' uses github-issues store but no [github] config found",
-                        type_name
-                    )
-                })?;
-                let repo = gh_config.repo.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "type '{}' uses github-issues store but no github.repo configured",
-                        type_name
-                    )
-                })?;
-                let mut gh_store = GithubIssuesStore {
-                    client: GhCli::new(),
-                    root: root.to_path_buf(),
-                    repo: repo.clone(),
-                    config: config.clone(),
-                    issue_map: IssueMap::load(root)?,
-                    issue_cache: IssueCache::new(root),
-                };
-                return gh_store.update(type_def, &doc.id, updates);
-            }
-            if type_def.store == StoreBackend::GithubMilestones {
-                let gh_config = config.documents.github.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "type '{}' uses github-milestones store but no [github] config found",
-                        type_name
-                    )
-                })?;
-                let repo = gh_config.repo.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "type '{}' uses github-milestones store but no github.repo configured",
-                        type_name
-                    )
-                })?;
-                let mut ms_store = GithubMilestonesStore {
-                    client: GhCli::new(),
-                    root: root.to_path_buf(),
-                    repo: repo.clone(),
-                    config: config.clone(),
-                    issue_map: IssueMap::load(root)?,
-                };
-                return ms_store.update(type_def, &doc.id, updates);
-            }
-            if type_def.store == StoreBackend::GithubProjects {
-                let gh_config = config.documents.github.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "type '{}' uses github-projects store but no [github] config found",
-                        type_name
-                    )
-                })?;
-                let repo = gh_config.repo.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "type '{}' uses github-projects store but no github.repo configured",
-                        type_name
-                    )
-                })?;
-                let mut proj_store = crate::engine::store_dispatch::GithubProjectsStore {
-                    client: GhCli::new(),
-                    root: root.to_path_buf(),
-                    repo: repo.clone(),
-                    config: config.clone(),
-                    issue_map: IssueMap::load(root)?,
-                };
-                return proj_store.update(type_def, &doc.id, updates);
-            }
-            if type_def.store == StoreBackend::GitRef {
-                let mut git_store = GitRefStore {
-                    git: GitCli,
-                    root: root.to_path_buf(),
-                    config: config.clone(),
-                    reserved_number: None,
-                };
-                return git_store.update(type_def, &doc.id, updates);
+                let mut registry = crate::engine::store_dispatch::build_registry(root, config);
+                return registry
+                    .for_type(type_def)?
+                    .update(type_def, &doc.id, updates);
             }
 
             return fs_ops::update_document_with_type(
@@ -216,5 +186,25 @@ mod tests {
     fn parse_attr_pairs_reserved_key_bails() {
         let err = parse_attr_pairs(&["status=done".to_string()]).unwrap_err();
         assert!(err.to_string().contains("reserved"), "got: {err}");
+    }
+
+    // A filesystem/GitHub type still gates a status move on its lifecycle edges.
+    #[test]
+    fn gate_rejects_off_edge_move_for_edge_gated_type() {
+        let td = TypeDef::test_fixture("rfc", StoreBackend::Filesystem);
+        // The default test fixture lifecycle carries no draft->accepted edge.
+        let err = gate_status_transition(&td, "draft", "accepted").unwrap_err();
+        assert!(err.to_string().contains("invalid transition"), "got: {err}");
+    }
+
+    // A ClickUp-backed type bypasses the local gate entirely: any status target
+    // passes, because ClickUp (not lazyspec) owns the transition rules and the
+    // derived lifecycle carries no edges (RFC-056 §Status handling).
+    #[test]
+    fn gate_bypasses_clickup_tasks_status_transition() {
+        let td = TypeDef::test_fixture("task", StoreBackend::ClickupTasks);
+        // A target that would be off-edge for any local DAG: still allowed.
+        gate_status_transition(&td, "open", "in progress").unwrap();
+        gate_status_transition(&td, "in progress", "done").unwrap();
     }
 }

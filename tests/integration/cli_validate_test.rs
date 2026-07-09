@@ -302,6 +302,8 @@ fn singleton_type(name: &str, dir: &str, prefix: &str) -> TypeDef {
         label_override: None,
         github_issue_tag: None,
         github_issue_type: None,
+        clickup_list_id: None,
+        clickup_custom_field_map: None,
     }
 }
 
@@ -325,6 +327,8 @@ fn child_type(name: &str, dir: &str, prefix: &str, parent: &str) -> TypeDef {
         label_override: None,
         github_issue_tag: None,
         github_issue_type: None,
+        clickup_list_id: None,
+        clickup_custom_field_map: None,
     }
 }
 
@@ -485,6 +489,8 @@ fn parent_type_references_non_singleton_error() {
         label_override: None,
         github_issue_tag: None,
         github_issue_type: None,
+        clickup_list_id: None,
+        clickup_custom_field_map: None,
     };
     let config = config_with_extra_types(vec![
         non_singleton_parent,

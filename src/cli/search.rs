@@ -2,6 +2,7 @@ use crate::cli::json::doc_to_json;
 use crate::cli::style::{dim, doc_card};
 use crate::engine::document::DocType;
 use crate::engine::fs::FileSystem;
+use crate::engine::status_colors::StatusColors;
 use crate::engine::store::{SearchResult, Store};
 
 fn filter_results<'a>(results: &mut Vec<SearchResult<'a>>, doc_type: Option<&str>) {
@@ -36,10 +37,17 @@ pub fn run(store: &Store, query: &str, doc_type: Option<&str>, json: bool, fs: &
             println!("No results for \"{}\"", query);
             return;
         }
+        let colors = StatusColors::load(store.root()).unwrap_or_default();
         for r in &results {
             println!(
                 "{} {}",
-                doc_card(&r.doc.title, &r.doc.doc_type, &r.doc.status, &r.doc.path),
+                doc_card(
+                    &colors,
+                    &r.doc.title,
+                    &r.doc.doc_type,
+                    &r.doc.status,
+                    &r.doc.path
+                ),
                 dim(&format!("[{}]", r.match_field)),
             );
             println!("  {}", dim(&format!("...{}...", r.snippet.trim())));

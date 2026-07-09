@@ -1,11 +1,106 @@
+use crate::engine::clickup::ClickupClient;
 use crate::engine::config::Config;
+use crate::engine::credentials::{CredentialLocation, CredentialStore, Token};
 use crate::engine::gh::{AuthStatus, GhAuth, GhGraphql, GhIssueReader};
 use crate::engine::github::resolve_repo;
 use crate::engine::issue_body::TypeMatchRule;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use anyhow::{bail, Context, Result};
+use clap::Subcommand;
+use serde::Serialize;
 use std::path::Path;
+
+/// `lazyspec setup <backend>` subcommands. Bare `lazyspec setup` keeps its
+/// existing behaviour (github-issues auth + fetch); the ClickUp backend has no
+/// external CLI to piggyback on, so it captures and stores its own credential.
+#[derive(Subcommand)]
+pub enum SetupCommand {
+    /// Validate a ClickUp personal API token and store it globally
+    Clickup {
+        /// Personal API token (`pk_...`); prompts securely when omitted
+        #[arg(long)]
+        token: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Serialize)]
+struct SetupClickupOutput {
+    ok: bool,
+    user_id: u64,
+    username: String,
+    storage: String,
+}
+
+/// Validates a ClickUp personal token against the API, then -- only on success
+/// -- persists it via `store`. Nothing is written when validation fails, so an
+/// invalid/revoked token leaves any existing credential untouched.
+///
+/// `client` and `store` are injected so tests exercise this end to end without a
+/// network call or touching the real home dir.
+pub fn run_clickup(
+    client: &dyn ClickupClient,
+    store: &dyn CredentialStore,
+    token_arg: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let raw = match token_arg {
+        Some(t) => t,
+        None => prompt_token()?,
+    };
+    let raw = raw.trim().to_string();
+    if raw.is_empty() {
+        bail!("no token provided");
+    }
+    let token = Token::new(raw);
+
+    // Validate before any write: a rejected token must not clobber a stored one.
+    let user = client
+        .auth_status(token.expose())
+        .map_err(|e| anyhow::anyhow!("ClickUp token validation failed: {}", e))?;
+
+    // Keychain-first; the store emits the loud fallback log itself when (and
+    // only when) no keychain backend is reachable.
+    let location = store.store_clickup_token(&token)?;
+
+    if json {
+        let output = SetupClickupOutput {
+            ok: true,
+            user_id: user.id,
+            username: user.username.clone(),
+            storage: location.to_string(),
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!(
+            "Authenticated with ClickUp as {} (id {})",
+            user.username, user.id
+        );
+        match &location {
+            CredentialLocation::Keychain => {
+                println!("Stored ClickUp token in the OS keychain")
+            }
+            CredentialLocation::File(path) => {
+                println!("Stored ClickUp token in plaintext at {}", path.display())
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reads a token from the terminal without echoing it.
+fn prompt_token() -> Result<String> {
+    let term = console::Term::stderr();
+    term.write_str("ClickUp personal API token: ")
+        .context("failed to write token prompt")?;
+    let line = term
+        .read_secure_line()
+        .context("failed to read token from terminal (use --token for non-interactive use)")?;
+    Ok(line)
+}
 
 pub fn run(
     root: &Path,
@@ -206,5 +301,96 @@ mod tests {
         assert!(cache_dir.exists());
         let map = IssueMap::load(dir.path()).unwrap();
         assert!(map.get("anything").is_none());
+    }
+
+    // --- setup clickup ---
+
+    use crate::engine::clickup::{ClickupError, ClickupUser, FakeClickupClient};
+    use crate::engine::credentials::FileCredentialStore;
+
+    fn clickup_user() -> ClickupUser {
+        ClickupUser {
+            id: 42,
+            username: "Jack".to_string(),
+            email: "jack@example.com".to_string(),
+        }
+    }
+
+    #[test]
+    fn run_clickup_valid_token_stores_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let cred_path = dir.path().join(".lazyspec/credentials.toml");
+        let store = FileCredentialStore::at_path(&cred_path);
+        let client = FakeClickupClient::valid(clickup_user());
+
+        run_clickup(&client, &store, Some("pk_valid".to_string()), false).unwrap();
+
+        assert_eq!(
+            store.load_clickup_token().unwrap().unwrap().expose(),
+            "pk_valid"
+        );
+    }
+
+    #[test]
+    fn run_clickup_invalid_token_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cred_path = dir.path().join(".lazyspec/credentials.toml");
+        let store = FileCredentialStore::at_path(&cred_path);
+        let client = FakeClickupClient::invalid_token();
+
+        let result = run_clickup(&client, &store, Some("pk_bad".to_string()), false);
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("validation failed"));
+        assert!(!cred_path.exists());
+        assert_eq!(store.load_clickup_token().unwrap(), None);
+    }
+
+    #[test]
+    fn run_clickup_invalid_token_leaves_existing_credential_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let cred_path = dir.path().join("credentials.toml");
+        let store = FileCredentialStore::at_path(&cred_path);
+        store
+            .store_clickup_token(&Token::new("pk_existing"))
+            .unwrap();
+
+        let client = FakeClickupClient::invalid_token();
+        let result = run_clickup(&client, &store, Some("pk_bad".to_string()), false);
+
+        assert!(result.is_err());
+        assert_eq!(
+            store.load_clickup_token().unwrap().unwrap().expose(),
+            "pk_existing"
+        );
+    }
+
+    #[test]
+    fn run_clickup_empty_token_errors_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cred_path = dir.path().join("credentials.toml");
+        let store = FileCredentialStore::at_path(&cred_path);
+        let client = FakeClickupClient::valid(clickup_user());
+
+        let result = run_clickup(&client, &store, Some("   ".to_string()), false);
+
+        assert!(result.is_err());
+        assert!(!cred_path.exists());
+    }
+
+    #[test]
+    fn run_clickup_transport_error_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cred_path = dir.path().join("credentials.toml");
+        let store = FileCredentialStore::at_path(&cred_path);
+        let client = FakeClickupClient::failing(ClickupError::Timeout);
+
+        let result = run_clickup(&client, &store, Some("pk_x".to_string()), false);
+
+        assert!(result.is_err());
+        assert!(!cred_path.exists());
     }
 }

@@ -982,6 +982,8 @@ require_parent_status = "accepted"
                 label_override: None,
                 github_issue_tag: None,
                 github_issue_type: None,
+                clickup_list_id: None,
+                clickup_custom_field_map: None,
             });
             c
         };
@@ -1072,6 +1074,8 @@ name = "related-to"
                 label_override: None,
                 github_issue_tag: None,
                 github_issue_type: None,
+                clickup_list_id: None,
+                clickup_custom_field_map: None,
             });
             c.rules.clear();
             c

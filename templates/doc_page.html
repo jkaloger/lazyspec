@@ -20,7 +20,7 @@
 <dl class="doc-frontmatter">
 <dt>id</dt><dd class="doc-id">{{ id }}</dd>
 <dt>type</dt><dd class="doc-type">{{ doc_type }}</dd>
-<dt>status</dt><dd class="doc-status" data-status="{{ status }}"><span class="status-swatch"></span>{{ status }}</dd>
+<dt>status</dt><dd class="doc-status" data-status="{{ status }}"><span class="status-swatch"{% if let Some(c) = status_color %} style="--status-color: {{ c }}"{% endif %}></span>{{ status }}</dd>
 <dt>author</dt><dd class="doc-author">{{ author }}</dd>
 <dt>date</dt><dd class="doc-date">{{ date }}</dd>
 {% if !tags.is_empty() %}<dt>tags</dt><dd class="doc-tags">{% for tag in tags %}<a class="tag tag--h{{ tag.hue }}" href="/?tag={{ tag.name }}">{{ tag.name }}</a>{% if !loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
@@ -38,19 +38,19 @@
 {% if !ancestors.is_empty() %}
 <div class="context-group" data-direction="ancestors">
 <span class="context-label">implements</span>
-<ul>{% for e in ancestors %}<li class="context-entry"><a href="/doc/{{ e.id }}">{{ e.id }}</a> <span class="context-type">{{ e.doc_type }}</span> <span class="context-status" data-status="{{ e.status }}"><span class="status-swatch"></span>{{ e.status }}</span> <span class="context-title">{{ e.title }}</span></li>{% endfor %}</ul>
+<ul>{% for e in ancestors %}<li class="context-entry"><a href="/doc/{{ e.id }}">{{ e.id }}</a> <span class="context-type">{{ e.doc_type }}</span> <span class="context-status" data-status="{{ e.status }}"><span class="status-swatch"{% if let Some(c) = e.status_color %} style="--status-color: {{ c }}"{% endif %}></span>{{ e.status }}</span> <span class="context-title">{{ e.title }}</span></li>{% endfor %}</ul>
 </div>
 {% endif %}
 {% if !descendants.is_empty() %}
 <div class="context-group" data-direction="descendants">
 <span class="context-label">implemented by</span>
-<ul>{% for e in descendants %}<li class="context-entry"><a href="/doc/{{ e.id }}">{{ e.id }}</a> <span class="context-type">{{ e.doc_type }}</span> <span class="context-status" data-status="{{ e.status }}"><span class="status-swatch"></span>{{ e.status }}</span> <span class="context-title">{{ e.title }}</span></li>{% endfor %}</ul>
+<ul>{% for e in descendants %}<li class="context-entry"><a href="/doc/{{ e.id }}">{{ e.id }}</a> <span class="context-type">{{ e.doc_type }}</span> <span class="context-status" data-status="{{ e.status }}"><span class="status-swatch"{% if let Some(c) = e.status_color %} style="--status-color: {{ c }}"{% endif %}></span>{{ e.status }}</span> <span class="context-title">{{ e.title }}</span></li>{% endfor %}</ul>
 </div>
 {% endif %}
 {% if !related.is_empty() %}
 <div class="context-group" data-direction="related">
 <span class="context-label">related</span>
-<ul>{% for e in related %}<li class="context-entry"><a href="/doc/{{ e.id }}">{{ e.id }}</a> <span class="context-type">{{ e.doc_type }}</span> <span class="context-status" data-status="{{ e.status }}"><span class="status-swatch"></span>{{ e.status }}</span> <span class="context-title">{{ e.title }}</span></li>{% endfor %}</ul>
+<ul>{% for e in related %}<li class="context-entry"><a href="/doc/{{ e.id }}">{{ e.id }}</a> <span class="context-type">{{ e.doc_type }}</span> <span class="context-status" data-status="{{ e.status }}"><span class="status-swatch"{% if let Some(c) = e.status_color %} style="--status-color: {{ c }}"{% endif %}></span>{{ e.status }}</span> <span class="context-title">{{ e.title }}</span></li>{% endfor %}</ul>
 </div>
 {% endif %}
 </section>

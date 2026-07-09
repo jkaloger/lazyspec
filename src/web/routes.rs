@@ -15,6 +15,7 @@ use crate::engine::document::{DocType, Status};
 use crate::engine::fs::RealFileSystem;
 use crate::engine::github_url::github_url;
 use crate::engine::graph::{flatten_forest, GraphSort};
+use crate::engine::status_colors::StatusColors;
 use crate::engine::store::{Filter, Store};
 use crate::web::render::{
     markdown_to_html, tag_hue, DocGroup, DocPage, DocRow, FilterOption, GraphPage, GraphTreeNode,
@@ -60,7 +61,7 @@ pub struct SearchQuery {
 
 /// Build the type-grouped rows for the documents matching `filter`, sorted by
 /// type name then by id for stable output.
-fn build_groups(store: &Store, filter: &Filter) -> Vec<DocGroup> {
+fn build_groups(store: &Store, filter: &Filter, colors: &StatusColors) -> Vec<DocGroup> {
     let mut by_type: BTreeMap<String, Vec<DocRow>> = BTreeMap::new();
     for doc in store.list(filter) {
         by_type
@@ -70,6 +71,9 @@ fn build_groups(store: &Store, filter: &Filter) -> Vec<DocGroup> {
                 id: doc.id.clone(),
                 title: doc.title.clone(),
                 status: doc.status.to_string(),
+                status_color: colors
+                    .get(&doc.doc_type.to_string(), &doc.status.to_string())
+                    .map(str::to_string),
                 tags: doc
                     .tags
                     .iter()
@@ -224,7 +228,8 @@ pub async fn list_page(
     let active_type = empty_to_none(query.r#type.clone());
     let active_tag = empty_to_none(query.tag.clone());
     let filter = filter_from_query(query);
-    let groups = build_groups(&store, &filter);
+    let colors = StatusColors::load(store.root()).unwrap_or_default();
+    let groups = build_groups(&store, &filter, &colors);
     let list = ListFragment { groups }.render_string();
     let (statuses, tags) = filter_options(&store);
     let page = ListPage {
@@ -253,7 +258,8 @@ pub async fn list_fragment(
 ) -> Html<String> {
     let store = state.store.snapshot();
     let filter = filter_from_query(query);
-    let groups = build_groups(&store, &filter);
+    let colors = StatusColors::load(store.root()).unwrap_or_default();
+    let groups = build_groups(&store, &filter, &colors);
     let fragment = ListFragment { groups };
     Html(fragment.render().unwrap_or_default())
 }
@@ -267,8 +273,9 @@ pub async fn search(
     Query(query): Query<SearchQuery>,
 ) -> Html<String> {
     let store = state.store.snapshot();
+    let colors = StatusColors::load(store.root()).unwrap_or_default();
     let Some(q) = empty_to_none(query.q) else {
-        let groups = build_groups(&store, &Filter::default());
+        let groups = build_groups(&store, &Filter::default(), &colors);
         return Html(ListFragment { groups }.render().unwrap_or_default());
     };
 
@@ -279,6 +286,9 @@ pub async fn search(
             id: r.doc.id.clone(),
             title: r.doc.title.clone(),
             status: r.doc.status.to_string(),
+            status_color: colors
+                .get(&r.doc.doc_type.to_string(), &r.doc.status.to_string())
+                .map(str::to_string),
             tags: r
                 .doc
                 .tags
@@ -312,7 +322,8 @@ pub async fn graph(State(state): State<AppState>, Query(query): Query<GraphQuery
         _ => resolve_forest(&store, None),
     };
     let flat = flatten_forest(&forest, &store, &GraphSort::default());
-    let roots = GraphTreeNode::nest(&flat);
+    let colors = StatusColors::load(store.root()).unwrap_or_default();
+    let roots = GraphTreeNode::nest(&flat, &colors);
 
     Html(
         GraphPage {
@@ -359,10 +370,63 @@ pub async fn doc_page(State(state): State<AppState>, AxumPath(id): AxumPath<Stri
     // unknown-id case already 404'd above) degrades to no Context section rather
     // than a 500.
     let context = resolve_chain(&store, &doc.id, 1).ok();
+    let colors = StatusColors::load(store.root()).unwrap_or_default();
 
-    let mut page = DocPage::from_doc(doc, &store, body_html, github_url, context.as_ref());
+    let mut page = DocPage::from_doc(
+        doc,
+        &store,
+        body_html,
+        github_url,
+        context.as_ref(),
+        &colors,
+    );
     page.sidebar = build_sidebar(&store, &state.config, "list", None, None, None);
     page.repo_name = state.repo_name.clone();
     page.branch = state.branch.clone();
     Html(page.render().unwrap_or_default()).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::config::{Config, StoreBackend, TypeDef};
+    use std::collections::HashMap;
+
+    fn temp_store() -> (tempfile::TempDir, Store) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let mut config = Config::default();
+        let mut t = TypeDef::test_fixture("doc", StoreBackend::Filesystem);
+        t.dir = "docs/doc".to_string();
+        config.documents.types = vec![t];
+        std::fs::write(root.join(".lazyspec.toml"), config.to_toml().unwrap()).unwrap();
+        std::fs::create_dir_all(root.join("docs/doc")).unwrap();
+        std::fs::write(
+            root.join("docs/doc/DOC-001-x.md"),
+            "---\ntitle: \"x\"\ntype: doc\nstatus: draft\nauthor: \"a\"\ndate: 2026-07-01\ntags: []\n---\n\nbody\n",
+        )
+        .unwrap();
+        let config = Config::load(root, &crate::engine::fs::RealFileSystem).unwrap();
+        let store = Store::load(root, &config).unwrap();
+        (tmp, store)
+    }
+
+    #[test]
+    fn build_groups_fills_status_color_on_resolver_hit() {
+        let (_tmp, store) = temp_store();
+        let mut colors = StatusColors::default();
+        colors.set_type(
+            "doc",
+            HashMap::from([("draft".to_string(), "#d33d44".to_string())]),
+        );
+        let groups = build_groups(&store, &Filter::default(), &colors);
+        assert_eq!(groups[0].docs[0].status_color.as_deref(), Some("#d33d44"));
+    }
+
+    #[test]
+    fn build_groups_leaves_status_color_none_on_miss() {
+        let (_tmp, store) = temp_store();
+        let groups = build_groups(&store, &Filter::default(), &StatusColors::default());
+        assert_eq!(groups[0].docs[0].status_color, None);
+    }
 }

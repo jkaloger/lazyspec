@@ -291,40 +291,44 @@ code,
   flex: none;
   width: var(--sp-2);
   height: var(--sp-2);
-  background: var(--ink-faint);
+  background: var(--status-color, var(--ink-faint));
 }
 
 /* Status hues are defined once here and shared by the document page
    (.doc-status) and the graph node (.graph-status) so both surfaces read the
-   state identically without duplicating color values. */
+   state identically without duplicating color values. A ClickUp-derived hue
+   arrives as an inline `--status-color` on the swatch; every rule resolves it
+   first, so a derived colour wins regardless of which rule the cascade picks,
+   while its absence leaves the name-keyed fallbacks exactly as before. */
 .doc-status[data-status="draft"] .status-swatch,
 .graph-status[data-status="draft"] .status-swatch,
 .context-status[data-status="draft"] .status-swatch {
-  background: var(--st-draft);
+  background: var(--status-color, var(--st-draft));
 }
 .doc-status[data-status="review"] .status-swatch,
 .graph-status[data-status="review"] .status-swatch,
 .context-status[data-status="review"] .status-swatch {
-  background: var(--st-review);
+  background: var(--status-color, var(--st-review));
 }
 .doc-status[data-status="accepted"] .status-swatch,
 .graph-status[data-status="accepted"] .status-swatch,
 .context-status[data-status="accepted"] .status-swatch {
-  background: var(--st-accepted);
+  background: var(--status-color, var(--st-accepted));
 }
 .doc-status[data-status="complete"] .status-swatch,
 .graph-status[data-status="complete"] .status-swatch,
 .context-status[data-status="complete"] .status-swatch {
-  background: var(--st-complete);
+  background: var(--status-color, var(--st-complete));
 }
 
 /* in-progress reads hollow (ring) against complete's solid fill, so the two
-   share a hue but stay distinct without relying on color alone. */
+   share a hue but stay distinct without relying on color alone. A derived
+   colour recolours the ring; the hollow shape stays the state encoding. */
 .doc-status[data-status="in-progress"] .status-swatch,
 .graph-status[data-status="in-progress"] .status-swatch,
 .context-status[data-status="in-progress"] .status-swatch {
   background: transparent;
-  box-shadow: inset 0 0 0 var(--rule-w) var(--st-progress);
+  box-shadow: inset 0 0 0 var(--rule-w) var(--status-color, var(--st-progress));
 }
 
 /* Terminal-dead states read without hue: struck label, faded swatch. */
@@ -340,13 +344,13 @@ code,
 .doc-status[data-status="rejected"] .status-swatch,
 .graph-status[data-status="rejected"] .status-swatch,
 .context-status[data-status="rejected"] .status-swatch {
-  background: var(--st-rejected);
+  background: var(--status-color, var(--st-rejected));
   opacity: 0.6;
 }
 .doc-status[data-status="superseded"] .status-swatch,
 .graph-status[data-status="superseded"] .status-swatch,
 .context-status[data-status="superseded"] .status-swatch {
-  background: var(--st-superseded);
+  background: var(--status-color, var(--st-superseded));
   opacity: 0.6;
 }
 

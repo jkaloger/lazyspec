@@ -65,7 +65,8 @@ impl Store {
                 StoreBackend::GithubIssues
                 | StoreBackend::GithubMilestones
                 | StoreBackend::GithubProjects
-                | StoreBackend::GitRef => root.join(".lazyspec/cache").join(&type_def.name),
+                | StoreBackend::GitRef
+                | StoreBackend::ClickupTasks => root.join(".lazyspec/cache").join(&type_def.name),
                 _ => root.join(&type_def.dir),
             };
 
@@ -725,6 +726,8 @@ mod tests {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            clickup_list_id: None,
+            clickup_custom_field_map: None,
         };
 
         let mut config = Config::default();
@@ -822,6 +825,8 @@ mod tests {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            clickup_list_id: None,
+            clickup_custom_field_map: None,
         };
 
         let mut config = Config::default();

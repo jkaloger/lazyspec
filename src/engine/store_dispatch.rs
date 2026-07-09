@@ -1,20 +1,20 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use chrono::Local;
 use serde::Serialize;
 
+use crate::engine::clickup_cache;
 use crate::engine::config::{Config, StoreBackend, TypeDef};
 use crate::engine::document::{compose_frontmatter, AttrValue, DocMeta, DocType, Status};
-use crate::engine::gh::{self, GhGraphql, GhIssueReader, GhIssueWriter, GqlVar};
+use crate::engine::gh::{self, GhClient, GhGraphql, GhMilestoneClient, GhProjectsClient, GqlVar};
 use crate::engine::gh_schema::{try_org_then_user, GhSchemaSnapshot};
-use crate::engine::git_ref::GitRefOps;
-use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::issue_body;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::{self, Store};
+use crate::engine::task_map::TaskMap;
 use crate::engine::template;
 
 #[derive(Serialize)]
@@ -41,7 +41,7 @@ pub struct CreatedDoc {
     pub id: String,
 }
 
-pub trait DocumentStore {
+pub trait DocumentStore: gh::AsAny {
     fn create(
         &mut self,
         type_def: &TypeDef,
@@ -65,6 +65,238 @@ pub trait DocumentStore {
 pub struct FilesystemStore {
     pub root: PathBuf,
     pub config: Config,
+}
+
+/// A store placeholder registered for a backend that the current config cannot
+/// serve (e.g. a GitHub backend with no `[github]` config). Every operation
+/// fails with `message`, so a misconfigured type still errors clearly at
+/// dispatch time rather than silently or with a generic "not registered".
+struct UnavailableStore {
+    message: String,
+}
+
+impl DocumentStore for UnavailableStore {
+    fn create(&mut self, _: &TypeDef, _: &str, _: &str, _: &str) -> Result<CreatedDoc> {
+        bail!("{}", self.message)
+    }
+    fn update(&mut self, _: &TypeDef, _: &str, _: &[(&str, &str)]) -> Result<()> {
+        bail!("{}", self.message)
+    }
+    fn delete(&mut self, _: &TypeDef, _: &str) -> Result<()> {
+        bail!("{}", self.message)
+    }
+    fn set_provenance(&mut self, _: &TypeDef, _: &str, _: &[String]) -> Result<()> {
+        bail!("{}", self.message)
+    }
+}
+
+/// ClickUp-backed store, registered under [`StoreBackend::ClickupTasks`]. The
+/// read path (fetch + materialize) lives in
+/// [`clickup_cache`](crate::engine::clickup_cache); this struct carries the
+/// boxed client, credential, and bindings the *write* path (create/update/
+/// delete = archive) will use in later RFC-056 stories. Until those land, the
+/// write methods fail loudly rather than silently no-op.
+pub struct ClickupTasksStore {
+    pub client: Box<dyn crate::engine::clickup::ClickupClient>,
+    pub root: PathBuf,
+    #[allow(dead_code)]
+    pub config: Config,
+    /// The ClickUp token the write path authenticates with. The registry leaves
+    /// this `None` (so building the registry never touches the keychain); the
+    /// CLI create branch loads it before dispatching a write.
+    pub token: Option<crate::engine::credentials::Token>,
+}
+
+impl ClickupTasksStore {
+    const WRITE_UNIMPLEMENTED: &'static str =
+        "this clickup-tasks write path is not implemented yet (later RFC-056 story)";
+
+    const NO_TOKEN: &'static str =
+        "no ClickUp token found; run `lazyspec setup clickup` before creating \
+         clickup-tasks documents";
+
+    /// Optimistic-lock pre-write check (RFC-056 §Caching/id-mapping).
+    ///
+    /// Before a `PUT` (update or advance), re-fetch the task (`GET /task/{id}`)
+    /// and compare ClickUp's current `date_updated` against the `TaskMap`
+    /// baseline recorded at the last create/fetch/write. If the remote is
+    /// *newer*, an external change landed since we synced -- proceeding would
+    /// clobber it -- so reject with a conflict error and perform no write. The
+    /// comparison is on integer epoch-ms, never string equality: ClickUp returns
+    /// `date_updated` as an epoch-ms string (`"1774587145901"`), so a raw string
+    /// compare would misorder unequal-length values.
+    ///
+    /// An empty or unparseable baseline means there is no timestamp to race
+    /// against (e.g. a create whose echo carried no `date_updated`); the check is
+    /// skipped and the write proceeds, matching the GitHub store's "just pushed
+    /// -> accept remote" posture.
+    fn check_optimistic_lock(
+        &self,
+        token: &str,
+        doc_id: &str,
+        task_id: &str,
+        baseline: &str,
+    ) -> Result<()> {
+        let Ok(local_ms) = baseline.trim().parse::<i64>() else {
+            return Ok(());
+        };
+
+        let remote = self.client.get_task(token, task_id)?;
+        let remote_ms = remote.date_updated.unwrap_or(0);
+
+        if remote_ms > local_ms {
+            bail!(
+                "{} changed on ClickUp since your last fetch; \
+                 run `lazyspec fetch` and retry.\n  \
+                 Local baseline: {}\n  \
+                 Remote updated: {}",
+                doc_id,
+                local_ms,
+                remote_ms,
+            );
+        }
+
+        Ok(())
+    }
+}
+
+impl DocumentStore for ClickupTasksStore {
+    /// Create a task in the bound ClickUp List and mirror it into the local
+    /// cache. Mirrors [`GithubIssuesStore::create`]: POST the remote task, use
+    /// its returned id to form the doc id, materialize the echoed task into a
+    /// cache file (reusing the read path's [`clickup_cache::task_to_doc`]), and
+    /// record it in the [`TaskMap`] (with `date_updated` as the optimistic-lock
+    /// baseline for later writes).
+    fn create(
+        &mut self,
+        type_def: &TypeDef,
+        title: &str,
+        _author: &str,
+        body: &str,
+    ) -> Result<CreatedDoc> {
+        let token = self
+            .token
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("{}", Self::NO_TOKEN))?;
+        let list_id = type_def.clickup_list_id.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "type '{}' is clickup-tasks but has no clickup_list_id configured",
+                type_def.name
+            )
+        })?;
+
+        // A create carries no attributes or status yet, so only name + body are
+        // sent; ClickUp assigns the List's default status.
+        let payload = clickup_cache::build_task_create(title, body, None, &BTreeMap::new());
+        let task = self.client.create_task(token.expose(), list_id, &payload)?;
+
+        let id = type_def.make_id(&task.id);
+        let (meta, doc_body) = clickup_cache::task_to_doc(&task, type_def, &id);
+        write_cache_file(&self.root, type_def, &meta, &doc_body)?;
+
+        let updated_at = task
+            .date_updated
+            .map(|ms| ms.to_string())
+            .unwrap_or_default();
+        let mut task_map = TaskMap::load(&self.root)?;
+        task_map.insert(&id, &task.id, updated_at);
+        task_map.save(&self.root)?;
+
+        let cache_path = self
+            .root
+            .join(".lazyspec/cache")
+            .join(&type_def.name)
+            .join(format!("{}.md", id));
+        let relative = cache_path
+            .strip_prefix(&self.root)
+            .unwrap_or(&cache_path)
+            .to_path_buf();
+        Ok(CreatedDoc { path: relative, id })
+    }
+
+    /// Edit the bound ClickUp task from a doc's `update` and re-materialize the
+    /// change into the cache -- the native-field round-trip (RFC-056 §Field
+    /// mapping). Resolve the task id from the [`TaskMap`], map the changed
+    /// fields to a partial [`TaskUpdate`], `PUT /task/{id}`, then rewrite the
+    /// cache file and `TaskMap.updated_at` from the *returned* task so a
+    /// subsequent read reflects the new native values. A `status` change (an
+    /// `advance`) rides the same path: it maps to the payload's raw status
+    /// string, is `PUT` verbatim, and re-materializes from ClickUp's echo
+    /// (RFC-056 §Status handling); lazyspec applies no local transition gate.
+    fn update(&mut self, type_def: &TypeDef, doc_id: &str, updates: &[(&str, &str)]) -> Result<()> {
+        let token = self
+            .token
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("{}", Self::NO_TOKEN))?;
+
+        let mut task_map = TaskMap::load(&self.root)?;
+        let (task_id, baseline) = task_map
+            .get(doc_id)
+            .map(|e| (e.task_id.clone(), e.updated_at.clone()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} is not mapped to a ClickUp task; run `lazyspec fetch` before updating",
+                    doc_id
+                )
+            })?;
+
+        // Optimistic lock: reject before the PUT if ClickUp has moved on since
+        // our recorded baseline, so a stale local doc never clobbers a concurrent
+        // external change. Applies equally to an `advance` (a status-only update).
+        self.check_optimistic_lock(token.expose(), doc_id, &task_id, &baseline)?;
+
+        let payload = clickup_cache::build_task_update(updates);
+        let task = self
+            .client
+            .update_task(token.expose(), &task_id, &payload)?;
+
+        // Re-materialize from the task ClickUp echoed back: the round-trip AC
+        // wants the cache (and a subsequent read) to reflect the updated native
+        // fields, and this keeps the same doc id.
+        let id = doc_id.to_string();
+        let (meta, doc_body) = clickup_cache::task_to_doc(&task, type_def, &id);
+        write_cache_file(&self.root, type_def, &meta, &doc_body)?;
+
+        let updated_at = task
+            .date_updated
+            .map(|ms| ms.to_string())
+            .unwrap_or_default();
+        task_map.insert(&id, &task.id, updated_at);
+        task_map.save(&self.root)?;
+
+        Ok(())
+    }
+    /// Delete a ClickUp-backed doc by *archiving* its task (RFC-056 §Design):
+    /// resolve the task id from the [`TaskMap`] and `PUT /task/{id}` with
+    /// `{"archived": true}` -- never a hard delete. The cache file and the
+    /// `TaskMap` entry are deliberately *not* evicted here: an archived task
+    /// drops out of `task_list`, so the next `fetch` (which owns the whole type
+    /// dir) removes the doc from the cache and the map. Eagerly deleting them now
+    /// would only race that authoritative sync.
+    fn delete(&mut self, _type_def: &TypeDef, doc_id: &str) -> Result<()> {
+        let token = self
+            .token
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("{}", Self::NO_TOKEN))?;
+
+        let task_map = TaskMap::load(&self.root)?;
+        let task_id = task_map
+            .get(doc_id)
+            .map(|e| e.task_id.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} is not mapped to a ClickUp task; run `lazyspec fetch` before deleting",
+                    doc_id
+                )
+            })?;
+
+        self.client.archive_task(token.expose(), &task_id)?;
+
+        Ok(())
+    }
+    fn set_provenance(&mut self, _: &TypeDef, _: &str, _: &[String]) -> Result<()> {
+        bail!("{}", Self::WRITE_UNIMPLEMENTED)
+    }
 }
 
 impl DocumentStore for FilesystemStore {
@@ -147,8 +379,59 @@ impl DocumentStore for FilesystemStore {
     }
 }
 
-pub struct GithubIssuesStore<G: GhIssueReader + GhIssueWriter + GhGraphql> {
-    pub client: G,
+/// The Projects v2 board numbers a doc is a member of, read from its `related`
+/// relations whose relationship declares `github_native = "membership"`.
+/// Targets are board doc ids (`PROJECT-n`).
+fn membership_board_numbers(config: &Config, meta: &DocMeta) -> Vec<u64> {
+    meta.related
+        .iter()
+        .filter(|r| {
+            config
+                .relationship_by_name(&r.rel_type.to_string())
+                .and_then(|rel| rel.github_native.as_deref())
+                == Some("membership")
+        })
+        .filter_map(|r| board_number(&r.target).ok())
+        .collect()
+}
+
+/// Read the per-item project field values for `meta` across every board it is a
+/// member of and inject them into `meta.attributes` keyed
+/// `PROJECT-{number}.{field_name}`. Standalone (no store) so read-path callers
+/// that only hold a borrowed graphql client (e.g. the fetch loop) can inject
+/// without owning a client. A missing node id or zero memberships is a no-op.
+pub fn inject_project_fields_for_meta(
+    client: &dyn GhGraphql,
+    repo: &str,
+    issue_map: &IssueMap,
+    config: &Config,
+    meta: &mut DocMeta,
+) -> Result<()> {
+    let boards = membership_board_numbers(config, meta);
+    if boards.is_empty() {
+        return Ok(());
+    }
+    let Some(node_id) = issue_map
+        .get(&meta.id)
+        .map(|e| e.node_id.clone())
+        .filter(|n| !n.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let values = client.project_item_fields(repo, &node_id)?;
+    for v in &values {
+        if !boards.contains(&v.project_number) {
+            continue;
+        }
+        let key = format!("PROJECT-{}.{}", v.project_number, v.field_name);
+        meta.attributes.insert(key, gh::gh_field_to_attr(&v.value));
+    }
+    Ok(())
+}
+
+pub struct GithubIssuesStore {
+    pub client: Box<dyn GhClient>,
     pub root: PathBuf,
     pub repo: String,
     pub config: Config,
@@ -156,7 +439,16 @@ pub struct GithubIssuesStore<G: GhIssueReader + GhIssueWriter + GhGraphql> {
     pub issue_cache: IssueCache,
 }
 
-impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
+impl GithubIssuesStore {
+    /// Downcast the boxed client to a concrete mock for test assertions.
+    #[cfg(test)]
+    fn mock(&self) -> &crate::engine::gh::test_support::MockGhClient {
+        (*self.client)
+            .as_any()
+            .downcast_ref::<crate::engine::gh::test_support::MockGhClient>()
+            .expect("client is a MockGhClient")
+    }
+
     /// Push the current cache file content to GitHub.
     ///
     /// Reads the cache file for `doc_id`, parses its frontmatter and body,
@@ -522,44 +814,13 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
     /// are coerced [`AttrValue`]s (never `Raw`); the board number namespaces the
     /// key so the same field name on two boards cannot collide.
     pub fn inject_project_fields(&self, meta: &mut DocMeta) -> Result<()> {
-        let boards = self.membership_board_numbers(meta);
-        if boards.is_empty() {
-            return Ok(());
-        }
-        let Some(node_id) = self
-            .issue_map
-            .get(&meta.id)
-            .map(|e| e.node_id.clone())
-            .filter(|n| !n.is_empty())
-        else {
-            return Ok(());
-        };
-
-        let values = self.client.project_item_fields(&self.repo, &node_id)?;
-        for v in &values {
-            if !boards.contains(&v.project_number) {
-                continue;
-            }
-            let key = format!("PROJECT-{}.{}", v.project_number, v.field_name);
-            meta.attributes.insert(key, gh::gh_field_to_attr(&v.value));
-        }
-        Ok(())
-    }
-
-    /// The Projects v2 board numbers this doc is a member of, read from its
-    /// `related` relations whose relationship declares `github_native =
-    /// "membership"`. Targets are board doc ids (`PROJECT-n`).
-    fn membership_board_numbers(&self, meta: &DocMeta) -> Vec<u64> {
-        meta.related
-            .iter()
-            .filter(|r| {
-                self.config
-                    .relationship_by_name(&r.rel_type.to_string())
-                    .and_then(|rel| rel.github_native.as_deref())
-                    == Some("membership")
-            })
-            .filter_map(|r| board_number(&r.target).ok())
-            .collect()
+        inject_project_fields_for_meta(
+            self.client.as_graphql(),
+            &self.repo,
+            &self.issue_map,
+            &self.config,
+            meta,
+        )
     }
 
     /// Write (or clear) one `PROJECT-{number}.{field}` project field for the
@@ -678,7 +939,7 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
             return Ok(id);
         }
         let owner = owner_of(&self.repo)?;
-        resolve_project_id_live(&self.client, owner, project_number)
+        resolve_project_id_live(self.client.as_graphql(), owner, project_number)
     }
 
     /// The project item id for the issue (`content_node_id`) on the board with
@@ -716,7 +977,11 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
     ) -> Result<MaterializeResult> {
         let result = self.materialize_subdir(type_def, parent_doc_id)?;
         let plan = result.to_plan(type_def);
-        crate::engine::gh_subissue::reconcile_subissues(&self.client, &self.repo, &plan)?;
+        crate::engine::gh_subissue::reconcile_subissues(
+            self.client.as_graphql(),
+            &self.repo,
+            &plan,
+        )?;
         Ok(result)
     }
 
@@ -767,7 +1032,11 @@ impl<G: GhIssueReader + GhIssueWriter + GhGraphql> GithubIssuesStore<G> {
                 order_index: 0,
             }],
         };
-        crate::engine::gh_subissue::reconcile_subissues(&self.client, &self.repo, &plan)?;
+        crate::engine::gh_subissue::reconcile_subissues(
+            self.client.as_graphql(),
+            &self.repo,
+            &plan,
+        )?;
 
         Ok(created)
     }
@@ -846,7 +1115,7 @@ const PROJECT_ITEM_ID_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on Is
 /// Live org-then-user resolve of a Projects v2 board number to its node id.
 /// Used by the issue store's field-write path when the issue map has no cached
 /// board binding.
-fn resolve_project_id_live<G: GhGraphql>(client: &G, owner: &str, number: u64) -> Result<String> {
+fn resolve_project_id_live(client: &dyn GhGraphql, owner: &str, number: u64) -> Result<String> {
     let (_kind, id_node) = try_org_then_user(
         client,
         PROJECT_NODE_ID_ORG_QUERY,
@@ -865,7 +1134,7 @@ fn resolve_project_id_live<G: GhGraphql>(client: &G, owner: &str, number: u64) -
         .ok_or_else(|| anyhow::anyhow!("Projects v2 board #{} not found under '{}'", number, owner))
 }
 
-impl<G: GhIssueReader + GhIssueWriter + GhGraphql> DocumentStore for GithubIssuesStore<G> {
+impl DocumentStore for GithubIssuesStore {
     fn create(
         &mut self,
         type_def: &TypeDef,
@@ -1221,15 +1490,24 @@ pub fn percent_complete(open: u64, closed: u64) -> Option<u8> {
 /// github-issues backend. Write policy is last-write-wins + refresh: pushes
 /// happen unconditionally, then the milestone is re-read into the cache; there
 /// is no optimistic lock.
-pub struct GithubMilestonesStore<M: gh::GhMilestoneApi> {
-    pub client: M,
+pub struct GithubMilestonesStore {
+    pub client: Box<dyn GhMilestoneClient>,
     pub root: PathBuf,
     pub repo: String,
     pub config: Config,
     pub issue_map: IssueMap,
 }
 
-impl<M: gh::GhMilestoneApi> GithubMilestonesStore<M> {
+impl GithubMilestonesStore {
+    /// Downcast the boxed client to a concrete mock for test assertions.
+    #[cfg(test)]
+    fn mock(&self) -> &crate::engine::gh::test_support::MockGhMilestoneClient {
+        (*self.client)
+            .as_any()
+            .downcast_ref::<crate::engine::gh::test_support::MockGhMilestoneClient>()
+            .expect("client is a MockGhMilestoneClient")
+    }
+
     fn resolve_number(&self, doc_id: &str) -> Result<u64> {
         self.issue_map
             .get(doc_id)
@@ -1279,7 +1557,7 @@ impl<M: gh::GhMilestoneApi> GithubMilestonesStore<M> {
     }
 }
 
-impl<M: gh::GhMilestoneApi> DocumentStore for GithubMilestonesStore<M> {
+impl DocumentStore for GithubMilestonesStore {
     fn create(
         &mut self,
         type_def: &TypeDef,
@@ -1420,7 +1698,7 @@ const CREATE_PROJECT_V2_MUTATION: &str = "mutation($ownerId: ID!, $title: String
 /// Resolve an owner login to its GraphQL node id, trying the organization root
 /// first then the user root (mirrors [`resolve_project_id_live`]). The
 /// `createProjectV2` mutation needs the owner's *node id*, not the login.
-fn resolve_owner_node_id<G: GhGraphql>(client: &G, owner: &str) -> Result<String> {
+fn resolve_owner_node_id(client: &dyn GhGraphql, owner: &str) -> Result<String> {
     let (_kind, id_node) = try_org_then_user(
         client,
         OWNER_NODE_ID_ORG_QUERY,
@@ -1484,15 +1762,24 @@ pub fn board_number(doc_id: &str) -> Result<u64> {
 /// `update`/`set_provenance` resolve the board node id without mutating the
 /// board. The owner type (org vs user) is auto-detected by trying the
 /// organization root first, then falling back to the user root.
-pub struct GithubProjectsStore<G: GhGraphql> {
-    pub client: G,
+pub struct GithubProjectsStore {
+    pub client: Box<dyn GhProjectsClient>,
     pub root: PathBuf,
     pub repo: String,
     pub config: Config,
     pub issue_map: IssueMap,
 }
 
-impl<G: GhGraphql> GithubProjectsStore<G> {
+impl GithubProjectsStore {
+    /// Downcast the boxed client to a concrete mock for test assertions.
+    #[cfg(test)]
+    fn mock(&self) -> &crate::engine::gh::test_support::MockGhClient {
+        (*self.client)
+            .as_any()
+            .downcast_ref::<crate::engine::gh::test_support::MockGhClient>()
+            .expect("client is a MockGhClient")
+    }
+
     /// Resolve a Projects v2 board number to its GraphQL node id. Tries the
     /// organization root first, then the user root. A board number that exists
     /// under neither (both `projectV2` null) is a not-found error. NEVER issues a
@@ -1570,7 +1857,7 @@ impl<G: GhGraphql> GithubProjectsStore<G> {
     }
 }
 
-impl<G: GhGraphql> DocumentStore for GithubProjectsStore<G> {
+impl DocumentStore for GithubProjectsStore {
     fn create(
         &mut self,
         type_def: &TypeDef,
@@ -1579,7 +1866,7 @@ impl<G: GhGraphql> DocumentStore for GithubProjectsStore<G> {
         _body: &str,
     ) -> Result<CreatedDoc> {
         let owner = owner_of(&self.repo)?.to_string();
-        let owner_id = resolve_owner_node_id(&self.client, &owner)?;
+        let owner_id = resolve_owner_node_id(self.client.as_graphql(), &owner)?;
 
         let resp = self.client.graphql(
             CREATE_PROJECT_V2_MUTATION,
@@ -1852,54 +2139,185 @@ fn render_cache_content(meta: &DocMeta, body: &str) -> Result<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn dispatch_for_type<
-    'a,
-    G: GhIssueReader + GhIssueWriter + GhGraphql,
-    R: GitRefOps,
-    M: gh::GhMilestoneApi,
-    P: GhGraphql,
->(
-    type_def: &TypeDef,
-    fs_store: &'a mut FilesystemStore,
-    gh_store: Option<&'a mut GithubIssuesStore<G>>,
-    git_ref_store: Option<&'a mut GitRefStore<R>>,
-    milestone_store: Option<&'a mut GithubMilestonesStore<M>>,
-    projects_store: Option<&'a mut GithubProjectsStore<P>>,
-) -> Result<&'a mut dyn DocumentStore> {
-    match type_def.store {
-        StoreBackend::Filesystem => Ok(fs_store as &mut dyn DocumentStore),
-        StoreBackend::GithubIssues => match gh_store {
-            Some(s) => Ok(s as &mut dyn DocumentStore),
-            None => bail!(
-                "type '{}' uses {} store but no GitHub backend is configured",
-                type_def.name,
-                type_def.store
-            ),
-        },
-        StoreBackend::GithubMilestones => match milestone_store {
-            Some(s) => Ok(s as &mut dyn DocumentStore),
-            None => bail!(
-                "type '{}' uses {} store but no GitHub milestones backend is configured",
-                type_def.name,
-                type_def.store
-            ),
-        },
-        StoreBackend::GithubProjects => match projects_store {
-            Some(s) => Ok(s as &mut dyn DocumentStore),
-            None => bail!(
-                "type '{}' uses {} store but no GitHub projects backend is configured",
-                type_def.name,
-                type_def.store
-            ),
-        },
-        StoreBackend::GitRef => match git_ref_store {
-            Some(s) => Ok(s as &mut dyn DocumentStore),
-            None => bail!(
-                "type '{}' uses git-ref store but no git-ref backend is configured",
-                type_def.name,
-            ),
-        },
+/// A non-generic lookup from a [`StoreBackend`] to the [`DocumentStore`] that
+/// serves it.
+///
+/// This replaces the former `dispatch_for_type` closed generic match, which was
+/// generic over one client type parameter per backend (`G`, `R`, `M`, `P`).
+/// That shape forced every new backend to add another generic parameter and
+/// forced every construction site to name all of them. The registry erases the
+/// concrete client type behind `&mut dyn DocumentStore`, so backends register
+/// by [`StoreBackend`] key and a new backend (e.g. `ClickupTasks`) is added by
+/// registering it, not by growing a generic signature.
+///
+/// The registry owns each backend's store as a boxed trait object. A new
+/// backend (e.g. `ClickupTasks`) is added by registering it in
+/// [`build_registry`], not by growing a generic signature or adding an `if`
+/// branch to every command. Lookup is keyed on [`TypeDef::store`].
+#[derive(Default)]
+pub struct DocumentStoreRegistry {
+    stores: HashMap<StoreBackend, Box<dyn DocumentStore>>,
+}
+
+impl DocumentStoreRegistry {
+    pub fn new() -> Self {
+        Self {
+            stores: HashMap::new(),
+        }
     }
+
+    /// Register the store serving `backend`. A later registration for the same
+    /// backend replaces the earlier one.
+    pub fn register(&mut self, backend: StoreBackend, store: Box<dyn DocumentStore>) {
+        self.stores.insert(backend, store);
+    }
+
+    /// Resolve the store for `type_def`'s backend, or error if no store is
+    /// registered for it.
+    pub fn for_type(&mut self, type_def: &TypeDef) -> Result<&mut dyn DocumentStore> {
+        match self.stores.get_mut(&type_def.store) {
+            Some(store) => Ok(store.as_mut()),
+            None => bail!(
+                "type '{}' uses {} store but no {} backend is registered",
+                type_def.name,
+                type_def.store,
+                type_def.store
+            ),
+        }
+    }
+
+    /// The store registered for `backend`, if any. Primarily for tests that
+    /// assert routing did not touch another backend.
+    #[cfg(test)]
+    pub fn get(&self, backend: StoreBackend) -> Option<&dyn DocumentStore> {
+        self.stores.get(&backend).map(|s| s.as_ref())
+    }
+}
+
+/// Build the production store registry for `root`/`config`: one boxed
+/// [`DocumentStore`] per backend the config can serve. The GitHub backends are
+/// registered only when `[github]` and a repo are configured; the git-ref store
+/// is registered with no reserved number (number reservation is a create-time
+/// concern handled by the caller). This is the single place a new backend is
+/// wired into production `update`/`delete`/`set_provenance` dispatch.
+pub fn build_registry(root: &std::path::Path, config: &Config) -> DocumentStoreRegistry {
+    let mut registry = DocumentStoreRegistry::new();
+
+    registry.register(
+        StoreBackend::Filesystem,
+        Box::new(FilesystemStore {
+            root: root.to_path_buf(),
+            config: config.clone(),
+        }),
+    );
+
+    let github = config.documents.github.as_ref();
+    match github.and_then(|g| g.repo.clone()) {
+        Some(repo) => {
+            let issue_map = IssueMap::load(root).unwrap_or_default();
+            registry.register(
+                StoreBackend::GithubIssues,
+                Box::new(GithubIssuesStore {
+                    client: Box::new(gh::GhCli::new()),
+                    root: root.to_path_buf(),
+                    repo: repo.clone(),
+                    config: config.clone(),
+                    issue_map: issue_map.clone(),
+                    issue_cache: IssueCache::new(root),
+                }),
+            );
+            registry.register(
+                StoreBackend::GithubMilestones,
+                Box::new(GithubMilestonesStore {
+                    client: Box::new(gh::GhCli::new()),
+                    root: root.to_path_buf(),
+                    repo: repo.clone(),
+                    config: config.clone(),
+                    issue_map: issue_map.clone(),
+                }),
+            );
+            registry.register(
+                StoreBackend::GithubProjects,
+                Box::new(GithubProjectsStore {
+                    client: Box::new(gh::GhCli::new()),
+                    root: root.to_path_buf(),
+                    repo,
+                    config: config.clone(),
+                    issue_map,
+                }),
+            );
+        }
+        // No usable GitHub config: register each GitHub backend as a store that
+        // fails on use with the same message the inline dispatch produced, so a
+        // GitHub-backed type still errors clearly (rather than a generic
+        // "backend not registered") without eagerly failing unrelated types.
+        None => {
+            let reason = if github.is_none() {
+                "no [github] config found"
+            } else {
+                "no github.repo configured"
+            };
+            for backend in [
+                StoreBackend::GithubIssues,
+                StoreBackend::GithubMilestones,
+                StoreBackend::GithubProjects,
+            ] {
+                let message = format!("type uses {} store but {}", backend, reason);
+                registry.register(backend, Box::new(UnavailableStore { message }));
+            }
+        }
+    }
+
+    registry.register(
+        StoreBackend::GitRef,
+        Box::new(crate::engine::git_ref_store::GitRefStore {
+            git: Box::new(crate::engine::git_ref::GitCli),
+            root: root.to_path_buf(),
+            config: config.clone(),
+            reserved_number: None,
+        }),
+    );
+
+    // ClickUp is registered the new way (the first backend to do so): a boxed
+    // trait object keyed by [`StoreBackend`], no generic param. The read path is
+    // inline in `cli::fetch`; the write path is a later RFC-056 story, so the
+    // write methods currently fail loudly. The token stays unloaded here to keep
+    // `build_registry` free of keychain I/O on every command; the write path
+    // will load it when it lands.
+    //
+    // Only register the real store when a clickup-tasks type actually exists:
+    // `ClickupHttpClient::new()` eagerly builds a reqwest client (system CA
+    // load), so registering it unconditionally would touch the network stack on
+    // every command and panic in CA-less environments. Mirrors the poll seam's
+    // `has_clickup_types` gate in `tui::infra::event_loop`.
+    let has_clickup_types = config
+        .documents
+        .types
+        .iter()
+        .any(|t| t.store == StoreBackend::ClickupTasks);
+    if has_clickup_types {
+        registry.register(
+            StoreBackend::ClickupTasks,
+            Box::new(ClickupTasksStore {
+                client: Box::new(crate::engine::clickup::ClickupHttpClient::new()),
+                root: root.to_path_buf(),
+                config: config.clone(),
+                token: None,
+            }),
+        );
+    } else {
+        registry.register(
+            StoreBackend::ClickupTasks,
+            Box::new(UnavailableStore {
+                message: format!(
+                    "type uses {} store but no clickup-tasks type is configured",
+                    StoreBackend::ClickupTasks
+                ),
+            }),
+        );
+    }
+
+    registry
 }
 
 #[cfg(test)]
@@ -1908,9 +2326,10 @@ mod tests {
     use crate::engine::config::{Config, NumberingStrategy, StoreBackend, TypeDef};
     use crate::engine::gh::{
         test_support::{MockGhClient, MockGhMilestoneClient},
-        GhIssue, GhLabel, GhMilestoneApi,
+        GhIssue, GhLabel,
     };
     use crate::engine::git_ref::test_support::MockGitRefClient;
+    use crate::engine::git_ref_store::GitRefStore;
     use crate::engine::issue_map::IssueMap;
 
     fn test_type_def(store: StoreBackend) -> TypeDef {
@@ -1933,6 +2352,8 @@ mod tests {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            clickup_list_id: None,
+            clickup_custom_field_map: None,
         }
     }
 
@@ -1983,6 +2404,670 @@ mod tests {
         assert!(!root.join(&created.path).exists());
     }
 
+    fn clickup_type_def(list_id: Option<&str>) -> TypeDef {
+        let mut td = test_type_def(StoreBackend::ClickupTasks);
+        td.name = "task".to_string();
+        td.prefix = "TASK".to_string();
+        td.clickup_list_id = list_id.map(|s| s.to_string());
+        td
+    }
+
+    fn clickup_user() -> crate::engine::clickup::ClickupUser {
+        crate::engine::clickup::ClickupUser {
+            id: 1,
+            username: "Jack".to_string(),
+            email: String::new(),
+        }
+    }
+
+    fn scripted_task(json: &str) -> crate::engine::clickup::ClickupTask {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn clickup_create_posts_task_and_mirrors_to_cache_and_map() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_create");
+        let td = clickup_type_def(Some("list123"));
+
+        let created = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "My task",
+                "status": {"status": "open"},
+                "date_updated": "1774587145901",
+                "markdown_description": "the body",
+                "creator": {"username": "Jack"}
+            }"#,
+        );
+        let fake = FakeClickupClient::valid(clickup_user()).with_created_task(created);
+        let calls = fake.create_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        let result = store
+            .create(&td, "My task", "ignored-author", "the body")
+            .unwrap();
+
+        // Doc id is the type prefix + the returned ClickUp task id.
+        assert_eq!(result.id, "TASK-90abc");
+
+        // The echoed task is materialized into a cache file, github-issues shape.
+        let cache = root.join(".lazyspec/cache/task/TASK-90abc.md");
+        let content = std::fs::read_to_string(&cache).unwrap();
+        assert!(content.contains("title: My task"), "got:\n{content}");
+        assert!(content.contains("status: open"), "got:\n{content}");
+        assert!(content.contains("the body"), "got:\n{content}");
+
+        // The task map records the task id + date_updated (the lock baseline).
+        let map = TaskMap::load(&root).unwrap();
+        let entry = map.get("TASK-90abc").unwrap();
+        assert_eq!(entry.task_id, "90abc");
+        assert_eq!(entry.updated_at, "1774587145901");
+
+        // Exactly one POST, to the bound List, with the mapped payload.
+        let recorded = calls.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "list123");
+        assert_eq!(recorded[0].1.name, "My task");
+        assert_eq!(recorded[0].1.markdown_content, Some("the body".to_string()));
+        // A create sends no status; ClickUp assigns the List default.
+        assert_eq!(recorded[0].1.status, None);
+    }
+
+    #[test]
+    fn clickup_create_without_token_errors() {
+        use crate::engine::clickup::FakeClickupClient;
+
+        let root = tmp_root("clickup_create_no_token");
+        let td = clickup_type_def(Some("list123"));
+        let fake = FakeClickupClient::valid(clickup_user());
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root,
+            config: Config::default(),
+            token: None,
+        };
+
+        let err = store.create(&td, "t", "a", "b").unwrap_err();
+        assert!(err.to_string().contains("setup clickup"), "got: {err}");
+    }
+
+    #[test]
+    fn clickup_create_without_list_id_errors() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_create_no_list");
+        let td = clickup_type_def(None);
+        let fake = FakeClickupClient::valid(clickup_user());
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root,
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        let err = store.create(&td, "t", "a", "b").unwrap_err();
+        assert!(err.to_string().contains("clickup_list_id"), "got: {err}");
+    }
+
+    #[test]
+    fn clickup_update_puts_native_fields_and_round_trips_through_cache() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_update_roundtrip");
+        let td = clickup_type_def(Some("list123"));
+
+        // The doc is already mapped to a ClickUp task (an earlier fetch/create),
+        // with a stale lock baseline the edit must bump.
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1700000000000");
+        map.save(&root).unwrap();
+
+        // ClickUp echoes the *updated* task: new priority/estimate/due and a
+        // fresh date_updated. The round-trip reads these back out of the cache.
+        let updated = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "Renamed task",
+                "status": {"status": "in progress"},
+                "priority": {"priority": "high"},
+                "due_date": "1748541600000",
+                "time_estimate": "3600000",
+                "date_updated": "1774587145901",
+                "markdown_description": "edited body",
+                "creator": {"username": "Jack"}
+            }"#,
+        );
+        // The pre-write optimistic-lock fetch sees the same date_updated the
+        // baseline recorded (no external change), so the write proceeds.
+        let remote_unchanged = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "My task",
+                "status": {"status": "open"},
+                "date_updated": "1700000000000"
+            }"#,
+        );
+        let fake = FakeClickupClient::valid(clickup_user())
+            .with_viewed_task(remote_unchanged)
+            .with_updated_task(updated);
+        let calls = fake.update_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        store
+            .update(
+                &td,
+                "TASK-90abc",
+                &[
+                    ("title", "Renamed task"),
+                    ("body", "edited body"),
+                    ("priority", "high"),
+                    ("due", "1748541600000"),
+                    ("estimate", "3600000"),
+                ],
+            )
+            .unwrap();
+
+        // Exactly one PUT, to the resolved task id, with the mapped native shape.
+        let recorded = calls.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "90abc");
+        let payload = &recorded[0].1;
+        assert_eq!(payload.name, Some("Renamed task".to_string()));
+        assert_eq!(payload.markdown_content, Some("edited body".to_string()));
+        assert_eq!(payload.priority, Some(2));
+        assert_eq!(payload.due_date, Some(1_748_541_600_000));
+        assert_eq!(payload.time_estimate, Some(3_600_000));
+
+        // Round-trip: the cache now reflects the updated native field values.
+        let cache = root.join(".lazyspec/cache/task/TASK-90abc.md");
+        let content = std::fs::read_to_string(&cache).unwrap();
+        assert!(content.contains("title: Renamed task"), "got:\n{content}");
+        assert!(content.contains("priority: high"), "got:\n{content}");
+        assert!(content.contains("estimate: 3600000"), "got:\n{content}");
+        assert!(content.contains("due: 1748541600000"), "got:\n{content}");
+        assert!(content.contains("edited body"), "got:\n{content}");
+
+        // The lock baseline is bumped to the returned task's date_updated.
+        let map = TaskMap::load(&root).unwrap();
+        let entry = map.get("TASK-90abc").unwrap();
+        assert_eq!(entry.task_id, "90abc");
+        assert_eq!(entry.updated_at, "1774587145901");
+    }
+
+    #[test]
+    fn clickup_advance_puts_raw_status_and_round_trips_through_cache() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_advance_status");
+        let td = clickup_type_def(Some("list123"));
+
+        // An existing mapped doc at "open" with a stale lock baseline.
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1700000000000");
+        map.save(&root).unwrap();
+
+        // ClickUp echoes the task at its new status with a fresh date_updated.
+        let advanced = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "My task",
+                "status": {"status": "in progress"},
+                "date_updated": "1774587145901",
+                "markdown_description": "the body",
+                "creator": {"username": "Jack"}
+            }"#,
+        );
+        // The pre-write optimistic-lock fetch matches the baseline, so the
+        // status push proceeds.
+        let remote_unchanged = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "My task",
+                "status": {"status": "open"},
+                "date_updated": "1700000000000"
+            }"#,
+        );
+        let fake = FakeClickupClient::valid(clickup_user())
+            .with_viewed_task(remote_unchanged)
+            .with_updated_task(advanced);
+        let calls = fake.update_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        // An advance is a status-only update; the CLI's local gate is bypassed
+        // for clickup-tasks, so the store simply pushes the raw string.
+        store
+            .update(&td, "TASK-90abc", &[("status", "in progress")])
+            .unwrap();
+
+        // Exactly one PUT, to the resolved task id, carrying the raw status only.
+        let recorded = calls.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "90abc");
+        let payload = &recorded[0].1;
+        assert_eq!(payload.status, Some("in progress".to_string()));
+        // A status-only advance touches no native field.
+        assert_eq!(payload.name, None);
+        assert_eq!(payload.markdown_content, None);
+        assert_eq!(payload.priority, None);
+
+        // Round-trip: the cache now reflects the new raw status verbatim.
+        let cache = root.join(".lazyspec/cache/task/TASK-90abc.md");
+        let content = std::fs::read_to_string(&cache).unwrap();
+        assert!(content.contains("status: in progress"), "got:\n{content}");
+
+        // The lock baseline is bumped to the returned task's date_updated.
+        let map = TaskMap::load(&root).unwrap();
+        let entry = map.get("TASK-90abc").unwrap();
+        assert_eq!(entry.task_id, "90abc");
+        assert_eq!(entry.updated_at, "1774587145901");
+    }
+
+    #[test]
+    fn clickup_update_without_token_errors() {
+        use crate::engine::clickup::FakeClickupClient;
+
+        let root = tmp_root("clickup_update_no_token");
+        let td = clickup_type_def(Some("list123"));
+        let fake = FakeClickupClient::valid(clickup_user());
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root,
+            config: Config::default(),
+            token: None,
+        };
+
+        let err = store
+            .update(&td, "TASK-90abc", &[("priority", "high")])
+            .unwrap_err();
+        assert!(err.to_string().contains("setup clickup"), "got: {err}");
+    }
+
+    #[test]
+    fn clickup_update_unmapped_doc_errors() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_update_unmapped");
+        let td = clickup_type_def(Some("list123"));
+        let fake = FakeClickupClient::valid(clickup_user());
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root,
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        let err = store
+            .update(&td, "TASK-missing", &[("priority", "high")])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not mapped to a ClickUp task"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn clickup_update_rejects_stale_write_and_performs_no_put() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_update_stale_conflict");
+        let td = clickup_type_def(Some("list123"));
+
+        // The doc's recorded baseline lags behind ClickUp: an external change
+        // advanced the task's date_updated after our last fetch.
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1700000000000");
+        map.save(&root).unwrap();
+
+        // The pre-write fetch sees a *newer* date_updated than the baseline.
+        let remote_changed = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "Changed elsewhere",
+                "status": {"status": "in progress"},
+                "date_updated": "1774587145901"
+            }"#,
+        );
+        // No update_task is scripted: if the store reached the PUT it would fail
+        // for a different reason, but the conflict must stop it before that.
+        let fake = FakeClickupClient::valid(clickup_user()).with_viewed_task(remote_changed);
+        let update_calls = fake.update_calls();
+        let view_calls = fake.view_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        let err = store
+            .update(&td, "TASK-90abc", &[("title", "My local edit")])
+            .unwrap_err();
+
+        // The error names the conflict and points at the recovery path.
+        let msg = err.to_string();
+        assert!(msg.contains("changed on ClickUp"), "got: {msg}");
+        assert!(msg.contains("lazyspec fetch"), "got: {msg}");
+
+        // No clobber: the pre-write fetch fired, but no PUT followed.
+        assert_eq!(view_calls.borrow().len(), 1, "expected exactly one GET");
+        assert!(
+            update_calls.borrow().is_empty(),
+            "a conflicting write must not PUT"
+        );
+
+        // The recorded baseline is left untouched -- nothing was overwritten.
+        let map = TaskMap::load(&root).unwrap();
+        assert_eq!(map.get("TASK-90abc").unwrap().updated_at, "1700000000000");
+    }
+
+    #[test]
+    fn clickup_advance_rejects_stale_write_and_performs_no_put() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_advance_stale_conflict");
+        let td = clickup_type_def(Some("list123"));
+
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1700000000000");
+        map.save(&root).unwrap();
+
+        let remote_changed = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "Changed elsewhere",
+                "status": {"status": "review"},
+                "date_updated": "1774587145901"
+            }"#,
+        );
+        let fake = FakeClickupClient::valid(clickup_user()).with_viewed_task(remote_changed);
+        let update_calls = fake.update_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        // An advance routes through update; the optimistic lock guards it too.
+        let err = store
+            .update(&td, "TASK-90abc", &[("status", "in progress")])
+            .unwrap_err();
+
+        assert!(err.to_string().contains("changed on ClickUp"), "got: {err}");
+        assert!(
+            update_calls.borrow().is_empty(),
+            "a conflicting advance must not PUT the status"
+        );
+    }
+
+    #[test]
+    fn clickup_update_proceeds_when_remote_matches_baseline() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_update_lock_ok");
+        let td = clickup_type_def(Some("list123"));
+
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1700000000000");
+        map.save(&root).unwrap();
+
+        // Remote date_updated equals the baseline: no external change, so the
+        // write is allowed through and the PUT fires.
+        let remote_unchanged = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "My task",
+                "status": {"status": "open"},
+                "date_updated": "1700000000000"
+            }"#,
+        );
+        let updated = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "Edited",
+                "status": {"status": "open"},
+                "date_updated": "1774587145901",
+                "markdown_description": "new body"
+            }"#,
+        );
+        let fake = FakeClickupClient::valid(clickup_user())
+            .with_viewed_task(remote_unchanged)
+            .with_updated_task(updated);
+        let update_calls = fake.update_calls();
+        let view_calls = fake.view_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        store
+            .update(&td, "TASK-90abc", &[("body", "new body")])
+            .unwrap();
+
+        // The lock check fetched, then the write proceeded with a single PUT.
+        assert_eq!(view_calls.borrow().len(), 1);
+        assert_eq!(update_calls.borrow().len(), 1);
+
+        // The baseline advanced to the returned task's fresh date_updated.
+        let map = TaskMap::load(&root).unwrap();
+        assert_eq!(map.get("TASK-90abc").unwrap().updated_at, "1774587145901");
+    }
+
+    #[test]
+    fn clickup_update_empty_baseline_skips_lock_check_and_writes() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_update_no_baseline");
+        let td = clickup_type_def(Some("list123"));
+
+        // No baseline timestamp (e.g. a create whose echo carried no
+        // date_updated): there is nothing to race against, so the lock is skipped
+        // and no pre-write GET is issued.
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "");
+        map.save(&root).unwrap();
+
+        let updated = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "Edited",
+                "status": {"status": "open"},
+                "date_updated": "1774587145901",
+                "markdown_description": "new body"
+            }"#,
+        );
+        // get_task is intentionally left unscripted (it would error if called),
+        // proving the empty baseline short-circuits before the fetch.
+        let fake = FakeClickupClient::valid(clickup_user()).with_updated_task(updated);
+        let update_calls = fake.update_calls();
+        let view_calls = fake.view_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        store
+            .update(&td, "TASK-90abc", &[("body", "new body")])
+            .unwrap();
+
+        assert!(view_calls.borrow().is_empty(), "no baseline -> no GET");
+        assert_eq!(update_calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn clickup_delete_archives_task_and_leaves_cache_and_map_for_sync() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_delete_archive");
+        let td = clickup_type_def(Some("list123"));
+
+        // An existing mapped, cached doc (from an earlier fetch/create).
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1774587145901");
+        map.save(&root).unwrap();
+        let cache = root.join(".lazyspec/cache/task/TASK-90abc.md");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, "---\ntitle: My task\n---\nbody\n").unwrap();
+
+        let fake = FakeClickupClient::valid(clickup_user());
+        let archive_calls = fake.archive_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        store.delete(&td, "TASK-90abc").unwrap();
+
+        // Exactly one archive (PUT /task/{id} {"archived":true}) for the resolved
+        // task id; there is no hard-delete method on the client to call.
+        let recorded = archive_calls.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0], "90abc");
+
+        // Archive is not an eager local eviction: the cache file and the map
+        // entry remain, and the next `fetch` (task gone from the list) removes
+        // them (RFC-056 §Design).
+        assert!(
+            cache.exists(),
+            "archive must not eagerly delete the cache file"
+        );
+        let map = TaskMap::load(&root).unwrap();
+        assert!(
+            map.get("TASK-90abc").is_some(),
+            "archive must not eagerly drop the TaskMap entry"
+        );
+    }
+
+    #[test]
+    fn clickup_delete_without_token_errors() {
+        use crate::engine::clickup::FakeClickupClient;
+
+        let root = tmp_root("clickup_delete_no_token");
+        let td = clickup_type_def(Some("list123"));
+        let fake = FakeClickupClient::valid(clickup_user());
+        let archive_calls = fake.archive_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root,
+            config: Config::default(),
+            token: None,
+        };
+
+        let err = store.delete(&td, "TASK-90abc").unwrap_err();
+        assert!(err.to_string().contains("setup clickup"), "got: {err}");
+        assert!(
+            archive_calls.borrow().is_empty(),
+            "a missing token must not archive"
+        );
+    }
+
+    #[test]
+    fn clickup_delete_unmapped_doc_errors() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_delete_unmapped");
+        let td = clickup_type_def(Some("list123"));
+        let fake = FakeClickupClient::valid(clickup_user());
+        let archive_calls = fake.archive_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root,
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        let err = store.delete(&td, "TASK-missing").unwrap_err();
+        assert!(
+            err.to_string().contains("not mapped to a ClickUp task"),
+            "got: {err}"
+        );
+        assert!(
+            archive_calls.borrow().is_empty(),
+            "an unmapped doc must not archive"
+        );
+    }
+
+    #[test]
+    fn clickup_delete_surfaces_archive_error() {
+        use crate::engine::clickup::{ClickupError, FakeClickupClient};
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_delete_archive_err");
+        let td = clickup_type_def(Some("list123"));
+
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1774587145901");
+        map.save(&root).unwrap();
+
+        let fake = FakeClickupClient::valid(clickup_user())
+            .failing_archive(ClickupError::Upstream { status: 500 });
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        let err = store.delete(&td, "TASK-90abc").unwrap_err();
+        assert!(
+            err.to_string().contains("ClickUp server error"),
+            "got: {err}"
+        );
+
+        // A failed archive left the local state intact for a retry.
+        let map = TaskMap::load(&root).unwrap();
+        assert!(map.get("TASK-90abc").is_some());
+    }
+
     #[test]
     fn filesystem_create_and_update() {
         let root = tmp_root("fs_create_update");
@@ -2008,7 +3093,7 @@ mod tests {
     fn github_issues_create_produces_cache_file() {
         let root = tmp_root("gh_create");
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2029,7 +3114,7 @@ mod tests {
         assert!(root.join(&result.path).exists());
 
         // Issue body sent to GH should NOT contain author: in lazyspec comment
-        let create_body = gh_store.client.last_create_body.borrow();
+        let create_body = gh_store.mock().last_create_body.borrow();
         let create_body_str = create_body
             .as_deref()
             .expect("issue_create should have been called");
@@ -2059,7 +3144,7 @@ mod tests {
     fn github_issues_create_updates_issue_map() {
         let root = tmp_root("gh_create_map");
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2082,7 +3167,7 @@ mod tests {
     fn github_issues_create_uses_label_override() {
         let root = tmp_root("gh_create_label_override");
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2095,7 +3180,7 @@ mod tests {
         gh_store.create(&td, "custom", "author", "").unwrap();
 
         assert_eq!(
-            *gh_store.client.last_create_labels.borrow(),
+            *gh_store.mock().last_create_labels.borrow(),
             vec!["Ticket".to_string()]
         );
     }
@@ -2104,7 +3189,7 @@ mod tests {
     fn github_issues_create_persists_issue_map() {
         let root = tmp_root("gh_create_persist");
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2123,7 +3208,7 @@ mod tests {
     fn github_issues_create_increments_id() {
         let root = tmp_root("gh_create_incr");
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2143,7 +3228,7 @@ mod tests {
     fn github_issues_create_uses_prefix_not_name() {
         let root = tmp_root("gh_create_prefix");
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2170,6 +3255,8 @@ mod tests {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            clickup_list_id: None,
+            clickup_custom_field_map: None,
         };
 
         let result = gh_store.create(&td, "test prefix", "author", "").unwrap();
@@ -2224,7 +3311,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2238,7 +3325,7 @@ mod tests {
             .unwrap();
 
         // Re-serialized body sent to GH should not contain author:
-        let captured = gh_store.client.last_edit_body.borrow();
+        let captured = gh_store.mock().last_edit_body.borrow();
         let body_str = captured
             .as_deref()
             .expect("issue_edit should have been called with body");
@@ -2276,7 +3363,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2344,7 +3431,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2359,7 +3446,7 @@ mod tests {
 
         // The body was re-mirrored (issue_edit ran).
         assert!(
-            gh_store.client.last_edit_body.borrow().is_some(),
+            gh_store.mock().last_edit_body.borrow().is_some(),
             "issue_edit should have been called"
         );
 
@@ -2397,7 +3484,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2409,8 +3496,8 @@ mod tests {
         gh_store
             .update(&td, "RFC-001", &[("status", "complete")])
             .unwrap();
-        assert!(gh_store.client.closed.get());
-        assert!(!gh_store.client.reopened.get());
+        assert!(gh_store.mock().closed.get());
+        assert!(!gh_store.mock().reopened.get());
     }
 
     #[test]
@@ -2440,7 +3527,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2452,15 +3539,15 @@ mod tests {
         gh_store
             .update(&td, "RFC-001", &[("status", "draft")])
             .unwrap();
-        assert!(gh_store.client.reopened.get());
-        assert!(!gh_store.client.closed.get());
+        assert!(gh_store.mock().reopened.get());
+        assert!(!gh_store.mock().closed.get());
     }
 
     #[test]
     fn github_issues_update_not_in_map() {
         let root = tmp_root("gh_update_nomap");
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2502,7 +3589,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2513,10 +3600,10 @@ mod tests {
         let td = test_type_def(StoreBackend::GithubIssues);
         gh_store.delete(&td, "RFC-001").unwrap();
 
-        assert!(gh_store.client.closed.get());
-        let title = gh_store.client.last_edit_title.borrow();
+        assert!(gh_store.mock().closed.get());
+        let title = gh_store.mock().last_edit_title.borrow();
         assert_eq!(title.as_deref(), Some("[DELETED] My RFC"));
-        let labels_remove = gh_store.client.last_edit_labels_remove.borrow();
+        let labels_remove = gh_store.mock().last_edit_labels_remove.borrow();
         assert_eq!(*labels_remove, vec!["lazyspec:rfc".to_string()]);
         assert!(gh_store.issue_map.get("RFC-001").is_none());
     }
@@ -2544,7 +3631,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2556,14 +3643,14 @@ mod tests {
         let err = gh_store.delete(&td, "RFC-001").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("has been modified on GitHub"), "got: {}", msg);
-        assert!(!gh_store.client.closed.get());
+        assert!(!gh_store.mock().closed.get());
     }
 
     #[test]
     fn github_issues_delete_not_in_map() {
         let root = tmp_root("gh_delete_nomap");
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2605,7 +3692,7 @@ mod tests {
         assert!(cache_file.exists());
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2621,9 +3708,9 @@ mod tests {
     fn milestone_store(
         root: &std::path::Path,
         client: MockGhMilestoneClient,
-    ) -> GithubMilestonesStore<MockGhMilestoneClient> {
+    ) -> GithubMilestonesStore {
         GithubMilestonesStore {
-            client,
+            client: Box::new(client),
             root: root.to_path_buf(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2644,8 +3731,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(created.id, td.make_id(1));
-        assert_eq!(store.client.create_calls.get(), 1);
-        let ms = &store.client.milestones.borrow()[0];
+        assert_eq!(store.mock().create_calls.get(), 1);
+        let ms = &store.mock().milestones.borrow()[0];
         assert_eq!(ms.title, "v1.0");
         assert_eq!(ms.description, "first release");
 
@@ -2704,7 +3791,7 @@ mod tests {
             )
             .unwrap();
 
-        let edit = store.client.last_edit.borrow();
+        let edit = store.mock().last_edit.borrow();
         let edit = edit.as_ref().unwrap();
         assert_eq!(edit.title.as_deref(), Some("v2.0"));
         assert_eq!(edit.description.as_deref(), Some("new desc"));
@@ -2747,7 +3834,7 @@ mod tests {
             .update(&td, &created.id, &[("status", "complete")])
             .unwrap();
 
-        let edit = store.client.last_edit.borrow();
+        let edit = store.mock().last_edit.borrow();
         assert_eq!(edit.as_ref().unwrap().state.as_deref(), Some("closed"));
 
         let cache = std::fs::read_to_string(root.join(&created.path)).unwrap();
@@ -2774,7 +3861,7 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("percent_complete"), "{err}");
         // No edit was issued.
-        assert!(store.client.last_edit.borrow().is_none());
+        assert!(store.mock().last_edit.borrow().is_none());
     }
 
     #[test]
@@ -2786,7 +3873,7 @@ mod tests {
 
         store.delete(&td, &created.id).unwrap();
 
-        assert!(store.client.milestones.borrow().is_empty());
+        assert!(store.mock().milestones.borrow().is_empty());
         assert!(store.issue_map.get(&created.id).is_none());
         assert!(!root.join(&created.path).exists());
     }
@@ -2795,22 +3882,17 @@ mod tests {
     #[test]
     fn dispatch_routes_to_github_milestones() {
         let root = tmp_root("dispatch_ms");
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config: Config::default(),
         };
-        let mut ms_store = milestone_store(&root, MockGhMilestoneClient::new());
+        let ms_store = milestone_store(&root, MockGhMilestoneClient::new());
 
         let td = test_type_def(StoreBackend::GithubMilestones);
-        let store = dispatch_for_type::<MockGhClient, MockGitRefClient, _, MockGhClient>(
-            &td,
-            &mut fs_store,
-            None,
-            None,
-            Some(&mut ms_store),
-            None,
-        )
-        .unwrap();
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        registry.register(StoreBackend::GithubMilestones, Box::new(ms_store));
+        let store = registry.for_type(&td).unwrap();
         let result = store.create(&td, "dispatched", "author", "");
         assert!(result.is_ok());
     }
@@ -2818,23 +3900,41 @@ mod tests {
     #[test]
     fn dispatch_github_milestones_without_backend_errors() {
         let root = tmp_root("dispatch_no_ms");
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config: Config::default(),
         };
         let td = test_type_def(StoreBackend::GithubMilestones);
-        let result = dispatch_for_type::<
-            MockGhClient,
-            MockGitRefClient,
-            MockGhMilestoneClient,
-            MockGhClient,
-        >(&td, &mut fs_store, None, None, None, None);
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        let result = registry.for_type(&td);
         assert!(result.is_err());
         assert!(result
             .err()
             .unwrap()
             .to_string()
-            .contains("GitHub milestones backend"));
+            .contains("github-milestones backend"));
+    }
+
+    // A project with no clickup-tasks type must not construct a real
+    // ClickupHttpClient (eager reqwest client -> system CA load -> panics in
+    // CA-less/hermetic environments). build_registry registers an
+    // UnavailableStore instead, which errors loudly only on use.
+    #[test]
+    fn build_registry_without_clickup_type_registers_unavailable() {
+        let root = tmp_root("registry_no_clickup");
+        let config = Config::default();
+        let mut registry = build_registry(&root, &config);
+
+        let td = test_type_def(StoreBackend::ClickupTasks);
+        let store = registry.for_type(&td).unwrap();
+        let result = store.create(&td, "x", "author", "");
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("no clickup-tasks type is configured"));
     }
 
     #[test]
@@ -2842,19 +3942,15 @@ mod tests {
         let root = tmp_root("dispatch_fs");
         let config = Config::default();
 
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config,
         };
 
         let td = test_type_def(StoreBackend::Filesystem);
-        let store = dispatch_for_type::<
-            MockGhClient,
-            MockGitRefClient,
-            MockGhMilestoneClient,
-            MockGhClient,
-        >(&td, &mut fs_store, None, None, None, None)
-        .unwrap();
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        let store = registry.for_type(&td).unwrap();
 
         // Should succeed (routed to filesystem)
         let result = store.create(&td, "dispatched", "author", "");
@@ -2866,13 +3962,13 @@ mod tests {
         let root = tmp_root("dispatch_gh");
         let config = Config::default();
 
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config,
         };
 
-        let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+        let gh_store = GithubIssuesStore {
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2881,15 +3977,10 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
-        let store = dispatch_for_type::<_, MockGitRefClient, MockGhMilestoneClient, MockGhClient>(
-            &td,
-            &mut fs_store,
-            Some(&mut gh_store),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        registry.register(StoreBackend::GithubIssues, Box::new(gh_store));
+        let store = registry.for_type(&td).unwrap();
 
         let result = store.create(&td, "dispatched", "author", "");
         assert!(result.is_ok());
@@ -2922,7 +4013,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -2935,7 +4026,7 @@ mod tests {
             .update(&td, "RFC-001", &[("body", "new content")])
             .unwrap();
 
-        let captured = gh_store.client.last_edit_body.borrow();
+        let captured = gh_store.mock().last_edit_body.borrow();
         let body_str = captured
             .as_deref()
             .expect("issue_edit should have been called with body");
@@ -2990,7 +4081,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -3003,13 +4094,13 @@ mod tests {
             .update(&td, "RFC-001", &[("body", "new"), ("status", "complete")])
             .unwrap();
 
-        let captured = gh_store.client.last_edit_body.borrow();
+        let captured = gh_store.mock().last_edit_body.borrow();
         let body_str = captured
             .as_deref()
             .expect("issue_edit should have been called with body");
         assert!(body_str.contains("new"), "body should contain updated text");
         assert!(
-            gh_store.client.closed.get(),
+            gh_store.mock().closed.get(),
             "issue should be closed for status=complete"
         );
     }
@@ -3041,7 +4132,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -3089,7 +4180,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -3102,7 +4193,7 @@ mod tests {
             .merge_relation_to_remote(&td, "RFC-001", "implements", "STORY-001", true)
             .expect("merge must not reject on a stale updated_at");
 
-        let pushed = gh_store.client.last_edit_body.borrow();
+        let pushed = gh_store.mock().last_edit_body.borrow();
         let pushed = pushed.as_ref().expect("issue_edit should run");
         assert!(pushed.contains("REMOTE PROSE LINE"), "got:\n{pushed}");
         assert!(pushed.contains("- implements: STORY-001"), "got:\n{pushed}");
@@ -3163,7 +4254,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -3177,7 +4268,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            gh_store.client.last_edit_body.borrow().is_none(),
+            gh_store.mock().last_edit_body.borrow().is_none(),
             "already-present relation must not trigger an issue_edit"
         );
     }
@@ -3222,24 +4313,21 @@ mod tests {
         let root = tmp_root("dispatch_no_gh");
         let config = Config::default();
 
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config,
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
-        let result = dispatch_for_type::<
-            MockGhClient,
-            MockGitRefClient,
-            MockGhMilestoneClient,
-            MockGhClient,
-        >(&td, &mut fs_store, None, None, None, None);
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        let result = registry.for_type(&td);
         assert!(result.is_err());
         assert!(result
             .err()
             .unwrap()
             .to_string()
-            .contains("no GitHub backend"));
+            .contains("no github-issues backend"));
     }
 
     #[test]
@@ -3247,7 +4335,7 @@ mod tests {
         let root = tmp_root("dispatch_gitref");
         let config = Config::default();
 
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config,
         };
@@ -3255,23 +4343,18 @@ mod tests {
         let mock = MockGitRefClient::new()
             .with_list_result(Ok(vec![]))
             .with_create_ref_commit_result(Ok("abc123".into()));
-        let mut git_ref_store = GitRefStore {
-            git: mock,
+        let git_ref_store = GitRefStore {
+            git: Box::new(mock),
             root: root.clone(),
             config: Config::default(),
             reserved_number: None,
         };
 
         let td = test_type_def(StoreBackend::GitRef);
-        let store = dispatch_for_type::<MockGhClient, _, MockGhMilestoneClient, MockGhClient>(
-            &td,
-            &mut fs_store,
-            None,
-            Some(&mut git_ref_store),
-            None,
-            None,
-        )
-        .unwrap();
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        registry.register(StoreBackend::GitRef, Box::new(git_ref_store));
+        let store = registry.for_type(&td).unwrap();
 
         let result = store.create(&td, "dispatched", "author", "");
         assert!(result.is_ok());
@@ -3282,34 +4365,43 @@ mod tests {
         let root = tmp_root("dispatch_fs_ignores_gitref");
         let config = Config::default();
 
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config,
         };
 
         let mock = MockGitRefClient::new();
-        let mut git_ref_store = GitRefStore {
-            git: mock,
+        let git_ref_store = GitRefStore {
+            git: Box::new(mock),
             root: root.clone(),
             config: Config::default(),
             reserved_number: None,
         };
 
         let td = test_type_def(StoreBackend::Filesystem);
-        let store = dispatch_for_type::<MockGhClient, _, MockGhMilestoneClient, MockGhClient>(
-            &td,
-            &mut fs_store,
-            None,
-            Some(&mut git_ref_store),
-            None,
-            None,
-        )
-        .unwrap();
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        registry.register(StoreBackend::GitRef, Box::new(git_ref_store));
+        let store = registry.for_type(&td).unwrap();
 
         let result = store.create(&td, "dispatched", "author", "");
         assert!(result.is_ok());
+        // The git-ref store is owned by the registry; downcast it back to assert
+        // routing to the filesystem type never touched it.
+        let git_ref_store = registry
+            .get(StoreBackend::GitRef)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<GitRefStore>()
+            .unwrap();
         assert!(
-            git_ref_store.git.calls.borrow().is_empty(),
+            (*git_ref_store.git)
+                .as_any()
+                .downcast_ref::<MockGitRefClient>()
+                .unwrap()
+                .calls
+                .borrow()
+                .is_empty(),
             "GitRefStore should not have been invoked for a Filesystem type"
         );
     }
@@ -3319,18 +4411,15 @@ mod tests {
         let root = tmp_root("dispatch_no_gitref");
         let config = Config::default();
 
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config,
         };
 
         let td = test_type_def(StoreBackend::GitRef);
-        let result = dispatch_for_type::<
-            MockGhClient,
-            MockGitRefClient,
-            MockGhMilestoneClient,
-            MockGhClient,
-        >(&td, &mut fs_store, None, None, None, None);
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        let result = registry.for_type(&td);
         assert!(result.is_err());
         assert!(result
             .err()
@@ -3587,7 +4676,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -3598,7 +4687,7 @@ mod tests {
         let td = test_type_def(StoreBackend::GithubIssues);
         gh_store.push_cache(&td, "RFC-001").unwrap();
 
-        let captured = gh_store.client.last_edit_body.borrow();
+        let captured = gh_store.mock().last_edit_body.borrow();
         let body_str = captured
             .as_deref()
             .expect("issue_edit should have been called");
@@ -3648,7 +4737,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -3661,7 +4750,7 @@ mod tests {
             .set_provenance(&td, "RFC-001", &["A".to_string()])
             .unwrap();
 
-        let captured = gh_store.client.last_edit_body.borrow();
+        let captured = gh_store.mock().last_edit_body.borrow();
         let body_str = captured
             .as_deref()
             .expect("issue_edit should have been called");
@@ -3710,7 +4799,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -3721,7 +4810,7 @@ mod tests {
         let td = test_type_def(StoreBackend::GithubIssues);
         gh_store.set_provenance(&td, "RFC-001", &[]).unwrap();
 
-        let captured = gh_store.client.last_edit_body.borrow();
+        let captured = gh_store.mock().last_edit_body.borrow();
         let body_str = captured
             .as_deref()
             .expect("issue_edit should have been called");
@@ -3931,7 +5020,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -3961,7 +5050,7 @@ mod tests {
             .unwrap();
 
         // Remote body carries the attributes block (clobber-protection sink).
-        let captured = gh_store.client.last_edit_body.borrow();
+        let captured = gh_store.mock().last_edit_body.borrow();
         let body_str = captured.as_deref().expect("issue_edit called");
         assert!(body_str.contains("attributes:"), "got: {body_str}");
         assert!(body_str.contains("owner: jkaloger"));
@@ -4013,7 +5102,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -4035,7 +5124,7 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("estimate"), "got: {err}");
         assert!(
-            gh_store.client.last_edit_body.borrow().is_none(),
+            gh_store.mock().last_edit_body.borrow().is_none(),
             "no remote issue_edit should have fired"
         );
     }
@@ -4085,7 +5174,7 @@ mod tests {
     fn issue_type_store(
         root: &std::path::Path,
         graphql: Vec<serde_json::Value>,
-    ) -> GithubIssuesStore<MockGhClient> {
+    ) -> GithubIssuesStore {
         let view_issue = gh_view_issue_with_lazyspec_body(42, vec!["lazyspec:story"]);
         let client = MockGhClient::new()
             .with_view_issue(view_issue)
@@ -4093,7 +5182,7 @@ mod tests {
         let mut map = IssueMap::load(root).unwrap();
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
         GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.to_path_buf(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -4134,7 +5223,7 @@ mod tests {
             .update(&td, "RFC-001", &[("issue_type", "Bug")])
             .unwrap();
 
-        let calls = gh_store.client.graphql_calls.borrow();
+        let calls = gh_store.mock().graphql_calls.borrow();
         let mutations: Vec<_> = calls
             .iter()
             .filter(|(q, _)| q.contains("updateIssue"))
@@ -4148,7 +5237,7 @@ mod tests {
         );
 
         // The issue-body HTML comment must NOT carry issue_type.
-        let body = gh_store.client.last_edit_body.borrow();
+        let body = gh_store.mock().last_edit_body.borrow();
         let body_str = body.as_deref().expect("issue_edit called");
         assert!(
             !body_str.contains("issue_type"),
@@ -4174,7 +5263,7 @@ mod tests {
             .update(&td, "RFC-001", &[("issue_type", "")])
             .unwrap();
 
-        let calls = gh_store.client.graphql_calls.borrow();
+        let calls = gh_store.mock().graphql_calls.borrow();
         let mutation = calls
             .iter()
             .find(|(q, _)| q.contains("updateIssue"))
@@ -4208,11 +5297,11 @@ mod tests {
             "error must name the invalid value, got: {err}"
         );
         assert!(
-            gh_store.client.graphql_calls.borrow().is_empty(),
+            gh_store.mock().graphql_calls.borrow().is_empty(),
             "zero graphql mutations on invalid issue_type"
         );
         assert!(
-            gh_store.client.last_edit_body.borrow().is_none(),
+            gh_store.mock().last_edit_body.borrow().is_none(),
             "no issue_edit on invalid issue_type"
         );
     }
@@ -4240,7 +5329,7 @@ mod tests {
             "error must name the org-only constraint, got: {err}"
         );
         let mutations = gh_store
-            .client
+            .mock()
             .graphql_calls
             .borrow()
             .iter()
@@ -4248,7 +5337,7 @@ mod tests {
             .count();
         assert_eq!(mutations, 0, "no updateIssue mutation on user account");
         assert!(
-            gh_store.client.last_edit_body.borrow().is_none(),
+            gh_store.mock().last_edit_body.borrow().is_none(),
             "no issue_edit on user account"
         );
     }
@@ -4288,7 +5377,7 @@ mod tests {
 
         // No label add/remove recorded.
         assert!(
-            gh_store.client.last_edit_labels_remove.borrow().is_empty(),
+            gh_store.mock().last_edit_labels_remove.borrow().is_empty(),
             "issue_type write must not remove labels"
         );
 
@@ -4314,10 +5403,10 @@ mod tests {
         };
 
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new().with_graphql_responses(vec![
+            client: Box::new(MockGhClient::new().with_graphql_responses(vec![
                 issue_node_id_response(),
                 serde_json::json!({"data": {"updateIssue": {"issue": {"id": "I_node1"}}}}),
-            ]),
+            ])),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -4330,7 +5419,7 @@ mod tests {
             .unwrap();
         assert_eq!(result.id, "RFC-1");
 
-        let calls = gh_store.client.graphql_calls.borrow();
+        let calls = gh_store.mock().graphql_calls.borrow();
         let mutations: Vec<_> = calls
             .iter()
             .filter(|(q, _)| q.contains("updateIssue"))
@@ -4353,7 +5442,7 @@ mod tests {
         assert_eq!(td.github_issue_type, None);
 
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -4365,9 +5454,9 @@ mod tests {
             .create(&td, "my title", "author", "body text")
             .unwrap();
         assert_eq!(result.id, "RFC-1");
-        assert_eq!(gh_store.client.create_titles.borrow().len(), 1);
+        assert_eq!(gh_store.mock().create_titles.borrow().len(), 1);
         assert!(
-            gh_store.client.graphql_calls.borrow().is_empty(),
+            gh_store.mock().graphql_calls.borrow().is_empty(),
             "no issue_type configured -> zero GraphQL calls"
         );
     }
@@ -4386,7 +5475,7 @@ mod tests {
             ..test_type_def(StoreBackend::GithubIssues)
         };
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -4401,11 +5490,11 @@ mod tests {
             "error must name the invalid value, got: {err}"
         );
         assert!(
-            gh_store.client.create_titles.borrow().is_empty(),
+            gh_store.mock().create_titles.borrow().is_empty(),
             "issue_create must never fire when the type is unresolvable"
         );
         assert!(
-            gh_store.client.graphql_calls.borrow().is_empty(),
+            gh_store.mock().graphql_calls.borrow().is_empty(),
             "zero GraphQL calls on invalid issue_type"
         );
 
@@ -4422,7 +5511,7 @@ mod tests {
             ..test_type_def(StoreBackend::GithubIssues)
         };
         let mut gh_store2 = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root2.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -4437,7 +5526,7 @@ mod tests {
             "error must name the org-only constraint, got: {err2}"
         );
         assert!(
-            gh_store2.client.create_titles.borrow().is_empty(),
+            gh_store2.mock().create_titles.borrow().is_empty(),
             "issue_create must never fire when the type is unresolvable"
         );
     }
@@ -4454,12 +5543,12 @@ mod tests {
         };
 
         let mut store = GithubIssuesStore {
-            client: MockGhClient::new().with_graphql_responses(vec![
+            client: Box::new(MockGhClient::new().with_graphql_responses(vec![
                 issue_node_id_response(),
                 serde_json::json!({"data": {"updateIssue": {"issue": {"id": "I_node1"}}}}),
                 serde_json::json!({"data": {"node": {"subIssues": {"nodes": []}}}}),
                 serde_json::json!({"data": {}}),
-            ]),
+            ])),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -4473,7 +5562,7 @@ mod tests {
             .create_child_subissue(&td, "RFC-1", "Child", "author", "")
             .unwrap();
 
-        let calls = store.client.graphql_calls.borrow();
+        let calls = store.mock().graphql_calls.borrow();
         let mutations: Vec<_> = calls
             .iter()
             .filter(|(q, _)| q.contains("updateIssue"))
@@ -4518,7 +5607,7 @@ mod tests {
         std::fs::write(path, content).unwrap();
     }
 
-    fn subdir_gh_store(root: &std::path::Path, td: &TypeDef) -> GithubIssuesStore<MockGhClient> {
+    fn subdir_gh_store(root: &std::path::Path, td: &TypeDef) -> GithubIssuesStore {
         // The subIssues read (empty) followed by enough generic mutation-OK
         // responses for the add/reprioritize calls the reconcile may issue.
         let mut responses = vec![serde_json::json!({
@@ -4526,7 +5615,7 @@ mod tests {
         })];
         responses.extend(std::iter::repeat_with(|| serde_json::json!({"data": {}})).take(8));
         GithubIssuesStore {
-            client: MockGhClient::new().with_graphql_responses(responses),
+            client: Box::new(MockGhClient::new().with_graphql_responses(responses)),
             root: root.to_path_buf(),
             repo: "owner/repo".to_string(),
             config: subdir_config(td),
@@ -4555,7 +5644,7 @@ mod tests {
         assert!(store.issue_map.get("02-second").is_some());
 
         assert_eq!(
-            store.client.create_titles.borrow().len(),
+            store.mock().create_titles.borrow().len(),
             3,
             "parent + 2 children = 3 issue_create calls"
         );
@@ -4600,7 +5689,7 @@ mod tests {
         let result = store.sync_subissues(&td, "STORY-300").unwrap();
 
         let parent_node = result.parent_node.clone();
-        let calls = store.client.graphql_calls.borrow();
+        let calls = store.mock().graphql_calls.borrow();
         let adds: Vec<_> = calls
             .iter()
             .filter(|(q, _)| q.contains("addSubIssue"))
@@ -4652,7 +5741,7 @@ mod tests {
 
         assert_eq!(result.children.len(), 1, "one CLI-authored child");
         let child_node = result.children[0].node_id.clone();
-        let calls = store.client.graphql_calls.borrow();
+        let calls = store.mock().graphql_calls.borrow();
         let adds: Vec<_> = calls
             .iter()
             .filter(|(q, _)| q.contains("addSubIssue"))
@@ -4682,7 +5771,7 @@ mod tests {
         let result = store.sync_subissues(&td, "STORY-400").unwrap();
 
         // Child routed to GraphQL addSubIssue.
-        let calls = store.client.graphql_calls.borrow();
+        let calls = store.mock().graphql_calls.borrow();
         let adds: Vec<_> = calls
             .iter()
             .filter(|(q, _)| q.contains("addSubIssue"))
@@ -4704,7 +5793,7 @@ mod tests {
         );
 
         // implements lives in the parent issue body produced by issue_body::serialize.
-        let parent_body = store.client.last_create_body.borrow();
+        let parent_body = store.mock().last_create_body.borrow();
         // last_create_body holds the most recent create (the child). Verify the
         // parent's body directly via the serializer instead.
         drop(parent_body);
@@ -4753,11 +5842,11 @@ mod tests {
             .unwrap();
 
         // A real child issue was created.
-        assert_eq!(store.client.create_titles.borrow().len(), 1);
+        assert_eq!(store.mock().create_titles.borrow().len(), 1);
         let child_node = store.issue_map.get(&created.id).unwrap().node_id.clone();
         assert!(!child_node.is_empty());
 
-        let calls = store.client.graphql_calls.borrow();
+        let calls = store.mock().graphql_calls.borrow();
         let adds: Vec<_> = calls
             .iter()
             .filter(|(q, _)| q.contains("addSubIssue"))
@@ -4803,9 +5892,9 @@ mod tests {
     fn projects_store(
         root: &std::path::Path,
         graphql: Vec<serde_json::Value>,
-    ) -> GithubProjectsStore<MockGhClient> {
+    ) -> GithubProjectsStore {
         GithubProjectsStore {
-            client: MockGhClient::new().with_graphql_responses(graphql),
+            client: Box::new(MockGhClient::new().with_graphql_responses(graphql)),
             root: root.to_path_buf(),
             repo: "my-org/repo".to_string(),
             config: Config::default(),
@@ -4867,7 +5956,7 @@ mod tests {
         let created = store.create(&td, "My Board", "", "").unwrap();
         assert_eq!(created.id, "PROJECT-42");
 
-        let calls = store.client.graphql_calls.borrow();
+        let calls = store.mock().graphql_calls.borrow();
         // First call resolves the owner node id via the organization root.
         assert!(
             calls[0].0.contains("organization") && calls[0].0.contains("id"),
@@ -4936,13 +6025,13 @@ mod tests {
         let td = projects_type_def();
         store.create(&td, "My Board", "", "").unwrap();
 
-        let calls_before = store.client.graphql_calls.borrow().len();
+        let calls_before = store.mock().graphql_calls.borrow().len();
         let entry = store.issue_map.get("PROJECT-42").unwrap();
         assert_eq!(entry.node_id, "PVT_42");
         // The binding came from the create response; the issue map read does not
         // touch graphql.
         assert_eq!(
-            store.client.graphql_calls.borrow().len(),
+            store.mock().graphql_calls.borrow().len(),
             calls_before,
             "reading the cached binding must not issue graphql"
         );
@@ -4966,7 +6055,7 @@ mod tests {
         let created = store.create(&td, "User Board", "", "").unwrap();
         assert_eq!(created.id, "PROJECT-7");
 
-        let calls = store.client.graphql_calls.borrow();
+        let calls = store.mock().graphql_calls.borrow();
         assert!(
             calls[0].0.contains("organization"),
             "first owner query is the organization root"
@@ -4994,7 +6083,7 @@ mod tests {
 
         store.set_provenance(&td, "PROJECT-7", &[]).unwrap();
 
-        let calls = store.client.graphql_calls.borrow();
+        let calls = store.mock().graphql_calls.borrow();
         assert_eq!(calls.len(), 1, "one org query, nothing else");
         assert!(
             calls[0].0.contains("organization") && calls[0].0.contains("projectV2"),
@@ -5023,7 +6112,7 @@ mod tests {
         let err = store.resolve_board("my-org", 99).unwrap_err();
         assert!(err.to_string().contains("not found"), "got: {err}");
 
-        let calls = store.client.graphql_calls.borrow();
+        let calls = store.mock().graphql_calls.borrow();
         assert!(
             !calls
                 .iter()
@@ -5048,45 +6137,37 @@ mod tests {
     #[test]
     fn dispatch_routes_to_github_projects() {
         let root = tmp_root("dispatch_proj");
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config: Config::default(),
         };
-        let mut proj_store = projects_store(&root, vec![org_board_response("PVT_x")]);
+        let proj_store = projects_store(&root, vec![org_board_response("PVT_x")]);
 
         let td = projects_type_def();
-        let store = dispatch_for_type::<MockGhClient, MockGitRefClient, MockGhMilestoneClient, _>(
-            &td,
-            &mut fs_store,
-            None,
-            None,
-            None,
-            Some(&mut proj_store),
-        )
-        .unwrap();
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        registry.register(StoreBackend::GithubProjects, Box::new(proj_store));
+        let store = registry.for_type(&td).unwrap();
         assert!(store.update(&td, "PROJECT-1", &[]).is_ok());
     }
 
     #[test]
     fn dispatch_github_projects_without_backend_errors() {
         let root = tmp_root("dispatch_no_proj");
-        let mut fs_store = FilesystemStore {
+        let fs_store = FilesystemStore {
             root: root.clone(),
             config: Config::default(),
         };
         let td = projects_type_def();
-        let result = dispatch_for_type::<
-            MockGhClient,
-            MockGitRefClient,
-            MockGhMilestoneClient,
-            MockGhClient,
-        >(&td, &mut fs_store, None, None, None, None);
+        let mut registry = DocumentStoreRegistry::new();
+        registry.register(StoreBackend::Filesystem, Box::new(fs_store));
+        let result = registry.for_type(&td);
         assert!(result.is_err());
         assert!(result
             .err()
             .unwrap()
             .to_string()
-            .contains("GitHub projects backend"));
+            .contains("github-projects backend"));
     }
 
     #[test]
@@ -5103,7 +6184,7 @@ mod tests {
         map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
 
         let mut gh_store = GithubIssuesStore {
-            client: MockGhClient::new(),
+            client: Box::new(MockGhClient::new()),
             root: root.clone(),
             repo: "owner/repo".to_string(),
             config: Config::default(),
@@ -5164,12 +6245,9 @@ mod tests {
         }
     }
 
-    fn issues_store_with(
-        root: &std::path::Path,
-        client: MockGhClient,
-    ) -> GithubIssuesStore<MockGhClient> {
+    fn issues_store_with(root: &std::path::Path, client: MockGhClient) -> GithubIssuesStore {
         GithubIssuesStore {
-            client,
+            client: Box::new(client),
             root: root.to_path_buf(),
             repo: "my-org/repo".to_string(),
             config: membership_relationship_config(),
@@ -5303,10 +6381,7 @@ mod tests {
         ]}}}})
     }
 
-    fn update_doc_with_attr(
-        value: &str,
-        root: &std::path::Path,
-    ) -> GithubIssuesStore<MockGhClient> {
+    fn update_doc_with_attr(value: &str, root: &std::path::Path) -> GithubIssuesStore {
         write_status_snapshot(root);
         // Responses: project node-id resolve (org), then item-id lookup.
         let client = MockGhClient::new().with_graphql_responses(vec![
@@ -5354,7 +6429,7 @@ mod tests {
         let root = tmp_root("iter217_write_select");
         let store = update_doc_with_attr("In Progress", &root);
 
-        let updates = store.client.field_updates.borrow();
+        let updates = store.mock().field_updates.borrow();
         assert_eq!(updates.len(), 1, "one field update");
         let (project_id, item_id, field_id, value) = &updates[0];
         assert_eq!(project_id, "PVT_board1");
@@ -5366,7 +6441,7 @@ mod tests {
             json,
             serde_json::json!({"singleSelectOptionId": "opt_inprog"})
         );
-        assert!(store.client.field_clears.borrow().is_empty());
+        assert!(store.mock().field_clears.borrow().is_empty());
     }
 
     // AC4: iteration write records exactly {iterationId}.
@@ -5424,7 +6499,7 @@ mod tests {
             .update(&td, "STORY-7", &[("PROJECT-1.Sprint", "Sprint 4")])
             .unwrap();
 
-        let updates = store.client.field_updates.borrow();
+        let updates = store.mock().field_updates.borrow();
         assert_eq!(updates.len(), 1);
         let json = serde_json::to_value(&updates[0].3).unwrap();
         assert_eq!(json, serde_json::json!({"iterationId": "iter_4"}));
@@ -5438,10 +6513,10 @@ mod tests {
         let store = update_doc_with_attr("", &root);
 
         assert!(
-            store.client.field_updates.borrow().is_empty(),
+            store.mock().field_updates.borrow().is_empty(),
             "no update mutation on clear"
         );
-        let clears = store.client.field_clears.borrow();
+        let clears = store.mock().field_clears.borrow();
         assert_eq!(clears.len(), 1, "one clear mutation");
         assert_eq!(
             clears[0],
@@ -5525,7 +6600,7 @@ mod tests {
             let key = format!("PROJECT-1.{}", field);
             store.update(&td, "STORY-7", &[(&key, raw)]).unwrap();
 
-            let updates = store.client.field_updates.borrow();
+            let updates = store.mock().field_updates.borrow();
             assert_eq!(updates.len(), 1, "{}: one update", data_type);
             let json = serde_json::to_value(&updates[0].3).unwrap();
             assert_eq!(json, expected, "{} value object", data_type);
@@ -5571,11 +6646,11 @@ mod tests {
             .update(&td, "STORY-7", &[("PROJECT-1.Status", "Frozen")])
             .unwrap_err();
         assert!(err.to_string().contains("unknown option"), "got: {}", err);
-        assert!(store.client.field_updates.borrow().is_empty());
-        assert!(store.client.field_clears.borrow().is_empty());
+        assert!(store.mock().field_updates.borrow().is_empty());
+        assert!(store.mock().field_clears.borrow().is_empty());
         // Only the check_lock issue_view read happened; no project/item graphql.
         assert!(
-            store.client.graphql_calls.borrow().is_empty(),
+            store.mock().graphql_calls.borrow().is_empty(),
             "no project/item graphql lookups before offline reject"
         );
     }

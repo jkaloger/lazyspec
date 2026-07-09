@@ -1,5 +1,7 @@
 use crate::cli::json::doc_to_json;
+use crate::engine::clickup::ClickupHttpClient;
 use crate::engine::config::{validate_status, Config, StoreBackend, ValidationRule};
+use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::document::Status;
 use crate::engine::document::{split_frontmatter, DocMeta, DocType};
 use crate::engine::fs_ops;
@@ -10,7 +12,9 @@ use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::reservation;
 use crate::engine::store::{Filter, Store};
-use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore, GithubMilestonesStore};
+use crate::engine::store_dispatch::{
+    ClickupTasksStore, DocumentStore, GithubIssuesStore, GithubMilestonesStore,
+};
 use anyhow::{anyhow, bail, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -126,7 +130,7 @@ pub fn run_with_body(
             )
         })?;
         let mut store = GithubIssuesStore {
-            client: GhCli::new(),
+            client: Box::new(GhCli::new()),
             root: root.to_path_buf(),
             repo: repo.clone(),
             config: config.clone(),
@@ -151,7 +155,7 @@ pub fn run_with_body(
             )
         })?;
         let mut store = GithubMilestonesStore {
-            client: GhCli::new(),
+            client: Box::new(GhCli::new()),
             root: root.to_path_buf(),
             repo: repo.clone(),
             config: config.clone(),
@@ -175,7 +179,7 @@ pub fn run_with_body(
             )
         })?;
         let mut store = crate::engine::store_dispatch::GithubProjectsStore {
-            client: GhCli::new(),
+            client: Box::new(GhCli::new()),
             root: root.to_path_buf(),
             repo: repo.clone(),
             config: config.clone(),
@@ -201,10 +205,33 @@ pub fn run_with_body(
             None
         };
         let mut store = GitRefStore {
-            git: GitCli,
+            git: Box::new(GitCli),
             root: root.to_path_buf(),
             config: config.clone(),
             reserved_number,
+        };
+        let created = store.create(type_def, title, author, body.unwrap_or(""))?;
+        return Ok(root.join(&created.path));
+    }
+
+    if type_def.store == StoreBackend::ClickupTasks {
+        // The registry leaves the ClickUp store's token unloaded to keep
+        // registry construction free of keychain I/O; the write path loads it
+        // here, from the global credential store (keychain-first, file
+        // fallback), never a repo-local file.
+        let token = LayeredCredentialStore::global()
+            .load_clickup_token()?
+            .ok_or_else(|| {
+                anyhow!(
+                    "no ClickUp token found; run `lazyspec setup clickup` before creating \
+                     clickup-tasks documents"
+                )
+            })?;
+        let mut store = ClickupTasksStore {
+            client: Box::new(ClickupHttpClient::new()),
+            root: root.to_path_buf(),
+            config: config.clone(),
+            token: Some(token),
         };
         let created = store.create(type_def, title, author, body.unwrap_or(""))?;
         return Ok(root.join(&created.path));
@@ -295,7 +322,7 @@ fn create_with_parent(
             )
         })?;
         let mut gh_store = GithubIssuesStore {
-            client: GhCli::new(),
+            client: Box::new(GhCli::new()),
             root: root.to_path_buf(),
             repo: repo.clone(),
             config: config.clone(),

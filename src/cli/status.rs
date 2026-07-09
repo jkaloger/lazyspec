@@ -5,6 +5,7 @@ use crate::cli::style::type_header;
 use crate::engine::config::Config;
 use crate::engine::document::{DocMeta, DocType};
 use crate::engine::gh::GhIssueReader;
+use crate::engine::status_colors::StatusColors;
 use crate::engine::store::Store;
 use std::path::Path;
 
@@ -49,6 +50,7 @@ pub fn run_human(store: &Store) -> String {
 
     all_docs.sort_by(|a, b| DocMeta::sort_by_date(a, b));
 
+    let colors = StatusColors::load(store.root()).unwrap_or_default();
     let mut output = String::new();
     let type_order = [
         DocType::new(DocType::RFC),
@@ -74,7 +76,7 @@ pub fn run_human(store: &Store) -> String {
         for doc in &group {
             output.push_str(&format!(
                 "  {}\n",
-                doc_card(&doc.title, &doc.doc_type, &doc.status, &doc.path)
+                doc_card(&colors, &doc.title, &doc.doc_type, &doc.status, &doc.path)
             ));
         }
     }

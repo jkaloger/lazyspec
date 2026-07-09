@@ -2,9 +2,12 @@ use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 use lazyspec::cli::provenance::ProvenanceCommand;
 use lazyspec::cli::reservations::ReservationsCommand;
+use lazyspec::cli::setup::SetupCommand;
 use lazyspec::cli::skills::SkillsCommand;
 use lazyspec::cli::{Cli, Commands};
+use lazyspec::engine::clickup::ClickupHttpClient;
 use lazyspec::engine::config::{Config, StoreBackend};
+use lazyspec::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use lazyspec::engine::fs::RealFileSystem;
 use lazyspec::engine::gh::GhCli;
 use lazyspec::engine::git_ref::GitCli;
@@ -99,20 +102,46 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Fetch { json, doc_type }) => {
             let gh = GhCli::new();
             let git_ref_ops = GitCli;
+            let clickup = ClickupHttpClient::new();
+            // Only touch the credential store when a clickup-tasks type is
+            // actually configured, so github-only projects never trigger
+            // keychain access on `fetch`.
+            let clickup_token = if config
+                .documents
+                .types
+                .iter()
+                .any(|t| t.store == lazyspec::engine::config::StoreBackend::ClickupTasks)
+            {
+                LayeredCredentialStore::global()
+                    .load_clickup_token()
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
             lazyspec::cli::fetch::run(
                 &cwd,
                 &config,
                 &gh,
                 &git_ref_ops,
+                &clickup,
+                clickup_token.as_ref(),
                 "origin",
                 doc_type.as_deref(),
                 json,
             )?;
         }
-        Some(Commands::Setup) => {
-            let gh = GhCli::new();
-            lazyspec::cli::setup::run(&cwd, &config, &gh)?;
-        }
+        Some(Commands::Setup { command }) => match command {
+            None => {
+                let gh = GhCli::new();
+                lazyspec::cli::setup::run(&cwd, &config, &gh)?;
+            }
+            Some(SetupCommand::Clickup { token, json }) => {
+                let client = ClickupHttpClient::new();
+                let store = LayeredCredentialStore::global();
+                lazyspec::cli::setup::run_clickup(&client, &store, token, json)?;
+            }
+        },
         Some(Commands::Create {
             doc_type,
             title,

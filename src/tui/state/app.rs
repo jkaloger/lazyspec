@@ -2647,6 +2647,8 @@ impl App {
                     label_override: None,
                     github_issue_tag: None,
                     github_issue_type: None,
+                    clickup_list_id: None,
+                    clickup_custom_field_map: None,
                 });
                 self.settings_entry = self.settings_buffer.documents.types.len() - 1;
             }
@@ -8257,12 +8259,14 @@ center = ["warnings"]
     /// Render the graph view into a fresh TestBackend and flatten the buffer to
     /// a single string.
     fn render_graph_to_string(app: &mut App, w: u16, h: u16, config: &Config) -> String {
+        use crate::engine::status_colors::StatusColors;
         use crate::tui::views::panels::draw_graph;
         use ratatui::{backend::TestBackend, Terminal};
 
+        let colors = StatusColors::default();
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal
-            .draw(|f| draw_graph(f, app, f.area(), config))
+            .draw(|f| draw_graph(f, app, f.area(), config, &colors))
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
         (0..buffer.area.height)

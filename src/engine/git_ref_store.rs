@@ -6,7 +6,7 @@ use chrono::Local;
 use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{Config, TypeDef};
 use crate::engine::document::{compose_frontmatter, split_frontmatter, DocMeta, DocType, Status};
-use crate::engine::git_ref::GitRefOps;
+use crate::engine::git_ref::GitRefClient;
 use crate::engine::store_dispatch::{find_cache_file, write_cache_file, CreatedDoc, DocumentStore};
 
 fn ensure_cache_gitignored(root: &Path) -> Result<()> {
@@ -29,14 +29,23 @@ fn ensure_cache_gitignored(root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub struct GitRefStore<R: GitRefOps> {
-    pub git: R,
+pub struct GitRefStore {
+    pub git: Box<dyn GitRefClient>,
     pub root: PathBuf,
     pub config: Config,
     pub reserved_number: Option<u32>,
 }
 
-impl<R: GitRefOps> GitRefStore<R> {
+impl GitRefStore {
+    /// Downcast the boxed client to a concrete mock for test assertions.
+    #[cfg(test)]
+    fn git_mock(&self) -> &crate::engine::git_ref::test_support::MockGitRefClient {
+        (*self.git)
+            .as_any()
+            .downcast_ref::<crate::engine::git_ref::test_support::MockGitRefClient>()
+            .expect("git client is a MockGitRefClient")
+    }
+
     fn ref_prefix(type_name: &str) -> String {
         format!("refs/lazyspec/{}/", type_name)
     }
@@ -87,7 +96,7 @@ impl<R: GitRefOps> GitRefStore<R> {
     }
 }
 
-impl<R: GitRefOps> DocumentStore for GitRefStore<R> {
+impl DocumentStore for GitRefStore {
     fn create(
         &mut self,
         type_def: &TypeDef,
@@ -363,6 +372,8 @@ mod tests {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            clickup_list_id: None,
+            clickup_custom_field_map: None,
         }
     }
 
@@ -394,9 +405,9 @@ mod tests {
         }
     }
 
-    fn make_store(tmp: &TempDir, mock: MockGitRefClient) -> GitRefStore<MockGitRefClient> {
+    fn make_store(tmp: &TempDir, mock: MockGitRefClient) -> GitRefStore {
         GitRefStore {
-            git: mock,
+            git: Box::new(mock),
             root: tmp.path().to_path_buf(),
             config: test_config(),
             reserved_number: None,
@@ -432,7 +443,7 @@ mod tests {
         let lock = CacheLock::load(tmp.path()).unwrap();
         assert_eq!(lock.get("iteration/ITERATION-001"), Some("abc123sha"));
 
-        let calls = store.git.calls.borrow();
+        let calls = store.git_mock().calls.borrow();
         assert!(calls.iter().any(|c| c.starts_with("list_refs:")));
         assert!(calls
             .iter()
@@ -498,7 +509,7 @@ mod tests {
         let lock = CacheLock::load(tmp.path()).unwrap();
         assert_eq!(lock.get("iteration/ITERATION-042"), Some("newsha456"));
 
-        let calls = store.git.calls.borrow();
+        let calls = store.git_mock().calls.borrow();
         let create_call = calls
             .iter()
             .find(|c| c.starts_with("create_commit:"))
@@ -584,7 +595,7 @@ mod tests {
             "lock entry should be removed"
         );
 
-        let calls = store.git.calls.borrow();
+        let calls = store.git_mock().calls.borrow();
         assert!(calls
             .iter()
             .any(|c| c == "delete_ref:refs/lazyspec/iteration/ITERATION-042"));
@@ -666,7 +677,7 @@ mod tests {
             MockGitRefClient::new().with_create_ref_commit_result(Ok("sha_reserved".to_string()));
 
         let mut store = GitRefStore {
-            git: mock,
+            git: Box::new(mock),
             root: tmp.path().to_path_buf(),
             config: test_config(),
             reserved_number: Some(42),
@@ -676,7 +687,7 @@ mod tests {
 
         assert_eq!(result.id, "ITERATION-042");
 
-        let calls = store.git.calls.borrow();
+        let calls = store.git_mock().calls.borrow();
         assert!(
             !calls.iter().any(|c| c.starts_with("list_refs:")),
             "should not call list_refs when reserved_number is set, got: {:?}",
@@ -699,7 +710,7 @@ mod tests {
             .with_create_ref_commit_result(Ok("sha_fallback".to_string()));
 
         let mut store = GitRefStore {
-            git: mock,
+            git: Box::new(mock),
             root: tmp.path().to_path_buf(),
             config: test_config(),
             reserved_number: None,
@@ -709,7 +720,7 @@ mod tests {
 
         assert_eq!(result.id, "ITERATION-004");
 
-        let calls = store.git.calls.borrow();
+        let calls = store.git_mock().calls.borrow();
         assert!(
             calls.iter().any(|c| c.starts_with("list_refs:")),
             "should call list_refs when no reserved_number"
@@ -737,7 +748,7 @@ mod tests {
             .with_push_result(Ok(()));
 
         let mut store = GitRefStore {
-            git: mock,
+            git: Box::new(mock),
             root: tmp.path().to_path_buf(),
             config: test_config_with_coordination(),
             reserved_number: None,
@@ -745,7 +756,7 @@ mod tests {
         let td = test_type_def();
         store.create(&td, "Pushed Doc", "alice", "").unwrap();
 
-        let calls = store.git.calls.borrow();
+        let calls = store.git_mock().calls.borrow();
         assert!(
             calls
                 .iter()
@@ -766,7 +777,7 @@ mod tests {
         let td = test_type_def();
         store.create(&td, "Local Doc", "alice", "").unwrap();
 
-        let calls = store.git.calls.borrow();
+        let calls = store.git_mock().calls.borrow();
         assert!(
             !calls.iter().any(|c| c.starts_with("push_ref:")),
             "should not push without coordination, got: {:?}",
@@ -795,7 +806,7 @@ mod tests {
             .with_push_result(Ok(()));
 
         let mut store = GitRefStore {
-            git: mock,
+            git: Box::new(mock),
             root: tmp.path().to_path_buf(),
             config: test_config_with_coordination(),
             reserved_number: None,
@@ -804,7 +815,7 @@ mod tests {
             .update(&td, "ITERATION-042", &[("status", "accepted")])
             .unwrap();
 
-        let calls = store.git.calls.borrow();
+        let calls = store.git_mock().calls.borrow();
         assert!(
             calls
                 .iter()
@@ -834,14 +845,14 @@ mod tests {
             .with_delete_ref_result(Ok(()));
 
         let mut store = GitRefStore {
-            git: mock,
+            git: Box::new(mock),
             root: tmp.path().to_path_buf(),
             config: test_config_with_coordination(),
             reserved_number: None,
         };
         store.delete(&td, "ITERATION-042").unwrap();
 
-        let calls = store.git.calls.borrow();
+        let calls = store.git_mock().calls.borrow();
         assert!(
             calls
                 .iter()
@@ -947,7 +958,7 @@ mod tests {
             .set_provenance(&td, "ITERATION-042", &["A".to_string()])
             .unwrap();
 
-        let calls = store.git.calls.borrow();
+        let calls = store.git_mock().calls.borrow();
         let create_call = calls
             .iter()
             .find(|c| c.starts_with("create_commit:"))
@@ -983,7 +994,7 @@ mod tests {
             .with_push_result(Err(anyhow::anyhow!("non-fast-forward")));
 
         let mut store = GitRefStore {
-            git: mock,
+            git: Box::new(mock),
             root: tmp.path().to_path_buf(),
             config: test_config_with_coordination(),
             reserved_number: None,
@@ -998,7 +1009,7 @@ mod tests {
             err_msg
         );
 
-        let calls = store.git.calls.borrow();
+        let calls = store.git_mock().calls.borrow();
         let update_ref_calls: Vec<&String> = calls
             .iter()
             .filter(|c| c.starts_with("update_ref:"))
@@ -1055,7 +1066,7 @@ mod tests {
             .with_push_result(Err(anyhow::anyhow!("non-fast-forward")));
 
         let mut store = GitRefStore {
-            git: mock,
+            git: Box::new(mock),
             root: tmp.path().to_path_buf(),
             config: test_config_with_coordination(),
             reserved_number: None,
@@ -1073,7 +1084,7 @@ mod tests {
             err_msg
         );
 
-        let calls = store.git.calls.borrow();
+        let calls = store.git_mock().calls.borrow();
         let update_ref_calls: Vec<&String> = calls
             .iter()
             .filter(|c| c.starts_with("update_ref:"))
@@ -1127,7 +1138,7 @@ mod tests {
             MockGitRefClient::new().with_delete_remote_result(Err(anyhow::anyhow!("network down")));
 
         let mut store = GitRefStore {
-            git: mock,
+            git: Box::new(mock),
             root: tmp.path().to_path_buf(),
             config: test_config_with_coordination(),
             reserved_number: None,
@@ -1162,7 +1173,7 @@ mod tests {
             "lock entry should still be present with original SHA"
         );
 
-        let calls = store.git.calls.borrow();
+        let calls = store.git_mock().calls.borrow();
         assert!(
             calls
                 .iter()
@@ -1199,7 +1210,7 @@ mod tests {
         let mut store = make_store(&tmp, mock);
         store.delete(&td, "ITERATION-042").unwrap();
 
-        let calls = store.git.calls.borrow();
+        let calls = store.git_mock().calls.borrow();
         assert!(
             !calls.iter().any(|c| c.starts_with("delete_remote_ref:")),
             "should not touch remote without coordination, got: {:?}",

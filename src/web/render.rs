@@ -8,6 +8,7 @@ use askama::Template;
 use crate::engine::context::ResolvedContext;
 use crate::engine::document::DocMeta;
 use crate::engine::graph::GraphNode;
+use crate::engine::status_colors::StatusColors;
 use crate::engine::store::{extract_id_from_name, Store};
 
 /// Size of the categorical tag palette; `tag_hue` returns a value in `0..TAG_HUES`.
@@ -24,6 +25,9 @@ pub struct DocRow {
     pub id: String,
     pub title: String,
     pub status: String,
+    /// ClickUp-derived hex for this type+status, emitted as an inline
+    /// `--status-color` on the swatch; `None` falls back to the name-keyed CSS.
+    pub status_color: Option<String>,
     pub tags: Vec<TagChip>,
 }
 
@@ -127,6 +131,7 @@ pub struct ContextEntry {
     pub id: String,
     pub doc_type: String,
     pub status: String,
+    pub status_color: Option<String>,
     pub title: String,
 }
 
@@ -140,6 +145,7 @@ pub struct DocPage {
     pub title: String,
     pub doc_type: String,
     pub status: String,
+    pub status_color: Option<String>,
     pub author: String,
     pub date: String,
     pub tags: Vec<TagChip>,
@@ -169,13 +175,15 @@ impl DocPage {
     /// `body_html` is the already-expanded, already-rendered HTML body;
     /// `github_url` is the resolved outbound deep-link, or `None`. `context` is
     /// the resolved anchored context (`None` when resolution failed; the page
-    /// then renders with empty context groups rather than erroring).
+    /// then renders with empty context groups rather than erroring). `colors` is
+    /// the ClickUp-derived status-colour cache, loaded once by the route.
     pub fn from_doc(
         doc: &DocMeta,
         store: &Store,
         body_html: String,
         github_url: Option<String>,
         context: Option<&ResolvedContext>,
+        colors: &StatusColors,
     ) -> Self {
         let relations = doc
             .related
@@ -208,6 +216,9 @@ impl DocPage {
             id: d.id.clone(),
             doc_type: d.doc_type.to_string(),
             status: d.status.to_string(),
+            status_color: colors
+                .get(&d.doc_type.to_string(), &d.status.to_string())
+                .map(str::to_string),
             title: d.title.clone(),
         };
         let (ancestors, descendants, related) = match context {
@@ -228,6 +239,9 @@ impl DocPage {
             title: doc.title.clone(),
             doc_type: doc.doc_type.to_string(),
             status: doc.status.to_string(),
+            status_color: colors
+                .get(&doc.doc_type.to_string(), &doc.status.to_string())
+                .map(str::to_string),
             author: doc.author.clone(),
             date: doc.date.to_string(),
             tags: doc
@@ -276,6 +290,7 @@ pub struct GraphTreeNode {
     pub title: String,
     pub doc_type: String,
     pub status: String,
+    pub status_color: Option<String>,
     pub depth: usize,
     pub related: Vec<String>,
     pub children: Vec<GraphTreeNode>,
@@ -295,8 +310,9 @@ impl GraphTreeNode {
     /// list is a pre-order DFS where `depth` increases by one when descending into
     /// a child and drops back when a subtree ends; this folds it back into nested
     /// `children` without re-running any ordering (the engine already fixed the
-    /// order, diamond/cycle handling included).
-    pub fn nest(flat: &[GraphNode]) -> Vec<GraphTreeNode> {
+    /// order, diamond/cycle handling included). `colors` is the ClickUp-derived
+    /// status-colour cache, loaded once by the route.
+    pub fn nest(flat: &[GraphNode], colors: &StatusColors) -> Vec<GraphTreeNode> {
         let mut roots: Vec<GraphTreeNode> = Vec::new();
         // Stack of indices into the path from a root down to the last-pushed node,
         // by depth. `stack[d]` is the most recent node at depth `d` on the current
@@ -309,6 +325,9 @@ impl GraphTreeNode {
                 title: node.title.clone(),
                 doc_type: node.doc_type.to_string(),
                 status: node.status.to_string(),
+                status_color: colors
+                    .get(&node.doc_type.to_string(), &node.status.to_string())
+                    .map(str::to_string),
                 depth: node.depth,
                 related: node.related.clone(),
                 children: Vec::new(),
@@ -366,6 +385,148 @@ pub fn markdown_to_html(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::document::{DocType, Status};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn colors_with(type_name: &str, status: &str, hex: &str) -> StatusColors {
+        let mut colors = StatusColors::default();
+        colors.set_type(
+            type_name,
+            HashMap::from([(status.to_string(), hex.to_string())]),
+        );
+        colors
+    }
+
+    fn graph_node(doc_type: &str, status: &str) -> GraphNode {
+        GraphNode {
+            path: PathBuf::from("docs/story/STORY-001-x.md"),
+            title: "x".to_string(),
+            doc_type: DocType::new(doc_type),
+            status: Status::new(status),
+            depth: 0,
+            related: Vec::new(),
+            attributes: Default::default(),
+        }
+    }
+
+    #[test]
+    fn nest_fills_status_color_on_resolver_hit() {
+        let colors = colors_with("story", "pending", "#d33d44");
+        let roots = GraphTreeNode::nest(&[graph_node("story", "pending")], &colors);
+        assert_eq!(roots[0].status_color.as_deref(), Some("#d33d44"));
+    }
+
+    #[test]
+    fn nest_leaves_status_color_none_on_miss() {
+        let roots =
+            GraphTreeNode::nest(&[graph_node("story", "pending")], &StatusColors::default());
+        assert_eq!(roots[0].status_color, None);
+    }
+
+    #[test]
+    fn graph_node_template_emits_inline_var_on_hit() {
+        let colors = colors_with("story", "pending", "#d33d44");
+        let roots = GraphTreeNode::nest(&[graph_node("story", "pending")], &colors);
+        let html = roots[0].render().unwrap();
+        assert!(html.contains("--status-color: #d33d44"), "{html}");
+        assert!(html.contains("data-status=\"pending\""), "{html}");
+    }
+
+    #[test]
+    fn graph_node_template_omits_inline_var_on_miss() {
+        let roots =
+            GraphTreeNode::nest(&[graph_node("story", "pending")], &StatusColors::default());
+        let html = roots[0].render().unwrap();
+        assert!(!html.contains("--status-color"), "{html}");
+        assert!(html.contains("data-status=\"pending\""), "{html}");
+    }
+
+    fn temp_store() -> (tempfile::TempDir, Store) {
+        use crate::engine::config::{Config, StoreBackend, TypeDef};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let mut config = Config::default();
+        let mut t = TypeDef::test_fixture("doc", StoreBackend::Filesystem);
+        t.dir = "docs/doc".to_string();
+        config.documents.types = vec![t];
+        std::fs::write(root.join(".lazyspec.toml"), config.to_toml().unwrap()).unwrap();
+        std::fs::create_dir_all(root.join("docs/doc")).unwrap();
+        std::fs::write(
+            root.join("docs/doc/DOC-001-x.md"),
+            "---\ntitle: \"x\"\ntype: doc\nstatus: draft\nauthor: \"a\"\ndate: 2026-07-01\ntags: []\n---\n\nbody\n",
+        )
+        .unwrap();
+        let config = Config::load(root, &crate::engine::fs::RealFileSystem).unwrap();
+        let store = Store::load(root, &config).unwrap();
+        (tmp, store)
+    }
+
+    #[test]
+    fn doc_page_fills_status_color_on_resolver_hit() {
+        let (_tmp, store) = temp_store();
+        let doc = store.all_docs()[0];
+        let colors = colors_with("doc", "draft", "#d33d44");
+        let page = DocPage::from_doc(doc, &store, String::new(), None, None, &colors);
+        assert_eq!(page.status_color.as_deref(), Some("#d33d44"));
+    }
+
+    #[test]
+    fn doc_page_leaves_status_color_none_on_miss() {
+        let (_tmp, store) = temp_store();
+        let doc = store.all_docs()[0];
+        let page = DocPage::from_doc(
+            doc,
+            &store,
+            String::new(),
+            None,
+            None,
+            &StatusColors::default(),
+        );
+        assert_eq!(page.status_color, None);
+    }
+
+    fn context_with_related(doc: &DocMeta) -> ResolvedContext<'_> {
+        use crate::engine::context::RelatedRef;
+        use crate::engine::document::RelationType;
+        ResolvedContext {
+            target: doc,
+            nodes: Vec::new(),
+            forward: Vec::new(),
+            related: vec![RelatedRef {
+                doc,
+                relation: RelationType::new("related-to"),
+                distance: 1,
+                via: doc.path.clone(),
+            }],
+        }
+    }
+
+    #[test]
+    fn context_entry_fills_status_color_on_resolver_hit() {
+        let (_tmp, store) = temp_store();
+        let doc = store.all_docs()[0];
+        let colors = colors_with("doc", "draft", "#d33d44");
+        let ctx = context_with_related(doc);
+        let page = DocPage::from_doc(doc, &store, String::new(), None, Some(&ctx), &colors);
+        assert_eq!(page.related[0].status_color.as_deref(), Some("#d33d44"));
+    }
+
+    #[test]
+    fn context_entry_leaves_status_color_none_on_miss() {
+        let (_tmp, store) = temp_store();
+        let doc = store.all_docs()[0];
+        let ctx = context_with_related(doc);
+        let page = DocPage::from_doc(
+            doc,
+            &store,
+            String::new(),
+            None,
+            Some(&ctx),
+            &StatusColors::default(),
+        );
+        assert_eq!(page.related[0].status_color, None);
+    }
 
     #[test]
     fn tag_hue_is_deterministic() {

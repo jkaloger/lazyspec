@@ -1,12 +1,9 @@
 use crate::cli::resolve::resolve_shorthand_or_path;
+use crate::engine::clickup::ClickupHttpClient;
 use crate::engine::config::{Config, StoreBackend};
-use crate::engine::gh::GhCli;
-use crate::engine::git_ref::GitCli;
-use crate::engine::git_ref_store::GitRefStore;
-use crate::engine::issue_cache::IssueCache;
-use crate::engine::issue_map::IssueMap;
+use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::store::Store;
-use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore, GithubMilestonesStore};
+use crate::engine::store_dispatch::{ClickupTasksStore, DocumentStore};
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
@@ -24,81 +21,35 @@ pub fn run_with_config(
         let doc = resolve_shorthand_or_path(store, doc_path)?;
         let type_name = doc.doc_type.as_str();
         if let Some(type_def) = config.type_by_name(type_name) {
-            if type_def.store == StoreBackend::GithubIssues {
-                let gh_config = config.documents.github.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "type '{}' uses github-issues store but no [github] config found",
-                        type_name
-                    )
-                })?;
-                let repo = gh_config.repo.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "type '{}' uses github-issues store but no github.repo configured",
-                        type_name
-                    )
-                })?;
-                let mut gh_store = GithubIssuesStore {
-                    client: GhCli::new(),
-                    root: root.to_path_buf(),
-                    repo: repo.clone(),
-                    config: config.clone(),
-                    issue_map: IssueMap::load(root)?,
-                    issue_cache: IssueCache::new(root),
-                };
-                return gh_store.delete(type_def, &doc.id);
-            }
-            if type_def.store == StoreBackend::GithubMilestones {
-                let gh_config = config.documents.github.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "type '{}' uses github-milestones store but no [github] config found",
-                        type_name
-                    )
-                })?;
-                let repo = gh_config.repo.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "type '{}' uses github-milestones store but no github.repo configured",
-                        type_name
-                    )
-                })?;
-                let mut ms_store = GithubMilestonesStore {
-                    client: GhCli::new(),
-                    root: root.to_path_buf(),
-                    repo: repo.clone(),
-                    config: config.clone(),
-                    issue_map: IssueMap::load(root)?,
-                };
-                return ms_store.delete(type_def, &doc.id);
-            }
-            if type_def.store == StoreBackend::GithubProjects {
-                let gh_config = config.documents.github.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "type '{}' uses github-projects store but no [github] config found",
-                        type_name
-                    )
-                })?;
-                let repo = gh_config.repo.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "type '{}' uses github-projects store but no github.repo configured",
-                        type_name
-                    )
-                })?;
-                let mut proj_store = crate::engine::store_dispatch::GithubProjectsStore {
-                    client: GhCli::new(),
-                    root: root.to_path_buf(),
-                    repo: repo.clone(),
-                    config: config.clone(),
-                    issue_map: IssueMap::load(root)?,
-                };
-                return proj_store.delete(type_def, &doc.id);
-            }
-            if type_def.store == StoreBackend::GitRef {
-                let mut git_store = GitRefStore {
-                    git: GitCli,
-                    root: root.to_path_buf(),
-                    config: config.clone(),
-                    reserved_number: None,
-                };
-                return git_store.delete(type_def, &doc.id);
+            // Non-filesystem backends dispatch through the store registry; a new
+            // backend routes here by being registered in `build_registry`.
+            // Filesystem falls through to its dedicated `fs_ops` path below.
+            if type_def.store != StoreBackend::Filesystem {
+                // ClickUp authenticates per write: the registry leaves its token
+                // unloaded (to keep registry construction free of keychain I/O),
+                // so the delete path loads the global credential here -- mirroring
+                // create/update -- and dispatches against a token-bearing store.
+                // A registry-built (token: None) ClickUp store would fail the
+                // archive on missing auth.
+                if type_def.store == StoreBackend::ClickupTasks {
+                    let token = LayeredCredentialStore::global()
+                        .load_clickup_token()?
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "no ClickUp token found; run `lazyspec setup clickup` before \
+                                 deleting clickup-tasks documents"
+                            )
+                        })?;
+                    let mut store = ClickupTasksStore {
+                        client: Box::new(ClickupHttpClient::new()),
+                        root: root.to_path_buf(),
+                        config: config.clone(),
+                        token: Some(token),
+                    };
+                    return store.delete(type_def, &doc.id);
+                }
+                let mut registry = crate::engine::store_dispatch::build_registry(root, config);
+                return registry.for_type(type_def)?.delete(type_def, &doc.id);
             }
         }
     }
