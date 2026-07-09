@@ -470,7 +470,7 @@ impl ClickupClient for ClickupHttpClient {
         let mut page: u32 = 0;
         loop {
             let url = format!(
-                "{}/list/{}/task?page={}&include_closed=true&subtasks=true",
+                "{}/list/{}/task?page={}&include_closed=true&subtasks=true&include_markdown_description=true",
                 self.base_url, list_id, page
             );
             let response = self.http.get(&url).header(AUTHORIZATION, token).send()?;
@@ -557,7 +557,10 @@ impl ClickupClient for ClickupHttpClient {
     }
 
     fn get_task(&self, token: &str, task_id: &str) -> Result<ClickupTask, ClickupError> {
-        let url = format!("{}/task/{}", self.base_url, task_id);
+        let url = format!(
+            "{}/task/{}?include_markdown_description=true",
+            self.base_url, task_id
+        );
         let response = self.http.get(&url).header(AUTHORIZATION, token).send()?;
 
         let status = response.status();

@@ -1,7 +1,7 @@
 ---
 title: clickup fetch requests markdown description not plaintext
 type: iteration
-status: draft
+status: complete
 author: Jack Kaloger
 date: 2026-07-09
 tags: []
