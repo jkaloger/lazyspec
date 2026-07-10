@@ -1,7 +1,7 @@
 ---
 title: Emit config JSON Schema via config schema command
 type: iteration
-status: in-progress
+status: complete
 author: jkaloger
 date: 2026-07-10
 tags: []
