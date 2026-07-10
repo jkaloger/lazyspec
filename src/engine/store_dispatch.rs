@@ -186,8 +186,15 @@ impl DocumentStore for ClickupTasksStore {
         })?;
 
         // A create carries no attributes or status yet, so only name + body are
-        // sent; ClickUp assigns the List's default status.
-        let payload = clickup_cache::build_task_create(title, body, None, &BTreeMap::new());
+        // sent; ClickUp assigns the List's default status. The type's configured
+        // task type (if any) stamps the new task's custom_item_id.
+        let payload = clickup_cache::build_task_create(
+            title,
+            body,
+            None,
+            &BTreeMap::new(),
+            type_def.clickup_task_type,
+        );
         let task = self.client.create_task(token.expose(), list_id, &payload)?;
 
         let id = type_def.make_id(&task.id);
@@ -2481,6 +2488,62 @@ mod tests {
         assert_eq!(recorded[0].1.markdown_content, Some("the body".to_string()));
         // A create sends no status; ClickUp assigns the List default.
         assert_eq!(recorded[0].1.status, None);
+    }
+
+    #[test]
+    fn clickup_create_stamps_configured_task_type_into_payload() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_create_task_type");
+        let mut td = clickup_type_def(Some("list123"));
+        td.clickup_task_type = Some(1001);
+
+        let created = scripted_task(
+            r#"{"id":"90abc","name":"My task","status":{"status":"open"},"custom_item_id":1001}"#,
+        );
+        let fake = FakeClickupClient::valid(clickup_user()).with_created_task(created);
+        let calls = fake.create_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root,
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        store.create(&td, "My task", "author", "body").unwrap();
+
+        let recorded = calls.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].1.custom_item_id, Some(1001));
+    }
+
+    #[test]
+    fn clickup_create_without_task_type_omits_custom_item_id() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_create_no_task_type");
+        let td = clickup_type_def(Some("list123"));
+        assert!(td.clickup_task_type.is_none());
+
+        let created =
+            scripted_task(r#"{"id":"90abc","name":"My task","status":{"status":"open"}}"#);
+        let fake = FakeClickupClient::valid(clickup_user()).with_created_task(created);
+        let calls = fake.create_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root,
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        store.create(&td, "My task", "author", "body").unwrap();
+
+        let recorded = calls.borrow();
+        assert_eq!(recorded[0].1.custom_item_id, None);
     }
 
     #[test]
