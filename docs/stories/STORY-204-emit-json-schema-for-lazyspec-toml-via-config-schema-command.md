@@ -1,7 +1,7 @@
 ---
 title: Emit JSON Schema for .lazyspec.toml via config schema command
 type: story
-status: in-progress
+status: complete
 author: jkaloger
 date: 2026-07-10
 tags: []

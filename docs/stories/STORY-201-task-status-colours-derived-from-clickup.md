@@ -1,7 +1,7 @@
 ---
 title: Task status colours derived from ClickUp
 type: story
-status: in-progress
+status: complete
 author: jkaloger
 date: 2026-07-09
 tags: []

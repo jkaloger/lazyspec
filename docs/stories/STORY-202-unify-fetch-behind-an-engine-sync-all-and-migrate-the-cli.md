@@ -1,7 +1,7 @@
 ---
 title: Unify fetch behind an engine sync_all and migrate the CLI
 type: story
-status: in-progress
+status: complete
 author: jkaloger
 date: 2026-07-09
 tags: []

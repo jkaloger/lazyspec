@@ -1,7 +1,7 @@
 ---
 title: Migrate the TUI background poll onto sync_all
 type: story
-status: in-progress
+status: complete
 author: jkaloger
 date: 2026-07-09
 tags: []
