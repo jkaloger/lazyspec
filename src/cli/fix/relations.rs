@@ -164,6 +164,7 @@ mod tests {
             github_issue_tag: None,
             github_issue_type: None,
             clickup_list_id: None,
+            clickup_task_type: None,
             clickup_custom_field_map: None,
         };
         let mut config = Config::default();

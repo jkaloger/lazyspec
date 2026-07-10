@@ -53,6 +53,17 @@ pub fn fetch_tasks(
         .task_list(token, list_id)
         .with_context(|| format!("fetching ClickUp tasks for list {}", list_id))?;
 
+    // When the type binds a custom task type, materialize only tasks of that type:
+    // a List can hold several task types, but a lazyspec type maps to exactly one.
+    // Unset means the type spans the whole List, so every task materializes.
+    let tasks: Vec<ClickupTask> = match type_def.clickup_task_type {
+        Some(expected) => tasks
+            .into_iter()
+            .filter(|task| task.custom_item_id == Some(expected))
+            .collect(),
+        None => tasks,
+    };
+
     let cache_dir = root.join(".lazyspec/cache").join(&type_def.name);
     let previously_cached: HashSet<String> = list_cached_ids(&cache_dir);
 
@@ -336,15 +347,20 @@ fn json_value_to_attr(value: &serde_json::Value) -> Option<AttrValue> {
 /// - `priority` <- the priority *name* mapped to ClickUp's bare integer
 ///   (`urgent=1 high=2 normal=3 low=4`); an unrecognized name is dropped;
 /// - `due_date`/`time_estimate` <- the integer epoch-ms / duration-ms attributes.
+/// - `custom_item_id` <- `task_type` (the type's configured `clickup_task_type`),
+///   omitted when `None` so ClickUp defaults the task to the List's native "Task"
+///   type; set, it stamps the new task with the bound custom task type (RFC-056).
 ///
 /// A `create` has no attributes yet (its signature carries only title/author/
-/// body), so it passes an empty map and only `name`/`markdown_content` are sent;
-/// the attribute mapping is exercised by the write path directly.
+/// body), so it passes an empty map and only `name`/`markdown_content` (plus the
+/// stamped `custom_item_id`, when set) are sent; the attribute mapping is
+/// exercised by the write path directly.
 pub(crate) fn build_task_create(
     title: &str,
     body: &str,
     status: Option<&str>,
     attributes: &std::collections::BTreeMap<String, AttrValue>,
+    task_type: Option<i64>,
 ) -> TaskCreate {
     let priority = match attributes.get("priority") {
         Some(AttrValue::Str(name)) => priority_name_to_int(name),
@@ -371,6 +387,7 @@ pub(crate) fn build_task_create(
         due_date,
         start_date: None,
         time_estimate,
+        custom_item_id: task_type,
     }
 }
 
@@ -548,6 +565,71 @@ mod tests {
     }
 
     #[test]
+    fn fetch_keeps_only_tasks_matching_configured_task_type() {
+        // A type bound to custom_item_id 1001 materializes only the tasks whose
+        // custom_item_id matches; a task of another type drops out of the cache.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let mut td = clickup_type();
+        td.clickup_task_type = Some(1001);
+
+        let matching = task_from_json(
+            r#"{"id":"a","name":"A","status":{"status":"open"},"custom_item_id":1001}"#,
+        );
+        let other = task_from_json(
+            r#"{"id":"b","name":"B","status":{"status":"open"},"custom_item_id":2002}"#,
+        );
+        let client = FakeClickupClient::with_tasks(vec![matching, other]);
+        let mut task_map = TaskMap::load(root).unwrap();
+
+        let result = fetch_tasks(root, &td, &client, "pk_x", &mut task_map).unwrap();
+
+        assert_eq!(result.fetched, 1);
+        assert_eq!(result.new, 1);
+        assert!(root.join(".lazyspec/cache/task/TASK-a.md").exists());
+        assert!(!root.join(".lazyspec/cache/task/TASK-b.md").exists());
+        assert!(task_map.get("TASK-a").is_some());
+        assert!(task_map.get("TASK-b").is_none());
+    }
+
+    #[test]
+    fn fetch_without_task_type_materializes_all_tasks() {
+        // Field unset: every task materializes regardless of custom_item_id (no
+        // behavior change from before task-type filtering existed).
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let td = clickup_type();
+        assert!(td.clickup_task_type.is_none());
+
+        let t1 = task_from_json(
+            r#"{"id":"a","name":"A","status":{"status":"open"},"custom_item_id":1001}"#,
+        );
+        let t2 = task_from_json(
+            r#"{"id":"b","name":"B","status":{"status":"open"},"custom_item_id":2002}"#,
+        );
+        let client = FakeClickupClient::with_tasks(vec![t1, t2]);
+        let mut task_map = TaskMap::load(root).unwrap();
+
+        let result = fetch_tasks(root, &td, &client, "pk_x", &mut task_map).unwrap();
+
+        assert_eq!(result.fetched, 2);
+        assert!(root.join(".lazyspec/cache/task/TASK-a.md").exists());
+        assert!(root.join(".lazyspec/cache/task/TASK-b.md").exists());
+    }
+
+    #[test]
+    fn build_task_create_stamps_custom_item_id_when_task_type_set() {
+        let payload = build_task_create("t", "b", None, &Default::default(), Some(1001));
+        assert_eq!(payload.custom_item_id, Some(1001));
+    }
+
+    #[test]
+    fn build_task_create_omits_custom_item_id_when_task_type_unset() {
+        let payload = build_task_create("t", "b", None, &Default::default(), None);
+        assert_eq!(payload.custom_item_id, None);
+    }
+
+    #[test]
     fn body_falls_back_to_text_content_when_markdown_empty() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
@@ -687,7 +769,7 @@ mod tests {
     #[test]
     fn build_task_create_maps_title_and_body_only_for_a_bare_create() {
         // A create carries no attributes and no status; only name + body are sent.
-        let payload = build_task_create("My task", "the body", None, &Default::default());
+        let payload = build_task_create("My task", "the body", None, &Default::default(), None);
         assert_eq!(payload.name, "My task");
         assert_eq!(payload.markdown_content, Some("the body".to_string()));
         assert_eq!(payload.status, None);
@@ -698,7 +780,7 @@ mod tests {
 
     #[test]
     fn build_task_create_omits_markdown_content_when_body_blank() {
-        let payload = build_task_create("t", "   ", None, &Default::default());
+        let payload = build_task_create("t", "   ", None, &Default::default(), None);
         assert_eq!(payload.markdown_content, None);
     }
 
@@ -711,7 +793,7 @@ mod tests {
         attrs.insert("due".to_string(), AttrValue::Int(1_748_541_600_000));
         attrs.insert("estimate".to_string(), AttrValue::Int(3_600_000));
 
-        let payload = build_task_create("t", "b", Some("in progress"), &attrs);
+        let payload = build_task_create("t", "b", Some("in progress"), &attrs, None);
         assert_eq!(payload.status, Some("in progress".to_string()));
         assert_eq!(payload.priority, Some(2));
         assert_eq!(payload.due_date, Some(1_748_541_600_000));
@@ -785,7 +867,7 @@ mod tests {
     fn build_task_create_drops_unrecognized_priority_name() {
         let mut attrs = std::collections::BTreeMap::new();
         attrs.insert("priority".to_string(), AttrValue::Str("bogus".to_string()));
-        let payload = build_task_create("t", "b", None, &attrs);
+        let payload = build_task_create("t", "b", None, &attrs, None);
         assert_eq!(payload.priority, None);
     }
 

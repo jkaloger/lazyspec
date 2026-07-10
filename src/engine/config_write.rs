@@ -93,6 +93,7 @@ fn update_type_table(entry: &mut Table, def: &TypeDef) {
         authorship_str(&def.authorship),
         "assisted",
     );
+    set_opt_int(entry, "clickup_task_type", def.clickup_task_type);
     set_lifecycle(entry, &def.lifecycle);
 }
 
@@ -593,6 +594,16 @@ fn set_int_defaulted(table: &mut dyn toml_edit::TableLike, key: &str, value: i64
     set_int(table, key, value);
 }
 
+// An `Option<i64>` field: Some writes/updates the key, None removes a present key.
+fn set_opt_int(table: &mut dyn toml_edit::TableLike, key: &str, value: Option<i64>) {
+    match value {
+        Some(v) => set_int(table, key, v),
+        None => {
+            table.remove(key);
+        }
+    }
+}
+
 // An `Option<String>` field: Some writes/updates the key (adding it within an
 // existing table is allowed), None removes a present key.
 fn set_opt_str(table: &mut dyn toml_edit::TableLike, key: &str, value: Option<&str>) {
@@ -983,6 +994,7 @@ require_parent_status = "accepted"
                 github_issue_tag: None,
                 github_issue_type: None,
                 clickup_list_id: None,
+                clickup_task_type: None,
                 clickup_custom_field_map: None,
             });
             c
@@ -1075,6 +1087,7 @@ name = "related-to"
                 github_issue_tag: None,
                 github_issue_type: None,
                 clickup_list_id: None,
+                clickup_task_type: None,
                 clickup_custom_field_map: None,
             });
             c.rules.clear();

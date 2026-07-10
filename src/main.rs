@@ -466,6 +466,7 @@ fn main() -> anyhow::Result<()> {
                     numbering,
                     intent,
                     authorship,
+                    clickup_task_type,
                 }) => {
                     lazyspec::cli::config::run_add_type(
                         &cwd,
@@ -481,6 +482,7 @@ fn main() -> anyhow::Result<()> {
                         numbering.as_deref(),
                         intent.as_deref(),
                         authorship.as_deref(),
+                        clickup_task_type,
                     )?;
                 }
                 Some(ConfigCommand::SetLifecycle {

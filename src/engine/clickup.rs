@@ -312,6 +312,12 @@ pub struct TaskCreate {
     pub start_date: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_estimate: Option<i64>,
+    /// The ClickUp custom task type's `custom_item_id`, stamped from the bound
+    /// type's `clickup_task_type` config so a new task materializes under that
+    /// type (RFC-056 §Field mapping). Omitted when unset, so ClickUp defaults the
+    /// task to the List's native "Task" type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_item_id: Option<i64>,
 }
 
 /// The *write* shape of an edit, sent as the JSON body of `PUT /task/{id}`.
@@ -1257,6 +1263,7 @@ mod tests {
             due_date: Some(1_748_541_600_000),
             start_date: None,
             time_estimate: Some(3_600_000),
+            custom_item_id: None,
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["name"], "Wire create");
@@ -1267,6 +1274,31 @@ mod tests {
         assert_eq!(json["time_estimate"], 3_600_000i64);
         // A `None` field is omitted entirely, not sent as JSON null.
         assert!(json.get("start_date").is_none());
+    }
+
+    #[test]
+    fn task_create_serializes_custom_item_id_when_set() {
+        // A type-stamped create carries the ClickUp custom_item_id so the new task
+        // materializes under the bound List's configured task type (RFC-056).
+        let payload = TaskCreate {
+            name: "Wire create".to_string(),
+            custom_item_id: Some(1001),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["custom_item_id"], 1001i64);
+    }
+
+    #[test]
+    fn task_create_omits_custom_item_id_when_unset() {
+        // No configured task type: the field is omitted, so ClickUp defaults the
+        // new task to the List's native "Task" type (no behavior change).
+        let payload = TaskCreate {
+            name: "Wire create".to_string(),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert!(json.get("custom_item_id").is_none());
     }
 
     #[test]

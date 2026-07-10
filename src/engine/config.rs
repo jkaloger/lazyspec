@@ -286,6 +286,12 @@ pub struct TypeDef {
     /// other stores.
     #[serde(default)]
     pub clickup_list_id: Option<String>,
+    /// The ClickUp custom task type (`custom_item_id`) stamped on this type's
+    /// tasks, for `clickup-tasks`-backed types. A numeric id only -- name->id
+    /// resolution is deferred. Setting it on any other store is a config error.
+    /// Unused by other stores.
+    #[serde(default)]
+    pub clickup_task_type: Option<i64>,
     /// Maps a lazyspec name to the ClickUp custom-field uuid that holds it, for
     /// anything with no native ClickUp field (RFC-056 §Field mapping). The
     /// reserved key [`CLICKUP_RELATIONS_FIELD`] names the *text* field carrying
@@ -685,6 +691,7 @@ pub fn starter_types() -> Vec<TypeDef> {
         github_issue_tag: None,
         github_issue_type: None,
         clickup_list_id: None,
+        clickup_task_type: None,
         clickup_custom_field_map: None,
     };
     vec![
@@ -719,6 +726,7 @@ pub fn starter_types() -> Vec<TypeDef> {
             github_issue_tag: None,
             github_issue_type: None,
             clickup_list_id: None,
+            clickup_task_type: None,
             clickup_custom_field_map: None,
         },
         TypeDef {
@@ -741,6 +749,7 @@ pub fn starter_types() -> Vec<TypeDef> {
             github_issue_tag: None,
             github_issue_type: None,
             clickup_list_id: None,
+            clickup_task_type: None,
             clickup_custom_field_map: None,
         },
     ]
@@ -912,6 +921,17 @@ impl Config {
         });
         if any_github && raw.github.is_none() {
             bail!("store = \"github-issues\", \"github-milestones\", or \"github-projects\" requires a [github] section");
+        }
+
+        if let Some(t) = types
+            .iter()
+            .find(|t| t.clickup_task_type.is_some() && t.store != StoreBackend::ClickupTasks)
+        {
+            bail!(
+                "type \"{}\" sets clickup_task_type but store = \"{}\"; clickup_task_type is only valid on store = \"clickup-tasks\"",
+                t.name,
+                t.store
+            );
         }
 
         let ref_count_ceiling = raw.ref_count_ceiling.unwrap_or(15);
@@ -1102,6 +1122,7 @@ impl TypeDef {
             github_issue_tag: None,
             github_issue_type: None,
             clickup_list_id: None,
+            clickup_task_type: None,
             clickup_custom_field_map: None,
         }
     }
@@ -2257,6 +2278,63 @@ owner = "uuid-owner"
         let config = Config::parse(TYPES).unwrap();
         let td = config.type_by_name("rfc").unwrap();
         assert!(td.clickup_custom_field_map.is_none());
+    }
+
+    #[test]
+    fn toml_clickup_task_type_parses_and_round_trips() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[[types]]
+name = "task"
+plural = "tasks"
+dir = "docs/tasks"
+prefix = "TASK"
+store = "clickup-tasks"
+clickup_list_id = "list123"
+clickup_task_type = 1001
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        let td = config.type_by_name("task").unwrap();
+        assert_eq!(td.clickup_task_type, Some(1001));
+
+        // Survives the config_write round-trip (to_toml -> parse) and surfaces
+        // in `config --json`.
+        let emitted = config.to_toml().unwrap();
+        let reparsed = Config::parse(&emitted).unwrap();
+        let td = reparsed.type_by_name("task").unwrap();
+        assert_eq!(td.clickup_task_type, Some(1001));
+        let json = serde_json::to_value(td).unwrap();
+        assert_eq!(json["clickup_task_type"], serde_json::json!(1001));
+    }
+
+    #[test]
+    fn toml_without_clickup_task_type_leaves_it_none() {
+        let config = Config::parse(TYPES).unwrap();
+        let td = config.type_by_name("rfc").unwrap();
+        assert_eq!(td.clickup_task_type, None);
+        let json = serde_json::to_value(td).unwrap();
+        assert_eq!(json["clickup_task_type"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn clickup_task_type_on_non_clickup_store_is_rejected() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[[types]]
+name = "task"
+plural = "tasks"
+dir = "docs/tasks"
+prefix = "TASK"
+clickup_task_type = 1001
+"#
+        );
+        let err = Config::parse(&toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("clickup_task_type"), "got: {msg}");
+        assert!(msg.contains("clickup-tasks"), "got: {msg}");
     }
 
     #[test]
