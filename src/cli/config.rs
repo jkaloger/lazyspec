@@ -15,6 +15,12 @@ pub enum ConfigCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Print the JSON Schema for .lazyspec.toml
+    Schema {
+        /// Output as JSON (schema output is JSON regardless)
+        #[arg(long)]
+        json: bool,
+    },
     /// Append a new document type to .lazyspec.toml
     AddType {
         /// Type name (e.g. spike)
@@ -70,6 +76,11 @@ pub enum ConfigCommand {
 
 pub fn run_show_json(config: &Config) -> Result<String> {
     Ok(serde_json::to_string_pretty(config)?)
+}
+
+pub fn run_schema_json() -> Result<String> {
+    let schema = crate::engine::config::config_schema();
+    Ok(serde_json::to_string_pretty(&schema)?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -317,6 +328,18 @@ severity = "error"
             .iter()
             .find(|r| r["name"] == name)
             .unwrap()
+    }
+
+    // `config schema` emits parseable JSON, and the flagless call needs no project
+    // state (it never touches a .lazyspec.toml).
+    #[test]
+    fn schema_json_is_valid_json() {
+        let out = run_schema_json().unwrap();
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            parsed.is_object(),
+            "schema should be a JSON object: {parsed}"
+        );
     }
 
     // AC1: every type serializes with all three STORY-145 axes, and the lifecycle

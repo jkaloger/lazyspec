@@ -1,10 +1,11 @@
 use crate::engine::document::Status;
 use anyhow::{bail, Result};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Error,
@@ -16,14 +17,14 @@ pub enum Severity {
 /// `Related` relationships form the symmetric depth-bounded neighbourhood.
 /// Absence (`None` on `RelationshipDef`) means the relationship participates in
 /// neither walk.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Traversal {
     Chain,
     Related,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(tag = "shape")]
 pub enum ValidationRule {
     #[serde(rename = "parent-child")]
@@ -45,7 +46,7 @@ pub enum ValidationRule {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum NumberingStrategy {
     #[default]
@@ -54,7 +55,7 @@ pub enum NumberingStrategy {
     Reserved,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct SqidsConfig {
     pub salt: String,
     #[serde(default = "default_sqids_min_length")]
@@ -65,14 +66,14 @@ fn default_sqids_min_length() -> u8 {
     3
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ReservedFormat {
     Incremental,
     Sqids,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct ReservedConfig {
     #[serde(default = "default_reserved_remote")]
     pub remote: String,
@@ -109,7 +110,7 @@ fn default_coordination_max_clock_skew() -> String {
     "5m".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct CoordinationConfig {
     #[serde(default = "default_coordination_remote")]
     pub remote: String,
@@ -123,7 +124,7 @@ pub struct CoordinationConfig {
     pub max_clock_skew: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default, JsonSchema)]
 pub enum StoreBackend {
     #[default]
     #[serde(rename = "filesystem")]
@@ -153,7 +154,7 @@ impl fmt::Display for StoreBackend {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Authorship {
     Human,
@@ -162,13 +163,13 @@ pub enum Authorship {
     Generated,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct Edge {
     pub from: String,
     pub to: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, JsonSchema)]
 pub struct Lifecycle {
     #[serde(default)]
     pub states: Vec<String>,
@@ -214,7 +215,7 @@ impl Lifecycle {
 
 /// The declared kind of a custom frontmatter attribute. `Str` serializes as
 /// `"string"`; the rest map to their lowercase name.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum AttrKind {
     Int,
@@ -229,7 +230,7 @@ pub enum AttrKind {
 /// One declared custom attribute on a document type: its frontmatter key
 /// (`name`), its `kind`, whether it is `required`, and for `enum` kinds the
 /// permitted `values`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct AttrDef {
     pub name: String,
     pub kind: AttrKind,
@@ -239,31 +240,63 @@ pub struct AttrDef {
     pub values: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct TypeDef {
+    /// The type's canonical singular name, used as its identifier in commands,
+    /// relationships, and rules (e.g. `rfc`, `story`).
     pub name: String,
+    /// The plural label shown in the TUI and used for grouping (e.g. `rfcs`).
     pub plural: String,
+    /// The directory this type's documents live in, relative to the project
+    /// root (e.g. `docs/rfcs`). Directories derive entirely from each type's
+    /// own `dir`; there is no separate `[directories]` table.
     pub dir: String,
+    /// The uppercase ID prefix for this type's document IDs (e.g. `RFC` yields
+    /// `RFC-001`).
     pub prefix: String,
+    /// An optional glyph shown beside this type in the TUI (e.g. `●`).
     pub icon: Option<String>,
+    /// How new document numbers are assigned for this type: `incremental`
+    /// (default), `sqids`, or `reserved`. See the `[numbering]` sections for
+    /// the `sqids`/`reserved` configuration each strategy requires.
     #[serde(default)]
     pub numbering: NumberingStrategy,
+    /// When true, documents of this type are authored as `PREFIX-n-slug/index.md`
+    /// inside their own subdirectory rather than as a flat `.md` file.
     #[serde(default)]
     pub subdirectory: bool,
+    /// The storage backend for this type's documents: `filesystem` (default),
+    /// `github-issues`, `github-milestones`, `github-projects`, `git-ref`, or
+    /// `clickup-tasks`.
     #[serde(default)]
     pub store: StoreBackend,
+    /// When true, this type holds at most one document (e.g. a project
+    /// convention), so `create` and numbering treat it as a singleton.
     #[serde(default)]
     pub singleton: bool,
+    /// The name of another declared type that documents of this type belong
+    /// under, if any. A child must share its parent's store backend.
     #[serde(default)]
     pub parent_type: Option<String>,
+    /// The ordered list of agent action skill names offered for this type. An
+    /// absent or empty list turns agent mode off for the type.
     #[serde(default)]
     pub agents: Vec<String>,
+    /// A short statement of what documents of this type are for, surfaced to
+    /// authors and agents as authoring guidance.
     #[serde(default)]
     pub intent: Option<String>,
+    /// The authorship ceiling for this type -- how much of a document's body an
+    /// AI may write: `human`, `assisted` (default), or `generated`.
     #[serde(default)]
     pub authorship: Authorship,
+    /// The valid statuses (`states`) and permitted transitions (`edges`) for
+    /// this type. `update --status` is gated by these edges; a lifecycle with
+    /// states but no edges is unconstrained.
     #[serde(default)]
     pub lifecycle: Lifecycle,
+    /// Declared custom frontmatter attributes for this type, each with a name,
+    /// kind, requiredness, and (for `enum` kinds) permitted values.
     #[serde(default)]
     pub attributes: Vec<AttrDef>,
     /// Overrides the default `lazyspec:{name}` GitHub label used to identify
@@ -308,7 +341,7 @@ pub const CLICKUP_RELATIONS_FIELD: &str = "relations";
 /// optional inverse keyword. A relationship with no `inverse` is symmetric
 /// (e.g. `related-to`); a directional one declares its inverse (e.g.
 /// `implements` / `implemented-by`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct RelationshipDef {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -412,7 +445,7 @@ pub struct FilesystemConfig {
     pub templates: Templates,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct StatusBarConfig {
     #[serde(default = "default_statusbar_enabled")]
     pub enabled: bool,
@@ -443,7 +476,7 @@ fn default_multiline_max_expanded_height() -> usize {
     5
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MultiLineConfig {
     #[serde(default = "default_multiline_max_expanded_height")]
     pub max_expanded_height: usize,
@@ -457,7 +490,7 @@ impl Default for MultiLineConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct UiConfig {
     #[serde(default)]
     pub ascii_diagrams: bool,
@@ -481,7 +514,7 @@ fn default_graph_sort() -> String {
 /// sort column. Column ids are the built-ins `status` / `related` plus any
 /// declared attribute name; `sort` is `path` (the topo tiebreak) or any column
 /// id. Both carry serde defaults so a config without the block still loads.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct GraphConfig {
     #[serde(default = "default_graph_columns")]
     pub columns: Vec<String>,
@@ -530,17 +563,17 @@ pub struct Config {
     pub web: Option<WebConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Templates {
     pub dir: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Naming {
     pub pattern: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CertificationConfig {
     #[serde(default = "default_normalize")]
     pub normalize: bool,
@@ -557,7 +590,7 @@ impl Default for CertificationConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CertificationOverride {
     pub normalize: bool,
 }
@@ -575,7 +608,7 @@ impl CertificationConfig {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct RawNumbering {
     sqids: Option<SqidsConfig>,
     reserved: Option<ReservedConfig>,
@@ -585,7 +618,7 @@ fn default_cache_ttl() -> u64 {
     60
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct GithubConfig {
     pub repo: Option<String>,
     #[serde(default = "default_cache_ttl")]
@@ -597,7 +630,7 @@ pub struct GithubConfig {
 /// the value otherwise inferred from the `origin` remote (owner/repo) or the
 /// current branch. All optional and independently overriding -- absence of the
 /// whole table is fine and falls back to `origin`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, JsonSchema)]
 pub struct WebConfig {
     #[serde(default)]
     pub owner: Option<String>,
@@ -610,7 +643,7 @@ pub struct WebConfig {
 /// The global `[agents]` block. `interactive` is the optional `bash -lc` shell
 /// command for terminal handover (e.g. `claude "$LAZYSPEC_PROMPT"`). Zero-defaults
 /// (ADR-015): absent -> None -> interactive run mode is unavailable and not offered.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, JsonSchema)]
 pub struct AgentsConfig {
     #[serde(default)]
     pub interactive: Option<String>,
@@ -623,7 +656,7 @@ pub fn default_skills_entry() -> String {
 /// The global `[skills]` block. `entry` names the router skill that `skills
 /// install` renames the embedded router directory to. Zero-defaults (ADR-015):
 /// absent -> `entry = "lazy"`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct SkillsConfig {
     #[serde(default = "default_skills_entry")]
     pub entry: String,
@@ -637,28 +670,62 @@ impl Default for SkillsConfig {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct RawConfig {
+    /// The document types this project declares, one per `[[types]]` block. At
+    /// least one type is required.
     types: Option<Vec<TypeDef>>,
+    /// The relationship vocabulary, one per `[[relationships]]` block. Each
+    /// declares a name and optional inverse; the block is required.
     relationships: Option<Vec<RelationshipDef>>,
+    /// Structural validation rules between types, one per `[[rules]]` block
+    /// (`parent-child` or `relation-existence` shapes), checked by `validate`.
     rules: Option<Vec<ValidationRule>>,
+    /// The `[templates]` block: where Markdown document templates live.
     templates: Option<Templates>,
+    /// The `[naming]` block: the filename pattern new documents are created
+    /// under (e.g. `{type}-{n:03}-{title}.md`).
     naming: Option<Naming>,
+    /// The `[tui]` block: terminal UI preferences (status bar, multiline
+    /// rendering, graph columns, ASCII diagrams).
     tui: Option<UiConfig>,
+    /// The `[numbering]` block: `sqids` and `reserved` sub-tables backing the
+    /// `sqids`/`reserved` numbering strategies used by types.
     numbering: Option<RawNumbering>,
+    /// The maximum number of distinct `@ref` code-reference targets a document
+    /// may embed before `validate` warns that it should be split. Defaults to 15.
     #[serde(default)]
     ref_count_ceiling: Option<usize>,
+    /// The `[certification]` block: whether document bodies are normalized on
+    /// write, with optional per-document overrides.
     #[serde(default)]
     certification: Option<CertificationConfig>,
+    /// The `[github]` block: repo coordinates and cache TTL. Required when any
+    /// type uses a GitHub-backed store.
     github: Option<GithubConfig>,
+    /// The `[coordination]` block: git-remote lease settings for distributed
+    /// task coordination (remote, lease/grace durations, retries, clock skew).
     #[serde(default)]
     coordination: Option<CoordinationConfig>,
+    /// The `[agents]` block: the interactive agent run-mode shell command.
     #[serde(default)]
     agents: Option<AgentsConfig>,
+    /// The `[skills]` block: the router skill entry name that `skills install`
+    /// uses (default `lazy`).
     #[serde(default)]
     skills: Option<SkillsConfig>,
+    /// The `[web]` block: overrides for the GitHub repo coordinates (owner,
+    /// repo, branch) the read-only web view deep-links against.
     #[serde(default)]
     web: Option<WebConfig>,
+}
+
+/// The JSON Schema for `.lazyspec.toml`, derived from the private `RawConfig`
+/// deserialize path (the input grammar), not the assembled `Config` output
+/// shape. Serves as an LLM-readable config reference and backs editor
+/// autocomplete.
+pub fn config_schema() -> schemars::Schema {
+    schemars::schema_for!(RawConfig)
 }
 
 /// The canonical starter document types. The engine carries no built-in types in
@@ -1139,6 +1206,37 @@ inverse = "implemented-by"
 [[relationships]]
 name = "related-to"
 "#;
+
+    #[test]
+    fn config_schema_serializes_and_encodes_input_grammar() {
+        let schema = config_schema();
+        let json = serde_json::to_value(&schema).expect("schema serializes to JSON");
+
+        assert!(
+            json["properties"]["types"].is_object(),
+            "schema must expose the top-level `types` property"
+        );
+
+        // The internally `shape`-tagged ValidationRule enum lands as a `oneOf`
+        // of two subschemas, each pinning `shape` to a const kebab-case tag.
+        let variants = json["$defs"]["ValidationRule"]["oneOf"]
+            .as_array()
+            .expect("ValidationRule must be a oneOf of variant subschemas");
+        assert_eq!(variants.len(), 2, "two rule shapes");
+
+        let shape_consts: Vec<&str> = variants
+            .iter()
+            .filter_map(|v| v["properties"]["shape"]["const"].as_str())
+            .collect();
+        assert!(
+            shape_consts.contains(&"parent-child"),
+            "expected a parent-child shape const, got {shape_consts:?}"
+        );
+        assert!(
+            shape_consts.contains(&"relation-existence"),
+            "expected a relation-existence shape const, got {shape_consts:?}"
+        );
+    }
 
     #[test]
     fn test_store_backend_display() {
