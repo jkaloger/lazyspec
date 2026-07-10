@@ -519,7 +519,7 @@ lazyspec config add-type spike spikes docs/spikes SPIKE \
   --icon "◆" --parent-type rfc --intent "throwaway exploration" \
   --authorship generated
 # also accepts --singleton, --store <filesystem|github-issues|github-milestones|github-projects|git-ref|clickup-tasks>,
-# --numbering <incremental|sqids|reserved>
+# --numbering <incremental|sqids|reserved>, --clickup-task-type <id> (clickup-tasks only)
 
 # Replace a type's lifecycle (states + edges; `*` matches any source state)
 lazyspec config set-lifecycle iteration \
@@ -661,6 +661,25 @@ prefix = "TASK"
 store = "clickup-tasks"
 clickup_list_id = "901234567890"
 ```
+
+An optional per-type `clickup_task_type` binds the type to a ClickUp **custom
+task type** by its numeric `custom_item_id`:
+
+```toml
+[[types]]
+name = "bug"
+plural = "bugs"
+dir = "docs/bugs"
+prefix = "BUG"
+store = "clickup-tasks"
+clickup_list_id = "901234567890"
+clickup_task_type = 1001
+```
+
+The value is a numeric id only -- name-to-id resolution is not supported. It is
+valid **only** on `store = "clickup-tasks"`; setting it on any other store is a
+config error. `config add-type ... --clickup-task-type <id>` writes it, and it
+surfaces in `config --json`.
 
 `lazyspec fetch` (optionally `--type <name>`) pulls the bound List's tasks
 (`GET /list/{id}/task`, paginated) using the token from `setup clickup`, and

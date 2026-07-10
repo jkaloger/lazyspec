@@ -46,6 +46,9 @@ pub enum ConfigCommand {
         /// Authorship ceiling: human, assisted, or generated
         #[arg(long)]
         authorship: Option<String>,
+        /// ClickUp custom task type (numeric custom_item_id); only valid on store = clickup-tasks
+        #[arg(long)]
+        clickup_task_type: Option<i64>,
     },
     /// Replace a type's lifecycle states and edges
     SetLifecycle {
@@ -87,6 +90,7 @@ pub fn run_add_type(
     numbering: Option<&str>,
     intent: Option<&str>,
     authorship: Option<&str>,
+    clickup_task_type: Option<i64>,
 ) -> Result<()> {
     let path = root.join(".lazyspec.toml");
     let src = fs.read_to_string(&path)?;
@@ -122,6 +126,7 @@ pub fn run_add_type(
         github_issue_tag: None,
         github_issue_type: None,
         clickup_list_id: None,
+        clickup_task_type,
         clickup_custom_field_map: None,
     });
 
@@ -394,6 +399,7 @@ require_parent_status = "accepted"
             None,
             Some("throwaway exploration"),
             Some("generated"),
+            None,
         )
         .unwrap();
 
@@ -414,6 +420,34 @@ require_parent_status = "accepted"
         assert_eq!(first, second);
     }
 
+    // A clickup_task_type supplied to add-type is written for a clickup-tasks type
+    // and surfaces in `config --json` as a number after a reload.
+    #[test]
+    fn add_type_writes_clickup_task_type() {
+        let (_dir, path, fs) = fixture(SRC);
+        run_add_type(
+            path.parent().unwrap(),
+            &fs,
+            "task",
+            "tasks",
+            "docs/tasks",
+            "TASK",
+            None,
+            None,
+            false,
+            Some("clickup-tasks"),
+            None,
+            None,
+            None,
+            Some(1001),
+        )
+        .unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let json = show(&after);
+        assert_eq!(type_named(&json, "task")["clickup_task_type"], 1001);
+    }
+
     #[test]
     fn add_type_rejects_duplicate_without_writing() {
         let (_dir, path, fs) = fixture(SRC);
@@ -428,6 +462,7 @@ require_parent_status = "accepted"
             None,
             None,
             false,
+            None,
             None,
             None,
             None,
@@ -531,6 +566,7 @@ require_parent_status = "accepted"
             None,
             None,
             false,
+            None,
             None,
             None,
             None,
