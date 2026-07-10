@@ -91,6 +91,18 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // `config schema` describes the shape of any .lazyspec.toml and is a property
+    // of the binary, not of a project, so it must dispatch before `Config::load`
+    // (which would otherwise fail when no .lazyspec.toml exists).
+    if let Some(Commands::Config {
+        command: Some(lazyspec::cli::config::ConfigCommand::Schema { .. }),
+        ..
+    }) = &cli.command
+    {
+        println!("{}", lazyspec::cli::config::run_schema_json()?);
+        return Ok(());
+    }
+
     let config = Config::load(&cwd, &fs)?;
 
     match cli.command {
@@ -453,6 +465,10 @@ fn main() -> anyhow::Result<()> {
             match command {
                 None | Some(ConfigCommand::Show { .. }) => {
                     println!("{}", lazyspec::cli::config::run_show_json(&config)?);
+                }
+                Some(ConfigCommand::Schema { .. }) => {
+                    // Dispatched before `Config::load` above; kept for exhaustiveness.
+                    println!("{}", lazyspec::cli::config::run_schema_json()?);
                 }
                 Some(ConfigCommand::AddType {
                     name,

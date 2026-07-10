@@ -509,10 +509,11 @@ frontmatter).
 `lazyspec config` reads and edits `.lazyspec.toml` without you opening the file.
 The read is plain JSON; the three mutators reconcile the TOML in place, preserving
 comments, formatting, and block order exactly as `fix --config` and the TUI
-settings screen do.
+settings screen do; and `schema` emits a JSON Schema describing the file's shape.
 
 ```sh
 lazyspec config --json                      # print the resolved config as JSON
+lazyspec config schema                      # print a JSON Schema for .lazyspec.toml
 
 # Append a new document type (name, plural, dir, prefix are positional)
 lazyspec config add-type spike spikes docs/spikes SPIKE \
@@ -535,6 +536,21 @@ lazyspec config add-gate stories-need-rfcs --status accepted
 unknown rule and refuses a `relation-existence` rule (the gate applies only to
 `parent-child` rules). The mutators require an already-valid config; run
 `lazyspec fix --config` first to migrate a legacy one.
+
+`config schema` is the exception: it needs no active project and runs from any
+directory, since the schema is a property of the binary, not of a project (every
+other `config` subcommand requires a `.lazyspec.toml` to read or edit). The
+schema is derived from the actual structs lazyspec deserializes the TOML into, so
+it tracks the real parser rather than a hand-maintained description that can drift.
+`--json` is accepted for consistency and produces identical output. Point a
+JSON-Schema-aware TOML language server at it (taplo, Even Better TOML) for
+editor autocomplete and hover docs, or save it as the authoritative
+machine-readable reference for a human or agent editing the config instead of
+inferring valid keys from this README:
+
+```sh
+lazyspec config schema > lazyspec.schema.json
+```
 
 #### `github-issues` store auth
 
