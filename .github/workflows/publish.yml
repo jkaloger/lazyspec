@@ -15,6 +15,9 @@ jobs:
       contents: write
       pull-requests: read
       id-token: write # OIDC for crates.io Trusted Publishing
+    outputs:
+      releases_created: ${{ steps.release-plz.outputs.releases_created }}
+      releases: ${{ steps.release-plz.outputs.releases }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -55,11 +58,110 @@ jobs:
         # complete toolchain and never re-syncs mid-build.
         run: rustup toolchain install stable --profile minimal --force
       - name: Run release-plz
+        id: release-plz
         uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
         with:
           command: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  upload-assets:
+    name: Upload assets (${{ matrix.target }})
+    needs: publish-release
+    if: needs.publish-release.outputs.releases_created == 'true'
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            arch: aarch64
+            app: true
+          - os: macos-13
+            target: x86_64-apple-darwin
+            arch: x86_64
+            app: true
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            app: false
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ fromJSON(needs.publish-release.outputs.releases)[0].tag }}
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
+
+      - name: Cache Nix store
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-${{ matrix.target }}-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nix-${{ matrix.target }}-
+
+      - name: Put flake's Rust toolchain on PATH
+        # nix develop --command spawns a subshell whose PATH doesn't survive
+        # to the next step, so the cargo tauri build step needs the devShell's
+        # cargo dir persisted to $GITHUB_PATH.
+        #
+        # $CARGO/$RUSTC/$RUSTDOC pin every build to the flake's toolchain:
+        # nixpkgs ships cargo and rustc in *separate* store paths, so pinning
+        # $CARGO alone still lets builds spawn the shim rustc; pin rustc/rustdoc
+        # too (env beats PATH ordering).
+        # tail -n1: the devShell shellHook prints to stdout before the path.
+        run: |
+          cargo_bin="$(nix develop --command sh -c 'command -v cargo' | tail -n1)"
+          rustc_bin="$(nix develop --command sh -c 'command -v rustc' | tail -n1)"
+          rustc_dir="$(dirname "$rustc_bin")"
+          echo "$(dirname "$cargo_bin")" >> "$GITHUB_PATH"
+          echo "$rustc_dir" >> "$GITHUB_PATH"
+          echo "CARGO=$cargo_bin" >> "$GITHUB_ENV"
+          echo "RUSTC=$rustc_bin" >> "$GITHUB_ENV"
+          echo "RUSTDOC=$rustc_dir/rustdoc" >> "$GITHUB_ENV"
+
+      - name: Build CLI
+        run: nix build .#default
+
+      - name: Archive CLI binary
+        run: |
+          tag="${{ fromJSON(needs.publish-release.outputs.releases)[0].tag }}"
+          cp -L result/bin/lazyspec ./lazyspec
+          chmod +w ./lazyspec
+          archive="lazyspec-${tag}-${{ matrix.target }}.tar.gz"
+          tar -czf "${archive}" lazyspec
+          echo "cli_archive=${archive}" >> "$GITHUB_ENV"
+
+      - name: Build macOS app
+        if: matrix.app
+        run: nix develop --command cargo tauri build --features app
+
+      - name: Archive macOS app
+        if: matrix.app
+        run: |
+          tag="${{ fromJSON(needs.publish-release.outputs.releases)[0].tag }}"
+          archive="lazyspec-${tag}-${{ matrix.arch }}-app.zip"
+          (cd target/release/bundle/macos && zip -r -y "${OLDPWD}/${archive}" lazyspec.app)
+          echo "app_archive=${archive}" >> "$GITHUB_ENV"
+
+      - name: Upload CLI archive to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ fromJSON(needs.publish-release.outputs.releases)[0].tag }}"
+          gh release upload "${tag}" "${cli_archive}" --clobber
+
+      - name: Upload app archive to release
+        if: matrix.app
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ fromJSON(needs.publish-release.outputs.releases)[0].tag }}"
+          gh release upload "${tag}" "${app_archive}" --clobber
 
   publish-pr:
     name: Publish PR
