@@ -30,7 +30,14 @@ jobs:
         # nix develop --command spawns a subshell whose PATH doesn't survive
         # to the next step, and release-plz/action is a separate step, so we
         # persist the devShell's cargo dir to $GITHUB_PATH instead.
-        run: nix develop --command sh -c 'dirname $(command -v cargo)' >> "$GITHUB_PATH"
+        #
+        # $CARGO pins release-plz and cargo-semver-checks to the flake's cargo:
+        # release-plz's cargo-binstall self-install prepends ~/.cargo/bin, whose
+        # rustup shim would otherwise shadow ours and auto-install a broken stable.
+        run: |
+          cargo_bin="$(nix develop --command sh -c 'command -v cargo')"
+          echo "$(dirname "$cargo_bin")" >> "$GITHUB_PATH"
+          echo "CARGO=$cargo_bin" >> "$GITHUB_ENV"
       - name: Run release-plz
         uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
         with:
@@ -62,7 +69,14 @@ jobs:
         # nix develop --command spawns a subshell whose PATH doesn't survive
         # to the next step, and release-plz/action is a separate step, so we
         # persist the devShell's cargo dir to $GITHUB_PATH instead.
-        run: nix develop --command sh -c 'dirname $(command -v cargo)' >> "$GITHUB_PATH"
+        #
+        # $CARGO pins release-plz and cargo-semver-checks to the flake's cargo:
+        # release-plz's cargo-binstall self-install prepends ~/.cargo/bin, whose
+        # rustup shim would otherwise shadow ours and auto-install a broken stable.
+        run: |
+          cargo_bin="$(nix develop --command sh -c 'command -v cargo')"
+          echo "$(dirname "$cargo_bin")" >> "$GITHUB_PATH"
+          echo "CARGO=$cargo_bin" >> "$GITHUB_ENV"
       - name: Run release-plz
         uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
         with:
