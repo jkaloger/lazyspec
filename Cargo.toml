@@ -1,6 +1,6 @@
 [package]
 name = "lazyspec"
-version = "0.9.1"
+version = "0.9.2"
 edition = "2021"
 description = "A little TUI & CLI for project documentation."
 license = "MIT"
