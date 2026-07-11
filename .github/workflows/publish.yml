@@ -39,6 +39,13 @@ jobs:
           cargo_bin="$(nix develop --command sh -c 'command -v cargo' | tail -n1)"
           echo "$(dirname "$cargo_bin")" >> "$GITHUB_PATH"
           echo "CARGO=$cargo_bin" >> "$GITHUB_ENV"
+      - name: Repair rustup stable for cargo-semver-checks
+        # cargo-semver-checks ignores $CARGO and builds rustdoc via the runner's
+        # rustup shim. The runner's pre-installed stable is partial, so the shim
+        # auto-updates and dies on a clippy component conflict (E0463). Reinstall
+        # stable to latest with a minimal profile (no clippy) so the shim finds a
+        # complete toolchain and never re-syncs mid-build.
+        run: rustup toolchain install stable --profile minimal --force
       - name: Run release-plz
         uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
         with:
