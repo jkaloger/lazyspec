@@ -31,14 +31,22 @@ jobs:
         # to the next step, and release-plz/action is a separate step, so we
         # persist the devShell's cargo dir to $GITHUB_PATH instead.
         #
-        # $CARGO pins release-plz and cargo-semver-checks to the flake's cargo:
+        # $CARGO/$RUSTC/$RUSTDOC pin every build to the flake's toolchain:
         # release-plz's cargo-binstall self-install prepends ~/.cargo/bin, whose
         # rustup shim would otherwise shadow ours and auto-install a broken stable.
+        # nixpkgs ships cargo and rustc in *separate* store paths, so pinning
+        # $CARGO alone still lets builds spawn the shim rustc; pin rustc/rustdoc
+        # too (env beats PATH ordering).
         # tail -n1: the devShell shellHook prints to stdout before the path.
         run: |
           cargo_bin="$(nix develop --command sh -c 'command -v cargo' | tail -n1)"
+          rustc_bin="$(nix develop --command sh -c 'command -v rustc' | tail -n1)"
+          rustc_dir="$(dirname "$rustc_bin")"
           echo "$(dirname "$cargo_bin")" >> "$GITHUB_PATH"
+          echo "$rustc_dir" >> "$GITHUB_PATH"
           echo "CARGO=$cargo_bin" >> "$GITHUB_ENV"
+          echo "RUSTC=$rustc_bin" >> "$GITHUB_ENV"
+          echo "RUSTDOC=$rustc_dir/rustdoc" >> "$GITHUB_ENV"
       - name: Repair rustup stable for cargo-semver-checks
         # cargo-semver-checks ignores $CARGO and builds rustdoc via the runner's
         # rustup shim. The runner's pre-installed stable is partial, so the shim
@@ -78,14 +86,22 @@ jobs:
         # to the next step, and release-plz/action is a separate step, so we
         # persist the devShell's cargo dir to $GITHUB_PATH instead.
         #
-        # $CARGO pins release-plz and cargo-semver-checks to the flake's cargo:
+        # $CARGO/$RUSTC/$RUSTDOC pin every build to the flake's toolchain:
         # release-plz's cargo-binstall self-install prepends ~/.cargo/bin, whose
         # rustup shim would otherwise shadow ours and auto-install a broken stable.
+        # nixpkgs ships cargo and rustc in *separate* store paths, so pinning
+        # $CARGO alone still lets builds spawn the shim rustc; pin rustc/rustdoc
+        # too (env beats PATH ordering).
         # tail -n1: the devShell shellHook prints to stdout before the path.
         run: |
           cargo_bin="$(nix develop --command sh -c 'command -v cargo' | tail -n1)"
+          rustc_bin="$(nix develop --command sh -c 'command -v rustc' | tail -n1)"
+          rustc_dir="$(dirname "$rustc_bin")"
           echo "$(dirname "$cargo_bin")" >> "$GITHUB_PATH"
+          echo "$rustc_dir" >> "$GITHUB_PATH"
           echo "CARGO=$cargo_bin" >> "$GITHUB_ENV"
+          echo "RUSTC=$rustc_bin" >> "$GITHUB_ENV"
+          echo "RUSTDOC=$rustc_dir/rustdoc" >> "$GITHUB_ENV"
       - name: Run release-plz
         uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
         with:
