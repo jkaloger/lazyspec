@@ -34,8 +34,9 @@ jobs:
         # $CARGO pins release-plz and cargo-semver-checks to the flake's cargo:
         # release-plz's cargo-binstall self-install prepends ~/.cargo/bin, whose
         # rustup shim would otherwise shadow ours and auto-install a broken stable.
+        # tail -n1: the devShell shellHook prints to stdout before the path.
         run: |
-          cargo_bin="$(nix develop --command sh -c 'command -v cargo')"
+          cargo_bin="$(nix develop --command sh -c 'command -v cargo' | tail -n1)"
           echo "$(dirname "$cargo_bin")" >> "$GITHUB_PATH"
           echo "CARGO=$cargo_bin" >> "$GITHUB_ENV"
       - name: Run release-plz
@@ -73,8 +74,9 @@ jobs:
         # $CARGO pins release-plz and cargo-semver-checks to the flake's cargo:
         # release-plz's cargo-binstall self-install prepends ~/.cargo/bin, whose
         # rustup shim would otherwise shadow ours and auto-install a broken stable.
+        # tail -n1: the devShell shellHook prints to stdout before the path.
         run: |
-          cargo_bin="$(nix develop --command sh -c 'command -v cargo')"
+          cargo_bin="$(nix develop --command sh -c 'command -v cargo' | tail -n1)"
           echo "$(dirname "$cargo_bin")" >> "$GITHUB_PATH"
           echo "CARGO=$cargo_bin" >> "$GITHUB_ENV"
       - name: Run release-plz
