@@ -268,6 +268,8 @@ All document management is available as subcommands. Most accept `--json` for ma
 | `delete <path>`                                                 | Delete a document                                                                               |
 | `link <from> <rel> <to>`                                        | Add a typed relationship (canonical or inverse keyword)                                         |
 | `unlink <from> <rel> <to>`                                      | Remove a relationship (canonical or inverse keyword)                                            |
+| `tag add <id> <tags>...`                                        | Add tags to a document (auto-creates GitHub labels if needed)                                   |
+| `tag remove <id> <tags>...`                                     | Remove tags from a document                                                                     |
 | `search <query> [--doc-type X]`                                 | Full-text search across all documents                                                           |
 | `context <id> [--depth N]`                                      | Show the full document chain (RFC -> Story -> Iteration)                                        |
 | `context [--anchor TYPE]`                                       | Emit the context forest (omit `<id>`); `--anchor` re-roots on a type                            |

@@ -4,7 +4,7 @@ use lazyspec::cli::provenance::ProvenanceCommand;
 use lazyspec::cli::reservations::ReservationsCommand;
 use lazyspec::cli::setup::SetupCommand;
 use lazyspec::cli::skills::SkillsCommand;
-use lazyspec::cli::{Cli, Commands};
+use lazyspec::cli::{Cli, Commands, TagAction};
 use lazyspec::engine::clickup::ClickupHttpClient;
 use lazyspec::engine::config::{Config, StoreBackend};
 use lazyspec::engine::credentials::{CredentialStore, LayeredCredentialStore};
@@ -307,6 +307,48 @@ fn main() -> anyhow::Result<()> {
                 outcome.target
             );
         }
+        Some(Commands::Tag { action }) => match action {
+            TagAction::Add { id, tags, json } => {
+                lazyspec::cli::lease::check_lease_gate(&cwd, &config, &id)?;
+                let store = Store::load(&cwd, &config)?;
+                lazyspec::cli::tag::tag_add_with_config(
+                    &cwd,
+                    &store,
+                    &id,
+                    &tags,
+                    &fs,
+                    Some(&config),
+                )?;
+                if json {
+                    let store = Store::load(&cwd, &config)?;
+                    let doc = lazyspec::cli::resolve::resolve_shorthand_or_path(&store, &id)?;
+                    let json_val = lazyspec::cli::json::doc_to_json(doc);
+                    println!("{}", serde_json::to_string_pretty(&json_val)?);
+                } else {
+                    println!("Tagged {}", id);
+                }
+            }
+            TagAction::Remove { id, tags, json } => {
+                lazyspec::cli::lease::check_lease_gate(&cwd, &config, &id)?;
+                let store = Store::load(&cwd, &config)?;
+                lazyspec::cli::tag::tag_remove_with_config(
+                    &cwd,
+                    &store,
+                    &id,
+                    &tags,
+                    &fs,
+                    Some(&config),
+                )?;
+                if json {
+                    let store = Store::load(&cwd, &config)?;
+                    let doc = lazyspec::cli::resolve::resolve_shorthand_or_path(&store, &id)?;
+                    let json_val = lazyspec::cli::json::doc_to_json(doc);
+                    println!("{}", serde_json::to_string_pretty(&json_val)?);
+                } else {
+                    println!("Untagged {}", id);
+                }
+            }
+        },
         Some(Commands::Ignore { path }) => {
             let store = Store::load(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
