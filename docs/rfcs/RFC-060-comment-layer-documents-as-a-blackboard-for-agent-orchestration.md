@@ -1,5 +1,5 @@
 ---
-title: "Comment layer: documents as a blackboard for agent orchestration"
+title: "Comment layer: attributed append-only annotations on documents"
 type: rfc
 status: draft
 author: "jack"
@@ -10,44 +10,33 @@ related: []
 
 ## Summary
 
-Add a comment/observation layer to lazyspec documents so an external agent orchestrator can use the doc store as a **blackboard**. Comments are immutable, attributed, append-only entries posted against a document. Each comment carries a **generic, project-configurable attribute map** — the blackboard vocabulary (`kind`, `confidence`, `anchor`, …) is declared in config, not hard-coded in the engine, exactly as document types already are. The storage sits behind a configurable `CommentStore` trait — filesystem (comment-per-file) and git-ref (blob + namespaced ref) impls ship first, with github-issues/clickup as thin adapters. This turns the existing typed-markdown store into shared problem-solving state that many knowledge sources read and contribute to concurrently.
+Add a comment layer to lazyspec documents: attributed, append-only, immutable annotations posted against a document or a section of it. This is the same primitive as a review comment on a spec, a margin note on an RFC, or a discussion thread on a story — a fine-grained contribution that lives beside the document without rewriting it. Each comment carries a small engine-owned envelope (id, author, timestamp, reply-to) plus a **project-configurable attribute map** — the vocabulary (`kind`, `confidence`, `anchor`, …) is declared in config, exactly as document types already are, not hard-coded in the engine. Thread structure and resolution state are *derived* by folding the append-only stream, never stored as mutable fields. Storage is a filesystem comment-per-file (maildir) layout: still just markdown on disk, PR-reviewable, `cat`-able. Every operation has `--json`, so both humans and agents consume the same interface.
 
 ## Motivation
 
-**Blackboard grounding.** Blackboard architecture has three parts: a shared, layered *blackboard* holding the evolving solution; independent *knowledge sources* (KS) that read it and contribute when their preconditions are met; a *control* component that decides which KS runs next. lazyspec already supplies most of the blackboard substrate:
+**The missing primitive: annotate without rewriting.** A lazyspec document is a whole artifact — you advance it, review it, edit its body. But there is no way to attach a fine-grained, attributed note *to* a document or a section of it without rewriting the document. Reviewing an RFC, you want to leave a comment on section 3. Reasoning about a spec, you want to record an observation, challenge a claim, or note a decision — dated and attributed — beside the doc, not folded into its prose. Today that has nowhere to live except the document body itself, which loses attribution, loses ordering, and forces a full rewrite for every note. A comment layer is the primitive that fills this gap, and it is squarely a documentation feature: attributed, append-only annotations on structured markdown.
 
-| Blackboard concept | lazyspec today |
-|---|---|
-| Blackboard (shared, layered state) | typed markdown + frontmatter + links |
-| Abstraction levels | doc types (rfc → story → iteration) |
-| Hypothesis | a document |
-| Confidence / maturity | lifecycle status |
-| Support / dependency relation | links |
-| KS precondition | gates |
-| Concurrency control | reservation refs, `claim`/`release`/`leases` (ref-backed) |
+**Append-only, so notes are safe and concurrent.** A comment is never edited. A correction is a new comment; a resolution is a new comment; agreement is a new comment. This is event sourcing: thread structure and resolution status are *folded* from the stream, never written as mutable fields. Immutability is what makes the reasoning trail survive — a claim is challenged, not erased — and it is also what makes concurrent posting conflict-free: each comment is a distinct entry with a unique id, so two writers never contend for the same target. On a maildir filesystem layout this falls out for free: distinct ULID-named files, no shared mutable state, clean git merges.
 
-The assumption for this RFC: **the orchestrator and its agents are external**. lazyspec is not a runner. It is the blackboard — plus the safe-write and query primitives that a blackboard needs.
+**Configurable attributes, mirroring document types.** Comments are not a fixed-schema social feature. Each comment carries a project-declared attribute map — `kind`, `confidence`, `anchor`, or whatever a project needs — validated against a config schema exactly the way document `[[types]]` are. The engine ships a sensible default vocabulary and hard-codes none of it. This keeps the engine domain-agnostic and consistent with how lazyspec already treats configurability.
 
-What is missing is the *posting* mechanism. A KS observes something, produces a partial result, challenges a hypothesis, or records a decision. Today that has nowhere to live except a full-document rewrite — which serializes writers and conflicts under concurrency. Commit+push per posting is too coarse for live orchestration: remote round-trip, serialized on the branch tip, history pollution, merge conflict at HEAD.
-
-A blackboard needs fine-grained, attributed, conflict-free contributions. That is what comments are here. They are not a social feature; they are the blackboard's contribution channel.
+**One consumer, not the reason.** These same properties — attributed, timestamped, append-only contributions with a `--since` view — happen to be what an external agent orchestrator would want if it used the doc store as shared state. That is a legitimate downstream *consumer* of the primitive, not its justification. This RFC scopes the comment layer as a documentation feature that stands on its own; orchestration is deliberately out of scope (see Non-goals) and is not designed for here.
 
 ## Goals
 
-- A comment is an immutable, attributed, timestamped entry against a document. Never edited; corrections are new comments.
-- Concurrent knowledge sources post without write conflicts.
-- Comments carry blackboard semantics as **configurable attributes**, not fixed fields: a project declares its attribute schema (e.g. `kind`, `confidence`, `anchor`) the same way it declares document types. The engine ships sensible defaults but hard-codes none of the vocabulary or its enum values.
+- A comment is an immutable, attributed, timestamped entry against a document or one of its sections. Never edited; corrections are new comments.
+- Concurrent writers post without write conflicts (distinct-file, distinct-id).
+- Comments carry semantics as **configurable attributes**, not fixed fields: a project declares its attribute schema (e.g. `kind`, `confidence`, `anchor`) the same way it declares document types. The engine ships sensible defaults but hard-codes none of the vocabulary or its enum values.
 - Thread and resolution state are *derived* by folding the append-only stream, never stored as mutable fields.
-- Storage is a configurable trait seam. Filesystem and git-ref impls ship; remote stores (github-issues, clickup) are adapters.
+- Storage is a filesystem maildir layout — still markdown on disk.
 - Every operation has `--json`. Agents consume the same interface humans do.
-- Change detection: an orchestrator can ask "what comments since revision N" to drive its control loop.
 
 ## Non-goals
 
-- No scheduler, no agent spawn, no priority policy. That is the external orchestrator's job. lazyspec exposes signals (frontier, confidence, timestamps), not the control decision.
-- No real-time push/subscribe daemon. Poll + revision cursor only — fits the simple-tool scope.
-- No mutable edit/delete of posted comments. Append-only is the invariant that makes concurrency safe.
-- No garbage collection of resolved threads in v1. Deferred.
+- **No orchestration.** No scheduler, no agent spawn, no priority policy, no control loop, no daemon. lazyspec is not a runner and does not model one. An external orchestrator *may* consume the comment layer, but this RFC does not design for it — no tier table, no control-loop section, no blackboard machinery. If orchestration is ever wanted, it is a separate RFC that builds on this primitive.
+- **Local filesystem store only in scope.** Comments are markdown-on-disk (maildir). No git-ref store, no `--since` revision cursor, no github-issues/clickup adapters in this RFC — those served the polling orchestrator and pull in multi-store cursor semantics, remote-mirror immutability questions, and dynamic nested attributes the schema doesn't model. If a second store becomes real, it justifies the `CommentStore` trait then (convention principle 6); until then the fs impl stays inline.
+- **No mutable edit/delete of posted comments.** Append-only is the invariant that makes the trail durable and concurrency safe.
+- **No garbage collection of resolved threads in v1.** Deferred.
 
 ## Design
 
