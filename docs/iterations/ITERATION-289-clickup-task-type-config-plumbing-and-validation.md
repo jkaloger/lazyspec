@@ -6,7 +6,7 @@ author: unknown
 date: 2026-07-10
 tags: []
 related:
-- implements: STORY-204
+- implements: STORY-205
 - blocks: ITERATION-290
 ---
 
