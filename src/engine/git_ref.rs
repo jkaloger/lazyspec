@@ -323,6 +323,10 @@ pub mod test_support {
         pub push_with_lease_results: RefCell<Vec<Result<()>>>,
         pub read_commit_timestamp_results: RefCell<Vec<Result<DateTime<Utc>>>>,
         pub calls: RefCell<Vec<String>>,
+        /// The `doc.md` blob content passed to each `create_commit`, in call
+        /// order. Lets tests assert what was serialized into the ref, which the
+        /// `calls` string log (parent SHA only) does not capture.
+        pub committed_blobs: RefCell<Vec<String>>,
     }
 
     impl Default for MockGitRefClient {
@@ -347,6 +351,7 @@ pub mod test_support {
                 push_with_lease_results: RefCell::new(vec![]),
                 read_commit_timestamp_results: RefCell::new(vec![]),
                 calls: RefCell::new(vec![]),
+                committed_blobs: RefCell::new(vec![]),
             }
         }
 
@@ -446,12 +451,15 @@ pub mod test_support {
             &self,
             _root: &Path,
             refname: &str,
-            _files: &[(&str, &str)],
+            files: &[(&str, &str)],
             parent: Option<&str>,
         ) -> Result<String> {
             self.calls
                 .borrow_mut()
                 .push(format!("create_commit:{}:parent={:?}", refname, parent));
+            if let Some((_, content)) = files.iter().find(|(name, _)| *name == "doc.md") {
+                self.committed_blobs.borrow_mut().push(content.to_string());
+            }
             Self::pop_or_default(&self.create_commit_results)
         }
 

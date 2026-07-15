@@ -1,12 +1,10 @@
-use crate::cli::resolve::resolve_to_path;
-use crate::engine::config::{Config, StoreBackend};
+use crate::cli::resolve::{resolve_shorthand_or_path, resolve_to_path};
+use crate::engine::config::Config;
 use crate::engine::document::rewrite_frontmatter;
 use crate::engine::fs::FileSystem;
-use crate::engine::gh::{deterministic_color, GhCli, GhIssueReader, GhIssueWriter};
-use crate::engine::issue_cache::IssueCache;
-use crate::engine::issue_map::IssueMap;
 use crate::engine::store::Store;
-use anyhow::{anyhow, Result};
+use crate::engine::store_dispatch::build_registry;
+use anyhow::Result;
 use std::path::Path;
 
 pub fn tag_add_with_config(
@@ -16,18 +14,6 @@ pub fn tag_add_with_config(
     tags: &[String],
     fs: &dyn FileSystem,
     config: Option<&Config>,
-) -> Result<()> {
-    tag_add_inner(root, store, id, tags, fs, config, GhCli::new)
-}
-
-fn tag_add_inner<G: GhIssueReader + GhIssueWriter>(
-    root: &Path,
-    store: &Store,
-    id: &str,
-    tags: &[String],
-    fs: &dyn FileSystem,
-    config: Option<&Config>,
-    client_factory: impl FnOnce() -> G,
 ) -> Result<()> {
     let resolved = resolve_to_path(store, id)?;
     let full_path = root.join(&resolved);
@@ -44,14 +30,7 @@ fn tag_add_inner<G: GhIssueReader + GhIssueWriter>(
         }
         Ok(())
     })?;
-    push_tags_if_github_backed(
-        root,
-        &resolved,
-        config,
-        client_factory,
-        &TagOp::Add(tags.to_vec()),
-    )?;
-    Ok(())
+    propagate_tags(root, store, id, config, tags, &[])
 }
 
 pub fn tag_remove_with_config(
@@ -61,18 +40,6 @@ pub fn tag_remove_with_config(
     tags: &[String],
     fs: &dyn FileSystem,
     config: Option<&Config>,
-) -> Result<()> {
-    tag_remove_inner(root, store, id, tags, fs, config, GhCli::new)
-}
-
-fn tag_remove_inner<G: GhIssueReader + GhIssueWriter>(
-    root: &Path,
-    store: &Store,
-    id: &str,
-    tags: &[String],
-    fs: &dyn FileSystem,
-    config: Option<&Config>,
-    client_factory: impl FnOnce() -> G,
 ) -> Result<()> {
     let resolved = resolve_to_path(store, id)?;
     let full_path = root.join(&resolved);
@@ -86,110 +53,43 @@ fn tag_remove_inner<G: GhIssueReader + GhIssueWriter>(
         }
         Ok(())
     })?;
-    push_tags_if_github_backed(
-        root,
-        &resolved,
-        config,
-        client_factory,
-        &TagOp::Remove(tags.to_vec()),
-    )?;
-    Ok(())
+    propagate_tags(root, store, id, config, &[], tags)
 }
 
-enum TagOp {
-    Add(Vec<String>),
-    Remove(Vec<String>),
-}
-
-/// Push label changes to GitHub for github-issues backed documents.
+/// Propagate a tag mutation to the document's backend via
+/// [`DocumentStore::sync_tags`](crate::engine::store_dispatch::DocumentStore::sync_tags).
 ///
-/// Skips optimistic locking (check_lock) because adding/removing a label is an
-/// atomic GitHub operation that doesn't depend on the issue body state.
-fn push_tags_if_github_backed<G: GhIssueReader + GhIssueWriter>(
+/// The frontmatter rewrite above is backend-agnostic (source file for
+/// filesystem, cache file for materialized backends); this dispatches the remote
+/// half through the store registry so each backend either syncs or fails loudly.
+/// With no config the type/backend cannot be resolved, so propagation is skipped
+/// and only the local rewrite stands.
+fn propagate_tags(
     root: &Path,
-    doc_path: &Path,
+    store: &Store,
+    id: &str,
     config: Option<&Config>,
-    client_factory: impl FnOnce() -> G,
-    op: &TagOp,
+    add: &[String],
+    remove: &[String],
 ) -> Result<()> {
-    let config = match config {
-        Some(c) => c,
-        None => return Ok(()),
+    let Some(config) = config else {
+        return Ok(());
     };
-
-    if !doc_path.starts_with(".lazyspec/cache/") {
+    let doc = resolve_shorthand_or_path(store, id)?;
+    let Some(type_def) = config.type_by_name(doc.doc_type.as_str()) else {
         return Ok(());
-    }
-
-    let type_name = doc_path
-        .components()
-        .nth(2)
-        .and_then(|c| c.as_os_str().to_str())
-        .ok_or_else(|| {
-            anyhow!(
-                "cannot determine type from cache path: {}",
-                doc_path.display()
-            )
-        })?;
-
-    let type_def = config
-        .type_by_name(type_name)
-        .ok_or_else(|| anyhow!("unknown type '{}' from cache path", type_name))?;
-
-    if type_def.store != StoreBackend::GithubIssues {
-        return Ok(());
-    }
-
-    let gh_config = config.documents.github.as_ref().ok_or_else(|| {
-        anyhow!(
-            "type '{}' uses github-issues store but no [github] config found",
-            type_name
-        )
-    })?;
-    let repo = gh_config.repo.as_ref().ok_or_else(|| {
-        anyhow!(
-            "type '{}' uses github-issues store but no github.repo configured",
-            type_name
-        )
-    })?;
-
-    let doc_id = crate::engine::store::extract_id_from_name(
-        doc_path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
-    );
-
-    let issue_map = IssueMap::load(root)?;
-    let entry = issue_map
-        .get(&doc_id)
-        .ok_or_else(|| anyhow!("{} not found in issue map", doc_id))?;
-    let issue_number = entry.issue_number;
-
-    let client = client_factory();
-
-    match op {
-        TagOp::Add(tags) => {
-            for tag in tags {
-                client.label_ensure(repo, tag, "", &deterministic_color(tag))?;
-            }
-            client.issue_edit(repo, issue_number, None, None, tags, &[])?;
-        }
-        TagOp::Remove(tags) => {
-            client.issue_edit(repo, issue_number, None, None, &[], tags)?;
-        }
-    }
-
-    let issue_cache = IssueCache::new(root);
-    issue_cache.touch_lock(&doc_id);
-
-    Ok(())
+    };
+    let mut registry = build_registry(root, config);
+    registry
+        .for_type(type_def)?
+        .sync_tags(type_def, &doc.id, add, remove)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::{Config, GithubConfig, NumberingStrategy, StoreBackend, TypeDef};
+    use crate::engine::config::{Config, NumberingStrategy, StoreBackend, TypeDef};
     use crate::engine::fs::RealFileSystem;
-    use crate::engine::gh::test_support::MockGhClient;
-    use crate::engine::issue_map::IssueMap;
     use crate::engine::store::Store;
 
     fn tmp_root(name: &str) -> std::path::PathBuf {
@@ -247,14 +147,13 @@ mod tests {
         let store = Store::load(&root, &config).unwrap();
         let fs = RealFileSystem;
 
-        tag_add_inner(
+        tag_add_with_config(
             &root,
             &store,
             "RFC-001",
             &[s("security")],
             &fs,
-            None,
-            MockGhClient::new,
+            Some(&config),
         )
         .unwrap();
 
@@ -275,14 +174,13 @@ mod tests {
         let store = Store::load(&root, &config).unwrap();
         let fs = RealFileSystem;
 
-        tag_add_inner(
+        tag_add_with_config(
             &root,
             &store,
             "RFC-001",
             &[s("auth"), s("refactor"), s("cleanup")],
             &fs,
-            None,
-            MockGhClient::new,
+            Some(&config),
         )
         .unwrap();
 
@@ -304,16 +202,7 @@ mod tests {
         let store = Store::load(&root, &config).unwrap();
         let fs = RealFileSystem;
 
-        tag_add_inner(
-            &root,
-            &store,
-            "RFC-001",
-            &[s("auth")],
-            &fs,
-            None,
-            MockGhClient::new,
-        )
-        .unwrap();
+        tag_add_with_config(&root, &store, "RFC-001", &[s("auth")], &fs, Some(&config)).unwrap();
 
         let updated = std::fs::read_to_string(root.join("docs/rfcs/RFC-001-my-rfc.md")).unwrap();
         let tags = extract_tags(&updated);
@@ -337,16 +226,7 @@ mod tests {
         let store = Store::load(&root, &config).unwrap();
         let fs = RealFileSystem;
 
-        tag_remove_inner(
-            &root,
-            &store,
-            "RFC-001",
-            &[s("auth")],
-            &fs,
-            None,
-            MockGhClient::new,
-        )
-        .unwrap();
+        tag_remove_with_config(&root, &store, "RFC-001", &[s("auth")], &fs, Some(&config)).unwrap();
 
         let updated = std::fs::read_to_string(root.join("docs/rfcs/RFC-001-my-rfc.md")).unwrap();
         let tags = extract_tags(&updated);
@@ -372,14 +252,13 @@ mod tests {
         let store = Store::load(&root, &config).unwrap();
         let fs = RealFileSystem;
 
-        tag_remove_inner(
+        tag_remove_with_config(
             &root,
             &store,
             "RFC-001",
             &[s("cleanup")],
             &fs,
-            None,
-            MockGhClient::new,
+            Some(&config),
         )
         .unwrap();
 
@@ -402,147 +281,18 @@ mod tests {
             .collect()
     }
 
-    fn gh_config_with_iteration_type() -> Config {
-        let iteration_type = TypeDef {
-            name: "iteration".to_string(),
-            plural: "iterations".to_string(),
-            dir: "docs/iterations".to_string(),
-            prefix: "ITERATION".to_string(),
-            icon: None,
-            numbering: NumberingStrategy::Incremental,
-            subdirectory: false,
-            store: StoreBackend::GithubIssues,
-            singleton: false,
-            parent_type: None,
-            agents: Vec::new(),
-            intent: None,
-            authorship: Default::default(),
-            lifecycle: Default::default(),
-            attributes: Vec::new(),
-            label_override: None,
-            github_issue_tag: None,
-            github_issue_type: None,
-            clickup_list_id: None,
-            clickup_task_type: None,
-            clickup_custom_field_map: None,
-        };
-        let mut config = Config::default();
-        config.documents.types = vec![iteration_type];
-        config.documents.github = Some(GithubConfig {
-            repo: Some("owner/repo".to_string()),
-            cache_ttl: 60,
-        });
-        config
-    }
-
+    // AC: sync routes through the store, not a backend match. The CLI must not
+    // branch on the github-issues backend variant; propagation dispatches through
+    // `DocumentStore::sync_tags`. Assert the variant literal is absent
+    // structurally (the needle is split so this test's own source does not match
+    // it). Per-backend propagation behaviour is covered by store-level tests in
+    // `store_dispatch` and `git_ref_store`.
     #[test]
-    fn tag_add_github_issues_triggers_label_ensure_and_issue_edit() {
-        let root = tmp_root("gh_tag_add");
-        let config = gh_config_with_iteration_type();
-
-        let cache_dir = root.join(".lazyspec/cache/iteration");
-        std::fs::create_dir_all(&cache_dir).unwrap();
-
-        let cache_content = concat!(
-            "---\n",
-            "title: Some Title\n",
-            "type: iteration\n",
-            "status: draft\n",
-            "author: agent-7\n",
-            "date: 2026-03-27\n",
-            "tags: []\n",
-            "---\n",
-            "Body text.\n",
-        );
-        std::fs::write(cache_dir.join("ITERATION-042-some-title.md"), cache_content).unwrap();
-
-        let mut issue_map = IssueMap::load(&root).unwrap();
-        issue_map.insert("ITERATION-042", 87, "2026-03-27T10:00:00Z", "");
-        issue_map.save(&root).unwrap();
-
-        // Create cache.lock so touch_lock has something to work with
-        let lock_dir = root.join(".lazyspec");
-        std::fs::write(lock_dir.join("cache.lock"), "{}").unwrap();
-
-        let store = Store::load(&root, &config).unwrap();
-        let fs = RealFileSystem;
-
-        tag_add_inner(
-            &root,
-            &store,
-            "ITERATION-042",
-            &[s("security")],
-            &fs,
-            Some(&config),
-            MockGhClient::new,
-        )
-        .unwrap();
-
-        // Verify cache file was updated with the new tag
-        let updated =
-            std::fs::read_to_string(cache_dir.join("ITERATION-042-some-title.md")).unwrap();
-        let tags = extract_tags(&updated);
+    fn cli_tag_does_not_branch_on_github_backend() {
+        let needle = concat!("StoreBackend", "::", "Github", "Issues");
         assert!(
-            tags.contains(&"security".to_string()),
-            "cache file should contain security tag"
-        );
-    }
-
-    #[test]
-    fn tag_remove_github_issues_triggers_labels_remove() {
-        let root = tmp_root("gh_tag_remove");
-        let config = gh_config_with_iteration_type();
-
-        let cache_dir = root.join(".lazyspec/cache/iteration");
-        std::fs::create_dir_all(&cache_dir).unwrap();
-
-        let cache_content = concat!(
-            "---\n",
-            "title: Some Title\n",
-            "type: iteration\n",
-            "status: draft\n",
-            "author: agent-7\n",
-            "date: 2026-03-27\n",
-            "tags:\n",
-            "- security\n",
-            "- auth\n",
-            "- lazyspec:iteration\n",
-            "---\n",
-            "Body text.\n",
-        );
-        std::fs::write(cache_dir.join("ITERATION-042-some-title.md"), cache_content).unwrap();
-
-        let mut issue_map = IssueMap::load(&root).unwrap();
-        issue_map.insert("ITERATION-042", 87, "2026-03-27T10:00:00Z", "");
-        issue_map.save(&root).unwrap();
-
-        std::fs::write(root.join(".lazyspec/cache.lock"), "{}").unwrap();
-
-        let store = Store::load(&root, &config).unwrap();
-        let fs = RealFileSystem;
-
-        tag_remove_inner(
-            &root,
-            &store,
-            "ITERATION-042",
-            &[s("security")],
-            &fs,
-            Some(&config),
-            MockGhClient::new,
-        )
-        .unwrap();
-
-        let updated =
-            std::fs::read_to_string(cache_dir.join("ITERATION-042-some-title.md")).unwrap();
-        let tags = extract_tags(&updated);
-        assert!(
-            !tags.contains(&"security".to_string()),
-            "security should be removed"
-        );
-        assert!(tags.contains(&"auth".to_string()), "auth should remain");
-        assert!(
-            tags.contains(&"lazyspec:iteration".to_string()),
-            "lazyspec:iteration should remain"
+            !include_str!("tag.rs").contains(needle),
+            "cli/tag.rs must route through DocumentStore::sync_tags, not match on the github backend"
         );
     }
 }
