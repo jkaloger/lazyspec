@@ -1,7 +1,7 @@
 ---
 title: "Lift tag sync into DocumentStore trait"
 type: iteration
-status: accepted
+status: complete
 author: "agent"
 date: 2026-07-14
 tags:

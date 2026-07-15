@@ -1,7 +1,7 @@
 ---
 title: "Tag mutations propagate to every backend or fail loudly"
 type: story
-status: accepted
+status: complete
 author: "jkaloger"
 date: 2026-07-14
 tags:
