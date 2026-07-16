@@ -117,10 +117,14 @@ fn link_inner<
     // Only on push success: mirror the edge into the cache frontmatter,
     // insert-if-absent so a double-link is a no-op on disk.
     rewrite_frontmatter(&full_path, fs, |doc| {
-        if doc.get("related").is_none() {
+        // A bare `related:` parses as YAML null; coerce anything that is not
+        // already a sequence so the push below never panics (AUDIT-018 C2).
+        if !doc.get("related").map(|r| r.is_sequence()).unwrap_or(false) {
             doc["related"] = serde_yaml::Value::Sequence(vec![]);
         }
-        let related = doc["related"].as_sequence_mut().unwrap();
+        let Some(related) = doc["related"].as_sequence_mut() else {
+            return Err(anyhow!("frontmatter `related` is not a sequence"));
+        };
         let already_present = related.iter().any(|entry| {
             entry
                 .as_mapping()
@@ -2818,6 +2822,55 @@ mod tests {
         )
         .unwrap();
         assert!(calls.borrow().is_empty());
+    }
+
+    // AUDIT-018 C2 / STORY-210 AC1: a doc whose frontmatter carries a bare
+    // `related:` (YAML null, common after a manual edit) must accept a link --
+    // the null is coerced to a sequence instead of panicking on
+    // `as_sequence_mut().unwrap()`.
+    #[test]
+    fn link_with_bare_null_related_coerces_to_sequence() {
+        let root = tmp_root("link_bare_null_related");
+        let config = milestone_assoc_config();
+
+        let dir = root.join("docs/spec");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SPEC-1.md"),
+            "---\ntitle: A\ntype: spec\nstatus: draft\nauthor: a\ndate: 2026-03-27\ntags: []\nrelated:\n---\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("SPEC-2.md"),
+            "---\ntitle: B\ntype: spec\nstatus: draft\nauthor: a\ndate: 2026-03-27\ntags: []\n---\nbody\n",
+        )
+        .unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+
+        link_inner(
+            &root,
+            &store,
+            "SPEC-1",
+            "implements",
+            "SPEC-2",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            MockGhMilestoneClient::new,
+            MockGhClient::new,
+        )
+        .expect("link into a doc with bare `related:` must succeed");
+
+        let updated = std::fs::read_to_string(dir.join("SPEC-1.md")).unwrap();
+        assert!(
+            updated.contains("implements: SPEC-2"),
+            "relation should be written, got:\n{updated}"
+        );
+        // The rewritten doc must parse (related is a real sequence now).
+        let meta = DocMeta::parse(&updated).unwrap();
+        assert_eq!(meta.related.len(), 1);
     }
 
     #[test]
