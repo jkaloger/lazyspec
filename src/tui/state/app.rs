@@ -953,7 +953,6 @@ impl App {
             "Validation Rules",
             "Numbering",
             "GitHub",
-            "Coordination",
             "Certification",
             "Agents",
             "Interface",
@@ -1058,31 +1057,6 @@ impl App {
                 .github
                 .as_ref()
                 .map(|g| g.cache_ttl.to_string())
-                .unwrap_or_default(),
-            FieldPath::CoordinationRemote => buf
-                .coordination
-                .as_ref()
-                .map(|c| c.remote.clone())
-                .unwrap_or_default(),
-            FieldPath::CoordinationLeaseDuration => buf
-                .coordination
-                .as_ref()
-                .map(|c| c.lease_duration.clone())
-                .unwrap_or_default(),
-            FieldPath::CoordinationGracePeriod => buf
-                .coordination
-                .as_ref()
-                .map(|c| c.grace_period.clone())
-                .unwrap_or_default(),
-            FieldPath::CoordinationMaxPushRetries => buf
-                .coordination
-                .as_ref()
-                .map(|c| c.max_push_retries.to_string())
-                .unwrap_or_default(),
-            FieldPath::CoordinationMaxClockSkew => buf
-                .coordination
-                .as_ref()
-                .map(|c| c.max_clock_skew.clone())
                 .unwrap_or_default(),
             FieldPath::CertNormalize => buf.certification.normalize.to_string(),
             FieldPath::CertOverride { key } => buf
@@ -1197,31 +1171,6 @@ impl App {
                     g.cache_ttl = n;
                 }
             }
-            FieldPath::CoordinationRemote => {
-                if let (Some(c), SettingsValue::Text(v)) = (buf.coordination.as_mut(), value) {
-                    c.remote = v;
-                }
-            }
-            FieldPath::CoordinationLeaseDuration => {
-                if let (Some(c), SettingsValue::Text(v)) = (buf.coordination.as_mut(), value) {
-                    c.lease_duration = v;
-                }
-            }
-            FieldPath::CoordinationGracePeriod => {
-                if let (Some(c), SettingsValue::Text(v)) = (buf.coordination.as_mut(), value) {
-                    c.grace_period = v;
-                }
-            }
-            FieldPath::CoordinationMaxPushRetries => {
-                if let (Some(c), SettingsValue::Num(n)) = (buf.coordination.as_mut(), value) {
-                    c.max_push_retries = n as u8;
-                }
-            }
-            FieldPath::CoordinationMaxClockSkew => {
-                if let (Some(c), SettingsValue::Text(v)) = (buf.coordination.as_mut(), value) {
-                    c.max_clock_skew = v;
-                }
-            }
             FieldPath::CertNormalize => {
                 if let SettingsValue::Bool(b) = value {
                     buf.certification.normalize = b;
@@ -1279,7 +1228,6 @@ impl App {
             FieldEditor::Text
                 | FieldEditor::BoundedNum { .. }
                 | FieldEditor::Nullable
-                | FieldEditor::Duration
                 | FieldEditor::List
         );
         if !editable {
@@ -1376,16 +1324,6 @@ impl App {
                 }
                 Err(msg) => {
                     self.settings_edit_error = Some(msg);
-                }
-            },
-            FieldEditor::Duration => match crate::engine::lease::parse_duration(&input) {
-                Ok(_) => {
-                    self.settings_write(&focused.path, SettingsValue::Text(input));
-                    self.settings_dirty = true;
-                    self.settings_editing = false;
-                }
-                Err(e) => {
-                    self.settings_edit_error = Some(e.to_string());
                 }
             },
             FieldEditor::Toggle
@@ -2735,7 +2673,7 @@ impl App {
     }
 
     /// Open the confirm prompt for removing the selected settings collection
-    /// entry. Resolves the target from `settings_entry` (sorted-key for cat 7).
+    /// entry. Resolves the target from `settings_entry` (sorted-key for cat 6).
     /// ADR-011: refuses to delete the last `[[relationships]]` entry (cat 2),
     /// returning without activating the confirm. No buffer mutation here.
     pub fn settings_open_delete_confirm(&mut self) {
@@ -2778,7 +2716,7 @@ impl App {
                 };
                 (SettingsDeleteTarget::Index(self.settings_entry), name)
             }
-            7 => {
+            6 => {
                 let mut keys: Vec<&String> = self
                     .settings_buffer
                     .certification
@@ -5456,8 +5394,7 @@ mod tests {
     // --- Settings field editors (ITERATION-188 Tasks 3/4/5) ---
 
     use crate::engine::config::{
-        CoordinationConfig, GithubConfig, ReservedFormat, Severity, SqidsConfig, StoreBackend,
-        ValidationRule,
+        GithubConfig, ReservedFormat, Severity, SqidsConfig, StoreBackend, ValidationRule,
     };
 
     /// Build a settings-edit-ready app: set the buffer to `config`, focus the
@@ -5504,13 +5441,6 @@ mod tests {
         assert_eq!(validate_bounded("5", 1, 10).unwrap(), 5);
     }
 
-    #[test]
-    fn parse_duration_rejects_bad_and_accepts_good() {
-        assert!(crate::engine::lease::parse_duration("abc").is_err());
-        assert!(crate::engine::lease::parse_duration("30").is_err());
-        assert!(crate::engine::lease::parse_duration("60m").is_ok());
-    }
-
     // --- AC1 Text ---
 
     #[test]
@@ -5537,7 +5467,7 @@ mod tests {
     fn ac2_toggle_statusbar_enabled_flips_and_dirties() {
         let mut config = config_one_type();
         config.ui.statusbar.enabled = true;
-        let mut app = settings_app(config, 9, 1); // Interface > statusbar.enabled
+        let mut app = settings_app(config, 8, 1); // Interface > statusbar.enabled
 
         app.settings_space();
         assert!(!app.settings_buffer.ui.statusbar.enabled);
@@ -5644,51 +5574,6 @@ mod tests {
                 .as_deref(),
             Some("owner/repo")
         );
-    }
-
-    // --- AC5 Duration (app-state) ---
-
-    #[test]
-    fn ac5_duration_rejects_keeps_buffer_then_accepts() {
-        let mut config = config_one_type();
-        config.coordination = Some(CoordinationConfig {
-            remote: "origin".to_string(),
-            lease_duration: "60m".to_string(),
-            grace_period: "2m".to_string(),
-            max_push_retries: 5,
-            max_clock_skew: "5m".to_string(),
-        });
-        let mut app = settings_app(config, 6, 1); // Coordination > lease_duration
-
-        app.settings_start_edit();
-        app.settings_edit_input.clear();
-        type_chars(&mut app, "abc");
-        app.settings_confirm_edit();
-        assert_eq!(
-            app.settings_buffer
-                .coordination
-                .as_ref()
-                .unwrap()
-                .lease_duration,
-            "60m"
-        );
-        assert!(app.settings_edit_error.is_some());
-        assert!(!app.settings_dirty);
-        assert!(app.settings_editing);
-
-        app.settings_edit_input.clear();
-        type_chars(&mut app, "30m");
-        app.settings_confirm_edit();
-        assert_eq!(
-            app.settings_buffer
-                .coordination
-                .as_ref()
-                .unwrap()
-                .lease_duration,
-            "30m"
-        );
-        assert!(app.settings_dirty);
-        assert!(!app.settings_editing);
     }
 
     // --- AC6 List ---
@@ -6102,7 +5987,7 @@ mod tests {
     fn ac3_enter_on_bool_flips_buffer_and_dirties() {
         let mut config = config_one_type();
         config.ui.statusbar.enabled = true;
-        let mut app = settings_app(config, 9, 1); // Interface > statusbar.enabled
+        let mut app = settings_app(config, 8, 1); // Interface > statusbar.enabled
         let config = Config::default();
 
         app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
@@ -6344,7 +6229,7 @@ mod tests {
     fn start_edit_noop_on_toggle_and_enumcycle() {
         let config = config_one_type();
         // Toggle field (Interface > ascii_diagrams at index 0).
-        let mut app = settings_app(config.clone(), 9, 0);
+        let mut app = settings_app(config.clone(), 8, 0);
         app.settings_start_edit();
         assert!(!app.settings_editing, "Toggle does not use edit mode");
 
@@ -7391,7 +7276,7 @@ inverse = "implemented-by"
     // a non-empty key inserts the override (default normalize) and drills in.
     #[test]
     fn ac3_seed_override_prompts_then_inserts_on_confirm() {
-        let mut app = settings_app(Config::default(), 7, 0);
+        let mut app = settings_app(Config::default(), 6, 0);
         let before = app.settings_buffer.certification.overrides.len();
 
         app.settings_seed_override();
@@ -7431,7 +7316,7 @@ inverse = "implemented-by"
     // AC3 edge: an empty key on confirm inserts nothing.
     #[test]
     fn ac3_empty_override_key_inserts_nothing() {
-        let mut app = settings_app(Config::default(), 7, 0);
+        let mut app = settings_app(Config::default(), 6, 0);
         app.settings_seed_override();
         app.settings_confirm_override();
         assert!(app.settings_buffer.certification.overrides.is_empty());
@@ -7629,7 +7514,7 @@ name = "related-to"
     fn iter192_ac2_ascii_diagrams_toggle_flips_and_dirties() {
         let mut config = config_one_type();
         config.ui.ascii_diagrams = false;
-        let mut app = settings_app(config, 9, 0); // Interface > ascii_diagrams
+        let mut app = settings_app(config, 8, 0); // Interface > ascii_diagrams
 
         app.settings_space();
         assert!(app.settings_buffer.ui.ascii_diagrams);
@@ -7644,7 +7529,7 @@ name = "related-to"
     #[test]
     fn iter192_ac3_max_expanded_height_rejects_then_accepts() {
         let config = config_one_type(); // [tui.multiline] absent -> default 5
-        let mut app = settings_app(config, 9, 5); // Interface > multiline.max_expanded_height
+        let mut app = settings_app(config, 8, 5); // Interface > multiline.max_expanded_height
         assert_eq!(app.settings_buffer.ui.multiline.max_expanded_height, 5);
 
         // Reject "0" (below min 1): prior value retained, error set, still editing.
@@ -7674,7 +7559,7 @@ name = "related-to"
         use crate::tui::views::status_bar::STATUS_BAR_DEFAULT_LEFT;
 
         let config = config_one_type(); // statusbar.left is None
-        let mut app = settings_app(config, 9, 2); // Interface > statusbar.left
+        let mut app = settings_app(config, 8, 2); // Interface > statusbar.left
 
         // Enter opens the zone editor (routed via start_edit).
         app.settings_start_edit();
@@ -7751,7 +7636,7 @@ left = ["mode"]
 center = ["warnings"]
 "#;
         let (tmp, mut app) = save_app(SRC);
-        app.settings_category = 9;
+        app.settings_category = 8;
 
         // Clear `center`: open its editor, remove all, commit -> Some(vec![]).
         app.settings_field = 3; // statusbar.center

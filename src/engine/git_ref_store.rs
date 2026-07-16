@@ -120,10 +120,6 @@ impl DocumentStore for GitRefStore {
             .git
             .create_ref_commit(&self.root, &refname, &[("doc.md", &content)])?;
 
-        if let Some(coord) = &self.config.coordination {
-            self.git.push_ref(&self.root, &coord.remote, &refname)?;
-        }
-
         let meta = DocMeta {
             path: PathBuf::new(),
             title: title.to_string(),
@@ -215,22 +211,6 @@ impl DocumentStore for GitRefStore {
             bail!("conflict updating {}: {}", doc_id, e);
         }
 
-        if let Some(coord) = &self.config.coordination {
-            if let Err(push_err) = self.git.push_ref(&self.root, &coord.remote, &refname) {
-                if let Err(rollback_err) = self
-                    .git
-                    .update_ref(&self.root, &refname, &old_sha, &new_sha)
-                {
-                    bail!(
-                        "push failed: {}; rollback failed: {}; local state wedged, recover with `lazyspec fetch`",
-                        push_err,
-                        rollback_err
-                    );
-                }
-                bail!("push failed for {}: {}", doc_id, push_err);
-            }
-        }
-
         std::fs::write(&cache_path, &updated_content)?;
 
         let mut lock = CacheLock::load(&self.root)?;
@@ -296,22 +276,6 @@ impl DocumentStore for GitRefStore {
             bail!("conflict updating {}: {}", doc_id, e);
         }
 
-        if let Some(coord) = &self.config.coordination {
-            if let Err(push_err) = self.git.push_ref(&self.root, &coord.remote, &refname) {
-                if let Err(rollback_err) = self
-                    .git
-                    .update_ref(&self.root, &refname, &old_sha, &new_sha)
-                {
-                    bail!(
-                        "push failed: {}; rollback failed: {}; local state wedged, recover with `lazyspec fetch`",
-                        push_err,
-                        rollback_err
-                    );
-                }
-                bail!("push failed for {}: {}", doc_id, push_err);
-            }
-        }
-
         std::fs::write(&cache_path, &updated_content)?;
 
         let mut lock = CacheLock::load(&self.root)?;
@@ -323,10 +287,6 @@ impl DocumentStore for GitRefStore {
 
     fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()> {
         let refname = Self::refname(&type_def.name, doc_id);
-        if let Some(coord) = &self.config.coordination {
-            self.git
-                .delete_remote_ref(&self.root, &coord.remote, &refname, None)?;
-        }
         self.git.delete_ref(&self.root, &refname)?;
 
         let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
@@ -341,16 +301,15 @@ impl DocumentStore for GitRefStore {
         Ok(())
     }
 
-    /// Re-commit the current cache content into the ref blob and push it.
+    /// Re-commit the current cache content into the ref blob.
     ///
     /// The CLI has already rewritten the cache file's `tags:` block (git-ref docs
     /// materialize under `.lazyspec/cache/<type>/`), so `add`/`remove` are unused
     /// here -- the cache already reflects them. This persists that content into
-    /// the git ref, mirroring the ref-push tail of [`Self::update`]: create a
-    /// child commit on the recorded SHA, CAS-swap the ref, and push only when
-    /// coordination is configured (rolling back the local ref on push failure).
-    /// The single-line `key: value` mutation loop of `update` is deliberately not
-    /// reused: it cannot touch a `tags:` sequence block.
+    /// the git ref, mirroring the tail of [`Self::update`]: create a child commit
+    /// on the recorded SHA, then CAS-swap the ref. The single-line `key: value`
+    /// mutation loop of `update` is deliberately not reused: it cannot touch a
+    /// `tags:` sequence block.
     fn sync_tags(
         &mut self,
         type_def: &TypeDef,
@@ -385,22 +344,6 @@ impl DocumentStore for GitRefStore {
             bail!("conflict updating {}: {}", doc_id, e);
         }
 
-        if let Some(coord) = &self.config.coordination {
-            if let Err(push_err) = self.git.push_ref(&self.root, &coord.remote, &refname) {
-                if let Err(rollback_err) = self
-                    .git
-                    .update_ref(&self.root, &refname, &old_sha, &new_sha)
-                {
-                    bail!(
-                        "push failed: {}; rollback failed: {}; local state wedged, recover with `lazyspec fetch`",
-                        push_err,
-                        rollback_err
-                    );
-                }
-                bail!("push failed for {}: {}", doc_id, push_err);
-            }
-        }
-
         let mut lock = CacheLock::load(&self.root)?;
         lock.set(&doc_key, &new_sha);
         lock.save(&self.root)?;
@@ -413,8 +356,8 @@ impl DocumentStore for GitRefStore {
 mod tests {
     use super::*;
     use crate::engine::config::{
-        Config, CoordinationConfig, DocumentConfig, FilesystemConfig, Naming, NumberingStrategy,
-        StoreBackend, Templates, TypeDef, UiConfig,
+        Config, DocumentConfig, FilesystemConfig, Naming, NumberingStrategy, StoreBackend,
+        Templates, TypeDef, UiConfig,
     };
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use tempfile::TempDir;
@@ -466,7 +409,6 @@ mod tests {
             rules: vec![],
             ref_count_ceiling: 0,
             certification: Default::default(),
-            coordination: None,
             agents: Default::default(),
             skills: Default::default(),
             web: None,
@@ -795,164 +737,11 @@ mod tests {
         );
     }
 
-    fn test_config_with_coordination() -> Config {
-        let mut config = test_config();
-        config.coordination = Some(CoordinationConfig {
-            remote: "origin".to_string(),
-            lease_duration: "60m".to_string(),
-            grace_period: "2m".to_string(),
-            max_push_retries: 5,
-            max_clock_skew: "5m".to_string(),
-        });
-        config
-    }
-
+    // AC: git-ref tag add/remove re-commits the ref. The CLI has already
+    // rewritten the cache `tags:`; sync_tags re-commits that content into the
+    // ref blob (create_commit + update_ref) and the lock advances.
     #[test]
-    fn create_pushes_ref_when_coordination_configured() {
-        let tmp = TempDir::new().unwrap();
-        let mock = MockGitRefClient::new()
-            .with_list_result(Ok(vec![]))
-            .with_create_ref_commit_result(Ok("abc123sha".to_string()))
-            .with_push_result(Ok(()));
-
-        let mut store = GitRefStore {
-            git: Box::new(mock),
-            root: tmp.path().to_path_buf(),
-            config: test_config_with_coordination(),
-            reserved_number: None,
-        };
-        let td = test_type_def();
-        store.create(&td, "Pushed Doc", "alice", "").unwrap();
-
-        let calls = store.git_mock().calls.borrow();
-        assert!(
-            calls
-                .iter()
-                .any(|c| c == "push_ref:origin:refs/lazyspec/iteration/ITERATION-001"),
-            "should push doc ref to remote, got: {:?}",
-            *calls
-        );
-    }
-
-    #[test]
-    fn create_does_not_push_without_coordination() {
-        let tmp = TempDir::new().unwrap();
-        let mock = MockGitRefClient::new()
-            .with_list_result(Ok(vec![]))
-            .with_create_ref_commit_result(Ok("abc123sha".to_string()));
-
-        let mut store = make_store(&tmp, mock);
-        let td = test_type_def();
-        store.create(&td, "Local Doc", "alice", "").unwrap();
-
-        let calls = store.git_mock().calls.borrow();
-        assert!(
-            !calls.iter().any(|c| c.starts_with("push_ref:")),
-            "should not push without coordination, got: {:?}",
-            *calls
-        );
-    }
-
-    #[test]
-    fn update_pushes_ref_when_coordination_configured() {
-        let tmp = TempDir::new().unwrap();
-        let td = test_type_def();
-        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
-        std::fs::create_dir_all(&cache_dir).unwrap();
-        std::fs::write(
-            cache_dir.join("ITERATION-042.md"),
-            "---\ntitle: Old Title\ntype: iteration\nstatus: draft\nauthor: alice\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\noriginal body\n",
-        ).unwrap();
-
-        let mut lock = CacheLock::default();
-        lock.set("iteration/ITERATION-042", "oldsha");
-        lock.save(tmp.path()).unwrap();
-
-        let mock = MockGitRefClient::new()
-            .with_create_commit_result(Ok("newsha456".to_string()))
-            .with_update_ref_result(Ok(()))
-            .with_push_result(Ok(()));
-
-        let mut store = GitRefStore {
-            git: Box::new(mock),
-            root: tmp.path().to_path_buf(),
-            config: test_config_with_coordination(),
-            reserved_number: None,
-        };
-        store
-            .update(&td, "ITERATION-042", &[("status", "accepted")])
-            .unwrap();
-
-        let calls = store.git_mock().calls.borrow();
-        assert!(
-            calls
-                .iter()
-                .any(|c| c == "push_ref:origin:refs/lazyspec/iteration/ITERATION-042"),
-            "should push updated ref to remote, got: {:?}",
-            *calls
-        );
-    }
-
-    // AC: git-ref tag add/remove re-pushes the ref. The CLI has already rewritten
-    // the cache `tags:`; sync_tags re-commits that content into the ref blob and,
-    // with coordination configured, pushes it.
-    #[test]
-    fn sync_tags_recommits_cache_and_pushes_when_coordinated() {
-        let tmp = TempDir::new().unwrap();
-        let td = test_type_def();
-        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
-        std::fs::create_dir_all(&cache_dir).unwrap();
-        std::fs::write(
-            cache_dir.join("ITERATION-042.md"),
-            "---\ntitle: T\ntype: iteration\nstatus: draft\nauthor: a\ndate: 2026-04-01\ntags:\n- security\nrelated: []\n---\n\nbody\n",
-        )
-        .unwrap();
-
-        let mut lock = CacheLock::default();
-        lock.set("iteration/ITERATION-042", "oldsha");
-        lock.save(tmp.path()).unwrap();
-
-        let mock = MockGitRefClient::new()
-            .with_create_commit_result(Ok("newsha456".to_string()))
-            .with_update_ref_result(Ok(()))
-            .with_push_result(Ok(()));
-
-        let mut store = GitRefStore {
-            git: Box::new(mock),
-            root: tmp.path().to_path_buf(),
-            config: test_config_with_coordination(),
-            reserved_number: None,
-        };
-        store
-            .sync_tags(&td, "ITERATION-042", &["security".to_string()], &[])
-            .unwrap();
-
-        // The committed ref blob is the current cache content, carrying the tag.
-        let blobs = store.git_mock().committed_blobs.borrow();
-        assert_eq!(blobs.len(), 1, "should commit exactly once");
-        assert!(
-            blobs[0].contains("security"),
-            "pushed ref blob should contain the tag, got: {}",
-            blobs[0]
-        );
-
-        let calls = store.git_mock().calls.borrow();
-        assert!(
-            calls
-                .iter()
-                .any(|c| c == "push_ref:origin:refs/lazyspec/iteration/ITERATION-042"),
-            "should push the ref, got: {:?}",
-            *calls
-        );
-
-        let lock = CacheLock::load(tmp.path()).unwrap();
-        assert_eq!(lock.get("iteration/ITERATION-042"), Some("newsha456"));
-    }
-
-    // AC: git-ref without coordination does not push. The ref is still re-committed
-    // locally (create_commit + update_ref) and the lock advances, but no push fires.
-    #[test]
-    fn sync_tags_commits_locally_but_does_not_push_without_coordination() {
+    fn sync_tags_recommits_cache_content() {
         let tmp = TempDir::new().unwrap();
         let td = test_type_def();
         let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
@@ -976,6 +765,16 @@ mod tests {
             .sync_tags(&td, "ITERATION-042", &["security".to_string()], &[])
             .unwrap();
 
+        // The committed ref blob is the current cache content, carrying the tag.
+        let blobs = store.git_mock().committed_blobs.borrow();
+        assert_eq!(blobs.len(), 1, "should commit exactly once");
+        assert!(
+            blobs[0].contains("security"),
+            "committed ref blob should contain the tag, got: {}",
+            blobs[0]
+        );
+        drop(blobs);
+
         let calls = store.git_mock().calls.borrow();
         assert!(
             calls.iter().any(|c| c.starts_with("create_commit:")),
@@ -987,63 +786,10 @@ mod tests {
             "should CAS-swap the ref, got: {:?}",
             *calls
         );
-        assert!(
-            !calls.iter().any(|c| c.starts_with("push_ref:")),
-            "must not push without coordination, got: {:?}",
-            *calls
-        );
+        drop(calls);
 
         let lock = CacheLock::load(tmp.path()).unwrap();
         assert_eq!(lock.get("iteration/ITERATION-042"), Some("newsha456"));
-    }
-
-    #[test]
-    fn delete_removes_remote_ref_when_coordination_configured() {
-        let tmp = TempDir::new().unwrap();
-        let td = test_type_def();
-        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
-        std::fs::create_dir_all(&cache_dir).unwrap();
-        std::fs::write(
-            cache_dir.join("ITERATION-042.md"),
-            "---\ntitle: T\ntype: iteration\nstatus: draft\nauthor: a\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n",
-        ).unwrap();
-
-        let mut lock = CacheLock::default();
-        lock.set("iteration/ITERATION-042", "somesha");
-        lock.save(tmp.path()).unwrap();
-
-        let mock = MockGitRefClient::new()
-            .with_delete_remote_result(Ok(()))
-            .with_delete_ref_result(Ok(()));
-
-        let mut store = GitRefStore {
-            git: Box::new(mock),
-            root: tmp.path().to_path_buf(),
-            config: test_config_with_coordination(),
-            reserved_number: None,
-        };
-        store.delete(&td, "ITERATION-042").unwrap();
-
-        let calls = store.git_mock().calls.borrow();
-        assert!(
-            calls
-                .iter()
-                .any(|c| c == "delete_remote_ref:origin:refs/lazyspec/iteration/ITERATION-042:expected_old=None"),
-            "should delete remote ref, got: {:?}",
-            *calls
-        );
-        let delete_remote_idx = calls
-            .iter()
-            .position(|c| c.starts_with("delete_remote_ref:"))
-            .unwrap();
-        let delete_local_idx = calls
-            .iter()
-            .position(|c| c.starts_with("delete_ref:"))
-            .unwrap();
-        assert!(
-            delete_remote_idx < delete_local_idx,
-            "should delete remote before local"
-        );
     }
 
     #[test]
@@ -1143,250 +889,5 @@ mod tests {
 
         let lock = CacheLock::load(tmp.path()).unwrap();
         assert_eq!(lock.get("iteration/ITERATION-042"), Some("newsha"));
-    }
-
-    #[test]
-    fn test_git_ref_store_update_rollback_on_push_failure() {
-        let tmp = TempDir::new().unwrap();
-        let td = test_type_def();
-        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
-        std::fs::create_dir_all(&cache_dir).unwrap();
-        let cache_content = "---\ntitle: Title\ntype: iteration\nstatus: draft\nauthor: alice\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\nbody\n";
-        let cache_path = cache_dir.join("ITERATION-042.md");
-        std::fs::write(&cache_path, cache_content).unwrap();
-
-        let mut lock = CacheLock::default();
-        lock.set("iteration/ITERATION-042", "oldsha");
-        lock.save(tmp.path()).unwrap();
-
-        let mock = MockGitRefClient::new()
-            .with_create_commit_result(Ok("newsha".to_string()))
-            .with_update_ref_result(Ok(()))
-            .with_update_ref_result(Ok(()))
-            .with_push_result(Err(anyhow::anyhow!("non-fast-forward")));
-
-        let mut store = GitRefStore {
-            git: Box::new(mock),
-            root: tmp.path().to_path_buf(),
-            config: test_config_with_coordination(),
-            reserved_number: None,
-        };
-        let result = store.update(&td, "ITERATION-042", &[("status", "accepted")]);
-
-        assert!(result.is_err(), "update should fail when push is rejected");
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("non-fast-forward"),
-            "error should mention push failure, got: {}",
-            err_msg
-        );
-
-        let calls = store.git_mock().calls.borrow();
-        let update_ref_calls: Vec<&String> = calls
-            .iter()
-            .filter(|c| c.starts_with("update_ref:"))
-            .collect();
-        assert_eq!(
-            update_ref_calls.len(),
-            2,
-            "should have two update_ref calls (forward + rollback), got: {:?}",
-            *calls
-        );
-        assert_eq!(
-            update_ref_calls[0], "update_ref:refs/lazyspec/iteration/ITERATION-042:newsha:oldsha",
-            "first update_ref is forward CAS"
-        );
-        assert_eq!(
-            update_ref_calls[1], "update_ref:refs/lazyspec/iteration/ITERATION-042:oldsha:newsha",
-            "second update_ref is rollback (reverse CAS)"
-        );
-        drop(calls);
-
-        let unchanged = std::fs::read_to_string(&cache_path).unwrap();
-        assert!(
-            unchanged.contains("status: draft"),
-            "cache file should be unchanged on push failure, got: {}",
-            unchanged
-        );
-
-        let lock = CacheLock::load(tmp.path()).unwrap();
-        assert_eq!(
-            lock.get("iteration/ITERATION-042"),
-            Some("oldsha"),
-            "cache.lock should be unchanged on push failure"
-        );
-    }
-
-    #[test]
-    fn test_git_ref_store_set_provenance_rollback_on_push_failure() {
-        let tmp = TempDir::new().unwrap();
-        let td = test_type_def();
-        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
-        std::fs::create_dir_all(&cache_dir).unwrap();
-        let cache_content = "---\ntitle: Title\ntype: iteration\nstatus: draft\nauthor: alice\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\nbody\n";
-        let cache_path = cache_dir.join("ITERATION-042.md");
-        std::fs::write(&cache_path, cache_content).unwrap();
-
-        let mut lock = CacheLock::default();
-        lock.set("iteration/ITERATION-042", "oldsha");
-        lock.save(tmp.path()).unwrap();
-
-        let mock = MockGitRefClient::new()
-            .with_create_commit_result(Ok("newsha".to_string()))
-            .with_update_ref_result(Ok(()))
-            .with_update_ref_result(Ok(()))
-            .with_push_result(Err(anyhow::anyhow!("non-fast-forward")));
-
-        let mut store = GitRefStore {
-            git: Box::new(mock),
-            root: tmp.path().to_path_buf(),
-            config: test_config_with_coordination(),
-            reserved_number: None,
-        };
-        let result = store.set_provenance(&td, "ITERATION-042", &["A".to_string()]);
-
-        assert!(
-            result.is_err(),
-            "set_provenance should fail when push is rejected"
-        );
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("non-fast-forward"),
-            "error should mention push failure, got: {}",
-            err_msg
-        );
-
-        let calls = store.git_mock().calls.borrow();
-        let update_ref_calls: Vec<&String> = calls
-            .iter()
-            .filter(|c| c.starts_with("update_ref:"))
-            .collect();
-        assert_eq!(
-            update_ref_calls.len(),
-            2,
-            "should have two update_ref calls (forward + rollback), got: {:?}",
-            *calls
-        );
-        assert_eq!(
-            update_ref_calls[0], "update_ref:refs/lazyspec/iteration/ITERATION-042:newsha:oldsha",
-            "first update_ref is forward CAS"
-        );
-        assert_eq!(
-            update_ref_calls[1], "update_ref:refs/lazyspec/iteration/ITERATION-042:oldsha:newsha",
-            "second update_ref is rollback (reverse CAS)"
-        );
-        drop(calls);
-
-        let unchanged = std::fs::read_to_string(&cache_path).unwrap();
-        assert!(
-            !unchanged.contains("provenance"),
-            "cache file should be unchanged on push failure, got: {}",
-            unchanged
-        );
-
-        let lock = CacheLock::load(tmp.path()).unwrap();
-        assert_eq!(
-            lock.get("iteration/ITERATION-042"),
-            Some("oldsha"),
-            "cache.lock should be unchanged on push failure"
-        );
-    }
-
-    #[test]
-    fn delete_preserves_local_state_when_remote_delete_fails() {
-        let tmp = TempDir::new().unwrap();
-        let td = test_type_def();
-        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
-        std::fs::create_dir_all(&cache_dir).unwrap();
-        let cache_content = "---\ntitle: T\ntype: iteration\nstatus: draft\nauthor: a\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n";
-        let cache_path = cache_dir.join("ITERATION-042.md");
-        std::fs::write(&cache_path, cache_content).unwrap();
-
-        let mut lock = CacheLock::default();
-        lock.set("iteration/ITERATION-042", "somesha");
-        lock.save(tmp.path()).unwrap();
-
-        let mock =
-            MockGitRefClient::new().with_delete_remote_result(Err(anyhow::anyhow!("network down")));
-
-        let mut store = GitRefStore {
-            git: Box::new(mock),
-            root: tmp.path().to_path_buf(),
-            config: test_config_with_coordination(),
-            reserved_number: None,
-        };
-        let result = store.delete(&td, "ITERATION-042");
-
-        assert!(
-            result.is_err(),
-            "delete should fail when remote delete fails"
-        );
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("network down"),
-            "error should mention remote failure, got: {}",
-            err_msg
-        );
-
-        assert!(
-            cache_path.exists(),
-            "cache file should still exist after remote delete failure"
-        );
-        let unchanged = std::fs::read_to_string(&cache_path).unwrap();
-        assert_eq!(
-            unchanged, cache_content,
-            "cache file content should be unchanged"
-        );
-
-        let lock = CacheLock::load(tmp.path()).unwrap();
-        assert_eq!(
-            lock.get("iteration/ITERATION-042"),
-            Some("somesha"),
-            "lock entry should still be present with original SHA"
-        );
-
-        let calls = store.git_mock().calls.borrow();
-        assert!(
-            calls
-                .iter()
-                .any(|c| c == "delete_remote_ref:origin:refs/lazyspec/iteration/ITERATION-042:expected_old=None"),
-            "should have attempted remote delete, got: {:?}",
-            *calls
-        );
-        assert!(
-            !calls
-                .iter()
-                .any(|c| c == "delete_ref:refs/lazyspec/iteration/ITERATION-042"),
-            "should NOT call local delete_ref when remote delete failed, got: {:?}",
-            *calls
-        );
-    }
-
-    #[test]
-    fn delete_does_not_touch_remote_without_coordination() {
-        let tmp = TempDir::new().unwrap();
-        let td = test_type_def();
-        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
-        std::fs::create_dir_all(&cache_dir).unwrap();
-        std::fs::write(
-            cache_dir.join("ITERATION-042.md"),
-            "---\ntitle: T\ntype: iteration\nstatus: draft\nauthor: a\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n",
-        ).unwrap();
-
-        let mut lock = CacheLock::default();
-        lock.set("iteration/ITERATION-042", "somesha");
-        lock.save(tmp.path()).unwrap();
-
-        let mock = MockGitRefClient::new().with_delete_ref_result(Ok(()));
-
-        let mut store = make_store(&tmp, mock);
-        store.delete(&td, "ITERATION-042").unwrap();
-
-        let calls = store.git_mock().calls.borrow();
-        assert!(
-            !calls.iter().any(|c| c.starts_with("delete_remote_ref:")),
-            "should not touch remote without coordination, got: {:?}",
-            *calls
-        );
     }
 }

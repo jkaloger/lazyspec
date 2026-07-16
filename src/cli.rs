@@ -9,7 +9,6 @@ pub mod fix;
 pub mod ignore;
 pub mod init;
 pub mod json;
-pub mod lease;
 pub mod link;
 pub mod list;
 pub mod pin;
@@ -324,57 +323,6 @@ pub enum Commands {
         #[command(subcommand)]
         command: Option<ConfigCommand>,
         /// Print the resolved configuration as JSON (the default when no subcommand is given)
-        #[arg(long)]
-        json: bool,
-    },
-    /// Acquire a lease on a document
-    Claim {
-        /// Document ID (e.g. STORY-108, RFC-035)
-        #[arg()]
-        doc_id: String,
-        /// Agent identity (defaults to auto-resolved agent ID)
-        #[arg(long)]
-        agent_id: Option<String>,
-        /// Force-acquire an expired lease held by another agent
-        #[arg(long)]
-        force: bool,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-    /// Release a lease on a document
-    Release {
-        /// Document ID (e.g. STORY-108, RFC-035)
-        #[arg()]
-        doc_id: String,
-        /// Agent identity (defaults to auto-resolved agent ID)
-        #[arg(long)]
-        agent_id: Option<String>,
-        /// Admin release: verify the current holder matches this ID
-        #[arg(long)]
-        expected_holder: Option<String>,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-    /// List all active leases
-    Leases {
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-    /// Extend the expiry of a held lease
-    Heartbeat {
-        /// Document ID (e.g. STORY-108, RFC-035)
-        #[arg()]
-        doc_id: String,
-        /// Agent identity (defaults to auto-resolved agent ID)
-        #[arg(long)]
-        agent_id: Option<String>,
-        /// Skip heartbeat if last run within duration (e.g. 15m). State in .lazyspec/state/
-        #[arg(long)]
-        min_interval: Option<String>,
-        /// Output as JSON
         #[arg(long)]
         json: bool,
     },

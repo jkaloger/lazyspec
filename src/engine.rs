@@ -26,7 +26,6 @@ pub mod hashing;
 pub mod issue_body;
 pub mod issue_cache;
 pub mod issue_map;
-pub mod lease;
 pub mod milestone_cache;
 pub mod prompt;
 pub mod provenance;

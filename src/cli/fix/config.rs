@@ -36,7 +36,7 @@ fn rule_name(rule: &ValidationRule) -> &str {
 ///
 /// Append-only by design: the existing file is preserved byte-for-byte and only
 /// the missing `[[relationships]]` / `[[rules]]` blocks are appended. This keeps
-/// every user section (`[github]`, `[coordination]`, comments, ordering) intact
+/// every user section (`[github]`, comments, ordering) intact
 /// and is idempotent — when nothing is missing the file is left untouched.
 pub(super) fn collect_config_fixes(
     root: &Path,

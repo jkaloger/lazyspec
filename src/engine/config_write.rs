@@ -17,7 +17,6 @@ pub fn write_config_in_place(existing_src: &str, buffer: &Config) -> Result<Stri
     write_tui(&mut doc, buffer);
     write_numbering(&mut doc, buffer);
     write_github(&mut doc, buffer);
-    write_coordination(&mut doc, buffer);
     write_certification(&mut doc, buffer);
     write_agents(&mut doc, buffer);
     write_skills(&mut doc, buffer);
@@ -286,28 +285,6 @@ fn write_github(doc: &mut DocumentMut, buffer: &Config) {
         .expect("github inserted/present as a table above");
     set_opt_str(github, "repo", cfg.repo.as_deref());
     set_int_defaulted(github, "cache_ttl", cfg.cache_ttl as i64, 60);
-}
-
-fn write_coordination(doc: &mut DocumentMut, buffer: &Config) {
-    let Some(coordination) = doc
-        .get_mut("coordination")
-        .and_then(Item::as_table_like_mut)
-    else {
-        return;
-    };
-    let Some(cfg) = &buffer.coordination else {
-        return;
-    };
-    set_str_defaulted(coordination, "remote", &cfg.remote, "origin");
-    set_str_defaulted(coordination, "lease_duration", &cfg.lease_duration, "60m");
-    set_str_defaulted(coordination, "grace_period", &cfg.grace_period, "2m");
-    set_int_defaulted(
-        coordination,
-        "max_push_retries",
-        cfg.max_push_retries as i64,
-        5,
-    );
-    set_str_defaulted(coordination, "max_clock_skew", &cfg.max_clock_skew, "5m");
 }
 
 fn write_certification(doc: &mut DocumentMut, buffer: &Config) {

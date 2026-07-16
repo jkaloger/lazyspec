@@ -5131,7 +5131,6 @@ mod tests {
             rules: vec![],
             ref_count_ceiling: 0,
             certification: Default::default(),
-            coordination: None,
             agents: Default::default(),
             skills: Default::default(),
             web: None,

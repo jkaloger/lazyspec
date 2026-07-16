@@ -1,7 +1,7 @@
 ---
 title: Remove the lease subsystem
 type: story
-status: accepted
+status: in-progress
 author: agent
 date: 2026-07-16
 tags: []
