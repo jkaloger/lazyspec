@@ -7,7 +7,7 @@ use crate::engine::fs::FileSystem;
 use crate::engine::store::{extract_id_from_name, Store};
 use crate::engine::template::{next_number, next_sqids_id};
 
-use super::renumber::cascade_references;
+use super::cascade::cascade_references;
 use super::ConflictFixResult;
 
 pub(super) fn collect_conflict_fixes(

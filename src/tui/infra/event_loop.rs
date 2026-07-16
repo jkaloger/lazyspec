@@ -10,7 +10,7 @@ use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::status_colors::StatusColors;
 use crate::engine::store::Store;
-use crate::engine::store_dispatch::{ClickupTasksStore, DocumentStore, GithubIssuesStore};
+use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
 use crate::engine::sync::{
     sync_all, ClickupMaps, ClickupSync, GhIssueSync, GhMaps, GhMilestoneSync, GitRefSync,
     SyncContext, Syncers,
@@ -176,19 +176,15 @@ fn try_push_clickup_edit_with<C: ClickupClient + 'static>(
         return Ok(());
     }
 
-    let token = token_loader().map_err(|e| e.to_string())?.ok_or_else(|| {
-        "no ClickUp token found; run `lazyspec setup clickup` before editing \
-         clickup-tasks documents"
-            .to_string()
-    })?;
-
     let body_trimmed = body.trim();
-    let mut clickup_store = ClickupTasksStore {
-        client: Box::new(client_factory()),
-        root: root.to_path_buf(),
-        config: config.clone(),
-        token: Some(token),
-    };
+    let mut clickup_store = crate::engine::store_dispatch::clickup_write_store(
+        root,
+        config,
+        "editing",
+        client_factory,
+        token_loader,
+    )
+    .map_err(|e| e.to_string())?;
     clickup_store
         .update(type_def, &doc_id, &[("body", body_trimmed)])
         .map_err(|e| e.to_string())
@@ -204,6 +200,46 @@ fn has_pollable_types(config: &Config) -> bool {
             || t.store == StoreBackend::GithubMilestones
             || t.store == StoreBackend::ClickupTasks
     })
+}
+
+// Human-readable summary of a fix run for the warnings panel. The engine op core
+// returns the structured `FixOutput`; each frontend renders its own
+// presentation, so this mirrors the CLI's `fix::output::format_human`
+// (non-dry-run) output without the TUI reaching into the cli module (STORY-212 AC1).
+fn format_fix_output(output: &crate::engine::ops::fix::FixOutput) -> String {
+    let mut result = String::new();
+
+    for r in &output.field_fixes {
+        if r.fields_added.is_empty() {
+            continue;
+        }
+        result.push_str(&format!(
+            "Fixed {} (added: {})\n",
+            r.path,
+            r.fields_added.join(", ")
+        ));
+    }
+
+    for c in &output.conflict_fixes {
+        result.push_str(&format!("Renamed {} -> {}\n", c.old_path, c.new_path));
+    }
+
+    for r in &output.relation_fixes {
+        for (old_target, new_target) in &r.replacements {
+            result.push_str(&format!(
+                "Migrated relation in {}: {} -> {}\n",
+                r.path, old_target, new_target
+            ));
+        }
+        for (rel_type, target) in &r.deduped {
+            result.push_str(&format!(
+                "Dropped duplicate relation in {}: {} {}\n",
+                r.path, rel_type, target
+            ));
+        }
+    }
+
+    result
 }
 
 // One background poll: refresh every configured type through the engine's
@@ -899,7 +935,10 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 .map(|e| e.path.to_string_lossy().to_string())
                 .collect();
             let fs = crate::engine::fs::RealFileSystem;
-            let output = crate::cli::fix::run_human(&root, &app.store, &config, &paths, false, &fs);
+            let fixes = crate::engine::ops::fix::plan_field_and_conflict_fixes(
+                &root, &app.store, &config, &paths, false, &fs,
+            );
+            let output = format_fix_output(&fixes);
             app.store = Store::load(&root, &config)?;
             app.refresh_validation(&config);
             app.fix_result = if output.is_empty() {

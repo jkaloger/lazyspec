@@ -1,7 +1,7 @@
 ---
 title: TUI and CLI share one engine operations layer
 type: story
-status: accepted
+status: in-progress
 author: agent
 date: 2026-07-16
 tags: []
