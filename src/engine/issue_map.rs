@@ -59,8 +59,7 @@ impl IssueMap {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(&self.entries)?;
-        std::fs::write(&path, json)?;
-        Ok(())
+        crate::engine::fs::atomic_write(&path, &json)
     }
 
     pub fn insert(

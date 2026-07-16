@@ -1,7 +1,7 @@
 ---
 title: Cache state survives crashes and interrupted fetches
 type: story
-status: accepted
+status: in-progress
 author: agent
 date: 2026-07-16
 tags: []

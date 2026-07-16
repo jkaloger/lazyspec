@@ -59,12 +59,15 @@ impl IssueCache {
         self.cache_dir().join(doc_type).join(format!("{}.md", id))
     }
 
-    fn load_lock(&self) -> CacheLock {
-        CacheLock::load(&self.root).unwrap_or_default()
+    /// Load the cache lock. Absent file -> clean default; present but
+    /// unparseable -> hard error (AUDIT-018 C1). Mutators must propagate the
+    /// error rather than saving a defaulted lock over the corrupt file, which
+    /// would erase every freshness timestamp.
+    fn load_lock(&self) -> anyhow::Result<CacheLock> {
+        CacheLock::load(&self.root)
     }
 
-    pub fn is_fresh(&self, id: &str, ttl: Duration) -> bool {
-        let lock = self.load_lock();
+    fn entry_is_fresh(lock: &CacheLock, id: &str, ttl: Duration) -> bool {
         let Some(value) = lock.get(id) else {
             return false;
         };
@@ -72,6 +75,14 @@ impl IssueCache {
             return false;
         };
         Utc::now() - cached_at < ttl
+    }
+
+    /// A corrupt lock reads as not fresh; this probe never persists anything,
+    /// and the hard error surfaces on the first mutating cache operation.
+    pub fn is_fresh(&self, id: &str, ttl: Duration) -> bool {
+        self.load_lock()
+            .map(|lock| Self::entry_is_fresh(&lock, id, ttl))
+            .unwrap_or(false)
     }
 
     pub fn read_if_fresh(&self, id: &str, doc_type: &str, ttl: Duration) -> Option<String> {
@@ -85,25 +96,29 @@ impl IssueCache {
         fs::read_to_string(self.doc_path(id, doc_type)).ok()
     }
 
-    pub fn write(&self, id: &str, doc_type: &str, content: &str) {
+    pub fn write(&self, id: &str, doc_type: &str, content: &str) -> anyhow::Result<()> {
+        // Load before writing the doc so a corrupt lock aborts the whole op.
+        let mut lock = self.load_lock()?;
+
         let path = self.doc_path(id, doc_type);
         if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent)?;
         }
-        let _ = fs::write(&path, content);
+        crate::engine::fs::atomic_write(&path, content)?;
 
-        let mut lock = self.load_lock();
         lock.set(id, &Utc::now().to_rfc3339());
-        let _ = lock.save(&self.root);
+        lock.save(&self.root)
     }
 
-    pub fn touch_lock(&self, id: &str) {
-        let mut lock = self.load_lock();
+    pub fn touch_lock(&self, id: &str) -> anyhow::Result<()> {
+        let mut lock = self.load_lock()?;
         lock.set(id, &Utc::now().to_rfc3339());
-        let _ = lock.save(&self.root);
+        lock.save(&self.root)
     }
 
-    pub fn remove(&self, id: &str, doc_type: &str) {
+    pub fn remove(&self, id: &str, doc_type: &str) -> anyhow::Result<()> {
+        // Load before deleting anything so a corrupt lock aborts the whole op.
+        let mut lock = self.load_lock()?;
         let type_dir = self.cache_dir().join(doc_type);
         let flat = self.doc_path(id, doc_type);
         if flat.is_file() {
@@ -120,15 +135,15 @@ impl IssueCache {
             }
         }
 
-        let mut lock = self.load_lock();
         lock.remove(id);
-        let _ = lock.save(&self.root);
+        lock.save(&self.root)
     }
 
     /// Refresh stale cache entries for a given type with a single `issue_list` call.
     ///
     /// Returns early with zero API calls if all cached documents are fresh.
     /// On API failure, leaves stale cache in place and returns a warning.
+    /// A corrupt cache lock is a hard `Err` before any API call.
     #[allow(clippy::too_many_arguments)]
     pub fn refresh_stale(
         &self,
@@ -141,23 +156,29 @@ impl IssueCache {
         ttl: Duration,
         known_types: &[TypeMatchRule],
         config: &Config,
-    ) -> RefreshResult {
+    ) -> anyhow::Result<RefreshResult> {
         let cached_ids = self.list_cached(&type_def.name);
         if cached_ids.is_empty() {
-            return RefreshResult {
+            return Ok(RefreshResult {
                 refreshed: 0,
                 unchanged: 0,
                 warnings: vec![],
-            };
+            });
         }
 
-        let any_stale = cached_ids.iter().any(|id| !self.is_fresh(id, ttl));
+        // Loaded once up front: a corrupt lock is a hard error before any API
+        // call, and never overwritten with a default.
+        let mut lock = self.load_lock()?;
+
+        let any_stale = cached_ids
+            .iter()
+            .any(|id| !Self::entry_is_fresh(&lock, id, ttl));
         if !any_stale {
-            return RefreshResult {
+            return Ok(RefreshResult {
                 refreshed: 0,
                 unchanged: cached_ids.len(),
                 warnings: vec![],
-            };
+            });
         }
 
         let fields = vec![
@@ -183,7 +204,7 @@ impl IssueCache {
         } = match discover_issues(gh, gh_graphql, repo, &rule, &fields, None) {
             Ok(d) => d,
             Err(e) => {
-                return RefreshResult {
+                return Ok(RefreshResult {
                     refreshed: 0,
                     unchanged: cached_ids.len(),
                     warnings: vec![RefreshWarning {
@@ -192,14 +213,13 @@ impl IssueCache {
                             type_def.name, e
                         ),
                     }],
-                };
+                });
             }
         };
 
         let mut refreshed = 0usize;
         let mut unchanged = 0usize;
         let mut write_warnings = Vec::new();
-        let mut lock = self.load_lock();
 
         for issue in &issues {
             let (meta, body) = parse_issue(
@@ -236,7 +256,7 @@ impl IssueCache {
             issue_map.insert(&id, issue.number, &issue.updated_at, &issue.id);
         }
 
-        let _ = lock.save(&self.root);
+        lock.save(&self.root)?;
 
         let mut warnings = write_warnings;
         if search_truncated {
@@ -244,11 +264,11 @@ impl IssueCache {
         }
         warnings.extend(self.refresh_schema_snapshot(gh_graphql, repo));
 
-        RefreshResult {
+        Ok(RefreshResult {
             refreshed,
             unchanged,
             warnings,
-        }
+        })
     }
 
     /// Best-effort fetch + persist of the native field schema snapshot.
@@ -341,8 +361,13 @@ impl IssueCache {
         let previously_cached: std::collections::HashSet<String> =
             self.list_cached(&type_def.name).into_iter().collect();
 
-        let cache_dir = root.join(".lazyspec/cache").join(&type_def.name);
-        fs::create_dir_all(&cache_dir)?;
+        // Loaded before any cache mutation: a corrupt lock is a hard error and
+        // is never overwritten with a default (AUDIT-018 C1).
+        let mut lock = self.load_lock()?;
+
+        let cache_root = root.join(".lazyspec/cache");
+        let live_dir = cache_root.join(&type_def.name);
+        fs::create_dir_all(&cache_root)?;
 
         // Parse every fetched issue up front so the parentage query can resolve
         // child node ids back to doc ids before we decide each doc's layout.
@@ -401,36 +426,65 @@ impl IssueCache {
         // across fetches. `write_cache_*` writes by CURRENT layout but never
         // removes a doc's prior file at a different path, so rebuild the type
         // dir from scratch to guarantee no stale or duplicated cache entries.
-        for entry in fs::read_dir(&cache_dir)?.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                fs::remove_dir_all(&path)?;
-            } else {
-                fs::remove_file(&path)?;
-            }
+        // The rebuild happens in a staging dir swapped into place only when
+        // every write succeeded, so a failure partway (disk full, crash) leaves
+        // the previous cache intact (AUDIT-018 C4).
+        let staging_root = cache_root.join(format!(".staging-{}", type_def.name));
+        if staging_root.exists() {
+            fs::remove_dir_all(&staging_root)?;
         }
+        // write_cache_* derive `<root>/.lazyspec/cache/<type>` from the root
+        // they are handed, so staging just means handing them a staging root.
+        let staged_type_dir = staging_root.join(".lazyspec/cache").join(&type_def.name);
+
+        let write_result = (|| -> anyhow::Result<()> {
+            fs::create_dir_all(&staged_type_dir)?;
+            for Parsed { id, meta, body } in parsed.iter() {
+                if let Some((parent_id, order, total)) = child_layout.get(id) {
+                    store_dispatch::write_cache_child(
+                        &staging_root,
+                        type_def,
+                        parent_id,
+                        *order,
+                        *total,
+                        meta,
+                        body,
+                    )?;
+                } else if parentage.contains_key(id) {
+                    store_dispatch::write_cache_parent(&staging_root, type_def, meta, body)?;
+                } else {
+                    store_dispatch::write_cache_file(&staging_root, type_def, meta, body)?;
+                }
+            }
+            Ok(())
+        })();
+        if let Err(e) = write_result {
+            let _ = fs::remove_dir_all(&staging_root);
+            return Err(e);
+        }
+
+        // Swap: move the previous dir aside, promote the staged one, drop the
+        // old. Only after this point does the lock/issue-map reflect the fetch.
+        let old_dir = cache_root.join(format!(".old-{}", type_def.name));
+        if old_dir.exists() {
+            fs::remove_dir_all(&old_dir)?;
+        }
+        if live_dir.exists() {
+            fs::rename(&live_dir, &old_dir)?;
+        }
+        fs::rename(&staged_type_dir, &live_dir)?;
+        let _ = fs::remove_dir_all(&old_dir);
+        let _ = fs::remove_dir_all(&staging_root);
 
         let mut new_count = 0usize;
         let mut fetched_ids = std::collections::HashSet::new();
-        let mut lock = self.load_lock();
 
-        for (issue, Parsed { id, meta, body }) in issues.iter().zip(parsed.iter()) {
+        for (issue, Parsed { id, .. }) in issues.iter().zip(parsed.iter()) {
             if !previously_cached.contains(id) {
                 new_count += 1;
             }
 
-            if let Some((parent_id, order, total)) = child_layout.get(id) {
-                store_dispatch::write_cache_child(
-                    root, type_def, parent_id, *order, *total, meta, body,
-                )?;
-            } else if parentage.contains_key(id) {
-                store_dispatch::write_cache_parent(root, type_def, meta, body)?;
-            } else {
-                store_dispatch::write_cache_file(root, type_def, meta, body)?;
-            }
-
             lock.set(id, &Utc::now().to_rfc3339());
-
             issue_map.insert(id, issue.number, &issue.updated_at, &issue.id);
             fetched_ids.insert(id.clone());
         }
@@ -440,7 +494,7 @@ impl IssueCache {
             .cloned()
             .collect();
 
-        // Cache files were already wiped during the rebuild above; the removed
+        // Cache files were already replaced by the swap above; the removed
         // set only needs lock + issue-map cleanup for docs gone from the remote.
         for id in &removed {
             lock.remove(id);
@@ -1024,11 +1078,13 @@ mod tests {
         let (cache, _tmp) = make_cache();
         let ttl = Duration::seconds(60);
 
-        cache.write(
-            "ITERATION-042",
-            "iteration",
-            "# Iteration 042\nSome content",
-        );
+        cache
+            .write(
+                "ITERATION-042",
+                "iteration",
+                "# Iteration 042\nSome content",
+            )
+            .unwrap();
 
         let result = cache.read_if_fresh("ITERATION-042", "iteration", ttl);
         assert_eq!(result, Some("# Iteration 042\nSome content".to_string()));
@@ -1036,7 +1092,7 @@ mod tests {
         let doc_path = cache.doc_path("ITERATION-042", "iteration");
         assert!(doc_path.exists());
 
-        let lock = cache.load_lock();
+        let lock = cache.load_lock().unwrap();
         assert!(lock.get("ITERATION-042").is_some());
     }
 
@@ -1045,10 +1101,12 @@ mod tests {
         let (cache, _tmp) = make_cache();
         let ttl = Duration::seconds(60);
 
-        cache.write("STORY-075", "story", "# Story 075\nStale content");
+        cache
+            .write("STORY-075", "story", "# Story 075\nStale content")
+            .unwrap();
 
         // Backdate the cached_at to 2 minutes ago
-        let mut lock = cache.load_lock();
+        let mut lock = cache.load_lock().unwrap();
         let two_min_ago = Utc::now() - Duration::seconds(120);
         lock.set("STORY-075", &two_min_ago.to_rfc3339());
         lock.save(&cache.root).unwrap();
@@ -1073,15 +1131,19 @@ mod tests {
     fn test_issue_cache_remove_deletes_file_and_lock_entry() {
         let (cache, _tmp) = make_cache();
 
-        cache.write("ITERATION-001", "iteration", "content one");
-        cache.write("ITERATION-002", "iteration", "content two");
+        cache
+            .write("ITERATION-001", "iteration", "content one")
+            .unwrap();
+        cache
+            .write("ITERATION-002", "iteration", "content two")
+            .unwrap();
 
-        cache.remove("ITERATION-001", "iteration");
+        cache.remove("ITERATION-001", "iteration").unwrap();
 
         assert!(!cache.doc_path("ITERATION-001", "iteration").exists());
         assert!(cache.doc_path("ITERATION-002", "iteration").exists());
 
-        let lock = cache.load_lock();
+        let lock = cache.load_lock().unwrap();
         assert!(lock.get("ITERATION-001").is_none());
         assert!(lock.get("ITERATION-002").is_some());
     }
@@ -1089,7 +1151,7 @@ mod tests {
     // --- refresh_stale tests ---
 
     fn backdate_all(cache: &IssueCache, ids: &[&str]) {
-        let mut lock = cache.load_lock();
+        let mut lock = cache.load_lock().unwrap();
         let old = (Utc::now() - Duration::seconds(300)).to_rfc3339();
         for id in ids {
             if lock.get(id).is_some() {
@@ -1106,9 +1168,9 @@ mod tests {
         let ttl = Duration::seconds(60);
 
         // Seed 3 stale cache entries
-        cache.write("STORY-10", "story", "old content 1");
-        cache.write("STORY-11", "story", "old content 2");
-        cache.write("STORY-12", "story", "old content 3");
+        cache.write("STORY-10", "story", "old content 1").unwrap();
+        cache.write("STORY-11", "story", "old content 2").unwrap();
+        cache.write("STORY-12", "story", "old content 3").unwrap();
         backdate_all(&cache, &["STORY-10", "STORY-11", "STORY-12"]);
 
         let gh = MockReader::new(vec![
@@ -1120,17 +1182,19 @@ mod tests {
 
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
         let known_types = vec![story_match_rule()];
-        let result = cache.refresh_stale(
-            tmp.path(),
-            &type_def,
-            &gh,
-            &gh,
-            "owner/repo",
-            &mut issue_map,
-            ttl,
-            &known_types,
-            &Config::default(),
-        );
+        let result = cache
+            .refresh_stale(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                ttl,
+                &known_types,
+                &Config::default(),
+            )
+            .unwrap();
 
         assert_eq!(
             gh.call_count(),
@@ -1162,7 +1226,7 @@ mod tests {
         let type_def = story_type_def();
         let ttl = Duration::seconds(60);
 
-        cache.write("STORY-10", "story", "old content 1");
+        cache.write("STORY-10", "story", "old content 1").unwrap();
         backdate_all(&cache, &["STORY-10"]);
 
         let issue_types_resp = serde_json::json!({
@@ -1179,17 +1243,19 @@ mod tests {
         .with_graphql_responses(vec![issue_types_resp]);
 
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
-        let result = cache.refresh_stale(
-            tmp.path(),
-            &type_def,
-            &gh,
-            &gh,
-            "octo-org/repo",
-            &mut issue_map,
-            ttl,
-            &[story_match_rule()],
-            &Config::default(),
-        );
+        let result = cache
+            .refresh_stale(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "octo-org/repo",
+                &mut issue_map,
+                ttl,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
         assert!(
             result.warnings.is_empty(),
             "warnings: {:?}",
@@ -1210,24 +1276,26 @@ mod tests {
         let ttl = Duration::seconds(60);
 
         // Seed 3 fresh cache entries (default write sets cached_at to now)
-        cache.write("STORY-10", "story", "content 1");
-        cache.write("STORY-11", "story", "content 2");
-        cache.write("STORY-12", "story", "content 3");
+        cache.write("STORY-10", "story", "content 1").unwrap();
+        cache.write("STORY-11", "story", "content 2").unwrap();
+        cache.write("STORY-12", "story", "content 3").unwrap();
 
         let gh = MockReader::new(vec![]);
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
         let known_types = vec![story_match_rule()];
-        let result = cache.refresh_stale(
-            tmp.path(),
-            &type_def,
-            &gh,
-            &gh,
-            "owner/repo",
-            &mut issue_map,
-            ttl,
-            &known_types,
-            &Config::default(),
-        );
+        let result = cache
+            .refresh_stale(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                ttl,
+                &known_types,
+                &Config::default(),
+            )
+            .unwrap();
 
         assert_eq!(gh.call_count(), 0, "should not call API when all fresh");
         assert_eq!(
@@ -1247,24 +1315,26 @@ mod tests {
         let ttl = Duration::seconds(60);
 
         // Seed stale cache entries
-        cache.write("STORY-10", "story", "stale content 1");
-        cache.write("STORY-11", "story", "stale content 2");
+        cache.write("STORY-10", "story", "stale content 1").unwrap();
+        cache.write("STORY-11", "story", "stale content 2").unwrap();
         backdate_all(&cache, &["STORY-10", "STORY-11"]);
 
         let gh = MockReader::failing();
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
         let known_types = vec![story_match_rule()];
-        let result = cache.refresh_stale(
-            tmp.path(),
-            &type_def,
-            &gh,
-            &gh,
-            "owner/repo",
-            &mut issue_map,
-            ttl,
-            &known_types,
-            &Config::default(),
-        );
+        let result = cache
+            .refresh_stale(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                ttl,
+                &known_types,
+                &Config::default(),
+            )
+            .unwrap();
 
         assert_eq!(result.refreshed, 0);
         assert_eq!(result.unchanged, 2);
@@ -1291,8 +1361,8 @@ mod tests {
         let type_def = story_type_def_signals(None, Some("Bug"));
         let ttl = Duration::seconds(60);
 
-        cache.write("STORY-10", "story", "old 10");
-        cache.write("STORY-11", "story", "old 11");
+        cache.write("STORY-10", "story", "old 10").unwrap();
+        cache.write("STORY-11", "story", "old 11").unwrap();
         backdate_all(&cache, &["STORY-10", "STORY-11"]);
 
         // First graphql response is the issue-type search; second is the schema
@@ -1308,17 +1378,19 @@ mod tests {
             ]);
 
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
-        let result = cache.refresh_stale(
-            tmp.path(),
-            &type_def,
-            &gh,
-            &gh,
-            "owner/repo",
-            &mut issue_map,
-            ttl,
-            &[story_match_rule()],
-            &Config::default(),
-        );
+        let result = cache
+            .refresh_stale(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                ttl,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
 
         assert_eq!(
             gh.call_count(),
@@ -1351,9 +1423,9 @@ mod tests {
         let type_def = story_type_def_signals(Some("Ticket"), Some("Bug"));
         let ttl = Duration::seconds(60);
 
-        cache.write("STORY-10", "story", "old 10");
-        cache.write("STORY-11", "story", "old 11");
-        cache.write("STORY-12", "story", "old 12");
+        cache.write("STORY-10", "story", "old 10").unwrap();
+        cache.write("STORY-11", "story", "old 11").unwrap();
+        cache.write("STORY-12", "story", "old 12").unwrap();
         backdate_all(&cache, &["STORY-10", "STORY-11", "STORY-12"]);
 
         // REST returns 10,11,12; search returns 11,12,99. Intersection: 11,12.
@@ -1368,17 +1440,19 @@ mod tests {
         ]);
 
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
-        let result = cache.refresh_stale(
-            tmp.path(),
-            &type_def,
-            &gh,
-            &gh,
-            "owner/repo",
-            &mut issue_map,
-            ttl,
-            &[story_match_rule()],
-            &Config::default(),
-        );
+        let result = cache
+            .refresh_stale(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                ttl,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
 
         assert_eq!(
             result.refreshed, 2,
@@ -1406,7 +1480,7 @@ mod tests {
         let ttl = Duration::seconds(60);
 
         // A stale entry so refresh proceeds past the all-fresh short-circuit.
-        cache.write("STORY-1", "story", "old 1");
+        cache.write("STORY-1", "story", "old 1").unwrap();
         backdate_all(&cache, &["STORY-1"]);
 
         let full_page: Vec<u64> = (1..=ISSUE_TYPE_SEARCH_PAGE_SIZE as u64).collect();
@@ -1416,17 +1490,19 @@ mod tests {
         ]);
 
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
-        let result = cache.refresh_stale(
-            tmp.path(),
-            &type_def,
-            &gh,
-            &gh,
-            "owner/repo",
-            &mut issue_map,
-            ttl,
-            &[story_match_rule()],
-            &Config::default(),
-        );
+        let result = cache
+            .refresh_stale(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                ttl,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
 
         assert!(
             result
@@ -1672,24 +1748,31 @@ mod tests {
 
         let ticket_path = tmp.path().join(".lazyspec/cache/ticket/TICKET-42.md");
         let ticket_content_before = std::fs::read_to_string(&ticket_path).unwrap();
-        let ticket_lock_before = cache.load_lock().get("TICKET-42").unwrap().to_string();
+        let ticket_lock_before = cache
+            .load_lock()
+            .unwrap()
+            .get("TICKET-42")
+            .unwrap()
+            .to_string();
 
         // Act: refresh only the story type, with a changed upstream body so a
         // real write happens (not a no-op "unchanged" skip).
         let story_refresh_gh =
             MockReader::new(vec![make_gh_issue(42, "Some Issue", "Body v2", &[])])
                 .with_graphql_responses(vec![empty_issue_types_response()]);
-        let story_result = cache.refresh_stale(
-            tmp.path(),
-            &story_type,
-            &story_refresh_gh,
-            &story_refresh_gh,
-            "owner/repo",
-            &mut issue_map,
-            ttl,
-            &[story_match_rule()],
-            &Config::default(),
-        );
+        let story_result = cache
+            .refresh_stale(
+                tmp.path(),
+                &story_type,
+                &story_refresh_gh,
+                &story_refresh_gh,
+                "owner/repo",
+                &mut issue_map,
+                ttl,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
 
         assert_eq!(story_result.refreshed, 1);
         assert!(
@@ -1700,7 +1783,12 @@ mod tests {
         // Assert: the story-only refresh left ticket's cache file, lock entry,
         // and issue-map row completely untouched.
         let ticket_content_after = std::fs::read_to_string(&ticket_path).unwrap();
-        let ticket_lock_after = cache.load_lock().get("TICKET-42").unwrap().to_string();
+        let ticket_lock_after = cache
+            .load_lock()
+            .unwrap()
+            .get("TICKET-42")
+            .unwrap()
+            .to_string();
         assert_eq!(
             ticket_content_before, ticket_content_after,
             "ticket cache content must be untouched by a story-only refresh"
@@ -1719,28 +1807,40 @@ mod tests {
         // confirm story (already refreshed above) is left alone this time.
         let story_path = tmp.path().join(".lazyspec/cache/story/STORY-42.md");
         let story_content_before = std::fs::read_to_string(&story_path).unwrap();
-        let story_lock_before = cache.load_lock().get("STORY-42").unwrap().to_string();
+        let story_lock_before = cache
+            .load_lock()
+            .unwrap()
+            .get("STORY-42")
+            .unwrap()
+            .to_string();
 
         let ticket_refresh_gh =
             MockReader::new(vec![make_gh_issue(42, "Some Issue", "Body v3", &[])])
                 .with_graphql_responses(vec![empty_issue_types_response()]);
-        let ticket_result = cache.refresh_stale(
-            tmp.path(),
-            &ticket_type,
-            &ticket_refresh_gh,
-            &ticket_refresh_gh,
-            "owner/repo",
-            &mut issue_map,
-            ttl,
-            &[ticket_match_rule()],
-            &Config::default(),
-        );
+        let ticket_result = cache
+            .refresh_stale(
+                tmp.path(),
+                &ticket_type,
+                &ticket_refresh_gh,
+                &ticket_refresh_gh,
+                "owner/repo",
+                &mut issue_map,
+                ttl,
+                &[ticket_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
 
         assert_eq!(ticket_result.refreshed, 1);
         assert!(cache.is_fresh("TICKET-42", ttl));
 
         let story_content_after = std::fs::read_to_string(&story_path).unwrap();
-        let story_lock_after = cache.load_lock().get("STORY-42").unwrap().to_string();
+        let story_lock_after = cache
+            .load_lock()
+            .unwrap()
+            .get("STORY-42")
+            .unwrap()
+            .to_string();
         assert_eq!(
             story_content_before, story_content_after,
             "story cache content must be untouched by a ticket-only refresh"
@@ -1848,7 +1948,7 @@ mod tests {
         assert!(!cache_dir.join("STORY-12.md").exists());
 
         // cache.lock should not contain STORY-12
-        let lock = cache.load_lock();
+        let lock = cache.load_lock().unwrap();
         assert!(lock.get("STORY-10").is_some());
         assert!(lock.get("STORY-11").is_some());
         assert!(lock.get("STORY-12").is_none());
@@ -2666,7 +2766,7 @@ mod tests {
         )
         .unwrap();
 
-        cache.remove("STORY-12", "story");
+        cache.remove("STORY-12", "story").unwrap();
 
         let folder = root.join(".lazyspec/cache/story/STORY-100");
         assert!(!folder.join("00-STORY-12.md").exists());
@@ -2692,7 +2792,7 @@ mod tests {
         )
         .unwrap();
 
-        cache.remove("STORY-100", "story");
+        cache.remove("STORY-100", "story").unwrap();
 
         assert!(!root.join(".lazyspec/cache/story/STORY-100").exists());
     }
@@ -2940,7 +3040,7 @@ mod tests {
         let root = tmp.path();
 
         store_dispatch::write_cache_file(root, &td, &nested_meta("STORY-7"), "flat").unwrap();
-        cache.remove("STORY-7", "story");
+        cache.remove("STORY-7", "story").unwrap();
 
         assert!(!root.join(".lazyspec/cache/story/STORY-7.md").exists());
     }
@@ -3287,5 +3387,186 @@ mod tests {
         let mut ids = cache.list_cached("story");
         ids.sort();
         assert_eq!(ids, vec!["STORY-100", "STORY-11"]);
+    }
+
+    // --- STORY-209: crash-safe persistence ---
+
+    // AC1: an absent cache.lock still yields a clean default.
+    #[test]
+    fn load_lock_absent_file_yields_default() {
+        let (cache, _tmp) = make_cache();
+        let lock = cache.load_lock().unwrap();
+        assert!(lock.get("anything").is_none());
+    }
+
+    // AC1: a corrupt (present but unparseable) cache.lock hard-errors every
+    // mutator, and the defaulted lock is never persisted over the corrupt file.
+    #[test]
+    fn corrupt_lock_fails_mutators_and_never_persists_default() {
+        let (cache, tmp) = make_cache();
+        cache.write("STORY-1", "story", "content").unwrap();
+
+        let lock_path = tmp.path().join(".lazyspec/cache.lock");
+        let corrupt = r#"{"STORY-1": "2026-03-27T10:0"#;
+        std::fs::write(&lock_path, corrupt).unwrap();
+
+        assert!(cache.load_lock().is_err());
+        assert!(cache.write("STORY-2", "story", "c").is_err());
+        assert!(cache.touch_lock("STORY-1").is_err());
+        assert!(cache.remove("STORY-1", "story").is_err());
+
+        // Read probes degrade to stale without persisting anything.
+        assert!(!cache.is_fresh("STORY-1", Duration::seconds(60)));
+
+        // The corrupt file is byte-for-byte untouched, and the failed remove
+        // did not delete the doc file.
+        assert_eq!(std::fs::read_to_string(&lock_path).unwrap(), corrupt);
+        assert!(cache.doc_path("STORY-1", "story").exists());
+    }
+
+    // AC1: refresh_stale hard-errors on a corrupt lock before any API call.
+    #[test]
+    fn refresh_stale_corrupt_lock_is_hard_error_before_api() {
+        let (cache, tmp) = make_cache();
+        let type_def = story_type_def();
+        cache.write("STORY-10", "story", "old content").unwrap();
+
+        let lock_path = tmp.path().join(".lazyspec/cache.lock");
+        std::fs::write(&lock_path, "{ truncated").unwrap();
+
+        let gh = MockReader::new(vec![]);
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let err = cache
+            .refresh_stale(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                Duration::seconds(60),
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("corrupt"), "got: {err}");
+        assert_eq!(gh.call_count(), 0, "no API call before the lock error");
+        assert_eq!(std::fs::read_to_string(&lock_path).unwrap(), "{ truncated");
+    }
+
+    // AC1 + AC3: fetch_all hard-errors on a corrupt lock and leaves the
+    // previous cache docs untouched.
+    #[test]
+    fn fetch_all_corrupt_lock_errors_and_leaves_cache_untouched() {
+        let (cache, tmp) = make_cache();
+        let type_def = story_type_def();
+        cache.write("STORY-10", "story", "old content").unwrap();
+
+        let lock_path = tmp.path().join(".lazyspec/cache.lock");
+        std::fs::write(&lock_path, "{ truncated").unwrap();
+
+        let gh = MockReader::new(vec![make_gh_issue(
+            10,
+            "STORY-001 First",
+            "new body",
+            &["lazyspec:story"],
+        )]);
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let err = cache
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("corrupt"), "got: {err}");
+        assert_eq!(
+            cache.read_stale("STORY-10", "story"),
+            Some("old content".to_string()),
+            "previous cache doc untouched"
+        );
+        assert_eq!(std::fs::read_to_string(&lock_path).unwrap(), "{ truncated");
+    }
+
+    // AC3: a fetch_all that fails partway through its writes (injected here by
+    // making the cache root refuse new entries, so creating the staging dir
+    // fails) leaves the previously cached docs and the lock intact.
+    #[cfg(unix)]
+    #[test]
+    fn fetch_all_write_failure_leaves_previous_cache_intact() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (cache, tmp) = make_cache();
+        let type_def = story_type_def();
+
+        // Seed a previous successful fetch.
+        let gh = MockReader::new(vec![make_gh_issue(
+            10,
+            "STORY-001 First",
+            "old body",
+            &["lazyspec:story"],
+        )]);
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        cache
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+        let doc_path = tmp.path().join(".lazyspec/cache/story/STORY-10.md");
+        let old_doc = std::fs::read_to_string(&doc_path).unwrap();
+        let lock_path = tmp.path().join(".lazyspec/cache.lock");
+        let old_lock = std::fs::read_to_string(&lock_path).unwrap();
+
+        // Inject the write failure.
+        let cache_root = tmp.path().join(".lazyspec/cache");
+        let mut perms = std::fs::metadata(&cache_root).unwrap().permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(&cache_root, perms).unwrap();
+
+        let gh = MockReader::new(vec![
+            make_gh_issue(10, "STORY-001 First", "new body", &["lazyspec:story"]),
+            make_gh_issue(11, "STORY-002 Second", "another", &["lazyspec:story"]),
+        ]);
+        let result = cache.fetch_all(
+            tmp.path(),
+            &type_def,
+            &gh,
+            &gh,
+            "owner/repo",
+            &mut issue_map,
+            &[story_match_rule()],
+            &Config::default(),
+        );
+
+        // Restore permissions before asserting so TempDir cleanup works.
+        let mut perms = std::fs::metadata(&cache_root).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&cache_root, perms).unwrap();
+
+        assert!(result.is_err(), "interrupted fetch must error");
+        assert_eq!(
+            std::fs::read_to_string(&doc_path).unwrap(),
+            old_doc,
+            "previous cache doc intact after failed fetch"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&lock_path).unwrap(),
+            old_lock,
+            "lock not rewritten by a failed fetch"
+        );
     }
 }

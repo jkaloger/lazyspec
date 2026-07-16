@@ -509,7 +509,7 @@ impl GithubIssuesStore {
         let node_id = self.existing_node_id(doc_id);
         self.issue_map.insert(doc_id, issue_number, "", node_id);
         self.issue_map.save(&self.root)?;
-        self.issue_cache.touch_lock(doc_id);
+        self.issue_cache.touch_lock(doc_id)?;
 
         Ok(())
     }
@@ -557,7 +557,7 @@ impl GithubIssuesStore {
             &remote_issue.id,
         );
         self.issue_map.save(&self.root)?;
-        self.issue_cache.touch_lock(doc_id);
+        self.issue_cache.touch_lock(doc_id)?;
 
         Ok(())
     }
@@ -643,7 +643,7 @@ impl GithubIssuesStore {
             &remote_issue.id,
         );
         self.issue_map.save(&self.root)?;
-        self.issue_cache.touch_lock(doc_id);
+        self.issue_cache.touch_lock(doc_id)?;
 
         Ok(())
     }
@@ -839,7 +839,7 @@ impl GithubIssuesStore {
             .insert(doc_id, issue.number, &issue.updated_at, &issue.id);
         self.issue_map.save(&self.root)?;
         write_cache_file(&self.root, type_def, &materialized_meta, &body)?;
-        self.issue_cache.touch_lock(doc_id);
+        self.issue_cache.touch_lock(doc_id)?;
 
         Ok((issue.number, issue.id))
     }
@@ -1265,7 +1265,7 @@ impl DocumentStore for GithubIssuesStore {
         self.issue_map.save(&self.root)?;
 
         write_cache_file(&self.root, type_def, &doc_meta, body)?;
-        self.issue_cache.touch_lock(&id);
+        self.issue_cache.touch_lock(&id)?;
 
         // Subdir types: co-materialize sibling children into issues and bind
         // them as native sub-issues. Best-effort during create -- children may
@@ -1414,7 +1414,7 @@ impl DocumentStore for GithubIssuesStore {
             ..meta
         };
         write_cache_file(&self.root, type_def, &meta, &body)?;
-        self.issue_cache.touch_lock(doc_id);
+        self.issue_cache.touch_lock(doc_id)?;
 
         Ok(())
     }
@@ -1458,7 +1458,7 @@ impl DocumentStore for GithubIssuesStore {
             ..meta
         };
         write_cache_file(&self.root, type_def, &meta, &body)?;
-        self.issue_cache.touch_lock(doc_id);
+        self.issue_cache.touch_lock(doc_id)?;
 
         Ok(())
     }
@@ -1482,7 +1482,7 @@ impl DocumentStore for GithubIssuesStore {
         self.issue_map.remove(doc_id);
         self.issue_map.save(&self.root)?;
 
-        self.issue_cache.remove(doc_id, &type_def.name);
+        self.issue_cache.remove(doc_id, &type_def.name)?;
 
         Ok(())
     }
@@ -1519,7 +1519,7 @@ impl DocumentStore for GithubIssuesStore {
                 .issue_edit(&self.repo, issue_number, None, None, &[], remove)?;
         }
 
-        self.issue_cache.touch_lock(doc_id);
+        self.issue_cache.touch_lock(doc_id)?;
 
         Ok(())
     }
@@ -2067,7 +2067,7 @@ pub fn write_cache_file(
         .unwrap_or_else(|| cache_dir.join(format!("{}.md", meta.id)));
 
     let cache_content = render_cache_content(meta, body)?;
-    std::fs::write(&cache_path, &cache_content)?;
+    crate::engine::fs::atomic_write(&cache_path, &cache_content)?;
     Ok(())
 }
 
@@ -2163,7 +2163,7 @@ pub fn write_cache_parent(
     std::fs::create_dir_all(&folder)?;
     let cache_path = folder.join("index.md");
     let content = render_cache_content(meta, body)?;
-    std::fs::write(&cache_path, &content)?;
+    crate::engine::fs::atomic_write(&cache_path, &content)?;
     Ok(())
 }
 
@@ -2191,7 +2191,7 @@ pub fn write_cache_child(
     std::fs::create_dir_all(&folder)?;
     let cache_path = folder.join(child_cache_filename(order, total, &meta.id));
     let content = render_cache_content(meta, body)?;
-    std::fs::write(&cache_path, &content)?;
+    crate::engine::fs::atomic_write(&cache_path, &content)?;
     Ok(())
 }
 
