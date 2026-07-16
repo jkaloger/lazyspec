@@ -92,7 +92,6 @@ store = "filesystem"
 singleton = false
 agents = []
 authorship = "assisted"
-attributes = []
 lifecycle = { states = ["reported", "triaged", "in-progress", "fixed", "wontfix"], edges = [{ from = "reported", to = "triaged" }, { from = "triaged", to = "in-progress" }, { from = "in-progress", to = "fixed" }, { from = "reported", to = "wontfix" }, { from = "triaged", to = "wontfix" }] }
 
 
