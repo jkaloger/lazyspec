@@ -6,9 +6,9 @@ use ratatui::{
     Frame,
 };
 
+use super::colors::StatusPalette;
 use crate::engine::document::Status;
 use crate::engine::git_status::GitFileStatus;
-use crate::engine::status_colors::StatusColors;
 use crate::tui::state::{App, FormField};
 
 use super::colors::status_color;
@@ -494,7 +494,7 @@ pub fn draw_settings_variant_picker(f: &mut Frame, app: &App) {
     f.render_widget(hint, rows[1]);
 }
 
-pub fn draw_status_picker(f: &mut Frame, app: &App, colors: &StatusColors) {
+pub fn draw_status_picker(f: &mut Frame, app: &App, colors: &StatusPalette) {
     let area = f.area();
 
     let type_name = app
@@ -929,7 +929,7 @@ pub fn draw_warnings_panel(f: &mut Frame, app: &App) {
     f.render_stateful_widget(list, popup_area, &mut state);
 }
 
-pub fn draw_search_overlay(f: &mut Frame, app: &App, colors: &StatusColors) {
+pub fn draw_search_overlay(f: &mut Frame, app: &App, colors: &StatusPalette) {
     let area = f.area();
 
     let layout = Layout::default()

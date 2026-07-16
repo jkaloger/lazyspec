@@ -8150,11 +8150,11 @@ center = ["warnings"]
     /// Render the graph view into a fresh TestBackend and flatten the buffer to
     /// a single string.
     fn render_graph_to_string(app: &mut App, w: u16, h: u16, config: &Config) -> String {
-        use crate::engine::status_colors::StatusColors;
         use crate::tui::views::panels::draw_graph;
+        use crate::tui::views::StatusPalette;
         use ratatui::{backend::TestBackend, Terminal};
 
-        let colors = StatusColors::default();
+        let colors = StatusPalette::default();
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal
             .draw(|f| draw_graph(f, app, f.area(), config, &colors))

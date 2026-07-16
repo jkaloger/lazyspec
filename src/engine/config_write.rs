@@ -301,6 +301,43 @@ fn write_tui(doc: &mut DocumentMut, buffer: &Config) {
             5,
         );
     }
+
+    write_status_colors(tui, buffer);
+}
+
+// Reconcile [tui.status_colors] to the buffer map: drop keys that left the map,
+// update/insert a scalar `status = "colour"` pair for every buffer entry, and
+// remove the parent status_colors table entirely when the buffer map is empty
+// (no dangling empty table is left behind, and none is fabricated for an empty
+// map).
+fn write_status_colors(tui: &mut dyn toml_edit::TableLike, buffer: &Config) {
+    if buffer.ui.status_colors.is_empty() {
+        tui.remove("status_colors");
+        return;
+    }
+
+    if !tui.contains_key("status_colors") {
+        tui.insert("status_colors", Item::Table(Table::new()));
+    }
+    let Some(colors) = tui
+        .get_mut("status_colors")
+        .and_then(Item::as_table_like_mut)
+    else {
+        return;
+    };
+
+    let stale: Vec<String> = colors
+        .iter()
+        .map(|(key, _)| key.to_string())
+        .filter(|key| !buffer.ui.status_colors.contains_key(key))
+        .collect();
+    for key in stale {
+        colors.remove(&key);
+    }
+
+    for (key, value) in &buffer.ui.status_colors {
+        set_str(colors, key, value);
+    }
 }
 
 fn write_numbering(doc: &mut DocumentMut, buffer: &Config) {
@@ -1514,5 +1551,23 @@ inverse = "implemented-by"
         let out = write_config_in_place(STATUSBAR_SRC, &buffer).unwrap();
         assert!(!out.contains("right"));
         Config::parse(&out).unwrap();
+    }
+
+    #[test]
+    fn status_colors_round_trip_through_config_write() {
+        let buffer = {
+            let mut c = Config::parse(STATUSBAR_SRC).unwrap();
+            c.ui.status_colors
+                .insert("draft".to_string(), "magenta".to_string());
+            c.ui.status_colors
+                .insert("pending".to_string(), "#336699".to_string());
+            c
+        };
+        let out = write_config_in_place(STATUSBAR_SRC, &buffer).unwrap();
+        assert!(out.contains("[tui.status_colors]"), "got: {out}");
+        assert!(out.contains(r#"draft = "magenta""#), "got: {out}");
+        assert!(out.contains(r##"pending = "#336699""##), "got: {out}");
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(reparsed.ui.status_colors, buffer.ui.status_colors);
     }
 }
