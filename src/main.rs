@@ -262,13 +262,28 @@ fn main() -> anyhow::Result<()> {
                 println!("Updated {}", resolved.display());
             }
         }
-        Some(Commands::Delete { path }) => {
+        Some(Commands::Delete { path, json }) => {
             let store = Store::load(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
             lazyspec::cli::delete::run_with_config(&cwd, &store, &path, Some(&config))?;
-            println!("Deleted {}", resolved.display());
+            if json {
+                let id = lazyspec::cli::resolve::resolve_to_id(&store, &path)?;
+                let out = serde_json::json!({
+                    "action": "deleted",
+                    "id": id,
+                    "path": resolved.to_string_lossy(),
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                println!("Deleted {}", resolved.display());
+            }
         }
-        Some(Commands::Link { from, rel_type, to }) => {
+        Some(Commands::Link {
+            from,
+            rel_type,
+            to,
+            json,
+        }) => {
             let store = Store::load(&cwd, &config)?;
             let outcome = lazyspec::cli::link::link_with_config(
                 &cwd,
@@ -279,14 +294,29 @@ fn main() -> anyhow::Result<()> {
                 &fs,
                 Some(&config),
             )?;
-            println!(
-                "Linked {} --{}--> {}",
-                outcome.source.display(),
-                outcome.rel_type,
-                outcome.target
-            );
+            if json {
+                let out = serde_json::json!({
+                    "action": "linked",
+                    "source": outcome.source.to_string_lossy(),
+                    "rel_type": outcome.rel_type.to_string(),
+                    "target": outcome.target,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                println!(
+                    "Linked {} --{}--> {}",
+                    outcome.source.display(),
+                    outcome.rel_type,
+                    outcome.target
+                );
+            }
         }
-        Some(Commands::Unlink { from, rel_type, to }) => {
+        Some(Commands::Unlink {
+            from,
+            rel_type,
+            to,
+            json,
+        }) => {
             let store = Store::load(&cwd, &config)?;
             let outcome = lazyspec::cli::link::unlink_with_config(
                 &cwd,
@@ -297,12 +327,22 @@ fn main() -> anyhow::Result<()> {
                 &fs,
                 Some(&config),
             )?;
-            println!(
-                "Unlinked {} --{}--> {}",
-                outcome.source.display(),
-                outcome.rel_type,
-                outcome.target
-            );
+            if json {
+                let out = serde_json::json!({
+                    "action": "unlinked",
+                    "source": outcome.source.to_string_lossy(),
+                    "rel_type": outcome.rel_type.to_string(),
+                    "target": outcome.target,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                println!(
+                    "Unlinked {} --{}--> {}",
+                    outcome.source.display(),
+                    outcome.rel_type,
+                    outcome.target
+                );
+            }
         }
         Some(Commands::Tag { action }) => match action {
             TagAction::Add { id, tags, json } => {
@@ -344,17 +384,39 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         },
-        Some(Commands::Ignore { path }) => {
+        Some(Commands::Ignore { path, json }) => {
             let store = Store::load(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
             lazyspec::cli::ignore::ignore(&cwd, &store, &path, &fs)?;
-            println!("Ignoring {}", resolved.display());
+            if json {
+                let id = lazyspec::cli::resolve::resolve_to_id(&store, &path)?;
+                let out = serde_json::json!({
+                    "action": "ignored",
+                    "id": id,
+                    "path": resolved.to_string_lossy(),
+                    "validate_ignore": true,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                println!("Ignoring {}", resolved.display());
+            }
         }
-        Some(Commands::Unignore { path }) => {
+        Some(Commands::Unignore { path, json }) => {
             let store = Store::load(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
             lazyspec::cli::ignore::unignore(&cwd, &store, &path, &fs)?;
-            println!("Unignoring {}", resolved.display());
+            if json {
+                let id = lazyspec::cli::resolve::resolve_to_id(&store, &path)?;
+                let out = serde_json::json!({
+                    "action": "unignored",
+                    "id": id,
+                    "path": resolved.to_string_lossy(),
+                    "validate_ignore": false,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                println!("Unignoring {}", resolved.display());
+            }
         }
         Some(Commands::Search {
             query,

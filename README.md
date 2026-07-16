@@ -264,7 +264,7 @@ This build is unsigned. On first launch macOS Gatekeeper will refuse a plain dou
 <details>
 <summary><h3>CLI</h3></summary>
 
-All document management is available as subcommands. Most accept `--json` for machine-readable output.
+All document management is available as subcommands. Most accept `--json` for machine-readable output, including every mutating command: `create`, `update`, and `tag` emit the resulting document, while `delete`, `link`, `unlink`, `ignore`, and `unignore` emit a structured outcome (`action` plus the doc id/path or relation edge) instead of the human confirmation line.
 
 | Command                                                         | Description                                                                                     |
 | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |

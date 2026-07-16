@@ -365,6 +365,147 @@ fn show_json_attributes_empty_object_when_none() {
     );
 }
 
+/// Run the lazyspec binary in `root`, asserting success, returning stdout.
+fn run_lazyspec(root: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lazyspec"))
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("failed to run lazyspec");
+    assert!(
+        output.status.success(),
+        "lazyspec {:?} should succeed, stderr: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+// ITERATION-299 / STORY-211 AC1: delete --json emits the structured outcome.
+#[test]
+fn delete_json_output() {
+    let fixture = crate::common::TestFixture::new();
+    fixture.write_rfc("RFC-001-auth.md", "Auth", "draft");
+
+    let stdout = run_lazyspec(fixture.root(), &["delete", "RFC-001", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(parsed["action"], "deleted");
+    assert_eq!(parsed["id"], "RFC-001");
+    assert_eq!(parsed["path"], "docs/rfcs/RFC-001-auth.md");
+    assert!(!fixture.root().join("docs/rfcs/RFC-001-auth.md").exists());
+}
+
+// ITERATION-299 / STORY-211 AC1: link --json emits the written edge.
+#[test]
+fn link_json_output() {
+    let fixture = crate::common::TestFixture::new();
+    fixture.write_rfc("RFC-001-auth.md", "Auth", "draft");
+    fixture.write_story("STORY-001-impl.md", "Impl", "draft", None);
+
+    let stdout = run_lazyspec(
+        fixture.root(),
+        &["link", "STORY-001", "implements", "RFC-001", "--json"],
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(parsed["action"], "linked");
+    assert_eq!(parsed["source"], "docs/stories/STORY-001-impl.md");
+    assert_eq!(parsed["rel_type"], "implements");
+    assert_eq!(parsed["target"], "RFC-001");
+}
+
+// ITERATION-299 / STORY-211 AC1: unlink --json emits the removed edge.
+#[test]
+fn unlink_json_output() {
+    let fixture = crate::common::TestFixture::new();
+    fixture.write_rfc("RFC-001-auth.md", "Auth", "draft");
+    fixture.write_story("STORY-001-impl.md", "Impl", "draft", Some("RFC-001"));
+
+    let stdout = run_lazyspec(
+        fixture.root(),
+        &["unlink", "STORY-001", "implements", "RFC-001", "--json"],
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(parsed["action"], "unlinked");
+    assert_eq!(parsed["source"], "docs/stories/STORY-001-impl.md");
+    assert_eq!(parsed["rel_type"], "implements");
+    assert_eq!(parsed["target"], "RFC-001");
+    let content =
+        std::fs::read_to_string(fixture.root().join("docs/stories/STORY-001-impl.md")).unwrap();
+    assert!(!content.contains("implements: RFC-001"));
+}
+
+// ITERATION-299 / STORY-211 AC1: ignore --json emits the outcome and new state.
+#[test]
+fn ignore_json_output() {
+    let fixture = crate::common::TestFixture::new();
+    fixture.write_rfc("RFC-001-auth.md", "Auth", "draft");
+
+    let stdout = run_lazyspec(fixture.root(), &["ignore", "RFC-001", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(parsed["action"], "ignored");
+    assert_eq!(parsed["id"], "RFC-001");
+    assert_eq!(parsed["path"], "docs/rfcs/RFC-001-auth.md");
+    assert_eq!(parsed["validate_ignore"], true);
+    let content =
+        std::fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-auth.md")).unwrap();
+    assert!(content.contains("validate-ignore: true"));
+}
+
+// ITERATION-299 / STORY-211 AC1: unignore --json emits the outcome and new state.
+#[test]
+fn unignore_json_output() {
+    let fixture = crate::common::TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-auth.md",
+        "---\ntitle: \"Auth\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nvalidate-ignore: true\n---\n",
+    );
+
+    let stdout = run_lazyspec(fixture.root(), &["unignore", "RFC-001", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(parsed["action"], "unignored");
+    assert_eq!(parsed["id"], "RFC-001");
+    assert_eq!(parsed["path"], "docs/rfcs/RFC-001-auth.md");
+    assert_eq!(parsed["validate_ignore"], false);
+    let content =
+        std::fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-auth.md")).unwrap();
+    assert!(!content.contains("validate-ignore"));
+}
+
+// ITERATION-299 / STORY-211 AC2: without --json the human output is unchanged.
+#[test]
+fn mutating_commands_human_output_unchanged() {
+    let fixture = crate::common::TestFixture::new();
+    fixture.write_rfc("RFC-001-auth.md", "Auth", "draft");
+    fixture.write_story("STORY-001-impl.md", "Impl", "draft", None);
+    let root = fixture.root();
+
+    assert_eq!(
+        run_lazyspec(root, &["link", "STORY-001", "implements", "RFC-001"]),
+        "Linked docs/stories/STORY-001-impl.md --implements--> RFC-001\n"
+    );
+    assert_eq!(
+        run_lazyspec(root, &["unlink", "STORY-001", "implements", "RFC-001"]),
+        "Unlinked docs/stories/STORY-001-impl.md --implements--> RFC-001\n"
+    );
+    assert_eq!(
+        run_lazyspec(root, &["ignore", "RFC-001"]),
+        "Ignoring docs/rfcs/RFC-001-auth.md\n"
+    );
+    assert_eq!(
+        run_lazyspec(root, &["unignore", "RFC-001"]),
+        "Unignoring docs/rfcs/RFC-001-auth.md\n"
+    );
+    assert_eq!(
+        run_lazyspec(root, &["delete", "RFC-001"]),
+        "Deleted docs/rfcs/RFC-001-auth.md\n"
+    );
+}
+
 // AC7: --json serializes a relationship under its configured name, end-to-end.
 #[test]
 fn json_output_serializes_relationship_by_configured_name() {
