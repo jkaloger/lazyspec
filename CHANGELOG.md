@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking:** remove the lease subsystem: `claim`, `release`, `leases`, and `heartbeat` subcommands are gone and now fail with the standard unknown-subcommand error
+- the `[coordination]` config block is no longer read; configs still carrying it parse fine and the block is ignored
+- migration: leftover `refs/lazyspec/leases/*` refs are orphaned and harmless; prune with `git for-each-ref --format='%(refname)' refs/lazyspec/leases | while read -r ref; do git update-ref -d "$ref"; done`
+
+### Changed
+
+- git-ref document stores are now local-write only: writes land in the local ref and remote sync happens via `lazyspec fetch`; there is no automatic remote push
+
 ## [0.9.2](https://github.com/jkaloger/lazyspec/compare/v0.9.1...v0.9.2) - 2026-07-11
 
 ### Other

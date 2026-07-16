@@ -1,7 +1,7 @@
 ---
 title: Purge lease traces from TUI-web-docs and sync README tables
 type: iteration
-status: accepted
+status: complete
 author: agent
 date: 2026-07-16
 tags: []
