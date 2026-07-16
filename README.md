@@ -487,6 +487,14 @@ lazyspec config add-type spike spikes docs/spikes SPIKE \
 # also accepts --singleton, --store <filesystem|github-issues|github-milestones|github-projects|git-ref|clickup-tasks>,
 # --numbering <incremental|sqids|reserved>, --clickup-task-type <id> (clickup-tasks only)
 
+# Declare custom frontmatter attributes with the type (repeat --attribute per
+# attribute; spec is NAME:KIND[:required][:VAL1,VAL2,...], kinds: int, float,
+# string, enum, date, bool -- values only for enum). Written as
+# [[types.attributes]] blocks; never hand-edit these into .lazyspec.toml.
+lazyspec config add-type bug bugs docs/bugs BUG \
+  --attribute "severity:enum:required:low,medium,high" \
+  --attribute "reported:date" --attribute "estimate:int"
+
 # Replace a type's lifecycle (states + edges; `*` matches any source state)
 lazyspec config set-lifecycle iteration \
   --state draft --state in-progress --state done \

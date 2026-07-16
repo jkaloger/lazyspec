@@ -2,8 +2,9 @@ use anyhow::Result;
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::engine::config::{
-    default_normalize, default_skills_entry, Authorship, Config, Edge, Lifecycle,
-    NumberingStrategy, RelationshipDef, ReservedFormat, Severity, TypeDef, ValidationRule,
+    default_normalize, default_skills_entry, AttrDef, AttrKind, Authorship, Config, Edge,
+    Lifecycle, NumberingStrategy, RelationshipDef, ReservedFormat, Severity, TypeDef,
+    ValidationRule,
 };
 
 pub fn write_config_in_place(existing_src: &str, buffer: &Config) -> Result<String> {
@@ -94,6 +95,7 @@ fn update_type_table(entry: &mut Table, def: &TypeDef) {
     );
     set_opt_int(entry, "clickup_task_type", def.clickup_task_type);
     set_lifecycle(entry, &def.lifecycle);
+    set_attributes(entry, &def.attributes);
 }
 
 fn authorship_str(a: &Authorship) -> &'static str {
@@ -127,6 +129,90 @@ fn set_lifecycle(entry: &mut Table, lifecycle: &Lifecycle) {
         "lifecycle",
         Item::Value(Value::InlineTable(lifecycle_inline(lifecycle))),
     );
+}
+
+// Reconcile a type's `attributes` to the buffer as `[[types.attributes]]`
+// array-of-tables. An empty buffer removes the key entirely (never emitting a
+// dangling `attributes = []`, whose inline form conflicts with any later
+// `[[types.attributes]]` block -- the c83bb99 outage shape). A present key that
+// already matches the buffer is left untouched (decor preserved); anything else
+// -- including a conflicting inline `attributes = [...]` value -- is replaced
+// wholesale by the array-of-tables form, so the writer's output always parses.
+fn set_attributes(entry: &mut Table, attributes: &[AttrDef]) {
+    if attributes.is_empty() {
+        entry.remove("attributes");
+        return;
+    }
+    if entry
+        .get("attributes")
+        .and_then(parse_attributes)
+        .as_deref()
+        == Some(attributes)
+    {
+        return;
+    }
+    let mut tables = ArrayOfTables::new();
+    for attr in attributes {
+        let mut table = Table::new();
+        set_str(&mut table, "name", &attr.name);
+        set_str(&mut table, "kind", attr_kind_str(&attr.kind));
+        set_bool_defaulted(&mut table, "required", attr.required, false);
+        set_str_array_defaulted(&mut table, "values", &attr.values);
+        tables.push(table);
+    }
+    entry.insert("attributes", Item::ArrayOfTables(tables));
+}
+
+fn parse_attributes(item: &Item) -> Option<Vec<AttrDef>> {
+    let tables = item.as_array_of_tables()?;
+    tables
+        .iter()
+        .map(|table| {
+            let name = table.get("name")?.as_str()?.to_string();
+            let kind = attr_kind_from_str(table.get("kind")?.as_str()?)?;
+            let required = match table.get("required") {
+                None => false,
+                Some(item) => item.as_bool()?,
+            };
+            let values = match table.get("values") {
+                None => Vec::new(),
+                Some(item) => item
+                    .as_array()?
+                    .iter()
+                    .map(|v| v.as_str().map(str::to_string))
+                    .collect::<Option<Vec<_>>>()?,
+            };
+            Some(AttrDef {
+                name,
+                kind,
+                required,
+                values,
+            })
+        })
+        .collect()
+}
+
+fn attr_kind_str(kind: &AttrKind) -> &'static str {
+    match kind {
+        AttrKind::Int => "int",
+        AttrKind::Float => "float",
+        AttrKind::Str => "string",
+        AttrKind::Enum => "enum",
+        AttrKind::Date => "date",
+        AttrKind::Bool => "bool",
+    }
+}
+
+fn attr_kind_from_str(value: &str) -> Option<AttrKind> {
+    match value {
+        "int" => Some(AttrKind::Int),
+        "float" => Some(AttrKind::Float),
+        "string" => Some(AttrKind::Str),
+        "enum" => Some(AttrKind::Enum),
+        "date" => Some(AttrKind::Date),
+        "bool" => Some(AttrKind::Bool),
+        _ => None,
+    }
 }
 
 fn parse_lifecycle(item: &Item) -> Option<Lifecycle> {
@@ -1273,6 +1359,149 @@ inverse = "implemented-by"
 enabled = true
 left = ["mode"]
 "#;
+
+    fn attr(name: &str, kind: AttrKind, required: bool, values: &[&str]) -> AttrDef {
+        AttrDef {
+            name: name.to_string(),
+            kind,
+            required,
+            values: values.iter().map(|v| v.to_string()).collect(),
+        }
+    }
+
+    fn all_kind_attrs() -> Vec<AttrDef> {
+        vec![
+            attr("estimate", AttrKind::Int, false, &[]),
+            attr("weight", AttrKind::Float, false, &[]),
+            attr("owner", AttrKind::Str, true, &[]),
+            attr("priority", AttrKind::Enum, false, &["low", "high"]),
+            attr("due", AttrKind::Date, false, &[]),
+            attr("blocked", AttrKind::Bool, false, &[]),
+        ]
+    }
+
+    // STORY-213 AC1/AC3: an attribute-bearing type writes [[types.attributes]]
+    // sub-tables and round-trips through reparse with identical AttrDefs, for
+    // all six kinds.
+    #[test]
+    fn type_attributes_round_trip_all_kinds() {
+        let buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.documents.types[0].attributes = all_kind_attrs();
+            c
+        };
+
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+
+        assert!(out.contains("[[types.attributes]]"), "got: {out}");
+        assert!(!out.contains("attributes = ["), "no inline form: {out}");
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(reparsed.documents.types[0].attributes, all_kind_attrs());
+        // The other type gained no attributes key.
+        assert!(reparsed.documents.types[1].attributes.is_empty());
+    }
+
+    // AC1: a conflicting inline `attributes = []` on the source type is replaced
+    // by the array-of-tables form, never left to collide with it (the c83bb99
+    // duplicate-key outage shape).
+    #[test]
+    fn inline_attributes_key_is_replaced_not_duplicated() {
+        const INLINE_SRC: &str = r#"[[types]]
+name = "bug"
+plural = "bugs"
+dir = "docs/bugs"
+prefix = "BUG"
+attributes = []
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+"#;
+        let buffer = {
+            let mut c = Config::parse(INLINE_SRC).unwrap();
+            c.documents.types[0].attributes =
+                vec![attr("severity", AttrKind::Enum, true, &["low", "high"])];
+            c
+        };
+
+        let out = write_config_in_place(INLINE_SRC, &buffer).unwrap();
+
+        assert!(!out.contains("attributes = []"), "got: {out}");
+        assert_eq!(out.matches("[[types.attributes]]").count(), 1);
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(
+            reparsed.documents.types[0].attributes,
+            vec![attr("severity", AttrKind::Enum, true, &["low", "high"])]
+        );
+
+        // An empty buffer removes the inline key rather than keeping the
+        // collision-prone `attributes = []` form.
+        let empty_buffer = Config::parse(INLINE_SRC).unwrap();
+        let out = write_config_in_place(INLINE_SRC, &empty_buffer).unwrap();
+        assert!(!out.contains("attributes"), "got: {out}");
+        Config::parse(&out).unwrap();
+    }
+
+    // Unchanged attributes keep their source representation (decor untouched),
+    // and clearing them drops the whole [[types.attributes]] block.
+    #[test]
+    fn unchanged_attributes_preserve_decor_and_cleared_ones_are_removed() {
+        const ATTRS_SRC: &str = r#"[[types]]
+name = "bug"
+plural = "bugs"
+dir = "docs/bugs"
+prefix = "BUG"
+
+# how bad is it
+[[types.attributes]]
+name = "severity"
+kind = "enum"
+required = true
+values = ["low", "high"]
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+"#;
+        // No-op write: the comment above the block survives byte-for-byte.
+        let buffer = Config::parse(ATTRS_SRC).unwrap();
+        let out = write_config_in_place(ATTRS_SRC, &buffer).unwrap();
+        assert_eq!(out, ATTRS_SRC);
+
+        // Clearing the attributes removes the sub-table block.
+        let cleared = {
+            let mut c = Config::parse(ATTRS_SRC).unwrap();
+            c.documents.types[0].attributes.clear();
+            c
+        };
+        let out = write_config_in_place(ATTRS_SRC, &cleared).unwrap();
+        assert!(!out.contains("[[types.attributes]]"));
+        assert!(!out.contains("severity"));
+        let reparsed = Config::parse(&out).unwrap();
+        assert!(reparsed.documents.types[0].attributes.is_empty());
+    }
+
+    // A freshly appended type carries its attributes in the same render.
+    #[test]
+    fn adding_a_type_with_attributes_emits_sub_tables() {
+        let buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.documents.types.push(TypeDef {
+                attributes: vec![attr("estimate", AttrKind::Int, false, &[])],
+                ..TypeDef::test_fixture("bug", StoreBackend::Filesystem)
+            });
+            c
+        };
+
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+
+        let reparsed = Config::parse(&out).unwrap();
+        let bug = reparsed.type_by_name("bug").unwrap();
+        assert_eq!(
+            bug.attributes,
+            vec![attr("estimate", AttrKind::Int, false, &[])]
+        );
+    }
 
     #[test]
     fn empty_array_on_absent_slot_is_not_fabricated() {
