@@ -110,6 +110,8 @@ fn create_json_output() {
     assert_eq!(parsed["status"], "draft");
     assert_eq!(parsed["author"], "jkaloger");
     assert!(parsed["path"].as_str().unwrap().contains("RFC-001"));
+    // AUDIT-018 F5 / STORY-210 AC4: the created doc's real assigned id, not "".
+    assert_eq!(parsed["id"], "RFC-001");
 }
 
 #[test]

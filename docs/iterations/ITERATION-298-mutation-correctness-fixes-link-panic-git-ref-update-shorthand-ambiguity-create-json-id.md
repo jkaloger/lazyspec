@@ -1,7 +1,7 @@
 ---
 title: 'Mutation correctness fixes: link panic, git-ref update, shorthand ambiguity, create json id'
 type: iteration
-status: accepted
+status: in-progress
 author: agent
 date: 2026-07-16
 tags: []

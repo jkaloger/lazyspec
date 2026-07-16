@@ -170,23 +170,26 @@ impl DocumentStore for GitRefStore {
 
         let (yaml, existing_body) = split_frontmatter(&content)?;
 
-        let mut lines: Vec<String> = yaml.lines().map(|l| l.to_string()).collect();
+        // Round-trip through serde_yaml (as set_provenance does) so missing
+        // keys are inserted rather than dropped and YAML-significant values
+        // ("Plan: phase 2") come out properly quoted (AUDIT-018 C3).
+        let mut frontmatter: serde_yaml::Value = serde_yaml::from_str(&yaml)?;
+        let map = frontmatter
+            .as_mapping_mut()
+            .ok_or_else(|| anyhow::anyhow!("frontmatter root must be a mapping"))?;
         let mut new_body: Option<String> = None;
         for &(key, value) in updates {
             if key == "body" {
                 new_body = Some(value.to_string());
                 continue;
             }
-            let prefix = format!("{}:", key);
-            if let Some(line) = lines
-                .iter_mut()
-                .find(|l| l.trim_start().starts_with(&prefix))
-            {
-                *line = format!("{}: {}", key, value);
-            }
+            map.insert(
+                serde_yaml::Value::String(key.to_string()),
+                serde_yaml::Value::String(value.to_string()),
+            );
         }
 
-        let updated_yaml = lines.join("\n");
+        let updated_yaml = serde_yaml::to_string(&frontmatter)?;
         let body = new_body.as_deref().unwrap_or(&existing_body);
         let body_trimmed = body.trim_start_matches('\n');
         let body_section = if body_trimmed.is_empty() {
@@ -537,6 +540,81 @@ mod tests {
         let update_call = calls.iter().find(|c| c.starts_with("update_ref:")).unwrap();
         assert!(update_call.contains("newsha456"), "new SHA in update_ref");
         assert!(update_call.contains("oldsha"), "old SHA in update_ref");
+    }
+
+    // AUDIT-018 C3 / STORY-210 AC2: updating a key not yet present in the
+    // frontmatter must insert it, not silently drop it while returning Ok.
+    #[test]
+    fn test_git_ref_store_update_inserts_missing_key() {
+        let tmp = TempDir::new().unwrap();
+
+        let td = test_type_def();
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache_content = "---\ntitle: Title\ntype: iteration\nstatus: draft\nauthor: alice\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\nbody\n";
+        std::fs::write(cache_dir.join("ITERATION-042.md"), cache_content).unwrap();
+
+        let mut lock = CacheLock::default();
+        lock.set("iteration/ITERATION-042", "oldsha");
+        lock.save(tmp.path()).unwrap();
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha".to_string()))
+            .with_update_ref_result(Ok(()));
+
+        let mut store = make_store(&tmp, mock);
+        store
+            .update(&td, "ITERATION-042", &[("priority", "high")])
+            .unwrap();
+
+        let updated = std::fs::read_to_string(cache_dir.join("ITERATION-042.md")).unwrap();
+        let (yaml, _) = split_frontmatter(&updated).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            parsed["priority"].as_str(),
+            Some("high"),
+            "new key must be inserted, got: {}",
+            updated
+        );
+        assert_eq!(parsed["title"].as_str(), Some("Title"));
+    }
+
+    // AUDIT-018 C3 / STORY-210 AC2: values with YAML-significant characters
+    // (`--title 'Plan: phase 2'`) must be serialized so the frontmatter still
+    // parses and round-trips the exact value.
+    #[test]
+    fn test_git_ref_store_update_quotes_yaml_significant_values() {
+        let tmp = TempDir::new().unwrap();
+
+        let td = test_type_def();
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache_content = "---\ntitle: Old Title\ntype: iteration\nstatus: draft\nauthor: alice\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\nbody\n";
+        std::fs::write(cache_dir.join("ITERATION-042.md"), cache_content).unwrap();
+
+        let mut lock = CacheLock::default();
+        lock.set("iteration/ITERATION-042", "oldsha");
+        lock.save(tmp.path()).unwrap();
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha".to_string()))
+            .with_update_ref_result(Ok(()));
+
+        let mut store = make_store(&tmp, mock);
+        store
+            .update(&td, "ITERATION-042", &[("title", "Plan: phase 2")])
+            .unwrap();
+
+        let updated = std::fs::read_to_string(cache_dir.join("ITERATION-042.md")).unwrap();
+        let (yaml, _) = split_frontmatter(&updated).unwrap();
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&yaml).expect("frontmatter must still parse as YAML");
+        assert_eq!(
+            parsed["title"].as_str(),
+            Some("Plan: phase 2"),
+            "colon-containing title must round-trip, got: {}",
+            updated
+        );
     }
 
     #[test]

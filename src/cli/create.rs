@@ -418,6 +418,9 @@ pub fn run_json_with_body(
     let content = fs::read_to_string(&path)?;
     let mut meta = DocMeta::parse(&content)?;
     meta.path = relative;
+    // Derive the assigned id from the written path exactly as the store does
+    // on load; DocMeta::parse leaves it empty (AUDIT-018 F5).
+    meta.id = crate::engine::store::extract_id(&meta.path);
 
     let json = doc_to_json(&meta);
     Ok(serde_json::to_string_pretty(&json)?)

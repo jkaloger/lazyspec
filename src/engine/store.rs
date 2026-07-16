@@ -193,16 +193,32 @@ impl Store {
             return self.resolve_unqualified(id);
         };
 
-        let parent = self
+        // Mirror resolve_unqualified: collect every prefix match, prefer an
+        // exact parent id, and error on genuine ambiguity rather than letting
+        // HashMap iteration order pick RFC-12 for `RFC-1/...` (AUDIT-018 C6).
+        let parent_matches: Vec<&DocMeta> = self
             .docs
             .values()
-            .find(|d| {
+            .filter(|d| {
                 !self.parent_of.contains_key(&d.path)
                     && canonical_name(&d.path)
                         .map(|n| n.starts_with(parent_id))
                         .unwrap_or(false)
             })
-            .ok_or_else(|| ResolveError::NotFound(id.to_string()))?;
+            .collect();
+
+        let parent = match parent_matches.len() {
+            0 => return Err(ResolveError::NotFound(id.to_string())),
+            1 => parent_matches[0],
+            _ => parent_matches
+                .iter()
+                .find(|d| d.id == parent_id)
+                .copied()
+                .ok_or_else(|| ResolveError::Ambiguous {
+                    id: parent_id.to_string(),
+                    matches: parent_matches.iter().map(|d| d.path.clone()).collect(),
+                })?,
+        };
 
         let child_paths = self
             .children
@@ -436,7 +452,7 @@ pub fn extract_id_from_name(name: &str) -> String {
     name.to_string()
 }
 
-fn extract_id(path: &Path) -> String {
+pub(crate) fn extract_id(path: &Path) -> String {
     let file_name = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
     let stem = path.file_stem().and_then(|f| f.to_str()).unwrap_or("");
 
@@ -906,6 +922,76 @@ mod tests {
             doc.path,
             PathBuf::from(".lazyspec/cache/issue/ISSUE-001-example.md")
         );
+    }
+
+    // Seed a subdirectory parent `docs/rfcs/<folder>/index.md` with one child
+    // markdown file, so parent/child shorthand (`RFC-1/STORY-5`) can resolve.
+    fn add_parent_with_child(fs: &InMemoryFileSystem, root: &Path, folder: &str, child: &str) {
+        let dir = root.join("docs/rfcs").join(folder);
+        fs.add_dir(dir.clone());
+        fs.add_file(
+            dir.join("index.md"),
+            &format!(
+                "---\ntitle: \"{folder}\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-01-01\ntags: []\n---\nparent\n"
+            ),
+        );
+        fs.add_file(
+            dir.join(format!("{child}.md")),
+            &format!(
+                "---\ntitle: \"{child}\"\ntype: story\nstatus: draft\nauthor: t\ndate: 2026-01-01\ntags: []\n---\nchild\n"
+            ),
+        );
+    }
+
+    // AUDIT-018 C6 / STORY-210 AC3: with RFC-1 and RFC-12 (plus more RFC-1*
+    // decoys) all present, `RFC-1/STORY-5` must resolve to RFC-1's child --
+    // the exact parent id wins over first-prefix-match-in-HashMap-order.
+    #[test]
+    fn test_resolve_shorthand_prefers_exact_parent_id() {
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+        fs.add_dir(root.join("docs/rfcs"));
+
+        add_parent_with_child(&fs, &root, "RFC-1-alpha", "STORY-5-real");
+        add_parent_with_child(&fs, &root, "RFC-10-b", "STORY-6-a");
+        add_parent_with_child(&fs, &root, "RFC-11-c", "STORY-7-b");
+        add_parent_with_child(&fs, &root, "RFC-12-d", "STORY-8-c");
+        add_parent_with_child(&fs, &root, "RFC-13-e", "STORY-9-d");
+
+        let store = Store::load_with_fs(&root, &Config::default(), &fs, None).unwrap();
+
+        let doc = store
+            .resolve_shorthand("RFC-1/STORY-5")
+            .expect("exact parent id RFC-1 must win over RFC-1* prefix decoys");
+        assert_eq!(
+            doc.path,
+            PathBuf::from("docs/rfcs/RFC-1-alpha/STORY-5-real.md")
+        );
+    }
+
+    // AUDIT-018 C6 / STORY-210 AC3: with no exact RFC-1, a prefix matching
+    // several parents (RFC-10, RFC-12) is a genuine ambiguity and must error
+    // listing the candidates, mirroring resolve_unqualified.
+    #[test]
+    fn test_resolve_shorthand_ambiguous_parent_prefix_errors() {
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+        fs.add_dir(root.join("docs/rfcs"));
+
+        add_parent_with_child(&fs, &root, "RFC-10-b", "STORY-6-a");
+        add_parent_with_child(&fs, &root, "RFC-12-d", "STORY-8-c");
+
+        let store = Store::load_with_fs(&root, &Config::default(), &fs, None).unwrap();
+
+        let err = store
+            .resolve_shorthand("RFC-1/STORY-6")
+            .expect_err("prefix RFC-1 matching RFC-10 and RFC-12 must be ambiguous");
+        match err {
+            ResolveError::Ambiguous { matches, .. } => {
+                assert_eq!(matches.len(), 2, "both candidates listed: {:?}", matches);
+            }
+            other => panic!("expected Ambiguous, got: {other:?}"),
+        }
     }
 
     #[test]
