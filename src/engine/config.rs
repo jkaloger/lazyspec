@@ -2,7 +2,7 @@ use crate::engine::document::Status;
 use anyhow::{bail, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -472,6 +472,11 @@ pub struct UiConfig {
     pub multiline: MultiLineConfig,
     #[serde(default)]
     pub graph: GraphConfig,
+    /// The `[tui.status_colors]` table: per-status colour overrides mapping a
+    /// status name to a raw colour string (named ANSI colour or `#rrggbb` hex).
+    /// Parsing into a concrete colour happens TUI-side, not in the engine.
+    #[serde(default)]
+    pub status_colors: BTreeMap<String, String>,
 }
 
 fn default_graph_columns() -> Vec<String> {
@@ -657,7 +662,7 @@ struct RawConfig {
     /// under (e.g. `{type}-{n:03}-{title}.md`).
     naming: Option<Naming>,
     /// The `[tui]` block: terminal UI preferences (status bar, multiline
-    /// rendering, graph columns, ASCII diagrams).
+    /// rendering, graph columns, ASCII diagrams, status colours).
     tui: Option<UiConfig>,
     /// The `[numbering]` block: `sqids` and `reserved` sub-tables backing the
     /// `sqids`/`reserved` numbering strategies used by types.
@@ -2189,6 +2194,33 @@ sort = "owner"
         // `columns` falls back to its default, `sort` is taken from the block.
         assert_eq!(config.ui.graph.columns, vec!["status", "related"]);
         assert_eq!(config.ui.graph.sort, "owner");
+    }
+
+    #[test]
+    fn status_colors_parse_named_and_hex_values() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r##"
+[tui.status_colors]
+draft = "magenta"
+pending = "#336699"
+"##
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        assert_eq!(
+            config.ui.status_colors.get("draft").map(String::as_str),
+            Some("magenta")
+        );
+        assert_eq!(
+            config.ui.status_colors.get("pending").map(String::as_str),
+            Some("#336699")
+        );
+    }
+
+    #[test]
+    fn status_colors_default_empty_when_absent() {
+        let config = Config::parse(TYPES).unwrap();
+        assert!(config.ui.status_colors.is_empty());
     }
 
     #[test]

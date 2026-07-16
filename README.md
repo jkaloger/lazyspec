@@ -227,6 +227,19 @@ sort = "path"                     # default
 
 Both keys carry defaults, so a config without a `[tui.graph]` block still loads.
 
+Status colours (used in both the documents table and the Graph view's `status` column) are configured under `[tui.status_colors]` in `.lazyspec.toml`, mapping a status name to a colour:
+
+```toml
+[tui.status_colors]
+draft = "yellow"
+in-progress = "cyan"
+blocked = "#cc4444"
+```
+
+A colour is either a named ANSI colour (case-insensitive: `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `gray`/`grey`, `darkgray`/`darkgrey`, `white`, or the light variants `lightred`, `lightgreen`, `lightyellow`, `lightblue`, `lightmagenta`, `lightcyan`) or a `#rrggbb` hex string. An invalid colour value is skipped, falling through to the next source below.
+
+A status's colour resolves in this order: this `[tui.status_colors]` config, then a synced ClickUp status-colour cache, then built-in defaults for the standard statuses (`draft`, `review`, `accepted`, `in-progress`, `complete`, `rejected`, `superseded`), then a deterministic hashed-palette fallback — so even unknown or custom statuses always render with a stable, visible colour. The block is optional; omitting it just means statuses resolve via the remaining sources.
+
 ### Web view
 
 A read-only web view of the project's documents is available behind the `web` cargo feature, so default builds carry no async/HTTP dependencies:

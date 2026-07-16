@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use ratatui::style::Color;
 
 use crate::engine::document::Status;
@@ -14,42 +16,102 @@ pub fn hex_to_color(hex: &str) -> Option<Color> {
     Some(Color::Rgb(r, g, b))
 }
 
-pub fn status_color(colors: &StatusColors, type_name: &str, status: &Status) -> Color {
-    if let Some(color) = colors
-        .get(type_name, status.as_str())
-        .and_then(hex_to_color)
-    {
-        return color;
+/// Parse a user-supplied colour value: a `#rrggbb` hex string or a named ANSI
+/// colour (case-insensitive). Never yields `Color::Reset`; invalid values
+/// return `None` so callers fall through the resolution order.
+fn parse_color(value: &str) -> Option<Color> {
+    if let Some(c) = hex_to_color(value) {
+        return Some(c);
     }
-    match status.as_str() {
-        "draft" => Color::Yellow,
-        "review" => Color::Blue,
-        "accepted" => Color::Green,
-        "in-progress" => Color::Cyan,
-        "complete" => Color::Green,
-        "rejected" => Color::Red,
-        "superseded" => Color::DarkGray,
-        _ => Color::Reset,
+    match value.to_ascii_lowercase().as_str() {
+        "black" => Some(Color::Black),
+        "red" => Some(Color::Red),
+        "green" => Some(Color::Green),
+        "yellow" => Some(Color::Yellow),
+        "blue" => Some(Color::Blue),
+        "magenta" => Some(Color::Magenta),
+        "cyan" => Some(Color::Cyan),
+        "gray" | "grey" => Some(Color::Gray),
+        "darkgray" | "darkgrey" => Some(Color::DarkGray),
+        "lightred" => Some(Color::LightRed),
+        "lightgreen" => Some(Color::LightGreen),
+        "lightyellow" => Some(Color::LightYellow),
+        "lightblue" => Some(Color::LightBlue),
+        "lightmagenta" => Some(Color::LightMagenta),
+        "lightcyan" => Some(Color::LightCyan),
+        "white" => Some(Color::White),
+        _ => None,
     }
 }
 
-pub fn tag_color(tag: &str) -> Color {
-    const PALETTE: &[Color] = &[
-        Color::Magenta,
-        Color::Cyan,
-        Color::Green,
-        Color::Yellow,
-        Color::Blue,
-        Color::Red,
-        Color::LightMagenta,
-        Color::LightCyan,
-        Color::LightGreen,
-        Color::LightBlue,
-    ];
-    let hash = tag
+/// Built-in colour for the seven core lifecycle statuses. `None` for anything
+/// else so unknown statuses fall through to the hash palette.
+fn builtin_status_color(name: &str) -> Option<Color> {
+    match name {
+        "draft" => Some(Color::Yellow),
+        "review" => Some(Color::Blue),
+        "accepted" => Some(Color::Green),
+        "in-progress" => Some(Color::Cyan),
+        "complete" => Some(Color::Green),
+        "rejected" => Some(Color::Red),
+        "superseded" => Some(Color::DarkGray),
+        _ => None,
+    }
+}
+
+const HASH_PALETTE: &[Color] = &[
+    Color::Magenta,
+    Color::Cyan,
+    Color::Green,
+    Color::Yellow,
+    Color::Blue,
+    Color::Red,
+    Color::LightMagenta,
+    Color::LightCyan,
+    Color::LightGreen,
+    Color::LightBlue,
+];
+
+/// Deterministic, visible colour for an arbitrary string, drawn from a fixed
+/// palette. Shared by `tag_color` and the status fallback so unknown values
+/// always get a stable, non-`Reset` colour.
+pub fn hash_palette_color(s: &str) -> Color {
+    let hash = s
         .bytes()
         .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
-    PALETTE[(hash as usize) % PALETTE.len()]
+    HASH_PALETTE[(hash as usize) % HASH_PALETTE.len()]
+}
+
+/// Owned status-colour resolver, constructed once per frame from the user
+/// config map and the ClickUp colour cache.
+#[derive(Debug, Clone, Default)]
+pub struct StatusPalette {
+    user: BTreeMap<String, String>,
+    cache: StatusColors,
+}
+
+impl StatusPalette {
+    pub fn new(user: BTreeMap<String, String>, cache: StatusColors) -> Self {
+        Self { user, cache }
+    }
+}
+
+pub fn status_color(palette: &StatusPalette, type_name: &str, status: &Status) -> Color {
+    let name = status.as_str();
+    if let Some(c) = palette.user.get(name).and_then(|v| parse_color(v)) {
+        return c;
+    }
+    if let Some(c) = palette.cache.get(type_name, name).and_then(hex_to_color) {
+        return c;
+    }
+    if let Some(c) = builtin_status_color(name) {
+        return c;
+    }
+    hash_palette_color(name)
+}
+
+pub fn tag_color(tag: &str) -> Color {
+    hash_palette_color(tag)
 }
 
 #[cfg(test)]
@@ -73,41 +135,107 @@ mod tests {
         assert_eq!(hex_to_color("#ff000000"), None);
     }
 
+    fn cache_with(type_name: &str, status: &str, hex: &str) -> StatusColors {
+        let mut cache = StatusColors::default();
+        cache.set_type(
+            type_name,
+            HashMap::from([(status.to_string(), hex.to_string())]),
+        );
+        cache
+    }
+
     #[test]
     fn status_color_uses_cached_hex_on_hit() {
-        let mut colors = StatusColors::default();
-        colors.set_type(
-            "clickup-tasks",
-            HashMap::from([("pending".to_string(), "#336699".to_string())]),
+        let palette = StatusPalette::new(
+            BTreeMap::new(),
+            cache_with("clickup-tasks", "pending", "#336699"),
         );
         assert_eq!(
-            status_color(&colors, "clickup-tasks", &Status::new("pending")),
+            status_color(&palette, "clickup-tasks", &Status::new("pending")),
             Color::Rgb(0x33, 0x66, 0x99)
         );
     }
 
     #[test]
-    fn status_color_falls_back_to_name_match_on_miss() {
-        let colors = StatusColors::default();
-        assert_eq!(
-            status_color(&colors, "story", &Status::new("draft")),
-            Color::Yellow
+    fn status_color_user_config_wins_over_cache_and_builtin() {
+        let palette = StatusPalette::new(
+            BTreeMap::from([("draft".to_string(), "magenta".to_string())]),
+            cache_with("story", "draft", "#336699"),
         );
         assert_eq!(
-            status_color(&colors, "story", &Status::new("unknown-status")),
-            Color::Reset
+            status_color(&palette, "story", &Status::new("draft")),
+            Color::Magenta
         );
     }
 
     #[test]
-    fn status_color_falls_back_on_garbage_hex() {
-        let mut colors = StatusColors::default();
-        colors.set_type(
-            "story",
-            HashMap::from([("draft".to_string(), "#zzzzzz".to_string())]),
+    fn status_color_user_config_accepts_hex() {
+        let palette = StatusPalette::new(
+            BTreeMap::from([("pending".to_string(), "#336699".to_string())]),
+            StatusColors::default(),
         );
         assert_eq!(
-            status_color(&colors, "story", &Status::new("draft")),
+            status_color(&palette, "story", &Status::new("pending")),
+            Color::Rgb(0x33, 0x66, 0x99)
+        );
+    }
+
+    #[test]
+    fn status_color_uses_cache_when_no_user_entry() {
+        let palette = StatusPalette::new(
+            BTreeMap::new(),
+            cache_with("clickup-tasks", "pending", "#112233"),
+        );
+        assert_eq!(
+            status_color(&palette, "clickup-tasks", &Status::new("pending")),
+            Color::Rgb(0x11, 0x22, 0x33)
+        );
+    }
+
+    #[test]
+    fn status_color_falls_back_to_name_match_on_miss() {
+        let palette = StatusPalette::default();
+        assert_eq!(
+            status_color(&palette, "story", &Status::new("draft")),
+            Color::Yellow
+        );
+    }
+
+    #[test]
+    fn status_color_unknown_status_is_stable_and_not_reset() {
+        let palette = StatusPalette::default();
+        let first = status_color(&palette, "story", &Status::new("that-status"));
+        let second = status_color(&palette, "story", &Status::new("that-status"));
+        assert_ne!(first, Color::Reset);
+        assert_eq!(first, second);
+        assert_eq!(first, hash_palette_color("that-status"));
+    }
+
+    #[test]
+    fn status_color_falls_back_on_invalid_user_value() {
+        let palette = StatusPalette::new(
+            BTreeMap::from([("draft".to_string(), "#zzzzzz".to_string())]),
+            StatusColors::default(),
+        );
+        assert_eq!(
+            status_color(&palette, "story", &Status::new("draft")),
+            Color::Yellow
+        );
+        let palette = StatusPalette::new(
+            BTreeMap::from([("draft".to_string(), "notacolour".to_string())]),
+            StatusColors::default(),
+        );
+        assert_eq!(
+            status_color(&palette, "story", &Status::new("draft")),
+            Color::Yellow
+        );
+    }
+
+    #[test]
+    fn status_color_falls_back_on_garbage_cache_hex() {
+        let palette = StatusPalette::new(BTreeMap::new(), cache_with("story", "draft", "#zzzzzz"));
+        assert_eq!(
+            status_color(&palette, "story", &Status::new("draft")),
             Color::Yellow
         );
     }

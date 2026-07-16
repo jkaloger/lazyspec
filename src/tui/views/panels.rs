@@ -17,7 +17,6 @@ use crate::engine::config::{
 };
 use crate::engine::document::{DocMeta, Status};
 use crate::engine::git_status::GitFileStatus;
-use crate::engine::status_colors::StatusColors;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
 use crate::tui::state::{
@@ -25,7 +24,7 @@ use crate::tui::state::{
     FilterField, GraphNode, PreviewTab, RelKey, RuleKey, TypeKey,
 };
 
-use super::colors::{status_color, tag_color};
+use super::colors::{status_color, tag_color, StatusPalette};
 use super::layout::{calculate_image_height, wrapped_line_count, wrapped_lines_total};
 
 /// Rounded panel border shared by the doc list, graph, and sidebars. `focused`
@@ -522,7 +521,7 @@ fn doc_row_cells(
     is_gh: bool,
     is_stale: bool,
     type_name: &str,
-    colors: &StatusColors,
+    colors: &StatusPalette,
 ) -> Vec<Cell<'static>> {
     let dim_style = Style::default().fg(Color::DarkGray);
     let normal_style = Style::default();
@@ -622,7 +621,7 @@ fn doc_row_cells_expanded(
     is_stale: bool,
     widths: DocCellWidths,
     type_name: &str,
-    colors: &StatusColors,
+    colors: &StatusPalette,
 ) -> Vec<Cell<'static>> {
     // Reuse the single-line cell builder, then replace title and provenance
     // cells with wrapped multi-line versions.
@@ -663,7 +662,7 @@ fn doc_row_for_node(
     dim: bool,
     config: &Config,
     area_width: u16,
-    colors: &StatusColors,
+    colors: &StatusPalette,
 ) -> Row<'static> {
     let tree_text = if node.depth > 0 {
         let leading = "   ".repeat(node.depth - 1);
@@ -830,7 +829,7 @@ pub fn draw_doc_list(
     app: &mut App,
     area: Rect,
     config: &Config,
-    colors: &StatusColors,
+    colors: &StatusPalette,
 ) {
     // Reserve 2 rows for the border and 1 for the header (matches draw_graph).
     app.doc_list_height = area.height.saturating_sub(3) as usize;
@@ -883,7 +882,7 @@ pub fn draw_doc_list(
     }
 }
 
-pub fn draw_preview(f: &mut Frame, app: &mut App, area: Rect, colors: &StatusColors) {
+pub fn draw_preview(f: &mut Frame, app: &mut App, area: Rect, colors: &StatusPalette) {
     let preview_title = if app.preview_tab == PreviewTab::Preview {
         Line::from(vec![
             Span::styled(
@@ -932,7 +931,7 @@ pub fn draw_preview(f: &mut Frame, app: &mut App, area: Rect, colors: &StatusCol
 pub(super) fn build_preview_header_lines(
     doc: &DocMeta,
     expanding: bool,
-    colors: &StatusColors,
+    colors: &StatusPalette,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = vec![
         Line::from(Span::styled(
@@ -1001,7 +1000,7 @@ pub fn render_document_preview(
     area: Rect,
     block: Block,
     doc: Option<&DocMeta>,
-    colors: &StatusColors,
+    colors: &StatusPalette,
 ) {
     let Some(doc) = doc else {
         let paragraph = Paragraph::new(" No document selected.")
@@ -1070,7 +1069,7 @@ pub fn render_relationship_sections(
     area: Rect,
     block: Block,
     doc: Option<&DocMeta>,
-    colors: &StatusColors,
+    colors: &StatusPalette,
 ) {
     let Some(doc) = doc else {
         let paragraph = Paragraph::new(" No document selected.")
@@ -1176,7 +1175,7 @@ pub fn render_relationship_sections(
     }
 }
 
-pub fn render_fullscreen_document(f: &mut Frame, app: &mut App, colors: &StatusColors) {
+pub fn render_fullscreen_document(f: &mut Frame, app: &mut App, colors: &StatusPalette) {
     let area = f.area();
     app.fullscreen_height = area.height.saturating_sub(2) as usize;
 
@@ -1273,7 +1272,7 @@ pub fn render_filter_panel(
     app: &mut App,
     area: Rect,
     config: &Config,
-    colors: &StatusColors,
+    colors: &StatusPalette,
 ) {
     let main = Layout::default()
         .direction(Direction::Horizontal)
@@ -1606,7 +1605,7 @@ pub(super) fn graph_node_spans(
     spans.push(Span::styled(
         format!(" {}", node.status),
         Style::default().fg(status_color(
-            &StatusColors::default(),
+            &StatusPalette::default(),
             node.doc_type.as_str(),
             &node.status,
         )),
@@ -1742,7 +1741,7 @@ pub fn draw_graph(
     app: &mut App,
     area: Rect,
     config: &Config,
-    colors: &StatusColors,
+    colors: &StatusPalette,
 ) {
     let layout = Layout::default()
         .direction(Direction::Horizontal)
@@ -2693,7 +2692,7 @@ pub(super) fn doc_row_cells_for_test(
     is_virtual: bool,
     dim: bool,
     type_name: &str,
-    colors: &StatusColors,
+    colors: &StatusPalette,
 ) -> Vec<Cell<'static>> {
     doc_row_cells(
         id, title, status, tags, provenance, is_virtual, dim, false, false, type_name, colors,
@@ -2712,7 +2711,7 @@ pub(super) fn doc_row_cells_gh_for_test(
     dim: bool,
     is_gh: bool,
     type_name: &str,
-    colors: &StatusColors,
+    colors: &StatusPalette,
 ) -> Vec<Cell<'static>> {
     doc_row_cells(
         id, title, status, tags, provenance, is_virtual, dim, is_gh, false, type_name, colors,
@@ -2722,6 +2721,7 @@ pub(super) fn doc_row_cells_gh_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::status_colors::StatusColors;
 
     #[test]
     fn is_cache_stale_returns_false_within_threshold() {
@@ -2787,7 +2787,7 @@ mod tests {
             false,
             false,
             "rfc",
-            &StatusColors::default(),
+            &StatusPalette::default(),
         );
         assert_eq!(cells.len(), 5);
         let dbg = cell_text(&cells[4]);
@@ -2809,7 +2809,7 @@ mod tests {
             false,
             false,
             "rfc",
-            &StatusColors::default(),
+            &StatusPalette::default(),
         );
         let dbg = cell_text(&cells[4]);
         assert!(
@@ -2840,11 +2840,12 @@ mod tests {
 
     #[test]
     fn doc_row_cells_status_uses_derived_colour_on_cache_hit() {
-        let mut colors = StatusColors::default();
-        colors.set_type(
+        let mut cache = StatusColors::default();
+        cache.set_type(
             "rfc",
             std::collections::HashMap::from([("draft".to_string(), "#d33d44".to_string())]),
         );
+        let colors = StatusPalette::new(std::collections::BTreeMap::new(), cache);
         let cells = doc_row_cells_for_test(
             "RFC-001",
             "Title",
@@ -2875,7 +2876,7 @@ mod tests {
             false,
             false,
             "rfc",
-            &StatusColors::default(),
+            &StatusPalette::default(),
         );
         let dbg = cell_text(&cells[2]);
         assert!(
@@ -2916,7 +2917,7 @@ mod tests {
     fn preview_header_includes_provenance_when_present() {
         let mut doc = fixture_doc_meta();
         doc.provenance = vec!["X".to_string(), "Y".to_string()];
-        let lines = build_preview_header_lines(&doc, false, &StatusColors::default());
+        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default());
         let prov_line = lines
             .iter()
             .find(|l| line_text(l).contains("Provenance:"))
@@ -3103,7 +3104,7 @@ mod tests {
             false,
             widths_for_test(80, 12, 20),
             "rfc",
-            &StatusColors::default(),
+            &StatusPalette::default(),
         );
         let dbg = format!("{:?}", cells[3]);
         for tag in &tags {
@@ -3124,7 +3125,7 @@ mod tests {
     #[test]
     fn preview_header_omits_provenance_when_empty() {
         let doc = fixture_doc_meta();
-        let lines = build_preview_header_lines(&doc, false, &StatusColors::default());
+        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default());
         for line in &lines {
             assert!(
                 !line_text(line).contains("Provenance:"),
