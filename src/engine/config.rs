@@ -855,6 +855,57 @@ impl DocumentConfig {
     }
 }
 
+// A TOML-level failure aborts before serde (and thus before any of parse_inner's
+// own diagnostics) can run, so the raw message is all the user gets. The one
+// shape worth enriching is a duplicate `attributes` key on a type -- an inline
+// `attributes = []` colliding with `[[types.attributes]]` blocks (the hand-edit
+// that broke this very repo's config, AUDIT-018 F1). TOML rejects it at the
+// grammar level, so the type is named here by scanning the source above the
+// error span; the original error (with its line/column snippet) is kept below
+// the hint. Anything else passes through untouched.
+fn enrich_parse_error(toml_str: &str, err: toml::de::Error) -> anyhow::Error {
+    if !err.message().contains("duplicate key `attributes`") {
+        return err.into();
+    }
+    let offset = err.span().map(|s| s.start).unwrap_or(0);
+    let Some(name) = enclosing_type_name(toml_str, offset) else {
+        return err.into();
+    };
+    anyhow::anyhow!(
+        "type \"{name}\" in .lazyspec.toml declares `attributes` twice: an inline \
+         `attributes = []` key and [[types.attributes]] blocks. Delete the inline \
+         `attributes = [...]` line and keep the [[types.attributes]] blocks.\n\n{err}"
+    )
+}
+
+// The `name` of the [[types]] block enclosing byte `offset`, per the source
+// text alone (the document is unparseable at this point). Sub-table headers
+// like [[types.attributes]] stay inside the block; any other header ends it.
+fn enclosing_type_name(toml_str: &str, offset: usize) -> Option<String> {
+    let head = &toml_str[..offset.min(toml_str.len())];
+    let mut name = None;
+    let mut in_type = false;
+    for line in head.lines() {
+        let line = line.trim();
+        if line.starts_with("[[types]]") {
+            in_type = true;
+            name = None;
+        } else if line.starts_with('[') && !line.starts_with("[[types.") {
+            in_type = false;
+            name = None;
+        } else if in_type && name.is_none() {
+            if let Some(value) = line
+                .strip_prefix("name")
+                .map(str::trim_start)
+                .and_then(|rest| rest.strip_prefix('='))
+            {
+                name = Some(value.trim().trim_matches('"').to_string());
+            }
+        }
+    }
+    name
+}
+
 impl Config {
     pub fn parse(toml_str: &str) -> Result<Self> {
         Self::parse_inner(toml_str, false)
@@ -869,7 +920,8 @@ impl Config {
     }
 
     fn parse_inner(toml_str: &str, lenient: bool) -> Result<Self> {
-        let raw: RawConfig = toml::from_str(toml_str)?;
+        let raw: RawConfig =
+            toml::from_str(toml_str).map_err(|e| enrich_parse_error(toml_str, e))?;
 
         let types = match raw.types {
             Some(types) if !types.is_empty() => types,
@@ -1764,6 +1816,72 @@ prefix = "RFC"
             msg.contains("lazyspec fix"),
             "error should point at the fix remedy, got: {msg}"
         );
+    }
+
+    // STORY-213 AC4: the c83bb99 outage shape -- a type carrying BOTH an inline
+    // `attributes = []` key AND [[types.attributes]] blocks -- is a TOML
+    // duplicate-key error before serde ever runs, so the enriched parse error
+    // must name the offending type and say how to fix it, on both the strict
+    // and lenient (`fix --config`) paths.
+    #[test]
+    fn duplicate_attributes_key_error_names_the_type() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "bug"
+plural = "bugs"
+dir = "docs/bugs"
+prefix = "BUG"
+attributes = []
+
+[[types.attributes]]
+name = "severity"
+kind = "enum"
+values = ["low", "high"]
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+"#;
+        for parse in [Config::parse, Config::parse_lenient] {
+            let err = parse(toml_str).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("\"bug\""),
+                "error should name the offending type, got: {msg}"
+            );
+            assert!(
+                msg.contains("attributes = []") && msg.contains("[[types.attributes]]"),
+                "error should describe both conflicting forms, got: {msg}"
+            );
+            assert!(
+                msg.contains("line"),
+                "error should keep the TOML line context, got: {msg}"
+            );
+        }
+    }
+
+    // A duplicate key unrelated to the attributes shape keeps the plain TOML
+    // error (line context included), with no bogus type-naming hint.
+    #[test]
+    fn unrelated_duplicate_key_keeps_plain_toml_error() {
+        let toml_str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+dir = "docs/other"
+prefix = "RFC"
+"#;
+        let err = Config::parse(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("duplicate key"), "got: {msg}");
+        assert!(!msg.contains("[[types.attributes]]"), "got: {msg}");
     }
 
     #[test]

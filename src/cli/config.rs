@@ -1,5 +1,6 @@
 use crate::engine::config::{
-    Authorship, Config, Edge, Lifecycle, NumberingStrategy, StoreBackend, TypeDef, ValidationRule,
+    AttrDef, AttrKind, Authorship, Config, Edge, Lifecycle, NumberingStrategy, StoreBackend,
+    TypeDef, ValidationRule,
 };
 use crate::engine::config_write::write_config_in_place;
 use crate::engine::fs::FileSystem;
@@ -7,6 +8,9 @@ use anyhow::{bail, Result};
 use clap::Subcommand;
 use std::path::Path;
 
+// AddType dwarfs the other variants; one instance exists per process, so the
+// size skew is irrelevant and boxing it would only complicate clap's derive.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum ConfigCommand {
     /// Print the resolved configuration as JSON
@@ -55,6 +59,10 @@ pub enum ConfigCommand {
         /// ClickUp custom task type (numeric custom_item_id); only valid on store = clickup-tasks
         #[arg(long)]
         clickup_task_type: Option<i64>,
+        /// A custom frontmatter attribute as NAME:KIND[:required][:VAL1,VAL2,...]
+        /// (kind: int, float, string, enum, date, bool; values only for enum; repeat per attribute)
+        #[arg(long = "attribute")]
+        attributes: Vec<String>,
     },
     /// Replace a type's lifecycle states and edges
     SetLifecycle {
@@ -102,6 +110,7 @@ pub fn run_add_type(
     intent: Option<&str>,
     authorship: Option<&str>,
     clickup_task_type: Option<i64>,
+    attributes: &[String],
 ) -> Result<()> {
     let path = root.join(".lazyspec.toml");
     let src = fs.read_to_string(&path)?;
@@ -109,6 +118,18 @@ pub fn run_add_type(
 
     if config.type_by_name(name).is_some() {
         bail!("type \"{}\" already exists", name);
+    }
+
+    let attributes = attributes
+        .iter()
+        .map(|spec| parse_attr_spec(spec))
+        .collect::<Result<Vec<_>>>()?;
+    if let Some(dup) = attributes
+        .iter()
+        .enumerate()
+        .find(|(i, a)| attributes[..*i].iter().any(|b| b.name == a.name))
+    {
+        bail!("attribute \"{}\" is declared more than once", dup.1.name);
     }
 
     config.documents.types.push(TypeDef {
@@ -132,7 +153,7 @@ pub fn run_add_type(
             .transpose()?
             .unwrap_or_default(),
         lifecycle: Lifecycle::default(),
-        attributes: Vec::new(),
+        attributes,
         label_override: None,
         github_issue_tag: None,
         github_issue_type: None,
@@ -218,6 +239,74 @@ fn parse_edge(spec: &str) -> Result<Edge> {
         from: from.to_string(),
         to: to.to_string(),
     })
+}
+
+// An `--attribute` spec: NAME:KIND, then any of a literal `required` segment
+// and (for enum kinds only) one comma-separated values segment, in either
+// order -- mirroring `--edge FROM:TO`'s colon-spec style.
+fn parse_attr_spec(spec: &str) -> Result<AttrDef> {
+    let mut parts = spec.split(':');
+    let name = parts.next().unwrap_or_default();
+    if name.is_empty() {
+        bail!(
+            "attribute \"{}\" must be NAME:KIND[:required][:VALUES]",
+            spec
+        );
+    }
+    let Some(kind_str) = parts.next() else {
+        bail!(
+            "attribute \"{}\" must be NAME:KIND[:required][:VALUES]",
+            spec
+        );
+    };
+    let kind = parse_attr_kind(kind_str)?;
+
+    let mut required = false;
+    let mut values: Vec<String> = Vec::new();
+    for part in parts {
+        if part == "required" {
+            required = true;
+        } else if values.is_empty() && !part.is_empty() {
+            values = part.split(',').map(str::to_string).collect();
+        } else {
+            bail!(
+                "attribute \"{}\" has an unrecognized segment \"{}\"",
+                spec,
+                part
+            );
+        }
+    }
+    if kind == AttrKind::Enum && values.is_empty() {
+        bail!(
+            "enum attribute \"{}\" needs values: {}:enum[:required]:VAL1,VAL2,...",
+            name,
+            name
+        );
+    }
+    if kind != AttrKind::Enum && !values.is_empty() {
+        bail!(
+            "attribute \"{}\" declares values, which only enum kinds accept",
+            name
+        );
+    }
+    Ok(AttrDef {
+        name: name.to_string(),
+        kind,
+        required,
+        values,
+    })
+}
+
+fn parse_attr_kind(value: &str) -> Result<AttrKind> {
+    match value {
+        "int" => Ok(AttrKind::Int),
+        "float" => Ok(AttrKind::Float),
+        "string" => Ok(AttrKind::Str),
+        "enum" => Ok(AttrKind::Enum),
+        "date" => Ok(AttrKind::Date),
+        "bool" => Ok(AttrKind::Bool),
+        other => bail!("unknown attribute kind \"{}\"", other),
+    }
 }
 
 fn parse_numbering(value: &str) -> Result<NumberingStrategy> {
@@ -423,6 +512,7 @@ require_parent_status = "accepted"
             Some("throwaway exploration"),
             Some("generated"),
             None,
+            &[],
         )
         .unwrap();
 
@@ -441,6 +531,129 @@ require_parent_status = "accepted"
         let first = run_show_json(&Config::parse(&after).unwrap()).unwrap();
         let second = run_show_json(&Config::parse(&after).unwrap()).unwrap();
         assert_eq!(first, second);
+    }
+
+    // STORY-213 AC2: add-type accepts --attribute NAME:KIND[:required][:VALUES]
+    // specs; the written config reparses with the declared AttrDefs intact.
+    #[test]
+    fn add_type_writes_attribute_definitions() {
+        let (_dir, path, fs) = fixture(SRC);
+        run_add_type(
+            path.parent().unwrap(),
+            &fs,
+            "bug",
+            "bugs",
+            "docs/bugs",
+            "BUG",
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[
+                "estimate:int".to_string(),
+                "owner:string:required".to_string(),
+                "severity:enum:required:low,medium,high".to_string(),
+            ],
+        )
+        .unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("[[types.attributes]]"), "got: {after}");
+        let bug = Config::parse(&after)
+            .unwrap()
+            .type_by_name("bug")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            bug.attributes,
+            vec![
+                AttrDef {
+                    name: "estimate".to_string(),
+                    kind: AttrKind::Int,
+                    required: false,
+                    values: vec![],
+                },
+                AttrDef {
+                    name: "owner".to_string(),
+                    kind: AttrKind::Str,
+                    required: true,
+                    values: vec![],
+                },
+                AttrDef {
+                    name: "severity".to_string(),
+                    kind: AttrKind::Enum,
+                    required: true,
+                    values: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn attr_spec_parses_all_kinds_and_segment_order() {
+        for (spec, kind) in [
+            ("a:int", AttrKind::Int),
+            ("a:float", AttrKind::Float),
+            ("a:string", AttrKind::Str),
+            ("a:date", AttrKind::Date),
+            ("a:bool", AttrKind::Bool),
+        ] {
+            let attr = parse_attr_spec(spec).unwrap();
+            assert_eq!(attr.kind, kind, "{spec}");
+            assert!(!attr.required);
+            assert!(attr.values.is_empty());
+        }
+        // `required` and the values list are accepted in either order.
+        let a = parse_attr_spec("p:enum:required:low,high").unwrap();
+        let b = parse_attr_spec("p:enum:low,high:required").unwrap();
+        assert_eq!(a, b);
+        assert!(a.required);
+        assert_eq!(a.values, vec!["low".to_string(), "high".to_string()]);
+    }
+
+    #[test]
+    fn attr_spec_rejects_malformed_input() {
+        for (spec, needle) in [
+            ("noskind", "must be NAME:KIND"),
+            (":int", "must be NAME:KIND"),
+            ("a:blob", "unknown attribute kind"),
+            ("a:enum", "needs values"),
+            ("a:int:low,high", "only enum kinds"),
+            ("a:enum:low:high,mid", "unrecognized segment"),
+        ] {
+            let err = parse_attr_spec(spec).unwrap_err();
+            assert!(err.to_string().contains(needle), "{spec}: got {}", err);
+        }
+    }
+
+    #[test]
+    fn add_type_rejects_duplicate_attribute_names_without_writing() {
+        let (_dir, path, fs) = fixture(SRC);
+        let before = std::fs::read_to_string(&path).unwrap();
+        let err = run_add_type(
+            path.parent().unwrap(),
+            &fs,
+            "bug",
+            "bugs",
+            "docs/bugs",
+            "BUG",
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &["estimate:int".to_string(), "estimate:bool".to_string()],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("more than once"), "got: {err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 
     // A clickup_task_type supplied to add-type is written for a clickup-tasks type
@@ -463,6 +676,7 @@ require_parent_status = "accepted"
             None,
             None,
             Some(1001),
+            &[],
         )
         .unwrap();
 
@@ -490,6 +704,7 @@ require_parent_status = "accepted"
             None,
             None,
             None,
+            &[],
         )
         .unwrap_err();
         assert!(err.to_string().contains("already exists"));
@@ -594,6 +809,7 @@ require_parent_status = "accepted"
             None,
             None,
             None,
+            &[],
         )
         .unwrap();
         let after = std::fs::read_to_string(&path).unwrap();

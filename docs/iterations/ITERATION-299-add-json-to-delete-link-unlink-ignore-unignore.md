@@ -1,7 +1,7 @@
 ---
 title: Add --json to delete, link, unlink, ignore, unignore
 type: iteration
-status: in-progress
+status: complete
 author: agent
 date: 2026-07-16
 tags: []
