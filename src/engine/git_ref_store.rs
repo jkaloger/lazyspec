@@ -340,6 +340,73 @@ impl DocumentStore for GitRefStore {
 
         Ok(())
     }
+
+    /// Re-commit the current cache content into the ref blob and push it.
+    ///
+    /// The CLI has already rewritten the cache file's `tags:` block (git-ref docs
+    /// materialize under `.lazyspec/cache/<type>/`), so `add`/`remove` are unused
+    /// here -- the cache already reflects them. This persists that content into
+    /// the git ref, mirroring the ref-push tail of [`Self::update`]: create a
+    /// child commit on the recorded SHA, CAS-swap the ref, and push only when
+    /// coordination is configured (rolling back the local ref on push failure).
+    /// The single-line `key: value` mutation loop of `update` is deliberately not
+    /// reused: it cannot touch a `tags:` sequence block.
+    fn sync_tags(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        _add: &[String],
+        _remove: &[String],
+    ) -> Result<()> {
+        let doc_key = Self::doc_key(&type_def.name, doc_id);
+        let lock = CacheLock::load(&self.root)?;
+        let old_sha = lock
+            .get(&doc_key)
+            .ok_or_else(|| anyhow::anyhow!("{} not found in cache.lock", doc_id))?
+            .to_string();
+
+        let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
+        let cache_path = find_cache_file(&cache_dir, doc_id)
+            .ok_or_else(|| anyhow::anyhow!("cache file not found for {}", doc_id))?;
+        let content = std::fs::read_to_string(&cache_path)?;
+
+        let refname = Self::refname(&type_def.name, doc_id);
+        let new_sha = self.git.create_commit(
+            &self.root,
+            &refname,
+            &[("doc.md", &content)],
+            Some(&old_sha),
+        )?;
+
+        if let Err(e) = self
+            .git
+            .update_ref(&self.root, &refname, &new_sha, &old_sha)
+        {
+            bail!("conflict updating {}: {}", doc_id, e);
+        }
+
+        if let Some(coord) = &self.config.coordination {
+            if let Err(push_err) = self.git.push_ref(&self.root, &coord.remote, &refname) {
+                if let Err(rollback_err) = self
+                    .git
+                    .update_ref(&self.root, &refname, &old_sha, &new_sha)
+                {
+                    bail!(
+                        "push failed: {}; rollback failed: {}; local state wedged, recover with `lazyspec fetch`",
+                        push_err,
+                        rollback_err
+                    );
+                }
+                bail!("push failed for {}: {}", doc_id, push_err);
+            }
+        }
+
+        let mut lock = CacheLock::load(&self.root)?;
+        lock.set(&doc_key, &new_sha);
+        lock.save(&self.root)?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -824,6 +891,110 @@ mod tests {
             "should push updated ref to remote, got: {:?}",
             *calls
         );
+    }
+
+    // AC: git-ref tag add/remove re-pushes the ref. The CLI has already rewritten
+    // the cache `tags:`; sync_tags re-commits that content into the ref blob and,
+    // with coordination configured, pushes it.
+    #[test]
+    fn sync_tags_recommits_cache_and_pushes_when_coordinated() {
+        let tmp = TempDir::new().unwrap();
+        let td = test_type_def();
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(
+            cache_dir.join("ITERATION-042.md"),
+            "---\ntitle: T\ntype: iteration\nstatus: draft\nauthor: a\ndate: 2026-04-01\ntags:\n- security\nrelated: []\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        let mut lock = CacheLock::default();
+        lock.set("iteration/ITERATION-042", "oldsha");
+        lock.save(tmp.path()).unwrap();
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha456".to_string()))
+            .with_update_ref_result(Ok(()))
+            .with_push_result(Ok(()));
+
+        let mut store = GitRefStore {
+            git: Box::new(mock),
+            root: tmp.path().to_path_buf(),
+            config: test_config_with_coordination(),
+            reserved_number: None,
+        };
+        store
+            .sync_tags(&td, "ITERATION-042", &["security".to_string()], &[])
+            .unwrap();
+
+        // The committed ref blob is the current cache content, carrying the tag.
+        let blobs = store.git_mock().committed_blobs.borrow();
+        assert_eq!(blobs.len(), 1, "should commit exactly once");
+        assert!(
+            blobs[0].contains("security"),
+            "pushed ref blob should contain the tag, got: {}",
+            blobs[0]
+        );
+
+        let calls = store.git_mock().calls.borrow();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c == "push_ref:origin:refs/lazyspec/iteration/ITERATION-042"),
+            "should push the ref, got: {:?}",
+            *calls
+        );
+
+        let lock = CacheLock::load(tmp.path()).unwrap();
+        assert_eq!(lock.get("iteration/ITERATION-042"), Some("newsha456"));
+    }
+
+    // AC: git-ref without coordination does not push. The ref is still re-committed
+    // locally (create_commit + update_ref) and the lock advances, but no push fires.
+    #[test]
+    fn sync_tags_commits_locally_but_does_not_push_without_coordination() {
+        let tmp = TempDir::new().unwrap();
+        let td = test_type_def();
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(
+            cache_dir.join("ITERATION-042.md"),
+            "---\ntitle: T\ntype: iteration\nstatus: draft\nauthor: a\ndate: 2026-04-01\ntags:\n- security\nrelated: []\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        let mut lock = CacheLock::default();
+        lock.set("iteration/ITERATION-042", "oldsha");
+        lock.save(tmp.path()).unwrap();
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha456".to_string()))
+            .with_update_ref_result(Ok(()));
+
+        let mut store = make_store(&tmp, mock);
+        store
+            .sync_tags(&td, "ITERATION-042", &["security".to_string()], &[])
+            .unwrap();
+
+        let calls = store.git_mock().calls.borrow();
+        assert!(
+            calls.iter().any(|c| c.starts_with("create_commit:")),
+            "should re-commit locally, got: {:?}",
+            *calls
+        );
+        assert!(
+            calls.iter().any(|c| c.starts_with("update_ref:")),
+            "should CAS-swap the ref, got: {:?}",
+            *calls
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("push_ref:")),
+            "must not push without coordination, got: {:?}",
+            *calls
+        );
+
+        let lock = CacheLock::load(tmp.path()).unwrap();
+        assert_eq!(lock.get("iteration/ITERATION-042"), Some("newsha456"));
     }
 
     #[test]

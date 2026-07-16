@@ -1294,7 +1294,9 @@ pub mod test_support {
         pub reopened: Cell<bool>,
         pub last_edit_title: RefCell<Option<String>>,
         pub last_edit_body: RefCell<Option<String>>,
+        pub last_edit_labels_add: RefCell<Vec<String>>,
         pub last_edit_labels_remove: RefCell<Vec<String>>,
+        pub last_ensure_label_names: RefCell<Vec<String>>,
         pub last_create_body: RefCell<Option<String>>,
         pub last_create_labels: RefCell<Vec<String>>,
         pub create_titles: RefCell<Vec<String>>,
@@ -1331,7 +1333,9 @@ pub mod test_support {
                 reopened: Cell::new(false),
                 last_edit_title: RefCell::new(None),
                 last_edit_body: RefCell::new(None),
+                last_edit_labels_add: RefCell::new(vec![]),
                 last_edit_labels_remove: RefCell::new(vec![]),
+                last_ensure_label_names: RefCell::new(vec![]),
                 last_create_body: RefCell::new(None),
                 last_create_labels: RefCell::new(vec![]),
                 create_titles: RefCell::new(vec![]),
@@ -1475,7 +1479,7 @@ pub mod test_support {
             _number: u64,
             title: Option<&str>,
             body: Option<&str>,
-            _labels_add: &[String],
+            labels_add: &[String],
             labels_remove: &[String],
         ) -> Result<()> {
             if self.edit_fail {
@@ -1483,6 +1487,7 @@ pub mod test_support {
             }
             *self.last_edit_title.borrow_mut() = title.map(|s| s.to_string());
             *self.last_edit_body.borrow_mut() = body.map(|s| s.to_string());
+            *self.last_edit_labels_add.borrow_mut() = labels_add.to_vec();
             *self.last_edit_labels_remove.borrow_mut() = labels_remove.to_vec();
             Ok(())
         }
@@ -1513,10 +1518,13 @@ pub mod test_support {
         fn label_ensure(
             &self,
             _repo: &str,
-            _name: &str,
+            name: &str,
             _description: &str,
             _color: &str,
         ) -> Result<()> {
+            self.last_ensure_label_names
+                .borrow_mut()
+                .push(name.to_string());
             Ok(())
         }
     }

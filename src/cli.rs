@@ -22,6 +22,7 @@ pub mod show;
 pub mod skills;
 pub mod status;
 pub mod style;
+pub mod tag;
 pub mod update;
 pub mod validate;
 
@@ -176,6 +177,11 @@ pub enum Commands {
         /// Target document path or shorthand ID (e.g. RFC-001)
         #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         to: String,
+    },
+    /// Add or remove tags on a document
+    Tag {
+        #[command(subcommand)]
+        action: TagAction,
     },
     /// Search across all documents
     Search {
@@ -378,5 +384,33 @@ pub enum Commands {
         /// Port to bind on 127.0.0.1 (default 8787)
         #[arg(long)]
         port: Option<u16>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TagAction {
+    /// Add tags to a document
+    Add {
+        /// Document path or shorthand ID (e.g. RFC-001)
+        #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
+        id: String,
+        /// Tags to add
+        #[arg(required = true, num_args = 1..)]
+        tags: Vec<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove tags from a document
+    Remove {
+        /// Document path or shorthand ID (e.g. RFC-001)
+        #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
+        id: String,
+        /// Tags to remove
+        #[arg(required = true, num_args = 1..)]
+        tags: Vec<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }

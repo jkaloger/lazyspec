@@ -60,6 +60,21 @@ pub trait DocumentStore: gh::AsAny {
         doc_id: &str,
         provenance: &[String],
     ) -> Result<()>;
+
+    /// Propagate a tag mutation to the backend, mirroring
+    /// [`gh::GhIssueWriter::issue_edit`]'s `(labels_add, labels_remove)` shape.
+    /// The CLI has already rewritten the local frontmatter (the source of truth
+    /// for filesystem docs, the cache for materialized backends); this is the
+    /// remote half. Each backend must propagate or `bail!`, so a new backend is
+    /// forced to make a tag decision at compile time rather than silently
+    /// dropping the mutation.
+    fn sync_tags(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()>;
 }
 
 pub struct FilesystemStore {
@@ -86,6 +101,9 @@ impl DocumentStore for UnavailableStore {
         bail!("{}", self.message)
     }
     fn set_provenance(&mut self, _: &TypeDef, _: &str, _: &[String]) -> Result<()> {
+        bail!("{}", self.message)
+    }
+    fn sync_tags(&mut self, _: &TypeDef, _: &str, _: &[String], _: &[String]) -> Result<()> {
         bail!("{}", self.message)
     }
 }
@@ -304,6 +322,12 @@ impl DocumentStore for ClickupTasksStore {
     fn set_provenance(&mut self, _: &TypeDef, _: &str, _: &[String]) -> Result<()> {
         bail!("{}", Self::WRITE_UNIMPLEMENTED)
     }
+    /// The ClickUp tag write path (task tags) is not implemented yet, so fail
+    /// loudly at the trait seam rather than silently dropping the mutation.
+    /// Deferred to the RFC-056 write path.
+    fn sync_tags(&mut self, _: &TypeDef, _: &str, _: &[String], _: &[String]) -> Result<()> {
+        bail!("{}", Self::WRITE_UNIMPLEMENTED)
+    }
 }
 
 impl DocumentStore for FilesystemStore {
@@ -383,6 +407,12 @@ impl DocumentStore for FilesystemStore {
                 Ok(())
             },
         )
+    }
+
+    /// No-op: the on-disk document is the source of truth and the CLI already
+    /// rewrote its frontmatter `tags`. There is no remote to propagate to.
+    fn sync_tags(&mut self, _: &TypeDef, _: &str, _: &[String], _: &[String]) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -1456,6 +1486,43 @@ impl DocumentStore for GithubIssuesStore {
 
         Ok(())
     }
+
+    /// Sync tag mutations to GitHub as issue labels.
+    ///
+    /// Ensures each added label exists (creating it with a deterministic color),
+    /// then applies the add/remove label deltas via `issue_edit`, and touches the
+    /// cache lock. Skips the optimistic `check_lock` gate because adding/removing
+    /// a label is an atomic GitHub operation independent of the issue body state.
+    fn sync_tags(
+        &mut self,
+        _type_def: &TypeDef,
+        doc_id: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        let issue_number = self
+            .issue_map
+            .get(doc_id)
+            .map(|e| e.issue_number)
+            .ok_or_else(|| anyhow::anyhow!("{} not found in issue map", doc_id))?;
+
+        if !add.is_empty() {
+            for tag in add {
+                self.client
+                    .label_ensure(&self.repo, tag, "", &gh::deterministic_color(tag))?;
+            }
+            self.client
+                .issue_edit(&self.repo, issue_number, None, None, add, &[])?;
+        }
+        if !remove.is_empty() {
+            self.client
+                .issue_edit(&self.repo, issue_number, None, None, &[], remove)?;
+        }
+
+        self.issue_cache.touch_lock(doc_id);
+
+        Ok(())
+    }
 }
 
 /// Map a lifecycle status to a milestone REST `state`. Closed-equivalent
@@ -1688,6 +1755,12 @@ impl DocumentStore for GithubMilestonesStore {
                 Ok(())
             },
         )
+    }
+
+    /// No-op: labels are an issue concept, not a milestone concept. Tag
+    /// mutations stay in the local cache frontmatter only.
+    fn sync_tags(&mut self, _: &TypeDef, _: &str, _: &[String], _: &[String]) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -1969,6 +2042,12 @@ impl DocumentStore for GithubProjectsStore {
         _provenance: &[String],
     ) -> Result<()> {
         self.bind_board(type_def, doc_id)?;
+        Ok(())
+    }
+
+    /// No-op: labels are an issue concept, not a Projects v2 board concept. Tag
+    /// mutations stay in the local cache frontmatter only.
+    fn sync_tags(&mut self, _: &TypeDef, _: &str, _: &[String], _: &[String]) -> Result<()> {
         Ok(())
     }
 }
@@ -2412,6 +2491,100 @@ mod tests {
         assert!(!root.join(&created.path).exists());
     }
 
+    // AC: Filesystem tag mutation unchanged. Propagation is a no-op -- the CLI
+    // already rewrote the on-disk frontmatter, and there is no remote.
+    #[test]
+    fn filesystem_sync_tags_is_noop() {
+        let root = tmp_root("fs_sync_tags");
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config: Config::default(),
+        };
+        let td = test_type_def(StoreBackend::Filesystem);
+
+        fs_store
+            .sync_tags(&td, "RFC-1", &["security".to_string()], &[])
+            .unwrap();
+        fs_store
+            .sync_tags(&td, "RFC-1", &[], &["security".to_string()])
+            .unwrap();
+    }
+
+    // AC: GitHub-issues tag add. Each added label is ensured, then applied via a
+    // single labels-add issue_edit; no labels are removed.
+    #[test]
+    fn github_issues_sync_tags_add_ensures_and_applies_label() {
+        let root = tmp_root("gh_sync_tags_add");
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("RFC-1", 87, "", "");
+        let mut gh_store = GithubIssuesStore {
+            client: Box::new(MockGhClient::new()),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map,
+            issue_cache: IssueCache::new(&root),
+        };
+        let td = test_type_def(StoreBackend::GithubIssues);
+
+        gh_store
+            .sync_tags(&td, "RFC-1", &["security".to_string()], &[])
+            .unwrap();
+
+        let mock = gh_store.mock();
+        assert_eq!(
+            *mock.last_ensure_label_names.borrow(),
+            vec!["security".to_string()],
+            "should ensure the added label exists"
+        );
+        assert_eq!(
+            *mock.last_edit_labels_add.borrow(),
+            vec!["security".to_string()],
+            "should apply the label to the issue"
+        );
+        assert!(
+            mock.last_edit_labels_remove.borrow().is_empty(),
+            "an add must not remove any labels"
+        );
+    }
+
+    // AC: GitHub-issues tag remove. Removal applies a labels-remove issue_edit
+    // and never ensures/creates a label.
+    #[test]
+    fn github_issues_sync_tags_remove_drops_label() {
+        let root = tmp_root("gh_sync_tags_remove");
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("RFC-1", 87, "", "");
+        let mut gh_store = GithubIssuesStore {
+            client: Box::new(MockGhClient::new()),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map,
+            issue_cache: IssueCache::new(&root),
+        };
+        let td = test_type_def(StoreBackend::GithubIssues);
+
+        gh_store
+            .sync_tags(&td, "RFC-1", &[], &["security".to_string()])
+            .unwrap();
+
+        let mock = gh_store.mock();
+        assert_eq!(
+            *mock.last_edit_labels_remove.borrow(),
+            vec!["security".to_string()],
+            "should remove the label from the issue"
+        );
+        assert!(
+            mock.last_ensure_label_names.borrow().is_empty(),
+            "a remove must not ensure/create a label"
+        );
+        assert!(
+            mock.last_edit_labels_add.borrow().is_empty(),
+            "a remove must not add any labels"
+        );
+    }
+
     fn clickup_type_def(list_id: Option<&str>) -> TypeDef {
         let mut td = test_type_def(StoreBackend::ClickupTasks);
         td.name = "task".to_string();
@@ -2430,6 +2603,30 @@ mod tests {
 
     fn scripted_task(json: &str) -> crate::engine::clickup::ClickupTask {
         serde_json::from_str(json).unwrap()
+    }
+
+    // AC: ClickUp tag mutation fails loudly. The write path is unimplemented, so
+    // sync_tags must error (not silently succeed) at the trait seam.
+    #[test]
+    fn clickup_sync_tags_fails_loudly() {
+        use crate::engine::clickup::FakeClickupClient;
+
+        let root = tmp_root("clickup_sync_tags");
+        let td = clickup_type_def(Some("list123"));
+        let mut store = ClickupTasksStore {
+            client: Box::new(FakeClickupClient::valid(clickup_user())),
+            root,
+            config: Config::default(),
+            token: None,
+        };
+
+        let err = store
+            .sync_tags(&td, "TASK-1", &["security".to_string()], &[])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not implemented"),
+            "expected a not-implemented error, got: {err}"
+        );
     }
 
     #[test]
