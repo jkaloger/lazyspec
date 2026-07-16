@@ -152,6 +152,9 @@ pub enum Commands {
         /// Document path or shorthand ID (e.g. RFC-001)
         #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         path: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Add a relationship between documents
     Link {
@@ -164,6 +167,9 @@ pub enum Commands {
         /// Target document path or shorthand ID (e.g. RFC-001)
         #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         to: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Remove a relationship between documents
     Unlink {
@@ -176,6 +182,9 @@ pub enum Commands {
         /// Target document path or shorthand ID (e.g. RFC-001)
         #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         to: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Add or remove tags on a document
     Tag {
@@ -224,12 +233,18 @@ pub enum Commands {
         /// Document path
         #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         path: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Remove validation skip from a document
     Unignore {
         /// Document path
         #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]
         path: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Fix documents with broken or incomplete frontmatter
     Fix {
