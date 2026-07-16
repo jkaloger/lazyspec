@@ -61,14 +61,14 @@ pub fn fetch_milestones(
             new_count += 1;
         }
         write_cache_file(root, type_def, &meta, &m.description)?;
-        cache.touch_lock(&id);
+        cache.touch_lock(&id)?;
         issue_map.insert_kind(&id, m.number, "", "", EntryKind::Milestone);
         fetched_ids.insert(id);
     }
 
     let removed: Vec<String> = previously.difference(&fetched_ids).cloned().collect();
     for id in &removed {
-        cache.remove(id, &type_def.name);
+        cache.remove(id, &type_def.name)?;
         issue_map.remove(id);
     }
 

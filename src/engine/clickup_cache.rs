@@ -64,29 +64,56 @@ pub fn fetch_tasks(
         None => tasks,
     };
 
-    let cache_dir = root.join(".lazyspec/cache").join(&type_def.name);
+    let cache_root = root.join(".lazyspec/cache");
+    let cache_dir = cache_root.join(&type_def.name);
     let previously_cached: HashSet<String> = list_cached_ids(&cache_dir);
 
-    // A full fetch owns the whole type directory; wipe it so a task removed from
-    // the List leaves no stale cache file behind.
-    if cache_dir.exists() {
-        for entry in std::fs::read_dir(&cache_dir)?.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                std::fs::remove_dir_all(&path)?;
-            } else {
-                std::fs::remove_file(&path)?;
-            }
-        }
+    // A full fetch owns the whole type directory; rebuild it so a task removed
+    // from the List leaves no stale cache file behind. The rebuild happens in a
+    // staging dir swapped into place only when every write succeeded, so a
+    // failure partway (disk full, crash) leaves the previous cache intact
+    // (AUDIT-018 C4).
+    std::fs::create_dir_all(&cache_root)?;
+    let staging_root = cache_root.join(format!(".staging-{}", type_def.name));
+    if staging_root.exists() {
+        std::fs::remove_dir_all(&staging_root)?;
     }
+    // write_cache_file derives `<root>/.lazyspec/cache/<type>` from the root it
+    // is handed, so staging just means handing it a staging root.
+    let staged_type_dir = staging_root.join(".lazyspec/cache").join(&type_def.name);
+
+    let write_result = (|| -> Result<()> {
+        std::fs::create_dir_all(&staged_type_dir)?;
+        for task in &tasks {
+            let id = type_def.make_id(&task.id);
+            let (meta, body) = task_to_doc(task, type_def, &id);
+            write_cache_file(&staging_root, type_def, &meta, &body)?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_dir_all(&staging_root);
+        return Err(e);
+    }
+
+    // Swap: move the previous dir aside, promote the staged one, drop the old.
+    // Only after this point does the task map reflect the fetch.
+    let old_dir = cache_root.join(format!(".old-{}", type_def.name));
+    if old_dir.exists() {
+        std::fs::remove_dir_all(&old_dir)?;
+    }
+    if cache_dir.exists() {
+        std::fs::rename(&cache_dir, &old_dir)?;
+    }
+    std::fs::rename(&staged_type_dir, &cache_dir)?;
+    let _ = std::fs::remove_dir_all(&old_dir);
+    let _ = std::fs::remove_dir_all(&staging_root);
 
     let mut new_count = 0usize;
     let mut fetched_ids = HashSet::new();
 
     for task in &tasks {
         let id = type_def.make_id(&task.id);
-        let (meta, body) = task_to_doc(task, type_def, &id);
-        write_cache_file(root, type_def, &meta, &body)?;
 
         let updated_at = task
             .date_updated
@@ -562,6 +589,58 @@ mod tests {
         assert!(!root.join(".lazyspec/cache/task/TASK-b.md").exists());
         assert!(task_map.get("TASK-b").is_none());
         assert!(task_map.get("TASK-a").is_some());
+    }
+
+    // STORY-209 AC3: a fetch that fails partway through its writes (injected
+    // here by making the cache root refuse new entries, so creating the staging
+    // dir fails) leaves the previously cached docs and the task map intact.
+    #[cfg(unix)]
+    #[test]
+    fn fetch_write_failure_leaves_previous_cache_intact() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let td = clickup_type();
+
+        // Seed a previous successful fetch.
+        let old_task = task_from_json(
+            r#"{"id":"a","name":"Old name","status":{"status":"open"},"date_updated":"111"}"#,
+        );
+        let client = FakeClickupClient::with_tasks(vec![old_task]);
+        let mut task_map = TaskMap::load(root).unwrap();
+        fetch_tasks(root, &td, &client, "pk_x", &mut task_map).unwrap();
+        let doc_path = root.join(".lazyspec/cache/task/TASK-a.md");
+        let old_doc = std::fs::read_to_string(&doc_path).unwrap();
+
+        // Inject the write failure.
+        let cache_root = root.join(".lazyspec/cache");
+        let mut perms = std::fs::metadata(&cache_root).unwrap().permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(&cache_root, perms).unwrap();
+
+        let new_task = task_from_json(
+            r#"{"id":"a","name":"New name","status":{"status":"open"},"date_updated":"222"}"#,
+        );
+        let client = FakeClickupClient::with_tasks(vec![new_task]);
+        let result = fetch_tasks(root, &td, &client, "pk_x", &mut task_map);
+
+        // Restore permissions before asserting so TempDir cleanup works.
+        let mut perms = std::fs::metadata(&cache_root).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&cache_root, perms).unwrap();
+
+        assert!(result.is_err(), "interrupted fetch must error");
+        assert_eq!(
+            std::fs::read_to_string(&doc_path).unwrap(),
+            old_doc,
+            "previous cache doc intact after failed fetch"
+        );
+        assert_eq!(
+            task_map.get("TASK-a").unwrap().updated_at,
+            "111",
+            "task map not advanced by a failed fetch"
+        );
     }
 
     #[test]

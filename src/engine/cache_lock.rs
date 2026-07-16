@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::engine::fs::atomic_write;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct CacheLock {
@@ -20,7 +22,15 @@ impl CacheLock {
             Ok(entries) => Ok(Self { entries }),
             Err(_) => {
                 // Migration: old format had { "key": { "cached_at": "..." } } or mixed values.
-                let raw: BTreeMap<String, serde_json::Value> = serde_json::from_str(&content)?;
+                // A file that parses as neither format is corrupt: hard error,
+                // never a silent default, so freshness state is not erased.
+                let raw: BTreeMap<String, serde_json::Value> = serde_json::from_str(&content)
+                    .with_context(|| {
+                        format!(
+                            "cache lock at {} is corrupt; fix or delete the file",
+                            path.display()
+                        )
+                    })?;
                 let entries = raw
                     .into_iter()
                     .filter_map(|(k, v)| match v {
@@ -44,8 +54,7 @@ impl CacheLock {
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("cache.lock");
         let json = serde_json::to_string_pretty(&self.entries)?;
-        std::fs::write(&path, json)?;
-        Ok(())
+        atomic_write(&path, &json)
     }
 
     pub fn get(&self, doc_key: &str) -> Option<&str> {
@@ -124,6 +133,25 @@ mod tests {
         // BTreeMap ensures sorted keys
         let keys: Vec<&String> = obj.keys().collect();
         assert_eq!(keys, vec!["iteration/ITERATION-042", "story/STORY-001"]);
+    }
+
+    #[test]
+    fn test_load_corrupt_lock_errors_and_leaves_file_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let dir = root.join(".lazyspec");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A truncated write: not valid JSON in either format.
+        let corrupt = r#"{"iteration/ITERATION-042": "abc12"#;
+        std::fs::write(dir.join("cache.lock"), corrupt).unwrap();
+
+        let err = CacheLock::load(root).unwrap_err();
+        assert!(err.to_string().contains("corrupt"), "got: {err}");
+
+        // The corrupt file is untouched: no defaulted lock persisted over it.
+        let raw = std::fs::read_to_string(dir.join("cache.lock")).unwrap();
+        assert_eq!(raw, corrupt);
     }
 
     #[test]

@@ -423,7 +423,7 @@ pub(crate) fn fetch_git_ref(
 
         std::fs::create_dir_all(&cache_dir)?;
         let cache_file = cache_dir.join(format!("{}.md", id));
-        std::fs::write(&cache_file, &content)?;
+        crate::engine::fs::atomic_write(&cache_file, &content)?;
 
         cache_lock.set(&doc_key, sha);
         fetched += 1;

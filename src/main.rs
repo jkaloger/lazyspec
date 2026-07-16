@@ -663,7 +663,7 @@ fn refresh_github_cache(cwd: &std::path::Path, config: &Config) {
             .iter()
             .map(lazyspec::engine::issue_body::TypeMatchRule::from)
             .collect();
-        let result = cache.refresh_stale(
+        let result = match cache.refresh_stale(
             cwd,
             type_def,
             &gh,
@@ -673,7 +673,16 @@ fn refresh_github_cache(cwd: &std::path::Path, config: &Config) {
             ttl,
             &all_type_rules,
             config,
-        );
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!(
+                    "warning: could not refresh cache for type '{}': {}",
+                    type_def.name, e
+                );
+                continue;
+            }
+        };
         for warning in &result.warnings {
             eprintln!("warning: {}", warning.message);
         }
