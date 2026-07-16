@@ -38,7 +38,7 @@ fn rule_name(rule: &ValidationRule) -> &str {
 /// the missing `[[relationships]]` / `[[rules]]` blocks are appended. This keeps
 /// every user section (`[github]`, comments, ordering) intact
 /// and is idempotent — when nothing is missing the file is left untouched.
-pub(super) fn collect_config_fixes(
+pub fn collect_config_fixes(
     root: &Path,
     dry_run: bool,
     fs: &dyn FileSystem,

@@ -1,7 +1,7 @@
 ---
 title: Hoist doc ops into engine ops layer and dedupe store wiring
 type: iteration
-status: accepted
+status: complete
 author: agent
 date: 2026-07-16
 tags: []

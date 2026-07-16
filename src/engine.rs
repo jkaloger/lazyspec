@@ -27,6 +27,7 @@ pub mod issue_body;
 pub mod issue_cache;
 pub mod issue_map;
 pub mod milestone_cache;
+pub mod ops;
 pub mod prompt;
 pub mod provenance;
 pub mod refs;

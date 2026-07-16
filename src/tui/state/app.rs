@@ -2385,7 +2385,7 @@ impl App {
                 let progress_tx = tx.clone();
                 let result = (|| -> Result<CreateResult, String> {
                     let store = Store::load(&root, &config).map_err(|e| e.to_string())?;
-                    let path = crate::cli::create::run(
+                    let path = crate::engine::ops::create::run(
                         &root,
                         &config,
                         &store,
@@ -2438,7 +2438,7 @@ impl App {
                     if !relations.is_empty() {
                         let store = Store::load(&root, &config).map_err(|e| e.to_string())?;
                         for (rel_type, target_path) in &relations {
-                            crate::cli::link::link_with_config(
+                            crate::engine::ops::link::link_with_config(
                                 &root,
                                 &store,
                                 &relative_str,
@@ -2463,7 +2463,7 @@ impl App {
             return Ok(());
         }
 
-        let path = crate::cli::create::run(
+        let path = crate::engine::ops::create::run(
             root,
             config,
             &self.store,
@@ -2489,7 +2489,7 @@ impl App {
 
         // Apply relations
         for (rel_type, target_path) in &relations {
-            crate::cli::link::link_with_config(
+            crate::engine::ops::link::link_with_config(
                 root,
                 &self.store,
                 &relative_str,
@@ -2548,7 +2548,12 @@ impl App {
     pub fn confirm_delete(&mut self, root: &Path, config: &Config) -> Result<()> {
         let doc_path = self.delete_confirm.doc_path.clone();
         let doc_path_str = doc_path.to_string_lossy().to_string();
-        crate::cli::delete::run_with_config(root, &self.store, &doc_path_str, Some(config))?;
+        crate::engine::ops::delete::run_with_config(
+            root,
+            &self.store,
+            &doc_path_str,
+            Some(config),
+        )?;
         self.store.remove_file(&doc_path);
         self.filtered_docs_cache = None;
         self.rebuild_search_index();
@@ -2829,7 +2834,7 @@ impl App {
         let doc_path = self.status_picker.doc_path.clone();
         let doc_path_str = doc_path.to_string_lossy().to_string();
 
-        if let Err(e) = crate::cli::update::run_with_config(
+        if let Err(e) = crate::engine::ops::update::run_with_config(
             root,
             &self.store,
             &doc_path_str,
@@ -3108,7 +3113,7 @@ impl App {
             .unwrap_or("related-to")
             .to_string();
 
-        let outcome = match crate::cli::link::link_with_config(
+        let outcome = match crate::engine::ops::link::link_with_config(
             root,
             &self.store,
             &from,

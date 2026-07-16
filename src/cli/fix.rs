@@ -1,8 +1,4 @@
-mod config;
-mod conflicts;
-mod fields;
 mod output;
-mod relations;
 pub mod renumber;
 
 use std::path::Path;
@@ -14,30 +10,11 @@ use crate::engine::config::Config;
 use crate::engine::fs::FileSystem;
 use crate::engine::store::Store;
 
-use config::collect_config_fixes;
-use conflicts::collect_conflict_fixes;
-use fields::collect_field_fixes;
+use crate::engine::ops::fix::{collect_config_fixes, plan_field_and_conflict_fixes};
+pub use crate::engine::ops::fix::{ConfigFixResult, ReferenceUpdate};
+
 use output::{format_config_human, format_human};
-use relations::collect_relation_fixes;
 use renumber::collect_renumber_output;
-
-#[derive(Debug, Serialize)]
-struct FixOutput {
-    field_fixes: Vec<FieldFixResult>,
-    conflict_fixes: Vec<ConflictFixResult>,
-    relation_fixes: Vec<RelationFixResult>,
-}
-
-#[derive(Debug, Serialize)]
-struct RelationFixResult {
-    path: String,
-    replacements: Vec<(String, String)>,
-    /// Duplicate `(rel_type, target)` pairs dropped from the doc's `related`
-    /// sequence (defect-C cleanup). Kept distinct from `replacements` so the
-    /// `--json` output surfaces path->id migrations and dedup separately.
-    deduped: Vec<(String, String)>,
-    written: bool,
-}
 
 #[derive(Debug, Serialize, Clone)]
 pub struct RenumberFixResult {
@@ -63,41 +40,6 @@ struct RenumberOutput {
     dry_run: bool,
     changes: Vec<RenumberFixResult>,
     external_references: Vec<ExternalReference>,
-}
-
-#[derive(Debug, Serialize)]
-struct FieldFixResult {
-    path: String,
-    fields_added: Vec<String>,
-    written: bool,
-}
-
-/// Outcome of `fix --config`: which standard relationships/rules were missing
-/// (and thus added) and whether the file was written.
-#[derive(Debug, Serialize)]
-pub struct ConfigFixResult {
-    relationships_added: Vec<String>,
-    rules_added: Vec<String>,
-    lifecycles_added: Vec<String>,
-    written: bool,
-}
-
-#[derive(Debug, Serialize, Clone)]
-pub struct ReferenceUpdate {
-    pub file: String,
-    pub field: String,
-    pub old_value: String,
-    pub new_value: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ConflictFixResult {
-    old_path: String,
-    new_path: String,
-    old_id: String,
-    new_id: String,
-    references_updated: Vec<ReferenceUpdate>,
-    written: bool,
 }
 
 pub fn run(
@@ -258,22 +200,4 @@ pub fn run_human(
 ) -> String {
     let output = plan_field_and_conflict_fixes(root, store, config, paths, dry_run, fs);
     format_human(&output, dry_run)
-}
-
-fn plan_field_and_conflict_fixes(
-    root: &Path,
-    store: &Store,
-    config: &Config,
-    paths: &[String],
-    dry_run: bool,
-    fs: &dyn FileSystem,
-) -> FixOutput {
-    let field_fixes = collect_field_fixes(root, store, config, paths, dry_run, fs);
-    let conflict_fixes = collect_conflict_fixes(root, store, config, dry_run, fs);
-    let relation_fixes = collect_relation_fixes(root, store, dry_run, fs);
-    FixOutput {
-        field_fixes,
-        conflict_fixes,
-        relation_fixes,
-    }
 }

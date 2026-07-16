@@ -1,7 +1,7 @@
 ---
 title: Config-write attribute serialization and add-type attribute support
 type: iteration
-status: in-progress
+status: complete
 author: agent
 date: 2026-07-16
 tags: []

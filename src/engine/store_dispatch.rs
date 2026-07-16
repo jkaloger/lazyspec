@@ -2406,6 +2406,43 @@ pub fn build_registry(root: &std::path::Path, config: &Config) -> DocumentStoreR
     registry
 }
 
+/// Load the ClickUp credential and bind a token-bearing [`ClickupTasksStore`] --
+/// the single place the write path's token load + store construction lives
+/// (STORY-212 AC3).
+///
+/// [`build_registry`] deliberately registers the ClickUp store with `token: None`
+/// to keep registry construction free of keychain I/O; every write path
+/// (create/update/delete and the TUI external-edit push) calls here instead to
+/// load the credential and bind a store that can actually authenticate. `action`
+/// names the operation for the missing-token error
+/// ("creating"/"updating"/"deleting"/"editing"). The client factory and token
+/// loader are injected so a test drives the `ClickupClient` seam with a
+/// `FakeClickupClient` and a scripted token without a keychain or the network
+/// (DICTUM-002); production passes `ClickupHttpClient::new` and the global
+/// credential store. The token is loaded (and checked present) before the client
+/// is built, so a missing credential fails loud without constructing a client.
+pub fn clickup_write_store<C: crate::engine::clickup::ClickupClient + 'static>(
+    root: &std::path::Path,
+    config: &Config,
+    action: &str,
+    client_factory: impl FnOnce() -> C,
+    token_loader: impl FnOnce() -> Result<Option<crate::engine::credentials::Token>>,
+) -> Result<ClickupTasksStore> {
+    let token = token_loader()?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no ClickUp token found; run `lazyspec setup clickup` before {} \
+             clickup-tasks documents",
+            action
+        )
+    })?;
+    Ok(ClickupTasksStore {
+        client: Box::new(client_factory()),
+        root: root.to_path_buf(),
+        config: config.clone(),
+        token: Some(token),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
