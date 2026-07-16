@@ -190,25 +190,11 @@ pub fn run_with_body(
     }
 
     if type_def.store == StoreBackend::GitRef {
-        let reserved_number = if let Some(coord) = &config.coordination {
-            let cache_dir = root.join(".lazyspec/cache").join(&type_def.name);
-            std::fs::create_dir_all(&cache_dir)?;
-            Some(reservation::reserve_next(
-                root,
-                &coord.remote,
-                &type_def.prefix,
-                coord.max_push_retries,
-                &cache_dir,
-                &on_progress,
-            )?)
-        } else {
-            None
-        };
         let mut store = GitRefStore {
             git: Box::new(GitCli),
             root: root.to_path_buf(),
             config: config.clone(),
-            reserved_number,
+            reserved_number: None,
         };
         let created = store.create(type_def, title, author, body.unwrap_or(""))?;
         return Ok(root.join(&created.path));

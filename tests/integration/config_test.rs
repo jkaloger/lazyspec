@@ -890,3 +890,30 @@ fn status_outside_lifecycle_states_is_rejected() {
     );
     assert!(msg.contains("rfc"), "error should name the type: {msg}");
 }
+
+// RFC-061 (STORY-208 AC3): the lease subsystem is gone, but configs written
+// before its removal may still carry a `[coordination]` block. It must parse
+// as an ignored unknown table, not an error.
+#[test]
+fn stray_coordination_block_still_parses() {
+    let toml_str = format!(
+        "{}{}",
+        r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[coordination]
+remote = "upstream"
+lease_duration = "30m"
+grace_period = "5m"
+max_push_retries = 10
+max_clock_skew = "5m"
+"#,
+        RELATIONSHIPS
+    );
+    let config = Config::parse(&toml_str).unwrap();
+    assert_eq!(config.documents.types.len(), 1);
+}

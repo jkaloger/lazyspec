@@ -1,7 +1,7 @@
 ---
 title: Remove lease engine, CLI commands, gates, and coordination config
 type: iteration
-status: accepted
+status: in-progress
 author: agent
 date: 2026-07-16
 tags: []

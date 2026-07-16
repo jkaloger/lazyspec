@@ -151,7 +151,6 @@ fn config_with_parent_status_gate() -> Config {
         }],
         ref_count_ceiling: 15,
         certification: Default::default(),
-        coordination: None,
         agents: Default::default(),
         skills: Default::default(),
         web: None,

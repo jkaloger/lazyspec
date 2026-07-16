@@ -412,7 +412,6 @@ pub enum FieldEditor {
         max: u64,
     },
     Nullable,
-    Duration,
     List,
     EnumCycle {
         variants: &'static [&'static str],
@@ -629,11 +628,6 @@ pub enum FieldPath {
     ReservedMaxRetries,
     GithubRepo,
     GithubCacheTtl,
-    CoordinationRemote,
-    CoordinationLeaseDuration,
-    CoordinationGracePeriod,
-    CoordinationMaxPushRetries,
-    CoordinationMaxClockSkew,
     CertNormalize,
     CertOverride {
         key: String,

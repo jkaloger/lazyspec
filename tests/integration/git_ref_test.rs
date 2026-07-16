@@ -286,16 +286,16 @@ fn push_ref_with_lease_succeeds_when_remote_matches() {
 
 #[test]
 fn push_ref_with_lease_pushes_dangling_commit_without_local_ref() {
-    // Regression: LeaseEngine::acquire and ::heartbeat mint a dangling commit
-    // (no local ref) and push it. Earlier impl pushed by refname, which failed
-    // with "src refspec ... does not match any" for acquire and silently no-op'd
-    // for heartbeat (local ref still at old sha). Push must use <sha>:<refname>.
+    // Regression: a caller may mint a dangling commit (no local ref) and push
+    // it. An earlier impl pushed by refname, which failed with "src refspec ...
+    // does not match any" when no local ref existed and silently no-op'd when
+    // the local ref lagged the new sha. Push must use <sha>:<refname>.
     let (fixture, _bare) = TestFixture::with_git_remote();
     let git = GitCli;
-    let refname = "refs/lazyspec/leases/iteration/ITERATION-REG";
+    let refname = "refs/lazyspec/test/dangling-push";
 
     let new_sha = git
-        .create_commit(fixture.root(), refname, &[("lease.json", "{}")], None)
+        .create_commit(fixture.root(), refname, &[("doc.md", "{}")], None)
         .unwrap();
 
     // Local ref must NOT exist at this point -- this is the precondition of acquire.
@@ -319,26 +319,21 @@ fn push_ref_with_lease_pushes_dangling_commit_without_local_ref() {
 
 #[test]
 fn push_ref_with_lease_pushes_new_sha_not_local_ref() {
-    // Regression for heartbeat: local ref still points at old sha when push fires.
-    // Earlier impl pushed by refname (i.e. old sha), so remote stayed stale even
-    // though local later advanced via update_ref. Push must carry new_sha.
+    // Regression: local ref still points at old sha when push fires. An earlier
+    // impl pushed by refname (i.e. old sha), so remote stayed stale even though
+    // local later advanced via update_ref. Push must carry new_sha.
     let (fixture, _bare) = TestFixture::with_git_remote();
     let git = GitCli;
-    let refname = "refs/lazyspec/leases/iteration/ITERATION-HB";
+    let refname = "refs/lazyspec/test/stale-local-push";
 
     let old_sha = git
-        .create_ref_commit(fixture.root(), refname, &[("lease.json", "{\"v\":1}")])
+        .create_ref_commit(fixture.root(), refname, &[("doc.md", "v1")])
         .unwrap();
     git.push_ref(fixture.root(), "origin", refname).unwrap();
 
     // Mint a dangling new commit. Local ref still at old_sha.
     let new_sha = git
-        .create_commit(
-            fixture.root(),
-            refname,
-            &[("lease.json", "{\"v\":2}")],
-            Some(&old_sha),
-        )
+        .create_commit(fixture.root(), refname, &[("doc.md", "v2")], Some(&old_sha))
         .unwrap();
     assert_eq!(
         git.resolve_ref(fixture.root(), refname).unwrap(),
@@ -439,66 +434,4 @@ fn create_ref_commit_fails_if_ref_exists() {
         result.is_err(),
         "second create_ref_commit on same refname should fail due to CAS"
     );
-}
-
-#[test]
-fn heartbeat_succeeds_and_extends_expiry() {
-    use chrono::{DateTime, Duration, Utc};
-    use lazyspec::engine::config::CoordinationConfig;
-    use lazyspec::engine::lease::LeaseEngine;
-
-    let (fixture, _bare) = TestFixture::with_git_remote();
-    let git = GitCli;
-    let config = CoordinationConfig {
-        remote: "origin".to_string(),
-        lease_duration: "60m".to_string(),
-        grace_period: "2m".to_string(),
-        max_push_retries: 5,
-        max_clock_skew: "5m".to_string(),
-    };
-
-    let engine = LeaseEngine::new(git, config.clone());
-    // Truncate to seconds to match serde ts_seconds serialization
-    let now = DateTime::from_timestamp(Utc::now().timestamp(), 0).unwrap();
-    let lease = engine
-        .acquire(fixture.root(), "story", "STORY-001", "agent-a", now)
-        .unwrap();
-
-    let heartbeat_time = now + Duration::minutes(30);
-    let git2 = GitCli;
-    let engine2 = LeaseEngine::new(git2, config);
-
-    // Fetch the ref before heartbeat (simulating a fresh client)
-    let updated = engine2
-        .heartbeat(
-            fixture.root(),
-            "story",
-            "STORY-001",
-            "agent-a",
-            heartbeat_time,
-        )
-        .unwrap();
-
-    assert_eq!(updated.agent, "agent-a");
-    assert_eq!(updated.acquired, lease.acquired);
-    assert!(
-        updated.expires > lease.expires,
-        "heartbeat should extend expiry: old={}, new={}",
-        lease.expires,
-        updated.expires
-    );
-    assert_eq!(updated.expires, heartbeat_time + Duration::minutes(60));
-
-    // Verify the ref was actually updated (no CAS error occurred)
-    let git3 = GitCli;
-    let refname = "refs/lazyspec/leases/story/STORY-001";
-    let sha = git3.resolve_ref(fixture.root(), refname).unwrap();
-    assert!(sha.is_some(), "ref should still exist after heartbeat");
-
-    // Read the lease back and verify content
-    let blob = git3
-        .read_ref_blob(fixture.root(), &sha.unwrap(), "lease.json")
-        .unwrap();
-    let stored_lease: lazyspec::engine::lease::Lease = serde_json::from_str(&blob).unwrap();
-    assert_eq!(stored_lease.expires, updated.expires);
 }

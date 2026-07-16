@@ -1925,9 +1925,9 @@ fn statusbar_value(slot: Option<&Vec<String>>) -> String {
 /// The FIELD list for the current settings field-view, mirroring the display
 /// rendered by `settings_lines_inner` exactly (same fields, order, values) with
 /// the editor kind and buffer path per field. Entry-LIST views (a collection
-/// category that is not drilled) carry no fields and return empty; the cat-7
+/// category that is not drilled) carry no fields and return empty; the cat-6
 /// override entries below `normalize` are likewise an entry-list, not fields, so
-/// the not-drilled cat-7 view returns only the top-level `normalize` field.
+/// the not-drilled cat-6 view returns only the top-level `normalize` field.
 pub fn settings_fields(
     category: usize,
     _entry: usize,
@@ -2263,57 +2263,7 @@ pub fn settings_fields(
                 ));
             }
         },
-        6 => match &config.coordination {
-            Some(c) => {
-                fields.push(field(
-                    "remote",
-                    c.remote.clone(),
-                    FieldEditor::Text,
-                    FieldPath::CoordinationRemote,
-                ));
-                fields.push(field(
-                    "lease_duration",
-                    c.lease_duration.clone(),
-                    FieldEditor::Duration,
-                    FieldPath::CoordinationLeaseDuration,
-                ));
-                fields.push(field(
-                    "grace_period",
-                    c.grace_period.clone(),
-                    FieldEditor::Duration,
-                    FieldPath::CoordinationGracePeriod,
-                ));
-                fields.push(field(
-                    "max_push_retries",
-                    c.max_push_retries.to_string(),
-                    FieldEditor::BoundedNum { min: 0, max: 1000 },
-                    FieldPath::CoordinationMaxPushRetries,
-                ));
-                fields.push(field(
-                    "max_clock_skew",
-                    c.max_clock_skew.clone(),
-                    FieldEditor::Duration,
-                    FieldPath::CoordinationMaxClockSkew,
-                ));
-            }
-            None => {
-                for label in [
-                    "remote",
-                    "lease_duration",
-                    "grace_period",
-                    "max_push_retries",
-                    "max_clock_skew",
-                ] {
-                    fields.push(field(
-                        label,
-                        "(unset)".to_string(),
-                        FieldEditor::ReadOnly,
-                        FieldPath::Unset,
-                    ));
-                }
-            }
-        },
-        7 => {
+        6 => {
             if let Some(d) = drill {
                 let mut keys: Vec<&String> = config.certification.overrides.keys().collect();
                 keys.sort();
@@ -2338,7 +2288,7 @@ pub fn settings_fields(
                 ));
             }
         }
-        8 => {
+        7 => {
             fields.push(field(
                 "interactive",
                 nullable_value(config.agents.interactive.as_deref()),
@@ -2346,7 +2296,7 @@ pub fn settings_fields(
                 FieldPath::AgentsInteractive,
             ));
         }
-        9 => {
+        8 => {
             fields.push(field(
                 "ascii_diagrams",
                 config.ui.ascii_diagrams.to_string(),
@@ -2434,7 +2384,7 @@ fn settings_display_value(
 }
 
 /// The navigable entry names for an entry-list collection (categories 1/2/3 and
-/// cat 7's certification overrides), read straight from the config model. The
+/// cat 6's certification overrides), read straight from the config model. The
 /// single source of truth for entry-list content: the render, the drilled-view
 /// title (`drill_entry_name`), and the legacy display-line builder all derive
 /// from it, so nothing reconstructs entry text from a rendered string.
@@ -2459,7 +2409,7 @@ pub(super) fn settings_entry_names(category: usize, config: &Config) -> Vec<Stri
                 ValidationRule::RelationExistence { name, .. } => name.clone(),
             })
             .collect(),
-        7 => {
+        6 => {
             let mut keys: Vec<&String> = config.certification.overrides.keys().collect();
             keys.sort();
             keys.into_iter().cloned().collect()
@@ -2481,7 +2431,7 @@ fn settings_lines_inner(
 ) -> Vec<String> {
     const COLLECTIONS: [usize; 3] = [1, 2, 3];
     // Entry-list categories (1,2,3) that are NOT drilled render a navigable name
-    // list, not a field list. cat 7 is a hybrid: the top `normalize` field plus an
+    // list, not a field list. cat 6 is a hybrid: the top `normalize` field plus an
     // override entry-list below it. Everything else (including drilled collections)
     // is a pure field-view derived from `settings_fields`.
     if COLLECTIONS.contains(&category) && drill.is_none() {
@@ -2495,7 +2445,7 @@ fn settings_lines_inner(
             .collect();
     }
 
-    if category == 7 {
+    if category == 6 {
         let mut lines: Vec<String> = settings_fields(category, entry, drill, config)
             .iter()
             .map(field_line)
@@ -2628,10 +2578,10 @@ pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
         .padding(Padding::horizontal(1))
         .title(title);
 
-    // Collection categories (1,2,3,7) that are not drilled render a navigable
+    // Collection categories (1,2,3,6) that are not drilled render a navigable
     // entry-name LIST; everything else is a two-column field-view.
     let in_entry_list =
-        matches!(app.settings_category, 1 | 2 | 3 | 7) && app.settings_drill.is_none();
+        matches!(app.settings_category, 1 | 2 | 3 | 6) && app.settings_drill.is_none();
 
     let highlight_style = Style::default().add_modifier(Modifier::REVERSED);
 
@@ -2640,21 +2590,21 @@ pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
         // former inline `▸` marker. Rows are sourced straight from the config model
         // (`settings_entry_names`), not by stripping a prefix off a rendered line.
         let mut rows: Vec<Row> = Vec::new();
-        // cat 7 keeps a non-selectable `normalize` field above its override entries.
-        if app.settings_category == 7 {
-            if let Some(fld) = settings_fields(7, app.settings_entry, None, config).first() {
+        // cat 6 keeps a non-selectable `normalize` field above its override entries.
+        if app.settings_category == 6 {
+            if let Some(fld) = settings_fields(6, app.settings_entry, None, config).first() {
                 rows.push(Row::new([Cell::from(field_line(fld))]));
             }
         }
         let names = settings_entry_names(app.settings_category, config);
-        if app.settings_category == 7 && names.is_empty() {
+        if app.settings_category == 6 && names.is_empty() {
             rows.push(Row::new([Cell::from("(no overrides configured)")]));
         } else {
             rows.extend(names.into_iter().map(|n| Row::new([Cell::from(n)])));
         }
-        // cat 7's leading `normalize` field offsets the entry cursor by one; other
+        // cat 6's leading `normalize` field offsets the entry cursor by one; other
         // collections select the entry row directly.
-        let selected = if app.settings_category == 7 {
+        let selected = if app.settings_category == 6 {
             app.settings_entry + 1
         } else {
             app.settings_entry
@@ -3472,21 +3422,9 @@ mod tests {
     }
 
     #[test]
-    fn settings_lines_coordination_absent_shows_unset() {
-        let config = Config::default();
-        let lines = settings_lines_inner(6, 0, None, &config);
-        assert_eq!(lines.len(), 5);
-        assert!(lines.contains(&"remote: (unset)".to_string()));
-        assert!(lines.contains(&"lease_duration: (unset)".to_string()));
-        assert!(lines.contains(&"grace_period: (unset)".to_string()));
-        assert!(lines.contains(&"max_push_retries: (unset)".to_string()));
-        assert!(lines.contains(&"max_clock_skew: (unset)".to_string()));
-    }
-
-    #[test]
     fn settings_lines_agents_absent_shows_unset() {
         let config = Config::default();
-        let lines = settings_lines_inner(8, 0, None, &config);
+        let lines = settings_lines_inner(7, 0, None, &config);
         assert!(lines.contains(&"interactive: (unset)".to_string()));
     }
 
@@ -3535,7 +3473,7 @@ mod tests {
     #[test]
     fn settings_lines_interface_default() {
         let config = Config::default();
-        let lines = settings_lines_inner(9, 0, None, &config);
+        let lines = settings_lines_inner(8, 0, None, &config);
         assert_eq!(lines.len(), 6);
         assert!(lines.contains(&"ascii_diagrams: false".to_string()));
         assert!(lines.contains(&"statusbar.enabled: true".to_string()));
@@ -3571,7 +3509,7 @@ mod tests {
     #[test]
     fn settings_lines_certification_empty_overrides() {
         let config = Config::default();
-        let lines = settings_lines_inner(7, 0, None, &config);
+        let lines = settings_lines_inner(6, 0, None, &config);
         assert!(lines.iter().any(|l| l.starts_with("normalize:")));
         assert!(lines.contains(&"(no overrides configured)".to_string()));
     }
@@ -3700,7 +3638,7 @@ name = "related-to"
     #[test]
     fn settings_fields_interface_surfaces_full_uiconfig_with_defaults() {
         let config = Config::default();
-        let fields = settings_fields(9, 0, None, &config);
+        let fields = settings_fields(8, 0, None, &config);
 
         let expected: &[(&str, FieldEditor, FieldPath)] = &[
             (
@@ -3775,7 +3713,7 @@ left = ["mode", "git_branch"]
 max_expanded_height = 8
 "#;
         let config = Config::parse(toml_str).unwrap();
-        let fields = settings_fields(9, 0, None, &config);
+        let fields = settings_fields(8, 0, None, &config);
         assert_eq!(field_by_label(&fields, "ascii_diagrams").value, "true");
         assert_eq!(field_by_label(&fields, "statusbar.enabled").value, "false");
         assert_eq!(
@@ -3799,7 +3737,7 @@ max_expanded_height = 8
     #[test]
     fn settings_fields_cert_normalize_top_is_toggle() {
         let config = Config::default();
-        let fields = settings_fields(7, 0, None, &config);
+        let fields = settings_fields(6, 0, None, &config);
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].label, "normalize");
         assert_eq!(fields[0].editor, FieldEditor::Toggle);

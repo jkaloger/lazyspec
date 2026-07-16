@@ -164,7 +164,6 @@ fn main() -> anyhow::Result<()> {
             json,
         }) => {
             let body_content = lazyspec::cli::resolve_body(&body, &body_file)?;
-            lazyspec::cli::lease::check_lease_gate_for_create(&cwd, &config, &doc_type)?;
             let store = Store::load(&cwd, &config)?;
             if json {
                 let output = lazyspec::cli::create::run_json_with_body(
@@ -236,7 +235,6 @@ fn main() -> anyhow::Result<()> {
             attr,
             json,
         }) => {
-            lazyspec::cli::lease::check_lease_gate(&cwd, &config, &path)?;
             let body_content = lazyspec::cli::resolve_body(&body, &body_file)?;
             let store = Store::load(&cwd, &config)?;
             let attr_pairs = lazyspec::cli::update::parse_attr_pairs(&attr)?;
@@ -265,7 +263,6 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Delete { path }) => {
-            lazyspec::cli::lease::check_lease_gate(&cwd, &config, &path)?;
             let store = Store::load(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
             lazyspec::cli::delete::run_with_config(&cwd, &store, &path, Some(&config))?;
@@ -309,7 +306,6 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Tag { action }) => match action {
             TagAction::Add { id, tags, json } => {
-                lazyspec::cli::lease::check_lease_gate(&cwd, &config, &id)?;
                 let store = Store::load(&cwd, &config)?;
                 lazyspec::cli::tag::tag_add_with_config(
                     &cwd,
@@ -329,7 +325,6 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             TagAction::Remove { id, tags, json } => {
-                lazyspec::cli::lease::check_lease_gate(&cwd, &config, &id)?;
                 let store = Store::load(&cwd, &config)?;
                 lazyspec::cli::tag::tag_remove_with_config(
                     &cwd,
@@ -583,82 +578,6 @@ fn main() -> anyhow::Result<()> {
                 }
                 ProvenanceCommand::List { id, json } => {
                     lazyspec::cli::provenance::run_list(&store, id.as_deref(), json, &mut stdout)?;
-                }
-            }
-        }
-        Some(Commands::Claim {
-            doc_id,
-            agent_id,
-            force,
-            json,
-        }) => {
-            if let Err(e) = lazyspec::cli::lease::run_claim(
-                &cwd,
-                &config,
-                &doc_id,
-                agent_id.as_deref(),
-                force,
-                json,
-            ) {
-                if json {
-                    println!("{}", serde_json::json!({"error": e.to_string()}));
-                    std::process::exit(1);
-                } else {
-                    return Err(e);
-                }
-            }
-        }
-        Some(Commands::Release {
-            doc_id,
-            agent_id,
-            expected_holder,
-            json,
-        }) => {
-            if let Err(e) = lazyspec::cli::lease::run_release(
-                &cwd,
-                &config,
-                &doc_id,
-                agent_id.as_deref(),
-                expected_holder.as_deref(),
-                json,
-            ) {
-                if json {
-                    println!("{}", serde_json::json!({"error": e.to_string()}));
-                    std::process::exit(1);
-                } else {
-                    return Err(e);
-                }
-            }
-        }
-        Some(Commands::Leases { json }) => {
-            if let Err(e) = lazyspec::cli::lease::run_leases(&cwd, &config, json) {
-                if json {
-                    println!("{}", serde_json::json!({"error": e.to_string()}));
-                    std::process::exit(1);
-                } else {
-                    return Err(e);
-                }
-            }
-        }
-        Some(Commands::Heartbeat {
-            doc_id,
-            agent_id,
-            min_interval,
-            json,
-        }) => {
-            if let Err(e) = lazyspec::cli::lease::run_heartbeat(
-                &cwd,
-                &config,
-                &doc_id,
-                agent_id.as_deref(),
-                min_interval.as_deref(),
-                json,
-            ) {
-                if json {
-                    println!("{}", serde_json::json!({"error": e.to_string()}));
-                    std::process::exit(1);
-                } else {
-                    return Err(e);
                 }
             }
         }
