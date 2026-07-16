@@ -80,15 +80,21 @@ authorship = "generated"
 lifecycle = { states = ["draft", "review", "accepted", "in-progress", "complete", "rejected", "superseded"], edges = [{ from = "draft", to = "review" }, { from = "review", to = "accepted" }, { from = "review", to = "rejected" }, { from = "accepted", to = "in-progress" }, { from = "in-progress", to = "complete" }, { from = "*", to = "superseded" }] }
 
 [[types]]
-name = "ticket"
-plural = "tickets"
-dir = "docs/tickets"
-prefix = "TICKET"
-icon = "🎫"
-store = "github-issues"
-subdirectory = true
-intent = "A GitHub issue authored as structured markdown"
-github_label = "Ticket"
+name = "bug"
+plural = "bugs"
+dir = "docs/bugs"
+prefix = "BUG"
+icon = "🐛"
+intent = "Report an observed defect — expected vs actual with repro steps — and track it to resolution."
+numbering = "incremental"
+subdirectory = false
+store = "filesystem"
+singleton = false
+agents = []
+authorship = "assisted"
+attributes = []
+lifecycle = { states = ["reported", "triaged", "in-progress", "fixed", "wontfix"], edges = [{ from = "reported", to = "triaged" }, { from = "triaged", to = "in-progress" }, { from = "in-progress", to = "fixed" }, { from = "reported", to = "wontfix" }, { from = "triaged", to = "wontfix" }] }
+
 
 [[types.attributes]]
 name = "priority"
