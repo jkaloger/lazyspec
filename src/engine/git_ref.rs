@@ -267,7 +267,7 @@ impl GitRefOps for GitCli {
             None => format!("--force-with-lease={}", refname),
         };
         // Push by SHA so dangling commit objects without a local ref can be pushed.
-        // Local ref advances only after this returns Ok (see LeaseEngine::acquire/heartbeat).
+        // The caller advances the local ref only after this returns Ok.
         let refspec = format!("{}:{}", new_sha, refname);
         let output = self.run_git(root, &["push", &lease_arg, remote, &refspec])?;
         if !output.status.success() {

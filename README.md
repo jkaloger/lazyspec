@@ -153,22 +153,30 @@ lazyspec
 
 Running `lazyspec` with no subcommand opens the interactive dashboard. It provides fuzzy search, markdown preview, document creation, and live file watching -- documents update automatically when changed on disk. An external edit of `.lazyspec.toml` (e.g. a `git pull`) reloads the running session automatically; press `R` to reload it manually. Press `?` for the full keybindings overlay.
 
-| Key       | Action                                              |
-| --------- | --------------------------------------------------- |
-| `j` / `k` | Navigate up/down                                    |
-| `h` / `l` | Switch document type                                |
-| `Enter`   | Open document fullscreen                            |
-| `/`       | Fuzzy search                                        |
-| `n`       | Create new document                                 |
-| `e`       | Edit document in `$EDITOR`                          |
-| `d`       | Delete document                                     |
-| `r`       | Add relation                                        |
-| `R`       | Reload config from `.lazyspec.toml`                 |
-| `w`       | Warnings / validation panel                         |
-| `5`       | Open the Settings view                              |
-| `` ` ``   | Cycle view (documents / filters / graph / settings) |
-| `q`       | Quit                                                |
-| `?`       | Toggle keybindings help                             |
+| Key                 | Action                                              |
+| ------------------- | --------------------------------------------------- |
+| `j` / `k`           | Navigate up/down                                    |
+| `h` / `l`           | Switch document type                                |
+| `g` / `G`           | Jump to top/bottom                                  |
+| `Ctrl-d` / `Ctrl-u` | Half page down/up                                   |
+| `Space`             | Expand/collapse                                     |
+| `Tab`               | Cycle preview tab                                   |
+| `Enter`             | Open document / follow relation                     |
+| `n`                 | Create new document                                 |
+| `e`                 | Edit document in `$EDITOR`                          |
+| `d`                 | Delete document                                     |
+| `s`                 | Change status                                       |
+| `r`                 | Add relation                                        |
+| `p`                 | Provenance                                          |
+| `R`                 | Reload config from `.lazyspec.toml`                 |
+| `a`                 | Agent (only with the `agent` cargo feature)         |
+| `x`                 | Toggle wrap                                         |
+| `/`                 | Fuzzy search                                        |
+| `w`                 | Warnings / validation panel                         |
+| `` ` ``             | Cycle view (documents / filters / graph / settings) |
+| `5`                 | Open the Settings view                              |
+| `?`                 | Toggle keybindings help                             |
+| `q` / `Ctrl-c`      | Quit                                                |
 
 #### Settings View
 
@@ -258,35 +266,45 @@ This build is unsigned. On first launch macOS Gatekeeper will refuse a plain dou
 
 All document management is available as subcommands. Most accept `--json` for machine-readable output.
 
-| Command                                                                            | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `init`                                                                             | Initialise lazyspec in the current project                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `create <type> <title> [--author X] [--parent ID] [--body / --body-file]`          | Create a document (rfc, adr, story, iteration); seed body inline, from a file, or `-` for stdin. `--parent <ID>` makes the new doc a child of an existing doc; the child must be the same store as its parent. For filesystem-store types the child is authored as a sibling `.md` inside the parent's subdir (promoting a flat parent to `TYPE-n-slug/index.md` on the first child). For `github-issues`-store types the child is created as a real GitHub issue and bound as a native sub-issue of the parent at create time; a later `fetch` mirrors them into the nested cache layout (`.lazyspec/cache/<type>/<PARENT>/index.md` + `NN-<child>.md`) |
-| `list [type] [--status X]`                                                         | List documents with optional filters                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `show <id> [-e]`                                                                   | Display a document by path or shorthand ID (e.g. `RFC-001`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `update <path> [--status X] [--title X] [--body / --body-file] [--attr key=value]` | Update frontmatter and/or body content (`--body-file -` reads stdin); `--attr` (repeatable) sets a declared custom attribute, coerced and validated against its type; works for all stores                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `delete <path>`                                                                    | Delete a document                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `link <from> <rel> <to>`                                                           | Add a typed relationship (canonical or inverse keyword)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `unlink <from> <rel> <to>`                                                         | Remove a relationship (canonical or inverse keyword)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `tag add <id> <tags>...`                                                           | Add tags to a document (auto-creates GitHub labels if needed)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `tag remove <id> <tags>...`                                                        | Remove tags from a document                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `search <query> [--doc-type X]`                                                    | Full-text search across all documents                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `context <id> [--depth N]`                                                         | Show the full document chain (RFC -> Story -> Iteration)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `context [--anchor TYPE]`                                                          | Emit the context forest (omit `<id>`); `--anchor` re-roots on a type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `status`                                                                           | Show full project status with all documents and validation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `ignore <path>`                                                                    | Mark a document to skip validation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `unignore <path>`                                                                  | Remove validation skip from a document                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `validate [--warnings]`                                                            | Check document integrity and link consistency                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `fix [paths] [--dry-run]`                                                          | Fix documents with broken or incomplete frontmatter                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `fix --config [--dry-run]`                                                         | Repair `.lazyspec.toml` (inject missing standard relationships/rules)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `pin <id>`                                                                         | Pin blob hashes onto `@ref` directives in a document                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `provenance add <id> <citation>`                                                   | Append a citation to a document's provenance list                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `provenance remove <id> <citation>`                                                | Remove an exact-match citation from a document's provenance list                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `provenance list [id]`                                                             | List citations for a document, or for all documents grouped by id                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `reservations list`                                                                | Show all reservation refs on the remote                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `reservations prune [--dry-run]`                                                   | Remove refs for documents that already exist locally                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `setup`                                                                            | Validate GitHub auth and fetch issues for `github-issues` types                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `setup clickup [--token pk_...]`                                                   | Validate a ClickUp personal API token and store it globally (see [ClickUp store auth](#clickup-store-auth))                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Command                                                         | Description                                                                                     |
+| --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `init`                                                          | Initialise lazyspec in the current project                                                      |
+| `create <type> <title> [--author X] [--parent ID] [--body / --body-file]` | Create a document (rfc, adr, story, iteration); seed body inline, from a file, or `-` for stdin. `--parent <ID>` makes the new doc a child of an existing doc; the child must be the same store as its parent. For filesystem-store types the child is authored as a sibling `.md` inside the parent's subdir (promoting a flat parent to `TYPE-n-slug/index.md` on the first child). For `github-issues`-store types the child is created as a real GitHub issue and bound as a native sub-issue of the parent at create time; a later `fetch` mirrors them into the nested cache layout (`.lazyspec/cache/<type>/<PARENT>/index.md` + `NN-<child>.md`) |
+| `list [type] [--status X]`                                      | List documents with optional filters                                                            |
+| `show <id> [-e]`                                                | Display a document by path or shorthand ID (e.g. `RFC-001`)                                     |
+| `update <path> [--status X] [--title X] [--body / --body-file] [--attr key=value]` | Update frontmatter and/or body content (`--body-file -` reads stdin); `--attr` (repeatable) sets a declared custom attribute, coerced and validated against its type; works for all stores |
+| `delete <path>`                                                 | Delete a document                                                                               |
+| `link <from> <rel> <to>`                                        | Add a typed relationship (canonical or inverse keyword)                                         |
+| `unlink <from> <rel> <to>`                                      | Remove a relationship (canonical or inverse keyword)                                            |
+| `tag add <id> <tags>...`                                        | Add tags to a document (auto-creates GitHub labels if needed)                                   |
+| `tag remove <id> <tags>...`                                     | Remove tags from a document                                                                     |
+| `search <query> [--doc-type X]`                                 | Full-text search across all documents                                                           |
+| `context <id> [--depth N]`                                      | Show the full document chain (RFC -> Story -> Iteration)                                        |
+| `context [--anchor TYPE]`                                       | Emit the context forest (omit `<id>`); `--anchor` re-roots on a type                            |
+| `status`                                                        | Show full project status with all documents and validation                                      |
+| `ignore <path>`                                                 | Mark a document to skip validation                                                              |
+| `unignore <path>`                                               | Remove validation skip from a document                                                          |
+| `validate [--warnings]`                                         | Check document integrity and link consistency                                                   |
+| `fix [paths] [--dry-run] [--type X]`                            | Fix documents with broken or incomplete frontmatter; `--type` filters to a single document type |
+| `fix --renumber <sqids\|incremental> [--type X] [--dry-run]`    | Renumber all documents to the given format; `--type` filters to a single document type          |
+| `fix --config [--dry-run]`                                      | Repair `.lazyspec.toml` (inject missing standard relationships/rules)                           |
+| `completions <shell>`                                           | Generate a shell completion script (bash, elvish, fish, powershell, zsh)                        |
+| `pin <id>`                                                      | Pin blob hashes onto `@ref` directives in a document                                            |
+| `fetch [--type X]`                                              | Fetch remote documents into the cache (`github-issues`, `github-milestones`, `git-ref`, `clickup-tasks` types) |
+| `convention [--preamble] [--tags X]`                            | Show convention and dictum content; `--preamble` omits the dictum, `--tags` filters it          |
+| `skills install [--runtime <claude\|agents-md>]`                | Install the embedded agent skill set into the project (both runtimes by default)                |
+| `config [--json]`                                               | Print the resolved `.lazyspec.toml` as JSON                                                     |
+| `config schema`                                                 | Print a JSON Schema for `.lazyspec.toml` (runs from any directory)                              |
+| `config add-type <name> <plural> <dir> <prefix>`                | Append a new document type to `.lazyspec.toml`                                                  |
+| `config set-lifecycle <type> [--state X] [--edge from:to]`      | Replace a type's lifecycle states and edges                                                     |
+| `config add-gate <rule> --status X`                             | Set the `require_parent_status` gate on a parent-child rule                                     |
+| `provenance add <id> <citation>`                                | Append a citation to a document's provenance list                                               |
+| `provenance remove <id> <citation>`                             | Remove an exact-match citation from a document's provenance list                                |
+| `provenance list [id]`                                          | List citations for a document, or for all documents grouped by id                               |
+| `reservations list`                                             | Show all reservation refs on the remote                                                         |
+| `reservations prune [--dry-run]`                                | Remove refs for documents that already exist locally                                            |
+| `setup`                                                         | Validate GitHub auth and fetch issues for `github-issues` types                                 |
+| `setup clickup [--token pk_...]`                                | Validate a ClickUp personal API token and store it globally (see [ClickUp store auth](#clickup-store-auth)) |
 
 #### Relationship Keywords
 
@@ -352,61 +370,6 @@ All three subcommands accept `--json`. Shapes:
 - `list` (no id): `{ "documents": [{ "id": "...", "path": "...", "provenance": [...] }, ...] }`
 
 `add` rejects empty citations. `remove` is exact-match and errors when the citation is absent.
-
-## Coordination
-
-### Claude Code Hooks
-
-Lazyspec ships hook snippets that claim, heartbeat, and release a lease on `$ASSIGNED_TASK` across a Claude Code session. The orchestrator (daemon, manual `export`, etc.) sets the env var; hooks no-op silently when it is unset, so the snippet is safe to install unconditionally.
-
-Drop into `.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "[ -n \"$ASSIGNED_TASK\" ] && lazyspec claim \"$ASSIGNED_TASK\" --agent-id \"$CLAUDE_SESSION_ID\" --json || true"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "[ -n \"$ASSIGNED_TASK\" ] && lazyspec heartbeat \"$ASSIGNED_TASK\" --agent-id \"$CLAUDE_SESSION_ID\" --min-interval 15m --json || true"
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "[ -n \"$ASSIGNED_TASK\" ] && lazyspec release \"$ASSIGNED_TASK\" --agent-id \"$CLAUDE_SESSION_ID\" --json || true"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-The standalone file lives at [`hooks/claude-code-settings.json`](hooks/claude-code-settings.json).
-
-**`$ASSIGNED_TASK` contract.** Orchestrator sets it to a doc id (e.g. `ITERATION-170`). If unset, the `[ -n "$ASSIGNED_TASK" ]` guard short-circuits and no `lazyspec` invocation happens.
-
-**Throttle.** `--min-interval 15m` matches the default `lease_duration / 4` (lease defaults to 60m). If you tune `lease_duration` in `.lazyspec.toml`, tune this to roughly a quarter of it.
-
-**Error tolerance.** `|| true` swallows non-zero exits from `lazyspec` (e.g. lease already released, network blip), so a session never fails to end because of a coordination error.
-
-See [RFC-035](docs/rfcs/RFC-035-git-ref-document-storage-with-lease-based-claiming.md) for the design rationale.
 
 </details>
 
@@ -501,7 +464,7 @@ are missing -- comparing by name, so user-added relationships and rules are kept
 and nothing is duplicated. It also injects the default `lifecycle` into any
 `[[types]]` entry that lacks one (a type that already declares a lifecycle is
 left untouched); migrated types are reported under `lifecycles_added`. Every
-existing section (`[github]`, `[coordination]`, comments, ordering) is preserved,
+existing section (`[github]`, comments, ordering) is preserved,
 and it is idempotent -- running it on an up-to-date config makes no change. The
 flag is config-only: no documents are touched (use plain `lazyspec fix` for
 frontmatter).
@@ -888,6 +851,10 @@ GH_TOKEN="$(gh auth token)" lazyspec fetch
 `lazyspec fetch [--type <name>] [--json]` refreshes every configured remote type
 (`github-issues`, `github-milestones`, `git-ref`, `clickup-tasks`) in one engine
 pass; `--type <name>` narrows it to a single type.
+
+Note that `git-ref` stores are local-write: document writes land in the local
+ref only, and syncing with the remote happens via `lazyspec fetch` -- there is
+no automatic remote push.
 
 The run is **continue-then-exit-non-zero**: if one type's fetch fails, the
 remaining types still refresh, everything that succeeded is still written to the
