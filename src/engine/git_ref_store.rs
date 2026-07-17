@@ -60,6 +60,10 @@ pub struct GitRefStore {
 }
 
 impl GitRefStore {
+    /// How many times `create` re-tries a number after a concurrent clone
+    /// claims it on the remote before giving up.
+    const CREATE_MAX_RETRIES: u8 = 5;
+
     /// Downcast the boxed client to a concrete mock for test assertions.
     #[cfg(test)]
     fn git_mock(&self) -> &crate::engine::git_ref::test_support::MockGitRefClient {
@@ -139,6 +143,76 @@ impl GitRefStore {
         }
     }
 
+    /// Create the ref commit, cache file, and lock entry for a new doc id,
+    /// returning the new commit SHA. Does not push.
+    fn materialize_created_doc(
+        &mut self,
+        type_def: &TypeDef,
+        id: &str,
+        title: &str,
+        author: &str,
+        date: &str,
+        body: &str,
+    ) -> Result<String> {
+        let content = Self::build_markdown(type_def, title, author, date, "draft", body);
+        let refname = Self::refname(&type_def.name, id);
+        let sha = self
+            .git
+            .create_ref_commit(&self.root, &refname, &[("doc.md", &content)])?;
+
+        let meta = DocMeta {
+            path: PathBuf::new(),
+            title: title.to_string(),
+            doc_type: DocType::new(&type_def.name),
+            status: Status::new("draft"),
+            author: author.to_string(),
+            date: Local::now().date_naive(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            attributes: Default::default(),
+            id: id.to_string(),
+        };
+        write_cache_file(&self.root, type_def, &meta, body)?;
+
+        let mut lock = CacheLock::load(&self.root)?;
+        lock.set(&Self::doc_key(&type_def.name, id), &sha);
+        lock.save(&self.root)?;
+        Ok(sha)
+    }
+
+    /// Undo a create attempt whose claim was rejected, so the next number can
+    /// be tried against clean local state.
+    fn unmaterialize_created_doc(&mut self, type_def: &TypeDef, id: &str) -> Result<()> {
+        let refname = Self::refname(&type_def.name, id);
+        self.git.delete_ref(&self.root, &refname)?;
+
+        let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
+        if let Some(cache_path) = find_cache_file(&cache_dir, id) {
+            std::fs::remove_file(&cache_path)?;
+        }
+
+        let mut lock = CacheLock::load(&self.root)?;
+        lock.remove(&Self::doc_key(&type_def.name, id));
+        lock.save(&self.root)?;
+        Ok(())
+    }
+
+    fn created_doc(&self, type_def: &TypeDef, id: String) -> CreatedDoc {
+        let cache_path = self
+            .root
+            .join(".lazyspec/cache")
+            .join(&type_def.name)
+            .join(format!("{}.md", id));
+        let relative = cache_path
+            .strip_prefix(&self.root)
+            .unwrap_or(&cache_path)
+            .to_path_buf();
+        CreatedDoc { path: relative, id }
+    }
+
     /// Re-commit the current cache content into the ref blob.
     ///
     /// The CLI has already rewritten the cache file's `tags:` block (git-ref docs
@@ -201,57 +275,62 @@ impl DocumentStore for GitRefStore {
         body: &str,
     ) -> Result<CreatedDoc> {
         ensure_cache_gitignored(&self.root)?;
-
-        let next_num = match self.reserved_number {
-            Some(n) => n,
-            None => self.next_number_from_refs(type_def)?,
-        };
-        let id = format!("{}-{:03}", type_def.prefix, next_num);
         let date = Local::now().format("%Y-%m-%d").to_string();
 
-        let content = Self::build_markdown(type_def, title, author, &date, "draft", body);
+        // A reserved number is claimed by the caller (e.g. the reservation
+        // subsystem); bypass cross-clone allocation and materialize it directly.
+        if let Some(n) = self.reserved_number {
+            let id = format!("{}-{:03}", type_def.prefix, n);
+            let sha = self.materialize_created_doc(type_def, &id, title, author, &date, body)?;
+            let refname = Self::refname(&type_def.name, &id);
+            let push = self
+                .git
+                .push_new_ref(&self.root, &self.remote, &refname, &sha);
+            self.handle_push_result(&id, push)?;
+            return Ok(self.created_doc(type_def, id));
+        }
 
-        let refname = Self::refname(&type_def.name, &id);
-        let sha = self
-            .git
-            .create_ref_commit(&self.root, &refname, &[("doc.md", &content)])?;
+        // Cross-clone-safe allocation (STORY-218 AC3): claim the number on the
+        // remote with an expect-absent push. A clone that concurrently grabbed
+        // the same number makes the remote reject the push, so we fetch the
+        // winning ref and retry with the next number, bounded by retries.
+        let mut last_rejection = None;
+        for _ in 0..Self::CREATE_MAX_RETRIES {
+            let next_num = self.next_number_from_refs(type_def)?;
+            let id = format!("{}-{:03}", type_def.prefix, next_num);
+            let sha = self.materialize_created_doc(type_def, &id, title, author, &date, body)?;
+            let refname = Self::refname(&type_def.name, &id);
 
-        let meta = DocMeta {
-            path: PathBuf::new(),
-            title: title.to_string(),
-            doc_type: DocType::new(&type_def.name),
-            status: Status::new("draft"),
-            author: author.to_string(),
-            date: Local::now().date_naive(),
-            tags: vec![],
-            provenance: vec![],
-            related: vec![],
-            validate_ignore: false,
-            virtual_doc: false,
-            attributes: Default::default(),
-            id: id.clone(),
-        };
+            match self
+                .git
+                .push_new_ref(&self.root, &self.remote, &refname, &sha)
+            {
+                Ok(()) => return Ok(self.created_doc(type_def, id)),
+                Err(e) if push_was_remote_rejection(&e) => {
+                    self.unmaterialize_created_doc(type_def, &id)?;
+                    let pattern = format!("{}*", Self::ref_prefix(&type_def.name));
+                    self.git.fetch_refs(&self.root, &self.remote, &pattern)?;
+                    last_rejection = Some(e);
+                }
+                Err(e) => {
+                    // Remote unreachable: keep the local write and warn, matching
+                    // the offline semantics of every other mutation (AC5/ITER-309).
+                    eprintln!("{}", push_failure_warning(&self.remote, &id, &e));
+                    return Ok(self.created_doc(type_def, id));
+                }
+            }
+        }
 
-        write_cache_file(&self.root, type_def, &meta, body)?;
-
-        let mut lock = CacheLock::load(&self.root)?;
-        lock.set(&Self::doc_key(&type_def.name, &id), &sha);
-        lock.save(&self.root)?;
-
-        let push = self.git.push_ref(&self.root, &self.remote, &refname);
-        self.handle_push_result(&id, push)?;
-
-        let cache_path = self
-            .root
-            .join(".lazyspec/cache")
-            .join(&type_def.name)
-            .join(format!("{}.md", id));
-        let relative = cache_path
-            .strip_prefix(&self.root)
-            .unwrap_or(&cache_path)
-            .to_path_buf();
-
-        Ok(CreatedDoc { path: relative, id })
+        bail!(
+            "could not allocate a cross-clone-safe number for {} after {} attempts: \
+             remote '{}' kept rejecting the claim ({})",
+            type_def.prefix,
+            Self::CREATE_MAX_RETRIES,
+            self.remote,
+            last_rejection
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        )
     }
 
     fn update(&mut self, type_def: &TypeDef, doc_id: &str, updates: &[(&str, &str)]) -> Result<()> {
@@ -1086,14 +1165,15 @@ mod tests {
 
     const SEED_CACHE: &str = "---\ntitle: Title\ntype: iteration\nstatus: draft\nauthor: alice\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\nbody\n";
 
-    // STORY-218 AC2: a successful create pushes the new ref to the remote.
+    // STORY-218 AC2/AC3: a successful create claims the new ref on the remote
+    // with an expect-absent push.
     #[test]
     fn create_pushes_ref_to_remote() {
         let tmp = TempDir::new().unwrap();
         let mock = MockGitRefClient::new()
             .with_list_result(Ok(vec![]))
             .with_create_ref_commit_result(Ok("abc123sha".to_string()))
-            .with_push_result(Ok(()));
+            .with_push_new_ref_result(Ok(()));
 
         let mut store = make_store(&tmp, mock);
         let td = test_type_def();
@@ -1101,10 +1181,143 @@ mod tests {
 
         let calls = store.git_mock().calls.borrow();
         assert!(
+            calls.iter().any(|c| c
+                == "push_new_ref:origin:refs/lazyspec/iteration/ITERATION-001:new_sha=abc123sha"),
+            "create should claim the new ref on the remote, got: {:?}",
+            *calls
+        );
+    }
+
+    // STORY-218 AC3: a concurrent clone claiming the same number makes the
+    // remote reject the push; create refetches and retries the next number.
+    #[test]
+    fn create_collision_retries_to_next_number() {
+        let tmp = TempDir::new().unwrap();
+        let mock = MockGitRefClient::new()
+            .with_list_result(Ok(vec![]))
+            .with_create_ref_commit_result(Ok("sha1".to_string()))
+            .with_push_new_ref_result(Err(anyhow::anyhow!("! [rejected] (stale info)")))
+            .with_list_result(Ok(vec![(
+                "refs/lazyspec/iteration/ITERATION-001".to_string(),
+                "winner".to_string(),
+            )]))
+            .with_create_ref_commit_result(Ok("sha2".to_string()))
+            .with_push_new_ref_result(Ok(()));
+
+        let mut store = make_store(&tmp, mock);
+        let td = test_type_def();
+        let result = store.create(&td, "Racy", "alice", "").unwrap();
+
+        assert_eq!(result.id, "ITERATION-002");
+
+        let calls = store.git_mock().calls.borrow();
+        assert!(
+            calls.iter().any(|c| c.starts_with("fetch_refs:")),
+            "a rejected claim should refetch before retrying, got: {:?}",
+            *calls
+        );
+        assert_eq!(
             calls
                 .iter()
-                .any(|c| c == "push_ref:origin:refs/lazyspec/iteration/ITERATION-001"),
-            "create should push the new ref, got: {:?}",
+                .filter(|c| c.starts_with("push_new_ref:"))
+                .count(),
+            2,
+            "should push twice: rejected then accepted, got: {:?}",
+            *calls
+        );
+        drop(calls);
+
+        let lock = CacheLock::load(tmp.path()).unwrap();
+        assert!(
+            lock.get("iteration/ITERATION-001").is_none(),
+            "the rejected number's lock entry should be cleaned up"
+        );
+        assert_eq!(lock.get("iteration/ITERATION-002"), Some("sha2"));
+    }
+
+    // STORY-218 AC3: if every retry keeps colliding, create fails rather than
+    // silently duplicating a number.
+    #[test]
+    fn create_exhausts_retries_and_errors() {
+        let tmp = TempDir::new().unwrap();
+        let mut mock = MockGitRefClient::new();
+        for _ in 0..GitRefStore::CREATE_MAX_RETRIES {
+            mock = mock
+                .with_list_result(Ok(vec![]))
+                .with_create_ref_commit_result(Ok("sha".to_string()))
+                .with_push_new_ref_result(Err(anyhow::anyhow!("! [rejected] (stale info)")));
+        }
+
+        let mut store = make_store(&tmp, mock);
+        let td = test_type_def();
+        let result = store.create(&td, "Always Losing", "alice", "");
+
+        assert!(result.is_err(), "exhausted retries must error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("after") && err.contains("attempts"),
+            "error should mention retry exhaustion, got: {}",
+            err
+        );
+
+        let calls = store.git_mock().calls.borrow();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| c.starts_with("push_new_ref:"))
+                .count(),
+            GitRefStore::CREATE_MAX_RETRIES as usize,
+            "should attempt exactly CREATE_MAX_RETRIES pushes, got: {:?}",
+            *calls
+        );
+    }
+
+    // STORY-218 AC3/AC5: an unreachable remote keeps the local write, warns,
+    // and does not retry (there is no competing claim to lose to).
+    #[test]
+    fn create_offline_falls_back_to_local_with_warning() {
+        let tmp = TempDir::new().unwrap();
+        let mock = MockGitRefClient::new()
+            .with_list_result(Ok(vec![]))
+            .with_create_ref_commit_result(Ok("localsha".to_string()))
+            .with_push_new_ref_result(Err(anyhow::anyhow!(
+                "fatal: Could not read from remote repository"
+            )));
+
+        let mut store = make_store(&tmp, mock);
+        let td = test_type_def();
+        let result = store
+            .create(&td, "Offline Feature", "alice", "body")
+            .unwrap();
+
+        assert_eq!(result.id, "ITERATION-001");
+
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        assert!(
+            find_cache_file(&cache_dir, "ITERATION-001").is_some(),
+            "offline create should keep the local cache file"
+        );
+
+        let lock = CacheLock::load(tmp.path()).unwrap();
+        assert_eq!(
+            lock.get("iteration/ITERATION-001"),
+            Some("localsha"),
+            "offline create should keep the local lock entry"
+        );
+
+        let calls = store.git_mock().calls.borrow();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("fetch_refs:")),
+            "an unreachable remote must not trigger a collision refetch, got: {:?}",
+            *calls
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| c.starts_with("push_new_ref:"))
+                .count(),
+            1,
+            "offline should not retry, got: {:?}",
             *calls
         );
     }

@@ -24,6 +24,7 @@ pub trait GitRefOps {
     fn delete_ref(&self, root: &Path, refname: &str) -> Result<()>;
     fn fetch_refs(&self, root: &Path, remote: &str, pattern: &str) -> Result<()>;
     fn push_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()>;
+    fn push_new_ref(&self, root: &Path, remote: &str, refname: &str, new_sha: &str) -> Result<()>;
     fn delete_remote_ref(
         &self,
         root: &Path,
@@ -232,6 +233,20 @@ impl GitRefOps for GitCli {
         Ok(())
     }
 
+    fn push_new_ref(&self, root: &Path, remote: &str, refname: &str, new_sha: &str) -> Result<()> {
+        // An empty lease expectation ("<refname>:") requires the ref to be
+        // absent on the remote, so a clone that concurrently claimed the same
+        // number gets its push rejected rather than silently overwritten.
+        let lease_arg = format!("--force-with-lease={}:", refname);
+        let refspec = format!("{}:{}", new_sha, refname);
+        let output = self.run_git(root, &["push", &lease_arg, remote, &refspec])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git push (new ref) failed: {}", stderr.trim());
+        }
+        Ok(())
+    }
+
     fn delete_remote_ref(
         &self,
         root: &Path,
@@ -319,6 +334,7 @@ pub mod test_support {
         pub delete_ref_results: RefCell<Vec<Result<()>>>,
         pub fetch_results: RefCell<Vec<Result<()>>>,
         pub push_results: RefCell<Vec<Result<()>>>,
+        pub push_new_ref_results: RefCell<Vec<Result<()>>>,
         pub delete_remote_results: RefCell<Vec<Result<()>>>,
         pub push_with_lease_results: RefCell<Vec<Result<()>>>,
         pub read_commit_timestamp_results: RefCell<Vec<Result<DateTime<Utc>>>>,
@@ -347,6 +363,7 @@ pub mod test_support {
                 delete_ref_results: RefCell::new(vec![]),
                 fetch_results: RefCell::new(vec![]),
                 push_results: RefCell::new(vec![]),
+                push_new_ref_results: RefCell::new(vec![]),
                 delete_remote_results: RefCell::new(vec![]),
                 push_with_lease_results: RefCell::new(vec![]),
                 read_commit_timestamp_results: RefCell::new(vec![]),
@@ -397,6 +414,11 @@ pub mod test_support {
 
         pub fn with_push_result(self, result: Result<()>) -> Self {
             self.push_results.borrow_mut().push(result);
+            self
+        }
+
+        pub fn with_push_new_ref_result(self, result: Result<()>) -> Self {
+            self.push_new_ref_results.borrow_mut().push(result);
             self
         }
 
@@ -507,6 +529,20 @@ pub mod test_support {
                 .borrow_mut()
                 .push(format!("push_ref:{}:{}", remote, refname));
             Self::pop_or_default(&self.push_results)
+        }
+
+        fn push_new_ref(
+            &self,
+            _root: &Path,
+            remote: &str,
+            refname: &str,
+            new_sha: &str,
+        ) -> Result<()> {
+            self.calls.borrow_mut().push(format!(
+                "push_new_ref:{}:{}:new_sha={}",
+                remote, refname, new_sha
+            ));
+            Self::pop_or_default(&self.push_new_ref_results)
         }
 
         fn delete_remote_ref(
