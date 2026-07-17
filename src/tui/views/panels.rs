@@ -12,10 +12,12 @@ use unicode_width::UnicodeWidthChar;
 
 use std::path::PathBuf;
 
+use std::collections::BTreeMap;
+
 use crate::engine::config::{
     Config, NumberingStrategy, ReservedFormat, Severity, StoreBackend, ValidationRule,
 };
-use crate::engine::document::{DocMeta, Status};
+use crate::engine::document::{AttrValue, DocMeta, Status};
 use crate::engine::git_status::GitFileStatus;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
@@ -258,43 +260,55 @@ const TITLE_MIN_COLS: u16 = 20;
 const STATUS_COLS: u16 = 12;
 const TAGS_COLS: u16 = 24;
 const PROV_MIN_COLS: u16 = 20;
+const ATTR_COLS: u16 = 16;
 
-fn doc_table_widths(area_width: u16) -> [Constraint; 7] {
+/// Desired width for a configured doc-table column and whether it flexes.
+/// Built-ins keep today's dimensions (status/tags fixed, provenance a flexible
+/// trailing min); any other id is a custom attribute rendered in a slim fixed
+/// column. The `bool` is `true` for `Constraint::Min`, `false` for a fixed
+/// `Constraint::Length` that collapses to 0 when the row is too narrow.
+fn doc_column_width_spec(col: &str) -> (u16, bool) {
+    match col {
+        "status" => (STATUS_COLS, false),
+        "tags" => (TAGS_COLS, false),
+        "provenance" => (PROV_MIN_COLS, true),
+        _ => (ATTR_COLS, false),
+    }
+}
+
+/// Table constraints for the doc list: fixed gutter/tree/ID/title leading
+/// columns followed by one constraint per configured column. Optional columns
+/// collapse to width 0 (right to left) when the row is too narrow, so the
+/// default `["status", "tags", "provenance"]` set reproduces the historical
+/// responsive layout exactly.
+fn doc_table_widths(area_width: u16, columns: &[String]) -> Vec<Constraint> {
     let inner = area_width.saturating_sub(2);
-    let essentials = GUTTER_COLS + TREE_COLS + ID_COLS + 6;
+    let spacing = (3 + columns.len()) as u16;
+    let essentials = GUTTER_COLS + TREE_COLS + ID_COLS + spacing;
     let mut remaining = inner
         .saturating_sub(essentials)
         .saturating_sub(TITLE_MIN_COLS);
-    let status = if remaining >= STATUS_COLS {
-        remaining -= STATUS_COLS;
-        STATUS_COLS
-    } else {
-        0
-    };
-    let tags = if remaining >= TAGS_COLS {
-        remaining -= TAGS_COLS;
-        TAGS_COLS
-    } else {
-        0
-    };
-    let prov_min = if remaining >= PROV_MIN_COLS {
-        PROV_MIN_COLS
-    } else {
-        0
-    };
-    [
+
+    let mut widths = vec![
         Constraint::Length(GUTTER_COLS),
         Constraint::Length(TREE_COLS),
         Constraint::Length(ID_COLS),
         Constraint::Min(TITLE_MIN_COLS),
-        Constraint::Length(status),
-        Constraint::Length(tags),
-        if prov_min > 0 {
-            Constraint::Min(prov_min)
+    ];
+    for col in columns {
+        let (desired, is_min) = doc_column_width_spec(col);
+        if remaining >= desired {
+            remaining -= desired;
+            widths.push(if is_min {
+                Constraint::Min(desired)
+            } else {
+                Constraint::Length(desired)
+            });
         } else {
-            Constraint::Length(0)
-        },
-    ]
+            widths.push(Constraint::Length(0));
+        }
+    }
+    widths
 }
 
 fn truncate_with_ellipsis(s: &str, max_cols: usize) -> String {
@@ -344,12 +358,12 @@ struct DocCellWidths {
 }
 
 impl DocCellWidths {
-    /// Resolve cell widths from the available table area width.
-    /// Mirrors `doc_table_widths(area_width)` ordering: gutter(1), tree(4),
-    /// id(18), title(Min 20), status, tags, provenance. Optional columns
-    /// (status, tags, provenance) collapse to width 0 at narrow widths so
-    /// soft-wrap measurement stays aligned with the responsive layout.
-    fn from_area_width(area_width: u16) -> Self {
+    /// Resolve wrap-measurement widths from the available table area width for
+    /// the configured `columns`. Mirrors `doc_table_widths` ordering: gutter(1),
+    /// tree(4), id(18), title(Min 20), then one rect per configured column.
+    /// `tags`/`provenance` widths are read from their configured positions (0 if
+    /// the column is absent); only these plus the title drive soft-wrap height.
+    fn from_area_width(area_width: u16, columns: &[String]) -> Self {
         // Mirror the layout ratatui's Table will compute for these
         // constraints so wrap measurements match the real cell rects.
         // `column_spacing` defaults to 1 between adjacent cells.
@@ -357,12 +371,21 @@ impl DocCellWidths {
         let rects = Layout::default()
             .direction(Direction::Horizontal)
             .spacing(1)
-            .constraints(doc_table_widths(area_width))
+            .constraints(doc_table_widths(area_width, columns))
             .split(Rect::new(0, 0, inner_width, 1));
+        let col_width = |id: &str| {
+            columns
+                .iter()
+                .position(|c| c == id)
+                .and_then(|i| rects.get(4 + i))
+                .map(|r| r.width)
+                .unwrap_or(0)
+                .max(1)
+        };
         DocCellWidths {
             title: rects[3].width.max(1),
-            tags: rects[5].width.max(1),
-            provenance: rects[6].width.max(1),
+            tags: col_width("tags"),
+            provenance: col_width("provenance"),
         }
     }
 }
@@ -509,6 +532,110 @@ fn pack_tags_to_width(tags: &[String], width: usize) -> (usize, usize) {
     (with_reserve, tags.len() - with_reserve)
 }
 
+/// Resolve a configured column id to its plain display text, shared by the graph
+/// table and the doc table's non-bespoke columns. `status` and `related` are
+/// built-ins; any other id is read as a custom attribute rendered via its typed
+/// value, or an empty string when the attribute is absent/undeclared on the
+/// row's type. Unknown id == custom attribute name matches the graph semantics.
+fn column_cell_text(
+    status: &Status,
+    related: &[String],
+    attributes: &BTreeMap<String, AttrValue>,
+    col: &str,
+) -> String {
+    match col {
+        "status" => status.to_string(),
+        "related" => related.join(", "),
+        attr => attributes
+            .get(attr)
+            .map(attr_value_display)
+            .unwrap_or_default(),
+    }
+}
+
+/// The single-line `status` cell: status text padded to the status column width,
+/// coloured by the resolved palette, with a red `[!]` suffix for stale docs.
+fn status_column_cell(
+    status: &Status,
+    dim: bool,
+    is_stale: bool,
+    type_name: &str,
+    colors: &StatusPalette,
+) -> Cell<'static> {
+    let dim_style = Style::default().fg(Color::DarkGray);
+    let status_style = if dim {
+        dim_style
+    } else {
+        Style::default().fg(status_color(colors, type_name, status))
+    };
+    if is_stale {
+        let stale_style = if dim {
+            dim_style
+        } else {
+            Style::default().fg(Color::Red)
+        };
+        Cell::new(Line::from(vec![
+            Span::styled(format!("{:<12}", status), status_style),
+            Span::styled(" [!]", stale_style),
+        ]))
+    } else {
+        Cell::new(Span::styled(format!("{:<12}", status), status_style))
+    }
+}
+
+/// The single-line `tags` cell: coloured `[tag]` tokens greedily packed into the
+/// tags column width with a dim ` +N` overflow indicator.
+fn tags_column_cell(tags: &[String], dim: bool) -> Cell<'static> {
+    let dim_style = Style::default().fg(Color::DarkGray);
+    let (take_count, dropped) = pack_tags_to_width(tags, TAGS_CELL_WIDTH);
+    let mut tag_spans: Vec<Span<'static>> = Vec::new();
+    for (idx, tag) in tags.iter().take(take_count).enumerate() {
+        if idx > 0 {
+            tag_spans.push(Span::raw(" "));
+        }
+        let tc = if dim { Color::DarkGray } else { tag_color(tag) };
+        tag_spans.push(Span::styled(format!("[{}]", tag), Style::default().fg(tc)));
+    }
+    if dropped > 0 {
+        tag_spans.push(Span::styled(format!(" +{}", dropped), dim_style));
+    }
+    Cell::new(Line::from(tag_spans))
+}
+
+/// One single-line doc-table cell for the configured column `col`. Built-ins
+/// carry their bespoke rendering; any other id resolves to its custom-attribute
+/// text (shared with the graph view via `column_cell_text`).
+#[allow(clippy::too_many_arguments)]
+fn doc_column_cell(
+    col: &str,
+    status: &Status,
+    tags: &[String],
+    provenance: &[String],
+    related: &[String],
+    attributes: &BTreeMap<String, AttrValue>,
+    dim: bool,
+    is_stale: bool,
+    type_name: &str,
+    colors: &StatusPalette,
+) -> Cell<'static> {
+    let dim_style = Style::default().fg(Color::DarkGray);
+    let normal_style = Style::default();
+    match col {
+        "status" => status_column_cell(status, dim, is_stale, type_name, colors),
+        "tags" => tags_column_cell(tags, dim),
+        "provenance" => {
+            let prov_text = provenance_cell_text(provenance, PROV_MIN_COLS as usize);
+            let prov_style = if dim { dim_style } else { normal_style };
+            Cell::new(Span::styled(prov_text, prov_style))
+        }
+        other => {
+            let text = column_cell_text(status, related, attributes, other);
+            let style = if dim { dim_style } else { normal_style };
+            Cell::new(Span::styled(text, style))
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn doc_row_cells(
     id: &str,
@@ -516,12 +643,15 @@ fn doc_row_cells(
     status: &Status,
     tags: &[String],
     provenance: &[String],
+    related: &[String],
+    attributes: &BTreeMap<String, AttrValue>,
     is_virtual: bool,
     dim: bool,
     is_gh: bool,
     is_stale: bool,
     type_name: &str,
     colors: &StatusPalette,
+    columns: &[String],
 ) -> Vec<Cell<'static>> {
     let dim_style = Style::default().fg(Color::DarkGray);
     let normal_style = Style::default();
@@ -550,44 +680,13 @@ fn doc_row_cells(
     let title_style = if dim { dim_style } else { normal_style };
     let title_cell = Cell::new(Span::styled(title_text, title_style));
 
-    let status_style = if dim {
-        dim_style
-    } else {
-        Style::default().fg(status_color(colors, type_name, status))
-    };
-    let status_cell = if is_stale {
-        let stale_style = if dim {
-            dim_style
-        } else {
-            Style::default().fg(Color::Red)
-        };
-        Cell::new(Line::from(vec![
-            Span::styled(format!("{:<12}", status), status_style),
-            Span::styled(" [!]", stale_style),
-        ]))
-    } else {
-        Cell::new(Span::styled(format!("{:<12}", status), status_style))
-    };
-
-    let (take_count, dropped) = pack_tags_to_width(tags, TAGS_CELL_WIDTH);
-    let mut tag_spans: Vec<Span<'static>> = Vec::new();
-    for (idx, tag) in tags.iter().take(take_count).enumerate() {
-        if idx > 0 {
-            tag_spans.push(Span::raw(" "));
-        }
-        let tc = if dim { Color::DarkGray } else { tag_color(tag) };
-        tag_spans.push(Span::styled(format!("[{}]", tag), Style::default().fg(tc)));
+    let mut cells = vec![id_cell, title_cell];
+    for col in columns {
+        cells.push(doc_column_cell(
+            col, status, tags, provenance, related, attributes, dim, is_stale, type_name, colors,
+        ));
     }
-    if dropped > 0 {
-        tag_spans.push(Span::styled(format!(" +{}", dropped), dim_style));
-    }
-    let tags_cell = Cell::new(Line::from(tag_spans));
-
-    let prov_text = provenance_cell_text(provenance, 20);
-    let prov_style = if dim { dim_style } else { normal_style };
-    let provenance_cell = Cell::new(Span::styled(prov_text, prov_style));
-
-    vec![id_cell, title_cell, status_cell, tags_cell, provenance_cell]
+    cells
 }
 
 fn wrap_to_lines(text: &str, width: u16, style: Style) -> Vec<Line<'static>> {
@@ -615,6 +714,8 @@ fn doc_row_cells_expanded(
     status: &Status,
     tags: &[String],
     provenance: &[String],
+    related: &[String],
+    attributes: &BTreeMap<String, AttrValue>,
     is_virtual: bool,
     dim: bool,
     is_gh: bool,
@@ -622,11 +723,13 @@ fn doc_row_cells_expanded(
     widths: DocCellWidths,
     type_name: &str,
     colors: &StatusPalette,
+    columns: &[String],
 ) -> Vec<Cell<'static>> {
-    // Reuse the single-line cell builder, then replace title and provenance
-    // cells with wrapped multi-line versions.
+    // Reuse the single-line cell builder, then replace title and the (configured)
+    // tags/provenance cells with wrapped multi-line versions.
     let mut cells = doc_row_cells(
-        id, title, status, tags, provenance, is_virtual, dim, is_gh, is_stale, type_name, colors,
+        id, title, status, tags, provenance, related, attributes, is_virtual, dim, is_gh, is_stale,
+        type_name, colors, columns,
     );
 
     let dim_style = Style::default().fg(Color::DarkGray);
@@ -642,14 +745,19 @@ fn doc_row_cells_expanded(
     let title_lines = wrap_to_lines(&title_text, widths.title, title_style);
     cells[1] = Cell::from(title_lines);
 
+    // Configured column cells begin at index 2 (after id and title).
     if !tags.is_empty() {
-        cells[3] = Cell::from(tag_wrapped_lines(tags, widths.tags, dim));
+        if let Some(pos) = columns.iter().position(|c| c == "tags") {
+            cells[2 + pos] = Cell::from(tag_wrapped_lines(tags, widths.tags, dim));
+        }
     }
 
     if !provenance.is_empty() {
-        let prov_text = provenance.join(", ");
-        let prov_lines = wrap_to_lines(&prov_text, widths.provenance, prov_style);
-        cells[4] = Cell::from(prov_lines);
+        if let Some(pos) = columns.iter().position(|c| c == "provenance") {
+            let prov_text = provenance.join(", ");
+            let prov_lines = wrap_to_lines(&prov_text, widths.provenance, prov_style);
+            cells[2 + pos] = Cell::from(prov_lines);
+        }
     }
 
     cells
@@ -689,15 +797,12 @@ fn doc_row_for_node(
 
     let gutter_cell = git_gutter_cell(app, &node.path);
 
-    let tags = app
-        .store
-        .get(&node.path)
-        .map(|doc| doc.tags.clone())
-        .unwrap_or_default();
-    let provenance = app
-        .store
-        .get(&node.path)
-        .map(|doc| doc.provenance.clone())
+    let doc = app.store.get(&node.path);
+    let tags = doc.map(|doc| doc.tags.clone()).unwrap_or_default();
+    let provenance = doc.map(|doc| doc.provenance.clone()).unwrap_or_default();
+    let attributes = doc.map(|doc| doc.attributes.clone()).unwrap_or_default();
+    let related: Vec<String> = doc
+        .map(|doc| doc.related.iter().map(|r| r.target.clone()).collect())
         .unwrap_or_default();
 
     let display_id = if node.has_duplicate_id {
@@ -708,7 +813,8 @@ fn doc_row_for_node(
 
     let (is_gh, is_stale) = check_doc_stale(&node.path, node.doc_type.as_str(), config);
 
-    let widths = DocCellWidths::from_area_width(area_width);
+    let columns = &config.ui.table.columns;
+    let widths = DocCellWidths::from_area_width(area_width, columns);
     let content_lines = row_content_lines(&node.title, &tags, &provenance, widths);
     let expanded = app.wrap_mode && index == app.selected_doc;
 
@@ -720,6 +826,8 @@ fn doc_row_for_node(
             &node.status,
             &tags,
             &provenance,
+            &related,
+            &attributes,
             node.is_virtual,
             dim,
             is_gh,
@@ -727,6 +835,7 @@ fn doc_row_for_node(
             widths,
             node.doc_type.as_str(),
             colors,
+            columns,
         ));
     } else {
         cells.extend(doc_row_cells(
@@ -735,12 +844,15 @@ fn doc_row_for_node(
             &node.status,
             &tags,
             &provenance,
+            &related,
+            &attributes,
             node.is_virtual,
             dim,
             is_gh,
             is_stale,
             node.doc_type.as_str(),
             colors,
+            columns,
         ));
     }
 
@@ -844,7 +956,8 @@ pub fn draw_doc_list(
         .map(|(i, node)| doc_row_for_node(app, node, i, dim, config, area_width, colors))
         .collect();
 
-    let widths = doc_table_widths(area.width);
+    let columns = &config.ui.table.columns;
+    let widths = doc_table_widths(area.width, columns);
 
     let highlight_style = if relations_focused {
         Style::default()
@@ -854,17 +967,19 @@ pub fn draw_doc_list(
         Style::default().add_modifier(Modifier::REVERSED)
     };
 
-    // Header mirrors the graph view: blank gutter + tree columns, then labels.
+    // Header mirrors the graph view: blank gutter + tree columns, the fixed
+    // ID/DOC labels, then one uppercased label per configured column.
     let hs = table_header_style();
-    let header = Row::new(vec![
+    let mut header_cells = vec![
         Cell::from(""),
         Cell::from(""),
         Cell::from("ID").style(hs),
         Cell::from("DOC").style(hs),
-        Cell::from("STATUS").style(hs),
-        Cell::from("TAGS").style(hs),
-        Cell::from("PROVENANCE").style(hs),
-    ]);
+    ];
+    for col in columns {
+        header_cells.push(Cell::from(col.to_uppercase()).style(hs));
+    }
+    let header = Row::new(header_cells);
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -1361,18 +1476,22 @@ pub fn render_filter_panel(
             let tree_cell = Cell::new("");
             let mut cells = vec![gutter_cell, tree_cell];
             let (is_gh, is_stale) = check_doc_stale(&doc.path, doc.doc_type.as_str(), config);
+            let related: Vec<String> = doc.related.iter().map(|r| r.target.clone()).collect();
             cells.extend(doc_row_cells(
                 &doc.id,
                 &doc.title,
                 &doc.status,
                 &doc.tags,
                 &doc.provenance,
+                &related,
+                &doc.attributes,
                 doc.virtual_doc,
                 dim,
                 is_gh,
                 is_stale,
                 doc.doc_type.as_str(),
                 colors,
+                &config.ui.table.columns,
             ));
             let style = if dim {
                 Style::default().fg(Color::DarkGray)
@@ -1383,7 +1502,7 @@ pub fn render_filter_panel(
         })
         .collect();
 
-    let widths = doc_table_widths(right[0].width);
+    let widths = doc_table_widths(right[0].width, &config.ui.table.columns);
 
     let border_style = if relations_focused {
         Style::default().fg(Color::DarkGray)
@@ -1702,26 +1821,8 @@ pub(super) fn graph_doc_cell_spans(
     spans
 }
 
-/// The rendered text of one configured graph column for a row. `status` and
-/// `related` are built-ins (`related` joins the row's cross-cutting neighbour
-/// ids with commas); any other id is read as an attribute and rendered via its
-/// typed value, or an empty string when the attribute is absent/undeclared on
-/// the row's type (AC2).
-fn graph_column_cell(node: &GraphNode, col: &str) -> String {
-    match col {
-        "status" => node.status.to_string(),
-        "related" => node.related.join(", "),
-        attr => node
-            .attributes
-            .get(attr)
-            .map(attr_value_display)
-            .unwrap_or_default(),
-    }
-}
-
 /// Render an [`AttrValue`] as a compact cell string.
-fn attr_value_display(v: &crate::engine::document::AttrValue) -> String {
-    use crate::engine::document::AttrValue;
+fn attr_value_display(v: &AttrValue) -> String {
     match v {
         AttrValue::Int(i) => i.to_string(),
         AttrValue::Float(f) => f.to_string(),
@@ -1813,7 +1914,7 @@ pub fn draw_graph(
 
             let mut cells = vec![gutter_cell, id_cell, doc_cell];
             for col in columns {
-                let text = graph_column_cell(node, col);
+                let text = column_cell_text(&node.status, &node.related, &node.attributes, col);
                 let style = if col == "status" {
                     Style::default().fg(status_color(colors, node.doc_type.as_str(), &node.status))
                 } else {
@@ -2695,7 +2796,20 @@ pub(super) fn doc_row_cells_for_test(
     colors: &StatusPalette,
 ) -> Vec<Cell<'static>> {
     doc_row_cells(
-        id, title, status, tags, provenance, is_virtual, dim, false, false, type_name, colors,
+        id,
+        title,
+        status,
+        tags,
+        provenance,
+        &[],
+        &BTreeMap::new(),
+        is_virtual,
+        dim,
+        false,
+        false,
+        type_name,
+        colors,
+        &crate::engine::config::default_table_columns(),
     )
 }
 
@@ -2714,7 +2828,20 @@ pub(super) fn doc_row_cells_gh_for_test(
     colors: &StatusPalette,
 ) -> Vec<Cell<'static>> {
     doc_row_cells(
-        id, title, status, tags, provenance, is_virtual, dim, is_gh, false, type_name, colors,
+        id,
+        title,
+        status,
+        tags,
+        provenance,
+        &[],
+        &BTreeMap::new(),
+        is_virtual,
+        dim,
+        is_gh,
+        false,
+        type_name,
+        colors,
+        &crate::engine::config::default_table_columns(),
     )
 }
 
@@ -2968,7 +3095,8 @@ mod tests {
     fn doc_cell_widths_resolves_title_from_area() {
         // Widths come from ratatui's Layout for the doc-table constraints.
         // Title (Fill) and provenance (Min 20) flex; tags is fixed at 24.
-        let widths = DocCellWidths::from_area_width(200);
+        let cols = crate::engine::config::default_table_columns();
+        let widths = DocCellWidths::from_area_width(200, &cols);
         assert!(widths.title > 0);
         assert!(widths.title < 200);
         assert_eq!(widths.tags, 24);
@@ -2977,14 +3105,16 @@ mod tests {
 
     #[test]
     fn doc_cell_widths_title_scales_with_area() {
-        let small = DocCellWidths::from_area_width(80);
-        let large = DocCellWidths::from_area_width(200);
+        let cols = crate::engine::config::default_table_columns();
+        let small = DocCellWidths::from_area_width(80, &cols);
+        let large = DocCellWidths::from_area_width(200, &cols);
         assert!(large.title > small.title);
     }
 
     #[test]
     fn doc_cell_widths_clamps_to_min_one_when_area_tiny() {
-        let widths = DocCellWidths::from_area_width(10);
+        let cols = crate::engine::config::default_table_columns();
+        let widths = DocCellWidths::from_area_width(10, &cols);
         assert!(widths.title >= 1);
         assert!(widths.tags >= 1);
         assert!(widths.provenance >= 1);
@@ -3098,6 +3228,8 @@ mod tests {
             &Status::new("draft"),
             &tags,
             &[],
+            &[],
+            &BTreeMap::new(),
             false,
             false,
             false,
@@ -3105,6 +3237,7 @@ mod tests {
             widths_for_test(80, 12, 20),
             "rfc",
             &StatusPalette::default(),
+            &crate::engine::config::default_table_columns(),
         );
         let dbg = format!("{:?}", cells[3]);
         for tag in &tags {
@@ -3119,6 +3252,92 @@ mod tests {
             !dbg.contains(" +"),
             "expanded tags cell should not show '+N' counter, got: {}",
             dbg
+        );
+    }
+
+    #[test]
+    fn doc_row_cells_renders_custom_attribute_column() {
+        let mut attributes = BTreeMap::new();
+        attributes.insert("priority".to_string(), AttrValue::Int(3));
+        let columns = vec!["status".to_string(), "priority".to_string()];
+        let cells = doc_row_cells(
+            "RFC-001",
+            "Title",
+            &Status::new("draft"),
+            &[],
+            &[],
+            &[],
+            &attributes,
+            false,
+            false,
+            false,
+            false,
+            "rfc",
+            &StatusPalette::default(),
+            &columns,
+        );
+        assert_eq!(
+            cells.len(),
+            4,
+            "id + title + one cell per configured column"
+        );
+        let dbg = format!("{:?}", cells[3]);
+        assert!(
+            dbg.contains('3'),
+            "custom attribute cell should render the value, got: {dbg}"
+        );
+    }
+
+    #[test]
+    fn doc_row_cells_absent_attribute_renders_empty() {
+        let columns = vec!["priority".to_string()];
+        let cells = doc_row_cells(
+            "RFC-001",
+            "Title",
+            &Status::new("draft"),
+            &[],
+            &[],
+            &[],
+            &BTreeMap::new(),
+            false,
+            false,
+            false,
+            false,
+            "rfc",
+            &StatusPalette::default(),
+            &columns,
+        );
+        let dbg = format!("{:?}", cells[2]);
+        assert!(
+            dbg.contains(r#"content: """#) || dbg.contains(r#""""#),
+            "absent attribute should render empty, got: {dbg}"
+        );
+    }
+
+    #[test]
+    fn doc_row_cells_renders_related_column() {
+        let related = vec!["STORY-001".to_string(), "STORY-002".to_string()];
+        let columns = vec!["related".to_string()];
+        let cells = doc_row_cells(
+            "RFC-001",
+            "Title",
+            &Status::new("draft"),
+            &[],
+            &[],
+            &related,
+            &BTreeMap::new(),
+            false,
+            false,
+            false,
+            false,
+            "rfc",
+            &StatusPalette::default(),
+            &columns,
+        );
+        let dbg = format!("{:?}", cells[2]);
+        assert!(
+            dbg.contains("STORY-001, STORY-002"),
+            "related column should join neighbour ids, got: {dbg}"
         );
     }
 
@@ -3139,7 +3358,10 @@ mod tests {
         Layout::default()
             .direction(Direction::Horizontal)
             .spacing(1)
-            .constraints(doc_table_widths(width))
+            .constraints(doc_table_widths(
+                width,
+                &crate::engine::config::default_table_columns(),
+            ))
             .split(Rect::new(0, 0, inner, 1))
             .iter()
             .map(|r| r.width)
@@ -3197,7 +3419,8 @@ mod tests {
         // `from_area_width` clamps tags/provenance to .max(1) so wrap-math
         // never divides by zero; mirror that here when comparing.
         let resolved = resolve_doc_widths(80);
-        let cells = DocCellWidths::from_area_width(80);
+        let cells =
+            DocCellWidths::from_area_width(80, &crate::engine::config::default_table_columns());
         assert_eq!(cells.title, resolved[3].max(1), "title agrees with split");
         assert_eq!(cells.tags, resolved[5].max(1), "tags agrees with split");
         assert_eq!(

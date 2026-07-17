@@ -1,7 +1,7 @@
 ---
 title: Configurable doc-table columns via tui.table
 type: iteration
-status: in-progress
+status: complete
 author: agent
 date: 2026-07-17
 tags: []

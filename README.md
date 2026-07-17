@@ -227,6 +227,19 @@ sort = "path"                     # default
 
 Both keys carry defaults, so a config without a `[tui.graph]` block still loads.
 
+The documents table's columns are configured under `[tui.table]` in `.lazyspec.toml`:
+
+```toml
+[tui.table]
+# Columns rendered to the right of the fixed ID and DOC columns. Each id is
+# either a built-in (`status`, `tags`, `provenance`, `related`) or a declared
+# attribute name (`[[types.attributes]]`). An attribute not declared/present
+# on a row's type renders as an empty cell.
+columns = ["status", "tags", "provenance"]   # default
+```
+
+The key carries a default matching today's layout, so a config without a `[tui.table]` block renders the table unchanged.
+
 Status colours (used in both the documents table and the Graph view's `status` column) are configured under `[tui.status_colors]` in `.lazyspec.toml`, mapping a status name to a colour:
 
 ```toml
