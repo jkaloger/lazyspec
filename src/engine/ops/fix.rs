@@ -3,6 +3,7 @@ mod config;
 mod conflicts;
 mod fields;
 mod relations;
+mod status;
 
 pub use cascade::cascade_references;
 pub use config::collect_config_fixes;
@@ -18,12 +19,25 @@ use crate::engine::store::Store;
 use conflicts::collect_conflict_fixes;
 use fields::collect_field_fixes;
 use relations::collect_relation_fixes;
+use status::collect_status_fixes;
 
 #[derive(Debug, Serialize)]
 pub struct FixOutput {
     pub field_fixes: Vec<FieldFixResult>,
     pub conflict_fixes: Vec<ConflictFixResult>,
     pub relation_fixes: Vec<RelationFixResult>,
+    pub status_fixes: Vec<StatusFixResult>,
+}
+
+/// Repair of a document whose frontmatter `status` is not one of its type's
+/// lifecycle states: rewritten to `lifecycle.states[0]` so it re-enters its
+/// lifecycle and gains legal transitions again.
+#[derive(Debug, Serialize)]
+pub struct StatusFixResult {
+    pub path: String,
+    pub old_status: String,
+    pub new_status: String,
+    pub written: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,9 +97,11 @@ pub fn plan_field_and_conflict_fixes(
     let field_fixes = collect_field_fixes(root, store, config, paths, dry_run, fs);
     let conflict_fixes = collect_conflict_fixes(root, store, config, dry_run, fs);
     let relation_fixes = collect_relation_fixes(root, store, dry_run, fs);
+    let status_fixes = collect_status_fixes(root, store, config, paths, dry_run, fs);
     FixOutput {
         field_fixes,
         conflict_fixes,
         relation_fixes,
+        status_fixes,
     }
 }

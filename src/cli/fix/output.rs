@@ -23,6 +23,20 @@ pub(super) fn format_human(output: &FixOutput, dry_run: bool) -> String {
         }
     }
 
+    for r in &output.status_fixes {
+        if dry_run {
+            result.push_str(&format!(
+                "Would fix status in {}: {} -> {}\n",
+                r.path, r.old_status, r.new_status
+            ));
+        } else {
+            result.push_str(&format!(
+                "Fixed status in {}: {} -> {}\n",
+                r.path, r.old_status, r.new_status
+            ));
+        }
+    }
+
     for r in &output.relation_fixes {
         for (old_target, new_target) in &r.replacements {
             if dry_run {

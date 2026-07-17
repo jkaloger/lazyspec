@@ -62,6 +62,22 @@ related: []
 "#
 }
 
+/// Overwrite a rendered template's frontmatter `status:` line with the type's
+/// first lifecycle state, so a document is born inside its lifecycle regardless
+/// of what the template hardcodes (BUG-002). Default lifecycles start at
+/// `draft`, so standard types are unaffected.
+fn seed_lifecycle_status(content: &str, status: &str) -> Result<String> {
+    let (yaml, body) = split_frontmatter(content)?;
+    let mut lines: Vec<String> = yaml.lines().map(|l| l.to_string()).collect();
+    if let Some(line) = lines
+        .iter_mut()
+        .find(|l| l.trim_start().starts_with("status:"))
+    {
+        *line = format!("status: {}", status);
+    }
+    Ok(compose_frontmatter(&lines.join("\n"), &body))
+}
+
 /// Create a document on the filesystem. Handles numbering, template resolution, and file writing.
 /// Returns the absolute path to the created file.
 #[allow(clippy::too_many_arguments)]
@@ -143,6 +159,12 @@ pub fn create_document(
         ("type", doc_type),
     ];
 
+    let seed_status = config
+        .type_by_name(doc_type)
+        .and_then(|t| t.lifecycle.states.first())
+        .map(|s| s.as_str())
+        .unwrap_or("draft");
+
     if subdirectory {
         let dir_name = filename.trim_end_matches(".md");
         let spec_dir = target_dir.join(dir_name);
@@ -150,6 +172,7 @@ pub fn create_document(
 
         let index_template = load_template(root, config, doc_type);
         let index_content = template::render_template(&index_template, &vars);
+        let index_content = seed_lifecycle_status(&index_content, seed_status)?;
         let index_path = spec_dir.join("index.md");
         fs::write(&index_path, index_content)?;
 
@@ -159,6 +182,7 @@ pub fn create_document(
     let target_path = target_dir.join(&filename);
     let template_content = load_template(root, config, doc_type);
     let content = template::render_template(&template_content, &vars);
+    let content = seed_lifecycle_status(&content, seed_status)?;
     fs::write(&target_path, content)?;
 
     Ok(target_path)
@@ -215,6 +239,13 @@ pub fn create_child_in_dir(
     ];
     let template_content = load_template(root, config, &child_type_def.name);
     let content = template::render_template(&template_content, &vars);
+    let seed_status = child_type_def
+        .lifecycle
+        .states
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("draft");
+    let content = seed_lifecycle_status(&content, seed_status)?;
 
     let target_path = target_dir.join(&filename);
     fs::write(&target_path, &content)?;
@@ -343,4 +374,149 @@ pub fn update_document_with_type(
     let new_content = compose_frontmatter(&new_yaml, &new_body);
     fs::write(&full_path, new_content)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::config::Lifecycle;
+    use tempfile::TempDir;
+
+    fn noop_progress(_: reservation::ReservationProgress) {}
+
+    fn status_line(path: &Path) -> String {
+        let content = fs::read_to_string(path).unwrap();
+        content
+            .lines()
+            .find(|l| l.trim_start().starts_with("status:"))
+            .expect("frontmatter has a status line")
+            .to_string()
+    }
+
+    fn config_with_bug_type(subdirectory: bool) -> Config {
+        let mut config = Config::default();
+        let mut bug = config.documents.types[0].clone();
+        bug.name = "bug".to_string();
+        bug.plural = "bugs".to_string();
+        bug.dir = "docs/bugs".to_string();
+        bug.prefix = "BUG".to_string();
+        bug.numbering = NumberingStrategy::Incremental;
+        bug.subdirectory = subdirectory;
+        bug.lifecycle = Lifecycle {
+            states: vec!["reported".into(), "triaged".into(), "fixed".into()],
+            edges: vec![],
+        };
+        config.documents.types.push(bug);
+        config
+    }
+
+    #[test]
+    fn create_seeds_first_lifecycle_state_for_non_draft_type() {
+        let tmp = TempDir::new().unwrap();
+        let config = config_with_bug_type(false);
+
+        let path = create_document(
+            tmp.path(),
+            &config,
+            "bug",
+            "docs/bugs",
+            "BUG",
+            "Broken thing",
+            "alice",
+            &NumberingStrategy::Incremental,
+            false,
+            noop_progress,
+        )
+        .unwrap();
+
+        assert_eq!(status_line(&path), "status: reported");
+    }
+
+    #[test]
+    fn create_seeds_first_lifecycle_state_in_subdirectory_index() {
+        let tmp = TempDir::new().unwrap();
+        let config = config_with_bug_type(true);
+
+        let path = create_document(
+            tmp.path(),
+            &config,
+            "bug",
+            "docs/bugs",
+            "BUG",
+            "Broken thing",
+            "alice",
+            &NumberingStrategy::Incremental,
+            true,
+            noop_progress,
+        )
+        .unwrap();
+
+        assert_eq!(status_line(&path), "status: reported");
+    }
+
+    #[test]
+    fn create_keeps_draft_for_default_lifecycle_type() {
+        let tmp = TempDir::new().unwrap();
+        let config = Config::default();
+
+        let path = create_document(
+            tmp.path(),
+            &config,
+            "iteration",
+            "docs/iterations",
+            "ITERATION",
+            "Some Work",
+            "bob",
+            &NumberingStrategy::Incremental,
+            false,
+            noop_progress,
+        )
+        .unwrap();
+
+        assert_eq!(status_line(&path), "status: draft");
+    }
+
+    #[test]
+    fn create_child_seeds_first_lifecycle_state() {
+        let tmp = TempDir::new().unwrap();
+        let config = config_with_bug_type(false);
+        let child_type = config.type_by_name("bug").unwrap().clone();
+        let target_dir = tmp.path().join("docs/stories/STORY-001/bugs");
+
+        let path = create_child_in_dir(
+            tmp.path(),
+            &config,
+            &child_type,
+            &target_dir,
+            "Child Bug",
+            "alice",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(status_line(&path), "status: reported");
+    }
+
+    #[test]
+    fn create_child_seed_survives_body_recompose() {
+        let tmp = TempDir::new().unwrap();
+        let config = config_with_bug_type(false);
+        let child_type = config.type_by_name("bug").unwrap().clone();
+        let target_dir = tmp.path().join("docs/stories/STORY-001/bugs");
+
+        let path = create_child_in_dir(
+            tmp.path(),
+            &config,
+            &child_type,
+            &target_dir,
+            "Child Bug",
+            "alice",
+            Some("some custom body"),
+        )
+        .unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(status_line(&path), "status: reported");
+        assert!(content.contains("some custom body"));
+    }
 }

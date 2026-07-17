@@ -266,6 +266,13 @@ fn format_fix_output(output: &crate::engine::ops::fix::FixOutput) -> String {
         result.push_str(&format!("Renamed {} -> {}\n", c.old_path, c.new_path));
     }
 
+    for r in &output.status_fixes {
+        result.push_str(&format!(
+            "Fixed status in {}: {} -> {}\n",
+            r.path, r.old_status, r.new_status
+        ));
+    }
+
     for r in &output.relation_fixes {
         for (old_target, new_target) in &r.replacements {
             result.push_str(&format!(
