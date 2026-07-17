@@ -1,7 +1,7 @@
 ---
 title: Push git-ref mutations to configured remote
 type: iteration
-status: accepted
+status: complete
 author: agent
 date: 2026-07-17
 tags: []

@@ -1,4 +1,3 @@
-use crate::engine::cache_lock::CacheLock;
 use crate::engine::clickup::{ClickupClient, ClickupHttpClient};
 use crate::engine::clickup_cache;
 use crate::engine::config::{Config, StoreBackend, CLICKUP_RELATIONS_FIELD};
@@ -6,7 +5,7 @@ use crate::engine::credentials::{CredentialStore, LayeredCredentialStore, Token}
 use crate::engine::document::{rewrite_frontmatter, DocMeta, RelationType};
 use crate::engine::fs::FileSystem;
 use crate::engine::gh::{GhCli, GhGraphql, GhIssueReader, GhIssueWriter, GhMilestoneApi, GqlVar};
-use crate::engine::git_ref::{GitCli, GitRefOps};
+use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::ops::resolve::{resolve_to_id, resolve_to_path};
@@ -715,35 +714,27 @@ fn push_if_git_ref_backed(root: &Path, doc_path: &Path, config: Option<&Config>)
         doc_path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
     );
 
-    let refname = format!("refs/lazyspec/{}/{}", type_name, doc_id);
-    let content = std::fs::read_to_string(root.join(doc_path))?;
-
-    let mut cache_lock = CacheLock::load(root)?;
-    let cache_key = format!("{}/{}", type_name, doc_id);
-    let old_sha = cache_lock
-        .get(&cache_key)
-        .ok_or_else(|| anyhow!("no cache.lock entry for '{}'", cache_key))?
-        .to_string();
-
-    let git = GitCli;
-    let new_sha = git.create_commit(root, &refname, &[("doc.md", &content)], Some(&old_sha))?;
-    git.update_ref(root, &refname, &new_sha, &old_sha)?;
-
-    cache_lock.set(&cache_key, &new_sha);
-    cache_lock.save(root)?;
-
-    Ok(())
+    let mut git_store = GitRefStore {
+        git: Box::new(crate::engine::git_ref::GitCli),
+        root: root.to_path_buf(),
+        remote: config.git_ref.remote.clone(),
+        config: config.clone(),
+        reserved_number: None,
+    };
+    git_store.recommit_cache(type_def, &doc_id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::cache_lock::CacheLock;
     use crate::engine::config::{Config, GithubConfig, NumberingStrategy, StoreBackend, TypeDef};
     use crate::engine::fs::RealFileSystem;
     use crate::engine::gh::{
         test_support::{MockGhClient, MockGhMilestoneClient},
         GhIssue, GhLabel,
     };
+    use crate::engine::git_ref::GitRefOps;
     use crate::engine::issue_map::IssueMap;
     use crate::engine::store::Store;
 

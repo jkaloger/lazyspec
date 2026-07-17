@@ -29,6 +29,28 @@ fn ensure_cache_gitignored(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// True when a push error is a live remote *rejecting* the update (the ref
+/// moved underneath us) rather than the remote being unreachable/offline.
+fn push_was_remote_rejection(err: &anyhow::Error) -> bool {
+    let s = err.to_string().to_lowercase();
+    [
+        "rejected",
+        "stale info",
+        "non-fast-forward",
+        "fetch first",
+        "failed to push some refs",
+    ]
+    .iter()
+    .any(|marker| s.contains(marker))
+}
+
+fn push_failure_warning(remote: &str, doc_id: &str, err: &anyhow::Error) -> String {
+    format!(
+        "warning: {doc_id} was saved locally but could not be pushed to remote '{remote}' \
+         ({err}). The change is safe in your local git refs; re-run once '{remote}' is reachable to sync."
+    )
+}
+
 pub struct GitRefStore {
     pub git: Box<dyn GitRefClient>,
     pub root: PathBuf,
@@ -95,6 +117,79 @@ impl GitRefStore {
             title, type_def.name, status, author, date, body_section
         )
     }
+
+    /// Turn a push Result into the mutation's outcome. A remote that *rejects*
+    /// the push (ref diverged) surfaces as the conflict error (STORY-218 AC2);
+    /// an unreachable/offline remote keeps the local write and warns (AC5).
+    fn handle_push_result(&self, doc_id: &str, result: Result<()>) -> Result<()> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(e) if push_was_remote_rejection(&e) => {
+                bail!(
+                    "conflict pushing {} to remote '{}': {}",
+                    doc_id,
+                    self.remote,
+                    e
+                )
+            }
+            Err(e) => {
+                eprintln!("{}", push_failure_warning(&self.remote, doc_id, &e));
+                Ok(())
+            }
+        }
+    }
+
+    /// Re-commit the current cache content into the ref blob.
+    ///
+    /// The CLI has already rewritten the cache file's `tags:` block (git-ref docs
+    /// materialize under `.lazyspec/cache/<type>/`), so callers pass no diff --
+    /// the cache already reflects the change. This persists that content into the
+    /// git ref, mirroring the tail of [`DocumentStore::update`]: create a child
+    /// commit on the recorded SHA, then CAS-swap the ref. The single-line
+    /// `key: value` mutation loop of `update` is deliberately not reused: it
+    /// cannot touch a `tags:` sequence block. Finally the new SHA is pushed with
+    /// a lease so the ref stays live on the remote.
+    pub(crate) fn recommit_cache(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()> {
+        let doc_key = Self::doc_key(&type_def.name, doc_id);
+        let lock = CacheLock::load(&self.root)?;
+        let old_sha = lock
+            .get(&doc_key)
+            .ok_or_else(|| anyhow::anyhow!("{} not found in cache.lock", doc_id))?
+            .to_string();
+
+        let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
+        let cache_path = find_cache_file(&cache_dir, doc_id)
+            .ok_or_else(|| anyhow::anyhow!("cache file not found for {}", doc_id))?;
+        let content = std::fs::read_to_string(&cache_path)?;
+
+        let refname = Self::refname(&type_def.name, doc_id);
+        let new_sha = self.git.create_commit(
+            &self.root,
+            &refname,
+            &[("doc.md", &content)],
+            Some(&old_sha),
+        )?;
+
+        if let Err(e) = self
+            .git
+            .update_ref(&self.root, &refname, &new_sha, &old_sha)
+        {
+            bail!("conflict updating {}: {}", doc_id, e);
+        }
+
+        let mut lock = CacheLock::load(&self.root)?;
+        lock.set(&doc_key, &new_sha);
+        lock.save(&self.root)?;
+
+        let push = self.git.push_ref_with_lease(
+            &self.root,
+            &self.remote,
+            &refname,
+            &new_sha,
+            Some(&old_sha),
+        );
+        self.handle_push_result(doc_id, push)
+    }
 }
 
 impl DocumentStore for GitRefStore {
@@ -142,6 +237,9 @@ impl DocumentStore for GitRefStore {
         let mut lock = CacheLock::load(&self.root)?;
         lock.set(&Self::doc_key(&type_def.name, &id), &sha);
         lock.save(&self.root)?;
+
+        let push = self.git.push_ref(&self.root, &self.remote, &refname);
+        self.handle_push_result(&id, push)?;
 
         let cache_path = self
             .root
@@ -221,7 +319,14 @@ impl DocumentStore for GitRefStore {
         lock.set(&doc_key, &new_sha);
         lock.save(&self.root)?;
 
-        Ok(())
+        let push = self.git.push_ref_with_lease(
+            &self.root,
+            &self.remote,
+            &refname,
+            &new_sha,
+            Some(&old_sha),
+        );
+        self.handle_push_result(doc_id, push)
     }
 
     fn set_provenance(
@@ -286,11 +391,24 @@ impl DocumentStore for GitRefStore {
         lock.set(&doc_key, &new_sha);
         lock.save(&self.root)?;
 
-        Ok(())
+        let push = self.git.push_ref_with_lease(
+            &self.root,
+            &self.remote,
+            &refname,
+            &new_sha,
+            Some(&old_sha),
+        );
+        self.handle_push_result(doc_id, push)
     }
 
     fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()> {
         let refname = Self::refname(&type_def.name, doc_id);
+        let doc_key = Self::doc_key(&type_def.name, doc_id);
+
+        let old_sha = CacheLock::load(&self.root)?
+            .get(&doc_key)
+            .map(|s| s.to_string());
+
         self.git.delete_ref(&self.root, &refname)?;
 
         let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
@@ -299,21 +417,15 @@ impl DocumentStore for GitRefStore {
         }
 
         let mut lock = CacheLock::load(&self.root)?;
-        lock.remove(&Self::doc_key(&type_def.name, doc_id));
+        lock.remove(&doc_key);
         lock.save(&self.root)?;
 
-        Ok(())
+        let push =
+            self.git
+                .delete_remote_ref(&self.root, &self.remote, &refname, old_sha.as_deref());
+        self.handle_push_result(doc_id, push)
     }
 
-    /// Re-commit the current cache content into the ref blob.
-    ///
-    /// The CLI has already rewritten the cache file's `tags:` block (git-ref docs
-    /// materialize under `.lazyspec/cache/<type>/`), so `add`/`remove` are unused
-    /// here -- the cache already reflects them. This persists that content into
-    /// the git ref, mirroring the tail of [`Self::update`]: create a child commit
-    /// on the recorded SHA, then CAS-swap the ref. The single-line `key: value`
-    /// mutation loop of `update` is deliberately not reused: it cannot touch a
-    /// `tags:` sequence block.
     fn sync_tags(
         &mut self,
         type_def: &TypeDef,
@@ -321,38 +433,7 @@ impl DocumentStore for GitRefStore {
         _add: &[String],
         _remove: &[String],
     ) -> Result<()> {
-        let doc_key = Self::doc_key(&type_def.name, doc_id);
-        let lock = CacheLock::load(&self.root)?;
-        let old_sha = lock
-            .get(&doc_key)
-            .ok_or_else(|| anyhow::anyhow!("{} not found in cache.lock", doc_id))?
-            .to_string();
-
-        let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
-        let cache_path = find_cache_file(&cache_dir, doc_id)
-            .ok_or_else(|| anyhow::anyhow!("cache file not found for {}", doc_id))?;
-        let content = std::fs::read_to_string(&cache_path)?;
-
-        let refname = Self::refname(&type_def.name, doc_id);
-        let new_sha = self.git.create_commit(
-            &self.root,
-            &refname,
-            &[("doc.md", &content)],
-            Some(&old_sha),
-        )?;
-
-        if let Err(e) = self
-            .git
-            .update_ref(&self.root, &refname, &new_sha, &old_sha)
-        {
-            bail!("conflict updating {}: {}", doc_id, e);
-        }
-
-        let mut lock = CacheLock::load(&self.root)?;
-        lock.set(&doc_key, &new_sha);
-        lock.save(&self.root)?;
-
-        Ok(())
+        self.recommit_cache(type_def, doc_id)
     }
 }
 
@@ -990,5 +1071,225 @@ mod tests {
 
         let lock = CacheLock::load(tmp.path()).unwrap();
         assert_eq!(lock.get("iteration/ITERATION-042"), Some("newsha"));
+    }
+
+    // Helper: seed a cache file + lock entry for an existing git-ref doc so a
+    // mutation has something to update/push.
+    fn seed_doc(tmp: &TempDir, cache_content: &str, sha: &str) {
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(cache_dir.join("ITERATION-042.md"), cache_content).unwrap();
+        let mut lock = CacheLock::default();
+        lock.set("iteration/ITERATION-042", sha);
+        lock.save(tmp.path()).unwrap();
+    }
+
+    const SEED_CACHE: &str = "---\ntitle: Title\ntype: iteration\nstatus: draft\nauthor: alice\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\nbody\n";
+
+    // STORY-218 AC2: a successful create pushes the new ref to the remote.
+    #[test]
+    fn create_pushes_ref_to_remote() {
+        let tmp = TempDir::new().unwrap();
+        let mock = MockGitRefClient::new()
+            .with_list_result(Ok(vec![]))
+            .with_create_ref_commit_result(Ok("abc123sha".to_string()))
+            .with_push_result(Ok(()));
+
+        let mut store = make_store(&tmp, mock);
+        let td = test_type_def();
+        store.create(&td, "My Feature", "alice", "body").unwrap();
+
+        let calls = store.git_mock().calls.borrow();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c == "push_ref:origin:refs/lazyspec/iteration/ITERATION-001"),
+            "create should push the new ref, got: {:?}",
+            *calls
+        );
+    }
+
+    // STORY-218 AC2: update pushes the new SHA with a lease on the old SHA.
+    #[test]
+    fn update_pushes_with_lease() {
+        let tmp = TempDir::new().unwrap();
+        seed_doc(&tmp, SEED_CACHE, "oldsha");
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha".to_string()))
+            .with_update_ref_result(Ok(()))
+            .with_push_with_lease_result(Ok(()));
+
+        let mut store = make_store(&tmp, mock);
+        store
+            .update(&test_type_def(), "ITERATION-042", &[("status", "accepted")])
+            .unwrap();
+
+        let calls = store.git_mock().calls.borrow();
+        assert!(
+            calls.iter().any(|c| c
+                == "push_ref_with_lease:origin:refs/lazyspec/iteration/ITERATION-042:new_sha=newsha:expected_old=Some(\"oldsha\")"),
+            "update should push with lease, got: {:?}",
+            *calls
+        );
+    }
+
+    // STORY-218 AC2: set_provenance pushes the new SHA with a lease.
+    #[test]
+    fn set_provenance_pushes_with_lease() {
+        let tmp = TempDir::new().unwrap();
+        seed_doc(&tmp, SEED_CACHE, "oldsha");
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha".to_string()))
+            .with_update_ref_result(Ok(()))
+            .with_push_with_lease_result(Ok(()));
+
+        let mut store = make_store(&tmp, mock);
+        store
+            .set_provenance(&test_type_def(), "ITERATION-042", &["A".to_string()])
+            .unwrap();
+
+        let calls = store.git_mock().calls.borrow();
+        assert!(
+            calls.iter().any(|c| c
+                == "push_ref_with_lease:origin:refs/lazyspec/iteration/ITERATION-042:new_sha=newsha:expected_old=Some(\"oldsha\")"),
+            "set_provenance should push with lease, got: {:?}",
+            *calls
+        );
+    }
+
+    // STORY-218 AC2: sync_tags (via recommit_cache) pushes with a lease.
+    #[test]
+    fn sync_tags_pushes_with_lease() {
+        let tmp = TempDir::new().unwrap();
+        seed_doc(&tmp, SEED_CACHE, "oldsha");
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha".to_string()))
+            .with_update_ref_result(Ok(()))
+            .with_push_with_lease_result(Ok(()));
+
+        let mut store = make_store(&tmp, mock);
+        store
+            .sync_tags(
+                &test_type_def(),
+                "ITERATION-042",
+                &["security".to_string()],
+                &[],
+            )
+            .unwrap();
+
+        let calls = store.git_mock().calls.borrow();
+        assert!(
+            calls.iter().any(|c| c
+                == "push_ref_with_lease:origin:refs/lazyspec/iteration/ITERATION-042:new_sha=newsha:expected_old=Some(\"oldsha\")"),
+            "sync_tags should push with lease, got: {:?}",
+            *calls
+        );
+    }
+
+    // STORY-218 AC2: delete pushes a remote deletion with a lease on old SHA.
+    #[test]
+    fn delete_pushes_delete_remote() {
+        let tmp = TempDir::new().unwrap();
+        seed_doc(&tmp, SEED_CACHE, "somesha");
+
+        let mock = MockGitRefClient::new()
+            .with_delete_ref_result(Ok(()))
+            .with_delete_remote_result(Ok(()));
+
+        let mut store = make_store(&tmp, mock);
+        store.delete(&test_type_def(), "ITERATION-042").unwrap();
+
+        let calls = store.git_mock().calls.borrow();
+        assert!(
+            calls.iter().any(|c| c
+                == "delete_remote_ref:origin:refs/lazyspec/iteration/ITERATION-042:expected_old=Some(\"somesha\")"),
+            "delete should push a remote deletion, got: {:?}",
+            *calls
+        );
+    }
+
+    // STORY-218 AC5 (F5): an unreachable remote keeps the local write and warns
+    // instead of failing the mutation.
+    #[test]
+    fn update_offline_keeps_local_write_and_warns() {
+        let tmp = TempDir::new().unwrap();
+        seed_doc(&tmp, SEED_CACHE, "oldsha");
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha".to_string()))
+            .with_update_ref_result(Ok(()))
+            .with_push_with_lease_result(Err(anyhow::anyhow!(
+                "fatal: Could not read from remote repository"
+            )));
+
+        let mut store = make_store(&tmp, mock);
+        let result = store.update(&test_type_def(), "ITERATION-042", &[("status", "accepted")]);
+        assert!(result.is_ok(), "offline push must not fail the mutation");
+
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        let updated = std::fs::read_to_string(cache_dir.join("ITERATION-042.md")).unwrap();
+        assert!(
+            updated.contains("status: accepted"),
+            "local write must be kept on offline push, got: {}",
+            updated
+        );
+
+        let lock = CacheLock::load(tmp.path()).unwrap();
+        assert_eq!(
+            lock.get("iteration/ITERATION-042"),
+            Some("newsha"),
+            "lock should advance even when the push is offline"
+        );
+
+        let calls = store.git_mock().calls.borrow();
+        assert!(
+            calls.iter().any(|c| c.starts_with("push_ref_with_lease:")),
+            "a push should still have been attempted, got: {:?}",
+            *calls
+        );
+    }
+
+    // STORY-218 AC2: a remote that *rejects* the push (ref diverged) surfaces as
+    // a conflict error.
+    #[test]
+    fn update_remote_rejection_is_conflict() {
+        let tmp = TempDir::new().unwrap();
+        seed_doc(&tmp, SEED_CACHE, "oldsha");
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha".to_string()))
+            .with_update_ref_result(Ok(()))
+            .with_push_with_lease_result(Err(anyhow::anyhow!(
+                "! [rejected] (stale info)\nerror: failed to push some refs"
+            )));
+
+        let mut store = make_store(&tmp, mock);
+        let result = store.update(&test_type_def(), "ITERATION-042", &[("status", "accepted")]);
+        assert!(result.is_err(), "a rejected push must fail the mutation");
+        assert!(
+            result.unwrap_err().to_string().contains("conflict"),
+            "rejection should surface as a conflict"
+        );
+    }
+
+    #[test]
+    fn push_was_remote_rejection_classifies_markers() {
+        assert!(push_was_remote_rejection(&anyhow::anyhow!(
+            "! [rejected] (stale info)"
+        )));
+        assert!(!push_was_remote_rejection(&anyhow::anyhow!(
+            "fatal: could not resolve host github.com"
+        )));
+    }
+
+    #[test]
+    fn push_failure_warning_mentions_remote_doc_and_retry() {
+        let msg = push_failure_warning("origin", "ITERATION-042", &anyhow::anyhow!("network down"));
+        assert!(msg.contains("origin"));
+        assert!(msg.contains("ITERATION-042"));
+        assert!(msg.contains("re-run"));
     }
 }
