@@ -154,7 +154,13 @@ impl GitRefStore {
         date: &str,
         body: &str,
     ) -> Result<String> {
-        let content = Self::build_markdown(type_def, title, author, date, "draft", body);
+        let seed_status = type_def
+            .lifecycle
+            .states
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or("draft");
+        let content = Self::build_markdown(type_def, title, author, date, seed_status, body);
         let refname = Self::refname(&type_def.name, id);
         let sha = self
             .git
@@ -164,7 +170,7 @@ impl GitRefStore {
             path: PathBuf::new(),
             title: title.to_string(),
             doc_type: DocType::new(&type_def.name),
-            status: Status::new("draft"),
+            status: Status::new(seed_status),
             author: author.to_string(),
             date: Local::now().date_naive(),
             tags: vec![],
@@ -642,6 +648,34 @@ mod tests {
         assert!(calls
             .iter()
             .any(|c| c.contains("create_ref_commit:refs/lazyspec/iteration/ITERATION-001")));
+    }
+
+    // BUG-002: a type whose lifecycle starts at a non-draft state must be born
+    // in that first state, not the hardcoded `draft`.
+    #[test]
+    fn test_git_ref_store_create_seeds_first_lifecycle_state() {
+        let tmp = TempDir::new().unwrap();
+        let mock = MockGitRefClient::new()
+            .with_list_result(Ok(vec![]))
+            .with_create_ref_commit_result(Ok("abc123sha".to_string()));
+
+        let mut store = make_store(&tmp, mock);
+        let mut td = test_type_def();
+        td.lifecycle = crate::engine::config::Lifecycle {
+            states: vec!["reported".into(), "triaged".into(), "fixed".into()],
+            edges: vec![],
+        };
+        let result = store.create(&td, "Broken", "alice", "body").unwrap();
+
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        let cache_file = find_cache_file(&cache_dir, &result.id).unwrap();
+        let content = std::fs::read_to_string(cache_file).unwrap();
+        assert!(
+            content.contains("status: reported"),
+            "doc should be seeded with the first lifecycle state, got: {}",
+            content
+        );
+        assert!(!content.contains("status: draft"));
     }
 
     #[test]

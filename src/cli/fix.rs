@@ -54,7 +54,8 @@ pub fn run(
     let output = plan_field_and_conflict_fixes(root, store, config, paths, dry_run, fs);
     let has_fixes = !output.field_fixes.iter().all(|r| r.fields_added.is_empty())
         || !output.conflict_fixes.is_empty()
-        || !output.relation_fixes.is_empty();
+        || !output.relation_fixes.is_empty()
+        || !output.status_fixes.is_empty();
 
     if json {
         let json_str = serde_json::to_string_pretty(&output).unwrap();
