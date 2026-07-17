@@ -6,12 +6,15 @@ use crate::engine::document::DocMeta;
 use crate::engine::fs::FileSystem;
 use crate::engine::gh::GhIssueReader;
 use crate::engine::github::resolve_repo;
+use crate::engine::github_url::resolve_repo_coords;
 use crate::engine::issue_map::IssueMap;
+use crate::engine::ops::open::{resolve_open_target, OpenTarget};
 use crate::engine::status_colors::StatusColors;
 use crate::engine::store::{ResolveError, Store};
 use anyhow::Result;
 use console::colors_enabled;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Read-only fetch of a document's GitHub issue comment thread as JSON values.
 ///
@@ -205,6 +208,105 @@ pub fn run_json(
     Ok(serde_json::to_string_pretty(&json)?)
 }
 
+/// `show <id> --open`: resolve where the document opens (a web URL, else the
+/// configured viewer on its file) and act on it. With `json`, print the resolved
+/// target and spawn nothing; otherwise launch the browser or viewer.
+pub fn run_open(store: &Store, id: &str, config: &Config, root: &Path, json: bool) -> Result<()> {
+    let doc = match resolve_shorthand_or_path(store, id) {
+        Ok(doc) => doc,
+        Err(ResolveError::Ambiguous { id, matches }) => {
+            eprintln!("Ambiguous ID '{}' matches multiple documents:", id);
+            for m in &matches {
+                eprintln!("  {}", m.display());
+            }
+            eprintln!("Specify the full path to open a specific document.");
+            return Ok(());
+        }
+        Err(ResolveError::NotFound(id)) => {
+            return Err(anyhow::anyhow!("document not found: {}", id));
+        }
+    };
+
+    let coords = resolve_repo_coords(config, root);
+    let issue_map = IssueMap::load(root).unwrap_or_default();
+    let target = resolve_open_target(doc, coords.as_ref(), config, &issue_map);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&open_target_json(&target))?
+        );
+        return Ok(());
+    }
+
+    spawn_open(plan_open(target, config.ui.viewer.as_deref(), root)?)
+}
+
+fn open_target_json(target: &OpenTarget) -> serde_json::Value {
+    match target {
+        OpenTarget::Url(url) => serde_json::json!({ "target": "url", "url": url }),
+        OpenTarget::File(path) => {
+            serde_json::json!({ "target": "file", "path": path.to_string_lossy() })
+        }
+    }
+}
+
+/// What `--open` will spawn: a browser on a resolved URL, or a viewer on a local
+/// file. Separated from spawning so the resolution/error logic stays testable.
+#[derive(Debug)]
+enum OpenAction {
+    Browser(String),
+    Viewer { command: String, path: PathBuf },
+}
+
+/// Decide the open action for a resolved target: a [`OpenTarget::Url`] opens in
+/// the browser; a [`OpenTarget::File`] opens in the configured `viewer` (its
+/// path joined onto `root`). A file target with no viewer configured is a clear
+/// error, not a silent no-op.
+fn plan_open(target: OpenTarget, viewer: Option<&str>, root: &Path) -> Result<OpenAction> {
+    match target {
+        OpenTarget::Url(url) => Ok(OpenAction::Browser(url)),
+        OpenTarget::File(path) => match viewer {
+            Some(command) => Ok(OpenAction::Viewer {
+                command: command.to_string(),
+                path: root.join(path),
+            }),
+            None => Err(anyhow::anyhow!(
+                "cannot open {}: it has no web URL and no viewer is configured. \
+                 Set `viewer` under [tui] in .lazyspec.toml (e.g. viewer = \"glow\").",
+                path.display()
+            )),
+        },
+    }
+}
+
+fn browser_opener() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    }
+}
+
+fn spawn_open(action: OpenAction) -> Result<()> {
+    match action {
+        OpenAction::Browser(url) => {
+            let opener = browser_opener();
+            Command::new(opener)
+                .arg(&url)
+                .status()
+                .map_err(|e| anyhow::anyhow!("failed to launch browser via '{}': {}", opener, e))?;
+        }
+        OpenAction::Viewer { command, path } => {
+            Command::new(&command)
+                .arg(&path)
+                .status()
+                .map_err(|e| anyhow::anyhow!("failed to launch viewer '{}': {}", command, e))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +409,66 @@ mod tests {
         let out = fetch_comments_for_doc(&doc("ghtype"), &config, tmp.path(), &gh);
         assert!(out.is_empty());
         assert_eq!(gh.comments_call_count.get(), 1);
+    }
+}
+
+#[cfg(test)]
+mod open_tests {
+    use super::*;
+
+    #[test]
+    fn json_shape_for_url_target() {
+        let json = open_target_json(&OpenTarget::Url("https://example.com/x".to_string()));
+        assert_eq!(json["target"], "url");
+        assert_eq!(json["url"], "https://example.com/x");
+    }
+
+    #[test]
+    fn json_shape_for_file_target() {
+        let json = open_target_json(&OpenTarget::File(PathBuf::from("docs/rfcs/RFC-1.md")));
+        assert_eq!(json["target"], "file");
+        assert_eq!(json["path"], "docs/rfcs/RFC-1.md");
+    }
+
+    #[test]
+    fn url_target_plans_a_browser_open() {
+        let action = plan_open(
+            OpenTarget::Url("https://example.com/x".to_string()),
+            None,
+            Path::new("/repo"),
+        )
+        .unwrap();
+        assert!(matches!(action, OpenAction::Browser(url) if url == "https://example.com/x"));
+    }
+
+    #[test]
+    fn file_target_with_viewer_plans_a_viewer_open_on_the_joined_path() {
+        let action = plan_open(
+            OpenTarget::File(PathBuf::from("docs/rfcs/RFC-1.md")),
+            Some("glow"),
+            Path::new("/repo"),
+        )
+        .unwrap();
+        match action {
+            OpenAction::Viewer { command, path } => {
+                assert_eq!(command, "glow");
+                assert_eq!(path, PathBuf::from("/repo/docs/rfcs/RFC-1.md"));
+            }
+            OpenAction::Browser(_) => panic!("expected a viewer action"),
+        }
+    }
+
+    #[test]
+    fn file_target_without_viewer_is_a_clear_error() {
+        let err = plan_open(
+            OpenTarget::File(PathBuf::from("docs/rfcs/RFC-1.md")),
+            None,
+            Path::new("/repo"),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no viewer is configured"), "got: {msg}");
+        assert!(msg.contains("viewer"), "got: {msg}");
     }
 }
 

@@ -1,7 +1,7 @@
 ---
 title: Open-target resolution and show --open
 type: iteration
-status: accepted
+status: complete
 author: agent
 date: 2026-07-17
 tags: []
