@@ -1,7 +1,12 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
+
+// Wall-clock cap for the network `git fetch` in the sync path, so a slow or
+// auth-prompting remote can't wedge the background poll thread (BUG-001).
+const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub trait GitRefOps {
     fn resolve_ref(&self, root: &Path, refname: &str) -> Result<Option<String>>;
@@ -216,7 +221,15 @@ impl GitRefOps for GitCli {
 
     fn fetch_refs(&self, root: &Path, remote: &str, pattern: &str) -> Result<()> {
         let refspec = format!("+{}:{}", pattern, pattern);
-        let output = self.run_git(root, &["fetch", "--prune", remote, &refspec])?;
+        // Build the command directly (not via `run_git`) so the fetch runs under a
+        // timeout and with credential prompts disabled -- a prompting remote would
+        // otherwise block forever on a headless poll thread.
+        let mut cmd = Command::new("git");
+        cmd.args(["fetch", "--prune", remote, &refspec])
+            .current_dir(root)
+            .env("GIT_TERMINAL_PROMPT", "0");
+        let output = crate::engine::subprocess::output_with_timeout(cmd, FETCH_TIMEOUT)
+            .context("git fetch")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("git fetch failed: {}", stderr.trim());

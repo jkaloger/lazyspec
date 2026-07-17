@@ -291,20 +291,31 @@ fn update_tags(root: &Path, relative: &Path, tags: &[String], fs: &dyn FileSyste
 
 pub fn resolve_editor_from(editor: Option<&str>, visual: Option<&str>) -> String {
     if let Some(e) = editor {
-        if !e.is_empty() {
+        if !e.trim().is_empty() {
             return e.to_string();
         }
     }
     if let Some(v) = visual {
-        if !v.is_empty() {
+        if !v.trim().is_empty() {
             return v.to_string();
         }
     }
     "vi".to_string()
 }
 
-pub fn resolve_editor() -> String {
-    resolve_editor_from(
+/// Resolve `$EDITOR`/`$VISUAL` into a command vector, splitting on whitespace so
+/// `EDITOR="code --wait"` spawns `code` with `--wait` rather than a binary named
+/// literally `code --wait`. Mirrors the viewer split in [`App::plan_open`]. The
+/// fallback (`vi`) guarantees a non-empty result.
+pub fn resolve_editor_command_from(editor: Option<&str>, visual: Option<&str>) -> Vec<String> {
+    resolve_editor_from(editor, visual)
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
+}
+
+pub fn resolve_editor_command() -> Vec<String> {
+    resolve_editor_command_from(
         std::env::var("EDITOR").ok().as_deref(),
         std::env::var("VISUAL").ok().as_deref(),
     )
@@ -8717,6 +8728,30 @@ sort = "estimate"
             }
             other => panic!("expected Viewer, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn resolve_editor_command_splits_args_on_whitespace() {
+        assert_eq!(
+            resolve_editor_command_from(Some("code --wait"), None),
+            vec!["code".to_string(), "--wait".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_editor_command_falls_back_to_vi_when_unset() {
+        assert_eq!(
+            resolve_editor_command_from(None, None),
+            vec!["vi".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_editor_command_falls_back_to_vi_when_whitespace_only() {
+        assert_eq!(
+            resolve_editor_command_from(Some("  "), Some(" ")),
+            vec!["vi".to_string()]
+        );
     }
 
     #[test]
