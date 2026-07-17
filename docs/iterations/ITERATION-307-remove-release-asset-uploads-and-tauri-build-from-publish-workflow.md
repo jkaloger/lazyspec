@@ -1,7 +1,7 @@
 ---
 title: Remove release asset uploads and tauri build from publish workflow
 type: iteration
-status: accepted
+status: complete
 author: agent
 date: 2026-07-17
 tags: []

@@ -285,17 +285,9 @@ branch = "main"     # optional; defaults to the current branch
 
 When owner/repo can't be resolved (no `origin` remote and no override), deep-links are omitted and `serve` logs a single startup warning rather than rendering broken links.
 
-### Native macOS app
+### Native macOS app (deprecated)
 
-The same read-only view ships as a native macOS app behind the `app` cargo feature. It renders through an in-process Tauri bridge, so it serves the same document view as `serve` without binding a port. Build the bundle with:
-
-```sh
-cargo tauri build --features app
-```
-
-The resulting bundle is written to `target/release/bundle/macos/lazyspec.app`.
-
-This build is unsigned. On first launch macOS Gatekeeper will refuse a plain double-click, so open it once via the context menu: right-click (or Control-click) `lazyspec.app`, choose **Open**, then confirm the prompt. macOS remembers the exception, so subsequent double-clicks open it directly.
+The native macOS app (the Tauri build behind the `app` cargo feature) is deprecated and is no longer built or shipped by CI. The `app` cargo feature and its source remain in-tree but are unsupported and unbuilt in releases. crates.io (`cargo install`) is the supported install and artifact channel.
 
 <details>
 <summary><h3>CLI</h3></summary>
