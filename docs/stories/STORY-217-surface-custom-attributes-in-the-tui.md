@@ -1,7 +1,7 @@
 ---
 title: "Surface custom attributes in the TUI"
 type: story
-status: accepted
+status: in-progress
 author: "agent"
 date: 2026-07-17
 tags: []
