@@ -4,8 +4,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::process::Command;
+use std::time::Duration;
 
 use crate::engine::document::AttrValue;
+
+// Wall-clock cap for a single `gh` invocation: every call is a network round-trip
+// that must not hang the caller indefinitely (BUG-001).
+const GH_TIMEOUT: Duration = Duration::from_secs(30);
 
 // --- Data types ---
 
@@ -765,14 +770,19 @@ impl GhCli {
     }
 
     fn run_gh(&self, args: &[&str]) -> Result<std::process::Output> {
-        let output = Command::new("gh").args(args).output();
+        // Every gh call is a network round-trip; cap it so a hung remote can't
+        // wedge the caller (e.g. the background poll thread -- BUG-001).
+        let mut cmd = Command::new("gh");
+        cmd.args(args);
 
-        match output {
+        match crate::engine::subprocess::output_with_timeout(cmd, GH_TIMEOUT) {
             Ok(o) => Ok(o),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                bail!(GhError::NotInstalled)
-            }
-            Err(e) => bail!("failed to execute gh: {}", e),
+            Err(e) => match e.downcast_ref::<std::io::Error>() {
+                Some(io) if io.kind() == std::io::ErrorKind::NotFound => {
+                    bail!(GhError::NotInstalled)
+                }
+                _ => bail!("failed to execute gh: {}", e),
+            },
         }
     }
 

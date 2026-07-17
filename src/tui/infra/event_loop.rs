@@ -33,7 +33,7 @@ use std::io;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 // Discard any pending crossterm events buffered in stdin. Called after a child
@@ -50,15 +50,16 @@ fn run_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     disable_raw_mode()?;
 
-    let editor = crate::tui::state::resolve_editor();
-    let status = Command::new(&editor).arg(path).status();
+    let command = crate::tui::state::resolve_editor_command();
+    let (program, args) = command.split_first().expect("editor command is non-empty");
+    let status = Command::new(program).args(args).arg(path).status();
 
     enable_raw_mode()?;
     execute!(terminal.backend_mut(), EnterAlternateScreen)?;
     terminal.clear()?;
 
     if let Err(e) = status {
-        eprintln!("Failed to launch editor '{}': {}", editor, e);
+        eprintln!("Failed to launch editor '{}': {}", program, e);
     }
 
     Ok(())
@@ -83,6 +84,25 @@ fn run_viewer(
         eprintln!("Failed to launch viewer '{}': {}", program, e);
     }
     Ok(())
+}
+
+// Reload the shared store's issue map from disk without ever waiting on the
+// lock. The background poll holds this same mutex across the whole network sync
+// (`poll_sync`), so a blocking `lock()` on the UI thread would stall the loop
+// until the sync finished -- the root of BUG-001. `try_lock` returns at once; on
+// contention we return `false` and the caller keeps `gh_issue_map_stale` set to
+// retry next tick. A poisoned lock is recovered: `issue_map` is plain data with
+// no invariant to protect.
+fn try_refresh_issue_map(shared_store: &Arc<Mutex<GithubIssuesStore>>, root: &Path) -> bool {
+    let mut guard = match shared_store.try_lock() {
+        Ok(g) => g,
+        Err(TryLockError::WouldBlock) => return false,
+        Err(TryLockError::Poisoned(e)) => e.into_inner(),
+    };
+    if let Ok(map) = IssueMap::load(root) {
+        guard.issue_map = map;
+    }
+    true
 }
 
 fn try_push_gh_edit(
@@ -769,14 +789,14 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         }
 
         if app.gh_issue_map_stale {
-            if let Some(ref shared_store) = shared_gh_store {
-                if let Ok(mut guard) = shared_store.lock() {
-                    if let Ok(map) = IssueMap::load(&root) {
-                        guard.issue_map = map;
+            match shared_gh_store {
+                Some(ref shared_store) => {
+                    if try_refresh_issue_map(shared_store, &root) {
+                        app.gh_issue_map_stale = false;
                     }
                 }
+                None => app.gh_issue_map_stale = false,
             }
-            app.gh_issue_map_stale = false;
         }
 
         if let Some(deadline) = next_poll {
@@ -1420,6 +1440,56 @@ mod tests {
             guard.issue_map.get("STORY-42").map(|e| e.node_id.as_str()),
             Some("I_node42"),
             "poll must write the fetched mapping into the shared store's issue_map"
+        );
+    }
+
+    // --- ITERATION-311: non-blocking store lock on the UI thread (BUG-001) ---
+
+    // Regression: the UI-thread issue-map refresh must never wait on the store
+    // mutex, so pressing `e` (open editor) stays instant even while the poll
+    // holds the lock across a slow network sync. Another thread grabs the lock
+    // and holds it; the refresh must return `false` at once, then succeed once
+    // the lock is free.
+    #[test]
+    fn issue_map_refresh_is_nonblocking_while_store_locked() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        let mut config = Config::default();
+        config.documents.types = vec![TypeDef::test_fixture("story", StoreBackend::GithubIssues)];
+
+        let store = Arc::new(Mutex::new(GithubIssuesStore {
+            client: Box::new(GhCli::new()),
+            root: root.to_path_buf(),
+            repo: "owner/repo".to_string(),
+            config,
+            issue_map: IssueMap::load(root).unwrap(),
+            issue_cache: IssueCache::new(root),
+        }));
+
+        // A stand-in for the poll thread: hold the lock until told to release,
+        // signalling once it is actually held so the assertion below is not racy.
+        let held = Arc::clone(&store);
+        let (locked_tx, locked_rx) = crossbeam_channel::unbounded::<()>();
+        let (release_tx, release_rx) = crossbeam_channel::unbounded::<()>();
+        let handle = std::thread::spawn(move || {
+            let _guard = held.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        locked_rx.recv().unwrap();
+
+        assert!(
+            !try_refresh_issue_map(&store, root),
+            "refresh must not block while another thread holds the store lock"
+        );
+
+        release_tx.send(()).unwrap();
+        handle.join().unwrap();
+
+        assert!(
+            try_refresh_issue_map(&store, root),
+            "refresh must acquire the lock and succeed once it is free"
         );
     }
 

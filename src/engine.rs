@@ -36,6 +36,7 @@ pub mod skills;
 pub mod status_colors;
 pub mod store;
 pub mod store_dispatch;
+pub mod subprocess;
 pub mod symbols;
 pub mod sync;
 pub mod task_map;

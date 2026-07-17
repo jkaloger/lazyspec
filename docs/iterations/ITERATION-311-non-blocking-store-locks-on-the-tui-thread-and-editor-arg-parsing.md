@@ -1,7 +1,7 @@
 ---
 title: Non-blocking store locks on the TUI thread and editor arg parsing
 type: iteration
-status: accepted
+status: complete
 author: agent
 date: 2026-07-17
 tags: []

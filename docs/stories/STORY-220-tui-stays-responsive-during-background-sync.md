@@ -1,7 +1,7 @@
 ---
 title: TUI stays responsive during background sync
 type: story
-status: accepted
+status: in-progress
 author: agent
 date: 2026-07-17
 tags: []
