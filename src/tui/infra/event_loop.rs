@@ -145,7 +145,7 @@ fn try_push_git_ref_edit(root: &Path, relative: &Path, config: &Config) -> Resul
         reserved_number: None,
     };
     git_store
-        .update(type_def, &doc_id, &[])
+        .recommit_cache(type_def, &doc_id)
         .map_err(|e| e.to_string())
 }
 

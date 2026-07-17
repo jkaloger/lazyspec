@@ -891,9 +891,14 @@ GH_TOKEN="$(gh auth token)" lazyspec fetch
 (`github-issues`, `github-milestones`, `git-ref`, `clickup-tasks`) in one engine
 pass; `--type <name>` narrows it to a single type.
 
-Note that `git-ref` stores are local-write: document writes land in the local
-ref only, and syncing with the remote happens via `lazyspec fetch` -- there is
-no automatic remote push.
+Note that `git-ref` stores are live: every mutation pushes to the configured
+remote (the `[git-ref]` `remote` setting, default `origin`) rather than staying
+local-only. Updates push with `--force-with-lease`, so a remote ref that has
+diverged is rejected as a conflict (mirroring the local optimistic-lock
+conflict); creates push the new ref, and deletes remove the remote ref. If the
+remote is unreachable the mutation still succeeds locally -- the change is safe
+in your local git refs -- and a `warning:` is printed with a hint to re-run once
+the remote is reachable; `lazyspec fetch` still pulls remote changes down.
 
 The run is **continue-then-exit-non-zero**: if one type's fetch fails, the
 remaining types still refresh, everything that succeeded is still written to the
