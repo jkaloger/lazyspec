@@ -1,7 +1,7 @@
 ---
 title: Assert ClickUp custom task type on clickup-tasks types
 type: story
-status: in-progress
+status: complete
 author: unknown
 date: 2026-07-10
 tags: []

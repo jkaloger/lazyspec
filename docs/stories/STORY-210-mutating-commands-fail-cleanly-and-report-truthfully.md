@@ -1,7 +1,7 @@
 ---
 title: Mutating commands fail cleanly and report truthfully
 type: story
-status: in-progress
+status: complete
 author: agent
 date: 2026-07-16
 tags: []
