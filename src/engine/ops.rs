@@ -5,5 +5,6 @@ pub mod create;
 pub mod delete;
 pub mod fix;
 pub mod link;
+pub mod open;
 pub mod resolve;
 pub mod update;

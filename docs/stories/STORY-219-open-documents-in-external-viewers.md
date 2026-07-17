@@ -1,7 +1,7 @@
 ---
 title: "Open documents in external viewers"
 type: story
-status: accepted
+status: in-progress
 author: "agent"
 date: 2026-07-17
 tags: []

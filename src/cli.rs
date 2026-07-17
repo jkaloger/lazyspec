@@ -122,6 +122,11 @@ pub enum Commands {
         /// Maximum lines per expanded @ref block
         #[arg(long, default_value_t = 25)]
         max_ref_lines: usize,
+        /// Open the document externally: a browser on its web URL, else the
+        /// `[tui] viewer` command on its file. With --json, print the resolved
+        /// target and spawn nothing.
+        #[arg(long)]
+        open: bool,
     },
     /// Update document frontmatter
     Update {

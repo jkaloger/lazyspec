@@ -253,6 +253,15 @@ A colour is either a named ANSI colour (case-insensitive: `black`, `red`, `green
 
 A status's colour resolves in this order: this `[tui.status_colors]` config, then a synced ClickUp status-colour cache, then built-in defaults for the standard statuses (`draft`, `review`, `accepted`, `in-progress`, `complete`, `rejected`, `superseded`), then a deterministic hashed-palette fallback — so even unknown or custom statuses always render with a stable, visible colour. The block is optional; omitting it just means statuses resolve via the remaining sources.
 
+The external viewer used to open documents without a web URL (via `show --open`) is configured with a `viewer` key under `[tui]`:
+
+```toml
+[tui]
+viewer = "glow"
+```
+
+This command is spawned with the document's file path as its argument when the document has no browser URL (a `git-ref`/`clickup-tasks` doc, or a filesystem doc whose repo coordinates don't resolve). The key is optional; without it, `show --open` on such a document reports an error instead of guessing a viewer.
+
 ### Web view
 
 A read-only web view of the project's documents is available behind the `web` cargo feature, so default builds carry no async/HTTP dependencies:
@@ -297,7 +306,7 @@ All document management is available as subcommands. Most accept `--json` for ma
 | `init`                                                          | Initialise lazyspec in the current project                                                      |
 | `create <type> <title> [--author X] [--parent ID] [--body / --body-file]` | Create a document (rfc, adr, story, iteration); seed body inline, from a file, or `-` for stdin. `--parent <ID>` makes the new doc a child of an existing doc; the child must be the same store as its parent. For filesystem-store types the child is authored as a sibling `.md` inside the parent's subdir (promoting a flat parent to `TYPE-n-slug/index.md` on the first child). For `github-issues`-store types the child is created as a real GitHub issue and bound as a native sub-issue of the parent at create time; a later `fetch` mirrors them into the nested cache layout (`.lazyspec/cache/<type>/<PARENT>/index.md` + `NN-<child>.md`) |
 | `list [type] [--status X]`                                      | List documents with optional filters                                                            |
-| `show <id> [-e]`                                                | Display a document by path or shorthand ID (e.g. `RFC-001`)                                     |
+| `show <id> [-e] [--open]`                                       | Display a document by path or shorthand ID (e.g. `RFC-001`); `--open` opens it in a browser or viewer instead |
 | `update <path> [--status X] [--title X] [--body / --body-file] [--attr key=value]` | Update frontmatter and/or body content (`--body-file -` reads stdin); `--attr` (repeatable) sets a declared custom attribute, coerced and validated against its type; works for all stores |
 | `delete <path>`                                                 | Delete a document                                                                               |
 | `link <from> <rel> <to>`                                        | Add a typed relationship (canonical or inverse keyword)                                         |
@@ -350,6 +359,9 @@ A relationship declared without an `inverse` is symmetric (like `related-to`) an
 | --------------------------- | ------------------------------------------------ |
 | `-e`, `--expand-references` | Expand `@ref` directives into fenced code blocks |
 | `--max-ref-lines N`         | Max lines per expanded ref (default: 25)         |
+| `--open`                    | Open the document externally (see below)         |
+
+`show <id> --open` opens the document in an external viewer. For a document whose backend has a web URL (a `github-issues` doc opens its issue page, a `github-milestones` doc its milestone page, a `filesystem` doc its blob on the default branch), it launches your browser (`open` on macOS, `xdg-open` on Linux). For any other document — `git-ref` and `clickup-tasks` docs, or a filesystem doc whose repo coordinates don't resolve — it launches the command configured as `viewer` under `[tui]` in `.lazyspec.toml` (e.g. `viewer = "glow"`) on the document's file. If no web URL resolves and no viewer is configured, `--open` reports a clear error rather than doing nothing. With `--json`, `--open` prints the resolved target (`{ "target": "url", "url": ... }` or `{ "target": "file", "path": ... }`) and spawns nothing.
 
 Each document entry in `show --json` and `status --json` (under `documents[]`) includes an `attributes` object holding the document's custom frontmatter attributes (declared via `[[types.attributes]]`). Declared attributes are emitted as their typed JSON value -- `int`/`float` as numbers, `string`/`enum` as strings, `bool` as a boolean, `date` as a `"YYYY-MM-DD"` string -- and undeclared keys pass through with their raw YAML value. The field is always present; a document with no attributes serializes it as `{}`, so consumers needn't null-check.
 

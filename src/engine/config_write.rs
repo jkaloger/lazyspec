@@ -302,6 +302,8 @@ fn write_tui(doc: &mut DocumentMut, buffer: &Config) {
         );
     }
 
+    set_opt_str(tui, "viewer", buffer.ui.viewer.as_deref());
+
     write_table(tui, buffer);
     write_status_colors(tui, buffer);
 }
@@ -1586,6 +1588,30 @@ inverse = "implemented-by"
         assert!(out.contains(r##"pending = "#336699""##), "got: {out}");
         let reparsed = Config::parse(&out).unwrap();
         assert_eq!(reparsed.ui.status_colors, buffer.ui.status_colors);
+    }
+
+    #[test]
+    fn viewer_round_trips_through_config_write() {
+        let buffer = {
+            let mut c = Config::parse(STATUSBAR_SRC).unwrap();
+            c.ui.viewer = Some("glow".to_string());
+            c
+        };
+        let out = write_config_in_place(STATUSBAR_SRC, &buffer).unwrap();
+        assert!(out.contains(r#"viewer = "glow""#), "got: {out}");
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(reparsed.ui.viewer.as_deref(), Some("glow"));
+
+        // Clearing the viewer removes the key.
+        let cleared = Config::parse(&out).unwrap();
+        let out = write_config_in_place(&out, &cleared).unwrap();
+        assert!(out.contains(r#"viewer = "glow""#));
+
+        let mut none_buffer = Config::parse(&out).unwrap();
+        none_buffer.ui.viewer = None;
+        let out = write_config_in_place(&out, &none_buffer).unwrap();
+        assert!(!out.contains("viewer"), "got: {out}");
+        assert_eq!(Config::parse(&out).unwrap().ui.viewer, None);
     }
 
     #[test]

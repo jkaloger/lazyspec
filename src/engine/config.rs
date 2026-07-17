@@ -483,6 +483,12 @@ pub struct UiConfig {
     /// Parsing into a concrete colour happens TUI-side, not in the engine.
     #[serde(default)]
     pub status_colors: BTreeMap<String, String>,
+    /// The `[tui] viewer` command spawned by `show --open` (and the TUI open
+    /// keybind) to view a document that has no web URL -- git-ref/clickup docs
+    /// and filesystem docs whose repo coords don't resolve. Absent -> opening
+    /// such a document errors rather than guessing a viewer.
+    #[serde(default)]
+    pub viewer: Option<String>,
 }
 
 fn default_graph_columns() -> Vec<String> {

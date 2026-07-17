@@ -206,10 +206,13 @@ fn main() -> anyhow::Result<()> {
             json,
             expand_references,
             max_ref_lines,
+            open,
         }) => {
             refresh_github_cache(&cwd, &config);
             let store = Store::load(&cwd, &config)?;
-            if json {
+            if open {
+                lazyspec::cli::show::run_open(&store, &id, &config, &cwd, json)?;
+            } else if json {
                 let gh = GhCli::new();
                 let output = lazyspec::cli::show::run_json(
                     &store,
