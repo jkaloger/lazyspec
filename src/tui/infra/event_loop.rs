@@ -141,6 +141,7 @@ fn try_push_git_ref_edit(root: &Path, relative: &Path, config: &Config) -> Resul
         git: Box::new(GitCli),
         root: root.to_path_buf(),
         config: config.clone(),
+        remote: config.git_ref.remote.clone(),
         reserved_number: None,
     };
     git_store
@@ -361,7 +362,7 @@ fn poll_sync(
         if has_git_ref {
             syncers.git_ref = Some(GitRefSync {
                 ops: git_ops,
-                remote: "origin".to_string(),
+                remote: config.git_ref.remote.clone(),
             });
         }
         if has_clickup {
