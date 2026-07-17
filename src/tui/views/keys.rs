@@ -16,6 +16,7 @@ impl App {
         root: &Path,
         config: &Config,
     ) {
+        self.open_message = None;
         if self.gh_conflict_message.is_some() {
             if code == KeyCode::Esc {
                 self.gh_conflict_message = None;
@@ -1105,6 +1106,9 @@ impl App {
                 if let Some(doc) = self.selected_doc_meta() {
                     self.editor_request = Some(root.join(&doc.path));
                 }
+            }
+            (KeyCode::Char('o'), _) if self.selected_doc_meta().is_some() => {
+                self.request_open(root, config);
             }
             (KeyCode::Char('x'), _) => {
                 self.wrap_mode = !self.wrap_mode;

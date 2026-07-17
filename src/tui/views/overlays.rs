@@ -1036,6 +1036,41 @@ pub fn draw_gh_conflict(f: &mut Frame, app: &App) {
     f.render_widget(paragraph, popup_area);
 }
 
+pub fn draw_open_message(f: &mut Frame, app: &App) {
+    let Some(message) = app.open_message.as_ref() else {
+        return;
+    };
+    let area = f.area();
+    let popup_width = 60.min(area.width.saturating_sub(4));
+    let popup_height = 5.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.height.saturating_sub(popup_height + 1);
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+    f.render_widget(Clear, popup_area);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {}", message),
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Press any key to dismiss",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    let paragraph = Paragraph::new(lines)
+        .wrap(ratatui::widgets::Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(" Open "),
+        );
+    f.render_widget(paragraph, popup_area);
+}
+
 fn display_name(path: &std::path::Path) -> &str {
     let stem = path.file_stem().and_then(|s| s.to_str());
     match stem {

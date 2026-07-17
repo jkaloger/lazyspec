@@ -164,6 +164,7 @@ Running `lazyspec` with no subcommand opens the interactive dashboard. It provid
 | `Enter`             | Open document / follow relation                     |
 | `n`                 | Create new document                                 |
 | `e`                 | Edit document in `$EDITOR`                          |
+| `o`                 | Open externally (browser or `[tui]` viewer)         |
 | `d`                 | Delete document                                     |
 | `s`                 | Change status                                       |
 | `r`                 | Add relation                                        |

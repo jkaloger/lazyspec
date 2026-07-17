@@ -28,7 +28,7 @@ use status_bar::draw_status_bar;
 use overlays::draw_agent_dialog;
 use overlays::{
     draw_create_form, draw_delete_confirm, draw_gh_conflict, draw_help_overlay, draw_link_editor,
-    draw_override_key_prompt, draw_provenance_editor, draw_search_overlay,
+    draw_open_message, draw_override_key_prompt, draw_provenance_editor, draw_search_overlay,
     draw_settings_delete_confirm, draw_settings_impact_confirm, draw_settings_quit_prompt,
     draw_settings_variant_picker, draw_settings_zone_editor, draw_status_picker,
     draw_warnings_panel,
@@ -270,6 +270,8 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
     if app.show_warnings {
         draw_warnings_panel(f, app);
     }
+
+    draw_open_message(f, app);
 
     if app.show_help {
         draw_help_overlay(f, app);

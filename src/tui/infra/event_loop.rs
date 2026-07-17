@@ -64,6 +64,27 @@ fn run_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path
     Ok(())
 }
 
+fn run_viewer(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    command: &[String],
+    path: &Path,
+) -> Result<()> {
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    disable_raw_mode()?;
+
+    let (program, args) = command.split_first().expect("viewer command is non-empty");
+    let status = Command::new(program).args(args).arg(path).status();
+
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    terminal.clear()?;
+
+    if let Err(e) = status {
+        eprintln!("Failed to launch viewer '{}': {}", program, e);
+    }
+    Ok(())
+}
+
 fn try_push_gh_edit(
     root: &Path,
     relative: &Path,
@@ -876,6 +897,31 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 }
             }
             app.refresh_validation(&config);
+        }
+
+        if let Some(req) = app.open_request.take() {
+            match req {
+                crate::tui::state::OpenRequest::Browser(url) => {
+                    // Detached: no terminal suspend/resume for a browser hand-off.
+                    let opener = if cfg!(target_os = "macos") {
+                        "open"
+                    } else {
+                        "xdg-open"
+                    };
+                    if let Err(e) = Command::new(opener).arg(&url).spawn() {
+                        app.open_message =
+                            Some(format!("failed to launch browser via '{opener}': {e}"));
+                    }
+                }
+                crate::tui::state::OpenRequest::Viewer { command, path } => {
+                    let _stdin_guard = stdin_lock.lock().unwrap_or_else(PoisonError::into_inner);
+                    while rx.try_recv().is_ok() {}
+                    run_viewer(&mut terminal, &command, &path)?;
+                    drain_stdin();
+                    while rx.try_recv().is_ok() {}
+                    drop(_stdin_guard);
+                }
+            }
         }
 
         #[cfg(feature = "agent")]
