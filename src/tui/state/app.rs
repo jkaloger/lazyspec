@@ -1,7 +1,7 @@
 #[cfg(feature = "agent")]
 use super::forms::AgentDialog;
 use super::forms::{
-    CreateForm, DeleteConfirm, EditableField, FieldEditor, FieldPath, LinkEditor,
+    CreateForm, DeleteConfirm, EditableField, FieldEditor, FieldPath, LinkEditor, OpenRequest,
     OverrideKeyPrompt, ProvenanceEditor, RelKey, RuleKey, SettingsDeleteConfirm,
     SettingsDeleteTarget, SettingsImpactConfirm, SettingsQuitPrompt, SettingsVariantPicker,
     StatusPicker, TypeKey, ZoneOrderingEditor,
@@ -19,6 +19,7 @@ use crate::engine::config::{
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, Status};
 use crate::engine::fs::FileSystem;
 use crate::engine::git_status::{query_git_branch, GitStatusCache};
+use crate::engine::ops::open::{resolve_open_target, OpenTarget};
 use crate::engine::reservation::ReservationProgress;
 use crate::engine::store::{Filter, Store};
 #[cfg(feature = "agent")]
@@ -525,6 +526,8 @@ pub struct App {
     pub graph_offset: usize,
     pub graph_list_height: usize,
     pub editor_request: Option<PathBuf>,
+    pub open_request: Option<OpenRequest>,
+    pub open_message: Option<String>,
     pub filter_focused: FilterField,
     pub filter_status: Option<Status>,
     pub filter_tag: Option<String>,
@@ -700,6 +703,8 @@ impl App {
             graph_offset: 0,
             graph_list_height: 0,
             editor_request: None,
+            open_request: None,
+            open_message: None,
             filter_focused: FilterField::Status,
             filter_status: None,
             filter_tag: None,
@@ -2055,6 +2060,55 @@ impl App {
             .and_then(|node| self.store.get(&node.path))
     }
 
+    /// Decide how an [`OpenTarget`] opens: a web URL hands off to the browser; a
+    /// file needs the configured viewer, whose command is split on whitespace so
+    /// `viewer = "code -w"` yields `["code", "-w"]`. Absent a viewer, a file has
+    /// no way to open and the error names the missing config.
+    pub(crate) fn plan_open(
+        target: OpenTarget,
+        viewer: Option<&str>,
+        root: &std::path::Path,
+    ) -> Result<OpenRequest, String> {
+        match target {
+            OpenTarget::Url(url) => Ok(OpenRequest::Browser(url)),
+            OpenTarget::File(path) => {
+                let command: Vec<String> = viewer
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect();
+                if command.is_empty() {
+                    Err(format!(
+                        "cannot open {}: it has no web URL and no viewer is configured. \
+                         Set `viewer` under [tui] in .lazyspec.toml (e.g. viewer = \"glow\").",
+                        path.display()
+                    ))
+                } else {
+                    Ok(OpenRequest::Viewer {
+                        command,
+                        path: root.join(path),
+                    })
+                }
+            }
+        }
+    }
+
+    /// Resolve the selected doc's open target and stage the request (browser or
+    /// viewer). A missing viewer for a file-only target surfaces the transient
+    /// `open_message` notice instead.
+    pub(crate) fn request_open(&mut self, root: &std::path::Path, config: &Config) {
+        let Some(doc) = self.selected_doc_meta().cloned() else {
+            return;
+        };
+        let coords = crate::engine::github_url::resolve_repo_coords(config, root);
+        let issue_map = crate::engine::issue_map::IssueMap::load(root).unwrap_or_default();
+        let target = resolve_open_target(&doc, coords.as_ref(), config, &issue_map);
+        match Self::plan_open(target, config.ui.viewer.as_deref(), root) {
+            Ok(req) => self.open_request = Some(req),
+            Err(msg) => self.open_message = Some(msg),
+        }
+    }
+
     pub fn doc_count(&self, doc_type: &DocType) -> usize {
         self.store
             .list(&Filter {
@@ -3262,7 +3316,7 @@ impl App {
                 "search_mode={} fullscreen_doc={} should_quit={} preview_tab={:?} ",
                 "filter_focused={:?} filter_status={:?} filter_tag={:?} selected_relation={} ",
                 "expanded_len={} expanded={:?} ",
-                "editor_request={} config_reload_request={} fix_request={} ",
+                "editor_request={} open_request={} open_message={} config_reload_request={} fix_request={} ",
                 "create_form.active={} create_form.field={:?} create_form.title={} ",
                 "create_form.author={} create_form.tags={} create_form.related={} ",
                 "delete_confirm.active={} override_key_prompt.active={} override_input={} ",
@@ -3299,6 +3353,8 @@ impl App {
             expanded.len(),
             expanded,
             self.editor_request.is_some(),
+            self.open_request.is_some(),
+            self.open_message.is_some(),
             self.config_reload_request,
             self.fix_request,
             self.create_form.active,
@@ -3417,6 +3473,8 @@ pub(crate) mod parity_seed {
             graph_offset: 0,
             graph_list_height: 0,
             editor_request: None,
+            open_request: None,
+            open_message: None,
             filter_focused: FilterField::Status,
             filter_status: None,
             filter_tag: None,
@@ -3892,6 +3950,8 @@ mod tests {
             graph_offset: 0,
             graph_list_height: 0,
             editor_request: None,
+            open_request: None,
+            open_message: None,
             filter_focused: FilterField::Status,
             filter_status: None,
             filter_tag: None,
@@ -8606,5 +8666,126 @@ sort = "estimate"
             ]),
             "whole-store forest includes every doc, ancestor RFC included"
         );
+    }
+
+    // ITERATION-306: App::plan_open is pure -- a URL target hands off to the
+    // browser, a file target needs a viewer (split on whitespace), and a
+    // file-only target with no viewer errors with a viewer-naming message.
+    #[test]
+    fn plan_open_url_target_opens_browser() {
+        let req = App::plan_open(
+            OpenTarget::Url("https://example.com/x".to_string()),
+            Some("glow"),
+            Path::new("/repo"),
+        )
+        .unwrap();
+        assert_eq!(
+            req,
+            OpenRequest::Browser("https://example.com/x".to_string())
+        );
+    }
+
+    #[test]
+    fn plan_open_file_target_with_viewer_joins_root() {
+        let rel = PathBuf::from("docs/rfcs/RFC-001-a.md");
+        let req = App::plan_open(
+            OpenTarget::File(rel.clone()),
+            Some("glow"),
+            Path::new("/repo"),
+        )
+        .unwrap();
+        assert_eq!(
+            req,
+            OpenRequest::Viewer {
+                command: vec!["glow".to_string()],
+                path: PathBuf::from("/repo").join(&rel),
+            }
+        );
+    }
+
+    #[test]
+    fn plan_open_splits_viewer_args_on_whitespace() {
+        let req = App::plan_open(
+            OpenTarget::File(PathBuf::from("docs/rfcs/RFC-001-a.md")),
+            Some("code -w"),
+            Path::new("/repo"),
+        )
+        .unwrap();
+        match req {
+            OpenRequest::Viewer { command, .. } => {
+                assert_eq!(command, vec!["code".to_string(), "-w".to_string()]);
+            }
+            other => panic!("expected Viewer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_open_file_target_without_viewer_errors() {
+        let err = App::plan_open(
+            OpenTarget::File(PathBuf::from("docs/rfcs/RFC-001-a.md")),
+            None,
+            Path::new("/repo"),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("viewer"),
+            "error should name the viewer: {err}"
+        );
+    }
+
+    // Select the first rfc doc so `selected_doc_meta()` is Some, mirroring how the
+    // parity seed drills into a type's tree.
+    fn select_rfc_doc(app: &mut App) {
+        let rfc_idx = app
+            .doc_types
+            .iter()
+            .position(|t| t.as_str() == "rfc")
+            .expect("default config has an rfc type");
+        app.selected_type = rfc_idx;
+        app.build_doc_tree();
+        app.selected_doc = 0;
+        assert!(
+            app.selected_doc_meta().is_some(),
+            "an rfc doc must be selected"
+        );
+    }
+
+    // ITERATION-306: pressing `o` in the Types view with a viewer configured
+    // stages a Viewer open request (the tempdir is not a git repo, so the target
+    // is a File).
+    #[test]
+    fn key_o_routes_to_open_request_with_viewer() {
+        let (tmp, mut app) = bare_app();
+        populate_docs(&mut app);
+        select_rfc_doc(&mut app);
+
+        let mut config = Config::default();
+        config.ui.viewer = Some("glow".to_string());
+        let root = tmp.path().to_path_buf();
+
+        app.handle_key(KeyCode::Char('o'), KeyModifiers::NONE, &root, &config);
+
+        assert!(
+            matches!(app.open_request, Some(OpenRequest::Viewer { .. })),
+            "pressing `o` must stage a Viewer open request"
+        );
+        assert!(app.open_message.is_none());
+    }
+
+    // ITERATION-306: with no viewer configured, a file-only target has nowhere to
+    // open -- pressing `o` sets the transient notice instead of an open request.
+    #[test]
+    fn key_o_without_viewer_sets_message() {
+        let (tmp, mut app) = bare_app();
+        populate_docs(&mut app);
+        select_rfc_doc(&mut app);
+
+        let config = Config::default();
+        let root = tmp.path().to_path_buf();
+
+        app.handle_key(KeyCode::Char('o'), KeyModifiers::NONE, &root, &config);
+
+        assert!(app.open_request.is_none());
+        assert!(app.open_message.is_some());
     }
 }

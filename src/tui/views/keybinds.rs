@@ -385,6 +385,7 @@ pub fn keybinds_for(ctx: KeyContext) -> Vec<KeybindGroup> {
                 binds: vec![
                     bind!("n", "New", [k(KeyCode::Char('n'))]),
                     bind!("e", "Edit", [k(KeyCode::Char('e'))]),
+                    bind!("o", "Open externally", [k(KeyCode::Char('o'))]),
                     bind!("d", "Delete", [k(KeyCode::Char('d'))]),
                     bind!("s", "Status", [k(KeyCode::Char('s'))]),
                     bind!("r", "Relation", [k(KeyCode::Char('r'))]),

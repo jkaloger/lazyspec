@@ -17,6 +17,6 @@ pub use app::{
 pub use forms::AgentDialog;
 pub use forms::{
     CreateForm, DeleteConfirm, EditableField, FieldEditor, FieldPath, FormField, LinkEditor,
-    OverrideKeyPrompt, ProvenanceEditor, RelKey, RuleKey, SettingsDeleteConfirm,
+    OpenRequest, OverrideKeyPrompt, ProvenanceEditor, RelKey, RuleKey, SettingsDeleteConfirm,
     SettingsDeleteTarget, StatusPicker, TypeKey,
 };

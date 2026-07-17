@@ -2,6 +2,19 @@ use crate::engine::document::DocType;
 use crate::tui::state::settings_guard::TypeFieldImpact;
 use std::path::PathBuf;
 
+/// A pending external-open handover (STORY-219): set on the `App` when the user
+/// presses `o`, drained by the event loop. `Browser` hands a web URL to the OS
+/// opener; `Viewer` suspends the TUI and runs the configured terminal viewer on
+/// the doc's file, mirroring the `$EDITOR` flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenRequest {
+    Browser(String),
+    Viewer {
+        command: Vec<String>,
+        path: std::path::PathBuf,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FormField {
     Title,
