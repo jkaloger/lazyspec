@@ -1,7 +1,7 @@
 ---
 title: "Deprecate web/native app builds in CI"
 type: story
-status: accepted
+status: in-progress
 author: "agent"
 date: 2026-07-17
 tags: []
