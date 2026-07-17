@@ -244,7 +244,6 @@ fn fresh_fetch_surfaces_issue_milestone_as_targets_relation() {
         &GitCli,
         &lazyspec::engine::clickup::FakeClickupClient::with_tasks(vec![]),
         None,
-        "origin",
         None,
         true,
     )

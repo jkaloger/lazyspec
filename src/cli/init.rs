@@ -35,6 +35,7 @@ pub fn starter_config() -> Config {
         agents: Default::default(),
         skills: Default::default(),
         web: None,
+        git_ref: Default::default(),
     }
 }
 

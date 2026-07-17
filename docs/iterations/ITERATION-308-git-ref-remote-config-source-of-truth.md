@@ -1,7 +1,7 @@
 ---
 title: Git-ref remote config source of truth
 type: iteration
-status: accepted
+status: complete
 author: agent
 date: 2026-07-17
 tags: []

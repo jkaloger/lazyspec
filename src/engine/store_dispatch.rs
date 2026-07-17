@@ -2360,6 +2360,7 @@ pub fn build_registry(root: &std::path::Path, config: &Config) -> DocumentStoreR
             git: Box::new(crate::engine::git_ref::GitCli),
             root: root.to_path_buf(),
             config: config.clone(),
+            remote: config.git_ref.remote.clone(),
             reserved_number: None,
         }),
     );
@@ -4645,6 +4646,7 @@ mod tests {
         let git_ref_store = GitRefStore {
             git: Box::new(mock),
             root: root.clone(),
+            remote: Config::default().git_ref.remote.clone(),
             config: Config::default(),
             reserved_number: None,
         };
@@ -4673,6 +4675,7 @@ mod tests {
         let git_ref_store = GitRefStore {
             git: Box::new(mock),
             root: root.clone(),
+            remote: Config::default().git_ref.remote.clone(),
             config: Config::default(),
             reserved_number: None,
         };
@@ -5171,6 +5174,7 @@ mod tests {
             agents: Default::default(),
             skills: Default::default(),
             web: None,
+            git_ref: Default::default(),
         };
 
         let store = Store::load(&root, &config).unwrap();

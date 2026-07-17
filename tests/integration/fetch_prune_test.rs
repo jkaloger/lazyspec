@@ -202,7 +202,6 @@ fn run_fetch(root: &Path, config: &Config) -> Result<()> {
         &GitCli,
         &lazyspec::engine::clickup::FakeClickupClient::with_tasks(vec![]),
         None,
-        "origin",
         None,
         true,
     )
@@ -224,6 +223,7 @@ fn fetch_prunes_deleted_remote_doc_refs() {
     let mut store_a = GitRefStore {
         git: Box::new(GitCli),
         root: fixture_a.root().to_path_buf(),
+        remote: config.git_ref.remote.clone(),
         config: config.clone(),
         reserved_number: Some(1),
     };

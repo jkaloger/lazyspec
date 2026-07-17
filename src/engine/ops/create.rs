@@ -191,6 +191,7 @@ pub fn run_with_body(
             git: Box::new(GitCli),
             root: root.to_path_buf(),
             config: config.clone(),
+            remote: config.git_ref.remote.clone(),
             reserved_number: None,
         };
         let created = store.create(type_def, title, author, body.unwrap_or(""))?;

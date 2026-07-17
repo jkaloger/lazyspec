@@ -24,7 +24,6 @@ pub fn run(
     git_ref_ops: &dyn GitRefOps,
     clickup: &dyn ClickupClient,
     clickup_token: Option<&Token>,
-    remote: &str,
     type_filter: Option<&str>,
     json: bool,
 ) -> Result<()> {
@@ -182,7 +181,7 @@ pub fn run(
         if !fetch_gitref.is_empty() {
             syncers.git_ref = Some(GitRefSync {
                 ops: git_ref_ops,
-                remote: remote.to_string(),
+                remote: config.git_ref.remote.clone(),
             });
         }
         if clickup_fetch {
@@ -609,9 +608,7 @@ name = "related-to"
         let gh = StubGh;
         let clickup = fake_clickup();
 
-        let result = run(
-            root, &config, &gh, &mock, &clickup, None, "origin", None, false,
-        );
+        let result = run(root, &config, &gh, &mock, &clickup, None, None, false);
         assert!(
             result.is_ok(),
             "all-succeed fetch must exit zero: {result:?}"
@@ -648,9 +645,7 @@ name = "related-to"
         let gh = StubGh;
         let clickup = fake_clickup();
 
-        let result = run(
-            root, &config, &gh, &mock, &clickup, None, "origin", None, false,
-        );
+        let result = run(root, &config, &gh, &mock, &clickup, None, None, false);
         assert!(
             result.is_err(),
             "a failing type must make fetch exit non-zero"
@@ -661,6 +656,40 @@ name = "related-to"
         assert_eq!(
             CacheLock::load(root).unwrap().get("alpha/ALPHA-1"),
             Some("sha1")
+        );
+    }
+
+    // STORY-218 AC1: fetch targets the remote from `[git-ref]`, not a hardcoded
+    // `origin`. A config override reaches the git client's fetch call.
+    #[test]
+    fn run_fetches_git_ref_from_configured_remote() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        let mut config = Config::default();
+        config.documents.types = vec![git_ref_type("alpha", "ALPHA")];
+        config.git_ref.remote = "upstream".to_string();
+
+        let mock = MockGitRefClient::new()
+            .with_fetch_result(Ok(()))
+            .with_list_result(Ok(vec![(
+                "refs/lazyspec/alpha/ALPHA-1".to_string(),
+                "sha1".to_string(),
+            )]))
+            .with_read_blob_result(Ok("# alpha".to_string()));
+
+        let gh = StubGh;
+        let clickup = fake_clickup();
+
+        let result = run(root, &config, &gh, &mock, &clickup, None, None, false);
+        assert!(result.is_ok(), "fetch must exit zero: {result:?}");
+
+        let calls = mock.calls.borrow();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c == "fetch_refs:upstream:refs/lazyspec/alpha/*"),
+            "fetch should target the configured remote, got: {calls:?}"
         );
     }
 

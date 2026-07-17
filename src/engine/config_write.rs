@@ -2,9 +2,9 @@ use anyhow::Result;
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::engine::config::{
-    default_normalize, default_skills_entry, default_table_columns, AttrDef, AttrKind, Authorship,
-    Config, Edge, Lifecycle, NumberingStrategy, RelationshipDef, ReservedFormat, Severity, TypeDef,
-    ValidationRule,
+    default_git_ref_remote, default_normalize, default_skills_entry, default_table_columns,
+    AttrDef, AttrKind, Authorship, Config, Edge, Lifecycle, NumberingStrategy, RelationshipDef,
+    ReservedFormat, Severity, TypeDef, ValidationRule,
 };
 
 pub fn write_config_in_place(existing_src: &str, buffer: &Config) -> Result<String> {
@@ -21,6 +21,7 @@ pub fn write_config_in_place(existing_src: &str, buffer: &Config) -> Result<Stri
     write_certification(&mut doc, buffer);
     write_agents(&mut doc, buffer);
     write_skills(&mut doc, buffer);
+    write_git_ref(&mut doc, buffer);
     write_rules(&mut doc, buffer);
 
     Ok(doc.to_string())
@@ -524,6 +525,24 @@ fn write_skills(doc: &mut DocumentMut, buffer: &Config) {
         "entry",
         &buffer.skills.entry,
         &default_skills_entry(),
+    );
+}
+
+fn write_git_ref(doc: &mut DocumentMut, buffer: &Config) {
+    if !doc.contains_key("git-ref") {
+        if buffer.git_ref.remote == default_git_ref_remote() {
+            return;
+        }
+        doc.insert("git-ref", Item::Table(Table::new()));
+    }
+    let Some(git_ref) = doc.get_mut("git-ref").and_then(Item::as_table_like_mut) else {
+        return;
+    };
+    set_str_defaulted(
+        git_ref,
+        "remote",
+        &buffer.git_ref.remote,
+        &default_git_ref_remote(),
     );
 }
 
@@ -1612,6 +1631,29 @@ inverse = "implemented-by"
         let out = write_config_in_place(&out, &none_buffer).unwrap();
         assert!(!out.contains("viewer"), "got: {out}");
         assert_eq!(Config::parse(&out).unwrap().ui.viewer, None);
+    }
+
+    // STORY-218 AC1: a non-default [git-ref] remote survives the config writer.
+    #[test]
+    fn git_ref_remote_round_trips_through_config_write() {
+        let buffer = {
+            let mut c = Config::parse(STATUSBAR_SRC).unwrap();
+            c.git_ref.remote = "upstream".to_string();
+            c
+        };
+        let out = write_config_in_place(STATUSBAR_SRC, &buffer).unwrap();
+        assert!(out.contains("[git-ref]"), "got: {out}");
+        assert!(out.contains(r#"remote = "upstream""#), "got: {out}");
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(reparsed.git_ref.remote, "upstream");
+    }
+
+    // The default remote is not fabricated into a config that omits [git-ref].
+    #[test]
+    fn git_ref_default_remote_writes_no_section() {
+        let buffer = Config::parse(STATUSBAR_SRC).unwrap();
+        let out = write_config_in_place(STATUSBAR_SRC, &buffer).unwrap();
+        assert!(!out.contains("[git-ref]"), "got: {out}");
     }
 
     #[test]

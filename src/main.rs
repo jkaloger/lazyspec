@@ -138,7 +138,6 @@ fn main() -> anyhow::Result<()> {
                 &git_ref_ops,
                 &clickup,
                 clickup_token.as_ref(),
-                "origin",
                 doc_type.as_deref(),
                 json,
             )?;

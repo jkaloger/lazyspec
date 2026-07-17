@@ -200,7 +200,6 @@ fn fetch_captures_status_colors_into_cache_not_config() {
         &GitCli,
         &clickup,
         Some(&token),
-        "origin",
         None,
         true,
     )

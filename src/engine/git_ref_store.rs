@@ -33,6 +33,7 @@ pub struct GitRefStore {
     pub git: Box<dyn GitRefClient>,
     pub root: PathBuf,
     pub config: Config,
+    pub remote: String,
     pub reserved_number: Option<u32>,
 }
 
@@ -415,16 +416,36 @@ mod tests {
             agents: Default::default(),
             skills: Default::default(),
             web: None,
+            git_ref: Default::default(),
         }
     }
 
     fn make_store(tmp: &TempDir, mock: MockGitRefClient) -> GitRefStore {
+        let config = test_config();
         GitRefStore {
             git: Box::new(mock),
             root: tmp.path().to_path_buf(),
-            config: test_config(),
+            remote: config.git_ref.remote.clone(),
+            config,
             reserved_number: None,
         }
+    }
+
+    // STORY-218 AC1: the store carries the remote resolved from `[git-ref]`,
+    // mirroring how the runtime construction sites wire it from config.
+    #[test]
+    fn store_carries_configured_remote() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config();
+        config.git_ref.remote = "upstream".to_string();
+        let store = GitRefStore {
+            git: Box::new(MockGitRefClient::new()),
+            root: tmp.path().to_path_buf(),
+            remote: config.git_ref.remote.clone(),
+            config,
+            reserved_number: None,
+        };
+        assert_eq!(store.remote, "upstream");
     }
 
     #[test]
@@ -767,6 +788,7 @@ mod tests {
         let mut store = GitRefStore {
             git: Box::new(mock),
             root: tmp.path().to_path_buf(),
+            remote: "origin".to_string(),
             config: test_config(),
             reserved_number: Some(42),
         };
@@ -800,6 +822,7 @@ mod tests {
         let mut store = GitRefStore {
             git: Box::new(mock),
             root: tmp.path().to_path_buf(),
+            remote: "origin".to_string(),
             config: test_config(),
             reserved_number: None,
         };

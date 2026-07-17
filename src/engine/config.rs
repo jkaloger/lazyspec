@@ -574,6 +574,11 @@ pub struct Config {
     /// table is absent.
     #[serde(skip)]
     pub web: Option<WebConfig>,
+    /// The `[git-ref]` table: the remote the git-ref store fetches from (and,
+    /// later, pushes to). Defaults to `origin`. Serialized into `config --json`
+    /// but parsed via `RawConfig`.
+    #[serde(rename = "git-ref", default, skip_deserializing)]
+    pub git_ref: GitRefConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -653,6 +658,28 @@ pub struct WebConfig {
     pub branch: Option<String>,
 }
 
+/// The `[git-ref]` table: settings for the `git-ref` document store. `remote`
+/// names the git remote that git-ref fetch (and, later, push) targets and is the
+/// single source of truth for it (STORY-218 AC1); it defaults to `origin`.
+/// Absence of the whole table falls back to that default.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct GitRefConfig {
+    #[serde(default = "default_git_ref_remote")]
+    pub remote: String,
+}
+
+pub fn default_git_ref_remote() -> String {
+    "origin".to_string()
+}
+
+impl Default for GitRefConfig {
+    fn default() -> Self {
+        GitRefConfig {
+            remote: default_git_ref_remote(),
+        }
+    }
+}
+
 /// The global `[agents]` block. `interactive` is the optional `bash -lc` shell
 /// command for terminal handover (e.g. `claude "$LAZYSPEC_PROMPT"`). Zero-defaults
 /// (ADR-015): absent -> None -> interactive run mode is unavailable and not offered.
@@ -727,6 +754,10 @@ struct RawConfig {
     /// repo, branch) the read-only web view deep-links against.
     #[serde(default)]
     web: Option<WebConfig>,
+    /// The `[git-ref]` block: the remote the git-ref store targets (default
+    /// `origin`).
+    #[serde(rename = "git-ref", default)]
+    git_ref: Option<GitRefConfig>,
 }
 
 /// The JSON Schema for `.lazyspec.toml`, derived from the private `RawConfig`
@@ -878,6 +909,7 @@ impl Default for Config {
             agents: AgentsConfig::default(),
             skills: SkillsConfig::default(),
             web: None,
+            git_ref: GitRefConfig::default(),
         }
     }
 }
@@ -1080,6 +1112,7 @@ impl Config {
             agents: raw.agents.unwrap_or_default(),
             skills: raw.skills.unwrap_or_default(),
             web: raw.web,
+            git_ref: raw.git_ref.unwrap_or_default(),
         })
     }
 
@@ -1780,6 +1813,27 @@ store = "git-ref"
 "#;
         let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
         assert_eq!(config.documents.types[0].store, StoreBackend::GitRef);
+    }
+
+    // STORY-218 AC1: with no [git-ref] table the remote defaults to `origin`.
+    #[test]
+    fn git_ref_remote_defaults_to_origin() {
+        let config = Config::parse(TYPES).unwrap();
+        assert_eq!(config.git_ref.remote, "origin");
+    }
+
+    // STORY-218 AC1: a [git-ref] remote override is parsed and wins over the default.
+    #[test]
+    fn git_ref_remote_override_is_honoured() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[git-ref]
+remote = "upstream"
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        assert_eq!(config.git_ref.remote, "upstream");
     }
 
     #[test]
