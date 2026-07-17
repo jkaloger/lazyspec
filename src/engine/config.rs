@@ -472,6 +472,12 @@ pub struct UiConfig {
     pub multiline: MultiLineConfig,
     #[serde(default)]
     pub graph: GraphConfig,
+    /// The `[tui.table]` block: the doc-table columns for the types view. Column
+    /// ids are the built-ins `status` / `tags` / `provenance` / `related` plus any
+    /// declared attribute name. Carries a serde default so a config without the
+    /// block still loads with today's visual column set.
+    #[serde(default)]
+    pub table: TableConfig,
     /// The `[tui.status_colors]` table: per-status colour overrides mapping a
     /// status name to a raw colour string (named ANSI colour or `#rrggbb` hex).
     /// Parsing into a concrete colour happens TUI-side, not in the engine.
@@ -504,6 +510,32 @@ impl Default for GraphConfig {
         GraphConfig {
             columns: default_graph_columns(),
             sort: default_graph_sort(),
+        }
+    }
+}
+
+pub fn default_table_columns() -> Vec<String> {
+    vec![
+        "status".to_string(),
+        "tags".to_string(),
+        "provenance".to_string(),
+    ]
+}
+
+/// The `[tui.table]` block: the doc-table columns for the types view. Column ids
+/// are the built-ins `status` / `tags` / `provenance` / `related` plus any
+/// declared attribute name. Carries a serde default so a config without the block
+/// still loads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct TableConfig {
+    #[serde(default = "default_table_columns")]
+    pub columns: Vec<String>,
+}
+
+impl Default for TableConfig {
+    fn default() -> Self {
+        TableConfig {
+            columns: default_table_columns(),
         }
     }
 }
@@ -2179,6 +2211,28 @@ sort = "estimate"
             vec!["status", "estimate", "related"]
         );
         assert_eq!(config.ui.graph.sort, "estimate");
+    }
+
+    #[test]
+    fn table_config_defaults_when_absent() {
+        let config = Config::parse(TYPES).unwrap();
+        assert_eq!(
+            config.ui.table.columns,
+            vec!["status", "tags", "provenance"]
+        );
+    }
+
+    #[test]
+    fn table_config_parses_columns() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[tui.table]
+columns = ["status", "priority"]
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        assert_eq!(config.ui.table.columns, vec!["status", "priority"]);
     }
 
     #[test]

@@ -2,8 +2,8 @@ use anyhow::Result;
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::engine::config::{
-    default_normalize, default_skills_entry, AttrDef, AttrKind, Authorship, Config, Edge,
-    Lifecycle, NumberingStrategy, RelationshipDef, ReservedFormat, Severity, TypeDef,
+    default_normalize, default_skills_entry, default_table_columns, AttrDef, AttrKind, Authorship,
+    Config, Edge, Lifecycle, NumberingStrategy, RelationshipDef, ReservedFormat, Severity, TypeDef,
     ValidationRule,
 };
 
@@ -302,7 +302,24 @@ fn write_tui(doc: &mut DocumentMut, buffer: &Config) {
         );
     }
 
+    write_table(tui, buffer);
     write_status_colors(tui, buffer);
+}
+
+// Reconcile [tui.table] to the buffer columns: update/insert the `columns` array
+// whenever it differs from the default set, and never fabricate the table for a
+// default column set that has no source block (matching absent == default).
+fn write_table(tui: &mut dyn toml_edit::TableLike, buffer: &Config) {
+    if !tui.contains_key("table") && buffer.ui.table.columns == default_table_columns() {
+        return;
+    }
+    if !tui.contains_key("table") {
+        tui.insert("table", Item::Table(Table::new()));
+    }
+    let Some(table) = tui.get_mut("table").and_then(Item::as_table_like_mut) else {
+        return;
+    };
+    set_str_array_defaulted(table, "columns", &buffer.ui.table.columns);
 }
 
 // Reconcile [tui.status_colors] to the buffer map: drop keys that left the map,
@@ -1569,5 +1586,22 @@ inverse = "implemented-by"
         assert!(out.contains(r##"pending = "#336699""##), "got: {out}");
         let reparsed = Config::parse(&out).unwrap();
         assert_eq!(reparsed.ui.status_colors, buffer.ui.status_colors);
+    }
+
+    #[test]
+    fn table_columns_round_trip_through_config_write() {
+        let buffer = {
+            let mut c = Config::parse(STATUSBAR_SRC).unwrap();
+            c.ui.table.columns = vec!["status".to_string(), "priority".to_string()];
+            c
+        };
+        let out = write_config_in_place(STATUSBAR_SRC, &buffer).unwrap();
+        assert!(out.contains("[tui.table]"), "got: {out}");
+        assert!(
+            out.contains(r#"columns = ["status", "priority"]"#),
+            "got: {out}"
+        );
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(reparsed.ui.table.columns, buffer.ui.table.columns);
     }
 }
