@@ -1,7 +1,7 @@
 ---
 title: Custom attributes in preview header
 type: iteration
-status: accepted
+status: complete
 author: agent
 date: 2026-07-17
 tags: []

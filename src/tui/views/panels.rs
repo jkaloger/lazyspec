@@ -1097,6 +1097,13 @@ pub(super) fn build_preview_header_lines(
         lines.push(Line::from(spans));
     }
 
+    for (name, value) in &doc.attributes {
+        lines.push(Line::from(vec![
+            Span::raw(format!(" {}: ", name)),
+            Span::raw(attr_value_display(value)),
+        ]));
+    }
+
     lines.push(Line::from(""));
 
     if expanding {
@@ -3052,6 +3059,45 @@ mod tests {
         let text = line_text(prov_line);
         assert!(text.contains('X'), "should contain X, got: {}", text);
         assert!(text.contains('Y'), "should contain Y, got: {}", text);
+    }
+
+    #[test]
+    fn preview_header_lists_custom_attributes() {
+        use crate::engine::document::AttrValue;
+        let mut doc = fixture_doc_meta();
+        doc.attributes
+            .insert("estimate".to_string(), AttrValue::Int(5));
+        doc.attributes.insert(
+            "owner".to_string(),
+            AttrValue::Raw(serde_yaml::Value::String("ada".to_string())),
+        );
+        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default());
+        let estimate = lines
+            .iter()
+            .find(|l| line_text(l).contains("estimate:"))
+            .map(line_text)
+            .expect("estimate attribute line should be present");
+        assert!(estimate.contains('5'), "got: {}", estimate);
+        let owner = lines
+            .iter()
+            .find(|l| line_text(l).contains("owner:"))
+            .map(line_text)
+            .expect("Raw attribute line should be present");
+        assert!(owner.contains("ada"), "got: {}", owner);
+    }
+
+    #[test]
+    fn preview_header_omits_attributes_when_empty() {
+        let with_attrs = {
+            use crate::engine::document::AttrValue;
+            let mut doc = fixture_doc_meta();
+            doc.attributes
+                .insert("estimate".to_string(), AttrValue::Int(5));
+            build_preview_header_lines(&doc, false, &StatusPalette::default()).len()
+        };
+        let empty = fixture_doc_meta();
+        let without = build_preview_header_lines(&empty, false, &StatusPalette::default()).len();
+        assert_eq!(without + 1, with_attrs);
     }
 
     fn widths_for_test(title: u16, tags: u16, provenance: u16) -> DocCellWidths {
