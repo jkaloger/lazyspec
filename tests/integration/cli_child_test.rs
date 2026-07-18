@@ -74,7 +74,8 @@ fn create_with_parent_promotes_flat_parent_and_tracks_child() {
         None,
         |_| {},
     )
-    .unwrap();
+    .unwrap()
+    .0;
 
     let index_path = fixture.root().join("docs/rfcs/RFC-003-multi/index.md");
     assert!(index_path.exists(), "parent should be promoted to index.md");
@@ -123,7 +124,8 @@ fn create_with_parent_idempotent_on_promoted_parent() {
         None,
         |_| {},
     )
-    .unwrap();
+    .unwrap()
+    .0;
     let second = lazyspec::cli::create::run_with_body(
         fixture.root(),
         &config,
@@ -135,7 +137,8 @@ fn create_with_parent_idempotent_on_promoted_parent() {
         None,
         |_| {},
     )
-    .unwrap();
+    .unwrap()
+    .0;
 
     assert_ne!(first, second);
     for p in [&first, &second] {

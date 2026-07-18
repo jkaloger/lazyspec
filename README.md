@@ -294,6 +294,8 @@ The native macOS app (the Tauri build behind the `app` cargo feature) is depreca
 
 All document management is available as subcommands. Most accept `--json` for machine-readable output, including every mutating command: `create`, `update`, and `tag` emit the resulting document, while `delete`, `link`, `unlink`, `ignore`, and `unignore` emit a structured outcome (`action` plus the doc id/path or relation edge) instead of the human confirmation line.
 
+Every mutation's `--json` output also reports whether the change reached the document's remote: a `"synced"` boolean (`true` when the backend push landed, `false` when only the local write succeeded), and — only when `"synced": false` — a `"warnings"` array carrying the push-failure message (naming the remote and doc). This matters for the `git-ref` store, whose push is deferred and can fall back to a local-only write when the remote is unreachable; synchronous backends (filesystem, GitHub, ClickUp) always report `"synced": true`. In non-`--json` mode the same warning is written to stderr, so the machine-readable channel and the human channel stay in sync.
+
 | Command                                                         | Description                                                                                     |
 | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `init`                                                          | Initialise lazyspec in the current project                                                      |
@@ -396,7 +398,7 @@ lazyspec provenance list
 
 All three subcommands accept `--json`. Shapes:
 
-- `add` / `remove`: `{ "doc": "...", "added"|"removed": "...", "provenance": [...] }`
+- `add` / `remove`: `{ "doc": "...", "added"|"removed": "...", "provenance": [...], "synced": true|false }` — as with every mutation, `add`/`remove` also carry the push outcome: `"synced"` reflects whether the backend push landed, and a `"warnings"` array is present only when `"synced": false` (a `git-ref` local-only write against an unreachable remote). The same warning goes to stderr in non-`--json` mode.
 - `list <id>`: `{ "doc": "...", "provenance": [...] }`
 - `list` (no id): `{ "documents": [{ "id": "...", "path": "...", "provenance": [...] }, ...] }`
 

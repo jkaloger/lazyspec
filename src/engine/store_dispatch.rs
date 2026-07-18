@@ -35,10 +35,41 @@ struct CacheFrontmatter {
     attributes: BTreeMap<String, AttrValue>,
 }
 
+/// Outcome of a mutation's push to a remote. Only `git-ref`-backed stores push
+/// asynchronously after a local write (see `GitRefStore`); every other backend's
+/// mutation is synced synchronously as part of the API call itself (a REST/
+/// GraphQL write that either succeeds or the whole mutation errors), so those
+/// backends always report `Synced`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushOutcome {
+    Synced,
+    LocalOnly { warning: String },
+}
+
+impl PushOutcome {
+    pub fn is_synced(&self) -> bool {
+        matches!(self, PushOutcome::Synced)
+    }
+
+    pub fn warning(&self) -> Option<&str> {
+        match self {
+            PushOutcome::Synced => None,
+            PushOutcome::LocalOnly { warning } => Some(warning),
+        }
+    }
+}
+
+impl Default for PushOutcome {
+    fn default() -> Self {
+        PushOutcome::Synced
+    }
+}
+
 #[derive(Debug)]
 pub struct CreatedDoc {
     pub path: PathBuf,
     pub id: String,
+    pub push_outcome: PushOutcome,
 }
 
 pub trait DocumentStore: gh::AsAny {
@@ -50,16 +81,21 @@ pub trait DocumentStore: gh::AsAny {
         body: &str,
     ) -> Result<CreatedDoc>;
 
-    fn update(&mut self, type_def: &TypeDef, doc_id: &str, updates: &[(&str, &str)]) -> Result<()>;
+    fn update(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        updates: &[(&str, &str)],
+    ) -> Result<PushOutcome>;
 
-    fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()>;
+    fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<PushOutcome>;
 
     fn set_provenance(
         &mut self,
         type_def: &TypeDef,
         doc_id: &str,
         provenance: &[String],
-    ) -> Result<()>;
+    ) -> Result<PushOutcome>;
 
     /// Propagate a tag mutation to the backend, mirroring
     /// [`gh::GhIssueWriter::issue_edit`]'s `(labels_add, labels_remove)` shape.
@@ -74,7 +110,7 @@ pub trait DocumentStore: gh::AsAny {
         doc_id: &str,
         add: &[String],
         remove: &[String],
-    ) -> Result<()>;
+    ) -> Result<PushOutcome>;
 }
 
 pub struct FilesystemStore {
@@ -94,16 +130,22 @@ impl DocumentStore for UnavailableStore {
     fn create(&mut self, _: &TypeDef, _: &str, _: &str, _: &str) -> Result<CreatedDoc> {
         bail!("{}", self.message)
     }
-    fn update(&mut self, _: &TypeDef, _: &str, _: &[(&str, &str)]) -> Result<()> {
+    fn update(&mut self, _: &TypeDef, _: &str, _: &[(&str, &str)]) -> Result<PushOutcome> {
         bail!("{}", self.message)
     }
-    fn delete(&mut self, _: &TypeDef, _: &str) -> Result<()> {
+    fn delete(&mut self, _: &TypeDef, _: &str) -> Result<PushOutcome> {
         bail!("{}", self.message)
     }
-    fn set_provenance(&mut self, _: &TypeDef, _: &str, _: &[String]) -> Result<()> {
+    fn set_provenance(&mut self, _: &TypeDef, _: &str, _: &[String]) -> Result<PushOutcome> {
         bail!("{}", self.message)
     }
-    fn sync_tags(&mut self, _: &TypeDef, _: &str, _: &[String], _: &[String]) -> Result<()> {
+    fn sync_tags(
+        &mut self,
+        _: &TypeDef,
+        _: &str,
+        _: &[String],
+        _: &[String],
+    ) -> Result<PushOutcome> {
         bail!("{}", self.message)
     }
 }
@@ -236,7 +278,11 @@ impl DocumentStore for ClickupTasksStore {
             .strip_prefix(&self.root)
             .unwrap_or(&cache_path)
             .to_path_buf();
-        Ok(CreatedDoc { path: relative, id })
+        Ok(CreatedDoc {
+            path: relative,
+            id,
+            push_outcome: PushOutcome::Synced,
+        })
     }
 
     /// Edit the bound ClickUp task from a doc's `update` and re-materialize the
@@ -248,7 +294,12 @@ impl DocumentStore for ClickupTasksStore {
     /// `advance`) rides the same path: it maps to the payload's raw status
     /// string, is `PUT` verbatim, and re-materializes from ClickUp's echo
     /// (RFC-056 §Status handling); lazyspec applies no local transition gate.
-    fn update(&mut self, type_def: &TypeDef, doc_id: &str, updates: &[(&str, &str)]) -> Result<()> {
+    fn update(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        updates: &[(&str, &str)],
+    ) -> Result<PushOutcome> {
         let token = self
             .token
             .as_ref()
@@ -289,7 +340,7 @@ impl DocumentStore for ClickupTasksStore {
         task_map.insert(&id, &task.id, updated_at);
         task_map.save(&self.root)?;
 
-        Ok(())
+        Ok(PushOutcome::Synced)
     }
     /// Delete a ClickUp-backed doc by *archiving* its task (RFC-056 §Design):
     /// resolve the task id from the [`TaskMap`] and `PUT /task/{id}` with
@@ -298,7 +349,7 @@ impl DocumentStore for ClickupTasksStore {
     /// drops out of `task_list`, so the next `fetch` (which owns the whole type
     /// dir) removes the doc from the cache and the map. Eagerly deleting them now
     /// would only race that authoritative sync.
-    fn delete(&mut self, _type_def: &TypeDef, doc_id: &str) -> Result<()> {
+    fn delete(&mut self, _type_def: &TypeDef, doc_id: &str) -> Result<PushOutcome> {
         let token = self
             .token
             .as_ref()
@@ -317,15 +368,21 @@ impl DocumentStore for ClickupTasksStore {
 
         self.client.archive_task(token.expose(), &task_id)?;
 
-        Ok(())
+        Ok(PushOutcome::Synced)
     }
-    fn set_provenance(&mut self, _: &TypeDef, _: &str, _: &[String]) -> Result<()> {
+    fn set_provenance(&mut self, _: &TypeDef, _: &str, _: &[String]) -> Result<PushOutcome> {
         bail!("{}", Self::WRITE_UNIMPLEMENTED)
     }
     /// The ClickUp tag write path (task tags) is not implemented yet, so fail
     /// loudly at the trait seam rather than silently dropping the mutation.
     /// Deferred to the RFC-056 write path.
-    fn sync_tags(&mut self, _: &TypeDef, _: &str, _: &[String], _: &[String]) -> Result<()> {
+    fn sync_tags(
+        &mut self,
+        _: &TypeDef,
+        _: &str,
+        _: &[String],
+        _: &[String],
+    ) -> Result<PushOutcome> {
         bail!("{}", Self::WRITE_UNIMPLEMENTED)
     }
 }
@@ -356,10 +413,19 @@ impl DocumentStore for FilesystemStore {
             relative.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
         );
 
-        Ok(CreatedDoc { path: relative, id })
+        Ok(CreatedDoc {
+            path: relative,
+            id,
+            push_outcome: PushOutcome::Synced,
+        })
     }
 
-    fn update(&mut self, type_def: &TypeDef, doc_id: &str, updates: &[(&str, &str)]) -> Result<()> {
+    fn update(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        updates: &[(&str, &str)],
+    ) -> Result<PushOutcome> {
         let store = Store::load(&self.root, &self.config)?;
         crate::engine::fs_ops::update_document_with_type(
             &self.root,
@@ -368,11 +434,13 @@ impl DocumentStore for FilesystemStore {
             updates,
             Some(type_def),
         )
+        .map(|()| PushOutcome::Synced)
     }
 
-    fn delete(&mut self, _type_def: &TypeDef, doc_id: &str) -> Result<()> {
+    fn delete(&mut self, _type_def: &TypeDef, doc_id: &str) -> Result<PushOutcome> {
         let store = Store::load(&self.root, &self.config)?;
         crate::engine::fs_ops::delete_document(&self.root, &store, doc_id)
+            .map(|()| PushOutcome::Synced)
     }
 
     fn set_provenance(
@@ -380,7 +448,7 @@ impl DocumentStore for FilesystemStore {
         _type_def: &TypeDef,
         doc_id: &str,
         provenance: &[String],
-    ) -> Result<()> {
+    ) -> Result<PushOutcome> {
         let store = Store::load(&self.root, &self.config)?;
         let doc = store
             .get(std::path::Path::new(doc_id))
@@ -407,12 +475,19 @@ impl DocumentStore for FilesystemStore {
                 Ok(())
             },
         )
+        .map(|()| PushOutcome::Synced)
     }
 
     /// No-op: the on-disk document is the source of truth and the CLI already
     /// rewrote its frontmatter `tags`. There is no remote to propagate to.
-    fn sync_tags(&mut self, _: &TypeDef, _: &str, _: &[String], _: &[String]) -> Result<()> {
-        Ok(())
+    fn sync_tags(
+        &mut self,
+        _: &TypeDef,
+        _: &str,
+        _: &[String],
+        _: &[String],
+    ) -> Result<PushOutcome> {
+        Ok(PushOutcome::Synced)
     }
 }
 
@@ -1283,10 +1358,19 @@ impl DocumentStore for GithubIssuesStore {
             .strip_prefix(&self.root)
             .unwrap_or(&cache_path)
             .to_path_buf();
-        Ok(CreatedDoc { path: relative, id })
+        Ok(CreatedDoc {
+            path: relative,
+            id,
+            push_outcome: PushOutcome::Synced,
+        })
     }
 
-    fn update(&mut self, type_def: &TypeDef, doc_id: &str, updates: &[(&str, &str)]) -> Result<()> {
+    fn update(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        updates: &[(&str, &str)],
+    ) -> Result<PushOutcome> {
         let (issue_number, remote_issue) = self.check_lock(doc_id)?;
 
         let ctx = issue_body::IssueContext {
@@ -1347,7 +1431,7 @@ impl DocumentStore for GithubIssuesStore {
                 && issue_type_update.is_none()
                 && !updates.iter().any(|(k, _)| matches!(*k, "title" | "body"))
             {
-                return Ok(());
+                return Ok(PushOutcome::Synced);
             }
         }
         if !attr_updates.is_empty() {
@@ -1416,7 +1500,7 @@ impl DocumentStore for GithubIssuesStore {
         write_cache_file(&self.root, type_def, &meta, &body)?;
         self.issue_cache.touch_lock(doc_id)?;
 
-        Ok(())
+        Ok(PushOutcome::Synced)
     }
 
     fn set_provenance(
@@ -1424,7 +1508,7 @@ impl DocumentStore for GithubIssuesStore {
         type_def: &TypeDef,
         doc_id: &str,
         provenance: &[String],
-    ) -> Result<()> {
+    ) -> Result<PushOutcome> {
         let (issue_number, remote_issue) = self.check_lock(doc_id)?;
 
         let ctx = issue_body::IssueContext {
@@ -1460,10 +1544,10 @@ impl DocumentStore for GithubIssuesStore {
         write_cache_file(&self.root, type_def, &meta, &body)?;
         self.issue_cache.touch_lock(doc_id)?;
 
-        Ok(())
+        Ok(PushOutcome::Synced)
     }
 
-    fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()> {
+    fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<PushOutcome> {
         let (issue_number, remote_issue) = self.check_lock(doc_id)?;
 
         let deleted_title = format!("[DELETED] {}", remote_issue.title);
@@ -1484,7 +1568,7 @@ impl DocumentStore for GithubIssuesStore {
 
         self.issue_cache.remove(doc_id, &type_def.name)?;
 
-        Ok(())
+        Ok(PushOutcome::Synced)
     }
 
     /// Sync tag mutations to GitHub as issue labels.
@@ -1499,7 +1583,7 @@ impl DocumentStore for GithubIssuesStore {
         doc_id: &str,
         add: &[String],
         remove: &[String],
-    ) -> Result<()> {
+    ) -> Result<PushOutcome> {
         let issue_number = self
             .issue_map
             .get(doc_id)
@@ -1521,7 +1605,7 @@ impl DocumentStore for GithubIssuesStore {
 
         self.issue_cache.touch_lock(doc_id)?;
 
-        Ok(())
+        Ok(PushOutcome::Synced)
     }
 }
 
@@ -1664,10 +1748,19 @@ impl DocumentStore for GithubMilestonesStore {
             .strip_prefix(&self.root)
             .unwrap_or(&cache_path)
             .to_path_buf();
-        Ok(CreatedDoc { path: relative, id })
+        Ok(CreatedDoc {
+            path: relative,
+            id,
+            push_outcome: PushOutcome::Synced,
+        })
     }
 
-    fn update(&mut self, type_def: &TypeDef, doc_id: &str, updates: &[(&str, &str)]) -> Result<()> {
+    fn update(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        updates: &[(&str, &str)],
+    ) -> Result<PushOutcome> {
         let number = self.resolve_number(doc_id)?;
 
         let mut title: Option<String> = None;
@@ -1707,10 +1800,10 @@ impl DocumentStore for GithubMilestonesStore {
         let meta = self.meta_from_milestone(type_def, doc_id, &milestone, "");
         write_cache_file(&self.root, type_def, &meta, &milestone.description)?;
 
-        Ok(())
+        Ok(PushOutcome::Synced)
     }
 
-    fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()> {
+    fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<PushOutcome> {
         let number = self.resolve_number(doc_id)?;
         self.client.milestone_delete(&self.repo, number)?;
 
@@ -1721,7 +1814,7 @@ impl DocumentStore for GithubMilestonesStore {
         if let Some(path) = find_cache_file(&cache_dir, doc_id) {
             let _ = std::fs::remove_file(path);
         }
-        Ok(())
+        Ok(PushOutcome::Synced)
     }
 
     fn set_provenance(
@@ -1729,7 +1822,7 @@ impl DocumentStore for GithubMilestonesStore {
         type_def: &TypeDef,
         doc_id: &str,
         provenance: &[String],
-    ) -> Result<()> {
+    ) -> Result<PushOutcome> {
         // Milestones have no provenance field on GitHub; keep it in the local
         // cache frontmatter only.
         let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
@@ -1755,12 +1848,19 @@ impl DocumentStore for GithubMilestonesStore {
                 Ok(())
             },
         )
+        .map(|()| PushOutcome::Synced)
     }
 
     /// No-op: labels are an issue concept, not a milestone concept. Tag
     /// mutations stay in the local cache frontmatter only.
-    fn sync_tags(&mut self, _: &TypeDef, _: &str, _: &[String], _: &[String]) -> Result<()> {
-        Ok(())
+    fn sync_tags(
+        &mut self,
+        _: &TypeDef,
+        _: &str,
+        _: &[String],
+        _: &[String],
+    ) -> Result<PushOutcome> {
+        Ok(PushOutcome::Synced)
     }
 }
 
@@ -2016,6 +2116,7 @@ impl DocumentStore for GithubProjectsStore {
         Ok(CreatedDoc {
             path: relative,
             id: doc_id,
+            push_outcome: PushOutcome::Synced,
         })
     }
 
@@ -2024,14 +2125,14 @@ impl DocumentStore for GithubProjectsStore {
         type_def: &TypeDef,
         doc_id: &str,
         _updates: &[(&str, &str)],
-    ) -> Result<()> {
+    ) -> Result<PushOutcome> {
         // Boards are not mutated from lazyspec; resolving the node id is the only
         // side effect, so an out-of-date binding refreshes.
         self.bind_board(type_def, doc_id)?;
-        Ok(())
+        Ok(PushOutcome::Synced)
     }
 
-    fn delete(&mut self, _type_def: &TypeDef, _doc_id: &str) -> Result<()> {
+    fn delete(&mut self, _type_def: &TypeDef, _doc_id: &str) -> Result<PushOutcome> {
         bail!("github-projects backend does not delete boards; boards are managed on GitHub")
     }
 
@@ -2040,15 +2141,21 @@ impl DocumentStore for GithubProjectsStore {
         type_def: &TypeDef,
         doc_id: &str,
         _provenance: &[String],
-    ) -> Result<()> {
+    ) -> Result<PushOutcome> {
         self.bind_board(type_def, doc_id)?;
-        Ok(())
+        Ok(PushOutcome::Synced)
     }
 
     /// No-op: labels are an issue concept, not a Projects v2 board concept. Tag
     /// mutations stay in the local cache frontmatter only.
-    fn sync_tags(&mut self, _: &TypeDef, _: &str, _: &[String], _: &[String]) -> Result<()> {
-        Ok(())
+    fn sync_tags(
+        &mut self,
+        _: &TypeDef,
+        _: &str,
+        _: &[String],
+        _: &[String],
+    ) -> Result<PushOutcome> {
+        Ok(PushOutcome::Synced)
     }
 }
 
@@ -3620,9 +3727,13 @@ mod tests {
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
-        gh_store
+        let outcome = gh_store
             .update(&td, "RFC-001", &[("status", "accepted")])
             .unwrap();
+
+        // BUG-006: a non-pushing backend syncs synchronously as part of the API
+        // call, so its mutation always reports `Synced` (never `LocalOnly`).
+        assert_eq!(outcome, PushOutcome::Synced);
 
         // Re-serialized body sent to GH should not contain author:
         let captured = gh_store.mock().last_edit_body.borrow();

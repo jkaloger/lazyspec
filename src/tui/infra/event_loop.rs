@@ -138,6 +138,7 @@ fn try_push_gh_edit(
         .map_err(|e| format!("lock poisoned: {e}"))?;
     gh_store
         .update(type_def, &doc_id, &[("body", body_trimmed)])
+        .map(|_| ())
         .map_err(|e| e.to_string())
 }
 
@@ -166,6 +167,7 @@ fn try_push_git_ref_edit(root: &Path, relative: &Path, config: &Config) -> Resul
     };
     git_store
         .recommit_cache(type_def, &doc_id)
+        .map(|_| ())
         .map_err(|e| e.to_string())
 }
 
@@ -229,6 +231,7 @@ fn try_push_clickup_edit_with<C: ClickupClient + 'static>(
     .map_err(|e| e.to_string())?;
     clickup_store
         .update(type_def, &doc_id, &[("body", body_trimmed)])
+        .map(|_| ())
         .map_err(|e| e.to_string())
 }
 

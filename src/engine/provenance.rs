@@ -1,4 +1,5 @@
 use crate::engine::config::Config;
+use crate::engine::store_dispatch::PushOutcome;
 use anyhow::{anyhow, Result};
 use std::fmt;
 use std::path::Path;
@@ -35,7 +36,7 @@ pub fn set_provenance(
     type_name: &str,
     doc_id: &str,
     new_list: &[String],
-) -> Result<()> {
+) -> Result<PushOutcome> {
     let type_def = config
         .type_by_name(type_name)
         .ok_or_else(|| anyhow!("unknown document type: {}", type_name))?;

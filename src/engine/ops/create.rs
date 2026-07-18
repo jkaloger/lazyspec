@@ -11,7 +11,9 @@ use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::reservation;
 use crate::engine::store::{Filter, Store};
-use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore, GithubMilestonesStore};
+use crate::engine::store_dispatch::{
+    DocumentStore, GithubIssuesStore, GithubMilestonesStore, PushOutcome,
+};
 use anyhow::{anyhow, bail, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -36,8 +38,15 @@ pub fn run(
         None,
         on_progress,
     )
+    .map(|(path, _)| path)
 }
 
+/// Author a document, returning its path alongside the backend push outcome.
+///
+/// The outcome is `Synced` for every synchronous backend (filesystem, and the
+/// REST/GraphQL stores whose create either lands remotely or errors); only a
+/// git-ref-backed create can report `LocalOnly` when the deferred push cannot
+/// reach the remote, carrying the warning the CLI surfaces in its JSON.
 #[allow(clippy::too_many_arguments)]
 pub fn run_with_body(
     root: &Path,
@@ -49,7 +58,7 @@ pub fn run_with_body(
     parent: Option<&str>,
     body: Option<&str>,
     on_progress: impl Fn(reservation::ReservationProgress),
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, PushOutcome)> {
     let type_def = config.type_by_name(doc_type).ok_or_else(|| {
         anyhow!(
             "unknown doc type: '{}'. valid types: {}",
@@ -110,7 +119,8 @@ pub fn run_with_body(
     if let Some(parent_id) = parent {
         return create_with_parent(
             root, config, store, type_def, title, author, body, parent_id,
-        );
+        )
+        .map(|path| (path, PushOutcome::Synced));
     }
 
     if type_def.store == StoreBackend::GithubIssues {
@@ -135,7 +145,7 @@ pub fn run_with_body(
             issue_cache: IssueCache::new(root),
         };
         let created = store.create(type_def, title, author, body.unwrap_or(""))?;
-        return Ok(root.join(&created.path));
+        return Ok((root.join(&created.path), created.push_outcome));
     }
 
     if type_def.store == StoreBackend::GithubMilestones {
@@ -159,7 +169,7 @@ pub fn run_with_body(
             issue_map: IssueMap::load(root)?,
         };
         let created = store.create(type_def, title, author, body.unwrap_or(""))?;
-        return Ok(root.join(&created.path));
+        return Ok((root.join(&created.path), created.push_outcome));
     }
 
     if type_def.store == StoreBackend::GithubProjects {
@@ -183,7 +193,7 @@ pub fn run_with_body(
             issue_map: IssueMap::load(root)?,
         };
         let created = store.create(type_def, title, author, body.unwrap_or(""))?;
-        return Ok(root.join(&created.path));
+        return Ok((root.join(&created.path), created.push_outcome));
     }
 
     if type_def.store == StoreBackend::GitRef {
@@ -195,7 +205,7 @@ pub fn run_with_body(
             reserved_number: None,
         };
         let created = store.create(type_def, title, author, body.unwrap_or(""))?;
-        return Ok(root.join(&created.path));
+        return Ok((root.join(&created.path), created.push_outcome));
     }
 
     if type_def.store == StoreBackend::ClickupTasks {
@@ -212,7 +222,7 @@ pub fn run_with_body(
             || LayeredCredentialStore::global().load_clickup_token(),
         )?;
         let created = store.create(type_def, title, author, body.unwrap_or(""))?;
-        return Ok(root.join(&created.path));
+        return Ok((root.join(&created.path), created.push_outcome));
     }
 
     let path = fs_ops::create_document(
@@ -235,7 +245,7 @@ pub fn run_with_body(
         fs::write(&path, new_content)?;
     }
 
-    Ok(path)
+    Ok((path, PushOutcome::Synced))
 }
 
 /// Author a child of `parent_id`, branching on the child type's store.

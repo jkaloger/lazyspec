@@ -3,7 +3,7 @@ use crate::engine::config::Config;
 use crate::engine::document::rewrite_frontmatter;
 use crate::engine::fs::FileSystem;
 use crate::engine::store::Store;
-use crate::engine::store_dispatch::build_registry;
+use crate::engine::store_dispatch::{build_registry, PushOutcome};
 use anyhow::Result;
 use std::path::Path;
 
@@ -14,7 +14,7 @@ pub fn tag_add_with_config(
     tags: &[String],
     fs: &dyn FileSystem,
     config: Option<&Config>,
-) -> Result<()> {
+) -> Result<PushOutcome> {
     let resolved = resolve_to_path(store, id)?;
     let full_path = root.join(&resolved);
     rewrite_frontmatter(&full_path, fs, |doc| {
@@ -40,7 +40,7 @@ pub fn tag_remove_with_config(
     tags: &[String],
     fs: &dyn FileSystem,
     config: Option<&Config>,
-) -> Result<()> {
+) -> Result<PushOutcome> {
     let resolved = resolve_to_path(store, id)?;
     let full_path = root.join(&resolved);
     rewrite_frontmatter(&full_path, fs, |doc| {
@@ -71,13 +71,13 @@ fn propagate_tags(
     config: Option<&Config>,
     add: &[String],
     remove: &[String],
-) -> Result<()> {
+) -> Result<PushOutcome> {
     let Some(config) = config else {
-        return Ok(());
+        return Ok(PushOutcome::Synced);
     };
     let doc = resolve_shorthand_or_path(store, id)?;
     let Some(type_def) = config.type_by_name(doc.doc_type.as_str()) else {
-        return Ok(());
+        return Ok(PushOutcome::Synced);
     };
     let mut registry = build_registry(root, config);
     registry
