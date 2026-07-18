@@ -120,6 +120,25 @@ impl fmt::Display for StoreBackend {
     }
 }
 
+impl StoreBackend {
+    /// The lifecycle a remote store dictates for a type that declares none. GitHub
+    /// issues and milestones are `open`/`closed`; the empty edge set leaves the
+    /// pair unconstrained, so the DAG is bidirectional (reopen is a valid move) and
+    /// `first_active_status`/`terminal_status` resolve to `open`/`closed`. Stores
+    /// whose status is authored locally (`filesystem`, `git-ref`) or captured from
+    /// the remote per-list at sync time (`clickup-tasks` persists its own derived
+    /// lifecycle) return `None`.
+    pub fn canonical_lifecycle(&self) -> Option<Lifecycle> {
+        match self {
+            StoreBackend::GithubIssues | StoreBackend::GithubMilestones => Some(Lifecycle {
+                states: vec!["open".to_string(), "closed".to_string()],
+                edges: Vec::new(),
+            }),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Authorship {
@@ -450,7 +469,7 @@ pub fn validate_status(type_def: &TypeDef, status: &Status) -> Result<()> {
         "status \"{}\" is not a valid state for type \"{}\" (allowed: {})",
         status,
         type_def.name,
-        type_def.lifecycle.states.join(", ")
+        type_def.effective_lifecycle().states.join(", ")
     )
 }
 
@@ -1275,9 +1294,30 @@ impl TypeDef {
         format!("{}-{}", self.prefix, suffix)
     }
 
-    /// True iff `status` names one of this type's declared lifecycle states.
+    /// True iff `status` names one of this type's effective lifecycle states
+    /// (declared, or the store's canonical lifecycle when none is declared).
     pub fn accepts_status(&self, status: &Status) -> bool {
-        self.lifecycle.states.iter().any(|s| s == status.as_str())
+        self.effective_lifecycle()
+            .states
+            .iter()
+            .any(|s| s == status.as_str())
+    }
+
+    /// The lifecycle to use for status derivation, transition gating, and the DAG:
+    /// the declared `lifecycle` when it names any states, else the store backend's
+    /// canonical lifecycle (github `open`/`closed`). A declared lifecycle always
+    /// wins; a store with no canonical lifecycle leaves the (possibly empty)
+    /// declared one untouched. Consult this rather than `self.lifecycle` directly
+    /// wherever a github-backed type's states must reflect the remote.
+    pub fn effective_lifecycle(&self) -> std::borrow::Cow<'_, Lifecycle> {
+        use std::borrow::Cow;
+        if !self.lifecycle.states.is_empty() {
+            return Cow::Borrowed(&self.lifecycle);
+        }
+        match self.store.canonical_lifecycle() {
+            Some(lc) => Cow::Owned(lc),
+            None => Cow::Borrowed(&self.lifecycle),
+        }
     }
 
     /// The GitHub label identifying this type's issues: the configured
@@ -2243,6 +2283,58 @@ interactive = 'claude "$LAZYSPEC_PROMPT"'
         let lc = Lifecycle::default();
         assert_eq!(lc.first_active_status(), "draft");
         assert_eq!(lc.terminal_status(), "complete");
+    }
+
+    // STORY-224 AC1/AC2: a github-backed type with no declared lifecycle resolves
+    // to the store's canonical open/closed lifecycle -- bidirectional (empty edges)
+    // with open first-active and closed terminal.
+    #[test]
+    fn effective_lifecycle_github_undeclared_is_open_closed() {
+        for store in [StoreBackend::GithubMilestones, StoreBackend::GithubIssues] {
+            let td = TypeDef::test_fixture("m", store);
+            let lc = td.effective_lifecycle();
+            assert_eq!(lc.states, vec!["open".to_string(), "closed".to_string()]);
+            assert_eq!(lc.first_active_status(), "open");
+            assert_eq!(lc.terminal_status(), "closed");
+            // bidirectional DAG: open<->closed both reachable.
+            assert!(lc.targets_from("open").contains(&"closed"));
+            assert!(lc.targets_from("closed").contains(&"open"));
+        }
+    }
+
+    // STORY-224 AC3: a declared non-empty lifecycle wins over the store canonical.
+    #[test]
+    fn effective_lifecycle_declared_wins_over_canonical() {
+        let mut td = TypeDef::test_fixture("m", StoreBackend::GithubMilestones);
+        td.lifecycle = Lifecycle {
+            states: vec!["backlog".into(), "shipped".into()],
+            edges: vec![],
+        };
+        let lc = td.effective_lifecycle();
+        assert_eq!(
+            lc.states,
+            vec!["backlog".to_string(), "shipped".to_string()]
+        );
+    }
+
+    // STORY-224 AC6: filesystem/git-ref have no canonical lifecycle, so an
+    // undeclared lifecycle stays empty (behaviour unchanged).
+    #[test]
+    fn effective_lifecycle_local_stores_stay_empty() {
+        for store in [StoreBackend::Filesystem, StoreBackend::GitRef] {
+            let td = TypeDef::test_fixture("s", store);
+            assert!(td.effective_lifecycle().states.is_empty());
+        }
+    }
+
+    // STORY-224 AC1: status membership for a github type accepts open/closed even
+    // with no declared lifecycle.
+    #[test]
+    fn accepts_status_github_undeclared_accepts_open_closed() {
+        let td = TypeDef::test_fixture("m", StoreBackend::GithubMilestones);
+        assert!(td.accepts_status(&Status::new("open")));
+        assert!(td.accepts_status(&Status::new("closed")));
+        assert!(!td.accepts_status(&Status::new("draft")));
     }
 
     // Empty edges = unconstrained lifecycle: any move between declared states.

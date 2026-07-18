@@ -850,7 +850,14 @@ dropped rather than sent as an invalid payload.
 
 Types stored as `--store github-milestones` map each document to a GitHub
 milestone over the REST API (title -> title, body -> description, `status` ->
-open/closed state, `due_on` passed through verbatim). Progress
+open/closed state, `due_on` passed through verbatim). A `github-milestones` (or
+`github-issues`) type that declares **no** `lifecycle` inherits the store's
+canonical `open`/`closed` lifecycle: an open milestone/issue reads as `open`, a
+closed one as `closed`, the status DAG offers `open` <-> `closed` (either
+direction, so reopening is a valid move), and new documents are born `open` — no
+`lifecycle` block required in `.lazyspec.toml`. Declaring a `lifecycle` on the
+type overrides this: its first state maps to the open milestone/issue and its
+terminal state to the closed one. Progress
 (`percent_complete`) is computed from the milestone's issue counts at read time
 and is never writable. The write policy is last-write-wins: a push happens
 unconditionally, then the milestone is re-read into the cache (no optimistic

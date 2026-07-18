@@ -815,7 +815,7 @@ impl App {
 
         self.available_statuses.clear();
         for t in &config.documents.types {
-            for state in &t.lifecycle.states {
+            for state in &t.effective_lifecycle().states {
                 if !self.available_statuses.contains(state) {
                     self.available_statuses.push(state.clone());
                 }
@@ -2870,7 +2870,7 @@ impl App {
         let current = doc.status.as_str().to_string();
         let mut states = vec![current.clone()];
         if let Some(type_def) = config.type_by_name(doc.doc_type.as_str()) {
-            for target in type_def.lifecycle.targets_from(&current) {
+            for target in type_def.effective_lifecycle().targets_from(&current) {
                 if !states.iter().any(|s| s == target) {
                     states.push(target.to_string());
                 }

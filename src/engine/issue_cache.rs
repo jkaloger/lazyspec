@@ -222,6 +222,7 @@ impl IssueCache {
         let mut unchanged = 0usize;
         let mut write_warnings = Vec::new();
 
+        let lifecycle = type_def.effective_lifecycle();
         for issue in &issues {
             let (meta, body) = parse_issue(
                 issue,
@@ -230,8 +231,8 @@ impl IssueCache {
                 &type_def.attributes,
                 milestone_rel,
                 issue_map,
-                type_def.lifecycle.first_active_status(),
-                type_def.lifecycle.terminal_status(),
+                lifecycle.first_active_status(),
+                lifecycle.terminal_status(),
             );
             let id = type_def.make_id(issue.number);
             let meta = DocMeta {
@@ -388,6 +389,7 @@ impl IssueCache {
         let milestone_rel = config
             .relationship_by_github_native("milestone")
             .map(|r| r.name.as_str());
+        let lifecycle = type_def.effective_lifecycle();
         for issue in &issues {
             let (meta, body) = parse_issue(
                 issue,
@@ -396,8 +398,8 @@ impl IssueCache {
                 &type_def.attributes,
                 milestone_rel,
                 issue_map,
-                type_def.lifecycle.first_active_status(),
-                type_def.lifecycle.terminal_status(),
+                lifecycle.first_active_status(),
+                lifecycle.terminal_status(),
             );
             let id = type_def.make_id(issue.number);
             let meta = DocMeta {

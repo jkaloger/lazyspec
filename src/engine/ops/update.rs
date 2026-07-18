@@ -21,8 +21,9 @@ fn gate_status_transition(type_def: &TypeDef, current: &str, target: &str) -> Re
     if type_def.store == StoreBackend::ClickupTasks {
         return Ok(());
     }
-    if current != target && !type_def.lifecycle.has_edge(current, target) {
-        let allowed = type_def.lifecycle.targets_from(current);
+    let lifecycle = type_def.effective_lifecycle();
+    if current != target && !lifecycle.has_edge(current, target) {
+        let allowed = lifecycle.targets_from(current);
         let allowed = if allowed.is_empty() {
             "(none)".to_string()
         } else {

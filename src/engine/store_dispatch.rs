@@ -682,8 +682,11 @@ impl GithubIssuesStore {
             issue_type: remote_issue.issue_type.clone(),
             default_type: type_def.name.clone(),
             attr_defs: type_def.attributes.clone(),
-            open_status: type_def.lifecycle.first_active_status().to_string(),
-            closed_status: type_def.lifecycle.terminal_status().to_string(),
+            open_status: type_def
+                .effective_lifecycle()
+                .first_active_status()
+                .to_string(),
+            closed_status: type_def.effective_lifecycle().terminal_status().to_string(),
         };
         let (mut remote_meta, remote_prose) = issue_body::deserialize(&remote_issue.body, &ctx)?;
 
@@ -1266,7 +1269,7 @@ impl DocumentStore for GithubIssuesStore {
             path: PathBuf::new(),
             title: title.to_string(),
             doc_type: DocType::new(&type_def.name),
-            status: Status::new(type_def.lifecycle.seed_status()),
+            status: Status::new(type_def.effective_lifecycle().seed_status()),
             author: author.to_string(),
             date,
             tags: vec![],
@@ -1393,8 +1396,11 @@ impl DocumentStore for GithubIssuesStore {
             issue_type: remote_issue.issue_type.clone(),
             default_type: type_def.name.clone(),
             attr_defs: type_def.attributes.clone(),
-            open_status: type_def.lifecycle.first_active_status().to_string(),
-            closed_status: type_def.lifecycle.terminal_status().to_string(),
+            open_status: type_def
+                .effective_lifecycle()
+                .first_active_status()
+                .to_string(),
+            closed_status: type_def.effective_lifecycle().terminal_status().to_string(),
         };
         let (mut meta, mut body) = issue_body::deserialize(&remote_issue.body, &ctx)?;
 
@@ -1486,7 +1492,7 @@ impl DocumentStore for GithubIssuesStore {
         if let Some(status) = new_status {
             let should_be_open = issue_body::status_maps_to_open(
                 status.as_str(),
-                type_def.lifecycle.terminal_status(),
+                type_def.effective_lifecycle().terminal_status(),
             );
             let is_open = remote_issue.state == "OPEN";
             if should_be_open && !is_open {
@@ -1554,8 +1560,11 @@ impl DocumentStore for GithubIssuesStore {
             issue_type: remote_issue.issue_type.clone(),
             default_type: type_def.name.clone(),
             attr_defs: type_def.attributes.clone(),
-            open_status: type_def.lifecycle.first_active_status().to_string(),
-            closed_status: type_def.lifecycle.terminal_status().to_string(),
+            open_status: type_def
+                .effective_lifecycle()
+                .first_active_status()
+                .to_string(),
+            closed_status: type_def.effective_lifecycle().terminal_status().to_string(),
         };
         let (mut meta, body) = issue_body::deserialize(&remote_issue.body, &ctx)?;
         meta.provenance = provenance.to_vec();
@@ -1725,7 +1734,7 @@ impl GithubMilestonesStore {
             path: PathBuf::new(),
             title: milestone.title.clone(),
             doc_type: DocType::new(&type_def.name),
-            status: milestone_state_to_status(&milestone.state, &type_def.lifecycle),
+            status: milestone_state_to_status(&milestone.state, &type_def.effective_lifecycle()),
             author: author.to_string(),
             date: Local::now().date_naive(),
             tags: vec![],
@@ -1804,7 +1813,7 @@ impl DocumentStore for GithubMilestonesStore {
                     // state (custom or default) closes the milestone.
                     let open = issue_body::status_maps_to_open(
                         s.as_str(),
-                        type_def.lifecycle.terminal_status(),
+                        type_def.effective_lifecycle().terminal_status(),
                     );
                     state = Some(if open { "open" } else { "closed" }.to_string());
                 }
@@ -2052,7 +2061,7 @@ impl GithubProjectsStore {
             path: PathBuf::new(),
             title: doc_id.to_string(),
             doc_type: DocType::new(&type_def.name),
-            status: Status::new(type_def.lifecycle.seed_status()),
+            status: Status::new(type_def.effective_lifecycle().seed_status()),
             author: String::new(),
             date: Local::now().date_naive(),
             tags: vec![],
@@ -2124,7 +2133,7 @@ impl DocumentStore for GithubProjectsStore {
             path: PathBuf::new(),
             title: doc_id.clone(),
             doc_type: DocType::new(&type_def.name),
-            status: Status::new(type_def.lifecycle.seed_status()),
+            status: Status::new(type_def.effective_lifecycle().seed_status()),
             author: String::new(),
             date: Local::now().date_naive(),
             tags: vec![],
@@ -3649,7 +3658,9 @@ mod tests {
             serde_yaml::from_str(&yaml).expect("valid YAML frontmatter");
         assert_eq!(parsed["title"].as_str().unwrap(), "my title");
         assert_eq!(parsed["type"].as_str().unwrap(), "rfc");
-        assert_eq!(parsed["status"].as_str().unwrap(), "draft");
+        // STORY-224: a github-issues type with no declared lifecycle is born at the
+        // store's canonical first-active state `open`, not the empty-fallback `draft`.
+        assert_eq!(parsed["status"].as_str().unwrap(), "open");
         assert_eq!(parsed["author"].as_str().unwrap(), "author");
         assert!(content.contains("body text"));
     }
@@ -4697,6 +4708,29 @@ mod tests {
         ));
     }
 
+    // STORY-224 AC1: a milestone type with no declared lifecycle derives
+    // open/closed from the store's canonical lifecycle -- open milestone -> "open",
+    // closed -> "closed" (not the draft/complete empty-lifecycle fallback).
+    #[test]
+    fn milestone_state_status_undeclared_uses_canonical_open_closed() {
+        let td = crate::engine::config::TypeDef::test_fixture(
+            "milestone",
+            crate::engine::config::StoreBackend::GithubMilestones,
+        );
+        let lc = td.effective_lifecycle();
+        assert_eq!(milestone_state_to_status("open", &lc).as_str(), "open");
+        assert_eq!(milestone_state_to_status("closed", &lc).as_str(), "closed");
+        // write-through: "open" reopens, "closed" (terminal) closes.
+        assert!(issue_body::status_maps_to_open(
+            "open",
+            lc.terminal_status()
+        ));
+        assert!(!issue_body::status_maps_to_open(
+            "closed",
+            lc.terminal_status()
+        ));
+    }
+
     // STORY-223 AC1: a custom-lifecycle milestone type inherits its own
     // first-active/terminal states from the remote open/closed state on read.
     #[test]
@@ -4746,22 +4780,28 @@ mod tests {
         assert_eq!(closed_meta.status.as_str(), "complete");
     }
 
+    // STORY-224: a milestone type with no declared lifecycle uses the canonical
+    // open/closed DAG -- born `open`, transition to the terminal `closed` closes
+    // the remote milestone and materializes `closed` in the cache.
     #[test]
-    fn milestone_update_status_complete_closes_state_and_cache() {
+    fn milestone_update_status_closed_closes_state_and_cache() {
         let root = tmp_root("ms_close");
         let mut store = milestone_store(&root, MockGhMilestoneClient::new());
         let td = test_type_def(StoreBackend::GithubMilestones);
 
         let created = store.create(&td, "v1.0", "author", "desc").unwrap();
+        let cache = std::fs::read_to_string(root.join(&created.path)).unwrap();
+        assert!(cache.contains("status: open"), "born open: {cache}");
+
         store
-            .update(&td, &created.id, &[("status", "complete")])
+            .update(&td, &created.id, &[("status", "closed")])
             .unwrap();
 
         let edit = store.mock().last_edit.borrow();
         assert_eq!(edit.as_ref().unwrap().state.as_deref(), Some("closed"));
 
         let cache = std::fs::read_to_string(root.join(&created.path)).unwrap();
-        assert!(cache.contains("status: complete"), "cache: {cache}");
+        assert!(cache.contains("status: closed"), "cache: {cache}");
     }
 
     // BUG-008 write half (milestones): transition into a CUSTOM terminal state

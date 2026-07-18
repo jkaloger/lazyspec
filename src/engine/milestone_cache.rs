@@ -45,7 +45,7 @@ pub fn fetch_milestones(
             path: std::path::PathBuf::new(),
             title: m.title.clone(),
             doc_type: DocType::new(&type_def.name),
-            status: milestone_state_to_status(&m.state, &type_def.lifecycle),
+            status: milestone_state_to_status(&m.state, &type_def.effective_lifecycle()),
             author: "github".to_string(),
             date: chrono::Utc::now().date_naive(),
             tags: vec![],
@@ -154,12 +154,12 @@ mod tests {
 
         let cache_dir = root.join(".lazyspec/cache/milestone");
         let open = std::fs::read_to_string(cache_dir.join("MILESTONE-3.md")).unwrap();
-        // STORY-223 AC1: an open milestone inherits the type's first active state
-        // (default lifecycle -> `draft`), not the former hardcoded `in-progress`.
-        assert!(open.contains("status: draft"), "{open}");
+        // STORY-224 AC1: a milestone type with no declared lifecycle inherits the
+        // store's canonical open/closed lifecycle -- open milestone -> `open`.
+        assert!(open.contains("status: open"), "{open}");
         assert!(open.contains("open_issues: 7"), "{open}");
         let closed = std::fs::read_to_string(cache_dir.join("MILESTONE-4.md")).unwrap();
-        assert!(closed.contains("status: complete"), "{closed}");
+        assert!(closed.contains("status: closed"), "{closed}");
 
         assert_eq!(issue_map.get("MILESTONE-3").unwrap().issue_number, 3);
         assert_eq!(issue_map.get("MILESTONE-4").unwrap().issue_number, 4);
