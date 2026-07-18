@@ -267,30 +267,41 @@ fn open_target_json(target: &OpenTarget) -> serde_json::Value {
 
 /// What `--open` will spawn: a browser on a resolved URL, or a viewer on a local
 /// file. Separated from spawning so the resolution/error logic stays testable.
+/// `Viewer.args` already has the resolved doc path pushed on as its last
+/// element, so `spawn_open` can stay a plain `Command::new(binary).args(args)`.
 #[derive(Debug)]
 enum OpenAction {
     Browser(String),
-    Viewer { command: String, path: PathBuf },
+    Viewer { binary: String, args: Vec<String> },
 }
 
 /// Decide the open action for a resolved target: a [`OpenTarget::Url`] opens in
-/// the browser; a [`OpenTarget::File`] opens in the configured `viewer` (its
-/// path joined onto `root`). A file target with no viewer configured is a clear
-/// error, not a silent no-op.
+/// the browser; a [`OpenTarget::File`] opens in the configured `viewer`, split
+/// on whitespace so a multi-word viewer like `"code -w"` resolves to binary
+/// `code` plus its own args, with the doc path (joined onto `root`) appended
+/// last -- matching the TUI's `App::plan_open`. A missing or blank viewer is a
+/// clear error, not a silent no-op.
 fn plan_open(target: OpenTarget, viewer: Option<&str>, root: &Path) -> Result<OpenAction> {
     match target {
         OpenTarget::Url(url) => Ok(OpenAction::Browser(url)),
-        OpenTarget::File(path) => match viewer {
-            Some(command) => Ok(OpenAction::Viewer {
-                command: command.to_string(),
-                path: root.join(path),
-            }),
-            None => Err(anyhow::anyhow!(
-                "cannot open {}: it has no web URL and no viewer is configured. \
-                 Set `viewer` under [tui] in .lazyspec.toml (e.g. viewer = \"glow\").",
-                path.display()
-            )),
-        },
+        OpenTarget::File(path) => {
+            let mut tokens = viewer.unwrap_or("").split_whitespace();
+            match tokens.next() {
+                Some(binary) => {
+                    let mut args: Vec<String> = tokens.map(str::to_string).collect();
+                    args.push(root.join(&path).to_string_lossy().into_owned());
+                    Ok(OpenAction::Viewer {
+                        binary: binary.to_string(),
+                        args,
+                    })
+                }
+                None => Err(anyhow::anyhow!(
+                    "cannot open {}: it has no web URL and no viewer is configured. \
+                     Set `viewer` under [tui] in .lazyspec.toml (e.g. viewer = \"glow\").",
+                    path.display()
+                )),
+            }
+        }
     }
 }
 
@@ -311,11 +322,11 @@ fn spawn_open(action: OpenAction) -> Result<()> {
                 .status()
                 .map_err(|e| anyhow::anyhow!("failed to launch browser via '{}': {}", opener, e))?;
         }
-        OpenAction::Viewer { command, path } => {
-            Command::new(&command)
-                .arg(&path)
+        OpenAction::Viewer { binary, args } => {
+            Command::new(&binary)
+                .args(&args)
                 .status()
-                .map_err(|e| anyhow::anyhow!("failed to launch viewer '{}': {}", command, e))?;
+                .map_err(|e| anyhow::anyhow!("failed to launch viewer '{}': {}", binary, e))?;
         }
     }
     Ok(())
@@ -456,7 +467,7 @@ mod open_tests {
     }
 
     #[test]
-    fn file_target_with_viewer_plans_a_viewer_open_on_the_joined_path() {
+    fn file_target_with_single_token_viewer_plans_binary_and_path_arg() {
         let action = plan_open(
             OpenTarget::File(PathBuf::from("docs/rfcs/RFC-1.md")),
             Some("glow"),
@@ -464,9 +475,32 @@ mod open_tests {
         )
         .unwrap();
         match action {
-            OpenAction::Viewer { command, path } => {
-                assert_eq!(command, "glow");
-                assert_eq!(path, PathBuf::from("/repo/docs/rfcs/RFC-1.md"));
+            OpenAction::Viewer { binary, args } => {
+                assert_eq!(binary, "glow");
+                assert_eq!(args, vec!["/repo/docs/rfcs/RFC-1.md".to_string()]);
+            }
+            OpenAction::Browser(_) => panic!("expected a viewer action"),
+        }
+    }
+
+    // BUG-005: `viewer = "code -w"` must split into binary "code" plus its own
+    // args, with the doc path appended last -- not passed as one unsplit token
+    // to Command::new, which the OS can't resolve to an executable.
+    #[test]
+    fn file_target_with_multi_token_viewer_splits_binary_from_args_and_appends_path_last() {
+        let action = plan_open(
+            OpenTarget::File(PathBuf::from("docs/rfcs/RFC-1.md")),
+            Some("code -w"),
+            Path::new("/repo"),
+        )
+        .unwrap();
+        match action {
+            OpenAction::Viewer { binary, args } => {
+                assert_eq!(binary, "code");
+                assert_eq!(
+                    args,
+                    vec!["-w".to_string(), "/repo/docs/rfcs/RFC-1.md".to_string()]
+                );
             }
             OpenAction::Browser(_) => panic!("expected a viewer action"),
         }
@@ -483,6 +517,30 @@ mod open_tests {
         let msg = err.to_string();
         assert!(msg.contains("no viewer is configured"), "got: {msg}");
         assert!(msg.contains("viewer"), "got: {msg}");
+    }
+
+    #[test]
+    fn file_target_with_empty_viewer_string_is_the_same_clear_error() {
+        let err = plan_open(
+            OpenTarget::File(PathBuf::from("docs/rfcs/RFC-1.md")),
+            Some(""),
+            Path::new("/repo"),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no viewer is configured"), "got: {msg}");
+    }
+
+    #[test]
+    fn file_target_with_whitespace_only_viewer_string_is_the_same_clear_error() {
+        let err = plan_open(
+            OpenTarget::File(PathBuf::from("docs/rfcs/RFC-1.md")),
+            Some("   "),
+            Path::new("/repo"),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no viewer is configured"), "got: {msg}");
     }
 }
 

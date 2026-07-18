@@ -1,7 +1,7 @@
 ---
 title: CLI show --open whitespace-splits viewer command
 type: iteration
-status: accepted
+status: complete
 author: unknown
 date: 2026-07-18
 tags: []
