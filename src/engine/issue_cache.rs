@@ -229,6 +229,8 @@ impl IssueCache {
                 &type_def.attributes,
                 milestone_rel,
                 issue_map,
+                type_def.lifecycle.first_active_status(),
+                type_def.lifecycle.terminal_status(),
             );
             let id = type_def.make_id(issue.number);
             let meta = DocMeta {
@@ -393,6 +395,8 @@ impl IssueCache {
                 &type_def.attributes,
                 milestone_rel,
                 issue_map,
+                type_def.lifecycle.first_active_status(),
+                type_def.lifecycle.terminal_status(),
             );
             let id = type_def.make_id(issue.number);
             let meta = DocMeta {
@@ -690,6 +694,7 @@ fn parse_created_date(created_at: &str) -> chrono::NaiveDate {
         .unwrap_or_else(|_| Utc::now().date_naive())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_issue(
     issue: &GhIssue,
     type_name: &str,
@@ -697,6 +702,8 @@ fn parse_issue(
     attr_defs: &[AttrDef],
     milestone_rel: Option<&str>,
     issue_map: &IssueMap,
+    open_status: &str,
+    closed_status: &str,
 ) -> (DocMeta, String) {
     let ctx = IssueContext {
         title: issue.title.clone(),
@@ -706,6 +713,8 @@ fn parse_issue(
         issue_type: issue.issue_type.clone(),
         default_type: type_name.to_string(),
         attr_defs: attr_defs.to_vec(),
+        open_status: open_status.to_string(),
+        closed_status: closed_status.to_string(),
     };
 
     let author = issue
@@ -722,9 +731,9 @@ fn parse_issue(
     }
 
     let status = if issue.state.eq_ignore_ascii_case("open") {
-        Status::new("draft")
+        Status::new(open_status)
     } else {
-        Status::new("complete")
+        Status::new(closed_status)
     };
 
     let (doc_type, tags) = issue_body::extract_type_and_tags(
@@ -2253,9 +2262,50 @@ mod tests {
             &[],
             None,
             &IssueMap::default(),
+            "draft",
+            "complete",
         );
         assert_eq!(meta.doc_type.as_str(), "ticket");
         assert_eq!(meta.tags, vec!["team-x"]);
+    }
+
+    // STORY-223 AC1/AC3: an issue with no explicit lifecycle status inherits the
+    // remote open/closed state into the type's OWN custom lifecycle -- open maps
+    // to the first active state and closed to the terminal state, not the
+    // hardcoded draft/complete.
+    #[test]
+    fn parse_issue_inherits_remote_state_into_custom_lifecycle() {
+        let body = "<!-- lazyspec\n---\ndate: 2026-03-27\n---\n-->\n\nbody";
+
+        let mut open_issue = make_gh_issue(1, "work", body, &["lazyspec:story"]);
+        open_issue.state = "OPEN".to_string();
+        let mut closed_issue = make_gh_issue(2, "work", body, &["lazyspec:story"]);
+        closed_issue.state = "CLOSED".to_string();
+
+        let known_types = vec![story_match_rule()];
+        let (open_meta, _) = parse_issue(
+            &open_issue,
+            "story",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+            "backlog",
+            "shipped",
+        );
+        let (closed_meta, _) = parse_issue(
+            &closed_issue,
+            "story",
+            &known_types,
+            &[],
+            None,
+            &IssueMap::default(),
+            "backlog",
+            "shipped",
+        );
+
+        assert_eq!(open_meta.status.as_str(), "backlog");
+        assert_eq!(closed_meta.status.as_str(), "shipped");
     }
 
     // Regression: a type with no override still resolves via its default
@@ -2276,6 +2326,8 @@ mod tests {
             &[],
             None,
             &IssueMap::default(),
+            "draft",
+            "complete",
         );
         assert_eq!(meta.doc_type.as_str(), "story");
         assert_eq!(meta.tags, vec!["team-y"]);
@@ -2294,6 +2346,8 @@ mod tests {
             &[],
             None,
             &IssueMap::default(),
+            "draft",
+            "complete",
         );
         assert_eq!(meta.doc_type.as_str(), "ticket");
         assert_eq!(meta.tags, vec!["extra"]);
@@ -2330,6 +2384,8 @@ mod tests {
             &[],
             None,
             &IssueMap::default(),
+            "draft",
+            "complete",
         );
         assert_eq!(meta.author, "@jkaloger");
     }
@@ -2351,6 +2407,8 @@ mod tests {
             &[],
             None,
             &IssueMap::default(),
+            "draft",
+            "complete",
         );
         assert_eq!(meta.author, "unknown");
     }
@@ -2373,6 +2431,8 @@ mod tests {
             &[],
             None,
             &IssueMap::default(),
+            "draft",
+            "complete",
         );
         assert_eq!(meta.author, "@octocat");
     }
@@ -2395,6 +2455,8 @@ mod tests {
             &[],
             None,
             &IssueMap::default(),
+            "draft",
+            "complete",
         );
         assert_eq!(meta.author, "@jkaloger");
     }
@@ -2447,6 +2509,8 @@ mod tests {
             &[],
             None,
             &IssueMap::default(),
+            "draft",
+            "complete",
         );
         assert_eq!(
             meta.date,
@@ -2466,6 +2530,8 @@ mod tests {
             &[],
             None,
             &IssueMap::default(),
+            "draft",
+            "complete",
         );
         assert_eq!(meta.date, Utc::now().date_naive());
     }
@@ -2482,6 +2548,8 @@ mod tests {
             &[],
             None,
             &IssueMap::default(),
+            "draft",
+            "complete",
         );
         assert_eq!(meta.date, Utc::now().date_naive());
     }
@@ -2505,6 +2573,8 @@ mod tests {
             &[],
             None,
             &IssueMap::default(),
+            "draft",
+            "complete",
         );
         assert_eq!(
             meta.attributes.get("issue_type"),
@@ -2530,6 +2600,8 @@ mod tests {
             &[],
             None,
             &IssueMap::default(),
+            "draft",
+            "complete",
         );
         assert!(!meta.attributes.contains_key("issue_type"));
     }
@@ -2552,6 +2624,8 @@ mod tests {
             &[],
             None,
             &IssueMap::default(),
+            "draft",
+            "complete",
         );
         assert_eq!(meta.doc_type.as_str(), "story");
         assert_eq!(
@@ -2573,6 +2647,8 @@ mod tests {
             &[],
             None,
             &IssueMap::default(),
+            "draft",
+            "complete",
         );
         assert_eq!(
             meta.attributes.get("issue_type"),
@@ -2647,7 +2723,16 @@ mod tests {
         map.insert_kind("MILESTONE-2", 7, "", "", EntryKind::Milestone);
 
         let known_types = vec![story_match_rule()];
-        let (meta, _) = parse_issue(&issue, "story", &known_types, &[], Some("targets"), &map);
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &known_types,
+            &[],
+            Some("targets"),
+            &map,
+            "draft",
+            "complete",
+        );
 
         let targets: Vec<(&str, &str)> = meta
             .related
@@ -2669,7 +2754,16 @@ mod tests {
 
         // Milestone #7 maps to no doc -> skipped even with a configured rel.
         let empty = IssueMap::default();
-        let (meta, _) = parse_issue(&issue, "story", &known_types, &[], Some("targets"), &empty);
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &known_types,
+            &[],
+            Some("targets"),
+            &empty,
+            "draft",
+            "complete",
+        );
         assert!(
             meta.related.is_empty(),
             "unmapped milestone must be skipped"
@@ -2679,7 +2773,16 @@ mod tests {
         use crate::engine::issue_map::EntryKind;
         let mut map = IssueMap::default();
         map.insert_kind("MILESTONE-2", 7, "", "", EntryKind::Milestone);
-        let (meta, _) = parse_issue(&issue, "story", &known_types, &[], None, &map);
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &known_types,
+            &[],
+            None,
+            &map,
+            "draft",
+            "complete",
+        );
         assert!(
             meta.related.is_empty(),
             "no github_native=milestone rel -> no relation"

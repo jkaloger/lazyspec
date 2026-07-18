@@ -56,6 +56,14 @@ pub struct IssueContext {
     /// Declared attribute schema for the document's type, used to coerce the
     /// `attributes:` block in the HTML comment back into typed [`AttrValue`]s.
     pub attr_defs: Vec<AttrDef>,
+    /// The lifecycle status a remote-`open` issue maps to (the type's first
+    /// active state) when the body carries no explicit lifecycle status.
+    /// Derived by the caller from the type's `lifecycle.first_active_status()`.
+    pub open_status: String,
+    /// The lifecycle status a remote-`closed` issue maps to (the type's terminal
+    /// state) when the body carries no explicit lifecycle status. Derived by the
+    /// caller from the type's `lifecycle.terminal_status()`.
+    pub closed_status: String,
 }
 
 const COMMENT_START: &str = "<!-- lazyspec\n";
@@ -136,7 +144,12 @@ pub fn deserialize(issue_body: &str, ctx: &IssueContext) -> Result<(DocMeta, Str
         &ctx.default_type,
     );
 
-    let status = reconstruct_status(ctx.is_open, parsed.status.as_deref());
+    let status = reconstruct_status(
+        ctx.is_open,
+        parsed.status.as_deref(),
+        &ctx.open_status,
+        &ctx.closed_status,
+    );
 
     let attributes = parse_attributes(parsed.attributes.as_ref(), &ctx.attr_defs);
 
@@ -186,20 +199,48 @@ fn needs_frontmatter_status(status: &Status) -> bool {
     !matches!(status.as_str(), "draft" | "complete")
 }
 
+/// Whether a lifecycle `status` corresponds to a GitHub *open* issue: the
+/// canonical open-equivalent set (`draft`/`review`/`accepted`/`in-progress`).
+/// Every other status (`complete`/`rejected`/`superseded`, and anything
+/// unrecognised) is closed-equivalent. The single classification both the sync
+/// read reconcile ([`reconstruct_status`]) and the issue write-through
+/// (`GithubIssuesStore::update`'s `should_be_open`) share, so the two directions
+/// agree on which statuses mean open and never disagree with GitHub's own bit.
+pub fn status_maps_to_open(status: &str) -> bool {
+    matches!(status, "draft" | "review" | "accepted" | "in-progress")
+}
+
 /// Reconstruct status from GitHub open/closed state and optional frontmatter
-/// override. Non-lifecycle statuses (rejected, superseded) are stored in
-/// frontmatter because they can't be derived from open/closed alone.
-fn reconstruct_status(is_open: bool, frontmatter_status: Option<&str>) -> Status {
+/// override, reconciling the two so the remote open/closed bit is always the
+/// source of truth (STORY-223 AC3).
+///
+/// An explicit frontmatter status wins ONLY when it agrees with the open/closed
+/// bit (per [`status_maps_to_open`]): an intermediate open state like
+/// `review`/`in-progress` round-trips while the issue is open, and an
+/// exceptional closed state like `rejected`/`superseded` round-trips while the
+/// issue is closed. When the stored status contradicts the bit -- e.g. a
+/// `status: in-progress` body on an issue closed directly on GitHub -- it is a
+/// stale local value the remote overrides: the bit maps to the type's
+/// first-active (`open_status`) / terminal (`closed_status`) lifecycle state.
+/// With no frontmatter status the bit maps the same way (STORY-223 AC1).
+fn reconstruct_status(
+    is_open: bool,
+    frontmatter_status: Option<&str>,
+    open_status: &str,
+    closed_status: &str,
+) -> Status {
     if let Some(s) = frontmatter_status {
         if let Ok(status) = s.parse::<Status>() {
-            return status;
+            if status_maps_to_open(status.as_str()) == is_open {
+                return status;
+            }
         }
     }
 
     if is_open {
-        Status::new("draft")
+        Status::new(open_status)
     } else {
-        Status::new("complete")
+        Status::new(closed_status)
     }
 }
 
@@ -369,6 +410,8 @@ mod tests {
             issue_type: None,
             default_type: "spec".to_string(),
             attr_defs: vec![],
+            open_status: "draft".to_string(),
+            closed_status: "complete".to_string(),
         }
     }
 
@@ -453,24 +496,111 @@ mod tests {
 
     #[test]
     fn status_from_open_issue_without_frontmatter() {
-        assert_eq!(reconstruct_status(true, None), Status::new("draft"));
+        assert_eq!(
+            reconstruct_status(true, None, "draft", "complete"),
+            Status::new("draft")
+        );
     }
 
     #[test]
     fn status_from_closed_issue_without_frontmatter() {
-        assert_eq!(reconstruct_status(false, None), Status::new("complete"));
+        assert_eq!(
+            reconstruct_status(false, None, "draft", "complete"),
+            Status::new("complete")
+        );
     }
 
+    // STORY-223 AC1: with no frontmatter status, open/closed maps to the type's
+    // own first-active/terminal states (a custom lifecycle here), not the
+    // hardcoded draft/complete.
     #[test]
-    fn status_from_frontmatter_overrides_open_closed() {
+    fn status_maps_custom_lifecycle_open_closed() {
         assert_eq!(
-            reconstruct_status(false, Some("rejected")),
+            reconstruct_status(true, None, "backlog", "shipped"),
+            Status::new("backlog")
+        );
+        assert_eq!(
+            reconstruct_status(false, None, "backlog", "shipped"),
+            Status::new("shipped")
+        );
+    }
+
+    // STORY-223 AC3: a closed-equivalent frontmatter status (`rejected`/
+    // `superseded`) agrees with a closed issue, so it still round-trips -- the
+    // reconcile only overrides a status that CONTRADICTS the open/closed bit.
+    #[test]
+    fn closed_equivalent_frontmatter_survives_close() {
+        assert_eq!(
+            reconstruct_status(false, Some("rejected"), "draft", "complete"),
             Status::new("rejected")
         );
         assert_eq!(
-            reconstruct_status(false, Some("superseded")),
+            reconstruct_status(false, Some("superseded"), "draft", "complete"),
             Status::new("superseded")
         );
+    }
+
+    // STORY-223 AC3 regression: an issue advanced to `in-progress` (open, status
+    // persisted in the body) then CLOSED directly on GitHub. The stale
+    // open-equivalent status must NOT mask the close -- the remote bit wins and
+    // the doc remaps to the terminal state. This is the review blocker.
+    #[test]
+    fn remote_close_overrides_stale_open_status() {
+        assert_eq!(
+            reconstruct_status(false, Some("in-progress"), "draft", "complete"),
+            Status::new("complete")
+        );
+        assert_eq!(
+            reconstruct_status(false, Some("review"), "draft", "complete"),
+            Status::new("complete")
+        );
+        // The stale open state remaps to the type's own terminal, custom or not.
+        assert_eq!(
+            reconstruct_status(false, Some("in-progress"), "backlog", "shipped"),
+            Status::new("shipped")
+        );
+    }
+
+    // Symmetric: an issue REOPENED on GitHub while the body still carries a
+    // closed-equivalent status (`rejected`/`superseded`). The open bit wins and
+    // the doc remaps to the first-active state.
+    #[test]
+    fn remote_reopen_overrides_stale_closed_status() {
+        assert_eq!(
+            reconstruct_status(true, Some("rejected"), "draft", "complete"),
+            Status::new("draft")
+        );
+        assert_eq!(
+            reconstruct_status(true, Some("superseded"), "draft", "complete"),
+            Status::new("draft")
+        );
+    }
+
+    // An open-equivalent intermediate status agrees with an open issue and still
+    // round-trips (open/closed alone cannot express `review`/`in-progress`).
+    #[test]
+    fn open_equivalent_intermediate_status_round_trips() {
+        assert_eq!(
+            reconstruct_status(true, Some("review"), "draft", "complete"),
+            Status::new("review")
+        );
+        assert_eq!(
+            reconstruct_status(true, Some("in-progress"), "draft", "complete"),
+            Status::new("in-progress")
+        );
+    }
+
+    #[test]
+    fn status_maps_to_open_classifies_open_and_closed_sets() {
+        for open in ["draft", "review", "accepted", "in-progress"] {
+            assert!(status_maps_to_open(open), "{open} should map to open");
+        }
+        for closed in ["complete", "rejected", "superseded"] {
+            assert!(
+                !status_maps_to_open(closed),
+                "{closed} should map to closed"
+            );
+        }
     }
 
     #[test]
@@ -559,6 +689,8 @@ mod tests {
             issue_type: None,
             default_type: "spec".to_string(),
             attr_defs: vec![],
+            open_status: "draft".to_string(),
+            closed_status: "complete".to_string(),
         };
 
         let (meta, _) = deserialize(&serialized, &ctx).unwrap();

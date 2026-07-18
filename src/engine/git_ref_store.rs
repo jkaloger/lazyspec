@@ -714,6 +714,50 @@ mod tests {
         assert_eq!(result.id, "ITERATION-006");
     }
 
+    // STORY-223 AC4: git-ref (like filesystem) is a local store with no remote
+    // open/closed concept. Its status comes straight from frontmatter and is
+    // never coerced by the github open/closed -> first-active/terminal mapping.
+    // A doc stored at an intermediate `in-progress` state reads/updates back at
+    // `in-progress`, not remapped to the lifecycle's first-active or terminal.
+    #[test]
+    fn test_git_ref_store_status_not_overridden_by_remote_state_logic() {
+        let tmp = TempDir::new().unwrap();
+
+        let mut td = test_type_def();
+        td.lifecycle = crate::engine::config::Lifecycle {
+            states: vec!["backlog".into(), "in-progress".into(), "shipped".into()],
+            edges: vec![],
+        };
+
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache_content = "---\ntitle: Feature\ntype: iteration\nstatus: in-progress\nauthor: alice\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\nbody\n";
+        std::fs::write(cache_dir.join("ITERATION-042.md"), cache_content).unwrap();
+
+        let mut lock = CacheLock::default();
+        lock.set("iteration/ITERATION-042", "oldsha");
+        lock.save(tmp.path()).unwrap();
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha".to_string()))
+            .with_update_ref_result(Ok(()));
+
+        let mut store = make_store(&tmp, mock);
+        // Update an unrelated field; status must be left exactly as stored.
+        store
+            .update(&td, "ITERATION-042", &[("title", "Renamed")])
+            .unwrap();
+
+        let updated = std::fs::read_to_string(cache_dir.join("ITERATION-042.md")).unwrap();
+        assert!(
+            updated.contains("status: in-progress"),
+            "git-ref status must not be remapped to first-active/terminal, got: {}",
+            updated
+        );
+        assert!(!updated.contains("status: backlog"));
+        assert!(!updated.contains("status: shipped"));
+    }
+
     #[test]
     fn test_git_ref_store_update() {
         let tmp = TempDir::new().unwrap();
