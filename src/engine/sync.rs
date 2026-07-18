@@ -581,6 +581,7 @@ mod tests {
             milestone: Some(GhIssueMilestone {
                 number: milestone_number,
             }),
+            assignees: vec![],
         }
     }
 
@@ -792,6 +793,7 @@ mod tests {
     fn gh_issue_no_milestone(number: u64) -> GhIssue {
         GhIssue {
             milestone: None,
+            assignees: vec![],
             ..gh_issue_with_milestone(number, 0)
         }
     }

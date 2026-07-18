@@ -191,6 +191,7 @@ impl IssueCache {
             "updatedAt".into(),
             "createdAt".into(),
             "milestone".into(),
+            "assignees".into(),
         ];
 
         let milestone_rel = config
@@ -727,6 +728,7 @@ fn parse_issue(
         meta.author = author;
         insert_issue_type(&mut meta, issue);
         inject_milestone_target(&mut meta, issue, milestone_rel, issue_map);
+        inject_assignee(&mut meta, issue);
         return (meta, body);
     }
 
@@ -761,6 +763,7 @@ fn parse_issue(
     };
     insert_issue_type(&mut meta, issue);
     inject_milestone_target(&mut meta, issue, milestone_rel, issue_map);
+    inject_assignee(&mut meta, issue);
 
     (meta, issue.body.clone())
 }
@@ -796,6 +799,16 @@ fn insert_issue_type(meta: &mut DocMeta, issue: &GhIssue) {
         meta.attributes
             .insert("issue_type".to_string(), AttrValue::Str(name.clone()));
     }
+}
+
+/// Inherit the issue's native assignee into `DocMeta.assignee` (STORY-222 AC3):
+/// the FIRST of GitHub's `assignees` (multi-assignee maps to first; the rest are
+/// out of scope for the single-assignee model), `None` when unassigned. Remote
+/// is source of truth, so this overwrites whatever the body/local carried. Kept
+/// native like the milestone edge -- never round-tripped through the body HTML
+/// comment.
+fn inject_assignee(meta: &mut DocMeta, issue: &GhIssue) {
+    meta.assignee = issue.assignees.first().map(|a| a.login.clone());
 }
 
 fn build_cache_content(meta: &DocMeta, body: &str) -> String {
@@ -952,6 +965,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         }
     }
 
@@ -2307,6 +2321,90 @@ mod tests {
 
         assert_eq!(open_meta.status.as_str(), "backlog");
         assert_eq!(closed_meta.status.as_str(), "shipped");
+    }
+
+    // STORY-222 AC3: an issue's native assignee is inherited into
+    // `DocMeta.assignee` (the first entry when multiple), and an unassigned
+    // issue yields `None`.
+    #[test]
+    fn parse_issue_inherits_native_assignee_first_entry() {
+        use crate::engine::gh::GhAssignee;
+
+        let body = "<!-- lazyspec\n---\ndate: 2026-03-27\n---\n-->\n\nbody";
+        let mut issue = make_gh_issue(1, "work", body, &["lazyspec:story"]);
+        issue.assignees = vec![
+            GhAssignee {
+                login: "carol".to_string(),
+            },
+            GhAssignee {
+                login: "dave".to_string(),
+            },
+        ];
+
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &[story_match_rule()],
+            &[],
+            None,
+            &IssueMap::default(),
+            "draft",
+            "complete",
+        );
+
+        assert_eq!(
+            meta.assignee,
+            Some("carol".to_string()),
+            "multi-assignee maps to the first login"
+        );
+    }
+
+    #[test]
+    fn parse_issue_unassigned_issue_yields_none_assignee() {
+        let body = "<!-- lazyspec\n---\ndate: 2026-03-27\n---\n-->\n\nbody";
+        let issue = make_gh_issue(1, "work", body, &["lazyspec:story"]);
+        assert!(issue.assignees.is_empty());
+
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &[story_match_rule()],
+            &[],
+            None,
+            &IssueMap::default(),
+            "draft",
+            "complete",
+        );
+
+        assert_eq!(meta.assignee, None);
+    }
+
+    // STORY-222 AC3 (remote is source of truth): a body that has no assignee but
+    // the native `assignees` field is set -- the native field wins and the doc
+    // inherits it, proving the read path does not depend on the body comment.
+    #[test]
+    fn parse_issue_native_assignee_overrides_bodyless_value() {
+        use crate::engine::gh::GhAssignee;
+
+        // Body deserialize fails (no lazyspec comment), exercising the fallback
+        // path; the native assignee must still be inherited.
+        let mut issue = make_gh_issue(1, "work", "plain body, no comment", &["lazyspec:story"]);
+        issue.assignees = vec![GhAssignee {
+            login: "erin".to_string(),
+        }];
+
+        let (meta, _) = parse_issue(
+            &issue,
+            "story",
+            &[story_match_rule()],
+            &[],
+            None,
+            &IssueMap::default(),
+            "draft",
+            "complete",
+        );
+
+        assert_eq!(meta.assignee, Some("erin".to_string()));
     }
 
     // Regression: a type with no override still resolves via its default

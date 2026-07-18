@@ -16,7 +16,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
-use crate::engine::clickup::{ClickupClient, ClickupStatus, ClickupTask, TaskCreate, TaskUpdate};
+use crate::engine::clickup::{
+    ClickupClient, ClickupStatus, ClickupTask, TaskAssigneeUpdate, TaskCreate, TaskUpdate,
+};
 use crate::engine::config::{Lifecycle, TypeDef, CLICKUP_RELATIONS_FIELD};
 use crate::engine::document::{self, AttrValue, DocMeta, DocType, Relation, Status};
 use crate::engine::store_dispatch::write_cache_file;
@@ -271,7 +273,10 @@ pub(crate) fn task_to_doc(task: &ClickupTask, type_def: &TypeDef, id: &str) -> (
         related,
         validate_ignore: false,
         virtual_doc: false,
-        assignee: None,
+        // Inherit the task's native assignee (STORY-222 AC3): the first entry's
+        // username (multi maps to first), `None` when unassigned. Remote is the
+        // source of truth, so sync overwrites any local value.
+        assignee: task.assignees.first().map(|a| a.username.clone()),
         id: id.to_string(),
         attributes,
     };
@@ -434,7 +439,9 @@ pub(crate) fn build_task_create(
 /// - `priority` -> the priority *name* mapped to the bare integer
 ///   (`urgent=1 high=2 normal=3 low=4`); an unrecognized name drops the field;
 /// - `due` -> `due_date`, `estimate` -> `time_estimate` (integer epoch-ms /
-///   duration-ms; an unparseable value drops the field).
+///   duration-ms; an unparseable value drops the field);
+/// - `assignee` -> `assignees` add/rem delta of ClickUp user ids (STORY-222 AC4;
+///   the value is a numeric user id -- username->id mapping is out of scope).
 ///
 /// Any other key (a non-native attribute or a relation) has no native field and
 /// routes to a custom field in a later RFC-056 story; it is ignored here.
@@ -448,6 +455,20 @@ pub(crate) fn build_task_update(updates: &[(&str, &str)]) -> TaskUpdate {
             "priority" => payload.priority = priority_name_to_int(value),
             "due" => payload.due_date = value.trim().parse::<i64>().ok(),
             "estimate" => payload.time_estimate = value.trim().parse::<i64>().ok(),
+            // Assignee maps to ClickUp's add/rem delta of user ids. Cross-identity
+            // mapping (username -> id) is out of scope (STORY-222), so the value
+            // must be a numeric ClickUp user id; a non-numeric value drops the
+            // field rather than sending an invalid payload.
+            "assignee" => {
+                payload.assignees = value
+                    .trim()
+                    .parse::<i64>()
+                    .ok()
+                    .map(|id| TaskAssigneeUpdate {
+                        add: vec![id],
+                        rem: vec![],
+                    })
+            }
             _ => {}
         }
     }
@@ -933,6 +954,58 @@ mod tests {
         assert_eq!(payload.name, None);
         assert_eq!(payload.markdown_content, None);
         assert_eq!(payload.priority, None);
+    }
+
+    // STORY-222 AC3: a task's native assignee is inherited into
+    // `DocMeta.assignee` (first entry's username when multiple); an unassigned
+    // task yields None.
+    #[test]
+    fn task_to_doc_inherits_first_assignee_username() {
+        let td = clickup_type();
+        let task = task_from_json(
+            r#"{
+                "id": "1",
+                "name": "T",
+                "status": {"status": "open"},
+                "assignees": [{"username": "alice"}, {"username": "dave"}]
+            }"#,
+        );
+        let (meta, _) = task_to_doc(&task, &td, "TASK-1");
+        assert_eq!(meta.assignee, Some("alice".to_string()));
+    }
+
+    #[test]
+    fn task_to_doc_unassigned_task_yields_none() {
+        let td = clickup_type();
+        let task = task_from_json(r#"{"id":"1","name":"T","status":{"status":"open"}}"#);
+        assert!(task.assignees.is_empty());
+        let (meta, _) = task_to_doc(&task, &td, "TASK-1");
+        assert_eq!(meta.assignee, None);
+    }
+
+    // STORY-222 AC4: an assignee update maps to ClickUp's `assignees {add, rem}`
+    // delta of user ids (the value is a numeric ClickUp user id).
+    #[test]
+    fn build_task_update_maps_assignee_to_add_rem_user_id() {
+        let payload = build_task_update(&[("assignee", "183")]);
+        assert_eq!(
+            payload.assignees,
+            Some(crate::engine::clickup::TaskAssigneeUpdate {
+                add: vec![183],
+                rem: vec![],
+            })
+        );
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["assignees"]["add"], serde_json::json!([183]));
+        assert_eq!(json["assignees"]["rem"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn build_task_update_drops_non_numeric_assignee() {
+        // Username -> id mapping is out of scope; a non-numeric value drops the
+        // field rather than sending an invalid payload.
+        let payload = build_task_update(&[("assignee", "alice")]);
+        assert_eq!(payload.assignees, None);
     }
 
     #[test]

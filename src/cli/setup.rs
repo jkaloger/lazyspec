@@ -214,6 +214,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         }
     }
 

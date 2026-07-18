@@ -161,6 +161,16 @@ impl GhIssueWriter for NestingGh {
     fn issue_reopen(&self, _repo: &str, _number: u64) -> Result<()> {
         unreachable!()
     }
+    fn issue_set_assignee(
+        &self,
+        _repo: &str,
+        _number: u64,
+        _add: &[String],
+        _remove: &[String],
+    ) -> Result<()> {
+        Ok(())
+    }
+
     fn label_create(
         &self,
         _repo: &str,
@@ -260,6 +270,7 @@ fn gh_issue(number: u64, node: &str, title: &str, body: &str) -> GhIssue {
         }),
         issue_type: None,
         milestone: None,
+        assignees: vec![],
     }
 }
 
