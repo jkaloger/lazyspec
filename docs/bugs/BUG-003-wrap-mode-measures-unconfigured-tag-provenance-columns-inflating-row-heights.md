@@ -1,7 +1,7 @@
 ---
 title: "Wrap mode measures unconfigured tag/provenance columns, inflating row heights"
 type: bug
-status: triaged
+status: fixed
 author: "unknown"
 date: 2026-07-18
 tags: []
