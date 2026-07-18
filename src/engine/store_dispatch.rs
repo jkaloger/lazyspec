@@ -42,10 +42,13 @@ struct CacheFrontmatter {
 /// mutation is synced synchronously as part of the API call itself (a REST/
 /// GraphQL write that either succeeds or the whole mutation errors), so those
 /// backends always report `Synced`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum PushOutcome {
+    #[default]
     Synced,
-    LocalOnly { warning: String },
+    LocalOnly {
+        warning: String,
+    },
 }
 
 impl PushOutcome {
@@ -58,12 +61,6 @@ impl PushOutcome {
             PushOutcome::Synced => None,
             PushOutcome::LocalOnly { warning } => Some(warning),
         }
-    }
-}
-
-impl Default for PushOutcome {
-    fn default() -> Self {
-        PushOutcome::Synced
     }
 }
 
