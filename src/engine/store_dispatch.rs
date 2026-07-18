@@ -1263,7 +1263,7 @@ impl DocumentStore for GithubIssuesStore {
             path: PathBuf::new(),
             title: title.to_string(),
             doc_type: DocType::new(&type_def.name),
-            status: Status::new("draft"),
+            status: Status::new(type_def.lifecycle.seed_status()),
             author: author.to_string(),
             date,
             tags: vec![],
@@ -2020,7 +2020,7 @@ impl GithubProjectsStore {
             path: PathBuf::new(),
             title: doc_id.to_string(),
             doc_type: DocType::new(&type_def.name),
-            status: Status::new("draft"),
+            status: Status::new(type_def.lifecycle.seed_status()),
             author: String::new(),
             date: Local::now().date_naive(),
             tags: vec![],
@@ -2091,7 +2091,7 @@ impl DocumentStore for GithubProjectsStore {
             path: PathBuf::new(),
             title: doc_id.clone(),
             doc_type: DocType::new(&type_def.name),
-            status: Status::new("draft"),
+            status: Status::new(type_def.lifecycle.seed_status()),
             author: String::new(),
             date: Local::now().date_naive(),
             tags: vec![],
@@ -3544,6 +3544,59 @@ mod tests {
         assert_eq!(parsed["status"].as_str().unwrap(), "draft");
         assert_eq!(parsed["author"].as_str().unwrap(), "author");
         assert!(content.contains("body text"));
+    }
+
+    #[test]
+    fn github_issues_create_seeds_first_lifecycle_state() {
+        // BUG-007: a github-backed type whose lifecycle starts at `reported`
+        // must be born `reported`, not the hardcoded `draft`.
+        let root = tmp_root("gh_create_seed_first_state");
+        let mut gh_store = GithubIssuesStore {
+            client: Box::new(MockGhClient::new()),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: IssueMap::load(&root).unwrap(),
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let mut td = test_type_def(StoreBackend::GithubIssues);
+        td.lifecycle = crate::engine::config::Lifecycle {
+            states: vec!["reported".to_string(), "triaged".to_string()],
+            edges: vec![],
+        };
+        let result = gh_store.create(&td, "a bug", "author", "").unwrap();
+
+        let content = std::fs::read_to_string(root.join(&result.path)).unwrap();
+        let (yaml, _) = crate::engine::document::split_frontmatter(&content).unwrap();
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&yaml).expect("valid YAML frontmatter");
+        assert_eq!(parsed["status"].as_str().unwrap(), "reported");
+    }
+
+    #[test]
+    fn github_issues_create_default_lifecycle_still_draft() {
+        // The default lifecycle's states[0] is `draft`, so a default-lifecycle
+        // github type is unchanged by BUG-007's seeding.
+        let root = tmp_root("gh_create_default_lifecycle_draft");
+        let mut gh_store = GithubIssuesStore {
+            client: Box::new(MockGhClient::new()),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: IssueMap::load(&root).unwrap(),
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let mut td = test_type_def(StoreBackend::GithubIssues);
+        td.lifecycle = crate::engine::config::default_lifecycle();
+        let result = gh_store.create(&td, "a doc", "author", "").unwrap();
+
+        let content = std::fs::read_to_string(root.join(&result.path)).unwrap();
+        let (yaml, _) = crate::engine::document::split_frontmatter(&content).unwrap();
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&yaml).expect("valid YAML frontmatter");
+        assert_eq!(parsed["status"].as_str().unwrap(), "draft");
     }
 
     #[test]

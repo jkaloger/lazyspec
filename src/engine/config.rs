@@ -144,6 +144,14 @@ pub struct Lifecycle {
 }
 
 impl Lifecycle {
+    /// The status a freshly-created document is born into: the first declared
+    /// lifecycle state, or `draft` when the lifecycle declares none. Every
+    /// store's create path (fs, git-ref, github) seeds from this single source
+    /// so a doc is always born inside its own lifecycle.
+    pub fn seed_status(&self) -> &str {
+        self.states.first().map(String::as_str).unwrap_or("draft")
+    }
+
     /// True iff a `from -> to` transition is permitted. With no declared edges
     /// the lifecycle is unconstrained: any move between declared states is
     /// allowed. Otherwise the transition must match a declared edge; a `*` edge
