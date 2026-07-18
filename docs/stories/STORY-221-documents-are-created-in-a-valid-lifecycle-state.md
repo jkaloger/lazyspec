@@ -1,7 +1,7 @@
 ---
 title: Documents are created in a valid lifecycle state
 type: story
-status: in-progress
+status: complete
 author: agent
 date: 2026-07-17
 tags: []
