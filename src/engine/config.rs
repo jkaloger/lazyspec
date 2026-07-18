@@ -579,6 +579,7 @@ pub fn default_table_columns() -> Vec<String> {
     vec![
         "status".to_string(),
         "tags".to_string(),
+        "assignee".to_string(),
         "provenance".to_string(),
     ]
 }
@@ -2390,7 +2391,7 @@ sort = "estimate"
         let config = Config::parse(TYPES).unwrap();
         assert_eq!(
             config.ui.table.columns,
-            vec!["status", "tags", "provenance"]
+            vec!["status", "tags", "assignee", "provenance"]
         );
     }
 

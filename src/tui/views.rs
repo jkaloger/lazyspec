@@ -336,7 +336,7 @@ mod tests {
             &StatusPalette::default(),
         );
 
-        assert_eq!(cells.len(), 5);
+        assert_eq!(cells.len(), 6);
 
         let id_dbg = cell_debug(&cells[0]);
         assert!(
@@ -394,7 +394,7 @@ mod tests {
             &StatusPalette::default(),
         );
 
-        assert_eq!(cells.len(), 5);
+        assert_eq!(cells.len(), 6);
 
         let title_dbg = cell_debug(&cells[1]);
         assert!(
@@ -465,7 +465,7 @@ mod tests {
             &StatusPalette::default(),
         );
 
-        assert_eq!(cells.len(), 5);
+        assert_eq!(cells.len(), 6);
         let id_dbg = cell_debug(&cells[0]);
         assert!(
             id_dbg.contains("[gh]"),

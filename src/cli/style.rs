@@ -107,14 +107,20 @@ pub fn doc_card(
     title: &str,
     doc_type: &DocType,
     status: &Status,
+    assignee: Option<&str>,
     path: &Path,
 ) -> String {
     let path_str = path.display().to_string();
+    let assignee_str = match assignee {
+        Some(a) => format!(" {}", dim(&format!("@{}", a))),
+        None => String::new(),
+    };
     format!(
-        "{} {} [{}] {}",
+        "{} {} [{}]{} {}",
         bold(&format!("[{}]", doc_type)),
         bold(title),
         styled_status(colors, doc_type.as_str(), status),
+        assignee_str,
         dim(&path_str),
     )
 }
@@ -206,5 +212,33 @@ mod tests {
         let colors = colors_with("clickup-tasks", "draft", "#ff0000");
         let style = status_style(&colors, "story", &Status::new("draft"));
         assert_eq!(style, Style::new().yellow());
+    }
+
+    // AC5 (CLI list): an assigned doc surfaces its assignee in the list card.
+    #[test]
+    fn doc_card_shows_assignee_when_set() {
+        let card = doc_card(
+            &StatusColors::default(),
+            "My Story",
+            &DocType::new("story"),
+            &Status::new("draft"),
+            Some("alice"),
+            Path::new("docs/stories/STORY-001.md"),
+        );
+        assert!(card.contains("@alice"), "got: {card}");
+    }
+
+    // AC5 (CLI list): an unassigned doc renders no assignee marker.
+    #[test]
+    fn doc_card_omits_assignee_when_none() {
+        let card = doc_card(
+            &StatusColors::default(),
+            "My Story",
+            &DocType::new("story"),
+            &Status::new("draft"),
+            None,
+            Path::new("docs/stories/STORY-001.md"),
+        );
+        assert!(!card.contains('@'), "got: {card}");
     }
 }
