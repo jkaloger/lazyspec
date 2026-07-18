@@ -161,8 +161,7 @@ pub fn create_document(
 
     let seed_status = config
         .type_by_name(doc_type)
-        .and_then(|t| t.lifecycle.states.first())
-        .map(|s| s.as_str())
+        .map(|t| t.lifecycle.seed_status())
         .unwrap_or("draft");
 
     if subdirectory {
@@ -239,12 +238,7 @@ pub fn create_child_in_dir(
     ];
     let template_content = load_template(root, config, &child_type_def.name);
     let content = template::render_template(&template_content, &vars);
-    let seed_status = child_type_def
-        .lifecycle
-        .states
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or("draft");
+    let seed_status = child_type_def.lifecycle.seed_status();
     let content = seed_lifecycle_status(&content, seed_status)?;
 
     let target_path = target_dir.join(&filename);

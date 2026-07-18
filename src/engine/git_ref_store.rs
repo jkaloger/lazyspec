@@ -155,12 +155,7 @@ impl GitRefStore {
         date: &str,
         body: &str,
     ) -> Result<String> {
-        let seed_status = type_def
-            .lifecycle
-            .states
-            .first()
-            .map(|s| s.as_str())
-            .unwrap_or("draft");
+        let seed_status = type_def.lifecycle.seed_status();
         let content = Self::build_markdown(type_def, title, author, date, seed_status, body);
         let refname = Self::refname(&type_def.name, id);
         let sha = self

@@ -1,7 +1,7 @@
 ---
 title: GitHub-backed docs seed first lifecycle state at birth
 type: iteration
-status: accepted
+status: complete
 author: unknown
 date: 2026-07-18
 tags: []
