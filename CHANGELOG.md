@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/jkaloger/lazyspec/compare/v0.9.2...v0.10.0) - 2026-07-18
+
+### Added
+
+- *(engine)* github types inherit canonical open/closed lifecycle
+- *(assignee)* display assignee across TUI, web, and CLI
+- *(assignee)* inherit and write through remote assignee for github and clickup
+- *(assignee)* first-class assignee field on DocMeta with update flag and JSON
+- cross-clone-safe git-ref number allocation
+- push git-ref mutations to configured remote
+- [git-ref] remote config as single source of truth
+- TUI o keybind opens doc in browser or viewer
+- engine open-target resolution and show --open
+- list custom attributes in preview header
+- configurable doc-table columns via [tui.table]
+- config-driven status colours with stable unknown-status fallback
+- config-write serializes attribute defs, add-type --attribute flag
+- add --json to delete, link, unlink, ignore, unignore
+- [**breaking**] remove lease subsystem — claim/release/leases/heartbeat, gates, coordination config
+- tag add/remove commands with backend sync ([#79](https://github.com/jkaloger/lazyspec/pull/79))
+
+### Fixed
+
+- *(engine)* skip lazyspec label on github docs with a native issue type
+- *(engine)* close remote issue/milestone on terminal-state transition
+- *(engine)* inherit remote issue/milestone open-closed into lifecycle on sync
+- *(engine)* seed github-backed docs with first lifecycle state at birth
+- *(engine,cli)* surface git-ref push outcome in mutation JSON
+- *(cli)* show --open whitespace-splits viewer command
+- *(cli)* show --open --json emits ambiguous_id JSON error
+- *(tui)* wrap-mode row height only measures configured tag/provenance columns
+- create seeds first lifecycle state, fix repairs invalid status
+- non-blocking UI-thread store lock, editor args, sync timeouts
+- mutation correctness — link null-related panic, git-ref update key drop and quoting, shorthand ambiguity, create --json id
+- crash-safe sidecar cache persistence
+- remove duplicate attributes key from bug type config
+
+### Other
+
+- derive Default for PushOutcome to satisfy clippy
+- story updates
+- story updates
+- advance STORY-222 to in-progress (iterations 320-322 complete, pending sign-off)
+- advance STORY-223 to in-progress (iterations 318-319 complete, pending sign-off)
+- advance ITERATION-316 to complete
+- bug report
+- iterations for bug-bash fixes and assignee feature (ITERATION-313..322, STORY-223)
+- card bug-bash findings BUG-003..008 and assignee story STORY-222
+- remove release asset uploads and tauri build from publish
+- docs
+- card bug-bash stories, bugs, git-ref liveness audit, iterations
+- hoist doc ops into engine::ops layer, dedupe store wiring
+- purge lease docs from README, sync command and keybind tables, changelog
+- codebase health audit AUDIT-018 with stories and iterations
+- bug type
+- readme updates ([#81](https://github.com/jkaloger/lazyspec/pull/81))
+- update deps
+- dedupe STORY-204/ITERATION-289, add lease-removal RFC, trim RFC-060 scope
+- comments rfc
+
 ### Removed
 
 - **Breaking:** remove the lease subsystem: `claim`, `release`, `leases`, and `heartbeat` subcommands are gone and now fail with the standard unknown-subcommand error
