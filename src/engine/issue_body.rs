@@ -199,15 +199,22 @@ fn needs_frontmatter_status(status: &Status) -> bool {
     !matches!(status.as_str(), "draft" | "complete")
 }
 
-/// Whether a lifecycle `status` corresponds to a GitHub *open* issue: the
-/// canonical open-equivalent set (`draft`/`review`/`accepted`/`in-progress`).
-/// Every other status (`complete`/`rejected`/`superseded`, and anything
-/// unrecognised) is closed-equivalent. The single classification both the sync
-/// read reconcile ([`reconstruct_status`]) and the issue write-through
-/// (`GithubIssuesStore::update`'s `should_be_open`) share, so the two directions
-/// agree on which statuses mean open and never disagree with GitHub's own bit.
-pub fn status_maps_to_open(status: &str) -> bool {
-    matches!(status, "draft" | "review" | "accepted" | "in-progress")
+/// Whether a lifecycle `status` corresponds to a GitHub *open* issue, given the
+/// type's `terminal_status` (from [`Lifecycle::terminal_status`], the single
+/// ITERATION-318 derivation). A status is closed-equivalent iff it is that
+/// terminal state OR one of the canonical closed-exceptional states
+/// (`complete`/`rejected`/`superseded`); every other status is open-equivalent.
+/// Passing the terminal state in makes the classification lifecycle-aware so a
+/// CUSTOM terminal (e.g. `shipped`) closes while a custom intermediate state
+/// stays open, without a second terminal definition. For the default lifecycle
+/// the terminal is `complete`, already in the canonical closed set, so behaviour
+/// is unchanged. The single classification both the sync read reconcile
+/// ([`reconstruct_status`]) and the github-backed write-through
+/// (`GithubIssuesStore::update`'s `should_be_open`, `GithubMilestonesStore::update`)
+/// share, so read and write agree on which statuses mean open and never disagree
+/// with GitHub's own bit.
+pub fn status_maps_to_open(status: &str, terminal_status: &str) -> bool {
+    status != terminal_status && !matches!(status, "complete" | "rejected" | "superseded")
 }
 
 /// Reconstruct status from GitHub open/closed state and optional frontmatter
@@ -231,7 +238,7 @@ fn reconstruct_status(
 ) -> Status {
     if let Some(s) = frontmatter_status {
         if let Ok(status) = s.parse::<Status>() {
-            if status_maps_to_open(status.as_str()) == is_open {
+            if status_maps_to_open(status.as_str(), closed_status) == is_open {
                 return status;
             }
         }
@@ -592,15 +599,38 @@ mod tests {
 
     #[test]
     fn status_maps_to_open_classifies_open_and_closed_sets() {
+        // Default lifecycle terminal is `complete`.
         for open in ["draft", "review", "accepted", "in-progress"] {
-            assert!(status_maps_to_open(open), "{open} should map to open");
+            assert!(
+                status_maps_to_open(open, "complete"),
+                "{open} should map to open"
+            );
         }
         for closed in ["complete", "rejected", "superseded"] {
             assert!(
-                !status_maps_to_open(closed),
+                !status_maps_to_open(closed, "complete"),
                 "{closed} should map to closed"
             );
         }
+    }
+
+    // A custom terminal state (not `complete`) is closed-equivalent, while a
+    // custom intermediate state stays open -- the lifecycle-aware classification
+    // ITERATION-319's write-through relies on.
+    #[test]
+    fn status_maps_to_open_is_lifecycle_aware_for_custom_terminal() {
+        assert!(
+            !status_maps_to_open("shipped", "shipped"),
+            "custom terminal `shipped` should map to closed"
+        );
+        assert!(
+            status_maps_to_open("doing", "shipped"),
+            "custom intermediate `doing` should map to open"
+        );
+        assert!(
+            status_maps_to_open("backlog", "shipped"),
+            "custom first-active `backlog` should map to open"
+        );
     }
 
     #[test]

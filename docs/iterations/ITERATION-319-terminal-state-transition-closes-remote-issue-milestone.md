@@ -1,7 +1,7 @@
 ---
 title: Terminal-state transition closes remote issue/milestone
 type: iteration
-status: accepted
+status: complete
 author: unknown
 date: 2026-07-18
 tags: []

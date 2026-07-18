@@ -1475,7 +1475,10 @@ impl DocumentStore for GithubIssuesStore {
             .issue_edit(&self.repo, issue_number, None, Some(&new_body), &[], &[])?;
 
         if let Some(status) = new_status {
-            let should_be_open = issue_body::status_maps_to_open(status.as_str());
+            let should_be_open = issue_body::status_maps_to_open(
+                status.as_str(),
+                type_def.lifecycle.terminal_status(),
+            );
             let is_open = remote_issue.state == "OPEN";
             if should_be_open && !is_open {
                 self.client.issue_reopen(&self.repo, issue_number)?;
@@ -1609,17 +1612,6 @@ impl DocumentStore for GithubIssuesStore {
         self.issue_cache.touch_lock(doc_id)?;
 
         Ok(PushOutcome::Synced)
-    }
-}
-
-/// Map a lifecycle status to a milestone REST `state`. Closed-equivalent
-/// statuses (`complete`, `rejected`, `superseded`) map to `"closed"`; everything
-/// else (draft/review/accepted/in-progress) maps to `"open"`. Mirrors the
-/// open/closed set used for issues.
-pub fn status_to_milestone_state(status: &Status) -> &'static str {
-    match status.as_str() {
-        "complete" | "rejected" | "superseded" => "closed",
-        _ => "open",
     }
 }
 
@@ -1781,7 +1773,14 @@ impl DocumentStore for GithubMilestonesStore {
                 "due_on" => due_on = Some(value.to_string()),
                 "status" => {
                     let s: Status = value.parse()?;
-                    state = Some(status_to_milestone_state(&s).to_string());
+                    // Route through the single ITERATION-318 open/closed
+                    // classification so a transition into the type's terminal
+                    // state (custom or default) closes the milestone.
+                    let open = issue_body::status_maps_to_open(
+                        s.as_str(),
+                        type_def.lifecycle.terminal_status(),
+                    );
+                    state = Some(if open { "open" } else { "closed" }.to_string());
                 }
                 // `percent_complete` is a computed read-only field; reject writes
                 // so it is never PATCHed to GitHub.
@@ -4014,6 +4013,85 @@ mod tests {
         assert!(!gh_store.mock().closed.get());
     }
 
+    fn custom_lifecycle() -> Lifecycle {
+        let edge = |from: &str, to: &str| crate::engine::config::Edge {
+            from: from.into(),
+            to: to.into(),
+        };
+        Lifecycle {
+            states: vec!["backlog".into(), "doing".into(), "shipped".into()],
+            edges: vec![edge("backlog", "doing"), edge("doing", "shipped")],
+        }
+    }
+
+    fn open_issue_store(root: &std::path::Path) -> GithubIssuesStore {
+        let issue_body = make_issue_body("agent-7", "2026-03-27", None, "");
+        let view_issue = GhIssue {
+            number: 42,
+            id: String::new(),
+            url: String::new(),
+            title: "My RFC".to_string(),
+            body: issue_body,
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+            issue_type: None,
+            milestone: None,
+        };
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
+        GithubIssuesStore {
+            client: Box::new(client),
+            root: root.to_path_buf(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(root),
+        }
+    }
+
+    // BUG-008 write half: transition into a CUSTOM terminal state (not
+    // `complete`) closes the remote issue via the lifecycle-aware classifier.
+    #[test]
+    fn github_issues_update_custom_terminal_status_closes_issue() {
+        let root = tmp_root("gh_update_close_custom");
+        let mut gh_store = open_issue_store(&root);
+        let mut td = test_type_def(StoreBackend::GithubIssues);
+        td.lifecycle = custom_lifecycle();
+
+        gh_store
+            .update(&td, "RFC-001", &[("status", "shipped")])
+            .unwrap();
+        assert!(gh_store.mock().closed.get(), "custom terminal must close");
+        assert!(!gh_store.mock().reopened.get());
+    }
+
+    // A transition into a custom NON-terminal (intermediate) state must NOT
+    // close the open issue -- the pre-319 non-lifecycle-aware classifier wrongly
+    // treated any non-canonical status as closed.
+    #[test]
+    fn github_issues_update_custom_intermediate_status_does_not_close() {
+        let root = tmp_root("gh_update_intermediate_custom");
+        let mut gh_store = open_issue_store(&root);
+        let mut td = test_type_def(StoreBackend::GithubIssues);
+        td.lifecycle = custom_lifecycle();
+
+        gh_store
+            .update(&td, "RFC-001", &[("status", "doing")])
+            .unwrap();
+        assert!(
+            !gh_store.mock().closed.get(),
+            "custom intermediate must not close"
+        );
+        assert!(!gh_store.mock().reopened.get());
+    }
+
     #[test]
     fn github_issues_update_not_in_map() {
         let root = tmp_root("gh_update_nomap");
@@ -4293,11 +4371,16 @@ mod tests {
             "complete"
         );
         assert_eq!(milestone_state_to_status("open", &lc).as_str(), "draft");
-        assert_eq!(
-            status_to_milestone_state(&Status::new("complete")),
-            "closed"
-        );
-        assert_eq!(status_to_milestone_state(&Status::new("draft")), "open");
+        // Write direction shares ITERATION-318's classifier: the default
+        // terminal `complete` closes, `draft` stays open.
+        assert!(!issue_body::status_maps_to_open(
+            "complete",
+            lc.terminal_status()
+        ));
+        assert!(issue_body::status_maps_to_open(
+            "draft",
+            lc.terminal_status()
+        ));
     }
 
     // STORY-223 AC1: a custom-lifecycle milestone type inherits its own
@@ -4365,6 +4448,42 @@ mod tests {
 
         let cache = std::fs::read_to_string(root.join(&created.path)).unwrap();
         assert!(cache.contains("status: complete"), "cache: {cache}");
+    }
+
+    // BUG-008 write half (milestones): transition into a CUSTOM terminal state
+    // closes the remote milestone, routed through the shared ITERATION-318
+    // classifier. Pre-319 the milestone-only mapping left `shipped` -> "open".
+    #[test]
+    fn milestone_update_custom_terminal_status_closes() {
+        let root = tmp_root("ms_close_custom");
+        let mut store = milestone_store(&root, MockGhMilestoneClient::new());
+        let mut td = test_type_def(StoreBackend::GithubMilestones);
+        td.lifecycle = custom_lifecycle();
+
+        let created = store.create(&td, "v1.0", "author", "desc").unwrap();
+        store
+            .update(&td, &created.id, &[("status", "shipped")])
+            .unwrap();
+
+        let edit = store.mock().last_edit.borrow();
+        assert_eq!(edit.as_ref().unwrap().state.as_deref(), Some("closed"));
+    }
+
+    // A transition into a custom non-terminal state leaves the milestone open.
+    #[test]
+    fn milestone_update_non_terminal_status_stays_open() {
+        let root = tmp_root("ms_nonterminal_custom");
+        let mut store = milestone_store(&root, MockGhMilestoneClient::new());
+        let mut td = test_type_def(StoreBackend::GithubMilestones);
+        td.lifecycle = custom_lifecycle();
+
+        let created = store.create(&td, "v1.0", "author", "desc").unwrap();
+        store
+            .update(&td, &created.id, &[("status", "doing")])
+            .unwrap();
+
+        let edit = store.mock().last_edit.borrow();
+        assert_eq!(edit.as_ref().unwrap().state.as_deref(), Some("open"));
     }
 
     // AC5: percent_complete is computed, and updating it is rejected (never PATCHed).
