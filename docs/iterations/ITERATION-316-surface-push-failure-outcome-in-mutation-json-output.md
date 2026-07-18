@@ -1,7 +1,7 @@
 ---
 title: Surface push-failure outcome in mutation JSON output
 type: iteration
-status: accepted
+status: complete
 author: unknown
 date: 2026-07-18
 tags: []
