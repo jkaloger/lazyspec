@@ -1,7 +1,7 @@
 ---
 title: Wrap-mode row height measures only configured columns
 type: iteration
-status: accepted
+status: complete
 author: unknown
 date: 2026-07-18
 tags: []

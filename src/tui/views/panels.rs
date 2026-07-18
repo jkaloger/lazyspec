@@ -444,27 +444,40 @@ fn tag_wrapped_lines(tags: &[String], width: u16, dim: bool) -> Vec<Line<'static
 }
 
 /// Compute the natural visual line count for a row's content given the
-/// resolved cell widths. Returns the maximum across the title, tags, and
-/// provenance cells.
+/// resolved cell widths. Returns the maximum across the title cell and
+/// whichever of the tags/provenance cells are present in `columns` -- this
+/// must mirror `doc_row_cells_expanded`'s gating so measured height never
+/// diverges from what's actually rendered.
 fn row_content_lines(
     title: &str,
     tags: &[String],
     provenance: &[String],
     widths: DocCellWidths,
+    columns: &[String],
 ) -> usize {
     let title_lines = wrap_segments(title, widths.title);
-    let tags_lines = tag_wrapped_lines(tags, widths.tags, false).len();
-    let prov_text = if provenance.is_empty() {
-        String::new()
-    } else {
-        provenance.join(", ")
-    };
-    let prov_lines = if prov_text.is_empty() {
-        1
-    } else {
-        wrap_segments(&prov_text, widths.provenance)
-    };
-    title_lines.max(tags_lines).max(prov_lines)
+    let mut max_lines = title_lines;
+
+    if columns.iter().any(|c| c == "tags") {
+        let tags_lines = tag_wrapped_lines(tags, widths.tags, false).len();
+        max_lines = max_lines.max(tags_lines);
+    }
+
+    if columns.iter().any(|c| c == "provenance") {
+        let prov_text = if provenance.is_empty() {
+            String::new()
+        } else {
+            provenance.join(", ")
+        };
+        let prov_lines = if prov_text.is_empty() {
+            1
+        } else {
+            wrap_segments(&prov_text, widths.provenance)
+        };
+        max_lines = max_lines.max(prov_lines);
+    }
+
+    max_lines
 }
 
 /// Returns `true` when `elapsed_secs` exceeds twice the given `cache_ttl`.
@@ -815,7 +828,7 @@ fn doc_row_for_node(
 
     let columns = &config.ui.table.columns;
     let widths = DocCellWidths::from_area_width(area_width, columns);
-    let content_lines = row_content_lines(&node.title, &tags, &provenance, widths);
+    let content_lines = row_content_lines(&node.title, &tags, &provenance, widths, columns);
     let expanded = app.wrap_mode && index == app.selected_doc;
 
     let mut cells = vec![gutter_cell, tree_cell];
@@ -3110,30 +3123,34 @@ mod tests {
 
     #[test]
     fn row_content_lines_single_line_inputs_returns_one() {
-        let lines = row_content_lines("short", &[], &[], widths_for_test(40, 24, 20));
+        let columns = crate::engine::config::default_table_columns();
+        let lines = row_content_lines("short", &[], &[], widths_for_test(40, 24, 20), &columns);
         assert_eq!(lines, 1);
     }
 
     #[test]
     fn row_content_lines_counts_explicit_newlines_in_title() {
+        let columns = crate::engine::config::default_table_columns();
         let title = "line1\nline2\nline3";
-        let lines = row_content_lines(title, &[], &[], widths_for_test(80, 24, 20));
+        let lines = row_content_lines(title, &[], &[], widths_for_test(80, 24, 20), &columns);
         assert_eq!(lines, 3);
     }
 
     #[test]
     fn row_content_lines_soft_wraps_long_title() {
         // 30-char title soft-wrapped into width 10 should produce >1 lines.
+        let columns = crate::engine::config::default_table_columns();
         let title = "alpha beta gamma delta epsilon zeta";
-        let lines = row_content_lines(title, &[], &[], widths_for_test(10, 24, 20));
+        let lines = row_content_lines(title, &[], &[], widths_for_test(10, 24, 20), &columns);
         assert!(lines > 1, "expected wrap, got {}", lines);
     }
 
     #[test]
     fn row_content_lines_takes_max_across_cells() {
         // Title fits on 1 line; provenance wraps to multiple.
+        let columns = crate::engine::config::default_table_columns();
         let provenance: Vec<String> = (0..5).map(|i| format!("contributor-{}", i)).collect();
-        let lines = row_content_lines("t", &[], &provenance, widths_for_test(80, 24, 10));
+        let lines = row_content_lines("t", &[], &provenance, widths_for_test(80, 24, 10), &columns);
         assert!(lines > 1);
     }
 
@@ -3256,11 +3273,59 @@ mod tests {
     #[test]
     fn row_content_lines_includes_all_tags_not_just_first_three() {
         // Many tags in narrow column should drive row line count up.
+        let columns = crate::engine::config::default_table_columns();
         let tags: Vec<String> = (0..10).map(|i| format!("tag-{}", i)).collect();
-        let lines = row_content_lines("t", &tags, &[], widths_for_test(80, 12, 20));
+        let lines = row_content_lines("t", &tags, &[], widths_for_test(80, 12, 20), &columns);
         assert!(
             lines > 1,
             "expected multi-line from tag wrap, got {}",
+            lines
+        );
+    }
+
+    #[test]
+    fn row_content_lines_ignores_tags_and_provenance_when_columns_exclude_them() {
+        // Many tags and provenance entries, narrow widths that would wrap
+        // to multiple lines if measured -- but columns only configure
+        // "status", so tags/provenance must not inflate the row height.
+        let tags: Vec<String> = (0..10).map(|i| format!("tag-{}", i)).collect();
+        let provenance: Vec<String> = (0..5).map(|i| format!("contributor-{}", i)).collect();
+        let columns = vec!["status".to_string()];
+        let lines = row_content_lines(
+            "short title",
+            &tags,
+            &provenance,
+            widths_for_test(80, 12, 10),
+            &columns,
+        );
+        assert_eq!(
+            lines, 1,
+            "tags/provenance wrap should not inflate height when their columns aren't configured, got {}",
+            lines
+        );
+    }
+
+    #[test]
+    fn row_content_lines_still_measures_tags_and_provenance_when_columns_include_them() {
+        // Same many-tags/provenance setup, but columns include "tags" and
+        // "provenance" -- wrapping should still inflate the row height.
+        let tags: Vec<String> = (0..10).map(|i| format!("tag-{}", i)).collect();
+        let provenance: Vec<String> = (0..5).map(|i| format!("contributor-{}", i)).collect();
+        let columns = vec![
+            "status".to_string(),
+            "tags".to_string(),
+            "provenance".to_string(),
+        ];
+        let lines = row_content_lines(
+            "short title",
+            &tags,
+            &provenance,
+            widths_for_test(80, 12, 10),
+            &columns,
+        );
+        assert!(
+            lines > 1,
+            "expected tag/provenance wrap to inflate height when columns configured, got {}",
             lines
         );
     }
