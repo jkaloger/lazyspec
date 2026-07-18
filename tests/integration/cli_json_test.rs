@@ -566,3 +566,68 @@ dir = ".lazyspec/templates"
         "relationship should serialize under its configured name"
     );
 }
+
+// ITERATION-314 / BUG-004: `show --open --json` on an ambiguous shorthand must
+// emit the same JSON error shape as plain `show --json`, not human text on stderr.
+#[test]
+fn show_open_json_ambiguous_id_matches_show_json_error() {
+    use std::process::Command;
+
+    let fixture = crate::common::TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-030-first.md",
+        "---\ntitle: \"First\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n\nFirst body.\n",
+    );
+    fixture.write_doc(
+        "docs/adrs/RFC-030-second.md",
+        "---\ntitle: \"Second\"\ntype: adr\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n\nSecond body.\n",
+    );
+    let root = fixture.root();
+
+    let show_json = Command::new(env!("CARGO_BIN_EXE_lazyspec"))
+        .args(["show", "RFC-030", "--json"])
+        .current_dir(root)
+        .output()
+        .expect("failed to run lazyspec show --json");
+    let open_json = Command::new(env!("CARGO_BIN_EXE_lazyspec"))
+        .args(["show", "RFC-030", "--open", "--json"])
+        .current_dir(root)
+        .output()
+        .expect("failed to run lazyspec show --open --json");
+
+    assert!(show_json.status.success());
+    assert!(open_json.status.success());
+    assert!(
+        open_json.stderr.is_empty(),
+        "expected no human-readable stderr with --json, got: {}",
+        String::from_utf8_lossy(&open_json.stderr)
+    );
+
+    let show_parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&show_json.stdout)).unwrap();
+    let open_parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&open_json.stdout)).unwrap();
+
+    // Match order isn't guaranteed by resolution, so compare fields directly
+    // instead of the raw JSON (a stray ordering difference isn't the bug here).
+    assert_eq!(open_parsed["error"], show_parsed["error"]);
+    assert_eq!(open_parsed["id"], show_parsed["id"]);
+    let mut open_matches: Vec<String> = open_parsed["ambiguous_matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let mut show_matches: Vec<String> = show_parsed["ambiguous_matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    open_matches.sort();
+    show_matches.sort();
+    assert_eq!(open_matches, show_matches);
+
+    assert_eq!(open_parsed["error"], "ambiguous_id");
+    assert_eq!(open_matches.len(), 2);
+}

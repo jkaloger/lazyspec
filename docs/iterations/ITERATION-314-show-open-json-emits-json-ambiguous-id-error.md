@@ -1,7 +1,7 @@
 ---
 title: show --open --json emits JSON ambiguous_id error
 type: iteration
-status: accepted
+status: complete
 author: unknown
 date: 2026-07-18
 tags: []

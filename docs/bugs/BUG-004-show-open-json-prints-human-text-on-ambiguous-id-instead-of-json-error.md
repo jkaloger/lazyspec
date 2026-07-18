@@ -1,7 +1,7 @@
 ---
 title: "show --open --json prints human text on ambiguous ID instead of JSON error"
 type: bug
-status: triaged
+status: fixed
 author: "unknown"
 date: 2026-07-18
 tags: []
