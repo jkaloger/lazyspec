@@ -1,7 +1,7 @@
 ---
 title: Assignee as first-class frontmatter
 type: story
-status: in-progress
+status: complete
 author: unknown
 date: 2026-07-18
 tags: []
