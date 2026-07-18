@@ -1416,6 +1416,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
         let gh = MockGhClient::new().with_list_result(vec![gh_issue]);
         let milestone = MockGhMilestoneClient::with_milestones(vec![]);

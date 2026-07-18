@@ -91,6 +91,16 @@ impl GhIssueWriter for NoopGh {
     fn issue_reopen(&self, _repo: &str, _number: u64) -> Result<()> {
         unreachable!("not used in this test (clickup types only)")
     }
+    fn issue_set_assignee(
+        &self,
+        _repo: &str,
+        _number: u64,
+        _add: &[String],
+        _remove: &[String],
+    ) -> Result<()> {
+        Ok(())
+    }
+
     fn label_create(
         &self,
         _repo: &str,

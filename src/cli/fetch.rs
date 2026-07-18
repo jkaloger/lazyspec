@@ -737,6 +737,10 @@ name = "related-to"
         fn issue_reopen(&self, _: &str, _: u64) -> Result<()> {
             unimplemented!()
         }
+        fn issue_set_assignee(&self, _: &str, _: u64, _: &[String], _: &[String]) -> Result<()> {
+            Ok(())
+        }
+
         fn label_create(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
             unimplemented!()
         }

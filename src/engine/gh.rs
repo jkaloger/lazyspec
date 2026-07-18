@@ -26,6 +26,15 @@ pub struct GhAuthor {
     pub login: String,
 }
 
+/// A single GitHub issue assignee, read from the `assignees` JSON field. Mirrors
+/// [`GhAuthor`]: only the `login` is materialized. Surfaced as the native
+/// `DocMeta.assignee` at fetch (first entry when multiple), and written through
+/// via `gh issue edit --add-assignee/--remove-assignee`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct GhAssignee {
+    pub login: String,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct GhIssue {
     pub number: u64,
@@ -60,6 +69,11 @@ pub struct GhIssue {
     /// doc); the inverse `targeted-by` is derived virtually, never stored.
     #[serde(default)]
     pub milestone: Option<GhIssueMilestone>,
+    /// Native GitHub issue assignees, read from the `assignees` JSON field. The
+    /// first entry is inherited as `DocMeta.assignee` at fetch; the rest are out
+    /// of scope (single assignee model). Empty when the issue is unassigned.
+    #[serde(default)]
+    pub assignees: Vec<GhAssignee>,
 }
 
 /// The slice of a milestone carried on an issue's `milestone` JSON field. Only
@@ -218,6 +232,34 @@ pub fn build_set_milestone_args(
     ]
 }
 
+/// Pure argv builder for `issue_set_assignee`: `gh issue edit <n> --repo <repo>`
+/// with one `--add-assignee <login>` per `add` and one `--remove-assignee
+/// <login>` per `remove`. Follows the `build_set_milestone_args` precedent
+/// (argv building kept pure so it is unit-testable without invoking `gh`).
+pub fn build_set_assignee_args(
+    repo: &str,
+    issue_number: u64,
+    add: &[String],
+    remove: &[String],
+) -> Vec<String> {
+    let mut args = vec![
+        "issue".to_string(),
+        "edit".to_string(),
+        issue_number.to_string(),
+        "--repo".to_string(),
+        repo.to_string(),
+    ];
+    for login in add {
+        args.push("--add-assignee".to_string());
+        args.push(login.clone());
+    }
+    for login in remove {
+        args.push("--remove-assignee".to_string());
+        args.push(login.clone());
+    }
+    args
+}
+
 // --- Label helpers ---
 
 pub fn type_label(type_name: &str) -> String {
@@ -272,6 +314,18 @@ pub trait GhIssueWriter {
     fn issue_close(&self, repo: &str, number: u64) -> Result<()>;
 
     fn issue_reopen(&self, repo: &str, number: u64) -> Result<()>;
+
+    /// Set/clear an issue's native assignees (`gh issue edit
+    /// --add-assignee/--remove-assignee`). `add` and `remove` are GitHub logins
+    /// (no `@`); the caller diffs the desired assignee against the remote's
+    /// current one and passes only the delta. A no-op when both are empty.
+    fn issue_set_assignee(
+        &self,
+        repo: &str,
+        number: u64,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()>;
 
     fn label_create(&self, repo: &str, name: &str, description: &str, color: &str) -> Result<()>;
 
@@ -508,6 +562,16 @@ impl<T: GhIssueWriter + ?Sized> GhIssueWriter for &T {
 
     fn issue_reopen(&self, repo: &str, number: u64) -> Result<()> {
         (**self).issue_reopen(repo, number)
+    }
+
+    fn issue_set_assignee(
+        &self,
+        repo: &str,
+        number: u64,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        (**self).issue_set_assignee(repo, number, add, remove)
     }
 
     fn label_create(&self, repo: &str, name: &str, description: &str, color: &str) -> Result<()> {
@@ -809,7 +873,8 @@ impl GhIssueReader for GhCli {
     ) -> Result<Vec<GhIssue>> {
         let label_filter = labels.join(",");
         let fields = if json_fields.is_empty() {
-            "id,number,url,title,body,labels,state,updatedAt,createdAt,author,milestone".to_string()
+            "id,number,url,title,body,labels,state,updatedAt,createdAt,author,milestone,assignees"
+                .to_string()
         } else {
             json_fields.join(",")
         };
@@ -842,7 +907,7 @@ impl GhIssueReader for GhCli {
             "--repo",
             repo,
             "--json",
-            "id,number,url,title,body,labels,state,updatedAt,createdAt,author,milestone",
+            "id,number,url,title,body,labels,state,updatedAt,createdAt,author,milestone,assignees",
         ];
 
         let stdout = self.run_gh_checked(&args)?;
@@ -988,6 +1053,21 @@ impl GhIssueWriter for GhCli {
     fn issue_reopen(&self, repo: &str, number: u64) -> Result<()> {
         let num_str = number.to_string();
         self.run_gh_checked(&["issue", "reopen", &num_str, "--repo", repo])?;
+        Ok(())
+    }
+
+    fn issue_set_assignee(
+        &self,
+        repo: &str,
+        number: u64,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        if add.is_empty() && remove.is_empty() {
+            return Ok(());
+        }
+        let args = build_set_assignee_args(repo, number, add, remove);
+        self.run_gh_checked(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
         Ok(())
     }
 
@@ -1302,6 +1382,7 @@ pub mod test_support {
         pub edit_fail: bool,
         pub closed: Cell<bool>,
         pub reopened: Cell<bool>,
+        pub last_set_assignee: RefCell<Option<(Vec<String>, Vec<String>)>>,
         pub last_edit_title: RefCell<Option<String>>,
         pub last_edit_body: RefCell<Option<String>>,
         pub last_edit_labels_add: RefCell<Vec<String>>,
@@ -1341,6 +1422,7 @@ pub mod test_support {
                 edit_fail: false,
                 closed: Cell::new(false),
                 reopened: Cell::new(false),
+                last_set_assignee: RefCell::new(None),
                 last_edit_title: RefCell::new(None),
                 last_edit_body: RefCell::new(None),
                 last_edit_labels_add: RefCell::new(vec![]),
@@ -1435,6 +1517,7 @@ pub mod test_support {
                 author: None,
                 issue_type: None,
                 milestone: None,
+                assignees: vec![],
             })
         }
 
@@ -1480,6 +1563,7 @@ pub mod test_support {
                 author: None,
                 issue_type: None,
                 milestone: None,
+                assignees: vec![],
             })
         }
 
@@ -1509,6 +1593,17 @@ pub mod test_support {
 
         fn issue_reopen(&self, _repo: &str, _number: u64) -> Result<()> {
             self.reopened.set(true);
+            Ok(())
+        }
+
+        fn issue_set_assignee(
+            &self,
+            _repo: &str,
+            _number: u64,
+            add: &[String],
+            remove: &[String],
+        ) -> Result<()> {
+            *self.last_set_assignee.borrow_mut() = Some((add.to_vec(), remove.to_vec()));
             Ok(())
         }
 
@@ -1775,6 +1870,15 @@ pub mod test_support {
         fn issue_reopen(&self, repo: &str, number: u64) -> Result<()> {
             (**self).issue_reopen(repo, number)
         }
+        fn issue_set_assignee(
+            &self,
+            repo: &str,
+            number: u64,
+            add: &[String],
+            remove: &[String],
+        ) -> Result<()> {
+            (**self).issue_set_assignee(repo, number, add, remove)
+        }
         fn label_create(
             &self,
             repo: &str,
@@ -1881,6 +1985,17 @@ pub mod test_support {
         }
         fn issue_reopen(&self, repo: &str, number: u64) -> Result<()> {
             self.lock().unwrap().issue_reopen(repo, number)
+        }
+        fn issue_set_assignee(
+            &self,
+            repo: &str,
+            number: u64,
+            add: &[String],
+            remove: &[String],
+        ) -> Result<()> {
+            self.lock()
+                .unwrap()
+                .issue_set_assignee(repo, number, add, remove)
         }
         fn label_create(
             &self,
@@ -2181,6 +2296,7 @@ mod tests {
                 author: None,
                 issue_type: None,
                 milestone: None,
+                assignees: vec![],
             },
             GhIssue {
                 number: 2,
@@ -2195,6 +2311,7 @@ mod tests {
                 author: None,
                 issue_type: None,
                 milestone: None,
+                assignees: vec![],
             },
         ]);
         let issues = client.issue_list("owner/repo", &[], &[], None).unwrap();

@@ -257,6 +257,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
         let url = github_url(
             &d,

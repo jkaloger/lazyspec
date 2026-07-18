@@ -607,6 +607,15 @@ the new issue's native issue type field (needs the `project` scope described
 above); `create` with `github_issue_tag` set applies that value as a label
 the same way the default `lazyspec:{type}` label is applied today.
 
+The `assignee` field is a **native GitHub field**, not part of the issue-body
+round-trip. On `fetch`, each issue's first native assignee is inherited into the
+document's `assignee` (multiple assignees map to the first; unassigned yields
+none), and the remote is the source of truth -- a sync overwrites any local
+value. `update <id> --assignee <login>` writes it through: lazyspec diffs the
+requested login against the issue's current assignee and issues a dedicated
+`gh issue edit --add-assignee/--remove-assignee` (never the body comment), then
+reflects the new assignee in the cache. `--assignee ""` clears it.
+
 By default, a `github-issues`-backed type's issues are created, filtered, and
 tagged with the label `lazyspec:{name}`. A type's `github_label` field
 replaces that label with a literal string of your choosing:
@@ -824,6 +833,14 @@ reserved `relations` key of `clickup_custom_field_map`; a `clickup-tasks` type
 without that entry raises a clear config error up front rather than failing
 mid-write, and the write loads the token from `setup clickup` (same
 "run `lazyspec setup clickup`" error when none is stored).
+
+Like GitHub, ClickUp's `assignee` is a **native task field**. On `fetch`, a
+task's first assignee username is inherited into the doc's `assignee` (remote is
+the source of truth). `update <id> --assignee <user-id>` writes it through as
+ClickUp's native `assignees: {add, rem}` delta via `PUT /task/{id}`. The value
+is a numeric **ClickUp user id** -- cross-identity mapping (a GitHub login or
+free-text name to a ClickUp user id) is out of scope, so a non-numeric value is
+dropped rather than sent as an invalid payload.
 
 #### `github-milestones` store
 

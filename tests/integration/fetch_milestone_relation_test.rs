@@ -102,6 +102,10 @@ impl GhIssueWriter for MilestoneGh {
     fn issue_reopen(&self, _: &str, _: u64) -> Result<()> {
         unreachable!()
     }
+    fn issue_set_assignee(&self, _: &str, _: u64, _: &[String], _: &[String]) -> Result<()> {
+        Ok(())
+    }
+
     fn label_create(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
         unreachable!()
     }
@@ -222,6 +226,7 @@ fn fresh_fetch_surfaces_issue_milestone_as_targets_relation() {
             author: None,
             issue_type: None,
             milestone: Some(GhIssueMilestone { number: 1 }),
+            assignees: vec![],
         }],
         milestones: vec![GhMilestone {
             number: 1,

@@ -1268,6 +1268,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         }
     }
 
@@ -1891,6 +1892,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         link_inner(
@@ -1946,6 +1948,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         }
     }
 

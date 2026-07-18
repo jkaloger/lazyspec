@@ -193,6 +193,15 @@ pub struct ClickupCreator {
     pub username: String,
 }
 
+/// A task assignee (mirrors [`ClickupCreator`]). Only the `username` is
+/// materialized -- inherited as the native `DocMeta.assignee` at fetch (first
+/// entry when multiple).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ClickupAssignee {
+    #[serde(default)]
+    pub username: String,
+}
+
 /// A custom-field value on a task, keyed by its ClickUp uuid. `value` is kept as
 /// a raw JSON value because ClickUp returns different shapes per field type; the
 /// read path decodes it against the type's `clickup_custom_field_map`
@@ -241,6 +250,8 @@ pub struct ClickupTask {
     pub tags: Vec<ClickupTag>,
     #[serde(default)]
     pub creator: Option<ClickupCreator>,
+    #[serde(default)]
+    pub assignees: Vec<ClickupAssignee>,
     #[serde(default)]
     pub custom_fields: Vec<ClickupCustomField>,
 }
@@ -352,6 +363,20 @@ pub struct TaskUpdate {
     pub start_date: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_estimate: Option<i64>,
+    /// Native assignee delta, serialized as ClickUp's `{"add": [ids], "rem":
+    /// [ids]}` shape. `None` leaves assignees untouched. Values are ClickUp user
+    /// ids: cross-identity mapping (username -> id) is out of scope (STORY-222),
+    /// so a non-numeric `--assignee` drops the field rather than guessing an id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignees: Option<TaskAssigneeUpdate>,
+}
+
+/// The `assignees` payload on a task edit: ClickUp takes an add/remove delta of
+/// user ids rather than a full list.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct TaskAssigneeUpdate {
+    pub add: Vec<i64>,
+    pub rem: Vec<i64>,
 }
 
 /// Validates a ClickUp personal token and fetches the tasks a bound List
@@ -1354,6 +1379,7 @@ mod tests {
             due_date: Some(1_748_541_600_000),
             start_date: None,
             time_estimate: Some(3_600_000),
+            assignees: None,
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["markdown_content"], "new body");
@@ -1363,6 +1389,7 @@ mod tests {
         assert!(json.get("name").is_none());
         assert!(json.get("status").is_none());
         assert!(json.get("start_date").is_none());
+        assert!(json.get("assignees").is_none());
     }
 
     #[test]

@@ -1400,6 +1400,7 @@ impl DocumentStore for GithubIssuesStore {
         let mut new_status: Option<Status> = None;
         let mut attr_updates: Vec<(&str, &str)> = Vec::new();
         let mut issue_type_update: Option<&str> = None;
+        let mut assignee_update: Option<&str> = None;
         let mut project_field_updates: Vec<(u64, &str, &str)> = Vec::new();
         for &(key, value) in updates {
             // `PROJECT-n.<field>` is a per-board project field, not a body
@@ -1421,6 +1422,9 @@ impl DocumentStore for GithubIssuesStore {
                 // The native issue-type lives in GitHub's `issueType` field, not
                 // the issue-body HTML comment, so it is kept out of attr_updates.
                 "issue_type" => issue_type_update = Some(value),
+                // Assignee is a native GitHub field (`assignees`), written through
+                // a dedicated `gh issue edit` mutation -- never the body comment.
+                "assignee" => assignee_update = Some(value),
                 _ => attr_updates.push((key, value)),
             }
         }
@@ -1436,6 +1440,7 @@ impl DocumentStore for GithubIssuesStore {
             if attr_updates.is_empty()
                 && new_status.is_none()
                 && issue_type_update.is_none()
+                && assignee_update.is_none()
                 && !updates.iter().any(|(k, _)| matches!(*k, "title" | "body"))
             {
                 return Ok(PushOutcome::Synced);
@@ -1492,6 +1497,22 @@ impl DocumentStore for GithubIssuesStore {
 
         if let Some(type_id) = issue_type_change {
             self.push_issue_type(issue_number, type_id.as_deref())?;
+        }
+
+        // Assignee native edge (STORY-222 AC4): diff the requested assignee
+        // against the remote's current one (first entry) and push only the delta
+        // via `gh issue edit`, then reflect it locally. The remote `assignees`
+        // field is the edge of record; the body comment never carries it.
+        if let Some(value) = assignee_update {
+            let requested = (!value.is_empty()).then(|| value.to_string());
+            let current = remote_issue.assignees.first().map(|a| a.login.clone());
+            if requested != current {
+                let add: Vec<String> = requested.iter().cloned().collect();
+                let remove: Vec<String> = current.into_iter().collect();
+                self.client
+                    .issue_set_assignee(&self.repo, issue_number, &add, &remove)?;
+            }
+            meta.assignee = requested;
         }
 
         // Clear updated_at: we just pushed, so our stored timestamp is stale.
@@ -3114,6 +3135,72 @@ mod tests {
         assert_eq!(entry.updated_at, "1774587145901");
     }
 
+    // STORY-222 AC4: `update --assignee <id>` on a clickup-tasks doc PUTs the
+    // native `assignees {add, rem}` payload via `update_task` and re-materializes
+    // the echoed task into the cache.
+    #[test]
+    fn clickup_update_assignee_puts_add_rem_payload_via_update_task() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_update_assignee");
+        let td = clickup_type_def(Some("list123"));
+
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1700000000000");
+        map.save(&root).unwrap();
+
+        let remote_unchanged = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "My task",
+                "status": {"status": "open"},
+                "date_updated": "1700000000000"
+            }"#,
+        );
+        // ClickUp echoes the task with the new assignee.
+        let updated = scripted_task(
+            r#"{
+                "id": "90abc",
+                "name": "My task",
+                "status": {"status": "open"},
+                "date_updated": "1774587145901",
+                "assignees": [{"username": "carol"}]
+            }"#,
+        );
+        let fake = FakeClickupClient::valid(clickup_user())
+            .with_viewed_task(remote_unchanged)
+            .with_updated_task(updated);
+        let calls = fake.update_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        store
+            .update(&td, "TASK-90abc", &[("assignee", "183")])
+            .unwrap();
+
+        let recorded = calls.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "90abc");
+        assert_eq!(
+            recorded[0].1.assignees,
+            Some(crate::engine::clickup::TaskAssigneeUpdate {
+                add: vec![183],
+                rem: vec![],
+            })
+        );
+
+        // Re-materialized cache reflects the echoed assignee.
+        let content =
+            std::fs::read_to_string(root.join(".lazyspec/cache/task/TASK-90abc.md")).unwrap();
+        assert!(content.contains("assignee: carol"), "got:\n{content}");
+    }
+
     #[test]
     fn clickup_update_without_token_errors() {
         use crate::engine::clickup::FakeClickupClient;
@@ -3784,6 +3871,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -3820,6 +3908,132 @@ mod tests {
         );
     }
 
+    // STORY-222 AC4: `update --assignee X` on a github-issues doc fires the
+    // native `gh issue edit` assignee mutation, diffing against the remote's
+    // current assignee (add the new login, remove the old), and reflects the new
+    // assignee in the local cache. The body comment never carries assignee.
+    #[test]
+    fn github_issues_update_assignee_fires_native_edit_and_diffs() {
+        let root = tmp_root("gh_update_assignee");
+        let issue_body = make_issue_body("agent-7", "2026-03-27", None, "original body");
+        let view_issue = GhIssue {
+            number: 42,
+            id: String::new(),
+            url: String::new(),
+            title: "My RFC".to_string(),
+            body: issue_body,
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+            issue_type: None,
+            milestone: None,
+            assignees: vec![crate::engine::gh::GhAssignee {
+                login: "bob".to_string(),
+            }],
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
+
+        let mut gh_store = GithubIssuesStore {
+            client: Box::new(client),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        gh_store
+            .update(&td, "RFC-001", &[("assignee", "carol")])
+            .unwrap();
+
+        // Diff vs remote: add the requested login, remove the current one.
+        let recorded = gh_store.mock().last_set_assignee.borrow().clone();
+        assert_eq!(
+            recorded,
+            Some((vec!["carol".to_string()], vec!["bob".to_string()])),
+            "assignee edit should add carol and remove bob"
+        );
+
+        // The re-serialized body must NOT carry an assignee (native field).
+        let body = gh_store.mock().last_edit_body.borrow();
+        assert!(
+            !body.as_deref().unwrap_or("").contains("assignee"),
+            "assignee must stay out of the issue body comment"
+        );
+
+        // Local cache reflects the new assignee.
+        let cache = std::fs::read_to_string(
+            root.join(".lazyspec/cache")
+                .join(&td.name)
+                .join("RFC-001.md"),
+        )
+        .unwrap();
+        assert!(
+            cache.contains("assignee: carol"),
+            "cache should reflect the new assignee, got:\n{cache}"
+        );
+    }
+
+    // STORY-222 AC4: setting the assignee to the login already on the remote is a
+    // no-op -- no `gh issue edit` assignee mutation fires (empty diff).
+    #[test]
+    fn github_issues_update_assignee_unchanged_is_noop() {
+        let root = tmp_root("gh_update_assignee_noop");
+        let issue_body = make_issue_body("agent-7", "2026-03-27", None, "body");
+        let view_issue = GhIssue {
+            number: 42,
+            id: String::new(),
+            url: String::new(),
+            title: "My RFC".to_string(),
+            body: issue_body,
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T10:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+            issue_type: None,
+            milestone: None,
+            assignees: vec![crate::engine::gh::GhAssignee {
+                login: "carol".to_string(),
+            }],
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
+
+        let mut gh_store = GithubIssuesStore {
+            client: Box::new(client),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        gh_store
+            .update(&td, "RFC-001", &[("assignee", "carol")])
+            .unwrap();
+
+        assert!(
+            gh_store.mock().last_set_assignee.borrow().is_none(),
+            "assignee unchanged vs remote must not fire an edit"
+        );
+    }
+
     #[test]
     fn github_issues_update_optimistic_lock_failure() {
         let root = tmp_root("gh_update_lock");
@@ -3840,6 +4054,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -3908,6 +4123,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -3961,6 +4177,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -4004,6 +4221,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -4056,6 +4274,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
         let client = MockGhClient::new().with_view_issue(view_issue);
         let mut map = IssueMap::load(root).unwrap();
@@ -4145,6 +4364,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -4187,6 +4407,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -4242,6 +4463,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -4665,6 +4887,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -4733,6 +4956,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -4784,6 +5008,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -4831,6 +5056,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -4907,6 +5133,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -5334,6 +5561,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -5395,6 +5623,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -5457,6 +5686,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -5679,6 +5909,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -5761,6 +5992,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
 
         let client = MockGhClient::new().with_view_issue(view_issue);
@@ -5834,6 +6066,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         }
     }
 
@@ -7073,6 +7306,7 @@ mod tests {
             author: None,
             issue_type: None,
             milestone: None,
+            assignees: vec![],
         };
         let client = client.with_view_issue(view);
         let mut store = issues_store_with(root, client);
@@ -7153,6 +7387,7 @@ mod tests {
                 author: None,
                 issue_type: None,
                 milestone: None,
+                assignees: vec![],
             });
         let mut store = issues_store_with(&root, client);
         store
@@ -7255,6 +7490,7 @@ mod tests {
                     author: None,
                     issue_type: None,
                     milestone: None,
+                    assignees: vec![],
                 });
             let mut store = issues_store_with(&root, client);
             store
@@ -7299,6 +7535,7 @@ mod tests {
                 author: None,
                 issue_type: None,
                 milestone: None,
+                assignees: vec![],
             });
         let mut store = issues_store_with(&root, client);
         store
