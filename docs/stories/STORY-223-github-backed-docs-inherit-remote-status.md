@@ -1,7 +1,7 @@
 ---
 title: GitHub-backed docs inherit remote status
 type: story
-status: accepted
+status: in-progress
 author: unknown
 date: 2026-07-18
 tags: []
