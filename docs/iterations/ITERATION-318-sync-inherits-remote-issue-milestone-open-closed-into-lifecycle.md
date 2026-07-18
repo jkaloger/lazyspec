@@ -1,7 +1,7 @@
 ---
 title: Sync inherits remote issue/milestone open-closed into lifecycle
 type: iteration
-status: accepted
+status: complete
 author: unknown
 date: 2026-07-18
 tags: []

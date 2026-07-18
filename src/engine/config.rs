@@ -152,6 +152,53 @@ impl Lifecycle {
         self.states.first().map(String::as_str).unwrap_or("draft")
     }
 
+    /// The lifecycle state a remote-`open` GitHub issue/milestone maps to on the
+    /// sync read path: the type's first active state, which is the birth/seed
+    /// state (`states[0]`). Shares its derivation with [`seed_status`] so a doc's
+    /// open state and its birth state always agree. Falls back to `draft` when
+    /// the lifecycle declares no states. The single source both this iteration's
+    /// read mapping and ITERATION-319's write-through close derive from.
+    pub fn first_active_status(&self) -> &str {
+        self.seed_status()
+    }
+
+    /// The terminal lifecycle state a remote-`closed` GitHub issue/milestone maps
+    /// to on the sync read path: the end of the lifecycle's *main forward path*.
+    /// Starting at the first declared state we follow the first declared
+    /// non-wildcard outgoing edge from each state until reaching a state with no
+    /// such edge -- that state is terminal. For the default lifecycle
+    /// (draft->review->accepted->in-progress->complete, plus `review->rejected`
+    /// and `* -> superseded`) this is `complete`, never the branch terminals
+    /// `rejected`/`superseded`. The universal `* -> X` wildcard edge is never
+    /// followed, so a terminal reachable only by wildcard (e.g. `superseded`) is
+    /// never selected. With no declared edges the lifecycle is unconstrained and
+    /// the last declared state is terminal; falls back to `complete` when the
+    /// lifecycle declares no states. Reused unchanged by ITERATION-319's
+    /// write-through close.
+    pub fn terminal_status(&self) -> &str {
+        if self.states.is_empty() {
+            return "complete";
+        }
+        if self.edges.is_empty() {
+            return self.states.last().map(String::as_str).unwrap_or("complete");
+        }
+        let mut current = self.states[0].as_str();
+        let mut visited = vec![current];
+        while let Some(next) = self
+            .edges
+            .iter()
+            .find(|e| e.from == current && e.to != current)
+            .map(|e| e.to.as_str())
+        {
+            if visited.contains(&next) {
+                break;
+            }
+            current = next;
+            visited.push(next);
+        }
+        current
+    }
+
     /// True iff a `from -> to` transition is permitted. With no declared edges
     /// the lifecycle is unconstrained: any move between declared states is
     /// allowed. Otherwise the transition must match a declared edge; a `*` edge
@@ -2123,6 +2170,63 @@ interactive = 'claude "$LAZYSPEC_PROMPT"'
         assert!(from_draft.contains(&"review"));
         assert!(from_draft.contains(&"superseded"));
         assert!(!from_draft.contains(&"accepted"));
+    }
+
+    // STORY-223 AC1: the default lifecycle's remote-open state is its first
+    // active state (`draft`) and its remote-closed state is the main-forward-path
+    // terminal (`complete`), never the branch terminals `rejected`/`superseded`.
+    #[test]
+    fn lifecycle_first_active_and_terminal_default() {
+        let lc = default_lifecycle();
+        assert_eq!(lc.first_active_status(), "draft");
+        assert_eq!(lc.terminal_status(), "complete");
+    }
+
+    // STORY-223 AC1: a custom lifecycle derives its own first-active and terminal
+    // states from its own states/edges.
+    #[test]
+    fn lifecycle_first_active_and_terminal_custom() {
+        let edge = |from: &str, to: &str| Edge {
+            from: from.into(),
+            to: to.into(),
+        };
+        let lc = Lifecycle {
+            states: vec![
+                "backlog".into(),
+                "doing".into(),
+                "shipped".into(),
+                "abandoned".into(),
+            ],
+            edges: vec![
+                edge("backlog", "doing"),
+                edge("doing", "shipped"),
+                edge("backlog", "abandoned"),
+            ],
+        };
+        assert_eq!(lc.first_active_status(), "backlog");
+        // `shipped` is the main-forward-path terminal (backlog->doing->shipped);
+        // `abandoned` is a branch terminal and is not selected.
+        assert_eq!(lc.terminal_status(), "shipped");
+    }
+
+    // With no declared edges the lifecycle is unconstrained: terminal falls back
+    // to the last declared state, first-active to the first.
+    #[test]
+    fn lifecycle_terminal_no_edges_uses_last_state() {
+        let lc = Lifecycle {
+            states: vec!["a".into(), "b".into(), "c".into()],
+            edges: vec![],
+        };
+        assert_eq!(lc.first_active_status(), "a");
+        assert_eq!(lc.terminal_status(), "c");
+    }
+
+    // A lifecycle with no states at all falls back to the draft/complete defaults.
+    #[test]
+    fn lifecycle_first_active_and_terminal_empty_defaults() {
+        let lc = Lifecycle::default();
+        assert_eq!(lc.first_active_status(), "draft");
+        assert_eq!(lc.terminal_status(), "complete");
     }
 
     // Empty edges = unconstrained lifecycle: any move between declared states.

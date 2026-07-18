@@ -6,7 +6,7 @@ use chrono::Local;
 use serde::Serialize;
 
 use crate::engine::clickup_cache;
-use crate::engine::config::{Config, StoreBackend, TypeDef};
+use crate::engine::config::{Config, Lifecycle, StoreBackend, TypeDef};
 use crate::engine::document::{compose_frontmatter, AttrValue, DocMeta, DocType, Status};
 use crate::engine::gh::{self, GhClient, GhGraphql, GhMilestoneClient, GhProjectsClient, GqlVar};
 use crate::engine::gh_schema::{try_org_then_user, GhSchemaSnapshot};
@@ -683,6 +683,8 @@ impl GithubIssuesStore {
             issue_type: remote_issue.issue_type.clone(),
             default_type: type_def.name.clone(),
             attr_defs: type_def.attributes.clone(),
+            open_status: type_def.lifecycle.first_active_status().to_string(),
+            closed_status: type_def.lifecycle.terminal_status().to_string(),
         };
         let (mut remote_meta, remote_prose) = issue_body::deserialize(&remote_issue.body, &ctx)?;
 
@@ -1387,6 +1389,8 @@ impl DocumentStore for GithubIssuesStore {
             issue_type: remote_issue.issue_type.clone(),
             default_type: type_def.name.clone(),
             attr_defs: type_def.attributes.clone(),
+            open_status: type_def.lifecycle.first_active_status().to_string(),
+            closed_status: type_def.lifecycle.terminal_status().to_string(),
         };
         let (mut meta, mut body) = issue_body::deserialize(&remote_issue.body, &ctx)?;
 
@@ -1471,10 +1475,7 @@ impl DocumentStore for GithubIssuesStore {
             .issue_edit(&self.repo, issue_number, None, Some(&new_body), &[], &[])?;
 
         if let Some(status) = new_status {
-            let should_be_open = matches!(
-                status.as_str(),
-                "draft" | "review" | "accepted" | "in-progress"
-            );
+            let should_be_open = issue_body::status_maps_to_open(status.as_str());
             let is_open = remote_issue.state == "OPEN";
             if should_be_open && !is_open {
                 self.client.issue_reopen(&self.repo, issue_number)?;
@@ -1525,6 +1526,8 @@ impl DocumentStore for GithubIssuesStore {
             issue_type: remote_issue.issue_type.clone(),
             default_type: type_def.name.clone(),
             attr_defs: type_def.attributes.clone(),
+            open_status: type_def.lifecycle.first_active_status().to_string(),
+            closed_status: type_def.lifecycle.terminal_status().to_string(),
         };
         let (mut meta, body) = issue_body::deserialize(&remote_issue.body, &ctx)?;
         meta.provenance = provenance.to_vec();
@@ -1620,14 +1623,18 @@ pub fn status_to_milestone_state(status: &Status) -> &'static str {
     }
 }
 
-/// Map a milestone REST `state` back to a lifecycle status. `"closed"` -> the
-/// closed-equivalent `complete`; anything else -> the open-equivalent
-/// `in-progress`.
-pub fn milestone_state_to_status(state: &str) -> Status {
+/// Map a milestone REST `state` back to a lifecycle status via the type's
+/// lifecycle (STORY-223 AC1): `"closed"` -> the type's terminal state, anything
+/// else -> the type's first active state. Uses the same
+/// [`Lifecycle::first_active_status`]/[`Lifecycle::terminal_status`] derivation
+/// as the github-issues read path, so a milestone-backed type inherits its
+/// remote open/closed state into its own lifecycle. Replaces the former
+/// hardcoded `in-progress`/`complete` mapping.
+pub fn milestone_state_to_status(state: &str, lifecycle: &Lifecycle) -> Status {
     if state.eq_ignore_ascii_case("closed") {
-        Status::new("complete")
+        Status::new(lifecycle.terminal_status())
     } else {
-        Status::new("in-progress")
+        Status::new(lifecycle.first_active_status())
     }
 }
 
@@ -1701,7 +1708,7 @@ impl GithubMilestonesStore {
             path: PathBuf::new(),
             title: milestone.title.clone(),
             doc_type: DocType::new(&type_def.name),
-            status: milestone_state_to_status(&milestone.state),
+            status: milestone_state_to_status(&milestone.state, &type_def.lifecycle),
             author: author.to_string(),
             date: Local::now().date_naive(),
             tags: vec![],
@@ -4278,13 +4285,68 @@ mod tests {
     // a closed-equivalent status in the cache.
     #[test]
     fn milestone_state_status_mappings() {
-        assert_eq!(milestone_state_to_status("closed").as_str(), "complete");
-        assert_eq!(milestone_state_to_status("open").as_str(), "in-progress");
+        // STORY-223 AC1: read maps via the type's lifecycle -- closed -> terminal,
+        // open -> first active. With the default lifecycle that is complete/draft.
+        let lc = crate::engine::config::default_lifecycle();
+        assert_eq!(
+            milestone_state_to_status("closed", &lc).as_str(),
+            "complete"
+        );
+        assert_eq!(milestone_state_to_status("open", &lc).as_str(), "draft");
         assert_eq!(
             status_to_milestone_state(&Status::new("complete")),
             "closed"
         );
         assert_eq!(status_to_milestone_state(&Status::new("draft")), "open");
+    }
+
+    // STORY-223 AC1: a custom-lifecycle milestone type inherits its own
+    // first-active/terminal states from the remote open/closed state on read.
+    #[test]
+    fn milestone_state_status_custom_lifecycle() {
+        let edge = |from: &str, to: &str| crate::engine::config::Edge {
+            from: from.into(),
+            to: to.into(),
+        };
+        let lc = Lifecycle {
+            states: vec!["backlog".into(), "doing".into(), "shipped".into()],
+            edges: vec![edge("backlog", "doing"), edge("doing", "shipped")],
+        };
+        assert_eq!(milestone_state_to_status("open", &lc).as_str(), "backlog");
+        assert_eq!(milestone_state_to_status("closed", &lc).as_str(), "shipped");
+    }
+
+    // STORY-223 AC1/AC3: a closed milestone read via the store materializes the
+    // type's terminal status in the cached doc, and an open one the first-active
+    // status -- the remote state is inherited without local edits.
+    #[test]
+    fn milestone_read_inherits_remote_open_closed_into_lifecycle() {
+        let root = tmp_root("ms_read_inherits");
+        let client = MockGhMilestoneClient::new();
+        let store = milestone_store(&root, client);
+        let mut td = test_type_def(StoreBackend::GithubMilestones);
+        td.lifecycle = crate::engine::config::default_lifecycle();
+
+        let open_ms = crate::engine::gh::GhMilestone {
+            number: 1,
+            title: "v1".to_string(),
+            description: String::new(),
+            due_on: None,
+            state: "open".to_string(),
+            open_issues: 2,
+            closed_issues: 0,
+            url: String::new(),
+        };
+        let closed_ms = crate::engine::gh::GhMilestone {
+            state: "closed".to_string(),
+            number: 2,
+            ..open_ms.clone()
+        };
+
+        let open_meta = store.meta_from_milestone(&td, "MILESTONE-1", &open_ms, "author");
+        let closed_meta = store.meta_from_milestone(&td, "MILESTONE-2", &closed_ms, "author");
+        assert_eq!(open_meta.status.as_str(), "draft");
+        assert_eq!(closed_meta.status.as_str(), "complete");
     }
 
     #[test]

@@ -45,7 +45,7 @@ pub fn fetch_milestones(
             path: std::path::PathBuf::new(),
             title: m.title.clone(),
             doc_type: DocType::new(&type_def.name),
-            status: milestone_state_to_status(&m.state),
+            status: milestone_state_to_status(&m.state, &type_def.lifecycle),
             author: "github".to_string(),
             date: chrono::Utc::now().date_naive(),
             tags: vec![],
@@ -153,7 +153,9 @@ mod tests {
 
         let cache_dir = root.join(".lazyspec/cache/milestone");
         let open = std::fs::read_to_string(cache_dir.join("MILESTONE-3.md")).unwrap();
-        assert!(open.contains("status: in-progress"), "{open}");
+        // STORY-223 AC1: an open milestone inherits the type's first active state
+        // (default lifecycle -> `draft`), not the former hardcoded `in-progress`.
+        assert!(open.contains("status: draft"), "{open}");
         assert!(open.contains("open_issues: 7"), "{open}");
         let closed = std::fs::read_to_string(cache_dir.join("MILESTONE-4.md")).unwrap();
         assert!(closed.contains("status: complete"), "{closed}");
