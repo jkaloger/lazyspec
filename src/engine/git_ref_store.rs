@@ -174,6 +174,7 @@ impl GitRefStore {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes: Default::default(),
             id: id.to_string(),
         };
@@ -377,6 +378,12 @@ impl DocumentStore for GitRefStore {
         for &(key, value) in updates {
             if key == "body" {
                 new_body = Some(value.to_string());
+                continue;
+            }
+            // `assignee` is absent-when-unset; clearing it with "" removes the
+            // key rather than writing an empty scalar.
+            if key == "assignee" && value.is_empty() {
+                map.remove(serde_yaml::Value::String("assignee".to_string()));
                 continue;
             }
             map.insert(
@@ -848,6 +855,50 @@ mod tests {
             updated
         );
         assert_eq!(parsed["title"].as_str(), Some("Title"));
+    }
+
+    // STORY-222 AC2: assignee is settable on a git-ref doc via `update` (no
+    // hand-edit), and clearing with "" removes the key.
+    #[test]
+    fn test_git_ref_store_update_sets_and_clears_assignee() {
+        let tmp = TempDir::new().unwrap();
+
+        let td = test_type_def();
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache_content = "---\ntitle: Title\ntype: iteration\nstatus: draft\nauthor: alice\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\nbody\n";
+        std::fs::write(cache_dir.join("ITERATION-042.md"), cache_content).unwrap();
+
+        let mut lock = CacheLock::default();
+        lock.set("iteration/ITERATION-042", "oldsha");
+        lock.save(tmp.path()).unwrap();
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("sha1".to_string()))
+            .with_update_ref_result(Ok(()));
+        let mut store = make_store(&tmp, mock);
+        store
+            .update(&td, "ITERATION-042", &[("assignee", "alice")])
+            .unwrap();
+
+        let updated = std::fs::read_to_string(cache_dir.join("ITERATION-042.md")).unwrap();
+        let (yaml, _) = split_frontmatter(&updated).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed["assignee"].as_str(), Some("alice"));
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("sha2".to_string()))
+            .with_update_ref_result(Ok(()));
+        let mut store = make_store(&tmp, mock);
+        store
+            .update(&td, "ITERATION-042", &[("assignee", "")])
+            .unwrap();
+
+        let cleared = std::fs::read_to_string(cache_dir.join("ITERATION-042.md")).unwrap();
+        assert!(
+            !cleared.contains("assignee:"),
+            "clearing with empty string must remove the key, got:\n{cleared}"
+        );
     }
 
     // AUDIT-018 C3 / STORY-210 AC2: values with YAML-significant characters

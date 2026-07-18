@@ -316,6 +316,10 @@ pub struct DocMeta {
     pub author: String,
     pub date: NaiveDate,
     pub tags: Vec<String>,
+    /// Optional single assignee. First-class field mirroring `tags`/`status`,
+    /// but absent from frontmatter when unset (serializers skip `None`), unlike
+    /// `tags` which always emits `tags: []`.
+    pub assignee: Option<String>,
     pub provenance: Vec<String>,
     pub related: Vec<Relation>,
     pub validate_ignore: bool,
@@ -337,6 +341,8 @@ struct RawFrontmatter {
     #[serde(deserialize_with = "deserialize_naive_date")]
     date: NaiveDate,
     tags: Vec<String>,
+    #[serde(default)]
+    assignee: Option<String>,
     #[serde(default)]
     provenance: Vec<String>,
     #[serde(default)]
@@ -466,6 +472,7 @@ impl DocMeta {
             author: raw.author,
             date: raw.date,
             tags: raw.tags,
+            assignee: raw.assignee,
             provenance: raw.provenance,
             related,
             validate_ignore: raw.validate_ignore,
@@ -503,6 +510,7 @@ mod tests {
             author: String::new(),
             date: NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
             tags: vec![],
+            assignee: None,
             provenance: vec![],
             related: vec![],
             validate_ignore: false,
@@ -703,6 +711,74 @@ Body.
         );
     }
 
+    // AC1/AC2: an `assignee:` frontmatter line parses into Some(name).
+    #[test]
+    fn assignee_present_parses_to_some() {
+        let content = r#"---
+title: "Doc"
+type: rfc
+status: draft
+author: a
+date: 2026-01-01
+tags: []
+assignee: alice
+---
+
+Body.
+"#;
+        let meta = DocMeta::parse(content).unwrap();
+        assert_eq!(meta.assignee, Some("alice".to_string()));
+        assert!(
+            !meta.attributes.contains_key("assignee"),
+            "assignee is a first-class field, not a custom attribute"
+        );
+    }
+
+    // AC6: no `assignee:` key parses to None.
+    #[test]
+    fn assignee_absent_parses_to_none() {
+        let content = r#"---
+title: "Doc"
+type: rfc
+status: draft
+author: a
+date: 2026-01-01
+tags: []
+---
+
+Body.
+"#;
+        let meta = DocMeta::parse(content).unwrap();
+        assert_eq!(meta.assignee, None);
+    }
+
+    // AC6: an unset assignee must NOT emit an `assignee:` line (diverges from
+    // `tags`, which always emits `tags: []`). Verified through the cache
+    // serializer, which is the local serialize path skipping `None`.
+    #[test]
+    fn assignee_none_is_absent_from_serialized_frontmatter() {
+        use crate::engine::store_dispatch::render_cache_content_for_test;
+        let mut meta = blank_meta();
+        meta.assignee = None;
+        let content = render_cache_content_for_test(&meta, "Body.");
+        assert!(
+            !content.contains("assignee:"),
+            "unset assignee must not appear in frontmatter, got:\n{content}"
+        );
+    }
+
+    // Round-trip: a set assignee survives serialize + re-parse.
+    #[test]
+    fn assignee_roundtrips_through_cache_serializer() {
+        use crate::engine::store_dispatch::render_cache_content_for_test;
+        let mut meta = blank_meta();
+        meta.assignee = Some("bob".to_string());
+        let content = render_cache_content_for_test(&meta, "Body.");
+        assert!(content.contains("assignee: bob"));
+        let reparsed = DocMeta::parse(&content).unwrap();
+        assert_eq!(reparsed.assignee, Some("bob".to_string()));
+    }
+
     #[test]
     fn relation_type_new_lowercases_and_displays_inner() {
         assert_eq!(RelationType::new("Tracks").to_string(), "tracks");
@@ -862,6 +938,7 @@ Body.
             author: String::new(),
             date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
             tags: vec![],
+            assignee: None,
             provenance: vec![],
             related: vec![],
             validate_ignore: false,

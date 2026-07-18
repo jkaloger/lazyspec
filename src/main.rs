@@ -235,6 +235,7 @@ fn main() -> anyhow::Result<()> {
             path,
             status,
             title,
+            assignee,
             body,
             body_file,
             attr,
@@ -249,6 +250,9 @@ fn main() -> anyhow::Result<()> {
             }
             if let Some(ref t) = title {
                 updates.push(("title", t.as_str()));
+            }
+            if let Some(ref a) = assignee {
+                updates.push(("assignee", a.as_str()));
             }
             if let Some(ref b) = body_content {
                 updates.push(("body", b.as_str()));

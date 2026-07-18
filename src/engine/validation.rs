@@ -1241,6 +1241,7 @@ mod attr_schema_tests {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             id: "STORY-001".to_string(),
             attributes,
         }
@@ -1482,6 +1483,7 @@ mod unknown_relationship_tests {
             }],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             id: "MILESTONE-001".to_string(),
             attributes: Default::default(),
         }
@@ -1567,6 +1569,7 @@ mod parent_link_chain_tests {
             related,
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             id: id.to_string(),
             attributes: Default::default(),
         }

@@ -4263,6 +4263,7 @@ mod tests {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes: Default::default(),
             id: "RFC-001".to_string(),
         };
@@ -4278,6 +4279,7 @@ mod tests {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes: Default::default(),
             id: "RFC-001".to_string(),
         };
@@ -4636,6 +4638,7 @@ mod tests {
                 related: Vec::new(),
                 validate_ignore: false,
                 virtual_doc: false,
+                assignee: None,
                 attributes: Default::default(),
             },
         );
@@ -5036,6 +5039,7 @@ mod tests {
                     related: Vec::new(),
                     validate_ignore: false,
                     virtual_doc: false,
+                    assignee: None,
                     attributes: Default::default(),
                 },
             );

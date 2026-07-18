@@ -755,6 +755,7 @@ fn parse_issue(
         related: vec![],
         validate_ignore: false,
         virtual_doc: false,
+        assignee: None,
         attributes: Default::default(),
         id: String::new(),
     };
@@ -2802,6 +2803,7 @@ mod tests {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes: Default::default(),
             id: id.to_string(),
         }

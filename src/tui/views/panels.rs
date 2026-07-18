@@ -3056,6 +3056,7 @@ mod tests {
             validate_ignore: false,
             path: PathBuf::from("docs/rfcs/RFC-001.md"),
             virtual_doc: false,
+            assignee: None,
             attributes: Default::default(),
         }
     }

@@ -271,6 +271,7 @@ pub(crate) fn task_to_doc(task: &ClickupTask, type_def: &TypeDef, id: &str) -> (
         related,
         validate_ignore: false,
         virtual_doc: false,
+        assignee: None,
         id: id.to_string(),
         attributes,
     };

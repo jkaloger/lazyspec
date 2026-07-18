@@ -165,6 +165,7 @@ pub fn deserialize(issue_body: &str, ctx: &IssueContext) -> Result<(DocMeta, Str
         related,
         validate_ignore: false,
         virtual_doc: false,
+        assignee: None,
         attributes,
         id: String::new(),
     };
@@ -378,6 +379,7 @@ mod tests {
             }],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes: Default::default(),
             id: "RFC-042".to_string(),
         }
