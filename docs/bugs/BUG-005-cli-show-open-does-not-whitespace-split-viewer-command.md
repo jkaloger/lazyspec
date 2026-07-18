@@ -1,7 +1,7 @@
 ---
 title: "CLI show --open does not whitespace-split viewer command"
 type: bug
-status: triaged
+status: fixed
 author: "unknown"
 date: 2026-07-18
 tags: []
