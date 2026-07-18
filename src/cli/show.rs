@@ -166,6 +166,20 @@ pub fn run(
     Ok(())
 }
 
+/// The `{"error": "ambiguous_id", ...}` shape shared by every `show` path
+/// (`--json`, `--open --json`) when a shorthand resolves to multiple documents.
+fn ambiguous_id_json(id: &str, matches: &[PathBuf]) -> serde_json::Value {
+    let paths: Vec<String> = matches
+        .iter()
+        .map(|m| m.to_string_lossy().to_string())
+        .collect();
+    serde_json::json!({
+        "error": "ambiguous_id",
+        "id": id,
+        "ambiguous_matches": paths,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_json(
     store: &Store,
@@ -180,16 +194,9 @@ pub fn run_json(
     let doc = match resolve_shorthand_or_path(store, id) {
         Ok(doc) => doc,
         Err(ResolveError::Ambiguous { id, matches }) => {
-            let paths: Vec<String> = matches
-                .iter()
-                .map(|m| m.to_string_lossy().to_string())
-                .collect();
-            let error = serde_json::json!({
-                "error": "ambiguous_id",
-                "id": id,
-                "ambiguous_matches": paths,
-            });
-            return Ok(serde_json::to_string_pretty(&error)?);
+            return Ok(serde_json::to_string_pretty(&ambiguous_id_json(
+                &id, &matches,
+            ))?);
         }
         Err(ResolveError::NotFound(id)) => {
             return Err(anyhow::anyhow!("document not found: {}", id));
@@ -215,11 +222,18 @@ pub fn run_open(store: &Store, id: &str, config: &Config, root: &Path, json: boo
     let doc = match resolve_shorthand_or_path(store, id) {
         Ok(doc) => doc,
         Err(ResolveError::Ambiguous { id, matches }) => {
-            eprintln!("Ambiguous ID '{}' matches multiple documents:", id);
-            for m in &matches {
-                eprintln!("  {}", m.display());
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&ambiguous_id_json(&id, &matches))?
+                );
+            } else {
+                eprintln!("Ambiguous ID '{}' matches multiple documents:", id);
+                for m in &matches {
+                    eprintln!("  {}", m.display());
+                }
+                eprintln!("Specify the full path to open a specific document.");
             }
-            eprintln!("Specify the full path to open a specific document.");
             return Ok(());
         }
         Err(ResolveError::NotFound(id)) => {
