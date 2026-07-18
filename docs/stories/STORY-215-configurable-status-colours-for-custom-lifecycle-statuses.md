@@ -1,7 +1,7 @@
 ---
 title: "Configurable status colours for custom lifecycle statuses"
 type: story
-status: in-progress
+status: complete
 author: "agent"
 date: 2026-07-17
 tags: []
