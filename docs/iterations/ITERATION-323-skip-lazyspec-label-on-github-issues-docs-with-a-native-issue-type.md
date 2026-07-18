@@ -1,7 +1,7 @@
 ---
 title: 'Skip lazyspec: label on github-issues docs with a native issue type'
 type: iteration
-status: draft
+status: complete
 author: Jack Kaloger
 date: 2026-07-18
 tags: []

@@ -901,14 +901,16 @@ impl GithubIssuesStore {
             .unwrap_or_default();
 
         let issue_body = issue_body::serialize(meta, &body);
-        let label = type_def.github_label();
+        let labels = type_def.github_create_labels();
         let color = gh::deterministic_color(&type_def.name);
         let description = format!("lazyspec document type: {}", type_def.name);
-        self.client
-            .label_ensure(&self.repo, &label, &description, &color)?;
+        for label in &labels {
+            self.client
+                .label_ensure(&self.repo, label, &description, &color)?;
+        }
         let issue = self
             .client
-            .issue_create(&self.repo, &meta.title, &issue_body, &[label])?;
+            .issue_create(&self.repo, &meta.title, &issue_body, &labels)?;
 
         let materialized_meta = DocMeta {
             id: doc_id.to_string(),
@@ -1281,11 +1283,13 @@ impl DocumentStore for GithubIssuesStore {
         };
 
         let issue_body = issue_body::serialize(&placeholder_meta, body);
-        let label = type_def.github_label();
+        let labels = type_def.github_create_labels();
         let color = gh::deterministic_color(&type_def.name);
         let description = format!("lazyspec document type: {}", type_def.name);
-        self.client
-            .label_ensure(&self.repo, &label, &description, &color)?;
+        for label in &labels {
+            self.client
+                .label_ensure(&self.repo, label, &description, &color)?;
+        }
 
         // Resolve the native issue-type offline before any remote write, so an
         // unresolvable name aborts before `issue_create` fires.
@@ -1314,7 +1318,7 @@ impl DocumentStore for GithubIssuesStore {
 
         let issue = self
             .client
-            .issue_create(&self.repo, title, &issue_body, &[label])?;
+            .issue_create(&self.repo, title, &issue_body, &labels)?;
 
         if let Some(resolved_id) = resolved_issue_type_id.as_deref() {
             self.push_issue_type(issue.number, Some(resolved_id))?;
@@ -3748,6 +3752,83 @@ mod tests {
         assert_eq!(
             *gh_store.mock().last_create_labels.borrow(),
             vec!["Ticket".to_string()]
+        );
+    }
+
+    #[test]
+    fn github_issues_create_with_native_type_attaches_no_labels() {
+        // BUG-010: a type whose `github_issue_type` is set is classified by the
+        // native GitHub issue type, so no `lazyspec:{name}` identity label is
+        // attached. The native type is still pushed.
+        let root = tmp_root("gh_create_native_type_no_labels");
+        write_bug_snapshot(&root);
+        let td = TypeDef {
+            github_issue_type: Some("Bug".to_string()),
+            github_issue_tag: None,
+            ..test_type_def(StoreBackend::GithubIssues)
+        };
+
+        let mut gh_store = GithubIssuesStore {
+            client: Box::new(MockGhClient::new().with_graphql_responses(vec![
+                issue_node_id_response(),
+                serde_json::json!({"data": {"updateIssue": {"issue": {"id": "I_node1"}}}}),
+            ])),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: IssueMap::load(&root).unwrap(),
+            issue_cache: IssueCache::new(&root),
+        };
+
+        gh_store
+            .create(&td, "my title", "author", "body text")
+            .unwrap();
+
+        assert!(
+            gh_store.mock().last_create_labels.borrow().is_empty(),
+            "native-typed issue must carry zero labels, got: {:?}",
+            gh_store.mock().last_create_labels.borrow()
+        );
+        let calls = gh_store.mock().graphql_calls.borrow();
+        let mutations = calls
+            .iter()
+            .filter(|(q, _)| q.contains("updateIssue"))
+            .count();
+        assert_eq!(mutations, 1, "native issue type must still be pushed");
+    }
+
+    #[test]
+    fn github_issues_create_with_native_type_and_tag_attaches_only_tag() {
+        // BUG-010: when both `github_issue_type` and `github_issue_tag` are set,
+        // only the tag label is attached (no `lazyspec:{name}` identity label).
+        let root = tmp_root("gh_create_native_type_with_tag");
+        write_bug_snapshot(&root);
+        let td = TypeDef {
+            github_issue_type: Some("Bug".to_string()),
+            github_issue_tag: Some("bug".to_string()),
+            ..test_type_def(StoreBackend::GithubIssues)
+        };
+
+        let mut gh_store = GithubIssuesStore {
+            client: Box::new(MockGhClient::new().with_graphql_responses(vec![
+                issue_node_id_response(),
+                serde_json::json!({"data": {"updateIssue": {"issue": {"id": "I_node1"}}}}),
+            ])),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: IssueMap::load(&root).unwrap(),
+            issue_cache: IssueCache::new(&root),
+        };
+
+        gh_store
+            .create(&td, "my title", "author", "body text")
+            .unwrap();
+
+        assert_eq!(
+            *gh_store.mock().last_create_labels.borrow(),
+            vec!["bug".to_string()],
+            "both set -> only the tag label attached"
         );
     }
 
