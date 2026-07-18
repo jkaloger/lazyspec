@@ -82,6 +82,7 @@ fn build_groups(store: &Store, filter: &Filter, colors: &StatusColors) -> Vec<Do
                         hue: tag_hue(t),
                     })
                     .collect(),
+                assignee: doc.assignee.clone(),
             });
     }
 
@@ -298,6 +299,7 @@ pub async fn search(
                     hue: tag_hue(t),
                 })
                 .collect(),
+            assignee: r.doc.assignee.clone(),
         })
         .collect();
 
@@ -428,5 +430,42 @@ mod tests {
         let (_tmp, store) = temp_store();
         let groups = build_groups(&store, &Filter::default(), &StatusColors::default());
         assert_eq!(groups[0].docs[0].status_color, None);
+    }
+
+    fn temp_store_with_assignee(assignee_line: &str) -> (tempfile::TempDir, Store) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let mut config = Config::default();
+        let mut t = TypeDef::test_fixture("doc", StoreBackend::Filesystem);
+        t.dir = "docs/doc".to_string();
+        config.documents.types = vec![t];
+        std::fs::write(root.join(".lazyspec.toml"), config.to_toml().unwrap()).unwrap();
+        std::fs::create_dir_all(root.join("docs/doc")).unwrap();
+        std::fs::write(
+            root.join("docs/doc/DOC-001-x.md"),
+            format!(
+                "---\ntitle: \"x\"\ntype: doc\nstatus: draft\nauthor: \"a\"\ndate: 2026-07-01\ntags: []\n{assignee_line}---\n\nbody\n"
+            ),
+        )
+        .unwrap();
+        let config = Config::load(root, &crate::engine::fs::RealFileSystem).unwrap();
+        let store = Store::load(root, &config).unwrap();
+        (tmp, store)
+    }
+
+    // AC5 (web list): an assigned doc's row carries the assignee.
+    #[test]
+    fn build_groups_populates_assignee_when_set() {
+        let (_tmp, store) = temp_store_with_assignee("assignee: alice\n");
+        let groups = build_groups(&store, &Filter::default(), &StatusColors::default());
+        assert_eq!(groups[0].docs[0].assignee.as_deref(), Some("alice"));
+    }
+
+    // AC5 (web list): an unassigned doc's row leaves assignee None.
+    #[test]
+    fn build_groups_leaves_assignee_none_when_unset() {
+        let (_tmp, store) = temp_store_with_assignee("");
+        let groups = build_groups(&store, &Filter::default(), &StatusColors::default());
+        assert_eq!(groups[0].docs[0].assignee, None);
     }
 }

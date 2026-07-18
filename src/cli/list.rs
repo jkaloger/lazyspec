@@ -22,7 +22,14 @@ pub fn run(store: &Store, doc_type: Option<&str>, status: Option<&str>, json: bo
     } else {
         let colors = StatusColors::load(store.root()).unwrap_or_default();
         for doc in docs {
-            let card = doc_card(&colors, &doc.title, &doc.doc_type, &doc.status, &doc.path);
+            let card = doc_card(
+                &colors,
+                &doc.title,
+                &doc.doc_type,
+                &doc.status,
+                doc.assignee.as_deref(),
+                &doc.path,
+            );
             if let Some(parent_path) = store.parent_of(&doc.path) {
                 let parent_title = store
                     .get(parent_path)

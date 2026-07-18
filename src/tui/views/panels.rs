@@ -259,6 +259,7 @@ const ID_COLS: u16 = 18;
 const TITLE_MIN_COLS: u16 = 20;
 const STATUS_COLS: u16 = 12;
 const TAGS_COLS: u16 = 24;
+const ASSIGNEE_COLS: u16 = 16;
 const PROV_MIN_COLS: u16 = 20;
 const ATTR_COLS: u16 = 16;
 
@@ -271,6 +272,7 @@ fn doc_column_width_spec(col: &str) -> (u16, bool) {
     match col {
         "status" => (STATUS_COLS, false),
         "tags" => (TAGS_COLS, false),
+        "assignee" => (ASSIGNEE_COLS, false),
         "provenance" => (PROV_MIN_COLS, true),
         _ => (ATTR_COLS, false),
     }
@@ -625,6 +627,7 @@ fn doc_column_cell(
     tags: &[String],
     provenance: &[String],
     related: &[String],
+    assignee: Option<&str>,
     attributes: &BTreeMap<String, AttrValue>,
     dim: bool,
     is_stale: bool,
@@ -636,6 +639,13 @@ fn doc_column_cell(
     match col {
         "status" => status_column_cell(status, dim, is_stale, type_name, colors),
         "tags" => tags_column_cell(tags, dim),
+        "assignee" => {
+            let text = assignee
+                .map(|a| truncate_with_ellipsis(a, ASSIGNEE_COLS as usize))
+                .unwrap_or_default();
+            let style = if dim { dim_style } else { normal_style };
+            Cell::new(Span::styled(text, style))
+        }
         "provenance" => {
             let prov_text = provenance_cell_text(provenance, PROV_MIN_COLS as usize);
             let prov_style = if dim { dim_style } else { normal_style };
@@ -657,6 +667,7 @@ fn doc_row_cells(
     tags: &[String],
     provenance: &[String],
     related: &[String],
+    assignee: Option<&str>,
     attributes: &BTreeMap<String, AttrValue>,
     is_virtual: bool,
     dim: bool,
@@ -696,7 +707,8 @@ fn doc_row_cells(
     let mut cells = vec![id_cell, title_cell];
     for col in columns {
         cells.push(doc_column_cell(
-            col, status, tags, provenance, related, attributes, dim, is_stale, type_name, colors,
+            col, status, tags, provenance, related, assignee, attributes, dim, is_stale, type_name,
+            colors,
         ));
     }
     cells
@@ -728,6 +740,7 @@ fn doc_row_cells_expanded(
     tags: &[String],
     provenance: &[String],
     related: &[String],
+    assignee: Option<&str>,
     attributes: &BTreeMap<String, AttrValue>,
     is_virtual: bool,
     dim: bool,
@@ -741,8 +754,8 @@ fn doc_row_cells_expanded(
     // Reuse the single-line cell builder, then replace title and the (configured)
     // tags/provenance cells with wrapped multi-line versions.
     let mut cells = doc_row_cells(
-        id, title, status, tags, provenance, related, attributes, is_virtual, dim, is_gh, is_stale,
-        type_name, colors, columns,
+        id, title, status, tags, provenance, related, assignee, attributes, is_virtual, dim, is_gh,
+        is_stale, type_name, colors, columns,
     );
 
     let dim_style = Style::default().fg(Color::DarkGray);
@@ -814,6 +827,7 @@ fn doc_row_for_node(
     let tags = doc.map(|doc| doc.tags.clone()).unwrap_or_default();
     let provenance = doc.map(|doc| doc.provenance.clone()).unwrap_or_default();
     let attributes = doc.map(|doc| doc.attributes.clone()).unwrap_or_default();
+    let assignee = doc.and_then(|doc| doc.assignee.clone());
     let related: Vec<String> = doc
         .map(|doc| doc.related.iter().map(|r| r.target.clone()).collect())
         .unwrap_or_default();
@@ -840,6 +854,7 @@ fn doc_row_for_node(
             &tags,
             &provenance,
             &related,
+            assignee.as_deref(),
             &attributes,
             node.is_virtual,
             dim,
@@ -858,6 +873,7 @@ fn doc_row_for_node(
             &tags,
             &provenance,
             &related,
+            assignee.as_deref(),
             &attributes,
             node.is_virtual,
             dim,
@@ -1099,6 +1115,13 @@ pub(super) fn build_preview_header_lines(
         lines.push(Line::from(tag_spans));
     }
 
+    if let Some(assignee) = &doc.assignee {
+        lines.push(Line::from(vec![
+            Span::raw(" Assignee: "),
+            Span::raw(assignee.clone()),
+        ]));
+    }
+
     if !doc.provenance.is_empty() {
         let mut spans: Vec<Span<'static>> = vec![Span::raw(" Provenance: ")];
         for (idx, entry) in doc.provenance.iter().enumerate() {
@@ -1323,7 +1346,7 @@ pub fn render_fullscreen_document(f: &mut Frame, app: &mut App, colors: &StatusP
         return;
     };
 
-    let header = Line::from(vec![
+    let mut header_spans = vec![
         Span::styled(
             format!(" {} ", doc.title),
             Style::default()
@@ -1336,8 +1359,15 @@ pub fn render_fullscreen_document(f: &mut Frame, app: &mut App, colors: &StatusP
             Style::default().fg(status_color(colors, doc.doc_type.as_str(), &doc.status)),
         ),
         Span::raw(format!(" | {} | {} ", doc.doc_type, doc.author)),
-        Span::styled("[Esc] back", Style::default().fg(Color::DarkGray)),
-    ]);
+    ];
+    if let Some(assignee) = &doc.assignee {
+        header_spans.push(Span::raw(format!("| @{} ", assignee)));
+    }
+    header_spans.push(Span::styled(
+        "[Esc] back",
+        Style::default().fg(Color::DarkGray),
+    ));
+    let header = Line::from(header_spans);
     f.render_widget(Paragraph::new(header), layout[0]);
 
     let body = app
@@ -1504,6 +1534,7 @@ pub fn render_filter_panel(
                 &doc.tags,
                 &doc.provenance,
                 &related,
+                doc.assignee.as_deref(),
                 &doc.attributes,
                 doc.virtual_doc,
                 dim,
@@ -2822,6 +2853,7 @@ pub(super) fn doc_row_cells_for_test(
         tags,
         provenance,
         &[],
+        None,
         &BTreeMap::new(),
         is_virtual,
         dim,
@@ -2854,6 +2886,7 @@ pub(super) fn doc_row_cells_gh_for_test(
         tags,
         provenance,
         &[],
+        None,
         &BTreeMap::new(),
         is_virtual,
         dim,
@@ -2936,13 +2969,87 @@ mod tests {
             "rfc",
             &StatusPalette::default(),
         );
-        assert_eq!(cells.len(), 5);
-        let dbg = cell_text(&cells[4]);
+        // id + title + one cell per default column [status, tags, assignee, provenance].
+        assert_eq!(cells.len(), 6);
+        let dbg = cell_text(&cells[5]);
         assert!(
             dbg.contains("Alice"),
             "provenance cell should contain joined entries, got: {}",
             dbg
         );
+    }
+
+    // AC5 (TUI list): the assignee column renders the assignee name.
+    #[test]
+    fn doc_column_cell_renders_assignee_when_set() {
+        let cell = doc_column_cell(
+            "assignee",
+            &Status::new("draft"),
+            &[],
+            &[],
+            &[],
+            Some("alice"),
+            &BTreeMap::new(),
+            false,
+            false,
+            "rfc",
+            &StatusPalette::default(),
+        );
+        let dbg = cell_text(&cell);
+        assert!(
+            dbg.contains("alice"),
+            "assignee cell should render name, got: {dbg}"
+        );
+    }
+
+    // AC5 (TUI list): an unassigned doc's assignee column is blank.
+    #[test]
+    fn doc_column_cell_assignee_blank_when_none() {
+        let cell = doc_column_cell(
+            "assignee",
+            &Status::new("draft"),
+            &[],
+            &[],
+            &[],
+            None,
+            &BTreeMap::new(),
+            false,
+            false,
+            "rfc",
+            &StatusPalette::default(),
+        );
+        let dbg = cell_text(&cell);
+        assert!(
+            dbg.contains(r#"content: """#) || dbg.contains(r#""""#),
+            "unset assignee should render empty, got: {dbg}"
+        );
+    }
+
+    // AC5 (TUI detail): the preview header shows an Assignee line when set, and
+    // omits it (with no extra line) when unset.
+    #[test]
+    fn preview_header_shows_assignee_when_set() {
+        let mut doc = fixture_doc_meta();
+        doc.assignee = Some("alice".to_string());
+        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default());
+        let assignee_line = lines
+            .iter()
+            .find(|l| line_text(l).contains("Assignee:"))
+            .map(line_text)
+            .expect("assignee line should be present");
+        assert!(assignee_line.contains("alice"), "got: {assignee_line}");
+    }
+
+    #[test]
+    fn preview_header_omits_assignee_when_none() {
+        let doc = fixture_doc_meta();
+        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default());
+        for line in &lines {
+            assert!(
+                !line_text(line).contains("Assignee:"),
+                "no Assignee line when unset"
+            );
+        }
     }
 
     #[test]
@@ -2958,7 +3065,7 @@ mod tests {
             "rfc",
             &StatusPalette::default(),
         );
-        let dbg = cell_text(&cells[4]);
+        let dbg = cell_text(&cells[5]);
         assert!(
             !dbg.contains("Alice") && !dbg.contains('…'),
             "empty provenance cell should not show entries, got: {}",
@@ -3341,6 +3448,7 @@ mod tests {
             &tags,
             &[],
             &[],
+            None,
             &BTreeMap::new(),
             false,
             false,
@@ -3379,6 +3487,7 @@ mod tests {
             &[],
             &[],
             &[],
+            None,
             &attributes,
             false,
             false,
@@ -3410,6 +3519,7 @@ mod tests {
             &[],
             &[],
             &[],
+            None,
             &BTreeMap::new(),
             false,
             false,
@@ -3437,6 +3547,7 @@ mod tests {
             &[],
             &[],
             &related,
+            None,
             &BTreeMap::new(),
             false,
             false,
@@ -3486,39 +3597,44 @@ mod tests {
         assert!(widths[3] >= 20, "title >= 20, got {}", widths[3]);
         assert_eq!(widths[4], 12, "status == 12");
         assert_eq!(widths[5], 24, "tags == 24");
-        assert!(widths[6] >= 20, "provenance >= 20, got {}", widths[6]);
+        assert_eq!(widths[6], 16, "assignee == 16");
+        assert!(widths[7] >= 20, "provenance >= 20, got {}", widths[7]);
     }
 
     #[test]
-    fn doc_table_widths_medium_drops_provenance() {
-        // width=90: inner=88. After essentials+title (49) + status (12) + tags (24) = 85,
-        // leaving 3 cols — below PROV_MIN_COLS so provenance collapses to 0.
+    fn doc_table_widths_medium_drops_assignee_and_provenance() {
+        // width=90: inner=88. essentials+title (50) + status (12) + tags (24) = 86,
+        // leaving 2 cols — below both ASSIGNEE_COLS and PROV_MIN_COLS, so assignee
+        // and provenance collapse to 0.
         let widths = resolve_doc_widths(90);
-        assert_eq!(widths[6], 0, "provenance dropped");
+        assert_eq!(widths[7], 0, "provenance dropped");
+        assert_eq!(widths[6], 0, "assignee dropped");
         assert_eq!(widths[5], 24, "tags retained");
         assert_eq!(widths[4], 12, "status retained");
         assert!(widths[3] >= 20, "title >= 20, got {}", widths[3]);
     }
 
     #[test]
-    fn doc_table_widths_narrow_drops_tags_and_provenance() {
-        // width=70: inner=68. After essentials+title (49) + status (12) = 61,
-        // leaving 7 cols — below TAGS_COLS, so tags and provenance collapse.
+    fn doc_table_widths_narrow_drops_tags_assignee_and_provenance() {
+        // width=70: inner=68. essentials+title (50) + status (12) = 62, leaving 6
+        // cols — below TAGS_COLS, so tags, assignee, and provenance all collapse.
         let widths = resolve_doc_widths(70);
         assert_eq!(widths[5], 0, "tags dropped");
-        assert_eq!(widths[6], 0, "provenance dropped");
+        assert_eq!(widths[6], 0, "assignee dropped");
+        assert_eq!(widths[7], 0, "provenance dropped");
         assert_eq!(widths[4], 12, "status retained");
         assert!(widths[3] >= 20, "title >= 20, got {}", widths[3]);
     }
 
     #[test]
     fn doc_table_widths_very_narrow_drops_status() {
-        // width=50: inner=48, after essentials (29) = 19 — below TITLE_MIN_COLS,
-        // so title takes remaining and status/tags/provenance collapse.
+        // width=50: inner=48, after essentials (30) = 18 — below TITLE_MIN_COLS,
+        // so title takes remaining and every optional column collapses.
         let widths = resolve_doc_widths(50);
         assert_eq!(widths[4], 0, "status dropped");
         assert_eq!(widths[5], 0, "tags dropped");
-        assert_eq!(widths[6], 0, "provenance dropped");
+        assert_eq!(widths[6], 0, "assignee dropped");
+        assert_eq!(widths[7], 0, "provenance dropped");
         assert!(
             widths[3] > 0,
             "title gets remaining budget, got {}",
@@ -3537,7 +3653,7 @@ mod tests {
         assert_eq!(cells.tags, resolved[5].max(1), "tags agrees with split");
         assert_eq!(
             cells.provenance,
-            resolved[6].max(1),
+            resolved[7].max(1),
             "provenance agrees with split"
         );
     }

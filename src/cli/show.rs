@@ -126,6 +126,9 @@ pub fn run(
     if !doc.tags.is_empty() {
         println!("{} {}", dim("Tags:"), doc.tags.join(", "));
     }
+    if let Some(assignee) = &doc.assignee {
+        println!("{} {}", dim("Assignee:"), bold(assignee));
+    }
     if let Some(parent_path) = store.parent_of(&doc.path) {
         if let Some(parent) = store.get(parent_path) {
             println!(

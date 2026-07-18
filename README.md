@@ -233,10 +233,11 @@ The documents table's columns are configured under `[tui.table]` in `.lazyspec.t
 ```toml
 [tui.table]
 # Columns rendered to the right of the fixed ID and DOC columns. Each id is
-# either a built-in (`status`, `tags`, `provenance`, `related`) or a declared
-# attribute name (`[[types.attributes]]`). An attribute not declared/present
-# on a row's type renders as an empty cell.
-columns = ["status", "tags", "provenance"]   # default
+# either a built-in (`status`, `tags`, `assignee`, `provenance`, `related`) or a
+# declared attribute name (`[[types.attributes]]`). An attribute not
+# declared/present on a row's type renders as an empty cell; the `assignee`
+# column is blank for unassigned documents.
+columns = ["status", "tags", "assignee", "provenance"]   # default
 ```
 
 The key carries a default matching today's layout, so a config without a `[tui.table]` block renders the table unchanged.
@@ -300,8 +301,8 @@ Every mutation's `--json` output also reports whether the change reached the doc
 | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `init`                                                          | Initialise lazyspec in the current project                                                      |
 | `create <type> <title> [--author X] [--parent ID] [--body / --body-file]` | Create a document (rfc, adr, story, iteration); seed body inline, from a file, or `-` for stdin. `--parent <ID>` makes the new doc a child of an existing doc; the child must be the same store as its parent. For filesystem-store types the child is authored as a sibling `.md` inside the parent's subdir (promoting a flat parent to `TYPE-n-slug/index.md` on the first child). For `github-issues`-store types the child is created as a real GitHub issue and bound as a native sub-issue of the parent at create time; a later `fetch` mirrors them into the nested cache layout (`.lazyspec/cache/<type>/<PARENT>/index.md` + `NN-<child>.md`) |
-| `list [type] [--status X]`                                      | List documents with optional filters                                                            |
-| `show <id> [-e] [--open]`                                       | Display a document by path or shorthand ID (e.g. `RFC-001`); `--open` opens it in a browser or viewer instead. The `--json` output includes an `assignee` field (a string, or `null` when unset) alongside `status`/`tags`; `status --json` reports it for every document too |
+| `list [type] [--status X]`                                      | List documents with optional filters; each list card shows the assignee (as `@name`) when one is set, and nothing when unset |
+| `show <id> [-e] [--open]`                                       | Display a document by path or shorthand ID (e.g. `RFC-001`); `--open` opens it in a browser or viewer instead. The detail header adds an `Assignee:` line when the document has one (omitted when unset), mirroring the `Tags:` line. The `--json` output includes an `assignee` field (a string, or `null` when unset) alongside `status`/`tags`; `status --json` reports it for every document too |
 | `update <path> [--status X] [--title X] [--assignee X] [--body / --body-file] [--attr key=value]` | Update frontmatter and/or body content (`--body-file -` reads stdin); `--assignee` sets the first-class assignee field (pass `--assignee ""` to clear it); `--attr` (repeatable) sets a declared custom attribute, coerced and validated against its type; works for all stores |
 | `delete <path>`                                                 | Delete a document                                                                               |
 | `link <from> <rel> <to>`                                        | Add a typed relationship (canonical or inverse keyword)                                         |

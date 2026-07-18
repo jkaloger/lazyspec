@@ -76,7 +76,14 @@ pub fn run_human(store: &Store) -> String {
         for doc in &group {
             output.push_str(&format!(
                 "  {}\n",
-                doc_card(&colors, &doc.title, &doc.doc_type, &doc.status, &doc.path)
+                doc_card(
+                    &colors,
+                    &doc.title,
+                    &doc.doc_type,
+                    &doc.status,
+                    doc.assignee.as_deref(),
+                    &doc.path
+                )
             ));
         }
     }

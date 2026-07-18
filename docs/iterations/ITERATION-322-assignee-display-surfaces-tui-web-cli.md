@@ -1,7 +1,7 @@
 ---
 title: 'Assignee display surfaces: TUI, web, CLI'
 type: iteration
-status: accepted
+status: complete
 author: unknown
 date: 2026-07-18
 tags: []

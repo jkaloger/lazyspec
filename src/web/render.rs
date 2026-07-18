@@ -29,6 +29,8 @@ pub struct DocRow {
     /// `--status-color` on the swatch; `None` falls back to the name-keyed CSS.
     pub status_color: Option<String>,
     pub tags: Vec<TagChip>,
+    /// The single assignee, blank/omitted when unset.
+    pub assignee: Option<String>,
 }
 
 /// A web-only categorical (wayfinding) hue for a tag label, in `0..TAG_HUES`.
@@ -149,6 +151,8 @@ pub struct DocPage {
     pub author: String,
     pub date: String,
     pub tags: Vec<TagChip>,
+    /// The single assignee, omitted from the frontmatter list when unset.
+    pub assignee: Option<String>,
     pub relations: Vec<RelationLink>,
     pub parent: Option<RelativeLink>,
     pub children: Vec<RelativeLink>,
@@ -252,6 +256,7 @@ impl DocPage {
                     hue: tag_hue(t),
                 })
                 .collect(),
+            assignee: doc.assignee.clone(),
             relations,
             parent,
             children,
@@ -484,6 +489,67 @@ mod tests {
             &StatusColors::default(),
         );
         assert_eq!(page.status_color, None);
+    }
+
+    fn temp_store_with_assignee(assignee_line: &str) -> (tempfile::TempDir, Store) {
+        use crate::engine::config::{Config, StoreBackend, TypeDef};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let mut config = Config::default();
+        let mut t = TypeDef::test_fixture("doc", StoreBackend::Filesystem);
+        t.dir = "docs/doc".to_string();
+        config.documents.types = vec![t];
+        std::fs::write(root.join(".lazyspec.toml"), config.to_toml().unwrap()).unwrap();
+        std::fs::create_dir_all(root.join("docs/doc")).unwrap();
+        std::fs::write(
+            root.join("docs/doc/DOC-001-x.md"),
+            format!(
+                "---\ntitle: \"x\"\ntype: doc\nstatus: draft\nauthor: \"a\"\ndate: 2026-07-01\ntags: []\n{assignee_line}---\n\nbody\n"
+            ),
+        )
+        .unwrap();
+        let config = Config::load(root, &crate::engine::fs::RealFileSystem).unwrap();
+        let store = Store::load(root, &config).unwrap();
+        (tmp, store)
+    }
+
+    // AC5 (web detail): an assigned doc's page carries the assignee, and the
+    // rendered frontmatter surfaces an `assignee` row.
+    #[test]
+    fn doc_page_populates_and_renders_assignee_when_set() {
+        let (_tmp, store) = temp_store_with_assignee("assignee: alice\n");
+        let doc = store.all_docs()[0];
+        let page = DocPage::from_doc(
+            doc,
+            &store,
+            String::new(),
+            None,
+            None,
+            &StatusColors::default(),
+        );
+        assert_eq!(page.assignee.as_deref(), Some("alice"));
+        let html = page.render().unwrap();
+        assert!(html.contains("doc-assignee"), "{html}");
+        assert!(html.contains("alice"), "{html}");
+    }
+
+    // AC5 (web detail): an unassigned doc's page leaves assignee None and emits
+    // no assignee frontmatter row.
+    #[test]
+    fn doc_page_omits_assignee_when_unset() {
+        let (_tmp, store) = temp_store_with_assignee("");
+        let doc = store.all_docs()[0];
+        let page = DocPage::from_doc(
+            doc,
+            &store,
+            String::new(),
+            None,
+            None,
+            &StatusColors::default(),
+        );
+        assert_eq!(page.assignee, None);
+        let html = page.render().unwrap();
+        assert!(!html.contains("doc-assignee"), "{html}");
     }
 
     fn context_with_related(doc: &DocMeta) -> ResolvedContext<'_> {

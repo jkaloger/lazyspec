@@ -46,6 +46,7 @@ pub fn run(store: &Store, query: &str, doc_type: Option<&str>, json: bool, fs: &
                     &r.doc.title,
                     &r.doc.doc_type,
                     &r.doc.status,
+                    r.doc.assignee.as_deref(),
                     &r.doc.path
                 ),
                 dim(&format!("[{}]", r.match_field)),
