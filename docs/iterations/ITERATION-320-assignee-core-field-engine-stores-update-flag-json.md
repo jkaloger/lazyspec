@@ -1,7 +1,7 @@
 ---
 title: 'Assignee core field: engine, stores, update flag, JSON'
 type: iteration
-status: accepted
+status: complete
 author: unknown
 date: 2026-07-18
 tags: []

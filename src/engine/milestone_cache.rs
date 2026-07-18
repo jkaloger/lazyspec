@@ -53,6 +53,7 @@ pub fn fetch_milestones(
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes,
             id: id.clone(),
         };

@@ -1000,6 +1000,7 @@ mod tests {
             related: Vec::new(),
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             id: path.to_string(),
             attributes: attrs,
         }

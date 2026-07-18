@@ -26,6 +26,8 @@ struct CacheFrontmatter {
     author: String,
     date: String,
     tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assignee: Option<String>,
     provenance: Vec<String>,
     related: Vec<BTreeMap<String, String>>,
     /// Custom attributes are flattened to top-level frontmatter keys so the
@@ -1273,6 +1275,7 @@ impl DocumentStore for GithubIssuesStore {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes: Default::default(),
             id: String::new(),
         };
@@ -1708,6 +1711,7 @@ impl GithubMilestonesStore {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes,
             id: id.to_string(),
         }
@@ -2034,6 +2038,7 @@ impl GithubProjectsStore {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes: Default::default(),
             id: doc_id.to_string(),
         };
@@ -2105,6 +2110,7 @@ impl DocumentStore for GithubProjectsStore {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes: Default::default(),
             id: doc_id.clone(),
         };
@@ -2308,6 +2314,13 @@ pub fn write_cache_child(
     Ok(())
 }
 
+/// Test-only access to the local cache serializer, used by `document.rs` to
+/// assert the `assignee` skip-when-`None` behaviour (AC6).
+#[cfg(test)]
+pub(crate) fn render_cache_content_for_test(meta: &DocMeta, body: &str) -> String {
+    render_cache_content(meta, body).unwrap()
+}
+
 fn render_cache_content(meta: &DocMeta, body: &str) -> Result<String> {
     let frontmatter = CacheFrontmatter {
         title: meta.title.clone(),
@@ -2316,6 +2329,7 @@ fn render_cache_content(meta: &DocMeta, body: &str) -> Result<String> {
         author: meta.author.clone(),
         date: meta.date.to_string(),
         tags: meta.tags.clone(),
+        assignee: meta.assignee.clone(),
         provenance: meta.provenance.clone(),
         related: meta
             .related
@@ -4871,6 +4885,7 @@ mod tests {
             related: vec![existing],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes: Default::default(),
             id: "RFC-001".to_string(),
         };
@@ -5098,6 +5113,7 @@ mod tests {
             }],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes: Default::default(),
             id: "RFC-099".to_string(),
         };
@@ -5140,6 +5156,7 @@ mod tests {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes: Default::default(),
             id: id.to_string(),
         }
@@ -5264,6 +5281,7 @@ mod tests {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes: Default::default(),
             id: String::new(),
         };
@@ -5490,6 +5508,7 @@ mod tests {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes: Default::default(),
             id: "RFC-099".to_string(),
         };
@@ -6459,6 +6478,7 @@ mod tests {
             }],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes: Default::default(),
             id: "STORY-400".to_string(),
         };
@@ -6887,6 +6907,7 @@ mod tests {
             related,
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes: Default::default(),
             id: id.to_string(),
         }

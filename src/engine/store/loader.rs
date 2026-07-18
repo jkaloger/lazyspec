@@ -184,6 +184,7 @@ fn load_subdirectory(
         related: vec![],
         validate_ignore: false,
         virtual_doc: true,
+        assignee: None,
         attributes: Default::default(),
         id: extract_id(&parent_relative),
     };

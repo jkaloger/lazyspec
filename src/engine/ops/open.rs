@@ -55,6 +55,7 @@ mod tests {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             id: id.to_string(),
             attributes: BTreeMap::new(),
         }

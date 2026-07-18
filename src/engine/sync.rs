@@ -816,6 +816,7 @@ mod tests {
             }],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes: Default::default(),
             id: String::new(),
         };

@@ -139,6 +139,9 @@ pub enum Commands {
         /// Set title
         #[arg(long)]
         title: Option<String>,
+        /// Set assignee (empty string clears)
+        #[arg(long)]
+        assignee: Option<String>,
         /// Set body content inline
         #[arg(long)]
         body: Option<String>,

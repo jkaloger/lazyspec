@@ -280,7 +280,7 @@ pub fn update_document(
     update_document_with_type(root, store, doc_id, updates, None)
 }
 
-const RESERVED_UPDATE_KEYS: &[&str] = &["status", "title", "body", "author"];
+const RESERVED_UPDATE_KEYS: &[&str] = &["status", "title", "body", "author", "assignee"];
 
 /// Update a filesystem document's frontmatter. Reserved keys (status/title/body/
 /// author) follow the in-place replace path; any other key is a declared custom
@@ -339,6 +339,22 @@ pub fn update_document_with_type(
     for (key, value) in updates {
         if *key == "body" {
             new_body = value.to_string();
+            continue;
+        }
+        // `assignee` is absent-when-unset, so unlike the other reserved keys it
+        // must insert a line when missing and remove it when cleared with "".
+        if *key == "assignee" {
+            let pos = lines
+                .iter()
+                .position(|l| l.trim_start().starts_with("assignee:"));
+            match (pos, value.is_empty()) {
+                (Some(i), true) => {
+                    lines.remove(i);
+                }
+                (Some(i), false) => lines[i] = format!("assignee: {}", value),
+                (None, true) => {}
+                (None, false) => lines.push(format!("assignee: {}", value)),
+            }
             continue;
         }
         if RESERVED_UPDATE_KEYS.contains(key) {

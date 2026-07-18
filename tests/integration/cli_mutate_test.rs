@@ -154,6 +154,72 @@ fn delete_github_milestones_type_routes_to_milestone_branch() {
     );
 }
 
+// AC1/AC2: `update --assignee` writes the frontmatter line and surfaces it in
+// the show/status JSON (both go through `doc_to_json`).
+#[test]
+fn update_assignee_sets_frontmatter_and_json() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-test.md", "Test", "draft");
+    let store = fixture.store();
+
+    lazyspec::cli::update::run(fixture.root(), &store, "RFC-001", &[("assignee", "alice")])
+        .unwrap();
+
+    let content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-test.md")).unwrap();
+    assert!(
+        content.contains("assignee: alice"),
+        "frontmatter should carry assignee line, got:\n{content}"
+    );
+    let meta = DocMeta::parse(&content).unwrap();
+    assert_eq!(meta.assignee, Some("alice".to_string()));
+
+    let config = fixture.config();
+    let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
+    let doc = lazyspec::cli::resolve::resolve_shorthand_or_path(&store, "RFC-001").unwrap();
+    let json_val = doc_to_json(doc);
+    assert_eq!(json_val["assignee"], "alice");
+}
+
+// AC6: a doc with no assignee has NO `assignee:` frontmatter line and reports
+// `"assignee": null` in JSON.
+#[test]
+fn unset_assignee_absent_from_frontmatter_and_null_in_json() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-test.md", "Test", "draft");
+
+    let content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-test.md")).unwrap();
+    assert!(
+        !content.contains("assignee:"),
+        "unset doc must not have an assignee line, got:\n{content}"
+    );
+
+    let store = fixture.store();
+    let doc = lazyspec::cli::resolve::resolve_shorthand_or_path(&store, "RFC-001").unwrap();
+    let json_val = doc_to_json(doc);
+    assert_eq!(json_val["assignee"], serde_json::Value::Null);
+}
+
+// AC2: setting then clearing with "" removes the assignee line entirely.
+#[test]
+fn update_assignee_empty_string_clears() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-test.md", "Test", "draft");
+    let store = fixture.store();
+
+    lazyspec::cli::update::run(fixture.root(), &store, "RFC-001", &[("assignee", "bob")]).unwrap();
+    let content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-test.md")).unwrap();
+    assert!(content.contains("assignee: bob"));
+
+    let store = fixture.store();
+    lazyspec::cli::update::run(fixture.root(), &store, "RFC-001", &[("assignee", "")]).unwrap();
+    let content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-test.md")).unwrap();
+    assert!(
+        !content.contains("assignee:"),
+        "clearing with empty string must remove the line, got:\n{content}"
+    );
+    assert_eq!(DocMeta::parse(&content).unwrap().assignee, None);
+}
+
 #[test]
 fn update_with_json_flag() {
     let fixture = TestFixture::new();

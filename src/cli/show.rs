@@ -356,6 +356,7 @@ mod tests {
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
+            assignee: None,
             attributes: Default::default(),
             id: "X-1".to_string(),
         }
