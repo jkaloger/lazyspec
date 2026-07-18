@@ -1,4 +1,4 @@
-use crate::cli::json::doc_to_json;
+use crate::cli::json::{doc_to_json, merge_push_outcome};
 use crate::engine::config::Config;
 use crate::engine::document::DocMeta;
 use crate::engine::reservation;
@@ -43,7 +43,7 @@ pub fn run_json_with_body(
     body: Option<&str>,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<String> {
-    let path = run_with_body(
+    let (path, push_outcome) = run_with_body(
         root,
         config,
         store,
@@ -63,6 +63,7 @@ pub fn run_json_with_body(
     // on load; DocMeta::parse leaves it empty (AUDIT-018 F5).
     meta.id = crate::engine::store::extract_id(&meta.path);
 
-    let json = doc_to_json(&meta);
+    let mut json = doc_to_json(&meta);
+    merge_push_outcome(&mut json, &push_outcome);
     Ok(serde_json::to_string_pretty(&json)?)
 }

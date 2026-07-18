@@ -1,7 +1,23 @@
 use crate::engine::document::{AttrValue, DocMeta};
 use crate::engine::store::Store;
-use crate::engine::store_dispatch::percent_complete;
+use crate::engine::store_dispatch::{percent_complete, PushOutcome};
 use serde_json::Value;
+
+/// Fold a backend [`PushOutcome`] into a mutation's JSON object: always record
+/// `synced`, and on a local-only push add a `warnings` array carrying the push
+/// failure text (omitted when synced). Fixes BUG-006, where a git-ref push that
+/// never reached the remote still printed a clean success to `--json` stdout.
+pub fn merge_push_outcome(value: &mut Value, outcome: &PushOutcome) {
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("synced".to_string(), Value::Bool(outcome.is_synced()));
+        if let Some(warning) = outcome.warning() {
+            obj.insert(
+                "warnings".to_string(),
+                Value::Array(vec![Value::String(warning.to_string())]),
+            );
+        }
+    }
+}
 
 /// Read a milestone's `open_issues`/`closed_issues` count attributes (set when a
 /// milestone document is materialized) and compute progress. `None` for any doc
@@ -137,5 +153,35 @@ mod tests {
         meta.attributes.clear();
         let json = doc_to_json(&meta);
         assert!(json.get("percent_complete").is_none());
+    }
+
+    // BUG-006: a local-only push (unreachable remote) surfaces `synced: false`
+    // and a `warnings` array carrying the push-failure text.
+    #[test]
+    fn merge_push_outcome_local_only_sets_synced_false_and_warnings() {
+        let mut value = serde_json::json!({ "id": "ITERATION-1" });
+        let outcome = PushOutcome::LocalOnly {
+            warning: "could not push ITERATION-1 to origin".to_string(),
+        };
+        merge_push_outcome(&mut value, &outcome);
+
+        assert_eq!(value["synced"], serde_json::json!(false));
+        assert_eq!(
+            value["warnings"],
+            serde_json::json!(["could not push ITERATION-1 to origin"])
+        );
+    }
+
+    // A synced push reports `synced: true` and omits the `warnings` key entirely.
+    #[test]
+    fn merge_push_outcome_synced_sets_synced_true_and_omits_warnings() {
+        let mut value = serde_json::json!({ "id": "ITERATION-1" });
+        merge_push_outcome(&mut value, &PushOutcome::Synced);
+
+        assert_eq!(value["synced"], serde_json::json!(true));
+        assert!(
+            value.get("warnings").is_none(),
+            "warnings must be omitted on a synced push, got: {value}"
+        );
     }
 }

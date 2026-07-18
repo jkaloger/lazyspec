@@ -3,11 +3,11 @@ use crate::engine::config::{Config, StoreBackend};
 use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::ops::resolve::resolve_shorthand_or_path;
 use crate::engine::store::Store;
-use crate::engine::store_dispatch::DocumentStore;
+use crate::engine::store_dispatch::{DocumentStore, PushOutcome};
 use anyhow::Result;
 use std::path::Path;
 
-pub fn run(root: &Path, store: &Store, doc_path: &str) -> Result<()> {
+pub fn run(root: &Path, store: &Store, doc_path: &str) -> Result<PushOutcome> {
     run_with_config(root, store, doc_path, None)
 }
 
@@ -16,7 +16,7 @@ pub fn run_with_config(
     store: &Store,
     doc_path: &str,
     config: Option<&Config>,
-) -> Result<()> {
+) -> Result<PushOutcome> {
     if let Some(config) = config {
         let doc = resolve_shorthand_or_path(store, doc_path)?;
         let type_name = doc.doc_type.as_str();
@@ -47,5 +47,5 @@ pub fn run_with_config(
         }
     }
 
-    crate::engine::fs_ops::delete_document(root, store, doc_path)
+    crate::engine::fs_ops::delete_document(root, store, doc_path).map(|_| PushOutcome::Synced)
 }

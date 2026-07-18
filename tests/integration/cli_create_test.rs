@@ -372,7 +372,8 @@ fn create_with_body_sets_content() {
         Some(body_content),
         |_| {},
     )
-    .unwrap();
+    .unwrap()
+    .0;
 
     let content = fs::read_to_string(&path).unwrap();
     assert!(
@@ -409,7 +410,8 @@ fn create_with_body_file_sets_content() {
         Some(body_content.as_str()),
         |_| {},
     )
-    .unwrap();
+    .unwrap()
+    .0;
 
     let content = fs::read_to_string(&path).unwrap();
     assert!(
@@ -470,5 +472,38 @@ fn non_singleton_create_multiple_succeeds() {
         second.is_ok(),
         "second create of non-singleton should succeed: {:?}",
         second.err()
+    );
+}
+
+// ITERATION-316 / BUG-006: a create --json on a non-pushing (filesystem) store
+// reports `synced: true` and carries no `warnings` key. This exercises the full
+// create ops -> CLI serialization chain that threads the backend PushOutcome
+// into the mutation JSON.
+#[test]
+fn create_json_filesystem_reports_synced_true_no_warnings() {
+    let fixture = crate::common::TestFixture::new();
+    let config = fixture.config();
+    let store = fixture.store();
+
+    let output = lazyspec::cli::create::run_json(
+        fixture.root(),
+        &config,
+        &store,
+        "rfc",
+        "Synced RFC",
+        "agent",
+        |_| {},
+    )
+    .unwrap();
+
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(
+        json["synced"],
+        serde_json::json!(true),
+        "filesystem create must report synced:true, got: {output}"
+    );
+    assert!(
+        json.get("warnings").is_none(),
+        "a synced create must omit warnings, got: {output}"
     );
 }

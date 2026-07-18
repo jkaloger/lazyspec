@@ -10,7 +10,9 @@ use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::ops::resolve::{resolve_to_id, resolve_to_path};
 use crate::engine::store::Store;
-use crate::engine::store_dispatch::{board_number, GithubIssuesStore, GithubProjectsStore};
+use crate::engine::store_dispatch::{
+    board_number, GithubIssuesStore, GithubProjectsStore, PushOutcome,
+};
 use crate::engine::task_map::TaskMap;
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
@@ -23,6 +25,10 @@ pub struct LinkOutcome {
     pub source: PathBuf,
     pub rel_type: RelationType,
     pub target: String,
+    /// Whether the edge reached the remote. Only git-ref-backed docs defer their
+    /// push (and can report `LocalOnly` on an unreachable remote); every other
+    /// backend syncs synchronously, so the outcome is `Synced`.
+    pub push_outcome: PushOutcome,
 }
 
 pub fn link_with_config(
@@ -142,7 +148,7 @@ fn link_inner<
         Ok(())
     })?;
 
-    push_if_git_ref_backed(root, &resolved_from, Some(config))?;
+    let push_outcome = push_if_git_ref_backed(root, &resolved_from, Some(config))?;
 
     // ClickUp-backed docs persist relations by serializing the doc's complete
     // relation set (now mirrored into the cache above) into the configured text
@@ -161,6 +167,7 @@ fn link_inner<
         source: resolved_from,
         rel_type: RelationType::new(&rel_str),
         target: to_id,
+        push_outcome,
     })
 }
 
@@ -477,7 +484,7 @@ fn unlink_inner<
         Ok(())
     })?;
 
-    push_if_git_ref_backed(root, &resolved_from, Some(config))?;
+    let push_outcome = push_if_git_ref_backed(root, &resolved_from, Some(config))?;
 
     // Unlink is the same full-replace write as link: the edge was dropped from
     // the cache above, so re-serializing the doc's remaining relations and
@@ -494,6 +501,7 @@ fn unlink_inner<
         source: resolved_from,
         rel_type: RelationType::new(&rel_str),
         target: to_id,
+        push_outcome,
     })
 }
 
@@ -681,14 +689,18 @@ fn push_if_github_backed<G: GhIssueReader + GhIssueWriter + GhGraphql + Send + '
     }
 }
 
-fn push_if_git_ref_backed(root: &Path, doc_path: &Path, config: Option<&Config>) -> Result<()> {
+fn push_if_git_ref_backed(
+    root: &Path,
+    doc_path: &Path,
+    config: Option<&Config>,
+) -> Result<PushOutcome> {
     let config = match config {
         Some(c) => c,
-        None => return Ok(()),
+        None => return Ok(PushOutcome::Synced),
     };
 
     if !doc_path.starts_with(".lazyspec/cache/") {
-        return Ok(());
+        return Ok(PushOutcome::Synced);
     }
 
     let type_name = doc_path
@@ -707,7 +719,7 @@ fn push_if_git_ref_backed(root: &Path, doc_path: &Path, config: Option<&Config>)
         .ok_or_else(|| anyhow!("unknown type '{}' from cache path", type_name))?;
 
     if type_def.store != StoreBackend::GitRef {
-        return Ok(());
+        return Ok(PushOutcome::Synced);
     }
 
     let doc_id = crate::engine::store::extract_id_from_name(

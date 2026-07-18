@@ -204,7 +204,8 @@ fn parent_status_gate_blocks_then_allows() {
         None,
         |_| {},
     )
-    .unwrap();
+    .unwrap()
+    .0;
     assert!(path.exists(), "child document should now exist");
 }
 
@@ -234,6 +235,7 @@ fn no_gate_when_require_parent_status_unset() {
         None,
         |_| {},
     )
-    .unwrap();
+    .unwrap()
+    .0;
     assert!(path.exists(), "child created freely without a gate");
 }

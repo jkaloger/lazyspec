@@ -43,6 +43,9 @@ struct AddOutput {
     doc: String,
     added: String,
     provenance: Vec<String>,
+    synced: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -50,6 +53,9 @@ struct RemoveOutput {
     doc: String,
     removed: String,
     provenance: Vec<String>,
+    synced: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -90,7 +96,8 @@ pub fn run_add(
     let mut new_list = doc.provenance.clone();
     new_list.push(citation.to_string());
 
-    crate::engine::provenance::set_provenance(root, config, &type_name, &doc_id, &new_list)?;
+    let push_outcome =
+        crate::engine::provenance::set_provenance(root, config, &type_name, &doc_id, &new_list)?;
 
     let store = Store::load(root, config)?;
     let reloaded = resolve_shorthand_or_path(&store, &doc_id)?;
@@ -101,11 +108,19 @@ pub fn run_add(
             doc: doc_id,
             added: citation.to_string(),
             provenance,
+            synced: push_outcome.is_synced(),
+            warnings: push_outcome
+                .warning()
+                .map(|w| vec![w.to_string()])
+                .unwrap_or_default(),
         };
         writeln!(writer, "{}", serde_json::to_string_pretty(&output)?)?;
     } else {
         for entry in &provenance {
             writeln!(writer, "{}", entry)?;
+        }
+        if let Some(warning) = push_outcome.warning() {
+            eprintln!("{}", warning);
         }
     }
     Ok(())
@@ -133,7 +148,8 @@ pub fn run_remove(
     let mut new_list = doc.provenance.clone();
     new_list.remove(idx);
 
-    crate::engine::provenance::set_provenance(root, config, &type_name, &doc_id, &new_list)?;
+    let push_outcome =
+        crate::engine::provenance::set_provenance(root, config, &type_name, &doc_id, &new_list)?;
 
     let store = Store::load(root, config)?;
     let reloaded = resolve_shorthand_or_path(&store, &doc_id)?;
@@ -144,11 +160,19 @@ pub fn run_remove(
             doc: doc_id,
             removed: citation.to_string(),
             provenance,
+            synced: push_outcome.is_synced(),
+            warnings: push_outcome
+                .warning()
+                .map(|w| vec![w.to_string()])
+                .unwrap_or_default(),
         };
         writeln!(writer, "{}", serde_json::to_string_pretty(&output)?)?;
     } else {
         for entry in &provenance {
             writeln!(writer, "{}", entry)?;
+        }
+        if let Some(warning) = push_outcome.warning() {
+            eprintln!("{}", warning);
         }
     }
     Ok(())

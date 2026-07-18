@@ -178,7 +178,7 @@ fn main() -> anyhow::Result<()> {
                 )?;
                 println!("{}", output);
             } else {
-                let path = lazyspec::cli::create::run_with_body(
+                let (path, push_outcome) = lazyspec::cli::create::run_with_body(
                     &cwd,
                     &config,
                     &store,
@@ -190,6 +190,9 @@ fn main() -> anyhow::Result<()> {
                     |_| {},
                 )?;
                 println!("{}", path.display());
+                if let Some(warning) = push_outcome.warning() {
+                    eprintln!("{}", warning);
+                }
             }
         }
         Some(Commands::List {
@@ -254,30 +257,45 @@ fn main() -> anyhow::Result<()> {
                 updates.push((key.as_str(), value.as_str()));
             }
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
-            lazyspec::cli::update::run_with_config(&cwd, &store, &path, &updates, Some(&config))?;
+            let push_outcome = lazyspec::cli::update::run_with_config(
+                &cwd,
+                &store,
+                &path,
+                &updates,
+                Some(&config),
+            )?;
             if json {
                 let store = Store::load(&cwd, &config)?;
                 let doc = lazyspec::cli::resolve::resolve_shorthand_or_path(&store, &path)?;
-                let json_val = lazyspec::cli::json::doc_to_json(doc);
+                let mut json_val = lazyspec::cli::json::doc_to_json(doc);
+                lazyspec::cli::json::merge_push_outcome(&mut json_val, &push_outcome);
                 println!("{}", serde_json::to_string_pretty(&json_val)?);
             } else {
                 println!("Updated {}", resolved.display());
+                if let Some(warning) = push_outcome.warning() {
+                    eprintln!("{}", warning);
+                }
             }
         }
         Some(Commands::Delete { path, json }) => {
             let store = Store::load(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
-            lazyspec::cli::delete::run_with_config(&cwd, &store, &path, Some(&config))?;
+            let push_outcome =
+                lazyspec::cli::delete::run_with_config(&cwd, &store, &path, Some(&config))?;
             if json {
                 let id = lazyspec::cli::resolve::resolve_to_id(&store, &path)?;
-                let out = serde_json::json!({
+                let mut out = serde_json::json!({
                     "action": "deleted",
                     "id": id,
                     "path": resolved.to_string_lossy(),
                 });
+                lazyspec::cli::json::merge_push_outcome(&mut out, &push_outcome);
                 println!("{}", serde_json::to_string_pretty(&out)?);
             } else {
                 println!("Deleted {}", resolved.display());
+                if let Some(warning) = push_outcome.warning() {
+                    eprintln!("{}", warning);
+                }
             }
         }
         Some(Commands::Link {
@@ -297,12 +315,13 @@ fn main() -> anyhow::Result<()> {
                 Some(&config),
             )?;
             if json {
-                let out = serde_json::json!({
+                let mut out = serde_json::json!({
                     "action": "linked",
                     "source": outcome.source.to_string_lossy(),
                     "rel_type": outcome.rel_type.to_string(),
                     "target": outcome.target,
                 });
+                lazyspec::cli::json::merge_push_outcome(&mut out, &outcome.push_outcome);
                 println!("{}", serde_json::to_string_pretty(&out)?);
             } else {
                 println!(
@@ -311,6 +330,9 @@ fn main() -> anyhow::Result<()> {
                     outcome.rel_type,
                     outcome.target
                 );
+                if let Some(warning) = outcome.push_outcome.warning() {
+                    eprintln!("{}", warning);
+                }
             }
         }
         Some(Commands::Unlink {
@@ -330,12 +352,13 @@ fn main() -> anyhow::Result<()> {
                 Some(&config),
             )?;
             if json {
-                let out = serde_json::json!({
+                let mut out = serde_json::json!({
                     "action": "unlinked",
                     "source": outcome.source.to_string_lossy(),
                     "rel_type": outcome.rel_type.to_string(),
                     "target": outcome.target,
                 });
+                lazyspec::cli::json::merge_push_outcome(&mut out, &outcome.push_outcome);
                 println!("{}", serde_json::to_string_pretty(&out)?);
             } else {
                 println!(
@@ -344,12 +367,15 @@ fn main() -> anyhow::Result<()> {
                     outcome.rel_type,
                     outcome.target
                 );
+                if let Some(warning) = outcome.push_outcome.warning() {
+                    eprintln!("{}", warning);
+                }
             }
         }
         Some(Commands::Tag { action }) => match action {
             TagAction::Add { id, tags, json } => {
                 let store = Store::load(&cwd, &config)?;
-                lazyspec::cli::tag::tag_add_with_config(
+                let push_outcome = lazyspec::cli::tag::tag_add_with_config(
                     &cwd,
                     &store,
                     &id,
@@ -360,15 +386,19 @@ fn main() -> anyhow::Result<()> {
                 if json {
                     let store = Store::load(&cwd, &config)?;
                     let doc = lazyspec::cli::resolve::resolve_shorthand_or_path(&store, &id)?;
-                    let json_val = lazyspec::cli::json::doc_to_json(doc);
+                    let mut json_val = lazyspec::cli::json::doc_to_json(doc);
+                    lazyspec::cli::json::merge_push_outcome(&mut json_val, &push_outcome);
                     println!("{}", serde_json::to_string_pretty(&json_val)?);
                 } else {
                     println!("Tagged {}", id);
+                    if let Some(warning) = push_outcome.warning() {
+                        eprintln!("{}", warning);
+                    }
                 }
             }
             TagAction::Remove { id, tags, json } => {
                 let store = Store::load(&cwd, &config)?;
-                lazyspec::cli::tag::tag_remove_with_config(
+                let push_outcome = lazyspec::cli::tag::tag_remove_with_config(
                     &cwd,
                     &store,
                     &id,
@@ -379,10 +409,14 @@ fn main() -> anyhow::Result<()> {
                 if json {
                     let store = Store::load(&cwd, &config)?;
                     let doc = lazyspec::cli::resolve::resolve_shorthand_or_path(&store, &id)?;
-                    let json_val = lazyspec::cli::json::doc_to_json(doc);
+                    let mut json_val = lazyspec::cli::json::doc_to_json(doc);
+                    lazyspec::cli::json::merge_push_outcome(&mut json_val, &push_outcome);
                     println!("{}", serde_json::to_string_pretty(&json_val)?);
                 } else {
                     println!("Untagged {}", id);
+                    if let Some(warning) = push_outcome.warning() {
+                        eprintln!("{}", warning);
+                    }
                 }
             }
         },

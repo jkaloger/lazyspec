@@ -4,7 +4,7 @@ use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::fs_ops;
 use crate::engine::ops::resolve::resolve_shorthand_or_path;
 use crate::engine::store::Store;
-use crate::engine::store_dispatch::DocumentStore;
+use crate::engine::store_dispatch::{DocumentStore, PushOutcome};
 use anyhow::{bail, Result};
 use std::path::Path;
 
@@ -39,7 +39,12 @@ fn gate_status_transition(type_def: &TypeDef, current: &str, target: &str) -> Re
     Ok(())
 }
 
-pub fn run(root: &Path, store: &Store, doc_path: &str, updates: &[(&str, &str)]) -> Result<()> {
+pub fn run(
+    root: &Path,
+    store: &Store,
+    doc_path: &str,
+    updates: &[(&str, &str)],
+) -> Result<PushOutcome> {
     run_with_config(root, store, doc_path, updates, None)
 }
 
@@ -49,7 +54,7 @@ pub fn run_with_config(
     doc_path: &str,
     updates: &[(&str, &str)],
     config: Option<&Config>,
-) -> Result<()> {
+) -> Result<PushOutcome> {
     if let Some(config) = config {
         let doc = resolve_shorthand_or_path(store, doc_path)?;
         let type_name = doc.doc_type.as_str();
@@ -90,11 +95,12 @@ pub fn run_with_config(
                 doc_path,
                 updates,
                 Some(type_def),
-            );
+            )
+            .map(|_| PushOutcome::Synced);
         }
     }
 
-    fs_ops::update_document(root, store, doc_path, updates)
+    fs_ops::update_document(root, store, doc_path, updates).map(|_| PushOutcome::Synced)
 }
 
 #[cfg(test)]

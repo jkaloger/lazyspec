@@ -7,7 +7,9 @@ use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{Config, TypeDef};
 use crate::engine::document::{compose_frontmatter, split_frontmatter, DocMeta, DocType, Status};
 use crate::engine::git_ref::GitRefClient;
-use crate::engine::store_dispatch::{find_cache_file, write_cache_file, CreatedDoc, DocumentStore};
+use crate::engine::store_dispatch::{
+    find_cache_file, write_cache_file, CreatedDoc, DocumentStore, PushOutcome,
+};
 
 fn ensure_cache_gitignored(root: &Path) -> Result<()> {
     let gitignore_path = root.join(".lazyspec/.gitignore");
@@ -125,9 +127,9 @@ impl GitRefStore {
     /// Turn a push Result into the mutation's outcome. A remote that *rejects*
     /// the push (ref diverged) surfaces as the conflict error (STORY-218 AC2);
     /// an unreachable/offline remote keeps the local write and warns (AC5).
-    fn handle_push_result(&self, doc_id: &str, result: Result<()>) -> Result<()> {
+    fn handle_push_result(&self, doc_id: &str, result: Result<()>) -> Result<PushOutcome> {
         match result {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(PushOutcome::Synced),
             Err(e) if push_was_remote_rejection(&e) => {
                 bail!(
                     "conflict pushing {} to remote '{}': {}",
@@ -136,10 +138,9 @@ impl GitRefStore {
                     e
                 )
             }
-            Err(e) => {
-                eprintln!("{}", push_failure_warning(&self.remote, doc_id, &e));
-                Ok(())
-            }
+            Err(e) => Ok(PushOutcome::LocalOnly {
+                warning: push_failure_warning(&self.remote, doc_id, &e),
+            }),
         }
     }
 
@@ -206,7 +207,7 @@ impl GitRefStore {
         Ok(())
     }
 
-    fn created_doc(&self, type_def: &TypeDef, id: String) -> CreatedDoc {
+    fn created_doc(&self, type_def: &TypeDef, id: String, push_outcome: PushOutcome) -> CreatedDoc {
         let cache_path = self
             .root
             .join(".lazyspec/cache")
@@ -216,7 +217,11 @@ impl GitRefStore {
             .strip_prefix(&self.root)
             .unwrap_or(&cache_path)
             .to_path_buf();
-        CreatedDoc { path: relative, id }
+        CreatedDoc {
+            path: relative,
+            id,
+            push_outcome,
+        }
     }
 
     /// Re-commit the current cache content into the ref blob.
@@ -229,7 +234,11 @@ impl GitRefStore {
     /// `key: value` mutation loop of `update` is deliberately not reused: it
     /// cannot touch a `tags:` sequence block. Finally the new SHA is pushed with
     /// a lease so the ref stays live on the remote.
-    pub(crate) fn recommit_cache(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()> {
+    pub(crate) fn recommit_cache(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+    ) -> Result<PushOutcome> {
         let doc_key = Self::doc_key(&type_def.name, doc_id);
         let lock = CacheLock::load(&self.root)?;
         let old_sha = lock
@@ -292,8 +301,8 @@ impl DocumentStore for GitRefStore {
             let push = self
                 .git
                 .push_new_ref(&self.root, &self.remote, &refname, &sha);
-            self.handle_push_result(&id, push)?;
-            return Ok(self.created_doc(type_def, id));
+            let outcome = self.handle_push_result(&id, push)?;
+            return Ok(self.created_doc(type_def, id, outcome));
         }
 
         // Cross-clone-safe allocation (STORY-218 AC3): claim the number on the
@@ -311,7 +320,7 @@ impl DocumentStore for GitRefStore {
                 .git
                 .push_new_ref(&self.root, &self.remote, &refname, &sha)
             {
-                Ok(()) => return Ok(self.created_doc(type_def, id)),
+                Ok(()) => return Ok(self.created_doc(type_def, id, PushOutcome::Synced)),
                 Err(e) if push_was_remote_rejection(&e) => {
                     self.unmaterialize_created_doc(type_def, &id)?;
                     let pattern = format!("{}*", Self::ref_prefix(&type_def.name));
@@ -319,10 +328,13 @@ impl DocumentStore for GitRefStore {
                     last_rejection = Some(e);
                 }
                 Err(e) => {
-                    // Remote unreachable: keep the local write and warn, matching
-                    // the offline semantics of every other mutation (AC5/ITER-309).
-                    eprintln!("{}", push_failure_warning(&self.remote, &id, &e));
-                    return Ok(self.created_doc(type_def, id));
+                    // Remote unreachable: keep the local write and surface the
+                    // warning as the outcome, matching the offline semantics of
+                    // every other mutation (AC5/ITER-309).
+                    let outcome = PushOutcome::LocalOnly {
+                        warning: push_failure_warning(&self.remote, &id, &e),
+                    };
+                    return Ok(self.created_doc(type_def, id, outcome));
                 }
             }
         }
@@ -339,7 +351,12 @@ impl DocumentStore for GitRefStore {
         )
     }
 
-    fn update(&mut self, type_def: &TypeDef, doc_id: &str, updates: &[(&str, &str)]) -> Result<()> {
+    fn update(
+        &mut self,
+        type_def: &TypeDef,
+        doc_id: &str,
+        updates: &[(&str, &str)],
+    ) -> Result<PushOutcome> {
         let doc_key = Self::doc_key(&type_def.name, doc_id);
         let lock = CacheLock::load(&self.root)?;
         let old_sha = lock
@@ -419,7 +436,7 @@ impl DocumentStore for GitRefStore {
         type_def: &TypeDef,
         doc_id: &str,
         provenance: &[String],
-    ) -> Result<()> {
+    ) -> Result<PushOutcome> {
         let doc_key = Self::doc_key(&type_def.name, doc_id);
         let lock = CacheLock::load(&self.root)?;
         let old_sha = lock
@@ -486,7 +503,7 @@ impl DocumentStore for GitRefStore {
         self.handle_push_result(doc_id, push)
     }
 
-    fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()> {
+    fn delete(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<PushOutcome> {
         let refname = Self::refname(&type_def.name, doc_id);
         let doc_key = Self::doc_key(&type_def.name, doc_id);
 
@@ -517,7 +534,7 @@ impl DocumentStore for GitRefStore {
         doc_id: &str,
         _add: &[String],
         _remove: &[String],
-    ) -> Result<()> {
+    ) -> Result<PushOutcome> {
         self.recommit_cache(type_def, doc_id)
     }
 }
@@ -1211,7 +1228,10 @@ mod tests {
 
         let mut store = make_store(&tmp, mock);
         let td = test_type_def();
-        store.create(&td, "My Feature", "alice", "body").unwrap();
+        let result = store.create(&td, "My Feature", "alice", "body").unwrap();
+
+        // BUG-006: a create whose push reaches the remote reports `Synced`.
+        assert_eq!(result.push_outcome, PushOutcome::Synced);
 
         let calls = store.git_mock().calls.borrow();
         assert!(
@@ -1326,6 +1346,23 @@ mod tests {
 
         assert_eq!(result.id, "ITERATION-001");
 
+        // BUG-006: the unreachable-remote outcome is reported (not printed and
+        // swallowed), carrying a warning that names the remote and the doc id.
+        let warning = match &result.push_outcome {
+            PushOutcome::LocalOnly { warning } => warning,
+            other => panic!("offline create should report LocalOnly, got: {:?}", other),
+        };
+        assert!(
+            warning.contains("origin"),
+            "warning should mention the remote, got: {}",
+            warning
+        );
+        assert!(
+            warning.contains("ITERATION-001"),
+            "warning should mention the doc id, got: {}",
+            warning
+        );
+
         let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
         assert!(
             find_cache_file(&cache_dir, "ITERATION-001").is_some(),
@@ -1368,9 +1405,12 @@ mod tests {
             .with_push_with_lease_result(Ok(()));
 
         let mut store = make_store(&tmp, mock);
-        store
+        let outcome = store
             .update(&test_type_def(), "ITERATION-042", &[("status", "accepted")])
             .unwrap();
+
+        // BUG-006: an update whose push reaches the remote reports `Synced`.
+        assert_eq!(outcome, PushOutcome::Synced);
 
         let calls = store.git_mock().calls.borrow();
         assert!(
@@ -1475,6 +1515,14 @@ mod tests {
         let mut store = make_store(&tmp, mock);
         let result = store.update(&test_type_def(), "ITERATION-042", &[("status", "accepted")]);
         assert!(result.is_ok(), "offline push must not fail the mutation");
+
+        // BUG-006: the unreachable-remote outcome is reported, not swallowed.
+        let outcome = result.unwrap();
+        assert!(
+            matches!(outcome, PushOutcome::LocalOnly { .. }),
+            "offline update should report LocalOnly, got: {:?}",
+            outcome
+        );
 
         let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
         let updated = std::fs::read_to_string(cache_dir.join("ITERATION-042.md")).unwrap();
