@@ -326,13 +326,15 @@ pub struct TypeDef {
     #[serde(default, rename = "github_label")]
     pub label_override: Option<String>,
     /// A GitHub label naming this type as a classification signal, distinct
-    /// from `label_override`'s identity label. Schema only for now -- no
-    /// resolver or matching logic reads this field yet.
+    /// from `label_override`'s identity label. Drives discovery/matching and,
+    /// on create, is the sole label attached to native-issue-typed documents
+    /// (see `github_create_labels`).
     #[serde(default)]
     pub github_issue_tag: Option<String>,
-    /// A GitHub native issue type naming this type as a classification
-    /// signal. Schema only for now -- no resolver, discovery, or write logic
-    /// reads this field yet.
+    /// A GitHub native issue type naming this type as a classification signal.
+    /// Drives discovery and classification, and is pushed on create; when set,
+    /// it replaces the `lazyspec:{name}` identity label (see
+    /// `github_create_labels`).
     #[serde(default)]
     pub github_issue_type: Option<String>,
     /// The ClickUp List id this type binds to, for `clickup-tasks`-backed types.
@@ -1284,6 +1286,19 @@ impl TypeDef {
         self.label_override
             .clone()
             .unwrap_or_else(|| crate::engine::gh::type_label(&self.name))
+    }
+
+    /// The GitHub labels to attach when creating this type's issues. A type
+    /// carrying a native `github_issue_type` is classified by that issue type,
+    /// so it gets no `lazyspec:{name}` identity label -- only its
+    /// `github_issue_tag`, if one is set. Types without a native issue type
+    /// keep the identity label (`github_label`).
+    pub fn github_create_labels(&self) -> Vec<String> {
+        if self.github_issue_type.is_some() {
+            self.github_issue_tag.clone().into_iter().collect()
+        } else {
+            vec![self.github_label()]
+        }
     }
 
     /// Resolve a lazyspec name to the ClickUp custom-field uuid holding it (the
@@ -2605,6 +2620,37 @@ name = "mentions"
         let td = TypeDef::test_fixture("story", StoreBackend::GithubIssues);
 
         assert_eq!(td.github_label(), "lazyspec:story");
+    }
+
+    #[test]
+    fn github_create_labels_native_type_without_tag_is_empty() {
+        let mut td = TypeDef::test_fixture("story", StoreBackend::GithubIssues);
+        td.github_issue_type = Some("Bug".to_string());
+        td.github_issue_tag = None;
+
+        assert!(td.github_create_labels().is_empty());
+    }
+
+    #[test]
+    fn github_create_labels_native_type_with_tag_attaches_only_tag() {
+        let mut td = TypeDef::test_fixture("story", StoreBackend::GithubIssues);
+        td.github_issue_type = Some("Bug".to_string());
+        td.github_issue_tag = Some("bug".to_string());
+
+        assert_eq!(td.github_create_labels(), vec!["bug".to_string()]);
+    }
+
+    #[test]
+    fn github_create_labels_without_native_type_uses_identity_label() {
+        let mut td = TypeDef::test_fixture("story", StoreBackend::GithubIssues);
+        td.github_issue_type = None;
+        // A tag without a native type does not change the identity-label path.
+        td.github_issue_tag = Some("bug".to_string());
+
+        assert_eq!(
+            td.github_create_labels(),
+            vec!["lazyspec:story".to_string()]
+        );
     }
 
     #[test]

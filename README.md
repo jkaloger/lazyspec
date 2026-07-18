@@ -605,8 +605,11 @@ types share.
 
 `create` on a type with `github_issue_type` set also pushes that value onto
 the new issue's native issue type field (needs the `project` scope described
-above); `create` with `github_issue_tag` set applies that value as a label
-the same way the default `lazyspec:{type}` label is applied today.
+above). Because the native issue type already classifies the issue, such a
+create attaches **no** `lazyspec:{type}` identity label; if `github_issue_tag`
+is also set, only that tag label is attached. A type with `github_issue_type`
+unset is unchanged -- it still gets the default `lazyspec:{type}` label
+(or its `github_label` override).
 
 The `assignee` field is a **native GitHub field**, not part of the issue-body
 round-trip. On `fetch`, each issue's first native assignee is inherited into the
