@@ -134,26 +134,66 @@ pub fn run_add_type(
         bail!("attribute \"{}\" is declared more than once", dup.1.name);
     }
 
-    config.documents.types.push(TypeDef {
+    config.documents.types.push(type_def_from_parts(
+        name,
+        plural,
+        dir,
+        prefix,
+        icon,
+        parent_type,
+        singleton,
+        store.map(parse_store).transpose()?.unwrap_or_default(),
+        numbering
+            .map(parse_numbering)
+            .transpose()?
+            .unwrap_or_default(),
+        intent,
+        authorship
+            .map(parse_authorship)
+            .transpose()?
+            .unwrap_or_default(),
+        clickup_task_type,
+        attributes,
+    ));
+
+    let out = write_config_in_place(&src, &config)?;
+    fs.write(&path, &out)?;
+    Ok(())
+}
+
+/// Assemble a `TypeDef` from already-parsed pieces. Shared by the flag path
+/// (`run_add_type`) and the in-memory init wizard (`apply_collected_type`) so the
+/// full field set is written the same way from both entry points.
+#[allow(clippy::too_many_arguments)]
+fn type_def_from_parts(
+    name: &str,
+    plural: &str,
+    dir: &str,
+    prefix: &str,
+    icon: Option<&str>,
+    parent_type: Option<&str>,
+    singleton: bool,
+    store: StoreBackend,
+    numbering: NumberingStrategy,
+    intent: Option<&str>,
+    authorship: Authorship,
+    clickup_task_type: Option<i64>,
+    attributes: Vec<AttrDef>,
+) -> TypeDef {
+    TypeDef {
         name: name.to_string(),
         plural: plural.to_string(),
         dir: dir.to_string(),
         prefix: prefix.to_string(),
         icon: icon.map(str::to_string),
-        numbering: numbering
-            .map(parse_numbering)
-            .transpose()?
-            .unwrap_or_default(),
+        numbering,
         subdirectory: false,
-        store: store.map(parse_store).transpose()?.unwrap_or_default(),
+        store,
         singleton,
         parent_type: parent_type.map(str::to_string),
         agents: Vec::new(),
         intent: intent.map(str::to_string),
-        authorship: authorship
-            .map(parse_authorship)
-            .transpose()?
-            .unwrap_or_default(),
+        authorship,
         lifecycle: Lifecycle::default(),
         attributes,
         label_override: None,
@@ -162,11 +202,7 @@ pub fn run_add_type(
         clickup_list_id: None,
         clickup_task_type,
         clickup_custom_field_map: None,
-    });
-
-    let out = write_config_in_place(&src, &config)?;
-    fs.write(&path, &out)?;
-    Ok(())
+    }
 }
 
 /// How `config add-type` should proceed given its four positionals: all four
@@ -189,20 +225,34 @@ pub fn classify_add_type_args(positionals: [&Option<String>; 4]) -> Result<AddTy
     }
 }
 
-/// Prompt for a type's fields on a TTY and drive the same writers the flag path
-/// uses. After the core fields it optionally collects attributes and a parent
-/// type (fed to `run_add_type`), a custom lifecycle (`run_set_lifecycle`), and a
-/// gate on an existing parent-child rule (`run_add_gate`). Every optional section
-/// pre-validates prompt-side and re-asks on failure rather than aborting.
-pub fn run_add_type_interactive(
-    root: &Path,
-    fs: &dyn FileSystem,
-    prompter: &mut dyn Prompter,
-) -> Result<()> {
-    let path = root.join(".lazyspec.toml");
-    let src = fs.read_to_string(&path)?;
-    let config = Config::parse(&src)?;
+/// The fields a single interactive type-authoring session collects, before any
+/// disk write. Produced by `collect_type_interactive` and applied either to a
+/// parsed-from-disk config (via `run_add_type` and friends) or to an in-memory
+/// config being designed by `init` (via `apply_collected_type`).
+pub struct CollectedType {
+    pub name: String,
+    pub plural: String,
+    pub dir: String,
+    pub prefix: String,
+    pub icon: Option<String>,
+    pub store: String,
+    pub numbering: String,
+    pub singleton: bool,
+    pub authorship: String,
+    pub attributes: Vec<String>,
+    pub parent_type: Option<String>,
+    pub lifecycle: Option<(Vec<String>, Vec<String>)>,
+    pub gate: Option<(String, String)>,
+}
 
+/// Prompt for a type's fields on a TTY, validating each section against `config`
+/// (an in-memory view of the project as it stands, so name/prefix/parent/gate
+/// checks see prior additions) without touching disk. Every optional section
+/// pre-validates prompt-side and re-asks on failure rather than aborting.
+pub fn collect_type_interactive(
+    config: &Config,
+    prompter: &mut dyn Prompter,
+) -> Result<CollectedType> {
     let default_authorship = match Authorship::default() {
         Authorship::Human => "human",
         Authorship::Assisted => "assisted",
@@ -387,6 +437,112 @@ pub fn run_add_type_interactive(
     } else {
         None
     };
+
+    Ok(CollectedType {
+        name,
+        plural,
+        dir,
+        prefix,
+        icon,
+        store,
+        numbering,
+        singleton,
+        authorship,
+        attributes,
+        parent_type,
+        lifecycle: custom_lifecycle,
+        gate,
+    })
+}
+
+/// Push a collected type onto an in-memory `Config` and apply its optional
+/// lifecycle and gate, without any disk IO. Used by the `init` wizard, which
+/// serializes the whole `Config` at the end rather than editing a file in place.
+pub fn apply_collected_type(config: &mut Config, collected: &CollectedType) -> Result<()> {
+    if config.type_by_name(&collected.name).is_some() {
+        bail!("type \"{}\" already exists", collected.name);
+    }
+
+    let attributes = collected
+        .attributes
+        .iter()
+        .map(|spec| parse_attr_spec(spec))
+        .collect::<Result<Vec<_>>>()?;
+
+    config.documents.types.push(type_def_from_parts(
+        &collected.name,
+        &collected.plural,
+        &collected.dir,
+        &collected.prefix,
+        collected.icon.as_deref(),
+        collected.parent_type.as_deref(),
+        collected.singleton,
+        parse_store(&collected.store)?,
+        parse_numbering(&collected.numbering)?,
+        None,
+        parse_authorship(&collected.authorship)?,
+        None,
+        attributes,
+    ));
+
+    if let Some((states, edges)) = &collected.lifecycle {
+        let parsed_edges = edges.iter().map(|e| parse_edge(e)).collect::<Result<_>>()?;
+        let type_def = config
+            .documents
+            .types
+            .iter_mut()
+            .find(|t| t.name == collected.name)
+            .expect("just-pushed type is present");
+        type_def.lifecycle = Lifecycle {
+            states: states.clone(),
+            edges: parsed_edges,
+        };
+    }
+
+    if let Some((rule, status)) = &collected.gate {
+        match config.rules.iter_mut().find(|r| rule_name(r) == rule) {
+            Some(ValidationRule::ParentChild {
+                require_parent_status,
+                ..
+            }) => {
+                *require_parent_status = Some(status.clone());
+            }
+            _ => bail!("unknown parent-child rule \"{}\"", rule),
+        }
+    }
+
+    Ok(())
+}
+
+/// Prompt for a type's fields on a TTY and drive the same writers the flag path
+/// uses. After the core fields it optionally collects attributes and a parent
+/// type (fed to `run_add_type`), a custom lifecycle (`run_set_lifecycle`), and a
+/// gate on an existing parent-child rule (`run_add_gate`). Every optional section
+/// pre-validates prompt-side and re-asks on failure rather than aborting.
+pub fn run_add_type_interactive(
+    root: &Path,
+    fs: &dyn FileSystem,
+    prompter: &mut dyn Prompter,
+) -> Result<()> {
+    let path = root.join(".lazyspec.toml");
+    let src = fs.read_to_string(&path)?;
+    let config = Config::parse(&src)?;
+
+    let CollectedType {
+        name,
+        plural,
+        dir,
+        prefix,
+        icon,
+        store,
+        numbering,
+        singleton,
+        authorship,
+        attributes,
+        parent_type,
+        lifecycle: custom_lifecycle,
+        gate,
+    } = collect_type_interactive(&config, prompter)?;
 
     run_add_type(
         root,

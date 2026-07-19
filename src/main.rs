@@ -22,8 +22,24 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let cwd = std::env::current_dir()?;
 
-    if matches!(cli.command, Some(Commands::Init)) {
-        lazyspec::cli::init::run(&cwd)?;
+    if let Some(Commands::Init {
+        non_interactive,
+        json,
+    }) = &cli.command
+    {
+        use std::io::IsTerminal;
+        let interactive = lazyspec::cli::init::init_is_interactive(
+            *non_interactive,
+            *json,
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+        );
+        if interactive {
+            let mut prompter = lazyspec::cli::wizard::StdinPrompter::new();
+            lazyspec::cli::init::run_init_interactive(&cwd, &mut prompter)?;
+        } else {
+            lazyspec::cli::init::run(&cwd)?;
+        }
         return Ok(());
     }
 
@@ -106,7 +122,7 @@ fn main() -> anyhow::Result<()> {
     let config = Config::load(&cwd, &fs)?;
 
     match cli.command {
-        Some(Commands::Init)
+        Some(Commands::Init { .. })
         | Some(Commands::Completions { .. })
         | Some(Commands::Skills { .. }) => {
             unreachable!()

@@ -299,7 +299,7 @@ Every mutation's `--json` output also reports whether the change reached the doc
 
 | Command                                                         | Description                                                                                     |
 | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `init`                                                          | Initialise lazyspec in the current project                                                      |
+| `init [--non-interactive] [--json]`                             | Initialise lazyspec in the current project. Runs an interactive starter-config wizard on a TTY; `--non-interactive`/`--json`/non-TTY write the starter config unchanged |
 | `create <type> <title> [--author X] [--parent ID] [--body / --body-file]` | Create a document (rfc, adr, story, iteration); seed body inline, from a file, or `-` for stdin. `--parent <ID>` makes the new doc a child of an existing doc; the child must be the same store as its parent. For filesystem-store types the child is authored as a sibling `.md` inside the parent's subdir (promoting a flat parent to `TYPE-n-slug/index.md` on the first child). For `github-issues`-store types the child is created as a real GitHub issue and bound as a native sub-issue of the parent at create time; a later `fetch` mirrors them into the nested cache layout (`.lazyspec/cache/<type>/<PARENT>/index.md` + `NN-<child>.md`) |
 | `list [type] [--status X]`                                      | List documents with optional filters; each list card shows the assignee (as `@name`) when one is set, and nothing when unset |
 | `show <id> [-e] [--open]`                                       | Display a document by path or shorthand ID (e.g. `RFC-001`); `--open` opens it in a browser or viewer instead. The detail header adds an `Assignee:` line when the document has one (omitted when unset), mirroring the `Tags:` line. The `--json` output includes an `assignee` field (a string, or `null` when unset) alongside `status`/`tags`; `status --json` reports it for every document too |
@@ -452,7 +452,12 @@ Unresolvable refs render as:
 <summary><h2>Configuration</h2></summary>
 
 `lazyspec init` creates a `.lazyspec.toml` in your project root with a starter set
-of document types, relationships, and validation rules. The engine carries no
+of document types, relationships, and validation rules. On a TTY it runs an
+interactive wizard first, letting you tweak the starter config -- set the naming
+pattern, keep or drop each starter type, and add new types -- before it scaffolds
+the project. Pass `--non-interactive` (or `--json`, which implies it), or run in a
+non-TTY context (a pipe or CI), to skip the wizard and write the starter config
+unchanged. The engine carries no
 built-in document types or relationship vocabulary: the `[[types]]`,
 `[[relationships]]`, and `[[rules]]` declared in `.lazyspec.toml` are the sole
 source of truth. A missing `.lazyspec.toml`, or a config with no `[[types]]`, is a

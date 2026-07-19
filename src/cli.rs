@@ -71,8 +71,16 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize lazyspec in the current project
-    Init,
+    /// Initialize lazyspec in the current project. On a TTY with neither flag,
+    /// walks an interactive wizard to tweak the starter config before writing.
+    Init {
+        /// Skip the wizard and write the starter config unchanged
+        #[arg(long)]
+        non_interactive: bool,
+        /// Suppress the wizard (implies --non-interactive) and write the starter config unchanged
+        #[arg(long)]
+        json: bool,
+    },
     /// Create a new document from template
     Create {
         /// Document type (rfc, adr, story, iteration)

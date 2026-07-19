@@ -1,3 +1,5 @@
+use crate::cli::config::{apply_collected_type, collect_type_interactive};
+use crate::cli::wizard::Prompter;
 use crate::engine::config::{
     default_rules, starter_relationships, starter_types, CertificationConfig, Config,
     DocumentConfig, FilesystemConfig, Naming, Templates, UiConfig,
@@ -8,6 +10,7 @@ use crate::engine::github::resolve_repo;
 use anyhow::{bail, Result};
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 /// The starter config `init` writes into a fresh project. Per ADR-011 this is the
 /// sole home for default types and rules; the engine load path carries none.
@@ -39,13 +42,35 @@ pub fn starter_config() -> Config {
     }
 }
 
-pub fn run(root: &Path) -> Result<()> {
-    let config_path = root.join(".lazyspec.toml");
-    if config_path.exists() {
+/// Whether `init` should run the interactive wizard: neither opt-out flag set
+/// and both stdin and stdout are TTYs. `--json` implies `--non-interactive`.
+pub fn init_is_interactive(
+    non_interactive: bool,
+    json: bool,
+    stdin_tty: bool,
+    stdout_tty: bool,
+) -> bool {
+    !non_interactive && !json && stdin_tty && stdout_tty
+}
+
+fn ensure_no_config(root: &Path) -> Result<()> {
+    if root.join(".lazyspec.toml").exists() {
         bail!(".lazyspec.toml already exists");
     }
+    Ok(())
+}
 
-    let config = starter_config();
+pub fn run(root: &Path) -> Result<()> {
+    ensure_no_config(root)?;
+    write_project(root, &starter_config())
+}
+
+/// Scaffold a fresh project from `config`: per-type directories, the templates
+/// dir and default template, type skeletons, the serialized `.lazyspec.toml`,
+/// and (for github-issues types) labels and gitignore entries. The single write
+/// path shared by both the non-interactive and interactive `init` entry points.
+pub fn write_project(root: &Path, config: &Config) -> Result<()> {
+    let config_path = root.join(".lazyspec.toml");
 
     for type_def in &config.documents.types {
         fs::create_dir_all(root.join(&type_def.dir))?;
@@ -54,15 +79,79 @@ pub fn run(root: &Path) -> Result<()> {
     fs::create_dir_all(&templates_dir)?;
     write_if_absent(&templates_dir.join("template.md"), default_template())?;
 
-    scaffold_skeleton_files(root, &config)?;
+    scaffold_skeleton_files(root, config)?;
 
     fs::write(&config_path, config.to_toml()?)?;
 
-    ensure_github_labels(&config, root);
-    ensure_gitignore(&config, root)?;
+    ensure_github_labels(config, root);
+    ensure_gitignore(config, root)?;
 
     println!("Initialized lazyspec in {}", root.display());
     Ok(())
+}
+
+/// Interactive `init`: bail if a config already exists (before prompting), then
+/// walk the starter-config wizard and scaffold the designed config.
+pub fn run_init_interactive(root: &Path, prompter: &mut dyn Prompter) -> Result<()> {
+    ensure_no_config(root)?;
+    let config = design_config_interactive(starter_config(), prompter)?;
+    write_project(root, &config)
+}
+
+/// Read `git config user.name` as the author prompt's default, or `None` when
+/// git is unavailable or unconfigured. Purely cosmetic: this slice prompts for
+/// an author but does not persist it (Config has no author field).
+fn git_user_name() -> Option<String> {
+    let output = Command::new("git")
+        .args(["config", "user.name"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// Walk the starter config with the user: prompt author (not persisted), naming
+/// pattern, keep/drop each starter type, then an add-type loop. Pure -- no disk
+/// IO -- so it is fully driveable by a `ScriptedPrompter`. Accepting every
+/// default returns `base` unchanged (byte-for-byte parity with `init`). A `no`
+/// at the final write confirmation discards the session and starts over.
+pub fn design_config_interactive(base: Config, prompter: &mut dyn Prompter) -> Result<Config> {
+    let author_default = git_user_name();
+    loop {
+        let mut config = base.clone();
+
+        // Prompted for the wizard's sake but intentionally discarded: there is
+        // no author field to persist it to in this slice.
+        let _author = prompter.ask("Author", author_default.as_deref())?;
+
+        let pattern = prompter.ask("Naming pattern", Some(&base.documents.naming.pattern))?;
+        config.documents.naming.pattern = pattern;
+
+        let mut kept = Vec::new();
+        for type_def in &base.documents.types {
+            if prompter.confirm(&format!("Keep type {}", type_def.name), true)? {
+                kept.push(type_def.clone());
+            }
+        }
+        config.documents.types = kept;
+
+        while prompter.confirm("Add another type", false)? {
+            let collected = collect_type_interactive(&config, prompter)?;
+            apply_collected_type(&mut config, &collected)?;
+        }
+
+        if prompter.confirm("Write this config", true)? {
+            return Ok(config);
+        }
+        println!("discarded; starting over");
+    }
 }
 
 fn ensure_github_labels(config: &Config, root: &Path) {
@@ -218,7 +307,205 @@ by agent skills. For example, a dictum about testing philosophy would have
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::wizard::ScriptedPrompter;
     use crate::engine::config::{StoreBackend, TypeDef};
+    use crate::engine::fs::RealFileSystem;
+    use crate::engine::store::Store;
+    use crate::engine::validation::validate_full;
+
+    fn scripted(answers: &[&str]) -> ScriptedPrompter {
+        ScriptedPrompter::new(answers.iter().map(|s| s.to_string()).collect())
+    }
+
+    // Enough blank answers to accept every default in the wizard: author, naming,
+    // one keep-confirm per starter type, the add-another decline, and the final
+    // write confirmation.
+    fn all_default_answers() -> Vec<String> {
+        let n = starter_config().documents.types.len();
+        vec![String::new(); n + 4]
+    }
+
+    // AC1: the wizard prompts author then naming then keep/drop, so a queued
+    // non-blank naming pattern lands on the config and every starter type
+    // survives a keep-all walk. (Misaligning the author prompt would divert the
+    // pattern answer and fail the assertion.)
+    #[test]
+    fn design_prompts_author_naming_types() {
+        let mut answers = vec![
+            "Ada Lovelace".to_string(), // author (prompted, discarded)
+            "custom-{type}-{n:03}-{title}.md".to_string(), // naming pattern
+        ];
+        let starter = starter_config();
+        for _ in &starter.documents.types {
+            answers.push("y".to_string()); // keep each starter type
+        }
+        answers.push("n".to_string()); // add another? no
+        answers.push("y".to_string()); // write? yes
+
+        let mut prompter = ScriptedPrompter::new(answers);
+        let config = design_config_interactive(starter_config(), &mut prompter).unwrap();
+
+        assert_eq!(
+            config.documents.naming.pattern,
+            "custom-{type}-{n:03}-{title}.md"
+        );
+        for type_def in &starter.documents.types {
+            assert!(
+                config.type_by_name(&type_def.name).is_some(),
+                "starter type {} should survive keep-all",
+                type_def.name
+            );
+        }
+    }
+
+    // AC2: accepting every default returns the starter config byte-for-byte, so a
+    // non-interactive `init` and an accept-all interactive `init` are identical.
+    #[test]
+    fn design_all_defaults_equals_starter() {
+        let mut prompter = ScriptedPrompter::new(all_default_answers());
+        let config = design_config_interactive(starter_config(), &mut prompter).unwrap();
+        assert_eq!(
+            config.to_toml().unwrap(),
+            starter_config().to_toml().unwrap()
+        );
+    }
+
+    // AC3: the non-interactive scaffold writer emits exactly the starter config.
+    #[test]
+    fn init_noninteractive_writes_starter() {
+        let dir = tempfile::tempdir().unwrap();
+        write_project(dir.path(), &starter_config()).unwrap();
+        let written = fs::read_to_string(dir.path().join(".lazyspec.toml")).unwrap();
+        assert_eq!(written, starter_config().to_toml().unwrap());
+    }
+
+    // AC3: `--json` and `--non-interactive` and a non-TTY each suppress the wizard;
+    // only a plain TTY invocation runs it.
+    #[test]
+    fn json_suppresses_interactive() {
+        assert!(!init_is_interactive(false, true, true, true), "--json");
+        assert!(
+            !init_is_interactive(true, false, true, true),
+            "--non-interactive"
+        );
+        assert!(
+            !init_is_interactive(false, false, false, true),
+            "no stdin tty"
+        );
+        assert!(
+            !init_is_interactive(false, false, true, false),
+            "no stdout tty"
+        );
+        assert!(init_is_interactive(false, false, true, true), "plain tty");
+    }
+
+    // AC4: an existing .lazyspec.toml bails both paths, and the interactive path
+    // bails before consuming any prompt answer (empty queue never errors).
+    #[test]
+    fn init_bails_when_config_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".lazyspec.toml"), "existing").unwrap();
+
+        let non_interactive = run(dir.path());
+        assert!(non_interactive.is_err(), "run should bail");
+
+        let mut prompter = scripted(&[]);
+        let interactive = run_init_interactive(dir.path(), &mut prompter);
+        assert!(interactive.is_err(), "interactive run should bail");
+        assert!(
+            interactive
+                .unwrap_err()
+                .to_string()
+                .contains("already exists"),
+            "bail message names the conflict"
+        );
+    }
+
+    // Drop one starter type and add a new one; the designed config reflects both.
+    fn drop_spec_add_spike_answers() -> Vec<String> {
+        [
+            "",       // author
+            "",       // naming (default)
+            "y",      // keep rfc
+            "y",      // keep story
+            "y",      // keep iteration
+            "y",      // keep adr
+            "n",      // DROP spec
+            "y",      // keep convention
+            "y",      // keep dictum
+            "y",      // add another type? yes
+            "spike",  // name
+            "spikes", // plural
+            "",       // dir -> docs/spikes
+            "",       // prefix -> SPIKE
+            "",       // icon (none)
+            "",       // store -> filesystem
+            "",       // numbering -> incremental
+            "",       // singleton -> false
+            "",       // authorship -> default
+            "n",      // add an attribute? no
+            "n",      // set a parent type? no
+            "n",      // design custom lifecycle? no
+            "n",      // gate a parent-child rule? no
+            "n",      // add another type? no
+            "y",      // write this config? yes
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
+    // AC5: dropping a starter type removes it and adding a new one appends it.
+    #[test]
+    fn design_drop_and_add() {
+        let mut prompter = ScriptedPrompter::new(drop_spec_add_spike_answers());
+        let config = design_config_interactive(starter_config(), &mut prompter).unwrap();
+
+        assert!(config.type_by_name("spec").is_none(), "dropped type absent");
+        assert!(config.type_by_name("spike").is_some(), "added type present");
+        let spike = config.type_by_name("spike").unwrap();
+        assert_eq!(spike.dir, "docs/spikes");
+        assert_eq!(spike.prefix, "SPIKE");
+    }
+
+    // AC5: scaffolding a designed config round-trips to a project that validates
+    // clean, with per-type dirs, the template, and skeletons matching the design.
+    #[test]
+    fn write_project_scaffold_validates() {
+        let mut prompter = ScriptedPrompter::new(drop_spec_add_spike_answers());
+        let config = design_config_interactive(starter_config(), &mut prompter).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_project(root, &config).unwrap();
+
+        // Per-type directories track the designed set: dropped type absent, new
+        // type present.
+        assert!(root.join("docs/spikes").is_dir(), "new type dir created");
+        assert!(!root.join("docs/specs").exists(), "dropped type dir absent");
+        assert!(root.join("docs/rfcs").is_dir());
+        assert!(
+            root.join(".lazyspec/templates/template.md").is_file(),
+            "default template written"
+        );
+        assert!(
+            root.join("docs/convention/convention/index.md").is_file(),
+            "convention skeleton written"
+        );
+
+        let fs = RealFileSystem;
+        let loaded = Config::load(root, &fs).unwrap();
+        assert!(loaded.type_by_name("spike").is_some());
+        assert!(loaded.type_by_name("spec").is_none());
+
+        let store = Store::load(root, &loaded).unwrap();
+        let result = validate_full(&store, &loaded);
+        assert!(
+            result.errors.is_empty(),
+            "scaffolded project should validate clean: {:?}",
+            result.errors
+        );
+    }
 
     fn gh_issues_config() -> Config {
         let mut config = Config::default();
