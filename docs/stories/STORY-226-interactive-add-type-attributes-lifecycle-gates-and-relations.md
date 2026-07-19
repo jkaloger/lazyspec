@@ -1,7 +1,7 @@
 ---
 title: 'Interactive add-type: attributes, lifecycle, gates and relations'
 type: story
-status: accepted
+status: in-progress
 author: jkaloger
 date: 2026-07-19
 tags: []
