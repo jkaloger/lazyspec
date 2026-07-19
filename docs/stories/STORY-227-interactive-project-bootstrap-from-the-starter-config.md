@@ -1,7 +1,7 @@
 ---
 title: Interactive project bootstrap from the starter config
 type: story
-status: accepted
+status: in-progress
 author: jkaloger
 date: 2026-07-19
 tags: []
