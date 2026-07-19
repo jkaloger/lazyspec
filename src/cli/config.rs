@@ -189,9 +189,11 @@ pub fn classify_add_type_args(positionals: [&Option<String>; 4]) -> Result<AddTy
     }
 }
 
-/// Prompt for a type's core fields on a TTY and delegate to `run_add_type`.
-/// Only the fields the spec calls out are prompted; lifecycle, attributes,
-/// gates, and relations are left to their defaults / the flag path.
+/// Prompt for a type's fields on a TTY and drive the same writers the flag path
+/// uses. After the core fields it optionally collects attributes and a parent
+/// type (fed to `run_add_type`), a custom lifecycle (`run_set_lifecycle`), and a
+/// gate on an existing parent-child rule (`run_add_gate`). Every optional section
+/// pre-validates prompt-side and re-asks on failure rather than aborting.
 pub fn run_add_type_interactive(
     root: &Path,
     fs: &dyn FileSystem,
@@ -252,6 +254,140 @@ pub fn run_add_type_interactive(
         default_authorship,
     )?;
 
+    // Attributes: keep offering to add one until declined. A malformed spec or a
+    // name already collected re-asks in place (no fresh "add another?" prompt) so
+    // a typo never costs the value or ends the session.
+    let mut attributes: Vec<String> = Vec::new();
+    let mut attribute_names: Vec<String> = Vec::new();
+    while prompter.confirm("Add an attribute", false)? {
+        loop {
+            let spec = prompter.ask("Attribute (NAME:KIND[:required][:VALUES])", None)?;
+            let def = match parse_attr_spec(&spec) {
+                Ok(def) => def,
+                Err(e) => {
+                    println!("{e}; try again");
+                    continue;
+                }
+            };
+            if attribute_names.contains(&def.name) {
+                println!(
+                    "attribute \"{}\" was already added; choose another",
+                    def.name
+                );
+                continue;
+            }
+            attribute_names.push(def.name);
+            attributes.push(spec);
+            break;
+        }
+    }
+
+    // Parent: only an already-defined type may be chosen. Skip entirely when the
+    // project has no types to point at.
+    let type_names: Vec<&str> = config
+        .documents
+        .types
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
+    let parent_type = if !type_names.is_empty() && prompter.confirm("Set a parent type", false)? {
+        Some(loop {
+            let choice = prompter.select("Parent", &type_names, type_names[0])?;
+            if type_names.contains(&choice.as_str()) {
+                break choice;
+            }
+            println!("\"{choice}\" is not a defined type; choose one of the listed names");
+        })
+    } else {
+        None
+    };
+
+    // Lifecycle: declining leaves the type's lifecycle empty so it inherits the
+    // store preset via `effective_lifecycle`. When designing one, an edge naming a
+    // state outside the collected set (source `*` excepted) re-asks in place.
+    let custom_lifecycle = if prompter.confirm("Design a custom lifecycle", false)? {
+        let mut states: Vec<String> = Vec::new();
+        loop {
+            let state = prompter.ask("Lifecycle state (blank to finish)", None)?;
+            if state.is_empty() {
+                if states.is_empty() {
+                    println!("at least one state is required");
+                    continue;
+                }
+                break;
+            }
+            states.push(state);
+        }
+        let mut edges: Vec<String> = Vec::new();
+        loop {
+            let spec = prompter.ask("Edge FROM:TO (blank to finish)", None)?;
+            if spec.is_empty() {
+                break;
+            }
+            let edge = match parse_edge(&spec) {
+                Ok(edge) => edge,
+                Err(e) => {
+                    println!("{e}; try again");
+                    continue;
+                }
+            };
+            let to_ok = states.contains(&edge.to);
+            let from_ok = edge.from == "*" || states.contains(&edge.from);
+            if !to_ok || !from_ok {
+                println!("edge \"{spec}\" names a state that isn't in the lifecycle; try again");
+                continue;
+            }
+            edges.push(spec);
+        }
+        Some((states, edges))
+    } else {
+        None
+    };
+
+    // Gate: attach `require_parent_status` to an existing parent-child rule. Only
+    // a status the parent type's effective lifecycle carries is accepted.
+    let parent_child_rules: Vec<(String, String)> = config
+        .rules
+        .iter()
+        .filter_map(|r| match r {
+            ValidationRule::ParentChild { name, parent, .. } => {
+                Some((name.clone(), parent.clone()))
+            }
+            ValidationRule::RelationExistence { .. } => None,
+        })
+        .collect();
+    let gate = if !parent_child_rules.is_empty()
+        && prompter.confirm("Gate a parent-child rule", false)?
+    {
+        let rule_names: Vec<&str> = parent_child_rules.iter().map(|(n, _)| n.as_str()).collect();
+        let rule = loop {
+            let choice = prompter.select("Rule", &rule_names, rule_names[0])?;
+            if rule_names.contains(&choice.as_str()) {
+                break choice;
+            }
+            println!("\"{choice}\" is not a parent-child rule; choose one of the listed names");
+        };
+        let parent_name = &parent_child_rules
+            .iter()
+            .find(|(n, _)| *n == rule)
+            .expect("selected rule came from this list")
+            .1;
+        let states = config
+            .type_by_name(parent_name)
+            .map(|t| t.effective_lifecycle().states.clone())
+            .unwrap_or_default();
+        let status = loop {
+            let answer = prompter.ask("Required parent status", None)?;
+            if states.contains(&answer) {
+                break answer;
+            }
+            println!("\"{answer}\" is not a lifecycle state of \"{parent_name}\"; choose another");
+        };
+        Some((rule, status))
+    } else {
+        None
+    };
+
     run_add_type(
         root,
         fs,
@@ -260,15 +396,23 @@ pub fn run_add_type_interactive(
         &dir,
         &prefix,
         icon.as_deref(),
-        None,
+        parent_type.as_deref(),
         singleton,
         Some(&store),
         Some(&numbering),
         None,
         Some(&authorship),
         None,
-        &[],
-    )
+        &attributes,
+    )?;
+
+    if let Some((states, edges)) = custom_lifecycle {
+        run_set_lifecycle(root, fs, &name, &states, &edges)?;
+    }
+    if let Some((rule, status)) = gate {
+        run_add_gate(root, fs, &rule, &status)?;
+    }
+    Ok(())
 }
 
 pub fn run_set_lifecycle(
@@ -834,6 +978,10 @@ require_parent_status = "accepted"
                 "incremental", // numbering
                 "y",           // singleton -> true
                 "generated",   // authorship
+                "n",           // add an attribute? no
+                "n",           // set a parent type? no
+                "n",           // design a custom lifecycle? no
+                "n",           // gate a parent-child rule? no
             ]
             .iter()
             .map(|s| s.to_string())
@@ -880,6 +1028,7 @@ require_parent_status = "accepted"
                 "", // numbering -> incremental
                 "", // singleton -> false
                 "", // authorship -> default
+                "n", "n", "n", "n", // attributes / parent / lifecycle / gate declined
             ]
             .iter()
             .map(|s| s.to_string())
@@ -909,7 +1058,8 @@ require_parent_status = "accepted"
         let mut prompter = ScriptedPrompter::new(
             [
                 "task", "tasks", "", "", // dir and prefix blank -> defaults
-                "", "", "", "", "",
+                "", "", "", "", "", // icon / store / numbering / singleton / authorship
+                "n", "n", "n", "n", // attributes / parent / lifecycle / gate declined
             ]
             .iter()
             .map(|s| s.to_string())
@@ -1095,5 +1245,274 @@ require_parent_status = "accepted"
         // The relation-existence rule is untouched.
         assert!(after.contains(r#"require = "any-relation""#));
         Config::parse(&after).unwrap();
+    }
+
+    fn scripted(answers: &[&str]) -> ScriptedPrompter {
+        ScriptedPrompter::new(answers.iter().map(|s| s.to_string()).collect())
+    }
+
+    // STORY-226 AC1: an interactively entered attribute spec is validated and
+    // written into the new type's frontmatter definition.
+    #[test]
+    fn interactive_add_type_collects_attributes() {
+        let (_dir, path, fs) = fixture(SRC);
+        let mut prompter = scripted(&[
+            "widget",
+            "widgets",
+            "",
+            "", // core fields (dir/prefix default)
+            "",
+            "",
+            "",
+            "",
+            "", // icon/store/numbering/singleton/authorship
+            "y",
+            "priority:enum:low,medium,high", // add one attribute
+            "n",                             // add another? no
+            "n",                             // parent? no
+            "n",                             // custom lifecycle? no
+            "n",                             // gate? no
+        ]);
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let config = Config::parse(&after).unwrap();
+        let widget = config.type_by_name("widget").unwrap();
+        assert_eq!(
+            widget.attributes,
+            vec![AttrDef {
+                name: "priority".to_string(),
+                kind: AttrKind::Enum,
+                required: false,
+                values: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+            }]
+        );
+    }
+
+    // STORY-226 AC1: a malformed attribute spec (unknown kind, enum without
+    // values) is rejected and re-asked in place, not aborted, and the eventual
+    // valid spec is written.
+    #[test]
+    fn interactive_add_type_reprompts_bad_attr() {
+        let (_dir, path, fs) = fixture(SRC);
+        let mut prompter = scripted(&[
+            "widget",
+            "widgets",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",                       // core fields
+            "y",                      // add an attribute
+            "priority:bogus",         // unknown kind -> re-ask
+            "priority:enum",          // enum without values -> re-ask
+            "priority:enum:low,high", // valid
+            "n",                      // add another? no
+            "n",
+            "n",
+            "n", // parent / lifecycle / gate declined
+        ]);
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let config = Config::parse(&after).unwrap();
+        let widget = config.type_by_name("widget").unwrap();
+        assert_eq!(widget.attributes.len(), 1);
+        assert_eq!(widget.attributes[0].name, "priority");
+        assert_eq!(widget.attributes[0].kind, AttrKind::Enum);
+        assert_eq!(
+            widget.attributes[0].values,
+            vec!["low".to_string(), "high".to_string()]
+        );
+    }
+
+    // STORY-226 AC2: while designing a custom lifecycle, an edge naming a state
+    // outside the collected set is rejected and re-asked; the valid edge is kept.
+    #[test]
+    fn interactive_add_type_custom_lifecycle_reprompts_bad_edge() {
+        let (_dir, path, fs) = fixture(SRC);
+        let mut prompter = scripted(&[
+            "widget",
+            "widgets",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",  // core fields
+            "n", // no attributes
+            "n", // no parent
+            "y", // design a custom lifecycle
+            "draft",
+            "done",
+            "",           // states, then blank to finish
+            "draft:nope", // `nope` isn't a state -> re-ask
+            "draft:done", // valid
+            "",           // blank to finish edges
+            "n",          // no gate
+        ]);
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let config = Config::parse(&after).unwrap();
+        let widget = config.type_by_name("widget").unwrap();
+        assert_eq!(
+            widget.lifecycle.states,
+            vec!["draft".to_string(), "done".to_string()]
+        );
+        assert_eq!(widget.lifecycle.edges.len(), 1);
+        assert_eq!(widget.lifecycle.edges[0].from, "draft");
+        assert_eq!(widget.lifecycle.edges[0].to, "done");
+    }
+
+    // STORY-226 AC2: declining the custom-lifecycle prompt leaves the lifecycle
+    // empty, so the type inherits the store preset via effective_lifecycle.
+    #[test]
+    fn interactive_add_type_declined_lifecycle_inherits_preset() {
+        let (_dir, path, fs) = fixture(SRC);
+        let mut prompter = scripted(&[
+            "widget", "widgets", "", "", "", "", "", "", "", // core fields
+            "n", "n", "n", "n", // attributes / parent / lifecycle / gate declined
+        ]);
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let config = Config::parse(&after).unwrap();
+        let widget = config.type_by_name("widget").unwrap();
+        // Empty lifecycle -> inherits the store preset via effective_lifecycle.
+        assert!(widget.lifecycle.states.is_empty());
+        assert!(widget.lifecycle.edges.is_empty());
+        assert!(widget.effective_lifecycle().states.is_empty());
+    }
+
+    // STORY-226 AC3: only already-defined types are selectable as a parent; an
+    // unknown answer is rejected and re-asked rather than accepted.
+    #[test]
+    fn interactive_add_type_parent_only_from_existing() {
+        let (_dir, path, fs) = fixture(SRC);
+        let mut prompter = scripted(&[
+            "widget", "widgets", "", "", "", "", "", "", "",      // core fields
+            "n",     // no attributes
+            "y",     // set a parent type
+            "bogus", // not a defined type -> re-ask
+            "rfc",   // valid existing type
+            "n", "n", // lifecycle / gate declined
+        ]);
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let config = Config::parse(&after).unwrap();
+        assert_eq!(
+            config
+                .type_by_name("widget")
+                .unwrap()
+                .parent_type
+                .as_deref(),
+            Some("rfc")
+        );
+    }
+
+    // STORY-226 AC4: gating a parent-child rule with a status the parent's
+    // lifecycle lacks is rejected and re-asked; the valid status is written.
+    #[test]
+    fn interactive_add_type_gate_reprompts_unknown_status() {
+        let (_dir, path, fs) = fixture(SRC);
+        let mut prompter = scripted(&[
+            "widget",
+            "widgets",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "", // core fields
+            "n",
+            "n",
+            "n",                 // attributes / parent / lifecycle declined
+            "y",                 // gate a parent-child rule
+            "stories-need-rfcs", // the only parent-child rule (parent = rfc)
+            "shipped",           // rfc lifecycle lacks `shipped` -> re-ask
+            "review",            // rfc lifecycle has `review`
+        ]);
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let json = show(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(
+            rule_named(&json, "stories-need-rfcs")["require_parent_status"],
+            "review"
+        );
+    }
+
+    // STORY-226 AC5: the full interactive flow produces a byte-identical config to
+    // the equivalent add-type(+attrs+parent) -> set-lifecycle -> add-gate flag
+    // chain, and the result reparses cleanly.
+    #[test]
+    fn interactive_full_flow_matches_flag_chain() {
+        let (_dir_a, path_a, fs_a) = fixture(SRC);
+        let mut prompter = scripted(&[
+            "widget",
+            "widgets",
+            "",
+            "", // core fields (dir/prefix default)
+            "",
+            "",
+            "",
+            "",
+            "", // icon/store/numbering/singleton/authorship
+            "y",
+            "priority:enum:low,medium,high",
+            "n", // one attribute
+            "y",
+            "rfc", // parent = rfc
+            "y",
+            "draft",
+            "done",
+            "",
+            "draft:done",
+            "", // custom lifecycle
+            "y",
+            "stories-need-rfcs",
+            "review", // gate
+        ]);
+        run_add_type_interactive(path_a.parent().unwrap(), &fs_a, &mut prompter).unwrap();
+        let interactive_out = std::fs::read_to_string(&path_a).unwrap();
+
+        let (_dir_b, path_b, fs_b) = fixture(SRC);
+        let root_b = path_b.parent().unwrap();
+        run_add_type(
+            root_b,
+            &fs_b,
+            "widget",
+            "widgets",
+            "docs/widgets",
+            "WIDGET",
+            None,
+            Some("rfc"),
+            false,
+            Some("filesystem"),
+            Some("incremental"),
+            None,
+            Some("assisted"),
+            None,
+            &["priority:enum:low,medium,high".to_string()],
+        )
+        .unwrap();
+        run_set_lifecycle(
+            root_b,
+            &fs_b,
+            "widget",
+            &["draft".to_string(), "done".to_string()],
+            &["draft:done".to_string()],
+        )
+        .unwrap();
+        run_add_gate(root_b, &fs_b, "stories-need-rfcs", "review").unwrap();
+        let flag_out = std::fs::read_to_string(&path_b).unwrap();
+
+        assert_eq!(interactive_out, flag_out);
+        Config::parse(&interactive_out).unwrap();
     }
 }
