@@ -326,7 +326,7 @@ Every mutation's `--json` output also reports whether the change reached the doc
 | `skills install [--runtime <claude\|agents-md>]`                | Install the embedded agent skill set into the project (both runtimes by default)                |
 | `config [--json]`                                               | Print the resolved `.lazyspec.toml` as JSON                                                     |
 | `config schema`                                                 | Print a JSON Schema for `.lazyspec.toml` (runs from any directory)                              |
-| `config add-type <name> <plural> <dir> <prefix>`                | Append a new document type to `.lazyspec.toml`                                                  |
+| `config add-type <name> <plural> <dir> <prefix>`                | Append a new document type to `.lazyspec.toml` (bare, on a TTY, prompts for the core fields)     |
 | `config set-lifecycle <type> [--state X] [--edge from:to]`      | Replace a type's lifecycle states and edges                                                     |
 | `config add-gate <rule> --status X`                             | Set the `require_parent_status` gate on a parent-child rule                                     |
 | `provenance add <id> <citation>`                                | Append a citation to a document's provenance list                                               |
@@ -518,6 +518,12 @@ lazyspec config schema                      # print a JSON Schema for .lazyspec.
 lazyspec config add-type spike spikes docs/spikes SPIKE \
   --icon "◆" --parent-type rfc --intent "throwaway exploration" \
   --authorship generated
+
+# With no positionals on a TTY, add-type prompts for the core fields
+# interactively (name, plural, dir, prefix, icon, store, numbering, singleton,
+# authorship). Flags, --json, and non-TTY invocations stay the canonical
+# scriptable path and still require all four positionals.
+lazyspec config add-type
 # also accepts --singleton, --store <filesystem|github-issues|github-milestones|github-projects|git-ref|clickup-tasks>,
 # --numbering <incremental|sqids|reserved>, --clickup-task-type <id> (clickup-tasks only)
 

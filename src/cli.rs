@@ -24,6 +24,7 @@ pub mod style;
 pub mod tag;
 pub mod update;
 pub mod validate;
+pub mod wizard;
 
 use crate::cli::config::ConfigCommand;
 use crate::cli::provenance::ProvenanceCommand;

@@ -1,3 +1,4 @@
+use crate::cli::wizard::Prompter;
 use crate::engine::config::{
     AttrDef, AttrKind, Authorship, Config, Edge, Lifecycle, NumberingStrategy, StoreBackend,
     TypeDef, ValidationRule,
@@ -25,16 +26,17 @@ pub enum ConfigCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Append a new document type to .lazyspec.toml
+    /// Append a new document type to .lazyspec.toml. With all four positionals
+    /// omitted on a TTY, prompts for the core fields interactively.
     AddType {
         /// Type name (e.g. spike)
-        name: String,
+        name: Option<String>,
         /// Plural form used for directory listings (e.g. spikes)
-        plural: String,
+        plural: Option<String>,
         /// Directory the type's documents live in (e.g. docs/spikes)
-        dir: String,
+        dir: Option<String>,
         /// ID prefix for the type (e.g. SPIKE)
-        prefix: String,
+        prefix: Option<String>,
         /// Icon shown in the TUI
         #[arg(long)]
         icon: Option<String>,
@@ -165,6 +167,108 @@ pub fn run_add_type(
     let out = write_config_in_place(&src, &config)?;
     fs.write(&path, &out)?;
     Ok(())
+}
+
+/// How `config add-type` should proceed given its four positionals: all four
+/// present runs the flag path, all four absent prompts, and any partial mix is
+/// a usage error.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AddTypeInvocation {
+    Positional,
+    Prompt,
+}
+
+pub fn classify_add_type_args(positionals: [&Option<String>; 4]) -> Result<AddTypeInvocation> {
+    let supplied = positionals.iter().filter(|p| p.is_some()).count();
+    match supplied {
+        4 => Ok(AddTypeInvocation::Positional),
+        0 => Ok(AddTypeInvocation::Prompt),
+        _ => bail!(
+            "config add-type needs all four of name, plural, dir, prefix (or none, to prompt interactively)"
+        ),
+    }
+}
+
+/// Prompt for a type's core fields on a TTY and delegate to `run_add_type`.
+/// Only the fields the spec calls out are prompted; lifecycle, attributes,
+/// gates, and relations are left to their defaults / the flag path.
+pub fn run_add_type_interactive(
+    root: &Path,
+    fs: &dyn FileSystem,
+    prompter: &mut dyn Prompter,
+) -> Result<()> {
+    let path = root.join(".lazyspec.toml");
+    let src = fs.read_to_string(&path)?;
+    let config = Config::parse(&src)?;
+
+    let default_authorship = match Authorship::default() {
+        Authorship::Human => "human",
+        Authorship::Assisted => "assisted",
+        Authorship::Generated => "generated",
+    };
+
+    // Re-prompt the identity fields until neither the name nor the prefix
+    // collides with an existing type, rather than aborting the whole session.
+    let (name, plural, dir, prefix) = loop {
+        let name = prompter.ask("Type name", None)?;
+        let plural = prompter.ask("Plural", None)?;
+        let dir = prompter.ask("Directory", Some(&format!("docs/{plural}")))?;
+        let prefix = prompter.ask("ID prefix", Some(&name.to_uppercase()))?;
+
+        if config.type_by_name(&name).is_some() {
+            println!("type \"{name}\" already exists; choose another");
+            continue;
+        }
+        if config.documents.types.iter().any(|t| t.prefix == prefix) {
+            println!("prefix \"{prefix}\" is already in use; choose another");
+            continue;
+        }
+        break (name, plural, dir, prefix);
+    };
+
+    let icon = prompter.ask("Icon", None)?;
+    let icon = if icon.is_empty() { None } else { Some(icon) };
+    let store = prompter.select(
+        "Store",
+        &[
+            "filesystem",
+            "github-issues",
+            "github-milestones",
+            "github-projects",
+            "git-ref",
+            "clickup-tasks",
+        ],
+        "filesystem",
+    )?;
+    let numbering = prompter.select(
+        "Numbering",
+        &["incremental", "sqids", "reserved"],
+        "incremental",
+    )?;
+    let singleton = prompter.confirm("Singleton", false)?;
+    let authorship = prompter.select(
+        "Authorship",
+        &["human", "assisted", "generated"],
+        default_authorship,
+    )?;
+
+    run_add_type(
+        root,
+        fs,
+        &name,
+        &plural,
+        &dir,
+        &prefix,
+        icon.as_deref(),
+        None,
+        singleton,
+        Some(&store),
+        Some(&numbering),
+        None,
+        Some(&authorship),
+        None,
+        &[],
+    )
 }
 
 pub fn run_set_lifecycle(
@@ -342,6 +446,7 @@ fn parse_authorship(value: &str) -> Result<Authorship> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::wizard::ScriptedPrompter;
     use crate::engine::fs::RealFileSystem;
     use serde_json::Value;
     use std::path::PathBuf;
@@ -713,6 +818,130 @@ require_parent_status = "accepted"
 
     // AC4: set-lifecycle replaces the whole lifecycle (not a merge) and is gated
     // by an existing type.
+    // Interactive add-type writes byte-for-byte the same config as the
+    // equivalent flag call: same start config, same delegated TypeDef.
+    #[test]
+    fn interactive_add_type_matches_flag_call() {
+        let (_dir_a, path_a, fs_a) = fixture(SRC);
+        let mut prompter = ScriptedPrompter::new(
+            [
+                "spike",       // name
+                "spikes",      // plural
+                "docs/spikes", // dir
+                "SPIKE",       // prefix
+                "◆",           // icon
+                "filesystem",  // store
+                "incremental", // numbering
+                "y",           // singleton -> true
+                "generated",   // authorship
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        );
+        run_add_type_interactive(path_a.parent().unwrap(), &fs_a, &mut prompter).unwrap();
+        let interactive_out = std::fs::read_to_string(&path_a).unwrap();
+
+        let (_dir_b, path_b, fs_b) = fixture(SRC);
+        run_add_type(
+            path_b.parent().unwrap(),
+            &fs_b,
+            "spike",
+            "spikes",
+            "docs/spikes",
+            "SPIKE",
+            Some("◆"),
+            None,
+            true,
+            Some("filesystem"),
+            Some("incremental"),
+            None,
+            Some("generated"),
+            None,
+            &[],
+        )
+        .unwrap();
+        let flag_out = std::fs::read_to_string(&path_b).unwrap();
+
+        assert_eq!(interactive_out, flag_out);
+    }
+
+    // A duplicate name on the first pass re-prompts (consuming the next queued
+    // identity) rather than aborting, and never writes a duplicate.
+    #[test]
+    fn interactive_add_type_reprompts_on_duplicate_name() {
+        let (_dir, path, fs) = fixture(SRC);
+        let mut prompter = ScriptedPrompter::new(
+            [
+                "rfc", "rfcs", "", "", // first pass: rfc already exists -> reprompt
+                "spike", "spikes", "", "", // second pass: unique
+                "", // icon
+                "", // store -> filesystem
+                "", // numbering -> incremental
+                "", // singleton -> false
+                "", // authorship -> default
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        );
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let config = Config::parse(&after).unwrap();
+        assert_eq!(
+            config
+                .documents
+                .types
+                .iter()
+                .filter(|t| t.name == "rfc")
+                .count(),
+            1,
+            "rfc must not be duplicated"
+        );
+        assert!(config.type_by_name("spike").is_some());
+    }
+
+    // Blank dir and prefix answers fall back to docs/<plural> and UPPERCASE(name).
+    #[test]
+    fn interactive_add_type_applies_default_dir_and_prefix() {
+        let (_dir, path, fs) = fixture(SRC);
+        let mut prompter = ScriptedPrompter::new(
+            [
+                "task", "tasks", "", "", // dir and prefix blank -> defaults
+                "", "", "", "", "",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        );
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let config = Config::parse(&after).unwrap();
+        let task = config.type_by_name("task").unwrap();
+        assert_eq!(task.dir, "docs/tasks");
+        assert_eq!(task.prefix, "TASK");
+    }
+
+    #[test]
+    fn classify_add_type_args_enforces_all_or_none() {
+        let some = Some("x".to_string());
+        assert_eq!(
+            classify_add_type_args([&some, &some, &some, &some]).unwrap(),
+            AddTypeInvocation::Positional
+        );
+        assert_eq!(
+            classify_add_type_args([&None, &None, &None, &None]).unwrap(),
+            AddTypeInvocation::Prompt
+        );
+        let err = classify_add_type_args([&some, &some, &None, &None]).unwrap_err();
+        assert!(
+            err.to_string().contains("all four"),
+            "partial positionals should error: {err}"
+        );
+    }
+
     #[test]
     fn set_lifecycle_replaces_states_and_edges() {
         let (_dir, path, fs) = fixture(SRC);

@@ -599,7 +599,7 @@ fn main() -> anyhow::Result<()> {
                 )?;
             }
         },
-        Some(Commands::Config { command, json: _ }) => {
+        Some(Commands::Config { command, json }) => {
             use lazyspec::cli::config::ConfigCommand;
             match command {
                 None | Some(ConfigCommand::Show { .. }) => {
@@ -624,23 +624,45 @@ fn main() -> anyhow::Result<()> {
                     clickup_task_type,
                     attributes,
                 }) => {
-                    lazyspec::cli::config::run_add_type(
-                        &cwd,
-                        &fs,
-                        &name,
-                        &plural,
-                        &dir,
-                        &prefix,
-                        icon.as_deref(),
-                        parent_type.as_deref(),
-                        singleton,
-                        store.as_deref(),
-                        numbering.as_deref(),
-                        intent.as_deref(),
-                        authorship.as_deref(),
-                        clickup_task_type,
-                        &attributes,
-                    )?;
+                    use lazyspec::cli::config::{classify_add_type_args, AddTypeInvocation};
+                    use std::io::IsTerminal;
+                    match classify_add_type_args([&name, &plural, &dir, &prefix])? {
+                        AddTypeInvocation::Positional => {
+                            lazyspec::cli::config::run_add_type(
+                                &cwd,
+                                &fs,
+                                name.as_deref().unwrap(),
+                                plural.as_deref().unwrap(),
+                                dir.as_deref().unwrap(),
+                                prefix.as_deref().unwrap(),
+                                icon.as_deref(),
+                                parent_type.as_deref(),
+                                singleton,
+                                store.as_deref(),
+                                numbering.as_deref(),
+                                intent.as_deref(),
+                                authorship.as_deref(),
+                                clickup_task_type,
+                                &attributes,
+                            )?;
+                        }
+                        AddTypeInvocation::Prompt => {
+                            let interactive = !json
+                                && std::io::stdin().is_terminal()
+                                && std::io::stdout().is_terminal();
+                            if !interactive {
+                                anyhow::bail!(
+                                    "config add-type requires name, plural, dir, and prefix (or run interactively on a TTY)"
+                                );
+                            }
+                            let mut prompter = lazyspec::cli::wizard::StdinPrompter::new();
+                            lazyspec::cli::config::run_add_type_interactive(
+                                &cwd,
+                                &fs,
+                                &mut prompter,
+                            )?;
+                        }
+                    }
                 }
                 Some(ConfigCommand::SetLifecycle {
                     name,
