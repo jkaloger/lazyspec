@@ -58,6 +58,15 @@ pub enum ConfigCommand {
         /// Authorship ceiling: human, assisted, or generated
         #[arg(long)]
         authorship: Option<String>,
+        /// GitHub issue tag (label); only valid on store = github-issues
+        #[arg(long)]
+        github_issue_tag: Option<String>,
+        /// GitHub issue type; only valid on store = github-issues
+        #[arg(long)]
+        github_issue_type: Option<String>,
+        /// ClickUp list ID documents are created in; only valid on store = clickup-tasks
+        #[arg(long)]
+        clickup_list_id: Option<String>,
         /// ClickUp custom task type (numeric custom_item_id); only valid on store = clickup-tasks
         #[arg(long)]
         clickup_task_type: Option<i64>,
@@ -111,6 +120,9 @@ pub fn run_add_type(
     numbering: Option<&str>,
     intent: Option<&str>,
     authorship: Option<&str>,
+    github_issue_tag: Option<&str>,
+    github_issue_type: Option<&str>,
+    clickup_list_id: Option<&str>,
     clickup_task_type: Option<i64>,
     attributes: &[String],
 ) -> Result<()> {
@@ -152,6 +164,9 @@ pub fn run_add_type(
             .map(parse_authorship)
             .transpose()?
             .unwrap_or_default(),
+        github_issue_tag,
+        github_issue_type,
+        clickup_list_id,
         clickup_task_type,
         attributes,
     ));
@@ -177,6 +192,9 @@ fn type_def_from_parts(
     numbering: NumberingStrategy,
     intent: Option<&str>,
     authorship: Authorship,
+    github_issue_tag: Option<&str>,
+    github_issue_type: Option<&str>,
+    clickup_list_id: Option<&str>,
     clickup_task_type: Option<i64>,
     attributes: Vec<AttrDef>,
 ) -> TypeDef {
@@ -197,9 +215,9 @@ fn type_def_from_parts(
         lifecycle: Lifecycle::default(),
         attributes,
         label_override: None,
-        github_issue_tag: None,
-        github_issue_type: None,
-        clickup_list_id: None,
+        github_issue_tag: github_issue_tag.map(str::to_string),
+        github_issue_type: github_issue_type.map(str::to_string),
+        clickup_list_id: clickup_list_id.map(str::to_string),
         clickup_task_type,
         clickup_custom_field_map: None,
     }
@@ -243,6 +261,10 @@ pub struct CollectedType {
     pub parent_type: Option<String>,
     pub lifecycle: Option<(Vec<String>, Vec<String>)>,
     pub gate: Option<(String, String)>,
+    pub github_issue_tag: Option<String>,
+    pub github_issue_type: Option<String>,
+    pub clickup_list_id: Option<String>,
+    pub clickup_task_type: Option<i64>,
 }
 
 /// Prompt for a type's fields on a TTY, validating each section against `config`
@@ -292,6 +314,35 @@ pub fn collect_type_interactive(
         ],
         "filesystem",
     )?;
+
+    let mut github_issue_tag = None;
+    let mut github_issue_type = None;
+    let mut clickup_list_id = None;
+    let mut clickup_task_type = None;
+    match store.as_str() {
+        "clickup-tasks" => {
+            let list_id = prompter.ask("ClickUp list ID", None)?;
+            clickup_list_id = (!list_id.is_empty()).then_some(list_id);
+            clickup_task_type = loop {
+                let answer = prompter.ask("ClickUp task type (numeric custom_item_id)", None)?;
+                if answer.is_empty() {
+                    break None;
+                }
+                match answer.parse::<i64>() {
+                    Ok(n) => break Some(n),
+                    Err(_) => println!("\"{answer}\" is not a number; try again"),
+                }
+            };
+        }
+        "github-issues" => {
+            let tag = prompter.ask("GitHub issue tag", None)?;
+            github_issue_tag = (!tag.is_empty()).then_some(tag);
+            let issue_type = prompter.ask("GitHub issue type", None)?;
+            github_issue_type = (!issue_type.is_empty()).then_some(issue_type);
+        }
+        _ => {}
+    }
+
     let numbering = prompter.select(
         "Numbering",
         &["incremental", "sqids", "reserved"],
@@ -448,6 +499,10 @@ pub fn collect_type_interactive(
         parent_type,
         lifecycle: custom_lifecycle,
         gate,
+        github_issue_tag,
+        github_issue_type,
+        clickup_list_id,
+        clickup_task_type,
     })
 }
 
@@ -561,7 +616,10 @@ pub fn apply_collected_type(config: &mut Config, collected: &CollectedType) -> R
         parse_numbering(&collected.numbering)?,
         None,
         parse_authorship(&collected.authorship)?,
-        None,
+        collected.github_issue_tag.as_deref(),
+        collected.github_issue_type.as_deref(),
+        collected.clickup_list_id.as_deref(),
+        collected.clickup_task_type,
         attributes,
     ));
 
@@ -622,6 +680,10 @@ pub fn run_add_type_interactive(
         parent_type,
         lifecycle: custom_lifecycle,
         gate,
+        github_issue_tag,
+        github_issue_type,
+        clickup_list_id,
+        clickup_task_type,
     } = collect_type_interactive(&config, prompter)?;
 
     run_add_type(
@@ -638,7 +700,10 @@ pub fn run_add_type_interactive(
         Some(&numbering),
         None,
         Some(&authorship),
-        None,
+        github_issue_tag.as_deref(),
+        github_issue_type.as_deref(),
+        clickup_list_id.as_deref(),
+        clickup_task_type,
         &attributes,
     )?;
 
@@ -1005,6 +1070,9 @@ require_parent_status = "accepted"
             Some("throwaway exploration"),
             Some("generated"),
             None,
+            None,
+            None,
+            None,
             &[],
         )
         .unwrap();
@@ -1041,6 +1109,9 @@ require_parent_status = "accepted"
             None,
             None,
             false,
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -1142,6 +1213,9 @@ require_parent_status = "accepted"
             None,
             None,
             None,
+            None,
+            None,
+            None,
             &["estimate:int".to_string(), "estimate:bool".to_string()],
         )
         .unwrap_err();
@@ -1168,6 +1242,9 @@ require_parent_status = "accepted"
             None,
             None,
             None,
+            None,
+            None,
+            None,
             Some(1001),
             &[],
         )
@@ -1176,6 +1253,40 @@ require_parent_status = "accepted"
         let after = std::fs::read_to_string(&path).unwrap();
         let json = show(&after);
         assert_eq!(type_named(&json, "task")["clickup_task_type"], 1001);
+    }
+
+    // The GitHub tag/type and ClickUp list-id string flags supplied to add-type
+    // are written onto the TypeDef and surface in `config --json` after a reload.
+    #[test]
+    fn add_type_writes_remote_string_fields() {
+        let (_dir, path, fs) = fixture(SRC);
+        run_add_type(
+            path.parent().unwrap(),
+            &fs,
+            "issue",
+            "issues",
+            "docs/issues",
+            "ISSUE",
+            None,
+            None,
+            false,
+            None, // default store; the remote fields are written regardless
+            None,
+            None,
+            None,
+            Some("Bug"),     // github_issue_tag
+            Some("Defect"),  // github_issue_type
+            Some("list-42"), // clickup_list_id
+            None,
+            &[],
+        )
+        .unwrap();
+
+        let json = show(&std::fs::read_to_string(&path).unwrap());
+        let issue = type_named(&json, "issue");
+        assert_eq!(issue["github_issue_tag"], "Bug");
+        assert_eq!(issue["github_issue_type"], "Defect");
+        assert_eq!(issue["clickup_list_id"], "list-42");
     }
 
     #[test]
@@ -1192,6 +1303,9 @@ require_parent_status = "accepted"
             None,
             None,
             false,
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -1249,6 +1363,9 @@ require_parent_status = "accepted"
             Some("incremental"),
             None,
             Some("generated"),
+            None,
+            None,
+            None,
             None,
             &[],
         )
@@ -1427,6 +1544,9 @@ require_parent_status = "accepted"
             None,
             None,
             false,
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -1649,6 +1769,189 @@ require_parent_status = "accepted"
         assert!(edges.is_empty());
     }
 
+    // ITERATION-338: choosing clickup-tasks prompts for the store's defaults right
+    // after the store select; both land on the collected type.
+    #[test]
+    fn collect_type_clickup_captures_list_id_and_task_type() {
+        let config = Config::parse(SRC).unwrap();
+        let mut prompter = scripted(&[
+            "task",
+            "tasks",
+            "",
+            "",
+            "",              // name/plural/dir/prefix/icon
+            "clickup-tasks", // store
+            "list123",       // clickup list id
+            "1001",          // clickup task type
+            "",
+            "",
+            "", // numbering/singleton/authorship
+            "n",
+            "n",
+            "n",
+            "n", // attributes / parent / lifecycle / gate declined
+        ]);
+        let collected = collect_type_interactive(&config, &mut prompter).unwrap();
+        assert_eq!(collected.clickup_list_id.as_deref(), Some("list123"));
+        assert_eq!(collected.clickup_task_type, Some(1001));
+        assert_eq!(collected.github_issue_tag, None);
+        assert_eq!(collected.github_issue_type, None);
+    }
+
+    // ITERATION-338: a non-numeric clickup task type is rejected and re-asked in
+    // place; a blank leaves it None.
+    #[test]
+    fn collect_type_clickup_task_type_reasks_on_non_numeric() {
+        let config = Config::parse(SRC).unwrap();
+        let mut prompter = scripted(&[
+            "task",
+            "tasks",
+            "",
+            "",
+            "",
+            "clickup-tasks",
+            "",     // clickup list id (blank -> None)
+            "nope", // not a number -> re-ask
+            "42",   // valid
+            "",
+            "",
+            "",
+            "n",
+            "n",
+            "n",
+            "n",
+        ]);
+        let collected = collect_type_interactive(&config, &mut prompter).unwrap();
+        assert_eq!(collected.clickup_list_id, None);
+        assert_eq!(collected.clickup_task_type, Some(42));
+    }
+
+    // ITERATION-338: choosing github-issues prompts for tag and issue type.
+    #[test]
+    fn collect_type_github_captures_tag_and_issue_type() {
+        let config = Config::parse(SRC).unwrap();
+        let mut prompter = scripted(&[
+            "issue",
+            "issues",
+            "",
+            "",
+            "",
+            "github-issues", // store
+            "Bug",           // github issue tag
+            "Bug",           // github issue type
+            "",
+            "",
+            "",
+            "n",
+            "n",
+            "n",
+            "n",
+        ]);
+        let collected = collect_type_interactive(&config, &mut prompter).unwrap();
+        assert_eq!(collected.github_issue_tag.as_deref(), Some("Bug"));
+        assert_eq!(collected.github_issue_type.as_deref(), Some("Bug"));
+        assert_eq!(collected.clickup_list_id, None);
+        assert_eq!(collected.clickup_task_type, None);
+    }
+
+    // ITERATION-338: a filesystem type prompts for NONE of the remote defaults.
+    // No answers are queued for them: a spurious remote prompt would consume a
+    // later answer and the run would end short, so a clean run proves they skip.
+    #[test]
+    fn collect_type_filesystem_prompts_for_no_remote_fields() {
+        let config = Config::parse(SRC).unwrap();
+        let mut prompter = scripted(&[
+            "doc",
+            "docs",
+            "",
+            "",
+            "",
+            "filesystem", // store
+            "",
+            "",
+            "", // numbering/singleton/authorship
+            "n",
+            "n",
+            "n",
+            "n",
+        ]);
+        let collected = collect_type_interactive(&config, &mut prompter).unwrap();
+        assert_eq!(collected.github_issue_tag, None);
+        assert_eq!(collected.github_issue_type, None);
+        assert_eq!(collected.clickup_list_id, None);
+        assert_eq!(collected.clickup_task_type, None);
+    }
+
+    // ITERATION-338: the interactive add-type path persists the GitHub remote
+    // fields it collects, rather than discarding them before the disk write.
+    #[test]
+    fn interactive_add_type_persists_github_fields() {
+        // A github-issues type reparses only with a [github] section present.
+        let src = format!("[github]\nrepo = \"owner/repo\"\n\n{SRC}");
+        let (_dir, path, fs) = fixture(&src);
+        let mut prompter = scripted(&[
+            "issue",
+            "issues",
+            "",
+            "",
+            "",              // name/plural/dir/prefix/icon
+            "github-issues", // store
+            "Bug",           // github issue tag
+            "Defect",        // github issue type
+            "",
+            "",
+            "", // numbering/singleton/authorship
+            "n",
+            "n",
+            "n",
+            "n", // attributes / parent / lifecycle / gate declined
+        ]);
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let issue = Config::parse(&after)
+            .unwrap()
+            .type_by_name("issue")
+            .unwrap()
+            .clone();
+        assert_eq!(issue.github_issue_tag.as_deref(), Some("Bug"));
+        assert_eq!(issue.github_issue_type.as_deref(), Some("Defect"));
+    }
+
+    // ITERATION-338: the interactive add-type path persists both ClickUp remote
+    // fields, including clickup_task_type (which the pre-fix path dropped).
+    #[test]
+    fn interactive_add_type_persists_clickup_fields() {
+        let (_dir, path, fs) = fixture(SRC);
+        let mut prompter = scripted(&[
+            "task",
+            "tasks",
+            "",
+            "",
+            "",              // name/plural/dir/prefix/icon
+            "clickup-tasks", // store
+            "list-7",        // clickup list id
+            "2002",          // clickup task type
+            "",
+            "",
+            "", // numbering/singleton/authorship
+            "n",
+            "n",
+            "n",
+            "n", // attributes / parent / lifecycle / gate declined
+        ]);
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let task = Config::parse(&after)
+            .unwrap()
+            .type_by_name("task")
+            .unwrap()
+            .clone();
+        assert_eq!(task.clickup_list_id.as_deref(), Some("list-7"));
+        assert_eq!(task.clickup_task_type, Some(2002));
+    }
+
     // STORY-226 AC2: declining the custom-lifecycle prompt leaves the lifecycle
     // empty, so the type inherits the store preset via effective_lifecycle.
     #[test]
@@ -1776,6 +2079,9 @@ require_parent_status = "accepted"
             Some("incremental"),
             None,
             Some("assisted"),
+            None,
+            None,
+            None,
             None,
             &["priority:enum:low,medium,high".to_string()],
         )

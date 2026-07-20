@@ -638,6 +638,9 @@ fn main() -> anyhow::Result<()> {
                     numbering,
                     intent,
                     authorship,
+                    github_issue_tag,
+                    github_issue_type,
+                    clickup_list_id,
                     clickup_task_type,
                     attributes,
                 }) => {
@@ -659,6 +662,9 @@ fn main() -> anyhow::Result<()> {
                                 numbering.as_deref(),
                                 intent.as_deref(),
                                 authorship.as_deref(),
+                                github_issue_tag.as_deref(),
+                                github_issue_type.as_deref(),
+                                clickup_list_id.as_deref(),
                                 clickup_task_type,
                                 &attributes,
                             )?;

@@ -539,7 +539,10 @@ lazyspec config add-type spike spikes docs/spikes SPIKE \
 
 # With no positionals on a TTY, add-type prompts interactively. After the core
 # fields (name, plural, dir, prefix, icon, store, numbering, singleton,
-# authorship) it optionally walks through: attributes (repeat until declined; a
+# authorship) -- where choosing store = github-issues additionally prompts for
+# the GitHub issue tag/label and issue type, and store = clickup-tasks for the
+# ClickUp list id and task type (other stores prompt for neither) -- it
+# optionally walks through: attributes (repeat until declined; a
 # malformed or duplicate spec re-asks in place), a parent type (chosen only from
 # already-defined types), a custom lifecycle (enter the states as one
 # comma-separated line, then FROM:TO edges, where an edge naming an unknown state
@@ -553,7 +556,8 @@ lazyspec config add-type spike spikes docs/spikes SPIKE \
 # still require all four positionals.
 lazyspec config add-type
 # also accepts --singleton, --store <filesystem|github-issues|github-milestones|github-projects|git-ref|clickup-tasks>,
-# --numbering <incremental|sqids|reserved>, --clickup-task-type <id> (clickup-tasks only)
+# --numbering <incremental|sqids|reserved>, --github-issue-tag <str> / --github-issue-type <str>
+# (github-issues only), and --clickup-list-id <str> / --clickup-task-type <id> (clickup-tasks only)
 
 # Declare custom frontmatter attributes with the type (repeat --attribute per
 # attribute; spec is NAME:KIND[:required][:VAL1,VAL2,...], kinds: int, float,
@@ -628,6 +632,10 @@ github_issue_type = "Feature"
   Issue Type equals that value; the label is not checked.
 - Both set: an issue must carry the tag **and** have the native issue type --
   AND, not OR.
+
+`config add-type ... --github-issue-tag <str>` and `--github-issue-type <str>`
+write these keys (both valid **only** on `store = "github-issues"`), and they
+surface in `config --json`.
 
 Because these are independent per-type rules, two types may legitimately
 match the same issue (e.g. both set `github_issue_type = "Feature"`). `fetch`
@@ -747,8 +755,9 @@ clickup_task_type = 1001
 
 The value is a numeric id only -- name-to-id resolution is not supported. It is
 valid **only** on `store = "clickup-tasks"`; setting it on any other store is a
-config error. `config add-type ... --clickup-task-type <id>` writes it, and it
-surfaces in `config --json`.
+config error. `config add-type ... --clickup-list-id <str>` (the List binding)
+and `--clickup-task-type <id>` write these keys -- both valid only on
+`store = "clickup-tasks"` -- and they surface in `config --json`.
 
 `lazyspec fetch` (optionally `--type <name>`) pulls the bound List's tasks
 (`GET /list/{id}/task`, paginated) using the token from `setup clickup`, and
