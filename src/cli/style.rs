@@ -149,6 +149,31 @@ pub fn warning_prefix() -> String {
     }
 }
 
+/// A section divider for wizard flow transitions and DAG-summary headers. Bold +
+/// underlined when colours are on; the bare text otherwise, so callers that embed
+/// it in a returned string keep byte-for-byte parity with the plain form.
+pub fn section_header(text: &str) -> String {
+    if colors_enabled() {
+        Style::new().bold().underlined().apply_to(text).to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+/// A success cue, mirroring `error_prefix`/`warning_prefix` but returning the
+/// whole line: a green check prefix when colours are on, the bare text otherwise.
+pub fn success_line(text: &str) -> String {
+    if colors_enabled() {
+        format!(
+            "{} {}",
+            Style::new().green().bold().apply_to("\u{2713}"),
+            text
+        )
+    } else {
+        text.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

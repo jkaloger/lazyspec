@@ -1,6 +1,7 @@
 use crate::cli::config::{
     apply_collected_type, collect_parent_child_rule, collect_type_interactive,
 };
+use crate::cli::style::{bold, dim, section_header, success_line, warning_prefix};
 use crate::cli::wizard::Prompter;
 use crate::engine::config::{
     default_rules, starter_relationships, starter_types, CertificationConfig, Config,
@@ -88,7 +89,10 @@ pub fn write_project(root: &Path, config: &Config) -> Result<()> {
     ensure_github_labels(config, root);
     ensure_gitignore(config, root)?;
 
-    println!("Initialized lazyspec in {}", root.display());
+    println!(
+        "{}",
+        success_line(&format!("Initialized lazyspec in {}", root.display()))
+    );
     Ok(())
 }
 
@@ -109,6 +113,7 @@ pub fn run_init_interactive(
     let config = if template == Some("starter") {
         design_config_interactive(starter_config(), prompter)?
     } else {
+        println!("{}", section_header("Start from"));
         let choice = prompter.select("Start from", &["blank", "starter"], "blank")?;
         if choice == "starter" {
             design_config_interactive(starter_config(), prompter)?
@@ -171,7 +176,7 @@ pub fn design_config_interactive(base: Config, prompter: &mut dyn Prompter) -> R
         if prompter.confirm("Write this config", true)? {
             return Ok(config);
         }
-        println!("discarded; starting over");
+        println!("{} {}", warning_prefix(), dim("discarded; starting over"));
     }
 }
 
@@ -222,7 +227,7 @@ pub fn design_config_from_scratch(prompter: &mut dyn Prompter) -> Result<Config>
                 let collected = collect_type_interactive(&config, prompter)?;
                 apply_collected_type(&mut config, &collected)?;
             } else if config.documents.types.is_empty() {
-                println!("at least one type is required");
+                println!("{} at least one type is required", warning_prefix());
             } else {
                 break;
             }
@@ -242,7 +247,7 @@ pub fn design_config_from_scratch(prompter: &mut dyn Prompter) -> Result<Config>
         if prompter.confirm("Write this config", true)? {
             return Ok(config);
         }
-        println!("discarded; starting over");
+        println!("{} {}", warning_prefix(), dim("discarded; starting over"));
     }
 }
 
@@ -254,21 +259,29 @@ fn render_dag_summary(config: &Config) -> String {
     use std::fmt::Write;
     let mut out = String::new();
 
-    out.push_str("\nTypes:\n");
+    let _ = writeln!(out, "\n{}", section_header("Types:"));
     for type_def in &config.documents.types {
         let _ = writeln!(
             out,
             "  {} (plural: {}, dir: {}, prefix: {}, store: {})",
-            type_def.name, type_def.plural, type_def.dir, type_def.prefix, type_def.store,
+            bold(&type_def.name),
+            type_def.plural,
+            dim(&type_def.dir),
+            dim(&type_def.prefix),
+            type_def.store,
         );
         let lifecycle = type_def.effective_lifecycle();
         let _ = writeln!(out, "    lifecycle: {}", lifecycle.states.join(", "));
         for edge in &lifecycle.edges {
-            let _ = writeln!(out, "      edge: {} -> {}", edge.from, edge.to);
+            let _ = writeln!(
+                out,
+                "      edge: {}",
+                dim(&format!("{} -> {}", edge.from, edge.to))
+            );
         }
     }
 
-    out.push_str("Parent-child rules:\n");
+    let _ = writeln!(out, "{}", section_header("Parent-child rules:"));
     let mut any_rule = false;
     for rule in &config.rules {
         if let ValidationRule::ParentChild {
@@ -281,7 +294,7 @@ fn render_dag_summary(config: &Config) -> String {
         {
             any_rule = true;
             let gate = match require_parent_status {
-                Some(status) => format!(", gate: parent status = {status}"),
+                Some(status) => dim(&format!(", gate: parent status = {status}")),
                 None => String::new(),
             };
             let severity = match severity {
@@ -290,7 +303,10 @@ fn render_dag_summary(config: &Config) -> String {
             };
             let _ = writeln!(
                 out,
-                "  {name}: {child} -> {parent} (severity: {severity}{gate})",
+                "  {}: {} (severity: {}{gate})",
+                bold(name),
+                dim(&format!("{child} -> {parent}")),
+                dim(severity),
             );
         }
     }
@@ -298,7 +314,7 @@ fn render_dag_summary(config: &Config) -> String {
         out.push_str("  (none)\n");
     }
 
-    out.push_str("Relation vocabulary:\n");
+    let _ = writeln!(out, "{}", section_header("Relation vocabulary:"));
     for rel in &config.relationships {
         let _ = writeln!(out, "  {}", rel.name);
     }
@@ -884,6 +900,43 @@ mod tests {
             "gate: {summary}"
         );
         assert!(summary.contains("implements"), "relation vocab: {summary}");
+    }
+
+    // ITERATION-331: colour parity. With colours forced off the summary carries
+    // zero ANSI escapes; with them forced on it does, yet every load-bearing
+    // substring survives because styling wraps whole tokens (never splits them).
+    #[test]
+    fn dag_summary_colour_parity() {
+        let mut prompter = ScriptedPrompter::new(full_scratch_answers());
+        let config = design_config_from_scratch(&mut prompter).unwrap();
+
+        console::set_colors_enabled(false);
+        let plain = render_dag_summary(&config);
+        assert!(
+            !plain.contains('\u{1b}'),
+            "colours-off summary must be free of ANSI: {plain:?}"
+        );
+
+        console::set_colors_enabled(true);
+        let colored = render_dag_summary(&config);
+        console::set_colors_enabled(false);
+
+        assert!(
+            colored.contains('\u{1b}'),
+            "colours-on summary should carry ANSI"
+        );
+        for needle in [
+            "rfc",
+            "draft -> accepted",
+            "story -> rfc",
+            "parent status = accepted",
+            "implements",
+        ] {
+            assert!(
+                colored.contains(needle),
+                "styled summary lost contiguous substring {needle:?}: {colored:?}"
+            );
+        }
     }
 
     // AC4: a full from-scratch design scaffolds into a temp dir that loads and

@@ -1,7 +1,7 @@
 ---
 title: Blank-by-default init wizard with --template starter
 type: iteration
-status: in-progress
+status: complete
 author: jkaloger
 date: 2026-07-20
 tags: []

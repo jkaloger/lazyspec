@@ -1,3 +1,4 @@
+use crate::cli::style::{bold, dim};
 use anyhow::{bail, Result};
 use std::io::{BufRead, Write};
 
@@ -70,8 +71,10 @@ impl<R: BufRead, W: Write> StdinPrompter<R, W> {
 impl<R: BufRead, W: Write> Prompter for StdinPrompter<R, W> {
     fn ask(&mut self, label: &str, default: Option<&str>) -> Result<String> {
         let prompt = match default {
-            Some(d) if !d.is_empty() => format!("{label} [{d}]: "),
-            _ => format!("{label}: "),
+            Some(d) if !d.is_empty() => {
+                format!("{} {}: ", bold(label), dim(&format!("[{d}]")))
+            }
+            _ => format!("{}: ", bold(label)),
         };
         let input = self.read_line(&prompt)?;
         if input.is_empty() {
@@ -84,7 +87,7 @@ impl<R: BufRead, W: Write> Prompter for StdinPrompter<R, W> {
 
     fn confirm(&mut self, label: &str, default: bool) -> Result<bool> {
         let hint = if default { "Y/n" } else { "y/N" };
-        let input = self.read_line(&format!("{label} [{hint}]: "))?;
+        let input = self.read_line(&format!("{} {}: ", bold(label), dim(&format!("[{hint}]"))))?;
         Ok(match input.to_ascii_lowercase().as_str() {
             "" => default,
             "y" | "yes" => true,
@@ -94,12 +97,16 @@ impl<R: BufRead, W: Write> Prompter for StdinPrompter<R, W> {
 
     fn select(&mut self, label: &str, options: &[&str], default: &str) -> Result<String> {
         loop {
-            writeln!(self.writer, "{label}:")?;
+            writeln!(self.writer, "{}:", bold(label))?;
             for (i, opt) in options.iter().enumerate() {
-                let cue = if *opt == default { " [default]" } else { "" };
+                let cue = if *opt == default {
+                    format!(" {}", dim("[default]"))
+                } else {
+                    String::new()
+                };
                 writeln!(self.writer, "  {}) {opt}{cue}", i + 1)?;
             }
-            let input = self.read_line(&format!("Choose [{default}]: "))?;
+            let input = self.read_line(&format!("Choose {}: ", dim(&format!("[{default}]"))))?;
             if input.is_empty() {
                 return Ok(default.to_string());
             }
