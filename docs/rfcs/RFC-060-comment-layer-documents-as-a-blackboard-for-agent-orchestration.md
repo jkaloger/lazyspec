@@ -1,11 +1,12 @@
 ---
-title: "Comment layer: attributed append-only annotations on documents"
+title: 'Comment layer: attributed append-only annotations on documents'
 type: rfc
-status: draft
-author: "jack"
+status: review
+author: jack
 date: 2026-07-12
 tags: []
-related: []
+related:
+- blocks: RFC-064
 ---
 
 ## Summary
