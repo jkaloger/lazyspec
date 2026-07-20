@@ -3,7 +3,8 @@
   <br>lazyspec
 </h1>
 <p align="center">
-    A context engine for humans & LLMs
+    Feature-rich documentation CLI & TUI for humans & LLMs.
+    <br>A context engine that unifies git-tracked markdown, GitHub issues, and more.
 </p>
 
 <p align="center">
@@ -417,12 +418,12 @@ Unresolvable refs render as:
 <details>
 <summary><h2>Configuration</h2></summary>
 
-`lazyspec init` creates a `.lazyspec.toml` in your project root. On a TTY it walks an interactive wizard that defaults to designing a **blank** DAG from scratch; pass `--template starter` to opt into tweaking the built-in starter DAG instead:
+`lazyspec init` creates a `.lazyspec.toml` in your project root. On a TTY it runs an interactive wizard: by default it designs a **blank** type DAG from scratch (prompting for each type, its lifecycle, and parent-child rules), or pass `--template starter` to tweak the built-in starter set instead. `--non-interactive`, `--json`, or a non-TTY writes the starter config unchanged.
 
-- **Blank** (the default) designs the whole type DAG from nothing. It prompts for each type (and its lifecycle), then, once at least two types exist, for parent-child rules with a severity and an optional parent-status gate. It defaults the relationship vocabulary to the type-agnostic starter set, renders a summary of the designed DAG, and asks to confirm before writing. Declining the confirmation discards the session and starts over; nothing is written.
-- **Starter** (`lazyspec init --template starter`, or picking `starter` on the first screen) starts from the built-in starter set of document types, relationships, and validation rules and lets you tweak it: set the naming pattern, keep or drop each starter type, and add new types, before it scaffolds the project. `--template starter` skips the first-screen prompt and goes straight to the starter designer.
+The engine ships no built-in types or vocabulary: the `[[types]]`, `[[relationships]]`, and `[[rules]]` in `.lazyspec.toml` are the sole source of truth. A missing `.lazyspec.toml` (or one with no `[[types]]`) errors and points you at `lazyspec init`; a config with no `[[relationships]]` points you at `lazyspec fix --config`.
 
-Pass `--non-interactive` (or `--json`, which implies it), or run in a non-TTY context (a pipe or CI), to skip the wizard and write the starter config unchanged; `--template` is ignored on those paths. The engine carries no built-in document types or relationship vocabulary: the `[[types]]`, `[[relationships]]`, and `[[rules]]` declared in `.lazyspec.toml` are the sole source of truth. A missing `.lazyspec.toml`, or a config with no `[[types]]`, is a hard error that points you at `lazyspec init`. A config missing the `[[relationships]]` block is a hard error that points you at `lazyspec fix --config`.
+> [!NOTE]
+> `lazyspec config schema` prints a JSON Schema for `.lazyspec.toml`, derived from the actual parser so it never drifts from the binary. It is the authoritative key reference: point [taplo](https://taplo.tamasfe.dev/) or Even Better TOML at it for editor autocomplete, or read it instead of inferring keys from this README. The sections below cover the main blocks with examples.
 
 ```toml
 [[types]]
@@ -489,195 +490,41 @@ lazyspec config add-gate stories-need-rfcs --status accepted
 
 `add-type` rejects a duplicate name; `set-lifecycle` replaces the whole lifecycle (it is a set, not a merge) and rejects an unknown type; `add-gate` rejects an unknown rule and refuses a `relation-existence` rule (the gate applies only to `parent-child` rules). The mutators require an already-valid config; run `lazyspec fix --config` first to migrate a legacy one.
 
-`config schema` is the exception: it needs no active project and runs from any directory, since the schema is a property of the binary, not of a project (every other `config` subcommand requires a `.lazyspec.toml` to read or edit). The schema is derived from the actual structs lazyspec deserializes the TOML into, so it tracks the real parser rather than a hand-maintained description that can drift. `--json` is accepted for consistency and produces identical output. Point a JSON-Schema-aware TOML language server at it (taplo, Even Better TOML) for editor autocomplete and hover docs, or save it as the authoritative machine-readable reference for a human or agent editing the config instead of inferring valid keys from this README:
+`config schema` needs no active project and runs from any directory (every other `config` subcommand requires a `.lazyspec.toml`). Save it as a machine-readable reference for a human or agent editing the config:
 
 ```sh
 lazyspec config schema > lazyspec.schema.json
 ```
 
-#### `github-issues` store auth
+### Store backends
 
-Types stored as GitHub issues (`--store github-issues`) shell out to the `gh` CLI, so run `gh auth login` first. Beyond plain issue access, lazyspec reads native GitHub fields (issue types, Projects v2 fields) over the GraphQL API, which needs the `project` scope on your token:
+Every `[[types]]` block has a `store` (default `filesystem`) that decides where its documents live and how mutations sync. Set it with `--store` on `config add-type`. Per-store config keys are documented in `lazyspec config schema`; per-command behaviour in `lazyspec <cmd> --help`.
 
-```sh
-gh auth refresh -s project
-```
+| Store                  | Documents are                                         | Auth                          |
+| ---------------------- | ----------------------------------------------------- | ----------------------------- |
+| `filesystem` (default) | Markdown files under the type's `dir`                 | none                          |
+| `github-issues`        | GitHub issues (labelled `lazyspec:{type}` by default) | `gh auth login`               |
+| `github-milestones`    | GitHub milestones                                     | `gh auth login`               |
+| `github-projects`      | Existing Projects v2 boards (associate only)          | `gh auth login`, `-s project` |
+| `git-ref`              | Docs in git custom refs, pushed live to the remote    | a writable git remote         |
+| `clickup-tasks`        | Tasks in one bound ClickUp List (read/write)          | `lazyspec setup clickup`      |
 
-Without it, schema-snapshot refreshes degrade gracefully: they emit a warning and keep serving the last cached snapshot, so offline validation still works.
+Remote-backed types cache into `.lazyspec/cache/` and refresh with `lazyspec fetch [--type <name>]`. `fetch` refreshes every remote type in one pass; a per-type failure still refreshes the rest, reports the error, and exits non-zero. `git-ref` mutations push live with `--force-with-lease`; if the remote is unreachable the change stays local and prints a `warning:`.
 
-A `[[types]]` entry may also declare `github_issue_tag` and/or `github_issue_type` to control which issues classify as that type, independent of (or instead of) the default `lazyspec:{type}` label:
-
-```toml
-[[types]]
-name = "feature"
-prefix = "FEAT"
-store = "github-issues"
-github_issue_tag = "customer-facing"
-github_issue_type = "Feature"
-```
-
-- Neither set: unchanged default, an issue matches when it carries the `lazyspec:{type}` label.
-- Only `github_issue_tag` set: matches every issue carrying that tag; the `lazyspec:{type}` label is not checked.
-- Only `github_issue_type` set: matches every issue whose native GitHub Issue Type equals that value; the label is not checked.
-- Both set: an issue must carry the tag **and** have the native issue type (AND, not OR).
-
-`config add-type ... --github-issue-tag <str>` and `--github-issue-type <str>` write these keys (both valid **only** on `store = "github-issues"`), and they surface in `config --json`.
-
-Because these are independent per-type rules, two types may legitimately match the same issue (for example both set `github_issue_type = "Feature"`). `fetch` then materializes one document per matching type from that single issue: same issue number, separate cache entries under each type's own prefix and numbering. Both documents stay independently `update`-able; each write goes to the same issue, so whichever update runs last wins on any field the two types share.
-
-`create` on a type with `github_issue_type` set also pushes that value onto the new issue's native issue type field (needs the `project` scope described above). Because the native issue type already classifies the issue, such a create attaches **no** `lazyspec:{type}` identity label; if `github_issue_tag` is also set, only that tag label is attached. A type with `github_issue_type` unset is unchanged: it still gets the default `lazyspec:{type}` label (or its `github_label` override).
-
-The `assignee` field is a **native GitHub field**, not part of the issue-body round-trip. On `fetch`, each issue's first native assignee is inherited into the document's `assignee` (multiple assignees map to the first; unassigned yields none), and the remote is the source of truth: a sync overwrites any local value. `update <id> --assignee <login>` writes it through: lazyspec diffs the requested login against the issue's current assignee and issues a dedicated `gh issue edit --add-assignee/--remove-assignee` (never the body comment), then reflects the new assignee in the cache. `--assignee ""` clears it.
-
-By default, a `github-issues`-backed type's issues are created, filtered, and tagged with the label `lazyspec:{name}`. A type's `github_label` field replaces that label with a literal string of your choosing:
-
-```toml
-[[types]]
-name = "ticket"
-plural = "tickets"
-dir = "docs/tickets"
-prefix = "TICKET"
-store = "github-issues"
-github_label = "Ticket"
-```
-
-With this set, `ticket` issues use the label `Ticket` instead of the default `lazyspec:ticket`. Omitting `github_label` leaves existing configs and their default labels unchanged. It only affects `github-issues`-backed types; setting it on any other `store` is inert.
-
-#### <a id="clickup-store-auth"></a>ClickUp store auth
-
-ClickUp has no `gh`-style CLI to piggyback on, so lazyspec owns its own credential store. Authenticate with a ClickUp personal API token (the `pk_` prefixed value from ClickUp's _Settings -> Apps_):
-
-```sh
-# prompt for the token without echoing it
-lazyspec setup clickup
-
-# or pass it non-interactively (scripts/CI)
-lazyspec setup clickup --token pk_XXXXXXXX
-
-# machine-readable result (never contains the token)
-lazyspec setup clickup --token pk_XXXXXXXX --json
-```
-
-`setup clickup` validates the token against ClickUp's `/user` endpoint **before** writing anything: an invalid or revoked token fails with a clear error and leaves any previously stored credential untouched.
-
-On success the token is stored **keychain-first**:
-
-- **Default, the OS keychain** (macOS Keychain, Windows Credential Manager, Linux Secret Service), via the `keyring` crate. The token is encrypted at rest by the OS and unlocked by your login session.
-- **Fallback, a plaintext file**, used only when no keychain backend is reachable (headless boxes, CI). The fallback is loud, never silent: lazyspec prints a warning and writes the token to a global, never-committed `~/.lazyspec/credentials.toml` under `[clickup] api_token`, creating the directory `0700` and the file `0600`. A credential file found with looser permissions on read is loudly warned about and tightened back to `0600`.
-
-Reads follow the same precedence: the keychain first, then the global file, never the repository. The token is a redacted value everywhere: it never appears in logs, error messages, or `--json` output.
-
-> The token is a bearer credential (full account access, no expiry). The credential store is global, not per-repo, and is read only from the OS keychain or your home directory, never from the repository.
-
-#### `clickup-tasks` store
-
-Types stored as `--store clickup-tasks` bind to exactly one ClickUp List via a per-type `clickup_list_id` and materialize that List's tasks as read-only documents, in the same cache shape as `github-issues` docs (`.lazyspec/cache/<type>/<ID>.md`):
-
-```toml
-[[types]]
-name = "task"
-plural = "tasks"
-dir = "docs/tasks"
-prefix = "TASK"
-store = "clickup-tasks"
-clickup_list_id = "901234567890"
-```
-
-An optional per-type `clickup_task_type` binds the type to a ClickUp **custom task type** by its numeric `custom_item_id`:
-
-```toml
-[[types]]
-name = "bug"
-plural = "bugs"
-dir = "docs/bugs"
-prefix = "BUG"
-store = "clickup-tasks"
-clickup_list_id = "901234567890"
-clickup_task_type = 1001
-```
-
-The value is a numeric id only; name-to-id resolution is not supported. It is valid **only** on `store = "clickup-tasks"`; setting it on any other store is a config error. `config add-type ... --clickup-list-id <str>` (the List binding) and `--clickup-task-type <id>` write these keys, both valid only on `store = "clickup-tasks"`, and they surface in `config --json`.
-
-**`fetch`.** `lazyspec fetch` (optionally `--type <name>`) pulls the bound List's tasks (`GET /list/{id}/task`, paginated) using the token from `setup clickup`, and writes one cache doc per task. The mapping:
-
-- doc `status` is the **raw ClickUp status string** verbatim, no local status mapping table;
-- `priority` (the ClickUp priority name), `estimate` (`time_estimate`, ms), and `due` (`due_date`, epoch ms) are read from ClickUp's **native task fields**, not a body blob;
-- body comes from the task's `markdown_description` (falling back to `text_content`);
-- a task that leaves the List (including one ClickUp archived) drops out of the cache on the next fetch.
-
-`fetch` also **populates the type's `lifecycle` from the bound List's status set** at sync time: the `states` are the List's status names in ClickUp workflow order (by `orderindex`), written back into `.lazyspec.toml` (in place, preserving comments). No `edges` are derived, because ClickUp enforces its own transition rules, so the lifecycle carries no local gating (the same empty-edge posture the `ticket` type takes). The lifecycle is never hand-authored for a `clickup-tasks` type; each `fetch` re-derives it from the live List.
-
-Fetched docs behave identically to `github-issues` docs under `status --json` and `show <ID> --json`. A doc-id -> task-id map is kept at `.lazyspec/task-map.json`. Running `fetch` for a `clickup-tasks` type without a stored token fails with a clear "run `lazyspec setup clickup`" error.
-
-**`create` and `update`.** `lazyspec create <type> <title> [--body ...]` on a `clickup-tasks` type writes through: it POSTs a new task to the bound List (`POST /list/{id}/task`, `name` from the title and `markdown_content` from the body; ClickUp assigns the List's default status), then mirrors the created task into the local cache and records it in `.lazyspec/task-map.json`. It uses the token from `setup clickup` and fails with the same "run `lazyspec setup clickup`" error when none is stored.
-
-`lazyspec update <doc> [--title ...] [--body ...] [--attr priority=... --attr due=... --attr estimate=...]` on a `clickup-tasks` doc also writes through: it resolves the task id from `.lazyspec/task-map.json`, PUTs the changed fields to ClickUp (`PUT /task/{id}`) as a partial edit (`title` -> `name`, `body` -> `markdown_content`, and `priority`/`estimate`/`due` -> ClickUp's **native task fields**: priority name -> `1..4`, `estimate` -> `time_estimate` ms, `due` -> `due_date` epoch ms), then re-materializes the returned task into the cache and bumps the `task-map.json` `updated_at` baseline, so a subsequent read reflects the new native values (the round-trip). Like `create` it loads the token from `setup clickup`.
-
-**`advance` (status).** Moving a doc's `status` (for example `lazyspec update <doc> --status "in progress"`) also writes through: the **raw ClickUp status string** is PUT to the task (`PUT /task/{id}` with `status`) verbatim, then the returned task is re-materialized into the cache and the `updated_at` baseline bumped. Because a `clickup-tasks` type carries no local lifecycle edges (its `states` mirror the List's status set), lazyspec applies **no local transition gate** for these docs. Unlike filesystem/GitHub types, any status in the List's set is accepted and ClickUp enforces its own transition rules, rejecting an illegal target.
-
-**`delete`.** `delete` on a `clickup-tasks` doc **archives** the ClickUp task rather than hard-deleting it: lazyspec resolves the task id from `.lazyspec/task-map.json` and sends `PUT /task/{id}` with `{"archived": true}` (the `DELETE /task/{id}` hard-delete endpoint is never used). An archived task drops out of `task_list` fetches, so the doc leaves the local cache and the task map on the next `fetch` (`delete` does not evict them eagerly), while the task itself stays recoverable in ClickUp. Like the other writes it loads the token from `setup clickup` and fails with the same "run `lazyspec setup clickup`" error when none is stored, and errors on a doc with no task-map entry.
-
-**Optimistic lock.** Both `update` and `advance` are guarded by an optimistic lock on the `task-map.json` `updated_at` baseline. Before the `PUT`, lazyspec re-fetches the task (`GET /task/{id}`) and compares ClickUp's current `date_updated` (epoch ms, compared as an integer) against the recorded baseline. If the remote is newer (an external change landed since your last fetch) the write is **rejected with a conflict error** ("`<doc>` changed on ClickUp since your last fetch; run `lazyspec fetch` and retry") and no `PUT` is sent, so a stale local doc never clobbers a concurrent change. When the baseline matches, the write proceeds and the baseline advances to the returned task's fresh `date_updated`. The conflict surfaces through the normal `--json` error path.
-
-**Relations and custom fields.** Anything with **no native ClickUp field** (relations and non-native attributes) rides a ClickUp _custom field_, mapped by a per-type `clickup_custom_field_map` (lazyspec name -> ClickUp custom-field uuid):
-
-```toml
-[[types]]
-name = "task"
-plural = "tasks"
-dir = "docs/tasks"
-prefix = "TASK"
-store = "clickup-tasks"
-clickup_list_id = "901234567890"
-
-[types.clickup_custom_field_map]
-# the reserved `relations` key names the *text* field holding the serialized
-# relations block; every other key names a non-native attribute
-relations = "b8c9d0e1-2f34-5678-9abc-def012345678"
-owner = "a1b2c3d4-5e6f-7890-1234-567890abcdef"
-```
-
-On `fetch`, each task's custom fields are decoded against this map. The field mapped from the reserved **`relations`** key is read as a serialized relations block (the same `- implements: RFC-056` YAML shape GitHub-issue bodies embed); its entries become the doc's `related` relations, resolving **identically to a filesystem doc's** under `context --json`. The targets are lazyspec doc ids stored directly in the text field, so relations to any store (for example a filesystem RFC) are representable, unlike a ClickUp relationship-type field whose values are only task ids. Every other mapped custom field becomes a non-native `attributes` entry under its configured name; custom fields the map does not name are ignored.
-
-`link`/`unlink` on a `clickup-tasks` doc **write relations back**, closing the round-trip: after the edge is mirrored into the cache frontmatter, lazyspec serializes the doc's **complete** relation set into the same `- implements: RFC-056` YAML block and writes it to the configured `relations` text field (`POST /task/{id}/field/{field_id}` with `{"value": "<block>"}`) as a **full replace**, not an add/remove diff, so `unlink` clears the dropped edge by re-writing the remaining set (an emptied set writes the empty string). What `link` writes is exactly what `fetch` decodes, so relations survive a write-then-fetch cycle. This uses the configured text custom field, **not** ClickUp's native dependency/linked-task API (whose values are task ids only, which cannot represent a cross-store target). The field id resolves from the reserved `relations` key of `clickup_custom_field_map`; a `clickup-tasks` type without that entry raises a clear config error up front rather than failing mid-write, and the write loads the token from `setup clickup` (same "run `lazyspec setup clickup`" error when none is stored).
-
-**Assignee.** Like GitHub, ClickUp's `assignee` is a native task field. On `fetch`, a task's first assignee username is inherited into the doc's `assignee` (remote is the source of truth). `update <id> --assignee <user-id>` writes it through as ClickUp's native `assignees: {add, rem}` delta via `PUT /task/{id}`. The value is a numeric **ClickUp user id**; cross-identity mapping (a GitHub login or free-text name to a ClickUp user id) is out of scope, so a non-numeric value is dropped rather than sent as an invalid payload.
-
-#### `github-milestones` store
-
-Types stored as `--store github-milestones` map each document to a GitHub milestone over the REST API (title -> title, body -> description, `status` -> open/closed state, `due_on` passed through verbatim). A `github-milestones` (or `github-issues`) type that declares **no** `lifecycle` inherits the store's canonical `open`/`closed` lifecycle: an open milestone/issue reads as `open`, a closed one as `closed`, the status DAG offers `open` <-> `closed` (either direction, so reopening is a valid move), and new documents are born `open`, with no `lifecycle` block required in `.lazyspec.toml`. Declaring a `lifecycle` on the type overrides this: its first state maps to the open milestone/issue and its terminal state to the closed one. Progress (`percent_complete`) is computed from the milestone's issue counts at read time and is never writable. The write policy is last-write-wins: a push happens unconditionally, then the milestone is re-read into the cache (no optimistic lock).
-
-An issue -> milestone association is surfaced as a forward relation on the issue document: declare a relationship with `github_native = "milestone"`, and at fetch each issue's native milestone is read back as that relation (for example `targets: MILESTONE-1`), resolving the milestone number to its document. `link` an issue-backed document to a milestone sets the association on GitHub (`unlink` clears it). The inverse is read-only and never stored: a milestone document's `targeted-by` entries are derived virtually as the reverse of each issue's forward relation; an issue whose milestone maps to no lazyspec document is skipped.
-
-The relation vocabulary is store-constrained for milestones: `link`/`unlink` reject store-illegal edges before writing. A `github-milestones` document may be the target only of the `targets` relation (the `github_native = "milestone"` edge) and may never be the source of any relation, and `targets` requires its source to be a `github-issues` document and its target to be a milestone document. Violations exit non-zero with a clear message (for example "milestone docs cannot be the source of a relation", "only github-issues docs can target a milestone", "`targets` requires a milestone target", "milestone docs can only be targeted by `targets`"). In the TUI link editor, milestone documents offer no relation types, `targets` is offered only for issue-backed sources, and the candidate search is scoped to match.
-
-#### `github-projects` store
-
-Types stored as `--store github-projects` bind each document to an existing GitHub Projects v2 board, addressed by its board number (`PROJECT-7` -> board #7 under `[github].repo`'s owner). The backend is **read/associate only**: lazyspec never creates or deletes boards (they are authored on GitHub), so `create` and `delete` are rejected. Resolving a board (`update`/binding) looks it up over GraphQL under the organization root first, then the user root, and errors if the number exists under neither; no create mutation is ever issued.
-
-Board membership is a many-to-many relation: declare a relationship with `github_native = "membership"`, then `link` an issue-backed document to a board document to add the issue to that board (`addProjectV2ItemById`); `unlink` removes only that board's item (`deleteProjectV2Item`), leaving memberships of other boards untouched. Each membership relation maps to exactly one board and is synced independently. Membership mutations are self-contained; no `--attr` is involved (per-board field values are a separate concern).
-
-Projects v2 mutations require the `project` scope on your `gh` token:
+GitHub native fields (issue types, Projects v2 boards, milestone associations) need the `project` scope on your token:
 
 ```sh
 gh auth refresh -s project
 ```
 
-On macOS, a slow keyring lookup can make `gh api` fall back to an unauthenticated request (surfacing as a surprise 403 / rate-limit). If you hit that, pass the token explicitly:
+**<a id="clickup-store-auth"></a>ClickUp auth.** ClickUp has no `gh`-style CLI, so lazyspec owns its own credential store. `lazyspec setup clickup` validates a `pk_` personal API token (from ClickUp's _Settings -> Apps_) against the `/user` endpoint, then stores it keychain-first: the OS keychain by default, falling back to a `0600` `~/.lazyspec/credentials.toml` (with a loud warning) on headless boxes. The token is global, never per-repo, never committed, and redacted in all output.
 
 ```sh
-GH_TOKEN="$(gh auth token)" lazyspec fetch
+lazyspec setup clickup                       # prompt (no echo)
+lazyspec setup clickup --token pk_XXXXXXXX    # non-interactive
 ```
 
-#### `fetch` output and exit status
-
-`lazyspec fetch [--type <name>] [--json]` refreshes every configured remote type (`github-issues`, `github-milestones`, `git-ref`, `clickup-tasks`) in one engine pass; `--type <name>` narrows it to a single type.
-
-Note that `git-ref` stores are live: every mutation pushes to the configured remote (the `[git-ref]` `remote` setting, default `origin`) rather than staying local-only. Updates push with `--force-with-lease`, so a remote ref that has diverged is rejected as a conflict (mirroring the local optimistic-lock conflict); creates push the new ref, and deletes remove the remote ref. If the remote is unreachable the mutation still succeeds locally (the change is safe in your local git refs) and a `warning:` is printed with a hint to re-run once the remote is reachable; `lazyspec fetch` still pulls remote changes down.
-
-The run is **continue-then-exit-non-zero**: if one type's fetch fails, the remaining types still refresh, everything that succeeded is still written to the cache, the failing type's error is reported, and the process exits **non-zero** (it no longer aborts on the first failure). A missing ClickUp token or an unresolvable GitHub repo is a _hard error raised before any type is fetched_ (nothing is written) and is distinct from a per-type failure. A best-effort `warning` (for example a project-field injection that could not read) is printed but is not a failure: absent any real error, the run exits **zero**.
-
-`--json` prints an array of one entry per type. A type that succeeded keeps the exact `{type, fetched, new, removed}` shape; a type that failed adds an `"error": "<message>"` field to its entry. The process exits non-zero whenever any entry carries an `error`.
+Deeper per-store behaviour (write-through, optimistic locking, label/tag matching, relation and custom-field mapping via keys like `github_issue_tag`, `github_label`, `clickup_list_id`, `clickup_custom_field_map`, and `github_native`) is described by `lazyspec config schema` and the relevant command's `--help`.
 
 ### Custom types
 
