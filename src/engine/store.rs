@@ -8,6 +8,8 @@ use crate::engine::fs::{FileSystem, RealFileSystem};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::refs::RefExpander;
 use anyhow::Result;
+use nucleo::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo::{Config as NucleoConfig, Matcher, Utf32Str};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -347,55 +349,81 @@ impl Store {
     }
 
     pub fn search(&self, query: &str, fs: &dyn FileSystem) -> Vec<SearchResult<'_>> {
-        let query_lower = query.to_lowercase();
+        let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+        let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
+        let mut buf: Vec<char> = Vec::new();
         let mut results = Vec::new();
 
         for meta in self.docs.values() {
-            if meta.title.to_lowercase().contains(&query_lower) {
-                results.push(SearchResult {
-                    doc: meta,
-                    match_field: "title",
-                    snippet: meta.title.clone(),
-                });
-                continue;
+            // Track the single best-scoring field for this document. A `None`
+            // score from `nucleo` means the field did not match at all; a
+            // document whose fields all score `None` is dropped (the score
+            // floor). Strict `>` keeps the earliest field on ties, so field
+            // selection is deterministic regardless of `docs` iteration order.
+            let mut best: Option<(u32, &'static str, String)> = None;
+
+            let mut consider = |score: u32, field: &'static str, snippet: &dyn Fn() -> String| {
+                if best.as_ref().is_none_or(|(b, _, _)| score > *b) {
+                    best = Some((score, field, snippet()));
+                }
+            };
+
+            if let Some(score) = pattern.score(Utf32Str::new(&meta.title, &mut buf), &mut matcher) {
+                consider(score, "title", &|| meta.title.clone());
             }
 
-            if meta
-                .tags
-                .iter()
-                .any(|t| t.to_lowercase().contains(&query_lower))
-            {
-                let matched_tag = meta
-                    .tags
-                    .iter()
-                    .find(|t| t.to_lowercase().contains(&query_lower))
-                    .unwrap();
-                results.push(SearchResult {
-                    doc: meta,
-                    match_field: "tag",
-                    snippet: matched_tag.clone(),
-                });
-                continue;
+            for tag in &meta.tags {
+                if let Some(score) = pattern.score(Utf32Str::new(tag, &mut buf), &mut matcher) {
+                    consider(score, "tag", &|| tag.clone());
+                }
+            }
+
+            let path_str = meta.path.to_string_lossy();
+            if let Some(score) = pattern.score(Utf32Str::new(&path_str, &mut buf), &mut matcher) {
+                consider(score, "path", &|| path_str.to_string());
             }
 
             if let Ok(body) = self.get_body_raw(&meta.path, fs) {
-                let body_lower = body.to_lowercase();
-                if let Some(pos) = body_lower.find(&query_lower) {
-                    let start = body.floor_char_boundary(pos.saturating_sub(40));
-                    let end = body.ceil_char_boundary((pos + query.len() + 40).min(body.len()));
-                    let snippet = body[start..end].to_string();
-                    results.push(SearchResult {
-                        doc: meta,
-                        match_field: "body",
-                        snippet,
-                    });
+                let mut indices: Vec<u32> = Vec::new();
+                if let Some(score) =
+                    pattern.indices(Utf32Str::new(&body, &mut buf), &mut matcher, &mut indices)
+                {
+                    consider(score, "body", &|| body_snippet(&body, &indices, query));
                 }
+            }
+
+            if let Some((score, match_field, snippet)) = best {
+                results.push(SearchResult {
+                    doc: meta,
+                    match_field,
+                    snippet,
+                    score,
+                });
             }
         }
 
-        results.sort_by(|a, b| DocMeta::sort_by_date(a.doc, b.doc));
+        results.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| a.doc.path.cmp(&b.doc.path))
+        });
         results
     }
+}
+
+/// Build a body snippet centred on the first fuzzy-matched character, preserving
+/// the historical ±40-character window (`nucleo` gives scattered match indices
+/// rather than a contiguous substring position).
+fn body_snippet(body: &str, indices: &[u32], query: &str) -> String {
+    let first_char = indices.first().copied().unwrap_or(0) as usize;
+    let pos = body
+        .char_indices()
+        .nth(first_char)
+        .map(|(b, _)| b)
+        .unwrap_or(0);
+    let start = body.floor_char_boundary(pos.saturating_sub(40));
+    let end = body.ceil_char_boundary((pos + query.len() + 40).min(body.len()));
+    body[start..end].to_string()
 }
 
 fn materialize_git_ref_cache(
@@ -572,6 +600,7 @@ pub struct SearchResult<'a> {
     pub doc: &'a DocMeta,
     pub match_field: &'static str,
     pub snippet: String,
+    pub score: u32,
 }
 
 #[cfg(test)]
@@ -718,6 +747,149 @@ mod tests {
         assert!(doc2.is_some());
         assert_eq!(doc2.unwrap().title, "Second RFC");
         assert_eq!(doc2.unwrap().id, "RFC-002");
+    }
+
+    /// Build an in-memory store of RFC documents from `(filename, title, tags, body)`
+    /// tuples, so the fuzzy `search` tests can control every match surface.
+    fn search_store(entries: &[(&str, &str, &[&str], &str)]) -> (Store, InMemoryFileSystem) {
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+        let rfc_dir = root.join("docs/rfcs");
+        fs.add_dir(rfc_dir.clone());
+
+        for (filename, title, tags, body) in entries {
+            let tags_yaml = if tags.is_empty() {
+                "[]".to_string()
+            } else {
+                let items: Vec<String> = tags.iter().map(|t| format!("\"{}\"", t)).collect();
+                format!("[{}]", items.join(", "))
+            };
+            let content = format!(
+                "---\ntitle: \"{}\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: {}\n---\n{}\n",
+                title, tags_yaml, body
+            );
+            fs.add_file(rfc_dir.join(filename), &content);
+        }
+
+        let config = Config::default();
+        let store = Store::load_with_fs(&root, &config, &fs, None).unwrap();
+        (store, fs)
+    }
+
+    #[test]
+    fn search_matches_non_contiguous_subsequence_in_title() {
+        // `enfz` is a subsequence of "engine fuzzy" (e-n from "engine", f-z from
+        // "fuzzy") but never a contiguous substring; the old `.contains()` path
+        // would have missed it. Filename has no matchable chars so only the title
+        // matches.
+        let (store, fs) = search_store(&[("RFC-001-doc.md", "engine fuzzy", &[], "some body")]);
+
+        let results = store.search("enfz", &fs);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].doc.title, "engine fuzzy");
+        assert_eq!(results[0].match_field, "title");
+        assert!(results[0].score > 0);
+    }
+
+    #[test]
+    fn search_ranks_by_score_descending() {
+        // The stronger (contiguous, exact) match lives at the later-sorting path,
+        // so if it ranks first the ordering must come from score, not the
+        // path tie-break.
+        let (store, fs) = search_store(&[
+            ("RFC-001-x.md", "xfxuxzxzxyx", &[], "x"),
+            ("RFC-002-y.md", "fuzzy", &[], "y"),
+        ]);
+
+        let results = store.search("fuzzy", &fs);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].doc.title, "fuzzy");
+        assert!(results[0].score > results[1].score);
+    }
+
+    #[test]
+    fn search_tie_break_by_path_is_stable_across_runs() {
+        // Both docs match only via their identical title "alpha", producing equal
+        // scores; their filenames carry no 'l'/'p'/'h' so the path field never
+        // matches and cannot break the tie by score.
+        let (store, fs) = search_store(&[
+            ("RFC-001-x.md", "alpha", &[], "body one"),
+            ("RFC-002-y.md", "alpha", &[], "body two"),
+        ]);
+
+        let first = store.search("alpha", &fs);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].score, first[1].score);
+        assert!(first[0].doc.path < first[1].doc.path);
+
+        let baseline: Vec<PathBuf> = first.iter().map(|r| r.doc.path.clone()).collect();
+        for _ in 0..5 {
+            let again: Vec<PathBuf> = store
+                .search("alpha", &fs)
+                .iter()
+                .map(|r| r.doc.path.clone())
+                .collect();
+            assert_eq!(again, baseline);
+        }
+    }
+
+    #[test]
+    fn search_score_floor_excludes_non_matches() {
+        // "datb" is a subsequence of "database" but not of "frontend" (no 'a'
+        // after its trailing 'd'); the non-matcher must be dropped entirely.
+        let (store, fs) = search_store(&[
+            ("RFC-001-a.md", "database", &[], "x"),
+            ("RFC-002-b.md", "frontend", &[], "y"),
+        ]);
+
+        let results = store.search("datb", &fs);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].doc.title, "database");
+    }
+
+    #[test]
+    fn search_body_only_match_sets_match_field_body() {
+        // "fuzzy" appears only in the body: the title "hello" and the filename
+        // (no 'u'/'z'/'y') do not match.
+        let (store, fs) =
+            search_store(&[("RFC-001-c.md", "hello", &[], "the fuzzy matcher lives here")]);
+
+        let results = store.search("fuzzy", &fs);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].match_field, "body");
+        assert!(results[0].snippet.contains("fuzzy"));
+    }
+
+    #[test]
+    fn search_multi_field_match_returns_one_result_with_best_field_score() {
+        // "core" matches the title only as a scattered subsequence
+        // ("custom order rebuild engine") but matches the tag exactly. The exact
+        // tag match outscores the title, so the doc yields exactly one result
+        // naming the tag and carrying the tag field's (higher) score.
+        let (store, fs) = search_store(&[(
+            "RFC-001-m.md",
+            "custom order rebuild engine",
+            &["core"],
+            "unrelated body text",
+        )]);
+
+        let results = store.search("core", &fs);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].match_field, "tag");
+
+        // The reported score equals the best (tag) field's score in isolation:
+        // a doc whose only matchable surface is the same "core" tag scores
+        // identically, since nucleo scores each haystack independently.
+        let (tag_only_store, tag_fs) = search_store(&[("RFC-002-n.md", "zzz", &["core"], "zzz")]);
+        let tag_only = tag_only_store.search("core", &tag_fs);
+        assert_eq!(tag_only.len(), 1);
+        assert_eq!(tag_only[0].match_field, "tag");
+        assert_eq!(results[0].score, tag_only[0].score);
     }
 
     fn github_issues_config() -> Config {
