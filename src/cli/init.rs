@@ -11,7 +11,9 @@ use crate::engine::fs_ops::default_template;
 use crate::engine::gh::{deterministic_color, GhCli, GhError, GhIssueWriter};
 use crate::engine::github::resolve_repo;
 use anyhow::{bail, Result};
+use console::colors_enabled;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::Path;
 use std::process::Command;
 
@@ -110,6 +112,11 @@ pub fn run_init_interactive(
     template: Option<&str>,
 ) -> Result<()> {
     ensure_no_config(root)?;
+    // This path is only reached interactively (main.rs routes `--json`/non-TTY to
+    // `run`), so json is false here; the guard still honours colours-off / non-TTY.
+    if crate::cli::spinner::should_greet(false, std::io::stdout().is_terminal(), colors_enabled()) {
+        crate::cli::spinner::say("hi there, let's set up your project");
+    }
     let config = if template == Some("starter") {
         design_config_interactive(starter_config(), prompter)?
     } else {

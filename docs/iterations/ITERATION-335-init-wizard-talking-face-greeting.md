@@ -1,7 +1,7 @@
 ---
 title: "Init wizard talking face greeting"
 type: iteration
-status: draft
+status: complete
 author: "Jack Kaloger"
 date: 2026-07-20
 tags: [cli]

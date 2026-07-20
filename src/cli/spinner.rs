@@ -1,13 +1,19 @@
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
+use std::thread::sleep;
 use std::time::Duration;
 
 use console::Style;
+use crossterm::{cursor, execute, terminal};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use crate::engine::reservation::ReservationProgress;
 use crate::spinners::{spinner, FrameColour, SpinnerState};
 
 const TICK: Duration = Duration::from_millis(120);
+
+/// Delay between spoken words in the greeting animation. Within the RFC's
+/// 75-200ms window: slow enough to read the mouth cycle, brisk enough to finish.
+const WORD_TICK: Duration = Duration::from_millis(110);
 
 /// Map a semantic [`FrameColour`] to a `console` style, mirroring the TUI's
 /// `frame_style`: Accent is the terminal default so both light and dark themes
@@ -87,6 +93,58 @@ pub fn finish_err(pb: Option<ProgressBar>, msg: &str) {
     }
 }
 
+/// Whether the interactive `init` wizard should play its animated greeting: only
+/// on a colour-capable TTY that is not emitting machine-readable output. Pure so
+/// the guard is testable without a terminal; the `say` animation itself assumes
+/// the caller has already cleared this gate (dictum 2).
+pub fn should_greet(json: bool, is_tty: bool, colors: bool) -> bool {
+    !json && is_tty && colors
+}
+
+/// Hand-rolled talking-face greeting for the interactive init wizard -- the
+/// Houston `say` equivalent. Draws the full-box face and speaks `msg` word by
+/// word, cycling the loading eyes/mouth on each word, then settles on the happy
+/// success face. This is a bespoke per-word animation, distinct from the
+/// steady-tick op spinner. Callers must gate on [`should_greet`]; this always
+/// draws (and emits ESC bytes), so it must never run under `--json`/non-TTY.
+pub fn say(msg: &str) {
+    let face = spinner("face");
+    let words: Vec<&str> = msg.split_whitespace().collect();
+    let mut out = std::io::stdout();
+
+    let draw = |out: &mut std::io::Stdout, state: SpinnerState, idx: u64, spoken: &str| {
+        let frame = face.full(state, idx);
+        let style = frame_style(frame.colour);
+        let _ = writeln!(out, "{}", style.apply_to(&frame.lines[0]));
+        let _ = writeln!(out, "{}  {}", style.apply_to(&frame.lines[1]), spoken);
+        let _ = writeln!(out, "{}", style.apply_to(&frame.lines[2]));
+        let _ = out.flush();
+    };
+
+    let redraw = |out: &mut std::io::Stdout, state: SpinnerState, idx: u64, spoken: &str| {
+        let _ = execute!(
+            out,
+            cursor::MoveToPreviousLine(3),
+            terminal::Clear(terminal::ClearType::FromCursorDown)
+        );
+        draw(out, state, idx, spoken);
+    };
+
+    let mut spoken = String::new();
+    draw(&mut out, SpinnerState::Loading, 0, &spoken);
+    for (i, word) in words.iter().enumerate() {
+        sleep(WORD_TICK);
+        if !spoken.is_empty() {
+            spoken.push(' ');
+        }
+        spoken.push_str(word);
+        redraw(&mut out, SpinnerState::Loading, i as u64 + 1, &spoken);
+    }
+
+    sleep(WORD_TICK);
+    redraw(&mut out, SpinnerState::Success, 0, &spoken);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,6 +159,17 @@ mod tests {
         // The test harness captures stderr, so it is never a TTY here; the guard
         // must suppress the spinner even when json is false.
         assert!(op_spinner("working", false).is_none());
+    }
+
+    // Dictum 2: the greeting plays only on a colour TTY without `--json`; every
+    // suppressing condition (json, non-TTY, colours off) gates it out so no ESC
+    // bytes reach machine-readable or piped output.
+    #[test]
+    fn should_greet_only_on_colour_tty_without_json() {
+        assert!(should_greet(false, true, true), "colour tty, no json");
+        assert!(!should_greet(true, true, true), "json suppresses");
+        assert!(!should_greet(false, false, true), "non-tty suppresses");
+        assert!(!should_greet(false, true, false), "colours off suppresses");
     }
 
     #[test]
