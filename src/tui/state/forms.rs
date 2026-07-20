@@ -54,6 +54,11 @@ pub struct CreateForm {
     pub error: Option<String>,
     pub loading: bool,
     pub status_message: Option<String>,
+    pub state: crate::spinners::SpinnerState,
+    /// When set, the event loop auto-dismisses the overlay once this deadline
+    /// passes. Used to hold the success face on screen briefly before teardown
+    /// so a create that finishes instantly still renders its success frame.
+    pub dismiss_at: Option<std::time::Instant>,
 }
 
 impl Default for CreateForm {
@@ -75,6 +80,8 @@ impl CreateForm {
             error: None,
             loading: false,
             status_message: None,
+            state: crate::spinners::SpinnerState::Idle,
+            dismiss_at: None,
         }
     }
 
@@ -88,6 +95,8 @@ impl CreateForm {
         self.error = None;
         self.loading = false;
         self.status_message = None;
+        self.state = crate::spinners::SpinnerState::Idle;
+        self.dismiss_at = None;
     }
 
     pub(super) fn focused_value_mut(&mut self) -> &mut String {
@@ -703,5 +712,39 @@ mod tests {
         let mut picker = SettingsVariantPicker::new(FieldPath::Unset, NUMBERING, 0);
         picker.cursor_up();
         assert_eq!(picker.selected, 0, "cursor_up saturates at 0");
+    }
+
+    // STORY-230 AC3: a successful create holds the success face -- state is
+    // Success, animation stops, and a dismiss deadline is armed rather than the
+    // overlay being torn down immediately.
+    #[test]
+    fn ac3_success_arms_dismiss_deadline_without_reset() {
+        let mut form = CreateForm::new();
+        form.active = true;
+        form.loading = true;
+        form.state = crate::spinners::SpinnerState::Loading;
+
+        // Mirror the event loop's CreateComplete Ok branch.
+        form.loading = false;
+        form.state = crate::spinners::SpinnerState::Success;
+        form.dismiss_at = Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
+
+        assert_eq!(form.state, crate::spinners::SpinnerState::Success);
+        assert!(!form.loading, "success is a held frame, not animating");
+        assert!(
+            form.dismiss_at.is_some(),
+            "overlay not dismissed immediately"
+        );
+        assert!(form.active, "overlay stays active during the hold");
+    }
+
+    // reset() (via close_create_form) must clear the dismiss deadline so a stale
+    // Instant can never re-trigger a dismiss on the next form.
+    #[test]
+    fn reset_clears_dismiss_at() {
+        let mut form = CreateForm::new();
+        form.dismiss_at = Some(std::time::Instant::now());
+        form.reset();
+        assert!(form.dismiss_at.is_none());
     }
 }

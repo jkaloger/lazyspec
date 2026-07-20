@@ -587,9 +587,10 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
             }
         }
         AppEvent::CreateStarted => {}
-        AppEvent::CreateProgress { message } => {
+        AppEvent::CreateProgress { message, state } => {
             if app.create_form.active && app.create_form.loading {
                 app.create_form.status_message = Some(message);
+                app.create_form.state = state;
             }
         }
         AppEvent::CreateComplete { result } => {
@@ -616,13 +617,20 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                             app.selected_doc = doc_idx;
                         }
                     }
-                    app.close_create_form();
                     app.refresh_validation(config);
                     app.git_status_cache.invalidate();
                     app.gh_issue_map_stale = true;
+                    // Hold the success face over the updated list for a beat so a
+                    // create that finishes instantly still renders it before the
+                    // overlay is torn down; the run loop dismisses on this deadline.
+                    app.create_form.loading = false;
+                    app.create_form.state = crate::spinners::SpinnerState::Success;
+                    app.create_form.dismiss_at =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
                 }
                 Err(msg) => {
                     app.create_form.loading = false;
+                    app.create_form.state = crate::spinners::SpinnerState::Error;
                     app.create_form.error = Some(msg);
                     app.create_form.status_message = None;
                 }
@@ -753,6 +761,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         let loop_start = Instant::now();
 
         let t = Instant::now();
+        app.frame_idx = loop_count;
         terminal.draw(|f| views::draw(f, &mut app, &config))?;
         perf_log::log_duration("draw", t);
 
@@ -795,6 +804,12 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             }
             Err(_) => {
                 perf_log::log_duration("recv_timeout", t);
+            }
+        }
+
+        if let Some(deadline) = app.create_form.dismiss_at {
+            if Instant::now() >= deadline {
+                app.close_create_form();
             }
         }
 

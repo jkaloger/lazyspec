@@ -265,6 +265,7 @@ pub enum AppEvent {
     CreateStarted,
     CreateProgress {
         message: String,
+        state: crate::spinners::SpinnerState,
     },
     CreateComplete {
         result: Result<CreateResult, String>,
@@ -648,6 +649,9 @@ pub struct App {
     /// `Enter`. `Some` routes keys to the picker; selecting writes the chosen
     /// variant back into `settings_buffer` (RFC-023 / STORY-144).
     pub settings_variant_picker: Option<SettingsVariantPicker>,
+    /// Free-running render-loop counter, set each frame before `terminal.draw`.
+    /// Drives spinner animation phase; shared with the header sync/push face.
+    pub frame_idx: u64,
 }
 
 impl App {
@@ -790,6 +794,7 @@ impl App {
             override_key_prompt: OverrideKeyPrompt::new(),
             settings_zone_editor: None,
             settings_variant_picker: None,
+            frame_idx: 0,
         };
         app.apply_config(config);
         app.rebuild_search_index();
@@ -2442,6 +2447,7 @@ impl App {
             let doc_type = self.create_form.doc_type.clone();
 
             self.create_form.loading = true;
+            self.create_form.state = crate::spinners::SpinnerState::Loading;
             self.create_form.status_message = Some("Reserving...".to_string());
             let _ = self.event_tx.send(AppEvent::CreateStarted);
 
@@ -2482,7 +2488,8 @@ impl App {
                                     format!("Reserved number {}", number)
                                 }
                             };
-                            let _ = progress_tx.send(AppEvent::CreateProgress { message });
+                            let state = p.spinner_state();
+                            let _ = progress_tx.send(AppEvent::CreateProgress { message, state });
                         },
                     )
                     .map_err(|e| e.to_string())?;
@@ -3556,6 +3563,7 @@ pub(crate) mod parity_seed {
             override_key_prompt: OverrideKeyPrompt::new(),
             settings_zone_editor: None,
             settings_variant_picker: None,
+            frame_idx: 0,
         };
         app.apply_config(&config);
         (tmp, app)
@@ -4033,6 +4041,7 @@ mod tests {
             override_key_prompt: OverrideKeyPrompt::new(),
             settings_zone_editor: None,
             settings_variant_picker: None,
+            frame_idx: 0,
         };
         app
     }

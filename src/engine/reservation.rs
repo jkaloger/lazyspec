@@ -27,6 +27,18 @@ pub enum ReservationProgress {
     },
 }
 
+impl ReservationProgress {
+    pub fn spinner_state(&self) -> crate::spinners::SpinnerState {
+        use crate::spinners::SpinnerState;
+        match self {
+            ReservationProgress::QueryingRemote
+            | ReservationProgress::PushAttempt { .. }
+            | ReservationProgress::PushRejected { .. } => SpinnerState::Loading,
+            ReservationProgress::Reserved { .. } => SpinnerState::Success,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum PruneProgress {
     QueryingRemote,
@@ -263,4 +275,35 @@ pub fn reserve_next(
         base + 1,
         base + max_retries as u32
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spinners::SpinnerState;
+
+    #[test]
+    fn progress_maps_to_spinner_state() {
+        assert_eq!(
+            ReservationProgress::QueryingRemote.spinner_state(),
+            SpinnerState::Loading
+        );
+        assert_eq!(
+            ReservationProgress::PushAttempt {
+                attempt: 1,
+                max: 3,
+                candidate: 7,
+            }
+            .spinner_state(),
+            SpinnerState::Loading
+        );
+        assert_eq!(
+            ReservationProgress::PushRejected { candidate: 7 }.spinner_state(),
+            SpinnerState::Loading
+        );
+        assert_eq!(
+            ReservationProgress::Reserved { number: 8 }.spinner_state(),
+            SpinnerState::Success
+        );
+    }
 }
