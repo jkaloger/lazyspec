@@ -1,8 +1,10 @@
-use crate::cli::config::{apply_collected_type, collect_type_interactive};
+use crate::cli::config::{
+    apply_collected_type, collect_parent_child_rule, collect_type_interactive,
+};
 use crate::cli::wizard::Prompter;
 use crate::engine::config::{
     default_rules, starter_relationships, starter_types, CertificationConfig, Config,
-    DocumentConfig, FilesystemConfig, Naming, Templates, UiConfig,
+    DocumentConfig, FilesystemConfig, Naming, Templates, UiConfig, ValidationRule,
 };
 use crate::engine::fs_ops::default_template;
 use crate::engine::gh::{deterministic_color, GhCli, GhError, GhIssueWriter};
@@ -91,10 +93,18 @@ pub fn write_project(root: &Path, config: &Config) -> Result<()> {
 }
 
 /// Interactive `init`: bail if a config already exists (before prompting), then
-/// walk the starter-config wizard and scaffold the designed config.
+/// offer the two authoring paths -- tweak the starter DAG (STORY-227) or design a
+/// DAG from scratch (STORY-228) -- and scaffold whichever config the chosen
+/// designer returns. The single interactive dispatch; `--json`/`--non-interactive`
+/// /non-TTY never reach it (they take the `starter_config()` path in `run`).
 pub fn run_init_interactive(root: &Path, prompter: &mut dyn Prompter) -> Result<()> {
     ensure_no_config(root)?;
-    let config = design_config_interactive(starter_config(), prompter)?;
+    let choice = prompter.select("Start from", &["starter", "scratch"], "starter")?;
+    let config = if choice == "scratch" {
+        design_config_from_scratch(prompter)?
+    } else {
+        design_config_interactive(starter_config(), prompter)?
+    };
     write_project(root, &config)
 }
 
@@ -152,6 +162,137 @@ pub fn design_config_interactive(base: Config, prompter: &mut dyn Prompter) -> R
         }
         println!("discarded; starting over");
     }
+}
+
+/// The empty base the from-scratch designer builds on: the starter config's
+/// non-type scaffolding (naming pattern, filesystem, ui, ceiling, certification)
+/// and the type-agnostic starter relationship vocabulary, but with NO types and
+/// NO rules. Rules must start empty so the from-scratch DAG never inherits a rule
+/// referencing a type it does not define (the dangling-rule trap); every rule is
+/// built from the user's own parent-child steps, whose endpoints are types they
+/// just defined. Relationships are safe to keep because they name no types.
+pub fn blank_config() -> Config {
+    Config {
+        documents: DocumentConfig {
+            types: vec![],
+            ..starter_config().documents
+        },
+        rules: vec![],
+        ..starter_config()
+    }
+}
+
+/// Design a whole type DAG from nothing, interactively: author (prompted, not
+/// persisted), naming pattern, a types loop (at least one type required), then --
+/// once two or more types exist -- a parent-child rules loop with severity and an
+/// optional parent-status gate. Renders a DAG summary and asks to write; a `no`
+/// discards the session and starts over. Pure -- no disk IO -- so it is fully
+/// driveable by a `ScriptedPrompter`. The returned `Config` owes nothing to
+/// `starter_config()`'s types or rules and validates clean via `write_project`.
+pub fn design_config_from_scratch(prompter: &mut dyn Prompter) -> Result<Config> {
+    let author_default = git_user_name();
+    let base = blank_config();
+    loop {
+        let mut config = base.clone();
+
+        // Prompted for the wizard's sake but intentionally discarded: there is
+        // no author field to persist it to in this slice.
+        let _author = prompter.ask("Author", author_default.as_deref())?;
+
+        let pattern = prompter.ask("Naming pattern", Some(&base.documents.naming.pattern))?;
+        config.documents.naming.pattern = pattern;
+
+        // Types loop: at least one type is required. The "Add a type" default is
+        // yes while no type exists yet and no afterwards, so accepting defaults
+        // adds one type then stops; declining while still empty re-asks.
+        loop {
+            let want_type = prompter.confirm("Add a type", config.documents.types.is_empty())?;
+            if want_type {
+                let collected = collect_type_interactive(&config, prompter)?;
+                apply_collected_type(&mut config, &collected)?;
+            } else if config.documents.types.is_empty() {
+                println!("at least one type is required");
+            } else {
+                break;
+            }
+        }
+
+        // Parent-child rules only make sense once at least two types exist. Each
+        // rule's endpoints are chosen from the defined types, so no rule can
+        // dangle. Gates attach here (after rules exist), not in the types loop.
+        if config.documents.types.len() >= 2 {
+            while prompter.confirm("Add a parent-child rule", false)? {
+                let rule = collect_parent_child_rule(&config, prompter)?;
+                config.rules.push(rule);
+            }
+        }
+
+        print!("{}", render_dag_summary(&config));
+        if prompter.confirm("Write this config", true)? {
+            return Ok(config);
+        }
+        println!("discarded; starting over");
+    }
+}
+
+/// A human-readable summary of the designed DAG: every type with its plural,
+/// directory, prefix, store, and effective lifecycle (states and edges); every
+/// parent-child rule with its child, parent, severity, and gate status; and the
+/// relation vocabulary. Rendered before the final write confirmation.
+fn render_dag_summary(config: &Config) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+
+    out.push_str("\nTypes:\n");
+    for type_def in &config.documents.types {
+        let _ = writeln!(
+            out,
+            "  {} (plural: {}, dir: {}, prefix: {}, store: {})",
+            type_def.name, type_def.plural, type_def.dir, type_def.prefix, type_def.store,
+        );
+        let lifecycle = type_def.effective_lifecycle();
+        let _ = writeln!(out, "    lifecycle: {}", lifecycle.states.join(", "));
+        for edge in &lifecycle.edges {
+            let _ = writeln!(out, "      edge: {} -> {}", edge.from, edge.to);
+        }
+    }
+
+    out.push_str("Parent-child rules:\n");
+    let mut any_rule = false;
+    for rule in &config.rules {
+        if let ValidationRule::ParentChild {
+            name,
+            child,
+            parent,
+            severity,
+            require_parent_status,
+        } = rule
+        {
+            any_rule = true;
+            let gate = match require_parent_status {
+                Some(status) => format!(", gate: parent status = {status}"),
+                None => String::new(),
+            };
+            let severity = match severity {
+                crate::engine::config::Severity::Error => "error",
+                crate::engine::config::Severity::Warning => "warning",
+            };
+            let _ = writeln!(
+                out,
+                "  {name}: {child} -> {parent} (severity: {severity}{gate})",
+            );
+        }
+    }
+    if !any_rule {
+        out.push_str("  (none)\n");
+    }
+
+    out.push_str("Relation vocabulary:\n");
+    for rel in &config.relationships {
+        let _ = writeln!(out, "  {}", rel.name);
+    }
+
+    out
 }
 
 fn ensure_github_labels(config: &Config, root: &Path) {
@@ -308,7 +449,7 @@ by agent skills. For example, a dictum about testing philosophy would have
 mod tests {
     use super::*;
     use crate::cli::wizard::ScriptedPrompter;
-    use crate::engine::config::{StoreBackend, TypeDef};
+    use crate::engine::config::{Severity, StoreBackend, TypeDef};
     use crate::engine::fs::RealFileSystem;
     use crate::engine::store::Store;
     use crate::engine::validation::validate_full;
@@ -504,6 +645,320 @@ mod tests {
             result.errors.is_empty(),
             "scaffolded project should validate clean: {:?}",
             result.errors
+        );
+    }
+
+    // --- STORY-228: from-scratch (blank slate) DAG designer ---
+
+    // Blank base parity: no types, no rules, but the type-agnostic starter
+    // relationship vocabulary and the `.md`-suffixed starter naming pattern.
+    #[test]
+    fn scratch_blank_config_parity() {
+        let blank = blank_config();
+        assert!(blank.documents.types.is_empty(), "types start empty");
+        assert!(
+            blank.rules.is_empty(),
+            "rules start empty (no dangling rules)"
+        );
+        assert_eq!(
+            blank.relationships,
+            crate::engine::config::starter_relationships()
+        );
+        assert_eq!(
+            blank.documents.naming.pattern, "{type}-{n:03}-{title}.md",
+            "naming default keeps the .md suffix"
+        );
+    }
+
+    // A full from-scratch happy-path script: rfc (custom lifecycle draft ->
+    // accepted), story (inherited lifecycle, parent rfc), and a story -> rfc
+    // parent-child rule with severity=error gated on parent status `accepted`.
+    fn full_scratch_answers() -> Vec<String> {
+        [
+            "",               // author
+            "",               // naming pattern (default)
+            "y",              // add a type? -> rfc
+            "rfc",            // name
+            "rfcs",           // plural
+            "",               // dir -> docs/rfcs
+            "",               // prefix -> RFC
+            "",               // icon (none)
+            "",               // store -> filesystem
+            "",               // numbering -> incremental
+            "",               // singleton -> false
+            "",               // authorship -> default
+            "n",              // add an attribute? no
+            "y",              // design a custom lifecycle? yes
+            "draft",          // state
+            "accepted",       // state
+            "",               // finish states
+            "draft:accepted", // edge
+            "",               // finish edges
+            "y",              // add a type? -> story
+            "story",          // name
+            "stories",        // plural
+            "",               // dir -> docs/stories
+            "",               // prefix -> STORY
+            "",               // icon (none)
+            "",               // store -> filesystem
+            "",               // numbering -> incremental
+            "",               // singleton -> false
+            "",               // authorship -> default
+            "n",              // add an attribute? no
+            "n",              // set a parent type? no (the DAG edge is the rule below)
+            "n",              // design a custom lifecycle? no (inherits preset)
+            "n",              // add another type? no
+            "y",              // add a parent-child rule? yes
+            "story",          // child
+            "rfc",            // parent
+            "error",          // severity
+            "y",              // gate on a parent status? yes
+            "accepted",       // required parent status
+            "n",              // add another rule? no
+            "y",              // write this config? yes
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
+    // AC1: a custom-lifecycle edge and a rule gate that each name an undefined
+    // state re-prompt (reusing the type collector) rather than aborting; only
+    // defined states/statuses are accepted.
+    #[test]
+    fn scratch_lifecycle_and_gate_reject_unknown_states() {
+        let answers = [
+            "",
+            "",  // author, naming
+            "y", // add a type -> alpha
+            "alpha",
+            "alphas",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",  // core fields
+            "n", // no attribute
+            "y", // custom lifecycle
+            "draft",
+            "done",
+            "",           // states
+            "draft:nope", // edge names an undefined state -> re-ask
+            "draft:done", // valid
+            "",           // finish edges
+            "y",          // add a type -> beta
+            "beta",
+            "betas",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",  // core fields
+            "n", // no attribute
+            "n", // set a parent type? no (the DAG edge is the rule below)
+            "n", // no custom lifecycle
+            "n", // add another type? no
+            "y", // add a parent-child rule
+            "beta",
+            "alpha", // child, parent
+            "",      // severity -> warning
+            "y",     // gate on a parent status
+            "bogus", // not in alpha's lifecycle -> re-ask
+            "done",  // valid
+            "n",     // add another rule? no
+            "y",     // write
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        let mut prompter = ScriptedPrompter::new(answers);
+        let config = design_config_from_scratch(&mut prompter).unwrap();
+
+        let alpha = config.type_by_name("alpha").unwrap();
+        assert_eq!(alpha.lifecycle.states, vec!["draft", "done"]);
+        assert_eq!(alpha.lifecycle.edges.len(), 1, "bad edge was not kept");
+        assert_eq!(alpha.lifecycle.edges[0].from, "draft");
+        assert_eq!(alpha.lifecycle.edges[0].to, "done");
+
+        let rule = config
+            .rules
+            .iter()
+            .find_map(|r| match r {
+                ValidationRule::ParentChild {
+                    require_parent_status,
+                    ..
+                } => require_parent_status.clone(),
+                _ => None,
+            })
+            .expect("a gated parent-child rule exists");
+        assert_eq!(rule, "done", "only a defined parent status is accepted");
+    }
+
+    // AC2: a parent-child rule draws child and parent from the defined types
+    // (an unknown child re-asks) and records the chosen severity.
+    #[test]
+    fn scratch_parent_child_rule_defined_types_and_severity() {
+        let answers = [
+            "", "",  // author, naming
+            "y", // add a type -> alpha
+            "alpha", "alphas", "", "", "", "", "", "", "",  // core fields
+            "n", // no attribute
+            "n", // no custom lifecycle
+            "y", // add a type -> beta
+            "beta", "betas", "", "", "", "", "", "", "",      // core fields
+            "n",     // no attribute
+            "n",     // no parent
+            "n",     // no custom lifecycle
+            "n",     // add another type? no
+            "y",     // add a parent-child rule
+            "ghost", // not a defined type -> re-ask child
+            "beta",  // child
+            "alpha", // parent
+            "error", // severity
+            "n",     // no gate
+            "n",     // add another rule? no
+            "y",     // write
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        let mut prompter = ScriptedPrompter::new(answers);
+        let config = design_config_from_scratch(&mut prompter).unwrap();
+
+        let rule = config
+            .rules
+            .iter()
+            .find_map(|r| match r {
+                ValidationRule::ParentChild {
+                    child,
+                    parent,
+                    severity,
+                    ..
+                } => Some((child.clone(), parent.clone(), severity.clone())),
+                _ => None,
+            })
+            .expect("a parent-child rule exists");
+        assert_eq!(rule.0, "beta", "child from defined types");
+        assert_eq!(rule.1, "alpha", "parent from defined types");
+        assert_eq!(rule.2, Severity::Error, "chosen severity recorded");
+    }
+
+    // AC3: the DAG summary names every type, its lifecycle, every rule and gate,
+    // and the relation vocabulary. (The write confirmation is exercised by the
+    // decline test below and by every happy-path script ending in `write? yes`.)
+    #[test]
+    fn scratch_summary_lists_dag() {
+        let mut prompter = ScriptedPrompter::new(full_scratch_answers());
+        let config = design_config_from_scratch(&mut prompter).unwrap();
+
+        let summary = render_dag_summary(&config);
+        assert!(summary.contains("rfc"), "type rfc: {summary}");
+        assert!(summary.contains("story"), "type story: {summary}");
+        assert!(
+            summary.contains("draft -> accepted"),
+            "rfc lifecycle edge: {summary}"
+        );
+        assert!(
+            summary.contains("stories-need-rfcs"),
+            "rule name: {summary}"
+        );
+        assert!(
+            summary.contains("story -> rfc"),
+            "rule endpoints: {summary}"
+        );
+        assert!(
+            summary.contains("parent status = accepted"),
+            "gate: {summary}"
+        );
+        assert!(summary.contains("implements"), "relation vocab: {summary}");
+    }
+
+    // AC4: a full from-scratch design scaffolds into a temp dir that loads and
+    // validates with zero errors -- including no dangling rule (every rule
+    // endpoint is a defined type).
+    #[test]
+    fn scratch_scaffold_validates_clean() {
+        let mut prompter = ScriptedPrompter::new(full_scratch_answers());
+        let config = design_config_from_scratch(&mut prompter).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_project(root, &config).unwrap();
+
+        assert!(root.join("docs/rfcs").is_dir(), "rfc dir created");
+        assert!(root.join("docs/stories").is_dir(), "story dir created");
+        assert!(
+            root.join(".lazyspec/templates/template.md").is_file(),
+            "template written"
+        );
+
+        let fs = RealFileSystem;
+        let loaded = Config::load(root, &fs).unwrap();
+
+        // Explicit no-dangling-rule check: every rule endpoint is a defined type.
+        let defined: Vec<&str> = loaded
+            .documents
+            .types
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        for rule in &loaded.rules {
+            if let ValidationRule::ParentChild { child, parent, .. } = rule {
+                assert!(defined.contains(&child.as_str()), "child {child} defined");
+                assert!(
+                    defined.contains(&parent.as_str()),
+                    "parent {parent} defined"
+                );
+            }
+        }
+
+        let store = Store::load(root, &loaded).unwrap();
+        let result = validate_full(&store, &loaded);
+        assert!(
+            result.errors.is_empty(),
+            "scaffolded from-scratch project should validate clean: {:?}",
+            result.errors
+        );
+    }
+
+    // AC5: declining at the write confirmation on the scratch path (then aborting
+    // the reloop) writes nothing -- no config file, no per-type directories.
+    #[test]
+    fn scratch_decline_writes_nothing() {
+        let answers = [
+            "scratch", // first-screen select
+            "", "",  // author, naming
+            "y", // add a type -> solo
+            "solo", "solos", "", "", "", "", "", "", "",  // core fields
+            "n", // no attribute
+            "n", // no custom lifecycle
+            "n", // add another type? no (one type is enough; no rule loop)
+            "n", // write this config? no -> discard and reloop
+                 // reloop asks for author again; the queue is empty -> Err (abort)
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut prompter = ScriptedPrompter::new(answers);
+        let result = run_init_interactive(root, &mut prompter);
+
+        assert!(result.is_err(), "aborting the reloop propagates an error");
+        assert!(
+            !root.join(".lazyspec.toml").exists(),
+            "no config written on decline"
+        );
+        assert!(
+            !root.join("docs/solos").exists(),
+            "no per-type dir written on decline"
         );
     }
 
