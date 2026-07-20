@@ -1,7 +1,7 @@
 ---
 title: Fast linked-document creation
 type: rfc
-status: draft
+status: superseded
 author: jkaloger
 date: 2026-06-18
 tags: []
