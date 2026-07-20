@@ -1,7 +1,7 @@
 ---
 title: "TUI loading face: create overlay and sync header"
 type: story
-status: in-progress
+status: complete
 author: "Jack Kaloger"
 date: 2026-07-20
 tags: [tui, ux]
