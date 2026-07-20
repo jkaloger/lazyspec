@@ -667,12 +667,6 @@ impl App {
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
         let git_branch = query_git_branch(store.root());
         let git_status_cache = GitStatusCache::new(store.root());
-        let has_github_issues = config
-            .documents
-            .types
-            .iter()
-            .any(|t| t.store == StoreBackend::GithubIssues);
-
         #[cfg(feature = "agent")]
         let agent_spawner = AgentSpawner::new(store.root());
         // ADR-015 zero-defaults: an absent agents dir yields no prompts; discovery
@@ -772,7 +766,7 @@ impl App {
             gh_conflict_message: None,
             gh_push_in_flight: Arc::new(AtomicBool::new(false)),
             refresh_in_flight: false,
-            last_sync: if has_github_issues {
+            last_sync: if crate::tui::has_pollable_types(config) {
                 Some(Instant::now())
             } else {
                 None

@@ -725,6 +725,13 @@ fn main() -> anyhow::Result<()> {
                                     "config add-type requires name, plural, dir, and prefix (or run interactively on a TTY)"
                                 );
                             }
+                            if lazyspec::cli::spinner::should_greet(
+                                json,
+                                std::io::stdout().is_terminal(),
+                                console::colors_enabled(),
+                            ) {
+                                lazyspec::cli::spinner::say("let's add a new document type");
+                            }
                             let mut prompter = lazyspec::cli::wizard::StdinPrompter::new();
                             lazyspec::cli::config::run_add_type_interactive(
                                 &cwd,

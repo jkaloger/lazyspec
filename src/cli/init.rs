@@ -115,7 +115,7 @@ pub fn run_init_interactive(
     // This path is only reached interactively (main.rs routes `--json`/non-TTY to
     // `run`), so json is false here; the guard still honours colours-off / non-TTY.
     if crate::cli::spinner::should_greet(false, std::io::stdout().is_terminal(), colors_enabled()) {
-        crate::cli::spinner::say("hi there, let's set up your project");
+        crate::cli::spinner::say("a new project begins......");
     }
     let config = if template == Some("starter") {
         design_config_interactive(starter_config(), prompter)?

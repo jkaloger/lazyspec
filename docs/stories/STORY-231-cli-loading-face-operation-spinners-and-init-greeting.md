@@ -1,7 +1,7 @@
 ---
 title: "CLI loading face: operation spinners and init greeting"
 type: story
-status: in-progress
+status: complete
 author: "Jack Kaloger"
 date: 2026-07-20
 tags: [cli, ux]

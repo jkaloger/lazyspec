@@ -19,7 +19,7 @@ use ratatui::{
 
 use std::sync::atomic::Ordering;
 
-use crate::engine::config::{Config, StoreBackend};
+use crate::engine::config::Config;
 use crate::engine::status_colors::StatusColors;
 use crate::tui::state::{App, ViewMode};
 use status_bar::draw_status_bar;
@@ -159,14 +159,8 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
     )]);
     f.render_widget(Paragraph::new(title), outer[0]);
 
-    let has_gh_types = config
-        .documents
-        .types
-        .iter()
-        .any(|t| t.store == StoreBackend::GithubIssues);
-
     let mut right_spans: Vec<Span> = Vec::new();
-    if has_gh_types {
+    if crate::tui::has_pollable_types(config) {
         let state = sync_spinner_state(
             app.refresh_in_flight,
             app.gh_push_in_flight.load(Ordering::Relaxed),
