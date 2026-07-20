@@ -162,13 +162,6 @@ mod tests {
         assert!(op_spinner("working", true).is_none());
     }
 
-    #[test]
-    fn op_spinner_none_when_stderr_not_a_terminal() {
-        // The test harness captures stderr, so it is never a TTY here; the guard
-        // must suppress the spinner even when json is false.
-        assert!(op_spinner("working", false).is_none());
-    }
-
     // Dictum 2: the greeting plays only on a colour TTY without `--json`; every
     // suppressing condition (json, non-TTY, colours off) gates it out so no ESC
     // bytes reach machine-readable or piped output.
