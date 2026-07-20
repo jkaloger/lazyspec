@@ -1,9 +1,10 @@
 use crate::engine::config::{Config, ReservedFormat};
-use crate::engine::reservation::{self, PruneProgress, Reservation};
+use crate::engine::reservation::{self, Reservation};
 use crate::engine::store::Store;
 use crate::engine::template::shuffle_alphabet;
 use anyhow::{bail, Result};
 use clap::Subcommand;
+use indicatif::ProgressBar;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
@@ -106,13 +107,22 @@ pub fn run_prune(
     store: &Store,
     dry_run: bool,
     json: bool,
-    on_progress: impl Fn(PruneProgress),
+    spinner: Option<&ProgressBar>,
 ) -> Result<()> {
     let Some(reserved_config) = config.documents.reserved.as_ref() else {
         bail!("reserved numbering is not configured");
     };
 
-    on_progress(PruneProgress::QueryingRemote);
+    // Print a result line, suspending the spinner so its stderr redraw never
+    // smears the stdout output.
+    let emit = |line: String| match spinner {
+        Some(pb) => pb.suspend(|| println!("{line}")),
+        None => println!("{line}"),
+    };
+
+    if let Some(pb) = spinner {
+        pb.set_message("querying remote reservations");
+    }
     let reservations = reservation::list_reservations(repo_root, &reserved_config.remote, |_| {})?;
 
     let prunable: Vec<_> = reservations
@@ -137,15 +147,21 @@ pub fn run_prune(
         if has_local_document(store, &r.prefix, &formatted) {
             if dry_run {
                 if !json {
-                    println!("would prune\t{}\t{}\t{}", r.prefix, r.number, r.ref_path);
+                    emit(format!(
+                        "would prune\t{}\t{}\t{}",
+                        r.prefix, r.number, r.ref_path
+                    ));
                 }
                 pruned.push(PruneEntry::from(r));
             } else {
-                on_progress(PruneProgress::Deleting {
-                    current: pruned.len() + errors.len() + 1,
-                    total,
-                    ref_path: r.ref_path.clone(),
-                });
+                if let Some(pb) = spinner {
+                    pb.set_message(format!(
+                        "deleting {}/{} {}",
+                        pruned.len() + errors.len() + 1,
+                        total,
+                        r.ref_path
+                    ));
+                }
                 match reservation::delete_remote_ref(
                     repo_root,
                     &reserved_config.remote,
@@ -153,13 +169,19 @@ pub fn run_prune(
                 ) {
                     Ok(()) => {
                         if !json {
-                            println!("pruned\t{}\t{}\t{}", r.prefix, r.number, r.ref_path);
+                            emit(format!(
+                                "pruned\t{}\t{}\t{}",
+                                r.prefix, r.number, r.ref_path
+                            ));
                         }
                         pruned.push(PruneEntry::from(r));
                     }
                     Err(e) => {
                         if !json {
-                            println!("error\t{}\t{}\t{}\t{}", r.prefix, r.number, r.ref_path, e);
+                            emit(format!(
+                                "error\t{}\t{}\t{}\t{}",
+                                r.prefix, r.number, r.ref_path, e
+                            ));
                         }
                         errors.push(PruneError {
                             prefix: r.prefix.clone(),
@@ -172,16 +194,14 @@ pub fn run_prune(
             }
         } else {
             if !json {
-                println!("orphan\t{}\t{}\t{}", r.prefix, r.number, r.ref_path);
+                emit(format!(
+                    "orphan\t{}\t{}\t{}",
+                    r.prefix, r.number, r.ref_path
+                ));
             }
             orphaned.push(PruneEntry::from(r));
         }
     }
-
-    on_progress(PruneProgress::Done {
-        pruned: pruned.len(),
-        orphaned: orphaned.len(),
-    });
 
     if json {
         let output = PruneOutput {

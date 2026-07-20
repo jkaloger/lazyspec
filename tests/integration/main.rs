@@ -26,6 +26,7 @@ mod cli_link_test;
 mod cli_mutate_test;
 mod cli_no_config_test;
 mod cli_query_test;
+mod cli_spinner_parity_test;
 mod cli_status_test;
 mod cli_template_test;
 mod cli_transition_gate_test;

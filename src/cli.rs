@@ -19,6 +19,7 @@ pub mod search;
 pub mod setup;
 pub mod show;
 pub mod skills;
+pub mod spinner;
 pub mod status;
 pub mod style;
 pub mod tag;

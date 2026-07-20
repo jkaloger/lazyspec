@@ -181,8 +181,9 @@ fn main() -> anyhow::Result<()> {
         }) => {
             let body_content = lazyspec::cli::resolve_body(&body, &body_file)?;
             let store = Store::load(&cwd, &config)?;
+            let pb = lazyspec::cli::spinner::op_spinner(format!("creating {}", doc_type), json);
             if json {
-                let output = lazyspec::cli::create::run_json_with_body(
+                let result = lazyspec::cli::create::run_json_with_body(
                     &cwd,
                     &config,
                     &store,
@@ -191,11 +192,24 @@ fn main() -> anyhow::Result<()> {
                     &author,
                     parent.as_deref(),
                     body_content.as_deref(),
-                    |_| {},
-                )?;
-                println!("{}", output);
+                    |p| {
+                        if let Some(pb) = &pb {
+                            pb.set_message(lazyspec::cli::spinner::reservation_message(&p));
+                        }
+                    },
+                );
+                match result {
+                    Ok(output) => {
+                        lazyspec::cli::spinner::finish_ok(pb, "created");
+                        println!("{}", output);
+                    }
+                    Err(e) => {
+                        lazyspec::cli::spinner::finish_err(pb, "create failed");
+                        return Err(e);
+                    }
+                }
             } else {
-                let (path, push_outcome) = lazyspec::cli::create::run_with_body(
+                let result = lazyspec::cli::create::run_with_body(
                     &cwd,
                     &config,
                     &store,
@@ -204,11 +218,24 @@ fn main() -> anyhow::Result<()> {
                     &author,
                     parent.as_deref(),
                     body_content.as_deref(),
-                    |_| {},
-                )?;
-                println!("{}", path.display());
-                if let Some(warning) = push_outcome.warning() {
-                    eprintln!("{}", warning);
+                    |p| {
+                        if let Some(pb) = &pb {
+                            pb.set_message(lazyspec::cli::spinner::reservation_message(&p));
+                        }
+                    },
+                );
+                match result {
+                    Ok((path, push_outcome)) => {
+                        lazyspec::cli::spinner::finish_ok(pb, "created");
+                        println!("{}", path.display());
+                        if let Some(warning) = push_outcome.warning() {
+                            eprintln!("{}", warning);
+                        }
+                    }
+                    Err(e) => {
+                        lazyspec::cli::spinner::finish_err(pb, "create failed");
+                        return Err(e);
+                    }
                 }
             }
         }
@@ -606,14 +633,22 @@ fn main() -> anyhow::Result<()> {
             }
             ReservationsCommand::Prune { dry_run, json } => {
                 let store = Store::load(&cwd, &config)?;
-                lazyspec::cli::reservations::run_prune(
+                let pb = lazyspec::cli::spinner::op_spinner("pruning reservations", json);
+                let result = lazyspec::cli::reservations::run_prune(
                     &cwd,
                     &config,
                     &store,
                     dry_run,
                     json,
-                    |_| {},
-                )?;
+                    pb.as_ref(),
+                );
+                match result {
+                    Ok(()) => lazyspec::cli::spinner::finish_ok(pb, "prune complete"),
+                    Err(e) => {
+                        lazyspec::cli::spinner::finish_err(pb, "prune failed");
+                        return Err(e);
+                    }
+                }
             }
         },
         Some(Commands::Config { command, json }) => {

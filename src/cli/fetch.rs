@@ -147,6 +147,7 @@ pub fn run(
         None
     };
 
+    let pb = crate::cli::spinner::op_spinner("fetching from remotes", json);
     let outcomes = {
         let mut ctx = SyncContext {
             gh: issue_map.as_mut().map(|m| GhMaps { issue_map: m }),
@@ -195,6 +196,12 @@ pub fn run(
 
         sync_all(root, config, &mut ctx, &mut syncers, type_filter)
     };
+
+    if outcomes.iter().any(|o| o.error.is_some()) {
+        crate::cli::spinner::finish_err(pb, "fetch completed with errors");
+    } else {
+        crate::cli::spinner::finish_ok(pb, "fetch complete");
+    }
 
     for o in &outcomes {
         for w in &o.warnings {
