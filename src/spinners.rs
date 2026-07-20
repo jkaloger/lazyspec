@@ -64,12 +64,16 @@ impl FaceSpinner {
 
     fn compact_frames(&self, state: SpinnerState) -> (&'static [&'static str], FrameColour) {
         match (self.ascii, state) {
-            (false, SpinnerState::Idle) => (&["[·‿·]"], FrameColour::Accent),
-            (false, SpinnerState::Loading) => {
-                (&["[◐‿◐]", "[◓‿◓]", "[◑‿◑]", "[◒‿◒]"], FrameColour::Accent)
-            }
-            (false, SpinnerState::Success) => (&["[◠‿◠]"], FrameColour::Success),
-            (false, SpinnerState::Error) => (&["[×_×]"], FrameColour::Error),
+            // Spaces around each glyph: the circle glyphs render wider than one
+            // cell in some fonts and bleed over an adjacent glyph. The box frames
+            // are already space-padded; compact needs the same clearance.
+            (false, SpinnerState::Idle) => (&["[· ‿ ·]"], FrameColour::Accent),
+            (false, SpinnerState::Loading) => (
+                &["[◐ ‿ ◐ ]", "[◓ ‿ ◓ ]", "[◑ ‿ ◑ ]", "[◒ ‿ ◒ ]"],
+                FrameColour::Accent,
+            ),
+            (false, SpinnerState::Success) => (&["[◠ ‿ ◠ ]"], FrameColour::Success),
+            (false, SpinnerState::Error) => (&["[× _ ×]"], FrameColour::Error),
             (true, SpinnerState::Idle) => (&["[o_o]"], FrameColour::Accent),
             (true, SpinnerState::Loading) => {
                 (&["[|_|]", "[/_/]", "[-_-]", "[\\_\\]"], FrameColour::Accent)
@@ -164,28 +168,28 @@ mod tests {
     fn compact_frame_catalogue_and_wrap() {
         let s = FaceSpinner { ascii: false };
 
-        assert_eq!(s.compact(SpinnerState::Idle, 0).lines[0], "[·‿·]");
+        assert_eq!(s.compact(SpinnerState::Idle, 0).lines[0], "[· ‿ ·]");
         assert_eq!(
             s.compact(SpinnerState::Idle, 1),
             s.compact(SpinnerState::Idle, 0)
         );
 
-        assert_eq!(s.compact(SpinnerState::Loading, 0).lines[0], "[◐‿◐]");
-        assert_eq!(s.compact(SpinnerState::Loading, 1).lines[0], "[◓‿◓]");
-        assert_eq!(s.compact(SpinnerState::Loading, 2).lines[0], "[◑‿◑]");
-        assert_eq!(s.compact(SpinnerState::Loading, 3).lines[0], "[◒‿◒]");
+        assert_eq!(s.compact(SpinnerState::Loading, 0).lines[0], "[◐ ‿ ◐ ]");
+        assert_eq!(s.compact(SpinnerState::Loading, 1).lines[0], "[◓ ‿ ◓ ]");
+        assert_eq!(s.compact(SpinnerState::Loading, 2).lines[0], "[◑ ‿ ◑ ]");
+        assert_eq!(s.compact(SpinnerState::Loading, 3).lines[0], "[◒ ‿ ◒ ]");
         assert_eq!(
             s.compact(SpinnerState::Loading, 4),
             s.compact(SpinnerState::Loading, 0)
         );
 
-        assert_eq!(s.compact(SpinnerState::Success, 0).lines[0], "[◠‿◠]");
+        assert_eq!(s.compact(SpinnerState::Success, 0).lines[0], "[◠ ‿ ◠ ]");
         assert_eq!(
             s.compact(SpinnerState::Success, 999),
             s.compact(SpinnerState::Success, 0)
         );
 
-        assert_eq!(s.compact(SpinnerState::Error, 0).lines[0], "[×_×]");
+        assert_eq!(s.compact(SpinnerState::Error, 0).lines[0], "[× _ ×]");
         assert_eq!(
             s.compact(SpinnerState::Error, 999),
             s.compact(SpinnerState::Error, 0)

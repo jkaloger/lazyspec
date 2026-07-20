@@ -757,11 +757,15 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     });
 
     let mut loop_count: u64 = 0;
+    let anim_start = Instant::now();
     loop {
         let loop_start = Instant::now();
 
         let t = Instant::now();
-        app.frame_idx = loop_count;
+        // Spinner cadence: wall-clock seconds, not loop count. The render loop
+        // wakes tens of times/sec for input; binding frame_idx to that spun the
+        // spinner far too fast. One frame per second.
+        app.frame_idx = anim_start.elapsed().as_secs();
         app.refresh_in_flight = refresh_in_flight.load(Ordering::Relaxed);
         terminal.draw(|f| views::draw(f, &mut app, &config))?;
         perf_log::log_duration("draw", t);
