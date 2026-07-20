@@ -235,18 +235,6 @@ fn try_push_clickup_edit_with<C: ClickupClient + 'static>(
         .map_err(|e| e.to_string())
 }
 
-// Whether the background poll should run for this project: true when any type is
-// backed by a store the poll refreshes (github issues/milestones OR clickup
-// tasks). Milestone-only and clickup-only projects still need the poll so a
-// milestone/task created after launch appears live in the list.
-fn has_pollable_types(config: &Config) -> bool {
-    config.documents.types.iter().any(|t| {
-        t.store == StoreBackend::GithubIssues
-            || t.store == StoreBackend::GithubMilestones
-            || t.store == StoreBackend::ClickupTasks
-    })
-}
-
 // Human-readable summary of a fix run for the warnings panel. The engine op core
 // returns the structured `FixOutput`; each frontend renders its own
 // presentation, so this mirrors the CLI's `fix::output::format_human`
@@ -587,9 +575,10 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
             }
         }
         AppEvent::CreateStarted => {}
-        AppEvent::CreateProgress { message } => {
+        AppEvent::CreateProgress { message, state } => {
             if app.create_form.active && app.create_form.loading {
                 app.create_form.status_message = Some(message);
+                app.create_form.state = state;
             }
         }
         AppEvent::CreateComplete { result } => {
@@ -616,13 +605,20 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                             app.selected_doc = doc_idx;
                         }
                     }
-                    app.close_create_form();
                     app.refresh_validation(config);
                     app.git_status_cache.invalidate();
                     app.gh_issue_map_stale = true;
+                    // Hold the success face over the updated list for a beat so a
+                    // create that finishes instantly still renders it before the
+                    // overlay is torn down; the run loop dismisses on this deadline.
+                    app.create_form.loading = false;
+                    app.create_form.state = crate::spinners::SpinnerState::Success;
+                    app.create_form.dismiss_at =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
                 }
                 Err(msg) => {
                     app.create_form.loading = false;
+                    app.create_form.state = crate::spinners::SpinnerState::Error;
                     app.create_form.error = Some(msg);
                     app.create_form.status_message = None;
                 }
@@ -676,24 +672,25 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     let (tx, rx) = crossbeam_channel::unbounded();
     app.event_tx = tx.clone();
 
-    let shared_gh_store: Option<Arc<Mutex<GithubIssuesStore>>> = if has_pollable_types(&config) {
-        let gh_config = config.documents.github.as_ref();
-        let repo = gh_config.and_then(|g| g.repo.clone());
-        repo.map(|repo| {
-            let root = app.store.root();
-            Arc::new(Mutex::new(GithubIssuesStore {
-                client: Box::new(GhCli::new()),
-                root: root.to_path_buf(),
-                repo,
-                config: config.clone(),
-                issue_map: IssueMap::load(root)
-                    .unwrap_or_else(|_| serde_json::from_str("{}").unwrap()),
-                issue_cache: IssueCache::new(root),
-            }))
-        })
-    } else {
-        None
-    };
+    let shared_gh_store: Option<Arc<Mutex<GithubIssuesStore>>> =
+        if crate::tui::has_pollable_types(&config) {
+            let gh_config = config.documents.github.as_ref();
+            let repo = gh_config.and_then(|g| g.repo.clone());
+            repo.map(|repo| {
+                let root = app.store.root();
+                Arc::new(Mutex::new(GithubIssuesStore {
+                    client: Box::new(GhCli::new()),
+                    root: root.to_path_buf(),
+                    repo,
+                    config: config.clone(),
+                    issue_map: IssueMap::load(root)
+                        .unwrap_or_else(|_| serde_json::from_str("{}").unwrap()),
+                    issue_cache: IssueCache::new(root),
+                }))
+            })
+        } else {
+            None
+        };
 
     let cache_ttl = config
         .documents
@@ -704,7 +701,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     // Schedule polling whenever the project has any pollable type, independent of
     // whether a github store was built: a clickup-only project has no github repo
     // (shared_gh_store == None) but must still poll to refresh its task cache.
-    let mut next_poll = if has_pollable_types(&config) {
+    let mut next_poll = if crate::tui::has_pollable_types(&config) {
         Some(Instant::now())
     } else {
         None
@@ -749,10 +746,16 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     });
 
     let mut loop_count: u64 = 0;
+    let anim_start = Instant::now();
     loop {
         let loop_start = Instant::now();
 
         let t = Instant::now();
+        // Spinner cadence: wall-clock seconds, not loop count. The render loop
+        // wakes tens of times/sec for input; binding frame_idx to that spun the
+        // spinner far too fast. One frame per second.
+        app.frame_idx = anim_start.elapsed().as_secs();
+        app.refresh_in_flight = refresh_in_flight.load(Ordering::Relaxed);
         terminal.draw(|f| views::draw(f, &mut app, &config))?;
         perf_log::log_duration("draw", t);
 
@@ -795,6 +798,12 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             }
             Err(_) => {
                 perf_log::log_duration("recv_timeout", t);
+            }
+        }
+
+        if let Some(deadline) = app.create_form.dismiss_at {
+            if Instant::now() >= deadline {
+                app.close_create_form();
             }
         }
 
@@ -1057,41 +1066,6 @@ mod tests {
     use super::*;
     use crate::engine::config::TypeDef;
     use tempfile::TempDir;
-
-    // Gate: a project whose only GitHub-backed type is github-milestones must
-    // still poll, so a milestone created after launch appears live in the list.
-    #[test]
-    fn milestone_only_project_is_pollable() {
-        let mut config = Config::default();
-        config.documents.types = vec![TypeDef::test_fixture(
-            "milestone",
-            StoreBackend::GithubMilestones,
-        )];
-
-        assert!(has_pollable_types(&config));
-    }
-
-    // Gate: a clickup-only project must poll too, so tasks created after launch
-    // appear live without a manual fetch — same parity as github types.
-    #[test]
-    fn clickup_only_project_is_pollable() {
-        let mut config = Config::default();
-        config.documents.types = vec![TypeDef::test_fixture("task", StoreBackend::ClickupTasks)];
-
-        assert!(has_pollable_types(&config));
-    }
-
-    // Gate: a project with no pollable types must not poll.
-    #[test]
-    fn project_without_gh_types_is_not_pollable() {
-        let mut config = Config::default();
-        config.documents.types = vec![
-            TypeDef::test_fixture("doc", StoreBackend::Filesystem),
-            TypeDef::test_fixture("note", StoreBackend::Filesystem),
-        ];
-
-        assert!(!has_pollable_types(&config));
-    }
 
     // Build an App over `root` with the given config, using a deterministic
     // halfblocks picker so no terminal probing happens in tests.

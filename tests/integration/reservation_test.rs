@@ -268,7 +268,7 @@ fn prune_deletes_refs_with_matching_documents() {
     fixture.write_rfc("RFC-042-some-title.md", "Some Title", "draft");
 
     let store = Store::load(fixture.root(), &config).unwrap();
-    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, false, false, |_| {})
+    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, false, false, None)
         .unwrap();
 
     assert!(
@@ -286,7 +286,7 @@ fn prune_flags_orphans_without_deleting() {
     seed_ref_on_bare(bare.path(), "RFC", 99);
 
     let store = Store::load(fixture.root(), &config).unwrap();
-    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, false, false, |_| {})
+    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, false, false, None)
         .unwrap();
 
     assert!(
@@ -305,7 +305,7 @@ fn prune_dry_run_does_not_delete() {
     fixture.write_rfc("RFC-042-some-title.md", "Some Title", "draft");
 
     let store = Store::load(fixture.root(), &config).unwrap();
-    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, true, false, |_| {})
+    lazyspec::cli::reservations::run_prune(fixture.root(), &config, &store, true, false, None)
         .unwrap();
 
     assert!(

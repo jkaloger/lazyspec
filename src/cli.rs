@@ -19,11 +19,13 @@ pub mod search;
 pub mod setup;
 pub mod show;
 pub mod skills;
+pub mod spinner;
 pub mod status;
 pub mod style;
 pub mod tag;
 pub mod update;
 pub mod validate;
+pub mod wizard;
 
 use crate::cli::config::ConfigCommand;
 use crate::cli::provenance::ProvenanceCommand;
@@ -70,8 +72,20 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize lazyspec in the current project
-    Init,
+    /// Initialize lazyspec in the current project. On a TTY with neither flag,
+    /// walks an interactive wizard to tweak the starter config before writing.
+    Init {
+        /// Skip the wizard and write the starter config unchanged
+        #[arg(long)]
+        non_interactive: bool,
+        /// Suppress the wizard (implies --non-interactive) and write the starter config unchanged
+        #[arg(long)]
+        json: bool,
+        /// Pre-select a starter template for the interactive wizard (only `starter`
+        /// is supported; the default is a blank DAG). Ignored on non-interactive runs.
+        #[arg(long, value_parser = ["starter"])]
+        template: Option<String>,
+    },
     /// Create a new document from template
     Create {
         /// Document type (rfc, adr, story, iteration)

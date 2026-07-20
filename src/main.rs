@@ -22,8 +22,25 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let cwd = std::env::current_dir()?;
 
-    if matches!(cli.command, Some(Commands::Init)) {
-        lazyspec::cli::init::run(&cwd)?;
+    if let Some(Commands::Init {
+        non_interactive,
+        json,
+        template,
+    }) = &cli.command
+    {
+        use std::io::IsTerminal;
+        let interactive = lazyspec::cli::init::init_is_interactive(
+            *non_interactive,
+            *json,
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+        );
+        if interactive {
+            let mut prompter = lazyspec::cli::wizard::StdinPrompter::new();
+            lazyspec::cli::init::run_init_interactive(&cwd, &mut prompter, template.as_deref())?;
+        } else {
+            lazyspec::cli::init::run(&cwd)?;
+        }
         return Ok(());
     }
 
@@ -106,7 +123,7 @@ fn main() -> anyhow::Result<()> {
     let config = Config::load(&cwd, &fs)?;
 
     match cli.command {
-        Some(Commands::Init)
+        Some(Commands::Init { .. })
         | Some(Commands::Completions { .. })
         | Some(Commands::Skills { .. }) => {
             unreachable!()
@@ -164,8 +181,9 @@ fn main() -> anyhow::Result<()> {
         }) => {
             let body_content = lazyspec::cli::resolve_body(&body, &body_file)?;
             let store = Store::load(&cwd, &config)?;
+            let pb = lazyspec::cli::spinner::op_spinner(format!("creating {}", doc_type), json);
             if json {
-                let output = lazyspec::cli::create::run_json_with_body(
+                let result = lazyspec::cli::create::run_json_with_body(
                     &cwd,
                     &config,
                     &store,
@@ -174,11 +192,24 @@ fn main() -> anyhow::Result<()> {
                     &author,
                     parent.as_deref(),
                     body_content.as_deref(),
-                    |_| {},
-                )?;
-                println!("{}", output);
+                    |p| {
+                        if let Some(pb) = &pb {
+                            pb.set_message(lazyspec::cli::spinner::reservation_message(&p));
+                        }
+                    },
+                );
+                match result {
+                    Ok(output) => {
+                        lazyspec::cli::spinner::finish_ok(pb, "created");
+                        println!("{}", output);
+                    }
+                    Err(e) => {
+                        lazyspec::cli::spinner::finish_err(pb, "create failed");
+                        return Err(e);
+                    }
+                }
             } else {
-                let (path, push_outcome) = lazyspec::cli::create::run_with_body(
+                let result = lazyspec::cli::create::run_with_body(
                     &cwd,
                     &config,
                     &store,
@@ -187,11 +218,24 @@ fn main() -> anyhow::Result<()> {
                     &author,
                     parent.as_deref(),
                     body_content.as_deref(),
-                    |_| {},
-                )?;
-                println!("{}", path.display());
-                if let Some(warning) = push_outcome.warning() {
-                    eprintln!("{}", warning);
+                    |p| {
+                        if let Some(pb) = &pb {
+                            pb.set_message(lazyspec::cli::spinner::reservation_message(&p));
+                        }
+                    },
+                );
+                match result {
+                    Ok((path, push_outcome)) => {
+                        lazyspec::cli::spinner::finish_ok(pb, "created");
+                        println!("{}", path.display());
+                        if let Some(warning) = push_outcome.warning() {
+                            eprintln!("{}", warning);
+                        }
+                    }
+                    Err(e) => {
+                        lazyspec::cli::spinner::finish_err(pb, "create failed");
+                        return Err(e);
+                    }
                 }
             }
         }
@@ -589,17 +633,25 @@ fn main() -> anyhow::Result<()> {
             }
             ReservationsCommand::Prune { dry_run, json } => {
                 let store = Store::load(&cwd, &config)?;
-                lazyspec::cli::reservations::run_prune(
+                let pb = lazyspec::cli::spinner::op_spinner("pruning reservations", json);
+                let result = lazyspec::cli::reservations::run_prune(
                     &cwd,
                     &config,
                     &store,
                     dry_run,
                     json,
-                    |_| {},
-                )?;
+                    pb.as_ref(),
+                );
+                match result {
+                    Ok(()) => lazyspec::cli::spinner::finish_ok(pb, "prune complete"),
+                    Err(e) => {
+                        lazyspec::cli::spinner::finish_err(pb, "prune failed");
+                        return Err(e);
+                    }
+                }
             }
         },
-        Some(Commands::Config { command, json: _ }) => {
+        Some(Commands::Config { command, json }) => {
             use lazyspec::cli::config::ConfigCommand;
             match command {
                 None | Some(ConfigCommand::Show { .. }) => {
@@ -621,36 +673,107 @@ fn main() -> anyhow::Result<()> {
                     numbering,
                     intent,
                     authorship,
+                    github_issue_tag,
+                    github_issue_type,
+                    clickup_list_id,
                     clickup_task_type,
                     attributes,
                 }) => {
-                    lazyspec::cli::config::run_add_type(
-                        &cwd,
-                        &fs,
-                        &name,
-                        &plural,
-                        &dir,
-                        &prefix,
-                        icon.as_deref(),
-                        parent_type.as_deref(),
-                        singleton,
-                        store.as_deref(),
-                        numbering.as_deref(),
-                        intent.as_deref(),
-                        authorship.as_deref(),
-                        clickup_task_type,
-                        &attributes,
-                    )?;
+                    use lazyspec::cli::config::{classify_add_type_args, AddTypeInvocation};
+                    use std::io::IsTerminal;
+                    match classify_add_type_args([&name, &plural, &dir, &prefix])? {
+                        AddTypeInvocation::Positional => {
+                            let type_name = name.as_deref().unwrap();
+                            let pb = lazyspec::cli::spinner::op_spinner(
+                                format!("adding type {type_name}"),
+                                json,
+                            );
+                            let result = lazyspec::cli::config::run_add_type(
+                                &cwd,
+                                &fs,
+                                type_name,
+                                plural.as_deref().unwrap(),
+                                dir.as_deref().unwrap(),
+                                prefix.as_deref().unwrap(),
+                                icon.as_deref(),
+                                parent_type.as_deref(),
+                                singleton,
+                                store.as_deref(),
+                                numbering.as_deref(),
+                                intent.as_deref(),
+                                authorship.as_deref(),
+                                github_issue_tag.as_deref(),
+                                github_issue_type.as_deref(),
+                                clickup_list_id.as_deref(),
+                                clickup_task_type,
+                                &attributes,
+                            );
+                            match result {
+                                Ok(()) => lazyspec::cli::spinner::finish_ok(pb, "type added"),
+                                Err(e) => {
+                                    lazyspec::cli::spinner::finish_err(pb, "add-type failed");
+                                    return Err(e);
+                                }
+                            }
+                        }
+                        AddTypeInvocation::Prompt => {
+                            let interactive = !json
+                                && std::io::stdin().is_terminal()
+                                && std::io::stdout().is_terminal();
+                            if !interactive {
+                                anyhow::bail!(
+                                    "config add-type requires name, plural, dir, and prefix (or run interactively on a TTY)"
+                                );
+                            }
+                            if lazyspec::cli::spinner::should_greet(
+                                json,
+                                std::io::stdout().is_terminal(),
+                                console::colors_enabled(),
+                            ) {
+                                lazyspec::cli::spinner::say("let's add a new document type");
+                            }
+                            let mut prompter = lazyspec::cli::wizard::StdinPrompter::new();
+                            lazyspec::cli::config::run_add_type_interactive(
+                                &cwd,
+                                &fs,
+                                &mut prompter,
+                            )?;
+                            // The wizard's prompts are the feedback while it runs;
+                            // settle on the happy face once the write lands.
+                            let pb = lazyspec::cli::spinner::op_spinner("type added", json);
+                            lazyspec::cli::spinner::finish_ok(pb, "type added");
+                        }
+                    }
                 }
                 Some(ConfigCommand::SetLifecycle {
                     name,
                     states,
                     edges,
                 }) => {
-                    lazyspec::cli::config::run_set_lifecycle(&cwd, &fs, &name, &states, &edges)?;
+                    let pb = lazyspec::cli::spinner::op_spinner(
+                        format!("setting lifecycle on {name}"),
+                        json,
+                    );
+                    match lazyspec::cli::config::run_set_lifecycle(
+                        &cwd, &fs, &name, &states, &edges,
+                    ) {
+                        Ok(()) => lazyspec::cli::spinner::finish_ok(pb, "lifecycle set"),
+                        Err(e) => {
+                            lazyspec::cli::spinner::finish_err(pb, "set-lifecycle failed");
+                            return Err(e);
+                        }
+                    }
                 }
                 Some(ConfigCommand::AddGate { name, status }) => {
-                    lazyspec::cli::config::run_add_gate(&cwd, &fs, &name, &status)?;
+                    let pb =
+                        lazyspec::cli::spinner::op_spinner(format!("gating rule {name}"), json);
+                    match lazyspec::cli::config::run_add_gate(&cwd, &fs, &name, &status) {
+                        Ok(()) => lazyspec::cli::spinner::finish_ok(pb, "gate added"),
+                        Err(e) => {
+                            lazyspec::cli::spinner::finish_err(pb, "add-gate failed");
+                            return Err(e);
+                        }
+                    }
                 }
             }
         }

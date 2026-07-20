@@ -94,6 +94,9 @@ fn update_type_table(entry: &mut Table, def: &TypeDef) {
         authorship_str(&def.authorship),
         "assisted",
     );
+    set_opt_str(entry, "github_issue_tag", def.github_issue_tag.as_deref());
+    set_opt_str(entry, "github_issue_type", def.github_issue_type.as_deref());
+    set_opt_str(entry, "clickup_list_id", def.clickup_list_id.as_deref());
     set_opt_int(entry, "clickup_task_type", def.clickup_task_type);
     set_lifecycle(entry, &def.lifecycle);
     set_attributes(entry, &def.attributes);

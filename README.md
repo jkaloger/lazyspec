@@ -299,7 +299,7 @@ Every mutation's `--json` output also reports whether the change reached the doc
 
 | Command                                                         | Description                                                                                     |
 | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `init`                                                          | Initialise lazyspec in the current project                                                      |
+| `init [--non-interactive] [--json] [--template starter]`        | Initialise lazyspec in the current project. On a TTY runs an interactive wizard that defaults to designing a blank DAG; `--template starter` (or picking `starter` on the first screen) tweaks the built-in starter DAG instead. `--non-interactive`/`--json`/non-TTY write the starter config unchanged (`--template` is ignored) |
 | `create <type> <title> [--author X] [--parent ID] [--body / --body-file]` | Create a document (rfc, adr, story, iteration); seed body inline, from a file, or `-` for stdin. `--parent <ID>` makes the new doc a child of an existing doc; the child must be the same store as its parent. For filesystem-store types the child is authored as a sibling `.md` inside the parent's subdir (promoting a flat parent to `TYPE-n-slug/index.md` on the first child). For `github-issues`-store types the child is created as a real GitHub issue and bound as a native sub-issue of the parent at create time; a later `fetch` mirrors them into the nested cache layout (`.lazyspec/cache/<type>/<PARENT>/index.md` + `NN-<child>.md`) |
 | `list [type] [--status X]`                                      | List documents with optional filters; each list card shows the assignee (as `@name`) when one is set, and nothing when unset |
 | `show <id> [-e] [--open]`                                       | Display a document by path or shorthand ID (e.g. `RFC-001`); `--open` opens it in a browser or viewer instead. The detail header adds an `Assignee:` line when the document has one (omitted when unset), mirroring the `Tags:` line. The `--json` output includes an `assignee` field (a string, or `null` when unset) alongside `status`/`tags`; `status --json` reports it for every document too |
@@ -326,7 +326,7 @@ Every mutation's `--json` output also reports whether the change reached the doc
 | `skills install [--runtime <claude\|agents-md>]`                | Install the embedded agent skill set into the project (both runtimes by default)                |
 | `config [--json]`                                               | Print the resolved `.lazyspec.toml` as JSON                                                     |
 | `config schema`                                                 | Print a JSON Schema for `.lazyspec.toml` (runs from any directory)                              |
-| `config add-type <name> <plural> <dir> <prefix>`                | Append a new document type to `.lazyspec.toml`                                                  |
+| `config add-type <name> <plural> <dir> <prefix>`                | Append a new document type to `.lazyspec.toml` (bare, on a TTY, runs the interactive wizard) |
 | `config set-lifecycle <type> [--state X] [--edge from:to]`      | Replace a type's lifecycle states and edges                                                     |
 | `config add-gate <rule> --status X`                             | Set the `require_parent_status` gate on a parent-child rule                                     |
 | `provenance add <id> <citation>`                                | Append a citation to a document's provenance list                                               |
@@ -451,8 +451,26 @@ Unresolvable refs render as:
 <details>
 <summary><h2>Configuration</h2></summary>
 
-`lazyspec init` creates a `.lazyspec.toml` in your project root with a starter set
-of document types, relationships, and validation rules. The engine carries no
+`lazyspec init` creates a `.lazyspec.toml` in your project root. On a TTY it walks
+an interactive wizard that defaults to designing a **blank** DAG from scratch; pass
+`--template starter` to opt into tweaking the built-in starter DAG instead:
+
+- **Blank** (the default) designs the whole type DAG from nothing: it prompts for
+  each type (and its lifecycle), then -- once at least two types exist -- for
+  parent-child rules with a severity and an optional parent-status gate, defaults
+  the relationship vocabulary to the type-agnostic starter set, renders a summary
+  of the designed DAG, and asks to confirm before writing. Declining the
+  confirmation discards the session and starts over; nothing is written.
+- **Starter** (`lazyspec init --template starter`, or picking `starter` on the
+  first screen) starts from the built-in starter set of document types,
+  relationships, and validation rules and lets you tweak it -- set the naming
+  pattern, keep or drop each starter type, and add new types -- before it
+  scaffolds the project. `--template starter` skips the first-screen prompt and
+  goes straight to the starter designer.
+
+Pass `--non-interactive` (or `--json`, which implies it), or run in a
+non-TTY context (a pipe or CI), to skip the wizard and write the starter config
+unchanged; `--template` is ignored on those paths. The engine carries no
 built-in document types or relationship vocabulary: the `[[types]]`,
 `[[relationships]]`, and `[[rules]]` declared in `.lazyspec.toml` are the sole
 source of truth. A missing `.lazyspec.toml`, or a config with no `[[types]]`, is a
@@ -518,8 +536,28 @@ lazyspec config schema                      # print a JSON Schema for .lazyspec.
 lazyspec config add-type spike spikes docs/spikes SPIKE \
   --icon "◆" --parent-type rfc --intent "throwaway exploration" \
   --authorship generated
+
+# With no positionals on a TTY, add-type prompts interactively. After the core
+# fields (name, plural, dir, prefix, icon, store, numbering, singleton,
+# authorship) -- where choosing store = github-issues additionally prompts for
+# the GitHub issue tag/label and issue type, and store = clickup-tasks for the
+# ClickUp list id and task type (other stores prompt for neither) -- it
+# optionally walks through: attributes (repeat until declined; a
+# malformed or duplicate spec re-asks in place), a parent type (chosen only from
+# already-defined types), a custom lifecycle (enter the states as one
+# comma-separated line, then FROM:TO edges, where an edge naming an unknown state
+# re-asks; decline to inherit the store preset), and a gate on an existing
+# parent-child rule (the status must be one the parent type's lifecycle carries).
+# Single-choice prompts (store, numbering, authorship, ...) are coloured
+# arrow-key menus -- move the highlight with up/down, Enter picks it, no typing
+# required. The wizard drives the same add-type / set-lifecycle
+# / add-gate writers as the flags, so it produces an identical .lazyspec.toml.
+# Flags, --json, and non-TTY invocations stay the canonical scriptable path and
+# still require all four positionals.
+lazyspec config add-type
 # also accepts --singleton, --store <filesystem|github-issues|github-milestones|github-projects|git-ref|clickup-tasks>,
-# --numbering <incremental|sqids|reserved>, --clickup-task-type <id> (clickup-tasks only)
+# --numbering <incremental|sqids|reserved>, --github-issue-tag <str> / --github-issue-type <str>
+# (github-issues only), and --clickup-list-id <str> / --clickup-task-type <id> (clickup-tasks only)
 
 # Declare custom frontmatter attributes with the type (repeat --attribute per
 # attribute; spec is NAME:KIND[:required][:VAL1,VAL2,...], kinds: int, float,
@@ -594,6 +632,10 @@ github_issue_type = "Feature"
   Issue Type equals that value; the label is not checked.
 - Both set: an issue must carry the tag **and** have the native issue type --
   AND, not OR.
+
+`config add-type ... --github-issue-tag <str>` and `--github-issue-type <str>`
+write these keys (both valid **only** on `store = "github-issues"`), and they
+surface in `config --json`.
 
 Because these are independent per-type rules, two types may legitimately
 match the same issue (e.g. both set `github_issue_type = "Feature"`). `fetch`
@@ -713,8 +755,9 @@ clickup_task_type = 1001
 
 The value is a numeric id only -- name-to-id resolution is not supported. It is
 valid **only** on `store = "clickup-tasks"`; setting it on any other store is a
-config error. `config add-type ... --clickup-task-type <id>` writes it, and it
-surfaces in `config --json`.
+config error. `config add-type ... --clickup-list-id <str>` (the List binding)
+and `--clickup-task-type <id>` write these keys -- both valid only on
+`store = "clickup-tasks"` -- and they surface in `config --json`.
 
 `lazyspec fetch` (optionally `--type <name>`) pulls the bound List's tasks
 (`GET /list/{id}/task`, paginated) using the token from `setup clickup`, and

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
 
 use crate::engine::document::Status;
 use crate::engine::status_colors::StatusColors;
@@ -114,10 +114,41 @@ pub fn tag_color(tag: &str) -> Color {
     hash_palette_color(tag)
 }
 
+/// Map a semantic spinner [`FrameColour`] to a ratatui style. Accent is the
+/// terminal default foreground; success/error carry the conventional
+/// green/red; dim is a modifier so it tracks the terminal's own palette.
+pub fn frame_style(colour: crate::spinners::FrameColour) -> Style {
+    use crate::spinners::FrameColour;
+    match colour {
+        FrameColour::Accent => Style::default(),
+        FrameColour::Dim => Style::default().add_modifier(Modifier::DIM),
+        FrameColour::Success => Style::default().fg(Color::Green),
+        FrameColour::Error => Style::default().fg(Color::Red),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn frame_style_maps_colours() {
+        use crate::spinners::FrameColour;
+        assert_eq!(frame_style(FrameColour::Accent), Style::default());
+        assert_eq!(
+            frame_style(FrameColour::Success),
+            Style::default().fg(Color::Green)
+        );
+        assert_eq!(
+            frame_style(FrameColour::Error),
+            Style::default().fg(Color::Red)
+        );
+        assert_eq!(
+            frame_style(FrameColour::Dim),
+            Style::default().add_modifier(Modifier::DIM)
+        );
+    }
 
     #[test]
     fn hex_to_color_parses_rrggbb() {

@@ -1,6 +1,7 @@
+use crate::cli::wizard::Prompter;
 use crate::engine::config::{
-    AttrDef, AttrKind, Authorship, Config, Edge, Lifecycle, NumberingStrategy, StoreBackend,
-    TypeDef, ValidationRule,
+    AttrDef, AttrKind, Authorship, Config, Edge, Lifecycle, NumberingStrategy, Severity,
+    StoreBackend, TypeDef, ValidationRule,
 };
 use crate::engine::config_write::write_config_in_place;
 use crate::engine::fs::FileSystem;
@@ -25,16 +26,17 @@ pub enum ConfigCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Append a new document type to .lazyspec.toml
+    /// Append a new document type to .lazyspec.toml. With all four positionals
+    /// omitted on a TTY, prompts for the core fields interactively.
     AddType {
         /// Type name (e.g. spike)
-        name: String,
+        name: Option<String>,
         /// Plural form used for directory listings (e.g. spikes)
-        plural: String,
+        plural: Option<String>,
         /// Directory the type's documents live in (e.g. docs/spikes)
-        dir: String,
+        dir: Option<String>,
         /// ID prefix for the type (e.g. SPIKE)
-        prefix: String,
+        prefix: Option<String>,
         /// Icon shown in the TUI
         #[arg(long)]
         icon: Option<String>,
@@ -56,6 +58,15 @@ pub enum ConfigCommand {
         /// Authorship ceiling: human, assisted, or generated
         #[arg(long)]
         authorship: Option<String>,
+        /// GitHub issue tag (label); only valid on store = github-issues
+        #[arg(long)]
+        github_issue_tag: Option<String>,
+        /// GitHub issue type; only valid on store = github-issues
+        #[arg(long)]
+        github_issue_type: Option<String>,
+        /// ClickUp list ID documents are created in; only valid on store = clickup-tasks
+        #[arg(long)]
+        clickup_list_id: Option<String>,
         /// ClickUp custom task type (numeric custom_item_id); only valid on store = clickup-tasks
         #[arg(long)]
         clickup_task_type: Option<i64>,
@@ -109,6 +120,9 @@ pub fn run_add_type(
     numbering: Option<&str>,
     intent: Option<&str>,
     authorship: Option<&str>,
+    github_issue_tag: Option<&str>,
+    github_issue_type: Option<&str>,
+    clickup_list_id: Option<&str>,
     clickup_task_type: Option<i64>,
     attributes: &[String],
 ) -> Result<()> {
@@ -132,38 +146,573 @@ pub fn run_add_type(
         bail!("attribute \"{}\" is declared more than once", dup.1.name);
     }
 
-    config.documents.types.push(TypeDef {
+    config.documents.types.push(type_def_from_parts(
+        name,
+        plural,
+        dir,
+        prefix,
+        icon,
+        parent_type,
+        singleton,
+        store.map(parse_store).transpose()?.unwrap_or_default(),
+        numbering
+            .map(parse_numbering)
+            .transpose()?
+            .unwrap_or_default(),
+        intent,
+        authorship
+            .map(parse_authorship)
+            .transpose()?
+            .unwrap_or_default(),
+        github_issue_tag,
+        github_issue_type,
+        clickup_list_id,
+        clickup_task_type,
+        attributes,
+    ));
+
+    let out = write_config_in_place(&src, &config)?;
+    fs.write(&path, &out)?;
+    Ok(())
+}
+
+/// Assemble a `TypeDef` from already-parsed pieces. Shared by the flag path
+/// (`run_add_type`) and the in-memory init wizard (`apply_collected_type`) so the
+/// full field set is written the same way from both entry points.
+#[allow(clippy::too_many_arguments)]
+fn type_def_from_parts(
+    name: &str,
+    plural: &str,
+    dir: &str,
+    prefix: &str,
+    icon: Option<&str>,
+    parent_type: Option<&str>,
+    singleton: bool,
+    store: StoreBackend,
+    numbering: NumberingStrategy,
+    intent: Option<&str>,
+    authorship: Authorship,
+    github_issue_tag: Option<&str>,
+    github_issue_type: Option<&str>,
+    clickup_list_id: Option<&str>,
+    clickup_task_type: Option<i64>,
+    attributes: Vec<AttrDef>,
+) -> TypeDef {
+    TypeDef {
         name: name.to_string(),
         plural: plural.to_string(),
         dir: dir.to_string(),
         prefix: prefix.to_string(),
         icon: icon.map(str::to_string),
-        numbering: numbering
-            .map(parse_numbering)
-            .transpose()?
-            .unwrap_or_default(),
+        numbering,
         subdirectory: false,
-        store: store.map(parse_store).transpose()?.unwrap_or_default(),
+        store,
         singleton,
         parent_type: parent_type.map(str::to_string),
         agents: Vec::new(),
         intent: intent.map(str::to_string),
-        authorship: authorship
-            .map(parse_authorship)
-            .transpose()?
-            .unwrap_or_default(),
+        authorship,
         lifecycle: Lifecycle::default(),
         attributes,
         label_override: None,
-        github_issue_tag: None,
-        github_issue_type: None,
-        clickup_list_id: None,
+        github_issue_tag: github_issue_tag.map(str::to_string),
+        github_issue_type: github_issue_type.map(str::to_string),
+        clickup_list_id: clickup_list_id.map(str::to_string),
         clickup_task_type,
         clickup_custom_field_map: None,
-    });
+    }
+}
 
-    let out = write_config_in_place(&src, &config)?;
-    fs.write(&path, &out)?;
+/// How `config add-type` should proceed given its four positionals: all four
+/// present runs the flag path, all four absent prompts, and any partial mix is
+/// a usage error.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AddTypeInvocation {
+    Positional,
+    Prompt,
+}
+
+pub fn classify_add_type_args(positionals: [&Option<String>; 4]) -> Result<AddTypeInvocation> {
+    let supplied = positionals.iter().filter(|p| p.is_some()).count();
+    match supplied {
+        4 => Ok(AddTypeInvocation::Positional),
+        0 => Ok(AddTypeInvocation::Prompt),
+        _ => bail!(
+            "config add-type needs all four of name, plural, dir, prefix (or none, to prompt interactively)"
+        ),
+    }
+}
+
+/// The fields a single interactive type-authoring session collects, before any
+/// disk write. Produced by `collect_type_interactive` and applied either to a
+/// parsed-from-disk config (via `run_add_type` and friends) or to an in-memory
+/// config being designed by `init` (via `apply_collected_type`).
+pub struct CollectedType {
+    pub name: String,
+    pub plural: String,
+    pub dir: String,
+    pub prefix: String,
+    pub icon: Option<String>,
+    pub store: String,
+    pub numbering: String,
+    pub singleton: bool,
+    pub authorship: String,
+    pub attributes: Vec<String>,
+    pub parent_type: Option<String>,
+    pub lifecycle: Option<(Vec<String>, Vec<String>)>,
+    pub gate: Option<(String, String)>,
+    pub github_issue_tag: Option<String>,
+    pub github_issue_type: Option<String>,
+    pub clickup_list_id: Option<String>,
+    pub clickup_task_type: Option<i64>,
+}
+
+/// Prompt for a type's fields on a TTY, validating each section against `config`
+/// (an in-memory view of the project as it stands, so name/prefix/parent/gate
+/// checks see prior additions) without touching disk. Every optional section
+/// pre-validates prompt-side and re-asks on failure rather than aborting.
+pub fn collect_type_interactive(
+    config: &Config,
+    prompter: &mut dyn Prompter,
+) -> Result<CollectedType> {
+    let default_authorship = match Authorship::default() {
+        Authorship::Human => "human",
+        Authorship::Assisted => "assisted",
+        Authorship::Generated => "generated",
+    };
+
+    // Re-prompt the identity fields until neither the name nor the prefix
+    // collides with an existing type, rather than aborting the whole session.
+    let (name, plural, dir, prefix) = loop {
+        let name = prompter.ask("Type name", None)?;
+        let plural = prompter.ask("Plural", None)?;
+        let dir = prompter.ask("Directory", Some(&format!("docs/{plural}")))?;
+        let prefix = prompter.ask("ID prefix", Some(&name.to_uppercase()))?;
+
+        if config.type_by_name(&name).is_some() {
+            println!("type \"{name}\" already exists; choose another");
+            continue;
+        }
+        if config.documents.types.iter().any(|t| t.prefix == prefix) {
+            println!("prefix \"{prefix}\" is already in use; choose another");
+            continue;
+        }
+        break (name, plural, dir, prefix);
+    };
+
+    let icon = prompter.ask("Icon", None)?;
+    let icon = if icon.is_empty() { None } else { Some(icon) };
+    let store = prompter.select(
+        "Store",
+        &[
+            "filesystem",
+            "github-issues",
+            "github-milestones",
+            "github-projects",
+            "git-ref",
+            "clickup-tasks",
+        ],
+        "filesystem",
+    )?;
+
+    let mut github_issue_tag = None;
+    let mut github_issue_type = None;
+    let mut clickup_list_id = None;
+    let mut clickup_task_type = None;
+    match store.as_str() {
+        "clickup-tasks" => {
+            let list_id = prompter.ask("ClickUp list ID", None)?;
+            clickup_list_id = (!list_id.is_empty()).then_some(list_id);
+            clickup_task_type = loop {
+                let answer = prompter.ask("ClickUp task type (numeric custom_item_id)", None)?;
+                if answer.is_empty() {
+                    break None;
+                }
+                match answer.parse::<i64>() {
+                    Ok(n) => break Some(n),
+                    Err(_) => println!("\"{answer}\" is not a number; try again"),
+                }
+            };
+        }
+        "github-issues" => {
+            let tag = prompter.ask("GitHub issue tag", None)?;
+            github_issue_tag = (!tag.is_empty()).then_some(tag);
+            let issue_type = prompter.ask("GitHub issue type", None)?;
+            github_issue_type = (!issue_type.is_empty()).then_some(issue_type);
+        }
+        _ => {}
+    }
+
+    let numbering = prompter.select(
+        "Numbering",
+        &["incremental", "sqids", "reserved"],
+        "incremental",
+    )?;
+    let singleton = prompter.confirm("Singleton", false)?;
+    let authorship = prompter.select(
+        "Authorship",
+        &["human", "assisted", "generated"],
+        default_authorship,
+    )?;
+
+    // Attributes: keep offering to add one until declined. A malformed spec or a
+    // name already collected re-asks in place (no fresh "add another?" prompt) so
+    // a typo never costs the value or ends the session.
+    let mut attributes: Vec<String> = Vec::new();
+    let mut attribute_names: Vec<String> = Vec::new();
+    while prompter.confirm("Add an attribute", false)? {
+        loop {
+            let spec = prompter.ask("Attribute (NAME:KIND[:required][:VALUES])", None)?;
+            let def = match parse_attr_spec(&spec) {
+                Ok(def) => def,
+                Err(e) => {
+                    println!("{e}; try again");
+                    continue;
+                }
+            };
+            if attribute_names.contains(&def.name) {
+                println!(
+                    "attribute \"{}\" was already added; choose another",
+                    def.name
+                );
+                continue;
+            }
+            attribute_names.push(def.name);
+            attributes.push(spec);
+            break;
+        }
+    }
+
+    // Parent: only an already-defined type may be chosen. Skip entirely when the
+    // project has no types to point at.
+    let type_names: Vec<&str> = config
+        .documents
+        .types
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
+    let parent_type = if !type_names.is_empty() && prompter.confirm("Set a parent type", false)? {
+        Some(loop {
+            let choice = prompter.select("Parent", &type_names, type_names[0])?;
+            if type_names.contains(&choice.as_str()) {
+                break choice;
+            }
+            println!("\"{choice}\" is not a defined type; choose one of the listed names");
+        })
+    } else {
+        None
+    };
+
+    // Lifecycle: declining leaves the type's lifecycle empty so it inherits the
+    // store preset via `effective_lifecycle`. When designing one, an edge naming a
+    // state outside the collected set (source `*` excepted) re-asks in place.
+    let custom_lifecycle = if prompter.confirm("Design a custom lifecycle", false)? {
+        let states = loop {
+            let states = prompter.multi_select("Lifecycle states", &[], &[])?;
+            if states.is_empty() {
+                println!("at least one state is required");
+                continue;
+            }
+            break states;
+        };
+        let mut edges: Vec<String> = Vec::new();
+        loop {
+            let spec = prompter.ask("Edge FROM:TO (blank to finish)", None)?;
+            if spec.is_empty() {
+                break;
+            }
+            let edge = match parse_edge(&spec) {
+                Ok(edge) => edge,
+                Err(e) => {
+                    println!("{e}; try again");
+                    continue;
+                }
+            };
+            let to_ok = states.contains(&edge.to);
+            let from_ok = edge.from == "*" || states.contains(&edge.from);
+            if !to_ok || !from_ok {
+                println!("edge \"{spec}\" names a state that isn't in the lifecycle; try again");
+                continue;
+            }
+            edges.push(spec);
+        }
+        Some((states, edges))
+    } else {
+        None
+    };
+
+    // Gate: attach `require_parent_status` to an existing parent-child rule. Only
+    // a status the parent type's effective lifecycle carries is accepted.
+    let parent_child_rules: Vec<(String, String)> = config
+        .rules
+        .iter()
+        .filter_map(|r| match r {
+            ValidationRule::ParentChild { name, parent, .. } => {
+                Some((name.clone(), parent.clone()))
+            }
+            ValidationRule::RelationExistence { .. } => None,
+        })
+        .collect();
+    let gate = if !parent_child_rules.is_empty()
+        && prompter.confirm("Gate a parent-child rule", false)?
+    {
+        let rule_names: Vec<&str> = parent_child_rules.iter().map(|(n, _)| n.as_str()).collect();
+        let rule = loop {
+            let choice = prompter.select("Rule", &rule_names, rule_names[0])?;
+            if rule_names.contains(&choice.as_str()) {
+                break choice;
+            }
+            println!("\"{choice}\" is not a parent-child rule; choose one of the listed names");
+        };
+        let parent_name = &parent_child_rules
+            .iter()
+            .find(|(n, _)| *n == rule)
+            .expect("selected rule came from this list")
+            .1;
+        let states = config
+            .type_by_name(parent_name)
+            .map(|t| t.effective_lifecycle().states.clone())
+            .unwrap_or_default();
+        let status = loop {
+            let answer = prompter.ask("Required parent status", None)?;
+            if states.contains(&answer) {
+                break answer;
+            }
+            println!("\"{answer}\" is not a lifecycle state of \"{parent_name}\"; choose another");
+        };
+        Some((rule, status))
+    } else {
+        None
+    };
+
+    Ok(CollectedType {
+        name,
+        plural,
+        dir,
+        prefix,
+        icon,
+        store,
+        numbering,
+        singleton,
+        authorship,
+        attributes,
+        parent_type,
+        lifecycle: custom_lifecycle,
+        gate,
+        github_issue_tag,
+        github_issue_type,
+        clickup_list_id,
+        clickup_task_type,
+    })
+}
+
+/// A stable, dedup-guarded name for the parent-child rule linking `child` to
+/// `parent`, built from their plural forms (e.g. `stories-need-rfcs`). Falls back
+/// to a naive `{name}s` plural when a type is absent, and appends `-2`, `-3`, ...
+/// if the base name already names a rule.
+fn parent_child_rule_name(config: &Config, child: &str, parent: &str) -> String {
+    let plural = |name: &str| {
+        config
+            .type_by_name(name)
+            .map(|t| t.plural.clone())
+            .unwrap_or_else(|| format!("{name}s"))
+    };
+    let base = format!("{}-need-{}", plural(child), plural(parent));
+    if !config.rules.iter().any(|r| rule_name(r) == base) {
+        return base;
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base}-{n}");
+        if !config.rules.iter().any(|r| rule_name(r) == candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Prompt for a single parent-child rule against `config` (an in-memory view of
+/// the project as designed so far). Child and parent are each chosen from the
+/// defined type names -- an unknown answer re-asks rather than aborting. Severity
+/// defaults to `warning`. An optional gate re-asks until the chosen status names
+/// a state in the parent type's effective lifecycle. Pure: no disk IO, fully
+/// driveable by a `ScriptedPrompter`.
+pub fn collect_parent_child_rule(
+    config: &Config,
+    prompter: &mut dyn Prompter,
+) -> Result<ValidationRule> {
+    let type_names: Vec<&str> = config
+        .documents
+        .types
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
+
+    let pick = |prompter: &mut dyn Prompter, label: &str| -> Result<String> {
+        loop {
+            let choice = prompter.select(label, &type_names, type_names[0])?;
+            if type_names.contains(&choice.as_str()) {
+                break Ok(choice);
+            }
+            println!("\"{choice}\" is not a defined type; choose one of the listed names");
+        }
+    };
+
+    let child = pick(prompter, "Child type")?;
+    let parent = pick(prompter, "Parent type")?;
+    let name = parent_child_rule_name(config, &child, &parent);
+
+    let severity =
+        parse_severity(&prompter.select("Severity", &["warning", "error"], "warning")?)?;
+
+    let require_parent_status = if prompter.confirm("Gate on a parent status", false)? {
+        let states = config
+            .type_by_name(&parent)
+            .map(|t| t.effective_lifecycle().states.clone())
+            .unwrap_or_default();
+        Some(loop {
+            let answer = prompter.ask("Required parent status", None)?;
+            if states.contains(&answer) {
+                break answer;
+            }
+            println!("\"{answer}\" is not a lifecycle state of \"{parent}\"; choose another");
+        })
+    } else {
+        None
+    };
+
+    Ok(ValidationRule::ParentChild {
+        name,
+        child,
+        parent,
+        severity,
+        require_parent_status,
+    })
+}
+
+/// Push a collected type onto an in-memory `Config` and apply its optional
+/// lifecycle and gate, without any disk IO. Used by the `init` wizard, which
+/// serializes the whole `Config` at the end rather than editing a file in place.
+pub fn apply_collected_type(config: &mut Config, collected: &CollectedType) -> Result<()> {
+    if config.type_by_name(&collected.name).is_some() {
+        bail!("type \"{}\" already exists", collected.name);
+    }
+
+    let attributes = collected
+        .attributes
+        .iter()
+        .map(|spec| parse_attr_spec(spec))
+        .collect::<Result<Vec<_>>>()?;
+
+    config.documents.types.push(type_def_from_parts(
+        &collected.name,
+        &collected.plural,
+        &collected.dir,
+        &collected.prefix,
+        collected.icon.as_deref(),
+        collected.parent_type.as_deref(),
+        collected.singleton,
+        parse_store(&collected.store)?,
+        parse_numbering(&collected.numbering)?,
+        None,
+        parse_authorship(&collected.authorship)?,
+        collected.github_issue_tag.as_deref(),
+        collected.github_issue_type.as_deref(),
+        collected.clickup_list_id.as_deref(),
+        collected.clickup_task_type,
+        attributes,
+    ));
+
+    if let Some((states, edges)) = &collected.lifecycle {
+        let parsed_edges = edges.iter().map(|e| parse_edge(e)).collect::<Result<_>>()?;
+        let type_def = config
+            .documents
+            .types
+            .iter_mut()
+            .find(|t| t.name == collected.name)
+            .expect("just-pushed type is present");
+        type_def.lifecycle = Lifecycle {
+            states: states.clone(),
+            edges: parsed_edges,
+        };
+    }
+
+    if let Some((rule, status)) = &collected.gate {
+        match config.rules.iter_mut().find(|r| rule_name(r) == rule) {
+            Some(ValidationRule::ParentChild {
+                require_parent_status,
+                ..
+            }) => {
+                *require_parent_status = Some(status.clone());
+            }
+            _ => bail!("unknown parent-child rule \"{}\"", rule),
+        }
+    }
+
+    Ok(())
+}
+
+/// Prompt for a type's fields on a TTY and drive the same writers the flag path
+/// uses. After the core fields it optionally collects attributes and a parent
+/// type (fed to `run_add_type`), a custom lifecycle (`run_set_lifecycle`), and a
+/// gate on an existing parent-child rule (`run_add_gate`). Every optional section
+/// pre-validates prompt-side and re-asks on failure rather than aborting.
+pub fn run_add_type_interactive(
+    root: &Path,
+    fs: &dyn FileSystem,
+    prompter: &mut dyn Prompter,
+) -> Result<()> {
+    let path = root.join(".lazyspec.toml");
+    let src = fs.read_to_string(&path)?;
+    let config = Config::parse(&src)?;
+
+    let CollectedType {
+        name,
+        plural,
+        dir,
+        prefix,
+        icon,
+        store,
+        numbering,
+        singleton,
+        authorship,
+        attributes,
+        parent_type,
+        lifecycle: custom_lifecycle,
+        gate,
+        github_issue_tag,
+        github_issue_type,
+        clickup_list_id,
+        clickup_task_type,
+    } = collect_type_interactive(&config, prompter)?;
+
+    run_add_type(
+        root,
+        fs,
+        &name,
+        &plural,
+        &dir,
+        &prefix,
+        icon.as_deref(),
+        parent_type.as_deref(),
+        singleton,
+        Some(&store),
+        Some(&numbering),
+        None,
+        Some(&authorship),
+        github_issue_tag.as_deref(),
+        github_issue_type.as_deref(),
+        clickup_list_id.as_deref(),
+        clickup_task_type,
+        &attributes,
+    )?;
+
+    if let Some((states, edges)) = custom_lifecycle {
+        run_set_lifecycle(root, fs, &name, &states, &edges)?;
+    }
+    if let Some((rule, status)) = gate {
+        run_add_gate(root, fs, &rule, &status)?;
+    }
     Ok(())
 }
 
@@ -330,6 +879,14 @@ fn parse_store(value: &str) -> Result<StoreBackend> {
     }
 }
 
+pub fn parse_severity(value: &str) -> Result<Severity> {
+    match value {
+        "warning" => Ok(Severity::Warning),
+        "error" => Ok(Severity::Error),
+        other => bail!("unknown severity \"{}\"", other),
+    }
+}
+
 fn parse_authorship(value: &str) -> Result<Authorship> {
     match value {
         "human" => Ok(Authorship::Human),
@@ -342,6 +899,7 @@ fn parse_authorship(value: &str) -> Result<Authorship> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::wizard::ScriptedPrompter;
     use crate::engine::fs::RealFileSystem;
     use serde_json::Value;
     use std::path::PathBuf;
@@ -512,6 +1070,9 @@ require_parent_status = "accepted"
             Some("throwaway exploration"),
             Some("generated"),
             None,
+            None,
+            None,
+            None,
             &[],
         )
         .unwrap();
@@ -548,6 +1109,9 @@ require_parent_status = "accepted"
             None,
             None,
             false,
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -649,6 +1213,9 @@ require_parent_status = "accepted"
             None,
             None,
             None,
+            None,
+            None,
+            None,
             &["estimate:int".to_string(), "estimate:bool".to_string()],
         )
         .unwrap_err();
@@ -675,6 +1242,9 @@ require_parent_status = "accepted"
             None,
             None,
             None,
+            None,
+            None,
+            None,
             Some(1001),
             &[],
         )
@@ -683,6 +1253,40 @@ require_parent_status = "accepted"
         let after = std::fs::read_to_string(&path).unwrap();
         let json = show(&after);
         assert_eq!(type_named(&json, "task")["clickup_task_type"], 1001);
+    }
+
+    // The GitHub tag/type and ClickUp list-id string flags supplied to add-type
+    // are written onto the TypeDef and surface in `config --json` after a reload.
+    #[test]
+    fn add_type_writes_remote_string_fields() {
+        let (_dir, path, fs) = fixture(SRC);
+        run_add_type(
+            path.parent().unwrap(),
+            &fs,
+            "issue",
+            "issues",
+            "docs/issues",
+            "ISSUE",
+            None,
+            None,
+            false,
+            None, // default store; the remote fields are written regardless
+            None,
+            None,
+            None,
+            Some("Bug"),     // github_issue_tag
+            Some("Defect"),  // github_issue_type
+            Some("list-42"), // clickup_list_id
+            None,
+            &[],
+        )
+        .unwrap();
+
+        let json = show(&std::fs::read_to_string(&path).unwrap());
+        let issue = type_named(&json, "issue");
+        assert_eq!(issue["github_issue_tag"], "Bug");
+        assert_eq!(issue["github_issue_type"], "Defect");
+        assert_eq!(issue["clickup_list_id"], "list-42");
     }
 
     #[test]
@@ -704,6 +1308,9 @@ require_parent_status = "accepted"
             None,
             None,
             None,
+            None,
+            None,
+            None,
             &[],
         )
         .unwrap_err();
@@ -713,6 +1320,139 @@ require_parent_status = "accepted"
 
     // AC4: set-lifecycle replaces the whole lifecycle (not a merge) and is gated
     // by an existing type.
+    // Interactive add-type writes byte-for-byte the same config as the
+    // equivalent flag call: same start config, same delegated TypeDef.
+    #[test]
+    fn interactive_add_type_matches_flag_call() {
+        let (_dir_a, path_a, fs_a) = fixture(SRC);
+        let mut prompter = ScriptedPrompter::new(
+            [
+                "spike",       // name
+                "spikes",      // plural
+                "docs/spikes", // dir
+                "SPIKE",       // prefix
+                "◆",           // icon
+                "filesystem",  // store
+                "incremental", // numbering
+                "y",           // singleton -> true
+                "generated",   // authorship
+                "n",           // add an attribute? no
+                "n",           // set a parent type? no
+                "n",           // design a custom lifecycle? no
+                "n",           // gate a parent-child rule? no
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        );
+        run_add_type_interactive(path_a.parent().unwrap(), &fs_a, &mut prompter).unwrap();
+        let interactive_out = std::fs::read_to_string(&path_a).unwrap();
+
+        let (_dir_b, path_b, fs_b) = fixture(SRC);
+        run_add_type(
+            path_b.parent().unwrap(),
+            &fs_b,
+            "spike",
+            "spikes",
+            "docs/spikes",
+            "SPIKE",
+            Some("◆"),
+            None,
+            true,
+            Some("filesystem"),
+            Some("incremental"),
+            None,
+            Some("generated"),
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        let flag_out = std::fs::read_to_string(&path_b).unwrap();
+
+        assert_eq!(interactive_out, flag_out);
+    }
+
+    // A duplicate name on the first pass re-prompts (consuming the next queued
+    // identity) rather than aborting, and never writes a duplicate.
+    #[test]
+    fn interactive_add_type_reprompts_on_duplicate_name() {
+        let (_dir, path, fs) = fixture(SRC);
+        let mut prompter = ScriptedPrompter::new(
+            [
+                "rfc", "rfcs", "", "", // first pass: rfc already exists -> reprompt
+                "spike", "spikes", "", "", // second pass: unique
+                "", // icon
+                "", // store -> filesystem
+                "", // numbering -> incremental
+                "", // singleton -> false
+                "", // authorship -> default
+                "n", "n", "n", "n", // attributes / parent / lifecycle / gate declined
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        );
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let config = Config::parse(&after).unwrap();
+        assert_eq!(
+            config
+                .documents
+                .types
+                .iter()
+                .filter(|t| t.name == "rfc")
+                .count(),
+            1,
+            "rfc must not be duplicated"
+        );
+        assert!(config.type_by_name("spike").is_some());
+    }
+
+    // Blank dir and prefix answers fall back to docs/<plural> and UPPERCASE(name).
+    #[test]
+    fn interactive_add_type_applies_default_dir_and_prefix() {
+        let (_dir, path, fs) = fixture(SRC);
+        let mut prompter = ScriptedPrompter::new(
+            [
+                "task", "tasks", "", "", // dir and prefix blank -> defaults
+                "", "", "", "", "", // icon / store / numbering / singleton / authorship
+                "n", "n", "n", "n", // attributes / parent / lifecycle / gate declined
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        );
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let config = Config::parse(&after).unwrap();
+        let task = config.type_by_name("task").unwrap();
+        assert_eq!(task.dir, "docs/tasks");
+        assert_eq!(task.prefix, "TASK");
+    }
+
+    #[test]
+    fn classify_add_type_args_enforces_all_or_none() {
+        let some = Some("x".to_string());
+        assert_eq!(
+            classify_add_type_args([&some, &some, &some, &some]).unwrap(),
+            AddTypeInvocation::Positional
+        );
+        assert_eq!(
+            classify_add_type_args([&None, &None, &None, &None]).unwrap(),
+            AddTypeInvocation::Prompt
+        );
+        let err = classify_add_type_args([&some, &some, &None, &None]).unwrap_err();
+        assert!(
+            err.to_string().contains("all four"),
+            "partial positionals should error: {err}"
+        );
+    }
+
     #[test]
     fn set_lifecycle_replaces_states_and_edges() {
         let (_dir, path, fs) = fixture(SRC);
@@ -809,6 +1549,9 @@ require_parent_status = "accepted"
             None,
             None,
             None,
+            None,
+            None,
+            None,
             &[],
         )
         .unwrap();
@@ -866,5 +1609,495 @@ require_parent_status = "accepted"
         // The relation-existence rule is untouched.
         assert!(after.contains(r#"require = "any-relation""#));
         Config::parse(&after).unwrap();
+    }
+
+    fn scripted(answers: &[&str]) -> ScriptedPrompter {
+        ScriptedPrompter::new(answers.iter().map(|s| s.to_string()).collect())
+    }
+
+    // STORY-226 AC1: an interactively entered attribute spec is validated and
+    // written into the new type's frontmatter definition.
+    #[test]
+    fn interactive_add_type_collects_attributes() {
+        let (_dir, path, fs) = fixture(SRC);
+        let mut prompter = scripted(&[
+            "widget",
+            "widgets",
+            "",
+            "", // core fields (dir/prefix default)
+            "",
+            "",
+            "",
+            "",
+            "", // icon/store/numbering/singleton/authorship
+            "y",
+            "priority:enum:low,medium,high", // add one attribute
+            "n",                             // add another? no
+            "n",                             // parent? no
+            "n",                             // custom lifecycle? no
+            "n",                             // gate? no
+        ]);
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let config = Config::parse(&after).unwrap();
+        let widget = config.type_by_name("widget").unwrap();
+        assert_eq!(
+            widget.attributes,
+            vec![AttrDef {
+                name: "priority".to_string(),
+                kind: AttrKind::Enum,
+                required: false,
+                values: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+            }]
+        );
+    }
+
+    // STORY-226 AC1: a malformed attribute spec (unknown kind, enum without
+    // values) is rejected and re-asked in place, not aborted, and the eventual
+    // valid spec is written.
+    #[test]
+    fn interactive_add_type_reprompts_bad_attr() {
+        let (_dir, path, fs) = fixture(SRC);
+        let mut prompter = scripted(&[
+            "widget",
+            "widgets",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",                       // core fields
+            "y",                      // add an attribute
+            "priority:bogus",         // unknown kind -> re-ask
+            "priority:enum",          // enum without values -> re-ask
+            "priority:enum:low,high", // valid
+            "n",                      // add another? no
+            "n",
+            "n",
+            "n", // parent / lifecycle / gate declined
+        ]);
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let config = Config::parse(&after).unwrap();
+        let widget = config.type_by_name("widget").unwrap();
+        assert_eq!(widget.attributes.len(), 1);
+        assert_eq!(widget.attributes[0].name, "priority");
+        assert_eq!(widget.attributes[0].kind, AttrKind::Enum);
+        assert_eq!(
+            widget.attributes[0].values,
+            vec!["low".to_string(), "high".to_string()]
+        );
+    }
+
+    // STORY-226 AC2: while designing a custom lifecycle, an edge naming a state
+    // outside the collected set is rejected and re-asked; the valid edge is kept.
+    #[test]
+    fn interactive_add_type_custom_lifecycle_reprompts_bad_edge() {
+        let (_dir, path, fs) = fixture(SRC);
+        let mut prompter = scripted(&[
+            "widget",
+            "widgets",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",           // core fields
+            "n",          // no attributes
+            "n",          // no parent
+            "y",          // design a custom lifecycle
+            "draft,done", // lifecycle states (comma-separated)
+            "draft:nope", // `nope` isn't a state -> re-ask
+            "draft:done", // valid
+            "",           // blank to finish edges
+            "n",          // no gate
+        ]);
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let config = Config::parse(&after).unwrap();
+        let widget = config.type_by_name("widget").unwrap();
+        assert_eq!(
+            widget.lifecycle.states,
+            vec!["draft".to_string(), "done".to_string()]
+        );
+        assert_eq!(widget.lifecycle.edges.len(), 1);
+        assert_eq!(widget.lifecycle.edges[0].from, "draft");
+        assert_eq!(widget.lifecycle.edges[0].to, "done");
+    }
+
+    // ITERATION-329: lifecycle states are collected in one `multi_select` prompt.
+    // A comma-separated answer becomes the full state list, and a blank answer
+    // trips the empty-guard re-ask before a valid answer is accepted.
+    #[test]
+    fn collect_type_multi_select_states_reasks_on_blank() {
+        let config = Config::parse(SRC).unwrap();
+        let mut prompter = scripted(&[
+            "widget",
+            "widgets",
+            "",
+            "", // core identity
+            "",
+            "",
+            "",
+            "",
+            "",                  // icon/store/numbering/singleton/authorship
+            "n",                 // no attribute
+            "n",                 // no parent
+            "y",                 // design a custom lifecycle
+            "",                  // blank states -> empty-guard re-ask
+            "draft,review,done", // valid states
+            "",                  // blank to finish edges
+            "n",                 // no gate
+        ]);
+        let collected = collect_type_interactive(&config, &mut prompter).unwrap();
+        let (states, edges) = collected
+            .lifecycle
+            .expect("a custom lifecycle was designed");
+        assert_eq!(
+            states,
+            vec![
+                "draft".to_string(),
+                "review".to_string(),
+                "done".to_string()
+            ]
+        );
+        assert!(edges.is_empty());
+    }
+
+    // ITERATION-338: choosing clickup-tasks prompts for the store's defaults right
+    // after the store select; both land on the collected type.
+    #[test]
+    fn collect_type_clickup_captures_list_id_and_task_type() {
+        let config = Config::parse(SRC).unwrap();
+        let mut prompter = scripted(&[
+            "task",
+            "tasks",
+            "",
+            "",
+            "",              // name/plural/dir/prefix/icon
+            "clickup-tasks", // store
+            "list123",       // clickup list id
+            "1001",          // clickup task type
+            "",
+            "",
+            "", // numbering/singleton/authorship
+            "n",
+            "n",
+            "n",
+            "n", // attributes / parent / lifecycle / gate declined
+        ]);
+        let collected = collect_type_interactive(&config, &mut prompter).unwrap();
+        assert_eq!(collected.clickup_list_id.as_deref(), Some("list123"));
+        assert_eq!(collected.clickup_task_type, Some(1001));
+        assert_eq!(collected.github_issue_tag, None);
+        assert_eq!(collected.github_issue_type, None);
+    }
+
+    // ITERATION-338: a non-numeric clickup task type is rejected and re-asked in
+    // place; a blank leaves it None.
+    #[test]
+    fn collect_type_clickup_task_type_reasks_on_non_numeric() {
+        let config = Config::parse(SRC).unwrap();
+        let mut prompter = scripted(&[
+            "task",
+            "tasks",
+            "",
+            "",
+            "",
+            "clickup-tasks",
+            "",     // clickup list id (blank -> None)
+            "nope", // not a number -> re-ask
+            "42",   // valid
+            "",
+            "",
+            "",
+            "n",
+            "n",
+            "n",
+            "n",
+        ]);
+        let collected = collect_type_interactive(&config, &mut prompter).unwrap();
+        assert_eq!(collected.clickup_list_id, None);
+        assert_eq!(collected.clickup_task_type, Some(42));
+    }
+
+    // ITERATION-338: choosing github-issues prompts for tag and issue type.
+    #[test]
+    fn collect_type_github_captures_tag_and_issue_type() {
+        let config = Config::parse(SRC).unwrap();
+        let mut prompter = scripted(&[
+            "issue",
+            "issues",
+            "",
+            "",
+            "",
+            "github-issues", // store
+            "Bug",           // github issue tag
+            "Bug",           // github issue type
+            "",
+            "",
+            "",
+            "n",
+            "n",
+            "n",
+            "n",
+        ]);
+        let collected = collect_type_interactive(&config, &mut prompter).unwrap();
+        assert_eq!(collected.github_issue_tag.as_deref(), Some("Bug"));
+        assert_eq!(collected.github_issue_type.as_deref(), Some("Bug"));
+        assert_eq!(collected.clickup_list_id, None);
+        assert_eq!(collected.clickup_task_type, None);
+    }
+
+    // ITERATION-338: a filesystem type prompts for NONE of the remote defaults.
+    // No answers are queued for them: a spurious remote prompt would consume a
+    // later answer and the run would end short, so a clean run proves they skip.
+    #[test]
+    fn collect_type_filesystem_prompts_for_no_remote_fields() {
+        let config = Config::parse(SRC).unwrap();
+        let mut prompter = scripted(&[
+            "doc",
+            "docs",
+            "",
+            "",
+            "",
+            "filesystem", // store
+            "",
+            "",
+            "", // numbering/singleton/authorship
+            "n",
+            "n",
+            "n",
+            "n",
+        ]);
+        let collected = collect_type_interactive(&config, &mut prompter).unwrap();
+        assert_eq!(collected.github_issue_tag, None);
+        assert_eq!(collected.github_issue_type, None);
+        assert_eq!(collected.clickup_list_id, None);
+        assert_eq!(collected.clickup_task_type, None);
+    }
+
+    // ITERATION-338: the interactive add-type path persists the GitHub remote
+    // fields it collects, rather than discarding them before the disk write.
+    #[test]
+    fn interactive_add_type_persists_github_fields() {
+        // A github-issues type reparses only with a [github] section present.
+        let src = format!("[github]\nrepo = \"owner/repo\"\n\n{SRC}");
+        let (_dir, path, fs) = fixture(&src);
+        let mut prompter = scripted(&[
+            "issue",
+            "issues",
+            "",
+            "",
+            "",              // name/plural/dir/prefix/icon
+            "github-issues", // store
+            "Bug",           // github issue tag
+            "Defect",        // github issue type
+            "",
+            "",
+            "", // numbering/singleton/authorship
+            "n",
+            "n",
+            "n",
+            "n", // attributes / parent / lifecycle / gate declined
+        ]);
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let issue = Config::parse(&after)
+            .unwrap()
+            .type_by_name("issue")
+            .unwrap()
+            .clone();
+        assert_eq!(issue.github_issue_tag.as_deref(), Some("Bug"));
+        assert_eq!(issue.github_issue_type.as_deref(), Some("Defect"));
+    }
+
+    // ITERATION-338: the interactive add-type path persists both ClickUp remote
+    // fields, including clickup_task_type (which the pre-fix path dropped).
+    #[test]
+    fn interactive_add_type_persists_clickup_fields() {
+        let (_dir, path, fs) = fixture(SRC);
+        let mut prompter = scripted(&[
+            "task",
+            "tasks",
+            "",
+            "",
+            "",              // name/plural/dir/prefix/icon
+            "clickup-tasks", // store
+            "list-7",        // clickup list id
+            "2002",          // clickup task type
+            "",
+            "",
+            "", // numbering/singleton/authorship
+            "n",
+            "n",
+            "n",
+            "n", // attributes / parent / lifecycle / gate declined
+        ]);
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let task = Config::parse(&after)
+            .unwrap()
+            .type_by_name("task")
+            .unwrap()
+            .clone();
+        assert_eq!(task.clickup_list_id.as_deref(), Some("list-7"));
+        assert_eq!(task.clickup_task_type, Some(2002));
+    }
+
+    // STORY-226 AC2: declining the custom-lifecycle prompt leaves the lifecycle
+    // empty, so the type inherits the store preset via effective_lifecycle.
+    #[test]
+    fn interactive_add_type_declined_lifecycle_inherits_preset() {
+        let (_dir, path, fs) = fixture(SRC);
+        let mut prompter = scripted(&[
+            "widget", "widgets", "", "", "", "", "", "", "", // core fields
+            "n", "n", "n", "n", // attributes / parent / lifecycle / gate declined
+        ]);
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let config = Config::parse(&after).unwrap();
+        let widget = config.type_by_name("widget").unwrap();
+        // Empty lifecycle -> inherits the store preset via effective_lifecycle.
+        assert!(widget.lifecycle.states.is_empty());
+        assert!(widget.lifecycle.edges.is_empty());
+        assert!(widget.effective_lifecycle().states.is_empty());
+    }
+
+    // STORY-226 AC3: only already-defined types are selectable as a parent; an
+    // unknown answer is rejected and re-asked rather than accepted.
+    #[test]
+    fn interactive_add_type_parent_only_from_existing() {
+        let (_dir, path, fs) = fixture(SRC);
+        let mut prompter = scripted(&[
+            "widget", "widgets", "", "", "", "", "", "", "",      // core fields
+            "n",     // no attributes
+            "y",     // set a parent type
+            "bogus", // not a defined type -> re-ask
+            "rfc",   // valid existing type
+            "n", "n", // lifecycle / gate declined
+        ]);
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let config = Config::parse(&after).unwrap();
+        assert_eq!(
+            config
+                .type_by_name("widget")
+                .unwrap()
+                .parent_type
+                .as_deref(),
+            Some("rfc")
+        );
+    }
+
+    // STORY-226 AC4: gating a parent-child rule with a status the parent's
+    // lifecycle lacks is rejected and re-asked; the valid status is written.
+    #[test]
+    fn interactive_add_type_gate_reprompts_unknown_status() {
+        let (_dir, path, fs) = fixture(SRC);
+        let mut prompter = scripted(&[
+            "widget",
+            "widgets",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "", // core fields
+            "n",
+            "n",
+            "n",                 // attributes / parent / lifecycle declined
+            "y",                 // gate a parent-child rule
+            "stories-need-rfcs", // the only parent-child rule (parent = rfc)
+            "shipped",           // rfc lifecycle lacks `shipped` -> re-ask
+            "review",            // rfc lifecycle has `review`
+        ]);
+        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
+
+        let json = show(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(
+            rule_named(&json, "stories-need-rfcs")["require_parent_status"],
+            "review"
+        );
+    }
+
+    // STORY-226 AC5: the full interactive flow produces a byte-identical config to
+    // the equivalent add-type(+attrs+parent) -> set-lifecycle -> add-gate flag
+    // chain, and the result reparses cleanly.
+    #[test]
+    fn interactive_full_flow_matches_flag_chain() {
+        let (_dir_a, path_a, fs_a) = fixture(SRC);
+        let mut prompter = scripted(&[
+            "widget",
+            "widgets",
+            "",
+            "", // core fields (dir/prefix default)
+            "",
+            "",
+            "",
+            "",
+            "", // icon/store/numbering/singleton/authorship
+            "y",
+            "priority:enum:low,medium,high",
+            "n", // one attribute
+            "y",
+            "rfc", // parent = rfc
+            "y",
+            "draft,done",
+            "draft:done",
+            "", // custom lifecycle
+            "y",
+            "stories-need-rfcs",
+            "review", // gate
+        ]);
+        run_add_type_interactive(path_a.parent().unwrap(), &fs_a, &mut prompter).unwrap();
+        let interactive_out = std::fs::read_to_string(&path_a).unwrap();
+
+        let (_dir_b, path_b, fs_b) = fixture(SRC);
+        let root_b = path_b.parent().unwrap();
+        run_add_type(
+            root_b,
+            &fs_b,
+            "widget",
+            "widgets",
+            "docs/widgets",
+            "WIDGET",
+            None,
+            Some("rfc"),
+            false,
+            Some("filesystem"),
+            Some("incremental"),
+            None,
+            Some("assisted"),
+            None,
+            None,
+            None,
+            None,
+            &["priority:enum:low,medium,high".to_string()],
+        )
+        .unwrap();
+        run_set_lifecycle(
+            root_b,
+            &fs_b,
+            "widget",
+            &["draft".to_string(), "done".to_string()],
+            &["draft:done".to_string()],
+        )
+        .unwrap();
+        run_add_gate(root_b, &fs_b, "stories-need-rfcs", "review").unwrap();
+        let flag_out = std::fs::read_to_string(&path_b).unwrap();
+
+        assert_eq!(interactive_out, flag_out);
+        Config::parse(&interactive_out).unwrap();
     }
 }

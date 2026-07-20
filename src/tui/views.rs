@@ -19,7 +19,7 @@ use ratatui::{
 
 use std::sync::atomic::Ordering;
 
-use crate::engine::config::{Config, StoreBackend};
+use crate::engine::config::Config;
 use crate::engine::status_colors::StatusColors;
 use crate::tui::state::{App, ViewMode};
 use status_bar::draw_status_bar;
@@ -41,6 +41,24 @@ use panels::{
     draw_doc_list, draw_graph, draw_preview, draw_settings, draw_type_panel, render_filter_panel,
     render_fullscreen_document,
 };
+
+const SYNC_SUCCESS_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn sync_spinner_state(
+    refresh_in_flight: bool,
+    gh_push_in_flight: bool,
+    last_sync_elapsed: Option<std::time::Duration>,
+    success_window: std::time::Duration,
+) -> crate::spinners::SpinnerState {
+    use crate::spinners::SpinnerState;
+    if refresh_in_flight || gh_push_in_flight {
+        SpinnerState::Loading
+    } else if last_sync_elapsed.is_some_and(|d| d < success_window) {
+        SpinnerState::Success
+    } else {
+        SpinnerState::Idle
+    }
+}
 
 pub fn sync_indicator_text(elapsed_secs: u64, cache_ttl: u64) -> (String, Color) {
     if elapsed_secs >= 2 * cache_ttl {
@@ -141,14 +159,20 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
     )]);
     f.render_widget(Paragraph::new(title), outer[0]);
 
-    let has_gh_types = config
-        .documents
-        .types
-        .iter()
-        .any(|t| t.store == StoreBackend::GithubIssues);
-
     let mut right_spans: Vec<Span> = Vec::new();
-    if has_gh_types {
+    if crate::tui::has_pollable_types(config) {
+        let state = sync_spinner_state(
+            app.refresh_in_flight,
+            app.gh_push_in_flight.load(Ordering::Relaxed),
+            app.last_sync.map(|t| t.elapsed()),
+            SYNC_SUCCESS_WINDOW,
+        );
+        let frame = crate::spinners::spinner("face").compact(state, app.frame_idx);
+        right_spans.push(Span::styled(
+            frame.lines[0].clone(),
+            colors::frame_style(frame.colour),
+        ));
+        right_spans.push(Span::raw(" "));
         if let Some(last_sync) = app.last_sync {
             let cache_ttl = config
                 .documents
@@ -161,12 +185,6 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
             right_spans.push(Span::styled(text, Style::default().fg(color)));
             right_spans.push(Span::raw("  "));
         }
-    }
-    if app.gh_push_in_flight.load(Ordering::Relaxed) {
-        right_spans.push(Span::styled(
-            "pushing... ",
-            Style::default().fg(Color::Yellow),
-        ));
     }
     right_spans.push(Span::styled(
         format!("[{}] ` to cycle ", app.view_mode.name()),
@@ -286,7 +304,51 @@ mod tests {
     use std::path::Path;
 
     use super::panels;
-    use super::sync_indicator_text;
+    use super::{sync_indicator_text, sync_spinner_state};
+    use crate::spinners::SpinnerState;
+    use std::time::Duration;
+
+    const WINDOW: Duration = Duration::from_secs(2);
+
+    #[test]
+    fn spinner_loading_when_refresh_in_flight() {
+        assert_eq!(
+            sync_spinner_state(true, false, Some(Duration::from_millis(500)), WINDOW),
+            SpinnerState::Loading
+        );
+    }
+
+    #[test]
+    fn spinner_loading_when_push_in_flight() {
+        assert_eq!(
+            sync_spinner_state(false, true, None, WINDOW),
+            SpinnerState::Loading
+        );
+    }
+
+    #[test]
+    fn spinner_success_within_window() {
+        assert_eq!(
+            sync_spinner_state(false, false, Some(Duration::from_millis(500)), WINDOW),
+            SpinnerState::Success
+        );
+    }
+
+    #[test]
+    fn spinner_idle_after_window() {
+        assert_eq!(
+            sync_spinner_state(false, false, Some(Duration::from_secs(5)), WINDOW),
+            SpinnerState::Idle
+        );
+    }
+
+    #[test]
+    fn spinner_idle_when_never_synced() {
+        assert_eq!(
+            sync_spinner_state(false, false, None, WINDOW),
+            SpinnerState::Idle
+        );
+    }
 
     fn display_name(path: &Path) -> &str {
         let stem = path.file_stem().and_then(|s| s.to_str());

@@ -265,6 +265,7 @@ pub enum AppEvent {
     CreateStarted,
     CreateProgress {
         message: String,
+        state: crate::spinners::SpinnerState,
     },
     CreateComplete {
         result: Result<CreateResult, String>,
@@ -595,6 +596,9 @@ pub struct App {
     pub git_status_cache: GitStatusCache,
     pub gh_conflict_message: Option<String>,
     pub gh_push_in_flight: Arc<AtomicBool>,
+    /// Mirror of the event loop's local `refresh_in_flight` atomic, refreshed
+    /// each frame so the header sync face can reflect an in-flight poll.
+    pub refresh_in_flight: bool,
     pub last_sync: Option<Instant>,
     pub gh_issue_map_stale: bool,
     pub status_bar_enabled: bool,
@@ -648,6 +652,9 @@ pub struct App {
     /// `Enter`. `Some` routes keys to the picker; selecting writes the chosen
     /// variant back into `settings_buffer` (RFC-023 / STORY-144).
     pub settings_variant_picker: Option<SettingsVariantPicker>,
+    /// Free-running render-loop counter, set each frame before `terminal.draw`.
+    /// Drives spinner animation phase; shared with the header sync/push face.
+    pub frame_idx: u64,
 }
 
 impl App {
@@ -660,12 +667,6 @@ impl App {
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
         let git_branch = query_git_branch(store.root());
         let git_status_cache = GitStatusCache::new(store.root());
-        let has_github_issues = config
-            .documents
-            .types
-            .iter()
-            .any(|t| t.store == StoreBackend::GithubIssues);
-
         #[cfg(feature = "agent")]
         let agent_spawner = AgentSpawner::new(store.root());
         // ADR-015 zero-defaults: an absent agents dir yields no prompts; discovery
@@ -764,7 +765,8 @@ impl App {
             git_status_cache,
             gh_conflict_message: None,
             gh_push_in_flight: Arc::new(AtomicBool::new(false)),
-            last_sync: if has_github_issues {
+            refresh_in_flight: false,
+            last_sync: if crate::tui::has_pollable_types(config) {
                 Some(Instant::now())
             } else {
                 None
@@ -790,6 +792,7 @@ impl App {
             override_key_prompt: OverrideKeyPrompt::new(),
             settings_zone_editor: None,
             settings_variant_picker: None,
+            frame_idx: 0,
         };
         app.apply_config(config);
         app.rebuild_search_index();
@@ -2442,6 +2445,7 @@ impl App {
             let doc_type = self.create_form.doc_type.clone();
 
             self.create_form.loading = true;
+            self.create_form.state = crate::spinners::SpinnerState::Loading;
             self.create_form.status_message = Some("Reserving...".to_string());
             let _ = self.event_tx.send(AppEvent::CreateStarted);
 
@@ -2482,7 +2486,8 @@ impl App {
                                     format!("Reserved number {}", number)
                                 }
                             };
-                            let _ = progress_tx.send(AppEvent::CreateProgress { message });
+                            let state = p.spinner_state();
+                            let _ = progress_tx.send(AppEvent::CreateProgress { message, state });
                         },
                     )
                     .map_err(|e| e.to_string())?;
@@ -3534,6 +3539,7 @@ pub(crate) mod parity_seed {
             git_status_cache: GitStatusCache::new(tmp.path()),
             gh_conflict_message: None,
             gh_push_in_flight: Arc::new(AtomicBool::new(false)),
+            refresh_in_flight: false,
             last_sync: None,
             gh_issue_map_stale: false,
             status_bar_enabled: true,
@@ -3556,6 +3562,7 @@ pub(crate) mod parity_seed {
             override_key_prompt: OverrideKeyPrompt::new(),
             settings_zone_editor: None,
             settings_variant_picker: None,
+            frame_idx: 0,
         };
         app.apply_config(&config);
         (tmp, app)
@@ -4011,6 +4018,7 @@ mod tests {
             git_status_cache: GitStatusCache::new(Path::new(".")),
             gh_conflict_message: None,
             gh_push_in_flight: Arc::new(AtomicBool::new(false)),
+            refresh_in_flight: false,
             last_sync: None,
             gh_issue_map_stale: false,
             status_bar_enabled: true,
@@ -4033,6 +4041,7 @@ mod tests {
             override_key_prompt: OverrideKeyPrompt::new(),
             settings_zone_editor: None,
             settings_variant_picker: None,
+            frame_idx: 0,
         };
         app
     }

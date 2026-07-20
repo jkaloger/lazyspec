@@ -6,6 +6,7 @@
 pub mod app;
 pub mod cli;
 pub mod engine;
+pub mod spinners;
 pub mod tui;
 #[cfg(feature = "web")]
 pub mod web;

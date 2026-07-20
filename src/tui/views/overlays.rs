@@ -82,7 +82,12 @@ pub fn draw_create_form(f: &mut Frame, app: &App) {
     let area = f.area();
 
     let popup_width = 60.min(area.width.saturating_sub(4));
-    let popup_height = 14.min(area.height.saturating_sub(4));
+    let base_height = if app.create_form.state == crate::spinners::SpinnerState::Idle {
+        14
+    } else {
+        17
+    };
+    let popup_height = base_height.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(popup_width)) / 2;
     let y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -126,6 +131,14 @@ pub fn draw_create_form(f: &mut Frame, app: &App) {
             Span::styled(format!("{}{}", value, cursor), value_style),
         ]));
         lines.push(Line::from(""));
+    }
+
+    if form.state != crate::spinners::SpinnerState::Idle {
+        let frame = crate::spinners::spinner("face").full(form.state, app.frame_idx);
+        let style = super::colors::frame_style(frame.colour);
+        for face_line in frame.lines {
+            lines.push(Line::from(Span::styled(format!("  {}", face_line), style)));
+        }
     }
 
     if let Some(ref msg) = form.status_message {
