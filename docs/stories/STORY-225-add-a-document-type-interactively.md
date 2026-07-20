@@ -1,7 +1,7 @@
 ---
 title: Add a document type interactively
 type: story
-status: in-progress
+status: complete
 author: jkaloger
 date: 2026-07-19
 tags: []
