@@ -1,7 +1,7 @@
 ---
 title: "Spinner framework and face in src/spinners.rs"
 type: iteration
-status: draft
+status: complete
 author: "Jack Kaloger"
 date: 2026-07-20
 tags: [foundation]
