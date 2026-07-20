@@ -1,7 +1,7 @@
 ---
 title: Colourise init wizard prompts and DAG summary
 type: iteration
-status: in-progress
+status: complete
 author: jkaloger
 date: 2026-07-20
 tags: []
