@@ -36,9 +36,9 @@ pub fn op_spinner(msg: impl Into<String>, json: bool) -> Option<ProgressBar> {
     }
 
     let face = spinner("face");
-    // indicatif treats the trailing tick as the finished frame; the loop cycles
-    // the four loading frames before it.
-    let mut ticks: Vec<String> = (0..4)
+    // The four loading frames cycle while the op runs; the terminal frame is
+    // drawn by finish_ok/finish_err, not by indicatif's finished tick.
+    let ticks: Vec<String> = (0..4)
         .map(|i| {
             let frame = face.compact(SpinnerState::Loading, i);
             frame_style(frame.colour)
@@ -46,7 +46,6 @@ pub fn op_spinner(msg: impl Into<String>, json: bool) -> Option<ProgressBar> {
                 .to_string()
         })
         .collect();
-    ticks.push(face.compact(SpinnerState::Success, 0).lines[0].clone());
     let tick_refs: Vec<&str> = ticks.iter().map(String::as_str).collect();
 
     let style = ProgressStyle::with_template("{spinner} {msg}")
@@ -75,22 +74,31 @@ pub fn reservation_message(progress: &ReservationProgress) -> String {
     }
 }
 
-/// Clear the spinner and print a green check completion line to stderr. A no-op
-/// when the spinner was suppressed, keeping non-interactive output untouched.
+/// Clear the animation and settle on the happy success face with `msg` to
+/// stderr. A no-op when the spinner was suppressed, keeping non-interactive
+/// output untouched.
 pub fn finish_ok(pb: Option<ProgressBar>, msg: &str) {
     if let Some(pb) = pb {
         pb.finish_and_clear();
-        eprintln!("{}", crate::cli::style::success_line(msg));
+        eprintln!("{}", terminal_face(SpinnerState::Success, msg));
     }
 }
 
-/// Clear the spinner and print a red cross failure line to stderr. A no-op when
-/// the spinner was suppressed.
+/// Clear the animation and settle on the error face with `msg` to stderr. A
+/// no-op when the spinner was suppressed.
 pub fn finish_err(pb: Option<ProgressBar>, msg: &str) {
     if let Some(pb) = pb {
         pb.finish_and_clear();
-        eprintln!("{} {}", crate::cli::style::error_prefix(), msg);
+        eprintln!("{}", terminal_face(SpinnerState::Error, msg));
     }
+}
+
+/// Render the compact terminal face for `state`, styled by its semantic colour,
+/// followed by `msg` -- the line that replaces the cleared spinner animation.
+fn terminal_face(state: SpinnerState, msg: &str) -> String {
+    let frame = spinner("face").compact(state, 0);
+    let style = frame_style(frame.colour);
+    format!("{} {}", style.apply_to(&frame.lines[0]), msg)
 }
 
 /// Whether the interactive `init` wizard should play its animated greeting: only

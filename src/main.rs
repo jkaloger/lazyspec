@@ -683,10 +683,15 @@ fn main() -> anyhow::Result<()> {
                     use std::io::IsTerminal;
                     match classify_add_type_args([&name, &plural, &dir, &prefix])? {
                         AddTypeInvocation::Positional => {
-                            lazyspec::cli::config::run_add_type(
+                            let type_name = name.as_deref().unwrap();
+                            let pb = lazyspec::cli::spinner::op_spinner(
+                                format!("adding type {type_name}"),
+                                json,
+                            );
+                            let result = lazyspec::cli::config::run_add_type(
                                 &cwd,
                                 &fs,
-                                name.as_deref().unwrap(),
+                                type_name,
                                 plural.as_deref().unwrap(),
                                 dir.as_deref().unwrap(),
                                 prefix.as_deref().unwrap(),
@@ -702,7 +707,14 @@ fn main() -> anyhow::Result<()> {
                                 clickup_list_id.as_deref(),
                                 clickup_task_type,
                                 &attributes,
-                            )?;
+                            );
+                            match result {
+                                Ok(()) => lazyspec::cli::spinner::finish_ok(pb, "type added"),
+                                Err(e) => {
+                                    lazyspec::cli::spinner::finish_err(pb, "add-type failed");
+                                    return Err(e);
+                                }
+                            }
                         }
                         AddTypeInvocation::Prompt => {
                             let interactive = !json
@@ -719,6 +731,10 @@ fn main() -> anyhow::Result<()> {
                                 &fs,
                                 &mut prompter,
                             )?;
+                            // The wizard's prompts are the feedback while it runs;
+                            // settle on the happy face once the write lands.
+                            let pb = lazyspec::cli::spinner::op_spinner("type added", json);
+                            lazyspec::cli::spinner::finish_ok(pb, "type added");
                         }
                     }
                 }
@@ -727,10 +743,30 @@ fn main() -> anyhow::Result<()> {
                     states,
                     edges,
                 }) => {
-                    lazyspec::cli::config::run_set_lifecycle(&cwd, &fs, &name, &states, &edges)?;
+                    let pb = lazyspec::cli::spinner::op_spinner(
+                        format!("setting lifecycle on {name}"),
+                        json,
+                    );
+                    match lazyspec::cli::config::run_set_lifecycle(
+                        &cwd, &fs, &name, &states, &edges,
+                    ) {
+                        Ok(()) => lazyspec::cli::spinner::finish_ok(pb, "lifecycle set"),
+                        Err(e) => {
+                            lazyspec::cli::spinner::finish_err(pb, "set-lifecycle failed");
+                            return Err(e);
+                        }
+                    }
                 }
                 Some(ConfigCommand::AddGate { name, status }) => {
-                    lazyspec::cli::config::run_add_gate(&cwd, &fs, &name, &status)?;
+                    let pb =
+                        lazyspec::cli::spinner::op_spinner(format!("gating rule {name}"), json);
+                    match lazyspec::cli::config::run_add_gate(&cwd, &fs, &name, &status) {
+                        Ok(()) => lazyspec::cli::spinner::finish_ok(pb, "gate added"),
+                        Err(e) => {
+                            lazyspec::cli::spinner::finish_err(pb, "add-gate failed");
+                            return Err(e);
+                        }
+                    }
                 }
             }
         }
