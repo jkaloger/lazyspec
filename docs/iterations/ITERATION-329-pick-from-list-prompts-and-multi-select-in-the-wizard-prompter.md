@@ -1,7 +1,7 @@
 ---
 title: Pick-from-list prompts and multi_select in the wizard Prompter
 type: iteration
-status: in-progress
+status: complete
 author: jkaloger
 date: 2026-07-20
 tags: []

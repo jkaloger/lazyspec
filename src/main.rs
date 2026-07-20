@@ -25,6 +25,7 @@ fn main() -> anyhow::Result<()> {
     if let Some(Commands::Init {
         non_interactive,
         json,
+        template,
     }) = &cli.command
     {
         use std::io::IsTerminal;
@@ -36,7 +37,7 @@ fn main() -> anyhow::Result<()> {
         );
         if interactive {
             let mut prompter = lazyspec::cli::wizard::StdinPrompter::new();
-            lazyspec::cli::init::run_init_interactive(&cwd, &mut prompter)?;
+            lazyspec::cli::init::run_init_interactive(&cwd, &mut prompter, template.as_deref())?;
         } else {
             lazyspec::cli::init::run(&cwd)?;
         }

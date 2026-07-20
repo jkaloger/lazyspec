@@ -93,17 +93,28 @@ pub fn write_project(root: &Path, config: &Config) -> Result<()> {
 }
 
 /// Interactive `init`: bail if a config already exists (before prompting), then
-/// offer the two authoring paths -- tweak the starter DAG (STORY-227) or design a
-/// DAG from scratch (STORY-228) -- and scaffold whichever config the chosen
-/// designer returns. The single interactive dispatch; `--json`/`--non-interactive`
-/// /non-TTY never reach it (they take the `starter_config()` path in `run`).
-pub fn run_init_interactive(root: &Path, prompter: &mut dyn Prompter) -> Result<()> {
+/// scaffold whichever config the chosen designer returns. The wizard defaults to a
+/// blank DAG (STORY-228); passing `template == Some("starter")` pre-selects the
+/// starter designer (STORY-227) and skips the first "Start from" screen entirely.
+/// With no template the first screen offers `blank`/`starter`, defaulting to
+/// `blank`. The single interactive dispatch; `--json`/`--non-interactive`/non-TTY
+/// never reach it (they take the `starter_config()` path in `run`, which never
+/// consults `template`).
+pub fn run_init_interactive(
+    root: &Path,
+    prompter: &mut dyn Prompter,
+    template: Option<&str>,
+) -> Result<()> {
     ensure_no_config(root)?;
-    let choice = prompter.select("Start from", &["starter", "scratch"], "starter")?;
-    let config = if choice == "scratch" {
-        design_config_from_scratch(prompter)?
-    } else {
+    let config = if template == Some("starter") {
         design_config_interactive(starter_config(), prompter)?
+    } else {
+        let choice = prompter.select("Start from", &["blank", "starter"], "blank")?;
+        if choice == "starter" {
+            design_config_interactive(starter_config(), prompter)?
+        } else {
+            design_config_from_scratch(prompter)?
+        }
     };
     write_project(root, &config)
 }
@@ -551,7 +562,7 @@ mod tests {
         assert!(non_interactive.is_err(), "run should bail");
 
         let mut prompter = scripted(&[]);
-        let interactive = run_init_interactive(dir.path(), &mut prompter);
+        let interactive = run_init_interactive(dir.path(), &mut prompter, None);
         assert!(interactive.is_err(), "interactive run should bail");
         assert!(
             interactive
@@ -928,7 +939,7 @@ mod tests {
     #[test]
     fn scratch_decline_writes_nothing() {
         let answers = [
-            "scratch", // first-screen select
+            "blank", // first-screen select
             "", "",  // author, naming
             "y", // add a type -> solo
             "solo", "solos", "", "", "", "", "", "", "",  // core fields
@@ -945,7 +956,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let mut prompter = ScriptedPrompter::new(answers);
-        let result = run_init_interactive(root, &mut prompter);
+        let result = run_init_interactive(root, &mut prompter, None);
 
         assert!(result.is_err(), "aborting the reloop propagates an error");
         assert!(
@@ -955,6 +966,65 @@ mod tests {
         assert!(
             !root.join("docs/solos").exists(),
             "no per-type dir written on decline"
+        );
+    }
+
+    // ITERATION-330: `--template starter` pre-selects the starter designer and
+    // SKIPS the first-screen select. The script starts at the author prompt (no
+    // queued "Start from" answer); accepting every default yields the starter
+    // config, proving no first-screen answer was consumed (a consumed answer would
+    // divert the author prompt and desync the keep-all walk).
+    #[test]
+    fn template_starter_skips_first_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut prompter = ScriptedPrompter::new(all_default_answers());
+
+        run_init_interactive(root, &mut prompter, Some("starter")).unwrap();
+
+        let written = fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
+        assert_eq!(
+            written,
+            starter_config().to_toml().unwrap(),
+            "starter template routes straight to the starter designer"
+        );
+    }
+
+    // ITERATION-330: with no template the first-screen default is `blank`, so a
+    // blank first answer routes to the from-scratch designer. A minimal scratch
+    // script (one type, no rule loop) then produces a config with only that type
+    // and none of the starter types.
+    #[test]
+    fn no_template_default_routes_to_scratch() {
+        let answers = [
+            "", // first-screen select -> default "blank"
+            "", "",  // author, naming
+            "y", // add a type -> solo
+            "solo", "solos", "", "", "", "", "", "", "",  // core fields
+            "n", // no attribute
+            "n", // no custom lifecycle
+            "n", // add another type? no
+            "y", // write this config? yes
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut prompter = ScriptedPrompter::new(answers);
+
+        run_init_interactive(root, &mut prompter, None).unwrap();
+
+        let fs = RealFileSystem;
+        let loaded = Config::load(root, &fs).unwrap();
+        assert!(
+            loaded.type_by_name("solo").is_some(),
+            "from-scratch type present"
+        );
+        assert!(
+            loaded.type_by_name("rfc").is_none(),
+            "no starter types on the from-scratch path"
         );
     }
 

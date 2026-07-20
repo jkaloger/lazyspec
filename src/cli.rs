@@ -80,6 +80,10 @@ pub enum Commands {
         /// Suppress the wizard (implies --non-interactive) and write the starter config unchanged
         #[arg(long)]
         json: bool,
+        /// Pre-select a starter template for the interactive wizard (only `starter`
+        /// is supported; the default is a blank DAG). Ignored on non-interactive runs.
+        #[arg(long, value_parser = ["starter"])]
+        template: Option<String>,
     },
     /// Create a new document from template
     Create {
