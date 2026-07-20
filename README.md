@@ -20,18 +20,16 @@
 > [!WARNING]
 > Lazyspec is experimental. APIs and CLI interfaces will change frequently and without notice.
 
-## Features
-
-Lazyspec manages project documentation as version-controlled markdown files with YAML frontmatter. Documents live in your repo, so agents and humans read from the same source of truth.
-
-- Create, update, link, and validate documents. Config-driven relationships (the starter set is `implements`, `supersedes`, `blocks`, `related-to`) keep the chain explicit.
-- Catch broken links, orphaned documents, and incomplete frontmatter before they rot. `lazyspec validate` exits non-zero on errors, so it slots into CI.
-- Embed `@ref` directives in your specs to point at source code. Lazyspec expands them inline using `git show`, with symbol-level extraction for Rust and TypeScript.
-- Fuzzy search, markdown preview, live file watching, and document creation without leaving the terminal.
-- Every command supports `--json` output for automation and agent integration.
-- Define your own types, templates, and directory layout in `.lazyspec.toml`.
+Lazyspec manages project documentation as version-controlled markdown files with YAML frontmatter. Documents live in your repo, so agents and humans read from the same source of truth. You define the document types, their relationships, and their lifecycle in `.lazyspec.toml`; lazyspec creates, links, validates, and serves them, and every command supports `--json` output for automation.
 
 ## Install
+
+```sh
+cargo install lazyspec
+```
+
+<details>
+<summary>Other install methods & shell completions</summary>
 
 ### Nix
 
@@ -39,19 +37,7 @@ Lazyspec manages project documentation as version-controlled markdown files with
 nix profile install github:jkaloger/lazyspec
 ```
 
-Or run without installing:
-
-```sh
-nix run github:jkaloger/lazyspec
-```
-
-### Cargo
-
-```sh
-cargo install --git https://github.com/jkaloger/lazyspec
-```
-
-### From Source
+### From source
 
 ```sh
 git clone https://github.com/jkaloger/lazyspec
@@ -59,7 +45,7 @@ cd lazyspec
 cargo install --path .
 ```
 
-### Shell Completions
+### Shell completions
 
 Generate and source a completion script for your shell:
 
@@ -74,69 +60,11 @@ source <(lazyspec completions bash)
 lazyspec completions fish | source
 ```
 
-Add the appropriate line to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.) to load completions on startup. Completions include subcommands, flags, document IDs, and relationship types.
+Add the appropriate line to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.) to load completions on startup. Completions cover subcommands, flags, document IDs, and relationship types.
 
-## Skills
+</details>
 
-Lazyspec ships a set of config-driven generic verb skills that enforce its
-workflow against whatever document types your `.lazyspec.toml` defines. The
-`lazy` router is the entry point: it reads the configured lifecycle DAG and the
-user's position, then dispatches the right verb.
-
-| Skill      | Purpose                                                                           |
-| ---------- | --------------------------------------------------------------------------------- |
-| `lazy`     | Entry-point router -- reads the DAG and position, dispatches the right verb       |
-| `scaffold` | Create a new document's file and frontmatter, hand the body back to the human     |
-| `co-write` | Collaboratively draft a document body -- AI proposes, human edits, iterate        |
-| `generate` | Author a full document body from context (only when the type's ceiling allows it) |
-| `advance`  | Move a document to its next status along the type's lifecycle DAG, checking gates |
-| `execute`  | Carry out the work a delivery document describes against its tasks and ACs        |
-| `review`   | Critique a document against its intent and acceptance criteria before advancing   |
-
-### Installing skills
-
-`skills install` places the embedded skill set into the project. It works with
-or without a `.lazyspec.toml` (and never creates one):
-
-```sh
-lazyspec skills install                  # both runtimes (default)
-lazyspec skills install --runtime claude     # .claude/skills/ only
-lazyspec skills install --runtime agents-md  # ./AGENTS.md only
-```
-
-For Claude, each skill is written under `.claude/skills/<verb>/SKILL.md`; the
-router is installed under the configured `[skills] entry` name (default `lazy`).
-For other agents, the same prose is concatenated into `./AGENTS.md`. Re-running
-is idempotent. Configure the router name via `[skills] entry` in
-`.lazyspec.toml`.
-
-### Install as a Claude Code plugin
-
-Claude Code users can install the skills and the convention hook together
-through the plugin marketplace hosted in this repo, instead of running `skills
-install` and hand-editing settings. Two commands:
-
-```
-/plugin marketplace add jkaloger/lazyspec
-/plugin install lazyspec@lazyspec
-```
-
-This loads every on-disk skill under `skills/` and registers a
-`UserPromptSubmit` hook that injects the project convention (`lazyspec
-convention --preamble`) into the agent's context on each prompt.
-
-**Prerequisite:** the `lazyspec` binary must be on `PATH`. The hook shells out
-to it; without the binary the hook is inert (a silent noop), and in any
-directory lacking a `.lazyspec.toml` it injects nothing.
-
-The plugin is an additional channel, not a replacement for `skills install`.
-Use `skills install` when you need the `AGENTS.md` target or a renamed router
-entry via `[skills] entry` -- a static plugin ships the default `lazy` entry and
-the Claude runtime only.
-
-## Usage
-
-### Quick Start
+## Quick start
 
 Initialise a new project, then launch the TUI:
 
@@ -145,13 +73,78 @@ lazyspec init
 lazyspec
 ```
 
+`init` writes a `.lazyspec.toml` and templates. Running `lazyspec` with no subcommand opens the interactive dashboard. From there, or from the CLI:
+
+```sh
+lazyspec create rfc "Adopt event sourcing"   # create a document
+lazyspec list                                # list documents
+lazyspec validate                            # check links and frontmatter (non-zero on error)
+```
+
 > [!TIP]
 > Check the `examples/` directory for a complete project setup including config, templates, and agent skill definitions you can use as a starting point.
-> This repo dogfoods lazyspec, so you can also check out the `docs/` directory or run `lazyspec` from this repo.
+> This repo dogfoods lazyspec, so you can also browse `docs/` or run `lazyspec` from this repo.
 
-### TUI
+<details>
+<summary><h2>Features</h2></summary>
 
-Running `lazyspec` with no subcommand opens the interactive dashboard. It provides fuzzy search, markdown preview, document creation, and live file watching -- documents update automatically when changed on disk. An external edit of `.lazyspec.toml` (e.g. a `git pull`) reloads the running session automatically; press `R` to reload it manually. Press `?` for the full keybindings overlay.
+- Create, update, link, and validate documents. Config-driven relationships (the starter set is `implements`, `supersedes`, `blocks`, `related-to`) keep the chain explicit.
+- Catch broken links, orphaned documents, and incomplete frontmatter before they rot. `lazyspec validate` exits non-zero on errors, so it slots into CI.
+- Embed `@ref` directives in your specs to point at source code. Lazyspec expands them inline using `git show`, with symbol-level extraction for Rust and TypeScript.
+- Fuzzy search, markdown preview, live file watching, and document creation without leaving the terminal.
+- Every command supports `--json` output for automation and agent integration.
+- Define your own types, templates, and directory layout in `.lazyspec.toml`.
+
+</details>
+
+<details>
+<summary><h2>Skills & agent integration</h2></summary>
+
+Lazyspec ships a set of config-driven generic verb skills that enforce its workflow against whatever document types your `.lazyspec.toml` defines. The `lazy` router is the entry point: it reads the configured lifecycle DAG and the user's position, then dispatches the right verb.
+
+| Skill      | Purpose                                                                           |
+| ---------- | --------------------------------------------------------------------------------- |
+| `lazy`     | Entry-point router: reads the DAG and position, dispatches the right verb         |
+| `scaffold` | Create a new document's file and frontmatter, hand the body back to the human     |
+| `co-write` | Collaboratively draft a document body: AI proposes, human edits, iterate          |
+| `generate` | Author a full document body from context (only when the type's ceiling allows it) |
+| `advance`  | Move a document to its next status along the type's lifecycle DAG, checking gates |
+| `execute`  | Carry out the work a delivery document describes against its tasks and ACs        |
+| `review`   | Critique a document against its intent and acceptance criteria before advancing   |
+
+### Installing skills
+
+`skills install` places the embedded skill set into the project. It works with or without a `.lazyspec.toml`, and never creates one:
+
+```sh
+lazyspec skills install                      # both runtimes (default)
+lazyspec skills install --runtime claude     # .claude/skills/ only
+lazyspec skills install --runtime agents-md  # ./AGENTS.md only
+```
+
+For Claude, each skill is written under `.claude/skills/<verb>/SKILL.md`, and the router is installed under the configured `[skills] entry` name (default `lazy`). For other agents, the same prose is concatenated into `./AGENTS.md`. Re-running is idempotent. Configure the router name via `[skills] entry` in `.lazyspec.toml`.
+
+### Install as a Claude Code plugin
+
+Claude Code users can install the skills and the convention hook together through the plugin marketplace hosted in this repo, instead of running `skills install` and hand-editing settings. Two commands:
+
+```
+/plugin marketplace add jkaloger/lazyspec
+/plugin install lazyspec@lazyspec
+```
+
+This loads every on-disk skill under `skills/` and registers a `UserPromptSubmit` hook that injects the project convention (`lazyspec convention --preamble`) into the agent's context on each prompt.
+
+**Prerequisite:** the `lazyspec` binary must be on `PATH`. The hook shells out to it. Without the binary the hook is a silent noop, and in any directory lacking a `.lazyspec.toml` it injects nothing.
+
+The plugin is an additional channel, not a replacement for `skills install`. Use `skills install` when you need the `AGENTS.md` target or a renamed router entry via `[skills] entry`: a static plugin ships the default `lazy` entry and the Claude runtime only.
+
+</details>
+
+<details>
+<summary><h2>TUI</h2></summary>
+
+Running `lazyspec` with no subcommand opens the interactive dashboard. It provides fuzzy search, markdown preview, document creation, and live file watching: documents update automatically when changed on disk. An external edit of `.lazyspec.toml` (for example a `git pull`) reloads the running session automatically; press `R` to reload it manually. Press `?` for the full keybindings overlay.
 
 | Key                 | Action                                              |
 | ------------------- | --------------------------------------------------- |
@@ -179,9 +172,9 @@ Running `lazyspec` with no subcommand opens the interactive dashboard. It provid
 | `?`                 | Toggle keybindings help                             |
 | `q` / `Ctrl-c`      | Quit                                                |
 
-#### Settings View
+### Settings view
 
-Press `5` (or cycle to it with `` ` ``) to open the Settings view, which edits `.lazyspec.toml` in place. Categories are listed on the left; the right panel shows the fields (or entries) of the selected category. Saving rewrites `.lazyspec.toml`, preserving its comments and formatting, after validating the whole config; an invalid config is reported and not written.
+Press `5` (or cycle to it with `` ` ``) to open the Settings view, which edits `.lazyspec.toml` in place. Categories are listed on the left; the right panel shows the fields (or entries) of the selected category. Saving rewrites `.lazyspec.toml`, preserving its comments and formatting, after validating the whole config. An invalid config is reported and not written.
 
 | Key            | Action                                                                                                                                                     |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -191,15 +184,15 @@ Press `5` (or cycle to it with `` ` ``) to open the Settings view, which edits `
 | `n`            | Add a new entry to a collection (Document Types / Relationships / Validation Rules seed a default and drill in; Certification prompts for a spec-path key) |
 | `d`            | Delete the selected collection entry, behind a confirm (refuses the last relationship)                                                                     |
 | `Space`        | Toggle a boolean / cycle an enum field                                                                                                                     |
-| `g`            | When a dependency section is auto-scaffolded (e.g. cycling numbering to `sqids`), jump to the required field it needs filled                               |
+| `g`            | When a dependency section is auto-scaffolded (for example cycling numbering to `sqids`), jump to the required field it needs filled                        |
 | type + `Enter` | Confirm a text / number / duration / list edit                                                                                                             |
 | `Esc`          | Cancel an in-progress edit, or undrill from an entry                                                                                                       |
 | `w` / `Ctrl-S` | Save changes to `.lazyspec.toml` (validates the whole config)                                                                                              |
 | `q` / `Esc`    | Quit; with unsaved changes, prompts `(s)ave / (d)iscard / (Esc) cancel`                                                                                    |
 
-#### Graph View
+### Graph view
 
-Cycle to the Graph view with `` ` ``. The left panel is a pivot picker (`h` / `l` to re-root the forest on a document type or a tag, or `All` for the whole store); the right panel renders the dependency forest as a nested table sharing the documents table's styling (git-status gutter, slim `ID` column, selection bar, scrolling). The `DOC` column is the document tree, with indentation and connector art showing the `implements` lineage; each configured column follows. A document reachable from more than one parent (a diamond) is drawn once under each parent; cyclic edges are hidden. Siblings under a shared parent can be sorted by any column while the parent grouping and topological order are preserved.
+Cycle to the Graph view with `` ` ``. The left panel is a pivot picker (`h` / `l` to re-root the forest on a document type or a tag, or `All` for the whole store). The right panel renders the dependency forest as a nested table sharing the documents table's styling (git-status gutter, slim `ID` column, selection bar, scrolling). The `DOC` column is the document tree, with indentation and connector art showing the `implements` lineage; each configured column follows. A document reachable from more than one parent (a diamond) is drawn once under each parent; cyclic edges are hidden. Siblings under a shared parent can be sorted by any column while the parent grouping and topological order are preserved.
 
 | Key                 | Action                                                                         |
 | ------------------- | ------------------------------------------------------------------------------ |
@@ -228,7 +221,7 @@ sort = "path"                     # default
 
 Both keys carry defaults, so a config without a `[tui.graph]` block still loads.
 
-The documents table's columns are configured under `[tui.table]` in `.lazyspec.toml`:
+The documents table's columns are configured under `[tui.table]`:
 
 ```toml
 [tui.table]
@@ -242,7 +235,7 @@ columns = ["status", "tags", "assignee", "provenance"]   # default
 
 The key carries a default matching today's layout, so a config without a `[tui.table]` block renders the table unchanged.
 
-Status colours (used in both the documents table and the Graph view's `status` column) are configured under `[tui.status_colors]` in `.lazyspec.toml`, mapping a status name to a colour:
+Status colours (used in both the documents table and the Graph view's `status` column) are configured under `[tui.status_colors]`, mapping a status name to a colour:
 
 ```toml
 [tui.status_colors]
@@ -253,7 +246,7 @@ blocked = "#cc4444"
 
 A colour is either a named ANSI colour (case-insensitive: `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `gray`/`grey`, `darkgray`/`darkgrey`, `white`, or the light variants `lightred`, `lightgreen`, `lightyellow`, `lightblue`, `lightmagenta`, `lightcyan`) or a `#rrggbb` hex string. An invalid colour value is skipped, falling through to the next source below.
 
-A status's colour resolves in this order: this `[tui.status_colors]` config, then a synced ClickUp status-colour cache, then built-in defaults for the standard statuses (`draft`, `review`, `accepted`, `in-progress`, `complete`, `rejected`, `superseded`), then a deterministic hashed-palette fallback — so even unknown or custom statuses always render with a stable, visible colour. The block is optional; omitting it just means statuses resolve via the remaining sources.
+A status's colour resolves in this order: this `[tui.status_colors]` config, then a synced ClickUp status-colour cache, then built-in defaults for the standard statuses (`draft`, `review`, `accepted`, `in-progress`, `complete`, `rejected`, `superseded`), then a deterministic hashed-palette fallback. Even unknown or custom statuses always render with a stable, visible colour. The block is optional; omitting it means statuses resolve via the remaining sources.
 
 The external viewer used to open documents without a web URL (via `show --open`) is configured with a `viewer` key under `[tui]`:
 
@@ -264,82 +257,58 @@ viewer = "glow"
 
 This command is spawned with the document's file path as its argument when the document has no browser URL (a `git-ref`/`clickup-tasks` doc, or a filesystem doc whose repo coordinates don't resolve). The key is optional; without it, `show --open` on such a document reports an error instead of guessing a viewer.
 
-### Web view
-
-A read-only web view of the project's documents is available behind the `web` cargo feature, so default builds carry no async/HTTP dependencies:
-
-```sh
-cargo run --features web -- serve            # binds 127.0.0.1:8787
-cargo run --features web -- serve --port 9000
-```
-
-`serve` loads the store once and renders a server-side document list (grouped by type) with htmx status/tag filtering. It binds loopback only.
-
-Each document page carries an outbound "edit on GitHub" deep-link, derived from the document's store backend: filesystem docs link to the blob (`/blob/{branch}/{path}`), `github-issues` docs to the issue, `github-milestones` docs to the milestone. The repo coordinates resolve from the `origin` remote (owner/repo) and current branch, overridable per field with an optional `[web]` table:
-
-```toml
-[web]
-owner = "acme"      # optional; defaults to the origin remote's owner
-repo = "widgets"    # optional; defaults to the origin remote's repo
-branch = "main"     # optional; defaults to the current branch
-```
-
-When owner/repo can't be resolved (no `origin` remote and no override), deep-links are omitted and `serve` logs a single startup warning rather than rendering broken links.
-
-### Native macOS app (deprecated)
-
-The native macOS app (the Tauri build behind the `app` cargo feature) is deprecated and is no longer built or shipped by CI. The `app` cargo feature and its source remain in-tree but are unsupported and unbuilt in releases. crates.io (`cargo install`) is the supported install and artifact channel.
+</details>
 
 <details>
-<summary><h3>CLI</h3></summary>
+<summary><h2>CLI</h2></summary>
 
 All document management is available as subcommands. Most accept `--json` for machine-readable output, including every mutating command: `create`, `update`, and `tag` emit the resulting document, while `delete`, `link`, `unlink`, `ignore`, and `unignore` emit a structured outcome (`action` plus the doc id/path or relation edge) instead of the human confirmation line.
 
-Every mutation's `--json` output also reports whether the change reached the document's remote: a `"synced"` boolean (`true` when the backend push landed, `false` when only the local write succeeded), and — only when `"synced": false` — a `"warnings"` array carrying the push-failure message (naming the remote and doc). This matters for the `git-ref` store, whose push is deferred and can fall back to a local-only write when the remote is unreachable; synchronous backends (filesystem, GitHub, ClickUp) always report `"synced": true`. In non-`--json` mode the same warning is written to stderr, so the machine-readable channel and the human channel stay in sync.
+Every mutation's `--json` output also reports whether the change reached the document's remote: a `"synced"` boolean (`true` when the backend push landed, `false` when only the local write succeeded), and, only when `"synced": false`, a `"warnings"` array carrying the push-failure message (naming the remote and doc). This matters for the `git-ref` store, whose push is deferred and can fall back to a local-only write when the remote is unreachable; synchronous backends (filesystem, GitHub, ClickUp) always report `"synced": true`. In non-`--json` mode the same warning is written to stderr, so the machine-readable channel and the human channel stay in sync.
 
-| Command                                                         | Description                                                                                     |
-| --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `init [--non-interactive] [--json] [--template starter]`        | Initialise lazyspec in the current project. On a TTY runs an interactive wizard that defaults to designing a blank DAG; `--template starter` (or picking `starter` on the first screen) tweaks the built-in starter DAG instead. `--non-interactive`/`--json`/non-TTY write the starter config unchanged (`--template` is ignored) |
-| `create <type> <title> [--author X] [--parent ID] [--body / --body-file]` | Create a document (rfc, adr, story, iteration); seed body inline, from a file, or `-` for stdin. `--parent <ID>` makes the new doc a child of an existing doc; the child must be the same store as its parent. For filesystem-store types the child is authored as a sibling `.md` inside the parent's subdir (promoting a flat parent to `TYPE-n-slug/index.md` on the first child). For `github-issues`-store types the child is created as a real GitHub issue and bound as a native sub-issue of the parent at create time; a later `fetch` mirrors them into the nested cache layout (`.lazyspec/cache/<type>/<PARENT>/index.md` + `NN-<child>.md`) |
-| `list [type] [--status X]`                                      | List documents with optional filters; each list card shows the assignee (as `@name`) when one is set, and nothing when unset |
-| `show <id> [-e] [--open]`                                       | Display a document by path or shorthand ID (e.g. `RFC-001`); `--open` opens it in a browser or viewer instead. The detail header adds an `Assignee:` line when the document has one (omitted when unset), mirroring the `Tags:` line. The `--json` output includes an `assignee` field (a string, or `null` when unset) alongside `status`/`tags`; `status --json` reports it for every document too |
-| `update <path> [--status X] [--title X] [--assignee X] [--body / --body-file] [--attr key=value]` | Update frontmatter and/or body content (`--body-file -` reads stdin); `--assignee` sets the first-class assignee field (pass `--assignee ""` to clear it); `--attr` (repeatable) sets a declared custom attribute, coerced and validated against its type; works for all stores |
-| `delete <path>`                                                 | Delete a document                                                                               |
-| `link <from> <rel> <to>`                                        | Add a typed relationship (canonical or inverse keyword)                                         |
-| `unlink <from> <rel> <to>`                                      | Remove a relationship (canonical or inverse keyword)                                            |
-| `tag add <id> <tags>...`                                        | Add tags to a document (auto-creates GitHub labels if needed)                                   |
-| `tag remove <id> <tags>...`                                     | Remove tags from a document                                                                     |
-| `search <query> [--doc-type X]`                                 | Full-text search across all documents                                                           |
-| `context <id> [--depth N]`                                      | Show the full document chain (RFC -> Story -> Iteration)                                        |
-| `context [--anchor TYPE]`                                       | Emit the context forest (omit `<id>`); `--anchor` re-roots on a type                            |
-| `status`                                                        | Show full project status with all documents and validation                                      |
-| `ignore <path>`                                                 | Mark a document to skip validation                                                              |
-| `unignore <path>`                                               | Remove validation skip from a document                                                          |
-| `validate [--warnings]`                                         | Check document integrity and link consistency                                                   |
-| `fix [paths] [--dry-run] [--type X]`                            | Fix documents with broken or incomplete frontmatter; `--type` filters to a single document type |
-| `fix --renumber <sqids\|incremental> [--type X] [--dry-run]`    | Renumber all documents to the given format; `--type` filters to a single document type          |
-| `fix --config [--dry-run]`                                      | Repair `.lazyspec.toml` (inject missing standard relationships/rules)                           |
-| `completions <shell>`                                           | Generate a shell completion script (bash, elvish, fish, powershell, zsh)                        |
-| `pin <id>`                                                      | Pin blob hashes onto `@ref` directives in a document                                            |
-| `fetch [--type X]`                                              | Fetch remote documents into the cache (`github-issues`, `github-milestones`, `git-ref`, `clickup-tasks` types) |
-| `convention [--preamble] [--tags X]`                            | Show convention and dictum content; `--preamble` omits the dictum, `--tags` filters it          |
-| `skills install [--runtime <claude\|agents-md>]`                | Install the embedded agent skill set into the project (both runtimes by default)                |
-| `config [--json]`                                               | Print the resolved `.lazyspec.toml` as JSON                                                     |
-| `config schema`                                                 | Print a JSON Schema for `.lazyspec.toml` (runs from any directory)                              |
-| `config add-type <name> <plural> <dir> <prefix>`                | Append a new document type to `.lazyspec.toml` (bare, on a TTY, runs the interactive wizard) |
-| `config set-lifecycle <type> [--state X] [--edge from:to]`      | Replace a type's lifecycle states and edges                                                     |
-| `config add-gate <rule> --status X`                             | Set the `require_parent_status` gate on a parent-child rule                                     |
-| `provenance add <id> <citation>`                                | Append a citation to a document's provenance list                                               |
-| `provenance remove <id> <citation>`                             | Remove an exact-match citation from a document's provenance list                                |
-| `provenance list [id]`                                          | List citations for a document, or for all documents grouped by id                               |
-| `reservations list`                                             | Show all reservation refs on the remote                                                         |
-| `reservations prune [--dry-run]`                                | Remove refs for documents that already exist locally                                            |
-| `setup`                                                         | Validate GitHub auth and fetch issues for `github-issues` types                                 |
-| `setup clickup [--token pk_...]`                                | Validate a ClickUp personal API token and store it globally (see [ClickUp store auth](#clickup-store-auth)) |
+| Command                                                                                           | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `init [--non-interactive] [--json] [--template starter]`                                          | Initialise lazyspec in the current project. On a TTY runs an interactive wizard that defaults to designing a blank DAG; `--template starter` (or picking `starter` on the first screen) tweaks the built-in starter DAG instead. `--non-interactive`/`--json`/non-TTY write the starter config unchanged (`--template` is ignored)                                                                                                                                                                                                                                                                                                                       |
+| `create <type> <title> [--author X] [--parent ID] [--body / --body-file]`                         | Create a document (rfc, adr, story, iteration); seed body inline, from a file, or `-` for stdin. `--parent <ID>` makes the new doc a child of an existing doc; the child must be the same store as its parent. For filesystem-store types the child is authored as a sibling `.md` inside the parent's subdir (promoting a flat parent to `TYPE-n-slug/index.md` on the first child). For `github-issues`-store types the child is created as a real GitHub issue and bound as a native sub-issue of the parent at create time; a later `fetch` mirrors them into the nested cache layout (`.lazyspec/cache/<type>/<PARENT>/index.md` + `NN-<child>.md`) |
+| `list [type] [--status X]`                                                                        | List documents with optional filters; each list card shows the assignee (as `@name`) when one is set, and nothing when unset                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `show <id> [-e] [--open]`                                                                         | Display a document by path or shorthand ID (for example `RFC-001`); `--open` opens it in a browser or viewer instead. The detail header adds an `Assignee:` line when the document has one (omitted when unset), mirroring the `Tags:` line. The `--json` output includes an `assignee` field (a string, or `null` when unset) alongside `status`/`tags`; `status --json` reports it for every document too                                                                                                                                                                                                                                              |
+| `update <path> [--status X] [--title X] [--assignee X] [--body / --body-file] [--attr key=value]` | Update frontmatter and/or body content (`--body-file -` reads stdin); `--assignee` sets the first-class assignee field (pass `--assignee ""` to clear it); `--attr` (repeatable) sets a declared custom attribute, coerced and validated against its type; works for all stores                                                                                                                                                                                                                                                                                                                                                                          |
+| `delete <path>`                                                                                   | Delete a document                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `link <from> <rel> <to>`                                                                          | Add a typed relationship (canonical or inverse keyword)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `unlink <from> <rel> <to>`                                                                        | Remove a relationship (canonical or inverse keyword)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `tag add <id> <tags>...`                                                                          | Add tags to a document (auto-creates GitHub labels if needed)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `tag remove <id> <tags>...`                                                                       | Remove tags from a document                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `search <query> [--doc-type X]`                                                                   | Full-text search across all documents                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `context <id> [--depth N]`                                                                        | Show the full document chain (RFC -> Story -> Iteration)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `context [--anchor TYPE]`                                                                         | Emit the context forest (omit `<id>`); `--anchor` re-roots on a type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `status`                                                                                          | Show full project status with all documents and validation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `ignore <path>`                                                                                   | Mark a document to skip validation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `unignore <path>`                                                                                 | Remove validation skip from a document                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `validate [--warnings]`                                                                           | Check document integrity and link consistency                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `fix [paths] [--dry-run] [--type X]`                                                              | Fix documents with broken or incomplete frontmatter; `--type` filters to a single document type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `fix --renumber <sqids\|incremental> [--type X] [--dry-run]`                                      | Renumber all documents to the given format; `--type` filters to a single document type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `fix --config [--dry-run]`                                                                        | Repair `.lazyspec.toml` (inject missing standard relationships/rules)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `completions <shell>`                                                                             | Generate a shell completion script (bash, elvish, fish, powershell, zsh)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `pin <id>`                                                                                        | Pin blob hashes onto `@ref` directives in a document                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `fetch [--type X]`                                                                                | Fetch remote documents into the cache (`github-issues`, `github-milestones`, `git-ref`, `clickup-tasks` types)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `convention [--preamble] [--tags X]`                                                              | Show convention and dictum content; `--preamble` omits the dictum, `--tags` filters it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `skills install [--runtime <claude\|agents-md>]`                                                  | Install the embedded agent skill set into the project (both runtimes by default)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `config [--json]`                                                                                 | Print the resolved `.lazyspec.toml` as JSON                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `config schema`                                                                                   | Print a JSON Schema for `.lazyspec.toml` (runs from any directory)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `config add-type <name> <plural> <dir> <prefix>`                                                  | Append a new document type to `.lazyspec.toml` (bare, on a TTY, runs the interactive wizard)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `config set-lifecycle <type> [--state X] [--edge from:to]`                                        | Replace a type's lifecycle states and edges                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `config add-gate <rule> --status X`                                                               | Set the `require_parent_status` gate on a parent-child rule                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `provenance add <id> <citation>`                                                                  | Append a citation to a document's provenance list                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `provenance remove <id> <citation>`                                                               | Remove an exact-match citation from a document's provenance list                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `provenance list [id]`                                                                            | List citations for a document, or for all documents grouped by id                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `reservations list`                                                                               | Show all reservation refs on the remote                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `reservations prune [--dry-run]`                                                                  | Remove refs for documents that already exist locally                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `setup`                                                                                           | Validate GitHub auth and fetch issues for `github-issues` types                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `setup clickup [--token pk_...]`                                                                  | Validate a ClickUp personal API token and store it globally (see [ClickUp store auth](#clickup-store-auth))                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
-#### Relationship Keywords
+### Relationship keywords
 
-`link` and `unlink` resolve relationship names against the `[[relationships]]` block in your `.lazyspec.toml` (see [Configuration](#configuration)). The starter config declares the canonical set (`implements`, `supersedes`, `blocks`, `related-to`) and, for each directional relationship, an inverse keyword (`implemented-by`, `superseded-by`, `blocked-by`) -- but the vocabulary is yours to change. An inverse keyword is a write-time alias: it flips the direction and stores the canonical relation on the target document. Nothing new is persisted; the reverse direction is still computed by the link graph.
+`link` and `unlink` resolve relationship names against the `[[relationships]]` block in your `.lazyspec.toml` (see [Configuration](#configuration)). The starter config declares the canonical set (`implements`, `supersedes`, `blocks`, `related-to`) and, for each directional relationship, an inverse keyword (`implemented-by`, `superseded-by`, `blocked-by`), but the vocabulary is yours to change. An inverse keyword is a write-time alias: it flips the direction and stores the canonical relation on the target document. Nothing new is persisted; the reverse direction is still computed by the link graph.
 
 ```sh
 lazyspec link STORY-9 blocked-by RFC-2
@@ -349,7 +318,7 @@ lazyspec link STORY-9 blocked-by RFC-2
 
 A relationship declared without an `inverse` is symmetric (like `related-to`) and has no separate inverse keyword. A keyword that matches no declared `name` or `inverse` is rejected before anything is written, and `validate` flags any document carrying a relationship name absent from `[[relationships]]`.
 
-#### `show` Flags
+### `show` flags
 
 | Flag                        | Description                                      |
 | --------------------------- | ------------------------------------------------ |
@@ -357,23 +326,20 @@ A relationship declared without an `inverse` is symmetric (like `related-to`) an
 | `--max-ref-lines N`         | Max lines per expanded ref (default: 25)         |
 | `--open`                    | Open the document externally (see below)         |
 
-`show <id> --open` opens the document in an external viewer. For a document whose backend has a web URL (a `github-issues` doc opens its issue page, a `github-milestones` doc its milestone page, a `filesystem` doc its blob on the default branch), it launches your browser (`open` on macOS, `xdg-open` on Linux). For any other document — `git-ref` and `clickup-tasks` docs, or a filesystem doc whose repo coordinates don't resolve — it launches the command configured as `viewer` under `[tui]` in `.lazyspec.toml` (e.g. `viewer = "glow"`) on the document's file. If no web URL resolves and no viewer is configured, `--open` reports a clear error rather than doing nothing. With `--json`, `--open` prints the resolved target (`{ "target": "url", "url": ... }` or `{ "target": "file", "path": ... }`) and spawns nothing.
+`show <id> --open` opens the document in an external viewer. For a document whose backend has a web URL (a `github-issues` doc opens its issue page, a `github-milestones` doc its milestone page, a `filesystem` doc its blob on the default branch), it launches your browser (`open` on macOS, `xdg-open` on Linux). For any other document (a `git-ref` or `clickup-tasks` doc, or a filesystem doc whose repo coordinates don't resolve) it launches the command configured as `viewer` under `[tui]` in `.lazyspec.toml` (for example `viewer = "glow"`) on the document's file. If no web URL resolves and no viewer is configured, `--open` reports a clear error rather than doing nothing. With `--json`, `--open` prints the resolved target (`{ "target": "url", "url": ... }` or `{ "target": "file", "path": ... }`) and spawns nothing.
 
-Each document entry in `show --json` and `status --json` (under `documents[]`) includes an `attributes` object holding the document's custom frontmatter attributes (declared via `[[types.attributes]]`). Declared attributes are emitted as their typed JSON value -- `int`/`float` as numbers, `string`/`enum` as strings, `bool` as a boolean, `date` as a `"YYYY-MM-DD"` string -- and undeclared keys pass through with their raw YAML value. The field is always present; a document with no attributes serializes it as `{}`, so consumers needn't null-check.
+Each document entry in `show --json` and `status --json` (under `documents[]`) includes an `attributes` object holding the document's custom frontmatter attributes (declared via `[[types.attributes]]`). Declared attributes are emitted as their typed JSON value: `int`/`float` as numbers, `string`/`enum` as strings, `bool` as a boolean, `date` as a `"YYYY-MM-DD"` string. Undeclared keys pass through with their raw YAML value. The field is always present; a document with no attributes serializes it as `{}`, so consumers needn't null-check.
 
 `show --json` and `status --json` also include a read-only `comments` array. For documents whose type uses the `github-issues` store, this fetches the issue's GitHub comment thread live (each entry `{ "author", "body", "timestamp" }`); for all other documents it is an empty array. Comments are never written back to GitHub, never merged into `body`, and never cached. The field is always present.
 
-#### `context` Flags
+### `context` flags
 
 | Flag            | Description                                                                                                                                               |
 | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--depth N`     | Max hops to follow `related-to` links when collecting related records (default: 1)                                                                        |
 | `--anchor TYPE` | Forest mode only (omit `<id>`): re-root the forest on documents of `TYPE`, emitting each anchor plus its chain descendants and pruning ancestors above it |
 
-With an `<id>`, `context` shows that document's chain. Omit the id to emit the
-whole-store context forest (every document, parents-first); add `--anchor TYPE`
-(e.g. `--anchor story`) to re-root the forest on a document type, surfacing each
-anchor-type doc with its descendant subtree only.
+With an `<id>`, `context` shows that document's chain. Omit the id to emit the whole-store context forest (every document, parents-first); add `--anchor TYPE` (for example `--anchor story`) to re-root the forest on a document type, surfacing each anchor-type doc with its descendant subtree only.
 
 ```sh
 lazyspec context ITERATION-001            # chain for one document
@@ -381,7 +347,7 @@ lazyspec context --json                   # whole-store forest
 lazyspec context --json --anchor story    # forest re-rooted on stories
 ```
 
-#### `provenance` Subcommands
+### `provenance` subcommands
 
 Cite the sources of truth that informed a document. Citations are free-form strings stored as a YAML list in frontmatter.
 
@@ -399,7 +365,7 @@ lazyspec provenance list
 
 All three subcommands accept `--json`. Shapes:
 
-- `add` / `remove`: `{ "doc": "...", "added"|"removed": "...", "provenance": [...], "synced": true|false }` — as with every mutation, `add`/`remove` also carry the push outcome: `"synced"` reflects whether the backend push landed, and a `"warnings"` array is present only when `"synced": false` (a `git-ref` local-only write against an unreachable remote). The same warning goes to stderr in non-`--json` mode.
+- `add` / `remove`: `{ "doc": "...", "added"|"removed": "...", "provenance": [...], "synced": true|false }`. As with every mutation, `add`/`remove` also carry the push outcome: `"synced"` reflects whether the backend push landed, and a `"warnings"` array is present only when `"synced": false` (a `git-ref` local-only write against an unreachable remote). The same warning goes to stderr in non-`--json` mode.
 - `list <id>`: `{ "doc": "...", "provenance": [...] }`
 - `list` (no id): `{ "documents": [{ "id": "...", "path": "...", "provenance": [...] }, ...] }`
 
@@ -408,7 +374,7 @@ All three subcommands accept `--json`. Shapes:
 </details>
 
 <details>
-<summary><h3><code>@ref</code> Syntax</h3></summary>
+<summary><h2><code>@ref</code> syntax</h2></summary>
 
 Documents can embed references to source code using `@ref` directives. By default, `lazyspec show` renders them as-is. Pass `-e` to expand them inline.
 
@@ -451,31 +417,12 @@ Unresolvable refs render as:
 <details>
 <summary><h2>Configuration</h2></summary>
 
-`lazyspec init` creates a `.lazyspec.toml` in your project root. On a TTY it walks
-an interactive wizard that defaults to designing a **blank** DAG from scratch; pass
-`--template starter` to opt into tweaking the built-in starter DAG instead:
+`lazyspec init` creates a `.lazyspec.toml` in your project root. On a TTY it walks an interactive wizard that defaults to designing a **blank** DAG from scratch; pass `--template starter` to opt into tweaking the built-in starter DAG instead:
 
-- **Blank** (the default) designs the whole type DAG from nothing: it prompts for
-  each type (and its lifecycle), then -- once at least two types exist -- for
-  parent-child rules with a severity and an optional parent-status gate, defaults
-  the relationship vocabulary to the type-agnostic starter set, renders a summary
-  of the designed DAG, and asks to confirm before writing. Declining the
-  confirmation discards the session and starts over; nothing is written.
-- **Starter** (`lazyspec init --template starter`, or picking `starter` on the
-  first screen) starts from the built-in starter set of document types,
-  relationships, and validation rules and lets you tweak it -- set the naming
-  pattern, keep or drop each starter type, and add new types -- before it
-  scaffolds the project. `--template starter` skips the first-screen prompt and
-  goes straight to the starter designer.
+- **Blank** (the default) designs the whole type DAG from nothing. It prompts for each type (and its lifecycle), then, once at least two types exist, for parent-child rules with a severity and an optional parent-status gate. It defaults the relationship vocabulary to the type-agnostic starter set, renders a summary of the designed DAG, and asks to confirm before writing. Declining the confirmation discards the session and starts over; nothing is written.
+- **Starter** (`lazyspec init --template starter`, or picking `starter` on the first screen) starts from the built-in starter set of document types, relationships, and validation rules and lets you tweak it: set the naming pattern, keep or drop each starter type, and add new types, before it scaffolds the project. `--template starter` skips the first-screen prompt and goes straight to the starter designer.
 
-Pass `--non-interactive` (or `--json`, which implies it), or run in a
-non-TTY context (a pipe or CI), to skip the wizard and write the starter config
-unchanged; `--template` is ignored on those paths. The engine carries no
-built-in document types or relationship vocabulary: the `[[types]]`,
-`[[relationships]]`, and `[[rules]]` declared in `.lazyspec.toml` are the sole
-source of truth. A missing `.lazyspec.toml`, or a config with no `[[types]]`, is a
-hard error that points you at `lazyspec init`; a config missing the
-`[[relationships]]` block is a hard error that points you at `lazyspec fix --config`.
+Pass `--non-interactive` (or `--json`, which implies it), or run in a non-TTY context (a pipe or CI), to skip the wizard and write the starter config unchanged; `--template` is ignored on those paths. The engine carries no built-in document types or relationship vocabulary: the `[[types]]`, `[[relationships]]`, and `[[rules]]` declared in `.lazyspec.toml` are the sole source of truth. A missing `.lazyspec.toml`, or a config with no `[[types]]`, is a hard error that points you at `lazyspec init`. A config missing the `[[relationships]]` block is a hard error that points you at `lazyspec fix --config`.
 
 ```toml
 [[types]]
@@ -499,34 +446,20 @@ dir = ".lazyspec/templates"
 pattern = "{type}-{n:03}-{title}.md"
 ```
 
-### Migrating an Existing Config
+### Migrating an existing config
 
-Projects created before relationships and rules became config-driven have a
-`.lazyspec.toml` with no `[[relationships]]` or `[[rules]]` blocks. Strict load
-now rejects such a config on every command, pointing you at the migration:
+Projects created before relationships and rules became config-driven have a `.lazyspec.toml` with no `[[relationships]]` or `[[rules]]` blocks. Strict load now rejects such a config on every command, pointing you at the migration:
 
 ```sh
 lazyspec fix --config            # inject missing standard relationships/rules and default lifecycles
 lazyspec fix --config --dry-run  # preview the additions without writing
 ```
 
-`fix --config` reads the config leniently (the one place strict load is
-bypassed), then appends only the standard `[[relationships]]` / `[[rules]]` that
-are missing -- comparing by name, so user-added relationships and rules are kept
-and nothing is duplicated. It also injects the default `lifecycle` into any
-`[[types]]` entry that lacks one (a type that already declares a lifecycle is
-left untouched); migrated types are reported under `lifecycles_added`. Every
-existing section (`[github]`, comments, ordering) is preserved,
-and it is idempotent -- running it on an up-to-date config makes no change. The
-flag is config-only: no documents are touched (use plain `lazyspec fix` for
-frontmatter).
+`fix --config` reads the config leniently (the one place strict load is bypassed), then appends only the standard `[[relationships]]` / `[[rules]]` that are missing, comparing by name, so user-added relationships and rules are kept and nothing is duplicated. It also injects the default `lifecycle` into any `[[types]]` entry that lacks one (a type that already declares a lifecycle is left untouched); migrated types are reported under `lifecycles_added`. Every existing section (`[github]`, comments, ordering) is preserved, and it is idempotent: running it on an up-to-date config makes no change. The flag is config-only: no documents are touched (use plain `lazyspec fix` for frontmatter).
 
-### Inspecting and Editing the Config
+### Inspecting and editing the config
 
-`lazyspec config` reads and edits `.lazyspec.toml` without you opening the file.
-The read is plain JSON; the three mutators reconcile the TOML in place, preserving
-comments, formatting, and block order exactly as `fix --config` and the TUI
-settings screen do; and `schema` emits a JSON Schema describing the file's shape.
+`lazyspec config` reads and edits `.lazyspec.toml` without you opening the file. The read is plain JSON; the three mutators reconcile the TOML in place, preserving comments, formatting, and block order exactly as `fix --config` and the TUI settings screen do; and `schema` emits a JSON Schema describing the file's shape.
 
 ```sh
 lazyspec config --json                      # print the resolved config as JSON
@@ -537,32 +470,10 @@ lazyspec config add-type spike spikes docs/spikes SPIKE \
   --icon "◆" --parent-type rfc --intent "throwaway exploration" \
   --authorship generated
 
-# With no positionals on a TTY, add-type prompts interactively. After the core
-# fields (name, plural, dir, prefix, icon, store, numbering, singleton,
-# authorship) -- where choosing store = github-issues additionally prompts for
-# the GitHub issue tag/label and issue type, and store = clickup-tasks for the
-# ClickUp list id and task type (other stores prompt for neither) -- it
-# optionally walks through: attributes (repeat until declined; a
-# malformed or duplicate spec re-asks in place), a parent type (chosen only from
-# already-defined types), a custom lifecycle (enter the states as one
-# comma-separated line, then FROM:TO edges, where an edge naming an unknown state
-# re-asks; decline to inherit the store preset), and a gate on an existing
-# parent-child rule (the status must be one the parent type's lifecycle carries).
-# Single-choice prompts (store, numbering, authorship, ...) are coloured
-# arrow-key menus -- move the highlight with up/down, Enter picks it, no typing
-# required. The wizard drives the same add-type / set-lifecycle
-# / add-gate writers as the flags, so it produces an identical .lazyspec.toml.
-# Flags, --json, and non-TTY invocations stay the canonical scriptable path and
-# still require all four positionals.
+# With no positionals on a TTY, add-type prompts interactively.
 lazyspec config add-type
-# also accepts --singleton, --store <filesystem|github-issues|github-milestones|github-projects|git-ref|clickup-tasks>,
-# --numbering <incremental|sqids|reserved>, --github-issue-tag <str> / --github-issue-type <str>
-# (github-issues only), and --clickup-list-id <str> / --clickup-task-type <id> (clickup-tasks only)
 
-# Declare custom frontmatter attributes with the type (repeat --attribute per
-# attribute; spec is NAME:KIND[:required][:VAL1,VAL2,...], kinds: int, float,
-# string, enum, date, bool -- values only for enum). Written as
-# [[types.attributes]] blocks; never hand-edit these into .lazyspec.toml.
+# Declare custom frontmatter attributes with the type
 lazyspec config add-type bug bugs docs/bugs BUG \
   --attribute "severity:enum:required:low,medium,high" \
   --attribute "reported:date" --attribute "estimate:int"
@@ -576,22 +487,9 @@ lazyspec config set-lifecycle iteration \
 lazyspec config add-gate stories-need-rfcs --status accepted
 ```
 
-`add-type` rejects a duplicate name; `set-lifecycle` replaces the whole lifecycle
-(it is a set, not a merge) and rejects an unknown type; `add-gate` rejects an
-unknown rule and refuses a `relation-existence` rule (the gate applies only to
-`parent-child` rules). The mutators require an already-valid config; run
-`lazyspec fix --config` first to migrate a legacy one.
+`add-type` rejects a duplicate name; `set-lifecycle` replaces the whole lifecycle (it is a set, not a merge) and rejects an unknown type; `add-gate` rejects an unknown rule and refuses a `relation-existence` rule (the gate applies only to `parent-child` rules). The mutators require an already-valid config; run `lazyspec fix --config` first to migrate a legacy one.
 
-`config schema` is the exception: it needs no active project and runs from any
-directory, since the schema is a property of the binary, not of a project (every
-other `config` subcommand requires a `.lazyspec.toml` to read or edit). The
-schema is derived from the actual structs lazyspec deserializes the TOML into, so
-it tracks the real parser rather than a hand-maintained description that can drift.
-`--json` is accepted for consistency and produces identical output. Point a
-JSON-Schema-aware TOML language server at it (taplo, Even Better TOML) for
-editor autocomplete and hover docs, or save it as the authoritative
-machine-readable reference for a human or agent editing the config instead of
-inferring valid keys from this README:
+`config schema` is the exception: it needs no active project and runs from any directory, since the schema is a property of the binary, not of a project (every other `config` subcommand requires a `.lazyspec.toml` to read or edit). The schema is derived from the actual structs lazyspec deserializes the TOML into, so it tracks the real parser rather than a hand-maintained description that can drift. `--json` is accepted for consistency and produces identical output. Point a JSON-Schema-aware TOML language server at it (taplo, Even Better TOML) for editor autocomplete and hover docs, or save it as the authoritative machine-readable reference for a human or agent editing the config instead of inferring valid keys from this README:
 
 ```sh
 lazyspec config schema > lazyspec.schema.json
@@ -599,21 +497,15 @@ lazyspec config schema > lazyspec.schema.json
 
 #### `github-issues` store auth
 
-Types stored as GitHub issues (`--store github-issues`) shell out to the `gh`
-CLI, so run `gh auth login` first. Beyond plain issue access, lazyspec reads
-native GitHub fields (issue types, Projects v2 fields) over the GraphQL API,
-which needs the `project` scope on your token:
+Types stored as GitHub issues (`--store github-issues`) shell out to the `gh` CLI, so run `gh auth login` first. Beyond plain issue access, lazyspec reads native GitHub fields (issue types, Projects v2 fields) over the GraphQL API, which needs the `project` scope on your token:
 
 ```sh
 gh auth refresh -s project
 ```
 
-Without it, schema-snapshot refreshes degrade gracefully -- they emit a warning
-and keep serving the last cached snapshot, so offline validation still works.
+Without it, schema-snapshot refreshes degrade gracefully: they emit a warning and keep serving the last cached snapshot, so offline validation still works.
 
-A `[[types]]` entry may also declare `github_issue_tag` and/or
-`github_issue_type` to control which issues classify as that type,
-independent of (or instead of) the default `lazyspec:{type}` label:
+A `[[types]]` entry may also declare `github_issue_tag` and/or `github_issue_type` to control which issues classify as that type, independent of (or instead of) the default `lazyspec:{type}` label:
 
 ```toml
 [[types]]
@@ -624,47 +516,20 @@ github_issue_tag = "customer-facing"
 github_issue_type = "Feature"
 ```
 
-- Neither set: unchanged default -- an issue matches when it carries the
-  `lazyspec:{type}` label.
-- Only `github_issue_tag` set: matches every issue carrying that tag; the
-  `lazyspec:{type}` label is not checked.
-- Only `github_issue_type` set: matches every issue whose native GitHub
-  Issue Type equals that value; the label is not checked.
-- Both set: an issue must carry the tag **and** have the native issue type --
-  AND, not OR.
+- Neither set: unchanged default, an issue matches when it carries the `lazyspec:{type}` label.
+- Only `github_issue_tag` set: matches every issue carrying that tag; the `lazyspec:{type}` label is not checked.
+- Only `github_issue_type` set: matches every issue whose native GitHub Issue Type equals that value; the label is not checked.
+- Both set: an issue must carry the tag **and** have the native issue type (AND, not OR).
 
-`config add-type ... --github-issue-tag <str>` and `--github-issue-type <str>`
-write these keys (both valid **only** on `store = "github-issues"`), and they
-surface in `config --json`.
+`config add-type ... --github-issue-tag <str>` and `--github-issue-type <str>` write these keys (both valid **only** on `store = "github-issues"`), and they surface in `config --json`.
 
-Because these are independent per-type rules, two types may legitimately
-match the same issue (e.g. both set `github_issue_type = "Feature"`). `fetch`
-then materializes one document per matching type from that single issue --
-same issue number, separate cache entries under each type's own prefix and
-numbering. Both documents stay independently `update`-able; each write goes
-to the same issue, so whichever update runs last wins on any field the two
-types share.
+Because these are independent per-type rules, two types may legitimately match the same issue (for example both set `github_issue_type = "Feature"`). `fetch` then materializes one document per matching type from that single issue: same issue number, separate cache entries under each type's own prefix and numbering. Both documents stay independently `update`-able; each write goes to the same issue, so whichever update runs last wins on any field the two types share.
 
-`create` on a type with `github_issue_type` set also pushes that value onto
-the new issue's native issue type field (needs the `project` scope described
-above). Because the native issue type already classifies the issue, such a
-create attaches **no** `lazyspec:{type}` identity label; if `github_issue_tag`
-is also set, only that tag label is attached. A type with `github_issue_type`
-unset is unchanged -- it still gets the default `lazyspec:{type}` label
-(or its `github_label` override).
+`create` on a type with `github_issue_type` set also pushes that value onto the new issue's native issue type field (needs the `project` scope described above). Because the native issue type already classifies the issue, such a create attaches **no** `lazyspec:{type}` identity label; if `github_issue_tag` is also set, only that tag label is attached. A type with `github_issue_type` unset is unchanged: it still gets the default `lazyspec:{type}` label (or its `github_label` override).
 
-The `assignee` field is a **native GitHub field**, not part of the issue-body
-round-trip. On `fetch`, each issue's first native assignee is inherited into the
-document's `assignee` (multiple assignees map to the first; unassigned yields
-none), and the remote is the source of truth -- a sync overwrites any local
-value. `update <id> --assignee <login>` writes it through: lazyspec diffs the
-requested login against the issue's current assignee and issues a dedicated
-`gh issue edit --add-assignee/--remove-assignee` (never the body comment), then
-reflects the new assignee in the cache. `--assignee ""` clears it.
+The `assignee` field is a **native GitHub field**, not part of the issue-body round-trip. On `fetch`, each issue's first native assignee is inherited into the document's `assignee` (multiple assignees map to the first; unassigned yields none), and the remote is the source of truth: a sync overwrites any local value. `update <id> --assignee <login>` writes it through: lazyspec diffs the requested login against the issue's current assignee and issues a dedicated `gh issue edit --add-assignee/--remove-assignee` (never the body comment), then reflects the new assignee in the cache. `--assignee ""` clears it.
 
-By default, a `github-issues`-backed type's issues are created, filtered, and
-tagged with the label `lazyspec:{name}`. A type's `github_label` field
-replaces that label with a literal string of your choosing:
+By default, a `github-issues`-backed type's issues are created, filtered, and tagged with the label `lazyspec:{name}`. A type's `github_label` field replaces that label with a literal string of your choosing:
 
 ```toml
 [[types]]
@@ -676,16 +541,11 @@ store = "github-issues"
 github_label = "Ticket"
 ```
 
-With this set, `ticket` issues use the label `Ticket` instead of the default
-`lazyspec:ticket`. Omitting `github_label` leaves existing configs and their
-default labels unchanged. It only affects `github-issues`-backed types; setting
-it on any other `store` is inert.
+With this set, `ticket` issues use the label `Ticket` instead of the default `lazyspec:ticket`. Omitting `github_label` leaves existing configs and their default labels unchanged. It only affects `github-issues`-backed types; setting it on any other `store` is inert.
 
-#### ClickUp store auth
+#### <a id="clickup-store-auth"></a>ClickUp store auth
 
-ClickUp has no `gh`-style CLI to piggyback on, so lazyspec owns its own
-credential store. Authenticate with a ClickUp personal API token (the `pk_`
-prefixed value from ClickUp's _Settings -> Apps_):
+ClickUp has no `gh`-style CLI to piggyback on, so lazyspec owns its own credential store. Authenticate with a ClickUp personal API token (the `pk_` prefixed value from ClickUp's _Settings -> Apps_):
 
 ```sh
 # prompt for the token without echoing it
@@ -698,36 +558,20 @@ lazyspec setup clickup --token pk_XXXXXXXX
 lazyspec setup clickup --token pk_XXXXXXXX --json
 ```
 
-`setup clickup` validates the token against ClickUp's `/user` endpoint **before**
-writing anything -- an invalid or revoked token fails with a clear error and
-leaves any previously stored credential untouched.
+`setup clickup` validates the token against ClickUp's `/user` endpoint **before** writing anything: an invalid or revoked token fails with a clear error and leaves any previously stored credential untouched.
 
 On success the token is stored **keychain-first**:
 
-- **Default -- the OS keychain** (macOS Keychain, Windows Credential Manager,
-  Linux Secret Service), via the `keyring` crate. The token is encrypted at rest
-  by the OS and unlocked by your login session.
-- **Fallback -- a plaintext file**, used only when no keychain backend is
-  reachable (headless boxes, CI). The fallback is loud, never silent: lazyspec
-  prints a warning and writes the token to a global, never-committed
-  `~/.lazyspec/credentials.toml` under `[clickup] api_token`, creating the
-  directory `0700` and the file `0600`. A credential file found with looser
-  permissions on read is loudly warned about and tightened back to `0600`.
+- **Default, the OS keychain** (macOS Keychain, Windows Credential Manager, Linux Secret Service), via the `keyring` crate. The token is encrypted at rest by the OS and unlocked by your login session.
+- **Fallback, a plaintext file**, used only when no keychain backend is reachable (headless boxes, CI). The fallback is loud, never silent: lazyspec prints a warning and writes the token to a global, never-committed `~/.lazyspec/credentials.toml` under `[clickup] api_token`, creating the directory `0700` and the file `0600`. A credential file found with looser permissions on read is loudly warned about and tightened back to `0600`.
 
-Reads follow the same precedence: the keychain first, then the global file --
-never the repository. The token is a redacted value everywhere -- it never
-appears in logs, error messages, or `--json` output.
+Reads follow the same precedence: the keychain first, then the global file, never the repository. The token is a redacted value everywhere: it never appears in logs, error messages, or `--json` output.
 
-> The token is a bearer credential (full account access, no expiry). The
-> credential store is global, not per-repo, and is read only from the OS
-> keychain or your home directory -- never from the repository.
+> The token is a bearer credential (full account access, no expiry). The credential store is global, not per-repo, and is read only from the OS keychain or your home directory, never from the repository.
 
 #### `clickup-tasks` store
 
-Types stored as `--store clickup-tasks` bind to exactly one ClickUp List via a
-per-type `clickup_list_id` and materialize that List's tasks as read-only
-documents, in the same cache shape as `github-issues` docs
-(`.lazyspec/cache/<type>/<ID>.md`):
+Types stored as `--store clickup-tasks` bind to exactly one ClickUp List via a per-type `clickup_list_id` and materialize that List's tasks as read-only documents, in the same cache shape as `github-issues` docs (`.lazyspec/cache/<type>/<ID>.md`):
 
 ```toml
 [[types]]
@@ -739,8 +583,7 @@ store = "clickup-tasks"
 clickup_list_id = "901234567890"
 ```
 
-An optional per-type `clickup_task_type` binds the type to a ClickUp **custom
-task type** by its numeric `custom_item_id`:
+An optional per-type `clickup_task_type` binds the type to a ClickUp **custom task type** by its numeric `custom_item_id`:
 
 ```toml
 [[types]]
@@ -753,90 +596,30 @@ clickup_list_id = "901234567890"
 clickup_task_type = 1001
 ```
 
-The value is a numeric id only -- name-to-id resolution is not supported. It is
-valid **only** on `store = "clickup-tasks"`; setting it on any other store is a
-config error. `config add-type ... --clickup-list-id <str>` (the List binding)
-and `--clickup-task-type <id>` write these keys -- both valid only on
-`store = "clickup-tasks"` -- and they surface in `config --json`.
+The value is a numeric id only; name-to-id resolution is not supported. It is valid **only** on `store = "clickup-tasks"`; setting it on any other store is a config error. `config add-type ... --clickup-list-id <str>` (the List binding) and `--clickup-task-type <id>` write these keys, both valid only on `store = "clickup-tasks"`, and they surface in `config --json`.
 
-`lazyspec fetch` (optionally `--type <name>`) pulls the bound List's tasks
-(`GET /list/{id}/task`, paginated) using the token from `setup clickup`, and
-writes one cache doc per task. The mapping:
+**`fetch`.** `lazyspec fetch` (optionally `--type <name>`) pulls the bound List's tasks (`GET /list/{id}/task`, paginated) using the token from `setup clickup`, and writes one cache doc per task. The mapping:
 
-- doc `status` is the **raw ClickUp status string** verbatim -- no local status
-  mapping table;
-- `priority` (the ClickUp priority name), `estimate` (`time_estimate`, ms), and
-  `due` (`due_date`, epoch ms) are read from ClickUp's **native task fields**,
-  not a body blob;
-- body comes from the task's `markdown_description` (falling back to
-  `text_content`);
-- a task that leaves the List (including one ClickUp archived) drops out of the
-  cache on the next fetch.
+- doc `status` is the **raw ClickUp status string** verbatim, no local status mapping table;
+- `priority` (the ClickUp priority name), `estimate` (`time_estimate`, ms), and `due` (`due_date`, epoch ms) are read from ClickUp's **native task fields**, not a body blob;
+- body comes from the task's `markdown_description` (falling back to `text_content`);
+- a task that leaves the List (including one ClickUp archived) drops out of the cache on the next fetch.
 
-`fetch` also **populates the type's `lifecycle` from the bound List's status
-set** at sync time: the `states` are the List's status names in ClickUp workflow
-order (by `orderindex`), written back into `.lazyspec.toml` (in place, preserving
-comments). No `edges` are derived -- ClickUp enforces its own transition rules,
-so the lifecycle carries no local gating (the same empty-edge posture the
-`ticket` type takes). The lifecycle is never hand-authored for a `clickup-tasks`
-type; each `fetch` re-derives it from the live List.
+`fetch` also **populates the type's `lifecycle` from the bound List's status set** at sync time: the `states` are the List's status names in ClickUp workflow order (by `orderindex`), written back into `.lazyspec.toml` (in place, preserving comments). No `edges` are derived, because ClickUp enforces its own transition rules, so the lifecycle carries no local gating (the same empty-edge posture the `ticket` type takes). The lifecycle is never hand-authored for a `clickup-tasks` type; each `fetch` re-derives it from the live List.
 
-Fetched docs behave identically to `github-issues` docs under `status --json`
-and `show <ID> --json`. A doc-id -> task-id map is kept at
-`.lazyspec/task-map.json`. Running `fetch` for a `clickup-tasks` type without a
-stored token fails with a clear "run `lazyspec setup clickup`" error.
+Fetched docs behave identically to `github-issues` docs under `status --json` and `show <ID> --json`. A doc-id -> task-id map is kept at `.lazyspec/task-map.json`. Running `fetch` for a `clickup-tasks` type without a stored token fails with a clear "run `lazyspec setup clickup`" error.
 
-`lazyspec create <type> <title> [--body ...]` on a `clickup-tasks` type writes
-through: it POSTs a new task to the bound List (`POST /list/{id}/task`, `name`
-from the title and `markdown_content` from the body; ClickUp assigns the List's
-default status), then mirrors the created task into the local cache and records
-it in `.lazyspec/task-map.json`. It uses the token from `setup clickup` and
-fails with the same "run `lazyspec setup clickup`" error when none is stored.
+**`create` and `update`.** `lazyspec create <type> <title> [--body ...]` on a `clickup-tasks` type writes through: it POSTs a new task to the bound List (`POST /list/{id}/task`, `name` from the title and `markdown_content` from the body; ClickUp assigns the List's default status), then mirrors the created task into the local cache and records it in `.lazyspec/task-map.json`. It uses the token from `setup clickup` and fails with the same "run `lazyspec setup clickup`" error when none is stored.
 
-`lazyspec update <doc> [--title ...] [--body ...] [--attr priority=... --attr
-due=... --attr estimate=...]` on a `clickup-tasks` doc also writes through: it
-resolves the task id from `.lazyspec/task-map.json`, PUTs the changed fields to
-ClickUp (`PUT /task/{id}`) as a partial edit -- `title` -> `name`, `body` ->
-`markdown_content`, and `priority`/`estimate`/`due` -> ClickUp's **native task
-fields** (priority name -> `1..4`, `estimate` -> `time_estimate` ms, `due` ->
-`due_date` epoch ms) -- then re-materializes the returned task into the cache and
-bumps the `task-map.json` `updated_at` baseline, so a subsequent read reflects
-the new native values (the round-trip). Like `create` it loads the token from
-`setup clickup`.
+`lazyspec update <doc> [--title ...] [--body ...] [--attr priority=... --attr due=... --attr estimate=...]` on a `clickup-tasks` doc also writes through: it resolves the task id from `.lazyspec/task-map.json`, PUTs the changed fields to ClickUp (`PUT /task/{id}`) as a partial edit (`title` -> `name`, `body` -> `markdown_content`, and `priority`/`estimate`/`due` -> ClickUp's **native task fields**: priority name -> `1..4`, `estimate` -> `time_estimate` ms, `due` -> `due_date` epoch ms), then re-materializes the returned task into the cache and bumps the `task-map.json` `updated_at` baseline, so a subsequent read reflects the new native values (the round-trip). Like `create` it loads the token from `setup clickup`.
 
-`advance` (moving a doc's `status`, e.g. `lazyspec update <doc> --status "in
-progress"`) also writes through: the **raw ClickUp status string** is PUT to the
-task (`PUT /task/{id}` with `status`) verbatim, then the returned task is
-re-materialized into the cache and the `updated_at` baseline bumped. Because a
-`clickup-tasks` type carries no local lifecycle edges (its `states` mirror the
-List's status set), lazyspec applies **no local transition gate** for these docs
--- unlike filesystem/GitHub types, any status in the List's set is accepted and
-ClickUp enforces its own transition rules, rejecting an illegal target.
+**`advance` (status).** Moving a doc's `status` (for example `lazyspec update <doc> --status "in progress"`) also writes through: the **raw ClickUp status string** is PUT to the task (`PUT /task/{id}` with `status`) verbatim, then the returned task is re-materialized into the cache and the `updated_at` baseline bumped. Because a `clickup-tasks` type carries no local lifecycle edges (its `states` mirror the List's status set), lazyspec applies **no local transition gate** for these docs. Unlike filesystem/GitHub types, any status in the List's set is accepted and ClickUp enforces its own transition rules, rejecting an illegal target.
 
-`delete` on a `clickup-tasks` doc **archives** the ClickUp task rather than
-hard-deleting it: lazyspec resolves the task id from `.lazyspec/task-map.json`
-and sends `PUT /task/{id}` with `{"archived": true}` (the `DELETE /task/{id}`
-hard-delete endpoint is never used). An archived task drops out of
-`task_list` fetches, so the doc leaves the local cache and the task map on the
-next `fetch` -- `delete` does not evict them eagerly -- while the task itself
-stays recoverable in ClickUp. Like the other writes it loads the token from
-`setup clickup` and fails with the same "run `lazyspec setup clickup`" error when
-none is stored, and errors on a doc with no task-map entry.
+**`delete`.** `delete` on a `clickup-tasks` doc **archives** the ClickUp task rather than hard-deleting it: lazyspec resolves the task id from `.lazyspec/task-map.json` and sends `PUT /task/{id}` with `{"archived": true}` (the `DELETE /task/{id}` hard-delete endpoint is never used). An archived task drops out of `task_list` fetches, so the doc leaves the local cache and the task map on the next `fetch` (`delete` does not evict them eagerly), while the task itself stays recoverable in ClickUp. Like the other writes it loads the token from `setup clickup` and fails with the same "run `lazyspec setup clickup`" error when none is stored, and errors on a doc with no task-map entry.
 
-Both `update` and `advance` are guarded by an **optimistic lock** on the
-`task-map.json` `updated_at` baseline. Before the `PUT`, lazyspec re-fetches the
-task (`GET /task/{id}`) and compares ClickUp's current `date_updated` (epoch ms,
-compared as an integer) against the recorded baseline. If the remote is newer --
-an external change landed since your last fetch -- the write is **rejected with a
-conflict error** ("`<doc>` changed on ClickUp since your last fetch; run
-`lazyspec fetch` and retry") and no `PUT` is sent, so a stale local doc never
-clobbers a concurrent change. When the baseline matches, the write proceeds and the baseline
-advances to the returned task's fresh `date_updated`. The conflict surfaces
-through the normal `--json` error path.
+**Optimistic lock.** Both `update` and `advance` are guarded by an optimistic lock on the `task-map.json` `updated_at` baseline. Before the `PUT`, lazyspec re-fetches the task (`GET /task/{id}`) and compares ClickUp's current `date_updated` (epoch ms, compared as an integer) against the recorded baseline. If the remote is newer (an external change landed since your last fetch) the write is **rejected with a conflict error** ("`<doc>` changed on ClickUp since your last fetch; run `lazyspec fetch` and retry") and no `PUT` is sent, so a stale local doc never clobbers a concurrent change. When the baseline matches, the write proceeds and the baseline advances to the returned task's fresh `date_updated`. The conflict surfaces through the normal `--json` error path.
 
-Anything with **no native ClickUp field** -- relations and non-native attributes
--- rides a ClickUp _custom field_, mapped by a per-type
-`clickup_custom_field_map` (lazyspec name -> ClickUp custom-field uuid):
+**Relations and custom fields.** Anything with **no native ClickUp field** (relations and non-native attributes) rides a ClickUp _custom field_, mapped by a per-type `clickup_custom_field_map` (lazyspec name -> ClickUp custom-field uuid):
 
 ```toml
 [[types]]
@@ -854,95 +637,25 @@ relations = "b8c9d0e1-2f34-5678-9abc-def012345678"
 owner = "a1b2c3d4-5e6f-7890-1234-567890abcdef"
 ```
 
-On `fetch`, each task's custom fields are decoded against this map. The field
-mapped from the reserved **`relations`** key is read as a serialized relations
-block (the same `- implements: RFC-056` YAML shape GitHub-issue bodies embed);
-its entries become the doc's `related` relations, resolving **identically to a
-filesystem doc's** under `context --json` (the targets are lazyspec doc ids
-stored directly in the text field, so relations to any store -- e.g. a
-filesystem RFC -- are representable, unlike a ClickUp relationship-type field
-whose values are only task ids). Every other mapped custom field becomes a
-non-native `attributes` entry under its configured name; custom fields the map
-does not name are ignored.
+On `fetch`, each task's custom fields are decoded against this map. The field mapped from the reserved **`relations`** key is read as a serialized relations block (the same `- implements: RFC-056` YAML shape GitHub-issue bodies embed); its entries become the doc's `related` relations, resolving **identically to a filesystem doc's** under `context --json`. The targets are lazyspec doc ids stored directly in the text field, so relations to any store (for example a filesystem RFC) are representable, unlike a ClickUp relationship-type field whose values are only task ids. Every other mapped custom field becomes a non-native `attributes` entry under its configured name; custom fields the map does not name are ignored.
 
-`link`/`unlink` on a `clickup-tasks` doc **write relations back**, closing the
-round-trip: after the edge is mirrored into the cache frontmatter, lazyspec
-serializes the doc's **complete** relation set into the same
-`- implements: RFC-056` YAML block and writes it to the configured `relations`
-text field (`POST /task/{id}/field/{field_id}` with `{"value": "<block>"}`) --
-a **full replace**, not an add/remove diff, so `unlink` clears the dropped edge
-by re-writing the remaining set (an emptied set writes the empty string). What
-`link` writes is exactly what `fetch` decodes, so relations survive a
-write-then-fetch cycle. This uses the configured text custom field, **not**
-ClickUp's native dependency/linked-task API (whose values are task ids only,
-which cannot represent a cross-store target). The field id resolves from the
-reserved `relations` key of `clickup_custom_field_map`; a `clickup-tasks` type
-without that entry raises a clear config error up front rather than failing
-mid-write, and the write loads the token from `setup clickup` (same
-"run `lazyspec setup clickup`" error when none is stored).
+`link`/`unlink` on a `clickup-tasks` doc **write relations back**, closing the round-trip: after the edge is mirrored into the cache frontmatter, lazyspec serializes the doc's **complete** relation set into the same `- implements: RFC-056` YAML block and writes it to the configured `relations` text field (`POST /task/{id}/field/{field_id}` with `{"value": "<block>"}`) as a **full replace**, not an add/remove diff, so `unlink` clears the dropped edge by re-writing the remaining set (an emptied set writes the empty string). What `link` writes is exactly what `fetch` decodes, so relations survive a write-then-fetch cycle. This uses the configured text custom field, **not** ClickUp's native dependency/linked-task API (whose values are task ids only, which cannot represent a cross-store target). The field id resolves from the reserved `relations` key of `clickup_custom_field_map`; a `clickup-tasks` type without that entry raises a clear config error up front rather than failing mid-write, and the write loads the token from `setup clickup` (same "run `lazyspec setup clickup`" error when none is stored).
 
-Like GitHub, ClickUp's `assignee` is a **native task field**. On `fetch`, a
-task's first assignee username is inherited into the doc's `assignee` (remote is
-the source of truth). `update <id> --assignee <user-id>` writes it through as
-ClickUp's native `assignees: {add, rem}` delta via `PUT /task/{id}`. The value
-is a numeric **ClickUp user id** -- cross-identity mapping (a GitHub login or
-free-text name to a ClickUp user id) is out of scope, so a non-numeric value is
-dropped rather than sent as an invalid payload.
+**Assignee.** Like GitHub, ClickUp's `assignee` is a native task field. On `fetch`, a task's first assignee username is inherited into the doc's `assignee` (remote is the source of truth). `update <id> --assignee <user-id>` writes it through as ClickUp's native `assignees: {add, rem}` delta via `PUT /task/{id}`. The value is a numeric **ClickUp user id**; cross-identity mapping (a GitHub login or free-text name to a ClickUp user id) is out of scope, so a non-numeric value is dropped rather than sent as an invalid payload.
 
 #### `github-milestones` store
 
-Types stored as `--store github-milestones` map each document to a GitHub
-milestone over the REST API (title -> title, body -> description, `status` ->
-open/closed state, `due_on` passed through verbatim). A `github-milestones` (or
-`github-issues`) type that declares **no** `lifecycle` inherits the store's
-canonical `open`/`closed` lifecycle: an open milestone/issue reads as `open`, a
-closed one as `closed`, the status DAG offers `open` <-> `closed` (either
-direction, so reopening is a valid move), and new documents are born `open` — no
-`lifecycle` block required in `.lazyspec.toml`. Declaring a `lifecycle` on the
-type overrides this: its first state maps to the open milestone/issue and its
-terminal state to the closed one. Progress
-(`percent_complete`) is computed from the milestone's issue counts at read time
-and is never writable. The write policy is last-write-wins: a push happens
-unconditionally, then the milestone is re-read into the cache (no optimistic
-lock). An issue -> milestone association is surfaced as a forward relation on
-the issue document: declare a relationship with `github_native = "milestone"`,
-and at fetch each issue's native milestone is read back as that relation (e.g.
-`targets: MILESTONE-1`), resolving the milestone number to its document.
-`link` an issue-backed document to a milestone sets the association on GitHub
-(`unlink` clears it). The inverse is read-only and never stored: a milestone
-document's `targeted-by` entries are derived virtually as the reverse of each
-issue's forward relation; an issue whose milestone maps to no lazyspec document
-is skipped.
+Types stored as `--store github-milestones` map each document to a GitHub milestone over the REST API (title -> title, body -> description, `status` -> open/closed state, `due_on` passed through verbatim). A `github-milestones` (or `github-issues`) type that declares **no** `lifecycle` inherits the store's canonical `open`/`closed` lifecycle: an open milestone/issue reads as `open`, a closed one as `closed`, the status DAG offers `open` <-> `closed` (either direction, so reopening is a valid move), and new documents are born `open`, with no `lifecycle` block required in `.lazyspec.toml`. Declaring a `lifecycle` on the type overrides this: its first state maps to the open milestone/issue and its terminal state to the closed one. Progress (`percent_complete`) is computed from the milestone's issue counts at read time and is never writable. The write policy is last-write-wins: a push happens unconditionally, then the milestone is re-read into the cache (no optimistic lock).
 
-The relation vocabulary is store-constrained for milestones: `link`/`unlink`
-reject store-illegal edges before writing. A `github-milestones` document may be
-the target only of the `targets` relation (the `github_native = "milestone"`
-edge) and may never be the source of any relation, and `targets` requires its
-source to be a `github-issues` document and its target to be a milestone
-document. Violations exit non-zero with a clear message (e.g. "milestone docs
-cannot be the source of a relation", "only github-issues docs can target a
-milestone", "`targets` requires a milestone target", "milestone docs can only be
-targeted by `targets`"). In the TUI link editor, milestone documents offer no
-relation types, `targets` is offered only for issue-backed sources, and the
-candidate search is scoped to match.
+An issue -> milestone association is surfaced as a forward relation on the issue document: declare a relationship with `github_native = "milestone"`, and at fetch each issue's native milestone is read back as that relation (for example `targets: MILESTONE-1`), resolving the milestone number to its document. `link` an issue-backed document to a milestone sets the association on GitHub (`unlink` clears it). The inverse is read-only and never stored: a milestone document's `targeted-by` entries are derived virtually as the reverse of each issue's forward relation; an issue whose milestone maps to no lazyspec document is skipped.
+
+The relation vocabulary is store-constrained for milestones: `link`/`unlink` reject store-illegal edges before writing. A `github-milestones` document may be the target only of the `targets` relation (the `github_native = "milestone"` edge) and may never be the source of any relation, and `targets` requires its source to be a `github-issues` document and its target to be a milestone document. Violations exit non-zero with a clear message (for example "milestone docs cannot be the source of a relation", "only github-issues docs can target a milestone", "`targets` requires a milestone target", "milestone docs can only be targeted by `targets`"). In the TUI link editor, milestone documents offer no relation types, `targets` is offered only for issue-backed sources, and the candidate search is scoped to match.
 
 #### `github-projects` store
 
-Types stored as `--store github-projects` bind each document to an existing
-GitHub Projects v2 board, addressed by its board number (`PROJECT-7` -> board
-#7 under `[github].repo`'s owner). The backend is **read/associate only**:
-lazyspec never creates or deletes boards (they are authored on GitHub), so
-`create` and `delete` are rejected. Resolving a board (`update`/binding) looks it
-up over GraphQL under the organization root first, then the user root, and
-errors if the number exists under neither -- no create mutation is ever issued.
+Types stored as `--store github-projects` bind each document to an existing GitHub Projects v2 board, addressed by its board number (`PROJECT-7` -> board #7 under `[github].repo`'s owner). The backend is **read/associate only**: lazyspec never creates or deletes boards (they are authored on GitHub), so `create` and `delete` are rejected. Resolving a board (`update`/binding) looks it up over GraphQL under the organization root first, then the user root, and errors if the number exists under neither; no create mutation is ever issued.
 
-Board membership is a many-to-many relation: declare a relationship with
-`github_native = "membership"`, then `link` an issue-backed document to a board
-document to add the issue to that board (`addProjectV2ItemById`); `unlink`
-removes only that board's item (`deleteProjectV2Item`), leaving memberships of
-other boards untouched. Each membership relation maps to exactly one board and is
-synced independently. Membership mutations are self-contained -- no `--attr` is
-involved (per-board field values are a separate concern).
+Board membership is a many-to-many relation: declare a relationship with `github_native = "membership"`, then `link` an issue-backed document to a board document to add the issue to that board (`addProjectV2ItemById`); `unlink` removes only that board's item (`deleteProjectV2Item`), leaving memberships of other boards untouched. Each membership relation maps to exactly one board and is synced independently. Membership mutations are self-contained; no `--attr` is involved (per-board field values are a separate concern).
 
 Projects v2 mutations require the `project` scope on your `gh` token:
 
@@ -950,9 +663,7 @@ Projects v2 mutations require the `project` scope on your `gh` token:
 gh auth refresh -s project
 ```
 
-On macOS, a slow keyring lookup can make `gh api` fall back to an unauthenticated
-request (surfacing as a surprise 403 / rate-limit). If you hit that, pass the
-token explicitly:
+On macOS, a slow keyring lookup can make `gh api` fall back to an unauthenticated request (surfacing as a surprise 403 / rate-limit). If you hit that, pass the token explicitly:
 
 ```sh
 GH_TOKEN="$(gh auth token)" lazyspec fetch
@@ -960,39 +671,17 @@ GH_TOKEN="$(gh auth token)" lazyspec fetch
 
 #### `fetch` output and exit status
 
-`lazyspec fetch [--type <name>] [--json]` refreshes every configured remote type
-(`github-issues`, `github-milestones`, `git-ref`, `clickup-tasks`) in one engine
-pass; `--type <name>` narrows it to a single type.
+`lazyspec fetch [--type <name>] [--json]` refreshes every configured remote type (`github-issues`, `github-milestones`, `git-ref`, `clickup-tasks`) in one engine pass; `--type <name>` narrows it to a single type.
 
-Note that `git-ref` stores are live: every mutation pushes to the configured
-remote (the `[git-ref]` `remote` setting, default `origin`) rather than staying
-local-only. Updates push with `--force-with-lease`, so a remote ref that has
-diverged is rejected as a conflict (mirroring the local optimistic-lock
-conflict); creates push the new ref, and deletes remove the remote ref. If the
-remote is unreachable the mutation still succeeds locally -- the change is safe
-in your local git refs -- and a `warning:` is printed with a hint to re-run once
-the remote is reachable; `lazyspec fetch` still pulls remote changes down.
+Note that `git-ref` stores are live: every mutation pushes to the configured remote (the `[git-ref]` `remote` setting, default `origin`) rather than staying local-only. Updates push with `--force-with-lease`, so a remote ref that has diverged is rejected as a conflict (mirroring the local optimistic-lock conflict); creates push the new ref, and deletes remove the remote ref. If the remote is unreachable the mutation still succeeds locally (the change is safe in your local git refs) and a `warning:` is printed with a hint to re-run once the remote is reachable; `lazyspec fetch` still pulls remote changes down.
 
-The run is **continue-then-exit-non-zero**: if one type's fetch fails, the
-remaining types still refresh, everything that succeeded is still written to the
-cache, the failing type's error is reported, and the process exits **non-zero**
-(it no longer aborts on the first failure). A missing ClickUp token or an
-unresolvable GitHub repo is a _hard error raised before any type is fetched_ --
-nothing is written -- and is distinct from a per-type failure. A best-effort
-`warning` (for example a project-field injection that could not read) is printed
-but is not a failure: absent any real error, the run exits **zero**.
+The run is **continue-then-exit-non-zero**: if one type's fetch fails, the remaining types still refresh, everything that succeeded is still written to the cache, the failing type's error is reported, and the process exits **non-zero** (it no longer aborts on the first failure). A missing ClickUp token or an unresolvable GitHub repo is a _hard error raised before any type is fetched_ (nothing is written) and is distinct from a per-type failure. A best-effort `warning` (for example a project-field injection that could not read) is printed but is not a failure: absent any real error, the run exits **zero**.
 
-`--json` prints an array of one entry per type. A type that succeeded keeps the
-exact `{type, fetched, new, removed}` shape; a type that failed adds an
-`"error": "<message>"` field to its entry. The process exits non-zero whenever
-any entry carries an `error`.
+`--json` prints an array of one entry per type. A type that succeeded keeps the exact `{type, fetched, new, removed}` shape; a type that failed adds an `"error": "<message>"` field to its entry. The process exits non-zero whenever any entry carries an `error`.
 
-### Custom Types
+### Custom types
 
-Each document type is declared with a `[[types]]` block. This lets you rename the
-defaults, add new types, or set custom prefixes and icons used in the TUI.
-Directories derive entirely from each type's own `dir`; there is no separate
-`[directories]` table.
+Each document type is declared with a `[[types]]` block. This lets you rename the defaults, add new types, or set custom prefixes and icons used in the TUI. Directories derive entirely from each type's own `dir`; there is no separate `[directories]` table.
 
 ```toml
 [[types]]
@@ -1012,18 +701,9 @@ icon = "◆"
 
 ### Lifecycle
 
-Each type declares a `lifecycle`: the set of valid statuses (`states`) and,
-optionally, the permitted status transitions (`edges`). `update --status` is
-gated by this lifecycle -- a move is allowed only when an edge from the current
-status to the target is declared. An edge with a `*` source matches any current
-status (e.g. `* -> superseded` lets any document be superseded). Setting a status
-to its current value is always a no-op (idempotent, never rejected). When a move
-has no matching edge, `update` exits non-zero and the frontmatter is left
-unchanged.
+Each type declares a `lifecycle`: the set of valid statuses (`states`) and, optionally, the permitted status transitions (`edges`). `update --status` is gated by this lifecycle: a move is allowed only when an edge from the current status to the target is declared. An edge with a `*` source matches any current status (for example `* -> superseded` lets any document be superseded). Setting a status to its current value is always a no-op (idempotent, never rejected). When a move has no matching edge, `update` exits non-zero and the frontmatter is left unchanged.
 
-`edges` is optional. A lifecycle that declares `states` but omits `edges` (or
-sets `edges = []`) is unconstrained: any move between declared states is allowed.
-Declare `edges` only when you want to constrain the order of transitions.
+`edges` is optional. A lifecycle that declares `states` but omits `edges` (or sets `edges = []`) is unconstrained: any move between declared states is allowed. Declare `edges` only when you want to constrain the order of transitions.
 
 ```toml
 [[types]]
@@ -1032,25 +712,13 @@ prefix = "RFC"
 lifecycle = { states = ["draft", "review", "accepted", "in-progress", "complete", "rejected", "superseded"], edges = [{ from = "draft", to = "review" }, { from = "review", to = "accepted" }, { from = "accepted", to = "in-progress" }, { from = "in-progress", to = "complete" }, { from = "*", to = "rejected" }, { from = "*", to = "superseded" }] }
 ```
 
-Projects whose `[[types]]` predate the lifecycle axis can backfill the default
-lifecycle with `lazyspec fix --config` (see _Migrating an Existing Config_).
+Projects whose `[[types]]` predate the lifecycle axis can backfill the default lifecycle with `lazyspec fix --config` (see _Migrating an existing config_).
 
 ### Relationships
 
-The relationship vocabulary is config-driven, just like document types. Each
-`[[relationships]]` block declares a relationship `name` and an optional
-`inverse` keyword. A directional relationship declares its inverse (e.g.
-`implements` / `implemented-by`); a relationship with no `inverse` is symmetric
-(e.g. `related-to`). `link`/`unlink` resolve the keyword you type against this
-registry -- a canonical `name` links in the stated direction, while a declared
-`inverse` flips it and stores the canonical relation on the target. `validate`
-flags any document carrying a relationship name not declared here.
+The relationship vocabulary is config-driven, just like document types. Each `[[relationships]]` block declares a relationship `name` and an optional `inverse` keyword. A directional relationship declares its inverse (for example `implements` / `implemented-by`); a relationship with no `inverse` is symmetric (for example `related-to`). `link`/`unlink` resolve the keyword you type against this registry: a canonical `name` links in the stated direction, while a declared `inverse` flips it and stores the canonical relation on the target. `validate` flags any document carrying a relationship name not declared here.
 
-A relationship may also declare `traversal`, which governs how it participates in
-context traversal: `chain` relationships form the parent-child hierarchy that
-`parent-child` validation rules and the context chain walk follow, while
-`related` relationships form the symmetric related-context neighbourhood. A
-relationship with no `traversal` participates in neither.
+A relationship may also declare `traversal`, which governs how it participates in context traversal: `chain` relationships form the parent-child hierarchy that `parent-child` validation rules and the context chain walk follow, while `related` relationships form the symmetric related-context neighbourhood. A relationship with no `traversal` participates in neither.
 
 ```toml
 [[relationships]]
@@ -1067,18 +735,14 @@ name = "related-to"
 traversal = "related"
 ```
 
-### Validation Rules
+### Validation rules
 
 Validation rules define structural constraints between document types. Two shapes are supported:
 
-- `parent-child` -- the child type must link to a parent type via any chain relationship (a relationship marked `traversal = "chain"` in `[[relationships]]`).
-- `relation-existence` -- documents of a given type must have at least one relationship.
+- `parent-child`: the child type must link to a parent type via any chain relationship (a relationship marked `traversal = "chain"` in `[[relationships]]`).
+- `relation-existence`: documents of a given type must have at least one relationship.
 
-A `parent-child` rule may also carry `require_parent_status`: when set, `create`
-of the child type is refused unless at least one parent document of the rule's
-`parent` type has reached that status. The required status must be a valid state
-of the parent type's lifecycle. Rules without `require_parent_status` impose no
-creation gate.
+A `parent-child` rule may also carry `require_parent_status`: when set, `create` of the child type is refused unless at least one parent document of the rule's `parent` type has reached that status. The required status must be a valid state of the parent type's lifecycle. Rules without `require_parent_status` impose no creation gate.
 
 ```toml
 [[rules]]
@@ -1127,7 +791,7 @@ If the remote is unreachable, `create` fails rather than silently falling back. 
 
 Markdown templates live in the templates directory (`.lazyspec/templates/` by default). `init` materializes a single `template.md` carrying general authoring guidance; because the tool is config-driven, no per-type templates are shipped. `{title}`, `{author}`, `{date}`, and `{type}` are substituted when a document is created, so one template serves every type.
 
-When creating a document, lazyspec resolves the template in this order: a per-type override `{type}.md` (e.g. `rfc.md`, `story.md`), then the shared `template.md`, then a built-in default. Add a `{type}.md` to override a single type while leaving the rest on the shared template.
+When creating a document, lazyspec resolves the template in this order: a per-type override `{type}.md` (for example `rfc.md`, `story.md`), then the shared `template.md`, then a built-in default. Add a `{type}.md` to override a single type while leaving the rest on the shared template.
 
 ### Agents
 
@@ -1143,7 +807,37 @@ Zero-defaults: when `[agents] interactive` is unset, interactive-mode templates 
 
 </details>
 
-## Development
+<details>
+<summary><h2>Web view</h2></summary>
+
+A read-only web view of the project's documents is available behind the `web` cargo feature, so default builds carry no async/HTTP dependencies:
+
+```sh
+cargo run --features web -- serve            # binds 127.0.0.1:8787
+cargo run --features web -- serve --port 9000
+```
+
+`serve` loads the store once and renders a server-side document list (grouped by type) with htmx status/tag filtering. It binds loopback only.
+
+Each document page carries an outbound "edit on GitHub" deep-link, derived from the document's store backend: filesystem docs link to the blob (`/blob/{branch}/{path}`), `github-issues` docs to the issue, `github-milestones` docs to the milestone. The repo coordinates resolve from the `origin` remote (owner/repo) and current branch, overridable per field with an optional `[web]` table:
+
+```toml
+[web]
+owner = "acme"      # optional; defaults to the origin remote's owner
+repo = "widgets"    # optional; defaults to the origin remote's repo
+branch = "main"     # optional; defaults to the current branch
+```
+
+When owner/repo can't be resolved (no `origin` remote and no override), deep-links are omitted and `serve` logs a single startup warning rather than rendering broken links.
+
+### Native macOS app (deprecated)
+
+The native macOS app (the Tauri build behind the `app` cargo feature) is deprecated and is no longer built or shipped by CI. The `app` cargo feature and its source remain in-tree but are unsupported and unbuilt in releases. crates.io (`cargo install`) is the supported install and artifact channel.
+
+</details>
+
+<details>
+<summary><h2>Development</h2></summary>
 
 ### Nix (recommended)
 
@@ -1173,3 +867,5 @@ nix flake check
 cargo build
 cargo test
 ```
+
+</details>
