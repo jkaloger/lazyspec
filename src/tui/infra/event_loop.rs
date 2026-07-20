@@ -762,6 +762,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
 
         let t = Instant::now();
         app.frame_idx = loop_count;
+        app.refresh_in_flight = refresh_in_flight.load(Ordering::Relaxed);
         terminal.draw(|f| views::draw(f, &mut app, &config))?;
         perf_log::log_duration("draw", t);
 

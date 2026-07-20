@@ -596,6 +596,9 @@ pub struct App {
     pub git_status_cache: GitStatusCache,
     pub gh_conflict_message: Option<String>,
     pub gh_push_in_flight: Arc<AtomicBool>,
+    /// Mirror of the event loop's local `refresh_in_flight` atomic, refreshed
+    /// each frame so the header sync face can reflect an in-flight poll.
+    pub refresh_in_flight: bool,
     pub last_sync: Option<Instant>,
     pub gh_issue_map_stale: bool,
     pub status_bar_enabled: bool,
@@ -768,6 +771,7 @@ impl App {
             git_status_cache,
             gh_conflict_message: None,
             gh_push_in_flight: Arc::new(AtomicBool::new(false)),
+            refresh_in_flight: false,
             last_sync: if has_github_issues {
                 Some(Instant::now())
             } else {
@@ -3541,6 +3545,7 @@ pub(crate) mod parity_seed {
             git_status_cache: GitStatusCache::new(tmp.path()),
             gh_conflict_message: None,
             gh_push_in_flight: Arc::new(AtomicBool::new(false)),
+            refresh_in_flight: false,
             last_sync: None,
             gh_issue_map_stale: false,
             status_bar_enabled: true,
@@ -4019,6 +4024,7 @@ mod tests {
             git_status_cache: GitStatusCache::new(Path::new(".")),
             gh_conflict_message: None,
             gh_push_in_flight: Arc::new(AtomicBool::new(false)),
+            refresh_in_flight: false,
             last_sync: None,
             gh_issue_map_stale: false,
             status_bar_enabled: true,
