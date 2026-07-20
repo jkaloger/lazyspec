@@ -538,10 +538,13 @@ lazyspec config add-type spike spikes docs/spikes SPIKE \
 # fields (name, plural, dir, prefix, icon, store, numbering, singleton,
 # authorship) it optionally walks through: attributes (repeat until declined; a
 # malformed or duplicate spec re-asks in place), a parent type (chosen only from
-# already-defined types), a custom lifecycle (states then FROM:TO edges, where an
-# edge naming an unknown state re-asks; decline to inherit the store preset), and
-# a gate on an existing parent-child rule (the status must be one the parent
-# type's lifecycle carries). The wizard drives the same add-type / set-lifecycle
+# already-defined types), a custom lifecycle (enter the states as one
+# comma-separated line, then FROM:TO edges, where an edge naming an unknown state
+# re-asks; decline to inherit the store preset), and a gate on an existing
+# parent-child rule (the status must be one the parent type's lifecycle carries).
+# Single-choice prompts (store, numbering, authorship, ...) render a numbered
+# list -- pick by number or exact name; an out-of-list answer is rejected and
+# re-asked. The wizard drives the same add-type / set-lifecycle
 # / add-gate writers as the flags, so it produces an identical .lazyspec.toml.
 # Flags, --json, and non-TTY invocations stay the canonical scriptable path and
 # still require all four positionals.

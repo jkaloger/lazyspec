@@ -356,18 +356,14 @@ pub fn collect_type_interactive(
     // store preset via `effective_lifecycle`. When designing one, an edge naming a
     // state outside the collected set (source `*` excepted) re-asks in place.
     let custom_lifecycle = if prompter.confirm("Design a custom lifecycle", false)? {
-        let mut states: Vec<String> = Vec::new();
-        loop {
-            let state = prompter.ask("Lifecycle state (blank to finish)", None)?;
-            if state.is_empty() {
-                if states.is_empty() {
-                    println!("at least one state is required");
-                    continue;
-                }
-                break;
+        let states = loop {
+            let states = prompter.multi_select("Lifecycle states", &[], &[])?;
+            if states.is_empty() {
+                println!("at least one state is required");
+                continue;
             }
-            states.push(state);
-        }
+            break states;
+        };
         let mut edges: Vec<String> = Vec::new();
         loop {
             let spec = prompter.ask("Edge FROM:TO (blank to finish)", None)?;
@@ -1590,13 +1586,11 @@ require_parent_status = "accepted"
             "",
             "",
             "",
-            "",  // core fields
-            "n", // no attributes
-            "n", // no parent
-            "y", // design a custom lifecycle
-            "draft",
-            "done",
-            "",           // states, then blank to finish
+            "",           // core fields
+            "n",          // no attributes
+            "n",          // no parent
+            "y",          // design a custom lifecycle
+            "draft,done", // lifecycle states (comma-separated)
             "draft:nope", // `nope` isn't a state -> re-ask
             "draft:done", // valid
             "",           // blank to finish edges
@@ -1614,6 +1608,45 @@ require_parent_status = "accepted"
         assert_eq!(widget.lifecycle.edges.len(), 1);
         assert_eq!(widget.lifecycle.edges[0].from, "draft");
         assert_eq!(widget.lifecycle.edges[0].to, "done");
+    }
+
+    // ITERATION-329: lifecycle states are collected in one `multi_select` prompt.
+    // A comma-separated answer becomes the full state list, and a blank answer
+    // trips the empty-guard re-ask before a valid answer is accepted.
+    #[test]
+    fn collect_type_multi_select_states_reasks_on_blank() {
+        let config = Config::parse(SRC).unwrap();
+        let mut prompter = scripted(&[
+            "widget",
+            "widgets",
+            "",
+            "", // core identity
+            "",
+            "",
+            "",
+            "",
+            "",                  // icon/store/numbering/singleton/authorship
+            "n",                 // no attribute
+            "n",                 // no parent
+            "y",                 // design a custom lifecycle
+            "",                  // blank states -> empty-guard re-ask
+            "draft,review,done", // valid states
+            "",                  // blank to finish edges
+            "n",                 // no gate
+        ]);
+        let collected = collect_type_interactive(&config, &mut prompter).unwrap();
+        let (states, edges) = collected
+            .lifecycle
+            .expect("a custom lifecycle was designed");
+        assert_eq!(
+            states,
+            vec![
+                "draft".to_string(),
+                "review".to_string(),
+                "done".to_string()
+            ]
+        );
+        assert!(edges.is_empty());
     }
 
     // STORY-226 AC2: declining the custom-lifecycle prompt leaves the lifecycle
@@ -1717,9 +1750,7 @@ require_parent_status = "accepted"
             "y",
             "rfc", // parent = rfc
             "y",
-            "draft",
-            "done",
-            "",
+            "draft,done",
             "draft:done",
             "", // custom lifecycle
             "y",

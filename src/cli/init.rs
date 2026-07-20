@@ -689,9 +689,7 @@ mod tests {
             "",               // authorship -> default
             "n",              // add an attribute? no
             "y",              // design a custom lifecycle? yes
-            "draft",          // state
-            "accepted",       // state
-            "",               // finish states
+            "draft,accepted", // lifecycle states (comma-separated)
             "draft:accepted", // edge
             "",               // finish edges
             "y",              // add a type? -> story
@@ -739,12 +737,10 @@ mod tests {
             "",
             "",
             "",
-            "",  // core fields
-            "n", // no attribute
-            "y", // custom lifecycle
-            "draft",
-            "done",
-            "",           // states
+            "",           // core fields
+            "n",          // no attribute
+            "y",          // custom lifecycle
+            "draft,done", // lifecycle states (comma-separated)
             "draft:nope", // edge names an undefined state -> re-ask
             "draft:done", // valid
             "",           // finish edges
