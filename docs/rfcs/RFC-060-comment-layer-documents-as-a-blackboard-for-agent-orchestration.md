@@ -1,7 +1,7 @@
 ---
 title: 'Comment layer: attributed append-only annotations on documents'
 type: rfc
-status: review
+status: accepted
 author: jack
 date: 2026-07-12
 tags: []

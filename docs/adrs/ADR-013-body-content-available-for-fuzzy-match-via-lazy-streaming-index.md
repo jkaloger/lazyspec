@@ -1,7 +1,7 @@
 ---
 title: Body content available for fuzzy match via lazy streaming index
 type: adr
-status: draft
+status: accepted
 author: jkaloger
 date: 2026-06-18
 tags: []

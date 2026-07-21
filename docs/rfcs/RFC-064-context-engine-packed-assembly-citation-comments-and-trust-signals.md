@@ -1,7 +1,7 @@
 ---
 title: "Context engine: packed assembly, citation comments, and trust signals"
 type: rfc
-status: review
+status: accepted
 author: "jack"
 date: 2026-07-20
 tags: []
