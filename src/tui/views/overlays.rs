@@ -1025,22 +1025,21 @@ pub fn draw_search_overlay(f: &mut Frame, app: &App, colors: &StatusPalette) {
         })
         .collect();
 
-    // While a search is in flight on the worker, the results title carries the
-    // shared loading face (same spinner machinery as the create form); it
-    // disappears when the matching-generation results land and clear
-    // `search_pending`.
-    let results_title = if app.search_pending {
-        let frame = crate::spinners::spinner("face")
-            .compact(crate::spinners::SpinnerState::Loading, app.frame_idx);
-        let style = super::colors::frame_style(frame.colour);
-        Line::from(vec![
-            Span::raw(" Results "),
-            Span::styled(frame.lines.join(""), style),
-            Span::raw(" "),
-        ])
+    // The results title always carries the shared face (same spinner machinery
+    // as the create form): the loading face while a search is in flight on the
+    // worker, the happy idle face otherwise.
+    let state = if app.search_pending {
+        crate::spinners::SpinnerState::Loading
     } else {
-        Line::from(" Results ")
+        crate::spinners::SpinnerState::Idle
     };
+    let frame = crate::spinners::spinner("face").compact(state, app.frame_idx);
+    let style = super::colors::frame_style(frame.colour);
+    let results_title = Line::from(vec![
+        Span::raw(" Results "),
+        Span::styled(frame.lines.join(""), style),
+        Span::raw(" "),
+    ]);
 
     let list = List::new(items)
         .block(
