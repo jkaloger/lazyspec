@@ -482,7 +482,6 @@ fn reload_session(
     app.refresh_validation(config);
     // Mirror the cache resets the CacheRefresh and GhPushResult(Ok) arms perform.
     app.filtered_docs_cache = None;
-    app.rebuild_search_index();
     app.build_doc_tree();
     app.git_status_cache.invalidate();
     app.expanded_body_cache.clear();
@@ -552,7 +551,6 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
             app.last_sync = Some(Instant::now());
             app.gh_fetch_warnings = warnings;
             app.filtered_docs_cache = None;
-            app.rebuild_search_index();
             app.refresh_validation(config);
         }
         AppEvent::GhPushResult(result) => {
@@ -564,7 +562,6 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                         app.store = refreshed;
                     }
                     app.filtered_docs_cache = None;
-                    app.rebuild_search_index();
                     app.refresh_validation(config);
                     app.expanded_body_cache.clear();
                     app.disk_cache.clear();
@@ -589,7 +586,6 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                 Ok(create_result) => {
                     let _ = app.store.reload_file(root, &create_result.path, &*app.fs);
                     app.filtered_docs_cache = None;
-                    app.rebuild_search_index();
                     if let Some(type_idx) = app
                         .doc_types
                         .iter()

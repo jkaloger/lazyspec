@@ -43,6 +43,13 @@ pub struct Store {
     /// walked by [`resolve_chain`](crate::engine::context::resolve_chain)'s
     /// related neighbourhood.
     pub(crate) related_relationships: Vec<String>,
+    /// Raw document bodies memoized on first read during [`search`](Store::search),
+    /// so repeated fuzzy queries (a live TUI filter re-runs on every keystroke)
+    /// score body text from memory instead of re-reading each file from disk.
+    /// Startup stays metadata-only (ADR-013): nothing is loaded here until a
+    /// search touches the body. Entries are dropped on `reload_file`/`remove_file`
+    /// so a changed body is re-read (file-watch invalidation).
+    pub(crate) body_cache: std::sync::Mutex<HashMap<PathBuf, String>>,
 }
 
 impl Store {
@@ -127,6 +134,7 @@ impl Store {
             parse_errors,
             chain_relationships,
             related_relationships,
+            body_cache: std::sync::Mutex::new(HashMap::new()),
         };
         store.propagate_parent_links();
 
@@ -285,6 +293,10 @@ impl Store {
         relative_path: &Path,
         fs: &dyn FileSystem,
     ) -> Result<()> {
+        // Drop any memoized body so a changed file is re-read (file-watch
+        // invalidation, ADR-013). Covers both the removed and re-parsed cases.
+        self.body_cache.lock().unwrap().remove(relative_path);
+
         let full_path = root.join(relative_path);
         if !fs.exists(&full_path) {
             self.docs.remove(relative_path);
@@ -314,6 +326,7 @@ impl Store {
     }
 
     pub fn remove_file(&mut self, relative_path: &Path) {
+        self.body_cache.lock().unwrap().remove(relative_path);
         self.docs.remove(relative_path);
         self.rebuild_links();
     }
@@ -383,7 +396,7 @@ impl Store {
                 consider(score, "path", &|| path_str.to_string());
             }
 
-            if let Ok(body) = self.get_body_raw(&meta.path, fs) {
+            if let Some(body) = self.cached_or_read_body(&meta.path, fs) {
                 let mut indices: Vec<u32> = Vec::new();
                 if let Some(score) =
                     pattern.indices(Utf32Str::new(&body, &mut buf), &mut matcher, &mut indices)
@@ -408,6 +421,48 @@ impl Store {
                 .then_with(|| a.doc.path.cmp(&b.doc.path))
         });
         results
+    }
+
+    /// Body text for `path`, served from the in-memory body cache when present
+    /// and otherwise read from disk and memoized. `None` when the file cannot be
+    /// read. See [`body_cache`](Store::body_cache) for the ADR-013 rationale.
+    fn cached_or_read_body(&self, path: &Path, fs: &dyn FileSystem) -> Option<String> {
+        if let Some(body) = self.body_cache.lock().unwrap().get(path) {
+            return Some(body.clone());
+        }
+        let body = self.get_body_raw(path, fs).ok()?;
+        self.body_cache
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), body.clone());
+        Some(body)
+    }
+}
+
+/// Char indices within `text` that `query` fuzzy-matches, using the same matcher
+/// configuration as [`Store::search`]. Empty when `query` is empty or does not
+/// match `text`, so a caller can highlight exactly the matched characters of a
+/// rendered field. Indices are ascending and de-duplicated.
+///
+/// Lives beside `search` so both surfaces (CLI, TUI) share one matcher config;
+/// the TUI must never own the scoring/matching algorithm (RFC-043 principle 3).
+pub fn match_indices(query: &str, text: &str) -> Vec<u32> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+    let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
+    let mut buf: Vec<char> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    if pattern
+        .indices(Utf32Str::new(text, &mut buf), &mut matcher, &mut indices)
+        .is_some()
+    {
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+    } else {
+        Vec::new()
     }
 }
 
@@ -890,6 +945,62 @@ mod tests {
         assert_eq!(tag_only.len(), 1);
         assert_eq!(tag_only[0].match_field, "tag");
         assert_eq!(results[0].score, tag_only[0].score);
+    }
+
+    #[test]
+    fn match_indices_returns_the_matched_subsequence_positions() {
+        // `tff` matches "tui fuzzy filter" as t(0) f(4) f(10): non-contiguous.
+        let idx = match_indices("tff", "tui fuzzy filter");
+        assert_eq!(idx, vec![0, 4, 10]);
+        assert_eq!(
+            "tui fuzzy filter".chars().next(),
+            Some('t'),
+            "index 0 is the leading 't'"
+        );
+        assert_eq!("tui fuzzy filter".chars().nth(4), Some('f'));
+        assert_eq!("tui fuzzy filter".chars().nth(10), Some('f'));
+    }
+
+    #[test]
+    fn match_indices_empty_when_no_match_or_empty_query() {
+        assert!(match_indices("zzz", "hello world").is_empty());
+        assert!(match_indices("", "hello world").is_empty());
+    }
+
+    #[test]
+    fn search_reads_body_from_cache_until_reload_invalidates_it() {
+        // Body match works; the body is then memoized. Editing the file on disk
+        // WITHOUT reloading keeps the stale (cached) body, so the new token does
+        // not match. `reload_file` drops the entry, and the fresh body is re-read.
+        let (mut store, fs) = search_store(&[("RFC-001-c.md", "hello", &[], "the fuzzy matcher")]);
+        let path = PathBuf::from("docs/rfcs/RFC-001-c.md");
+
+        assert_eq!(store.search("fuzzy", &fs).len(), 1, "cold body match");
+
+        // Rewrite the body on disk: drop "fuzzy", add "gadget".
+        fs.add_file(
+            PathBuf::from("/fake/root").join(&path),
+            "---\ntitle: \"hello\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\nthe gadget matcher\n",
+        );
+
+        assert!(
+            store.search("gadget", &fs).is_empty(),
+            "cached body is stale until reload"
+        );
+
+        store
+            .reload_file(Path::new("/fake/root"), &path, &fs)
+            .unwrap();
+
+        assert_eq!(
+            store.search("gadget", &fs).len(),
+            1,
+            "reload invalidates the cache; the new body is re-read and matches"
+        );
+        assert!(
+            store.search("fuzzy", &fs).is_empty(),
+            "the old body token no longer matches after reload"
+        );
     }
 
     fn github_issues_config() -> Config {

@@ -20,17 +20,22 @@ RFC-043 introduces fuzzy, ranked search shared by the CLI `search` command and t
 
 Supersede ADR-002. Body content becomes available to fuzzy matching in both the CLI and the TUI. To preserve ADR-002's fast-startup invariant rather than abandon it, body is not loaded eagerly at startup. Instead:
 
-- Adopt the full `nucleo` crate (not only `nucleo-matcher`). `nucleo` is a streaming, fzf-style matcher: an injector feeds candidates, a background worker pool scores them, and the UI reads a per-frame snapshot of ranked results.
-- At startup, inject document metadata (title, tags, path) immediately, so the list is interactive instantly. Startup cost is unchanged from ADR-002.
-- A background task reads document bodies lazily and injects them into the matcher as they load. Body matches stream into results without blocking the UI.
-- Loaded bodies are cached (reusing the engine `DiskCache`) so warm runs skip the disk read; file-watch events invalidate cached bodies on change.
+- Both surfaces call the engine's `Store::search`, which owns all matching. The engine uses `nucleo`'s `Pattern`/`Matcher` to fuzzy-score each document across title, tags, path, and body, returning ranked results with a score floor. The TUI reuses this exact path so no scoring logic leaks into the TUI layer (principle 3).
+- At startup nothing reads a body: `Store` holds an empty `body_cache` and the list is interactive from frontmatter immediately. Startup cost is unchanged from ADR-002.
+- Bodies are read lazily on first search and memoized in an in-memory `body_cache` on `Store`, so later keystrokes score from memory. File-watch events (`reload_file`/`remove_file`) drop the changed path's cached body, keeping the cache coherent.
+
+### Deviation from the original streaming design (implemented in ITERATION-341)
+
+The design first drafted here — the full `nucleo` streaming injector with a background worker pool and per-frame snapshots, bodies streamed in as they load, cached via the engine `DiskCache` — was **not** built. Driving a `Nucleo<T>` instance would require the TUI to hold matcher state and aggregate snapshots itself, duplicating the engine scorer and weakening the engine-owns-matching boundary. Routing the TUI through `Store::search` with a memoized in-memory body cache delivers the substantive goals (body coverage, ranking, score floor, metadata-only fast startup, cached bodies with invalidation) while keeping 100% of matching in the engine.
+
+Accepted tradeoff: the first-ever search keystroke reads every document body from disk synchronously on the UI thread (once), and each subsequent keystroke re-scores cached bodies on the UI thread — O(corpus body size) per keystroke, single-threaded. This is imperceptible at lazyspec's scope (a simple structured-markdown doc tool, small corpora) and is the reason the background worker pool was not warranted. On a multi-thousand large-doc corpus it would stall; that is a scope-bounded acceptance, not a defect. `DiskCache` was likewise not reused: raw bodies already live on disk as the source files, so disk-caching them is redundant.
 
 ## Consequences
 
 - TUI fuzzy search spans body content, not only frontmatter fields.
-- Startup latency is preserved (metadata-only at boot). First body matches appear shortly after launch as the background read completes, the same perceived behavior as helix/zed.
-- Steady-state memory grows by the size of cached bodies, bounded by cache policy. ADR-002's "body content is never cached in the store" no longer holds; bodies are now cached deliberately.
+- Startup latency is preserved (metadata-only at boot; `body_cache` empty).
+- Steady-state memory grows by the size of cached bodies, held in the in-memory `body_cache`. ADR-002's "body content is never cached in the store" no longer holds; bodies are now cached deliberately.
 - CLI body search, already permitted under ADR-002 as an acceptable one-shot operation, now runs through the same engine scorer as the TUI.
-- Adds the heavier `nucleo` dependency footprint over the matcher-only `nucleo-matcher` originally sketched in RFC-043.
+- The `nucleo` dependency is used only for its `Pattern`/`Matcher` scoring, not the streaming injector; the lighter `nucleo-matcher` would have sufficed, but the full crate is retained for parity with RFC-043 and future streaming if corpus scale ever demands it.
 
 Supersedes ADR-002.

@@ -984,12 +984,36 @@ pub fn draw_search_overlay(f: &mut Frame, app: &App, colors: &StatusPalette) {
                 }
                 None => Span::raw(" "),
             };
-            let line = Line::from(vec![
-                gutter_span,
-                Span::raw(format!("  {:<40} ", title)),
-                Span::styled(status_str, Style::default().fg(status_clr)),
-            ]);
-            ListItem::new(line)
+
+            // Highlight the title characters the query fuzzy-matched, using the
+            // engine matcher's indices so the on-screen feedback matches the
+            // ranking (STORY-130). A body-only match yields no title indices, so
+            // the row simply renders unhighlighted.
+            let matched: std::collections::HashSet<usize> =
+                crate::engine::store::match_indices(&app.search_query, title)
+                    .into_iter()
+                    .map(|i| i as usize)
+                    .collect();
+            let highlight = Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD);
+
+            let mut spans = vec![gutter_span, Span::raw("  ")];
+            let title_width = title.chars().count();
+            for (i, ch) in title.chars().enumerate() {
+                if matched.contains(&i) {
+                    spans.push(Span::styled(ch.to_string(), highlight));
+                } else {
+                    spans.push(Span::raw(ch.to_string()));
+                }
+            }
+            // Left-align to width 40 like the previous `{:<40}` (no truncation).
+            if title_width < 40 {
+                spans.push(Span::raw(" ".repeat(40 - title_width)));
+            }
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(status_str, Style::default().fg(status_clr)));
+            ListItem::new(Line::from(spans))
         })
         .collect();
 

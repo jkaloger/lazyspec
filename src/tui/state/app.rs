@@ -240,11 +240,6 @@ fn rule_write(rule: &mut ValidationRule, key: &RuleKey, value: SettingsValue) {
     }
 }
 
-pub struct SearchEntry {
-    pub path: PathBuf,
-    pub searchable: String, // pre-lowercased "title\0tag1\0tag2\0path"
-}
-
 pub struct CreateResult {
     pub path: PathBuf,
     pub doc_type: DocType,
@@ -591,7 +586,6 @@ pub struct App {
         Vec<crate::tui::content::diagram::DiagramBlock>,
     )>,
     pub filtered_docs_cache: Option<Vec<PathBuf>>,
-    pub search_index: Vec<SearchEntry>,
     pub git_branch: Option<String>,
     pub git_status_cache: GitStatusCache,
     pub gh_conflict_message: Option<String>,
@@ -760,7 +754,6 @@ impl App {
             ascii_diagrams: false,
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
-            search_index: Vec::new(),
             git_branch,
             git_status_cache,
             gh_conflict_message: None,
@@ -795,7 +788,6 @@ impl App {
             frame_idx: 0,
         };
         app.apply_config(config);
-        app.rebuild_search_index();
         app.refresh_available_tags();
         app.build_doc_tree();
         app
@@ -852,7 +844,6 @@ impl App {
         self.validation_warnings
             .extend(self.gh_fetch_warnings.iter().cloned());
         self.filtered_docs_cache = None;
-        self.rebuild_search_index();
     }
 
     pub fn cycle_mode(&mut self) {
@@ -1820,27 +1811,6 @@ impl App {
         self.refresh_available_tags();
     }
 
-    pub fn rebuild_search_index(&mut self) {
-        self.search_index = self
-            .store
-            .all_docs()
-            .iter()
-            .map(|doc| {
-                let mut searchable = doc.title.to_lowercase();
-                for tag in &doc.tags {
-                    searchable.push('\0');
-                    searchable.push_str(&tag.to_lowercase());
-                }
-                searchable.push('\0');
-                searchable.push_str(&doc.path.to_string_lossy().to_lowercase());
-                SearchEntry {
-                    path: doc.path.clone(),
-                    searchable,
-                }
-            })
-            .collect();
-    }
-
     pub fn reset_filters(&mut self) {
         self.filter_status = None;
         self.filter_tag = None;
@@ -2234,15 +2204,16 @@ impl App {
             return;
         }
 
-        let query = self.search_query.to_lowercase();
-        let mut results: Vec<_> = self
-            .search_index
-            .iter()
-            .filter(|e| e.searchable.contains(&query))
-            .map(|e| e.path.clone())
+        // Fuzzy, ranked results from the shared engine scorer (STORY-129): the
+        // TUI never owns the matching algorithm. Results already arrive sorted by
+        // score descending with a path tie-break, and the engine's score floor
+        // drops non-matches, so an unmatched query yields an empty list.
+        self.search_results = self
+            .store
+            .search(&self.search_query, &*self.fs)
+            .into_iter()
+            .map(|r| r.doc.path.clone())
             .collect();
-        results.sort();
-        self.search_results = results;
         self.search_selected = 0;
     }
 
@@ -2573,7 +2544,6 @@ impl App {
         // Reload again to pick up the relation changes
         let _ = self.store.reload_file(root, &relative, &*self.fs);
         self.filtered_docs_cache = None;
-        self.rebuild_search_index();
 
         let doc_type = self.create_form.doc_type.clone();
         if let Some(type_idx) = self.doc_types.iter().position(|t| *t == doc_type) {
@@ -2626,7 +2596,6 @@ impl App {
         )?;
         self.store.remove_file(&doc_path);
         self.filtered_docs_cache = None;
-        self.rebuild_search_index();
 
         self.close_delete_confirm();
         self.build_doc_tree();
@@ -2916,7 +2885,6 @@ impl App {
         }
         self.store.reload_file(root, &doc_path, &*self.fs)?;
         self.filtered_docs_cache = None;
-        self.rebuild_search_index();
         self.build_doc_tree();
         self.status_picker.error = None;
         self.close_status_picker();
@@ -3088,7 +3056,6 @@ impl App {
 
         self.store.reload_file(root, &doc_path, &*self.fs)?;
         self.filtered_docs_cache = None;
-        self.rebuild_search_index();
         self.build_doc_tree();
         self.close_provenance_editor();
         Ok(())
@@ -3202,7 +3169,6 @@ impl App {
         // not the viewed doc. Reload whichever file actually changed.
         self.store.reload_file(root, &outcome.source, &*self.fs)?;
         self.filtered_docs_cache = None;
-        self.rebuild_search_index();
         self.build_doc_tree();
         self.link_editor.error = None;
         self.close_link_editor();
@@ -3534,7 +3500,6 @@ pub(crate) mod parity_seed {
             ascii_diagrams: false,
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
-            search_index: Vec::new(),
             git_branch: None,
             git_status_cache: GitStatusCache::new(tmp.path()),
             gh_conflict_message: None,
@@ -3615,7 +3580,6 @@ pub(crate) mod parity_seed {
         }
 
         app.store = Store::load(&root, &Config::default()).unwrap();
-        app.rebuild_search_index();
         app.build_doc_tree();
     }
 
@@ -3922,6 +3886,7 @@ mod tests {
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
             related_relationships: vec!["related-to".to_string()],
+            body_cache: std::sync::Mutex::new(HashMap::new()),
         };
 
         let (tx, _rx) = crossbeam_channel::unbounded();
@@ -4013,7 +3978,6 @@ mod tests {
             ascii_diagrams: false,
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
-            search_index: Vec::new(),
             git_branch: None,
             git_status_cache: GitStatusCache::new(Path::new(".")),
             gh_conflict_message: None,
@@ -4258,6 +4222,7 @@ mod tests {
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
             related_relationships: vec!["related-to".to_string()],
+            body_cache: std::sync::Mutex::new(HashMap::new()),
         };
 
         let meta_a = DocMeta {
@@ -5127,6 +5092,137 @@ mod tests {
         let mut app = make_test_app(0);
         app.store = store;
         (tmp, app)
+    }
+
+    /// An rfc doc with an explicit `title` and `body` and no tags, so a search
+    /// test controls exactly which surface (title vs body) a query can match.
+    fn titled_doc(title: &str, body: &str) -> String {
+        format!(
+            "---\ntitle: \"{title}\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\n---\n\n{body}\n"
+        )
+    }
+
+    /// Titles of the current `search_results`, in result order.
+    fn result_titles(app: &App) -> Vec<String> {
+        app.search_results
+            .iter()
+            .map(|p| app.store.get(p).unwrap().title.clone())
+            .collect()
+    }
+
+    // AC: a query whose chars appear in a title in order but not contiguously
+    // ("tff" in "tui fuzzy filter") is kept -- the old `.contains()` filter would
+    // have dropped it.
+    #[test]
+    fn update_search_keeps_non_contiguous_title_subsequence() {
+        let (_tmp, mut app) = app_with_store(&[(
+            "docs/rfcs/RFC-001-a.md",
+            &titled_doc("tui fuzzy filter", "unrelated body"),
+        )]);
+
+        app.search_query = "tff".to_string();
+        app.update_search();
+
+        assert_eq!(result_titles(&app), vec!["tui fuzzy filter".to_string()]);
+    }
+
+    // AC: rows are ordered by relevance score descending. The strong (exact)
+    // match sits at the LATER-sorting path, so leading it proves the order comes
+    // from score, not the path tie-break.
+    #[test]
+    fn update_search_orders_by_relevance_score_descending() {
+        let (_tmp, mut app) = app_with_store(&[
+            ("docs/rfcs/RFC-001-a.md", &titled_doc("xfxuxzxzxyx", "b1")),
+            ("docs/rfcs/RFC-002-b.md", &titled_doc("fuzzy", "b2")),
+        ]);
+
+        app.search_query = "fuzzy".to_string();
+        app.update_search();
+
+        assert_eq!(
+            result_titles(&app),
+            vec!["fuzzy".to_string(), "xfxuxzxzxyx".to_string()]
+        );
+    }
+
+    // AC: a query that fuzzy-matches only within a body (not title/tags/path)
+    // still surfaces the document.
+    #[test]
+    fn update_search_surfaces_body_only_match() {
+        let (_tmp, mut app) = app_with_store(&[(
+            "docs/rfcs/RFC-001-a.md",
+            &titled_doc("hello", "the quadratic solver lives here"),
+        )]);
+
+        app.search_query = "quadratic".to_string();
+        app.update_search();
+
+        assert_eq!(result_titles(&app), vec!["hello".to_string()]);
+    }
+
+    // AC: a query nothing fuzzy-matches yields an empty list -- non-matches are
+    // dropped by the engine's score floor, not shown unhighlighted.
+    #[test]
+    fn update_search_empty_when_nothing_matches() {
+        let (_tmp, mut app) =
+            app_with_store(&[("docs/rfcs/RFC-001-a.md", &titled_doc("hello", "world body"))]);
+
+        app.search_query = "zzqqww".to_string();
+        app.update_search();
+
+        assert!(app.search_results.is_empty());
+    }
+
+    // AC: the characters that matched are visually highlighted in the rendered
+    // row. The matched title chars render bold + yellow; an unmatched title char
+    // does not.
+    #[test]
+    fn search_overlay_highlights_matched_title_chars() {
+        use crate::tui::views::StatusPalette;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (_tmp, mut app) =
+            app_with_store(&[("docs/rfcs/RFC-001-a.md", &titled_doc("fuzzy", "body"))]);
+        app.search_mode = true;
+        app.search_query = "fzy".to_string(); // matches f(0) z(2) y(4) of "fuzzy"
+        app.update_search();
+        assert_eq!(app.search_results.len(), 1);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let palette = StatusPalette::default();
+        terminal
+            .draw(|f| crate::tui::views::overlays::draw_search_overlay(f, &app, &palette))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let mut matched_cells = 0usize;
+        let mut plain_u = false;
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = buffer.cell((x, y)).unwrap();
+                let sym = cell.symbol();
+                let highlighted = cell.fg == ratatui::style::Color::Yellow
+                    && cell.modifier.contains(ratatui::style::Modifier::BOLD);
+                if (sym == "f" || sym == "z" || sym == "y") && highlighted {
+                    matched_cells += 1;
+                }
+                // The 'u' at index 1 of "fuzzy" is NOT part of the match, so it
+                // must render without the highlight style.
+                if sym == "u" && !highlighted {
+                    plain_u = true;
+                }
+            }
+        }
+
+        assert!(
+            matched_cells >= 3,
+            "matched title chars f/z/y should render highlighted (yellow+bold)"
+        );
+        assert!(
+            plain_u,
+            "the unmatched 'u' should render without the highlight style"
+        );
     }
 
     /// The `DocMeta` whose id matches, cloned out of the store.
