@@ -245,6 +245,16 @@ pub struct CreateResult {
     pub doc_type: DocType,
 }
 
+/// One keystroke's worth of work for the background search worker. Carries its
+/// own corpus snapshot so freshness is trivial: every request searches the
+/// store exactly as it stood when the key was handled, and the worker never
+/// borrows `Store` (which lives on the UI thread).
+pub struct SearchRequest {
+    pub corpus: crate::engine::store::SearchCorpus,
+    pub query: String,
+    pub generation: u64,
+}
+
 pub enum AppEvent {
     Terminal(crossterm::event::KeyEvent),
     FileChange(notify::Event),
@@ -264,6 +274,10 @@ pub enum AppEvent {
     },
     CreateComplete {
         result: Result<CreateResult, String>,
+    },
+    SearchResults {
+        generation: u64,
+        results: Vec<PathBuf>,
     },
     CacheRefresh {
         warnings: Vec<String>,
@@ -502,6 +516,17 @@ pub struct App {
     pub search_query: String,
     pub search_results: Vec<std::path::PathBuf>,
     pub search_selected: usize,
+    /// True while a search request is in flight on the worker; the overlay
+    /// renders a spinner until the matching-generation results land.
+    pub search_pending: bool,
+    /// Monotonic id stamped onto each dispatched search; results carrying an
+    /// older generation are dropped so a slow search never overwrites a newer
+    /// query's results.
+    pub search_generation: u64,
+    /// Sender to the background search worker (BUG-011). Like `event_tx`, a
+    /// throwaway channel at construction; the event loop rebinds it when it
+    /// spawns the worker, so state code just sends and ignores errors.
+    pub search_tx: crossbeam_channel::Sender<SearchRequest>,
     pub show_help: bool,
     pub help_scroll: u16,
     /// Maximum legal `help_scroll` for the current help content + viewport,
@@ -659,6 +684,7 @@ impl App {
         fs: Box<dyn FileSystem>,
     ) -> Self {
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
+        let (search_tx, _search_rx) = crossbeam_channel::unbounded();
         let git_branch = query_git_branch(store.root());
         let git_status_cache = GitStatusCache::new(store.root());
         #[cfg(feature = "agent")]
@@ -687,6 +713,9 @@ impl App {
             search_query: String::new(),
             search_results: Vec::new(),
             search_selected: 0,
+            search_pending: false,
+            search_generation: 0,
+            search_tx,
             show_help: false,
             help_scroll: 0,
             help_max_scroll: 0,
@@ -2188,6 +2217,8 @@ impl App {
         self.search_query.clear();
         self.search_results.clear();
         self.search_selected = 0;
+        self.search_pending = false;
+        self.search_generation = self.search_generation.wrapping_add(1);
     }
 
     pub fn exit_search(&mut self) {
@@ -2195,26 +2226,67 @@ impl App {
         self.search_query.clear();
         self.search_results.clear();
         self.search_selected = 0;
+        self.search_pending = false;
+        self.search_generation = self.search_generation.wrapping_add(1);
     }
 
+    /// Dispatch the current query to the background search worker (BUG-011):
+    /// scoring 700+ full bodies per keystroke blocked the event loop, so the UI
+    /// thread only snapshots the corpus (a cheap clone via the engine body
+    /// cache) and stamps a fresh generation; results arrive later as
+    /// [`AppEvent::SearchResults`] and are applied by [`apply_search_results`].
+    /// The generation bump on an empty query invalidates any in-flight search
+    /// so its late results cannot repopulate a cleared list.
+    ///
+    /// Fuzzy, ranked results still come from the shared engine scorer
+    /// (STORY-129): the TUI never owns the matching algorithm.
     pub fn update_search(&mut self) {
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_selected = 0;
+
         if self.search_query.is_empty() {
             self.search_results.clear();
-            self.search_selected = 0;
+            self.search_pending = false;
             return;
         }
 
-        // Fuzzy, ranked results from the shared engine scorer (STORY-129): the
-        // TUI never owns the matching algorithm. Results already arrive sorted by
-        // score descending with a path tie-break, and the engine's score floor
-        // drops non-matches, so an unmatched query yields an empty list.
-        self.search_results = self
-            .store
-            .search(&self.search_query, &*self.fs)
-            .into_iter()
-            .map(|r| r.doc.path.clone())
-            .collect();
+        self.search_pending = true;
+        let corpus = self.store.search_corpus(&*self.fs);
+        let _ = self.search_tx.send(SearchRequest {
+            corpus,
+            query: self.search_query.clone(),
+            generation: self.search_generation,
+        });
+    }
+
+    /// Apply worker results, dropping them silently when the generation is
+    /// stale (a newer keystroke has already superseded the query).
+    pub fn apply_search_results(&mut self, generation: u64, results: Vec<std::path::PathBuf>) {
+        if generation != self.search_generation {
+            return;
+        }
+        self.search_results = results;
         self.search_selected = 0;
+        self.search_pending = false;
+    }
+
+    /// Test-only synchronous search: dispatch, then run the corpus search
+    /// inline and apply, so ranking tests exercise the exact production path
+    /// (corpus snapshot -> engine scorer -> apply) without a worker thread.
+    #[cfg(test)]
+    pub(crate) fn run_search_now(&mut self) {
+        self.update_search();
+        if self.search_query.is_empty() {
+            return;
+        }
+        let results = self
+            .store
+            .search_corpus(&*self.fs)
+            .search(&self.search_query)
+            .into_iter()
+            .map(|r| r.path)
+            .collect();
+        self.apply_search_results(self.search_generation, results);
     }
 
     pub fn select_search_result(&mut self) {
@@ -3414,6 +3486,7 @@ pub(crate) mod parity_seed {
         let tmp = TempDir::new().unwrap();
         let store = Store::load(tmp.path(), &Config::default()).unwrap();
         let (tx, _rx) = crossbeam_channel::unbounded();
+        let (search_tx, _search_rx) = crossbeam_channel::unbounded();
         #[cfg(feature = "agent")]
         let agent_spawner = AgentSpawner::new(store.root());
         let config = Config::default();
@@ -3433,6 +3506,9 @@ pub(crate) mod parity_seed {
             search_query: String::new(),
             search_results: Vec::new(),
             search_selected: 0,
+            search_pending: false,
+            search_generation: 0,
+            search_tx,
             show_help: false,
             help_scroll: 0,
             help_max_scroll: 0,
@@ -3684,7 +3760,7 @@ pub(crate) mod parity_seed {
                 populate_docs(&mut app);
                 app.search_mode = true;
                 app.search_query = "title".to_string();
-                app.update_search(); // results non-empty
+                app.run_search_now(); // results non-empty (search is async in prod)
                 app.search_selected = 1; // middle: Up and Down both move
             }
             KeyContext::Fullscreen => {
@@ -3890,6 +3966,7 @@ mod tests {
         };
 
         let (tx, _rx) = crossbeam_channel::unbounded();
+        let (search_tx, _search_rx) = crossbeam_channel::unbounded();
         let config = Config::default();
 
         #[cfg(feature = "agent")]
@@ -3911,6 +3988,9 @@ mod tests {
             search_query: String::new(),
             search_results: Vec::new(),
             search_selected: 0,
+            search_pending: false,
+            search_generation: 0,
+            search_tx,
             show_help: false,
             help_scroll: 0,
             help_max_scroll: 0,
@@ -5121,7 +5201,7 @@ mod tests {
         )]);
 
         app.search_query = "tff".to_string();
-        app.update_search();
+        app.run_search_now();
 
         assert_eq!(result_titles(&app), vec!["tui fuzzy filter".to_string()]);
     }
@@ -5137,7 +5217,7 @@ mod tests {
         ]);
 
         app.search_query = "fuzzy".to_string();
-        app.update_search();
+        app.run_search_now();
 
         assert_eq!(
             result_titles(&app),
@@ -5155,7 +5235,7 @@ mod tests {
         )]);
 
         app.search_query = "quadratic".to_string();
-        app.update_search();
+        app.run_search_now();
 
         assert_eq!(result_titles(&app), vec!["hello".to_string()]);
     }
@@ -5168,9 +5248,98 @@ mod tests {
             app_with_store(&[("docs/rfcs/RFC-001-a.md", &titled_doc("hello", "world body"))]);
 
         app.search_query = "zzqqww".to_string();
+        app.run_search_now();
+
+        assert!(app.search_results.is_empty());
+    }
+
+    // AC (BUG-011 a): each dispatch marks the search pending and bumps the
+    // generation, and the request lands on the worker channel with that
+    // generation and the current query.
+    #[test]
+    fn update_search_marks_pending_and_bumps_generation() {
+        let (_tmp, mut app) =
+            app_with_store(&[("docs/rfcs/RFC-001-a.md", &titled_doc("hello", "body"))]);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.search_tx = tx;
+
+        let before = app.search_generation;
+        app.search_query = "hel".to_string();
+        app.update_search();
+
+        assert!(app.search_pending);
+        assert_eq!(app.search_generation, before + 1);
+        let req = rx.try_recv().expect("a request is dispatched");
+        assert_eq!(req.query, "hel");
+        assert_eq!(req.generation, app.search_generation);
+    }
+
+    // AC (BUG-011 b): results stamped with a stale generation are dropped
+    // silently -- current results and the pending flag stay untouched.
+    #[test]
+    fn stale_generation_results_are_dropped() {
+        let (_tmp, mut app) =
+            app_with_store(&[("docs/rfcs/RFC-001-a.md", &titled_doc("hello", "body"))]);
+
+        app.search_query = "hel".to_string();
+        app.update_search();
+        app.search_query = "hell".to_string();
+        app.update_search();
+
+        let stale = app.search_generation - 1;
+        app.apply_search_results(stale, vec![PathBuf::from("docs/rfcs/RFC-001-a.md")]);
+
+        assert!(app.search_results.is_empty(), "stale results not applied");
+        assert!(app.search_pending, "still waiting on the live generation");
+    }
+
+    // AC (BUG-011 c): matching-generation results are applied and clear the
+    // pending flag (which also clears the overlay spinner).
+    #[test]
+    fn matching_generation_results_apply_and_clear_pending() {
+        let (_tmp, mut app) =
+            app_with_store(&[("docs/rfcs/RFC-001-a.md", &titled_doc("hello", "body"))]);
+
+        app.search_query = "hel".to_string();
+        app.update_search();
+        app.search_selected = 3;
+
+        let path = PathBuf::from("docs/rfcs/RFC-001-a.md");
+        app.apply_search_results(app.search_generation, vec![path.clone()]);
+
+        assert_eq!(app.search_results, vec![path]);
+        assert!(!app.search_pending);
+        assert_eq!(app.search_selected, 0);
+    }
+
+    // AC (BUG-011 d): an empty query clears results immediately without going
+    // pending or dispatching to the worker; the generation bump invalidates any
+    // in-flight search so its late results cannot repopulate the cleared list.
+    #[test]
+    fn empty_query_clears_results_without_pending() {
+        let (_tmp, mut app) =
+            app_with_store(&[("docs/rfcs/RFC-001-a.md", &titled_doc("hello", "body"))]);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.search_tx = tx;
+
+        app.search_query = "hel".to_string();
+        app.run_search_now();
+        assert!(!app.search_results.is_empty());
+        let in_flight = app.search_generation;
+        let _ = rx.try_recv();
+
+        app.search_query.clear();
         app.update_search();
 
         assert!(app.search_results.is_empty());
+        assert!(!app.search_pending);
+        assert!(rx.try_recv().is_err(), "empty query dispatches nothing");
+
+        app.apply_search_results(in_flight, vec![PathBuf::from("docs/rfcs/RFC-001-a.md")]);
+        assert!(
+            app.search_results.is_empty(),
+            "late results for the pre-clear query stay dropped"
+        );
     }
 
     // AC: the characters that matched are visually highlighted in the rendered
@@ -5185,7 +5354,7 @@ mod tests {
             app_with_store(&[("docs/rfcs/RFC-001-a.md", &titled_doc("fuzzy", "body"))]);
         app.search_mode = true;
         app.search_query = "fzy".to_string(); // matches f(0) z(2) y(4) of "fuzzy"
-        app.update_search();
+        app.run_search_now();
         assert_eq!(app.search_results.len(), 1);
 
         let backend = TestBackend::new(80, 24);

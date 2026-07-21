@@ -964,8 +964,16 @@ pub fn draw_search_overlay(f: &mut Frame, app: &App, colors: &StatusPalette) {
     );
     f.render_widget(input, layout[0]);
 
-    let items: Vec<ListItem> = app
-        .search_results
+    // Only the visible window of results becomes ListItems: building per-char
+    // spans (and running the matcher) for all 450+ rows every frame is the
+    // render-side half of BUG-011. One IndexMatcher parses the query pattern
+    // once per frame instead of once per row.
+    let window = layout[1].height.saturating_sub(2) as usize;
+    let start = window_start(app.search_selected, app.search_results.len(), window);
+    let end = (start + window).min(app.search_results.len());
+    let mut index_matcher = crate::engine::store::IndexMatcher::new(&app.search_query);
+
+    let items: Vec<ListItem> = app.search_results[start..end]
         .iter()
         .map(|path| {
             let doc = app.store.get(path);
@@ -989,11 +997,11 @@ pub fn draw_search_overlay(f: &mut Frame, app: &App, colors: &StatusPalette) {
             // engine matcher's indices so the on-screen feedback matches the
             // ranking (STORY-130). A body-only match yields no title indices, so
             // the row simply renders unhighlighted.
-            let matched: std::collections::HashSet<usize> =
-                crate::engine::store::match_indices(&app.search_query, title)
-                    .into_iter()
-                    .map(|i| i as usize)
-                    .collect();
+            let matched: std::collections::HashSet<usize> = index_matcher
+                .indices(title)
+                .into_iter()
+                .map(|i| i as usize)
+                .collect();
             let highlight = Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD);
@@ -1017,17 +1025,45 @@ pub fn draw_search_overlay(f: &mut Frame, app: &App, colors: &StatusPalette) {
         })
         .collect();
 
+    // While a search is in flight on the worker, the results title carries the
+    // shared loading face (same spinner machinery as the create form); it
+    // disappears when the matching-generation results land and clear
+    // `search_pending`.
+    let results_title = if app.search_pending {
+        let frame = crate::spinners::spinner("face")
+            .compact(crate::spinners::SpinnerState::Loading, app.frame_idx);
+        let style = super::colors::frame_style(frame.colour);
+        Line::from(vec![
+            Span::raw(" Results "),
+            Span::styled(frame.lines.join(""), style),
+            Span::raw(" "),
+        ])
+    } else {
+        Line::from(" Results ")
+    };
+
     let list = List::new(items)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .title(" Results ")
+                .title(results_title)
                 .border_style(Style::default().fg(Color::DarkGray)),
         )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    let mut state = ListState::default().with_selected(Some(app.search_selected));
+    // Items are a window slice, so the selection must be window-relative.
+    let mut state = ListState::default().with_selected(Some(app.search_selected - start));
     f.render_stateful_widget(list, layout[1], &mut state);
+}
+
+/// First visible index of a `window`-row view over a `len`-item list keeping
+/// `selected` visible: 0 until the selection passes the first window, then the
+/// selection rides the bottom edge, clamped so the last window is full.
+fn window_start(selected: usize, len: usize, window: usize) -> usize {
+    if window == 0 || len <= window {
+        return 0;
+    }
+    selected.saturating_sub(window - 1).min(len - window)
 }
 
 pub fn draw_gh_conflict(f: &mut Frame, app: &App) {
@@ -1118,5 +1154,47 @@ fn display_name(path: &std::path::Path) -> &str {
             .unwrap_or("?"),
         Some(name) => name,
         None => "?",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::window_start;
+
+    #[test]
+    fn window_start_zero_when_list_fits_in_window() {
+        assert_eq!(window_start(0, 4, 10), 0);
+        assert_eq!(window_start(3, 4, 10), 0);
+        assert_eq!(window_start(0, 10, 10), 0);
+    }
+
+    #[test]
+    fn window_start_zero_while_selection_within_first_window() {
+        assert_eq!(window_start(0, 100, 10), 0);
+        assert_eq!(window_start(9, 100, 10), 0);
+    }
+
+    #[test]
+    fn window_start_slides_to_keep_middle_selection_visible() {
+        assert_eq!(window_start(10, 100, 10), 1);
+        assert_eq!(window_start(50, 100, 10), 41);
+    }
+
+    #[test]
+    fn window_start_clamps_at_end_of_list() {
+        assert_eq!(window_start(99, 100, 10), 90);
+        assert_eq!(window_start(95, 100, 10), 86);
+    }
+
+    #[test]
+    fn window_start_of_one_tracks_selection_exactly() {
+        assert_eq!(window_start(0, 100, 1), 0);
+        assert_eq!(window_start(7, 100, 1), 7);
+        assert_eq!(window_start(99, 100, 1), 99);
+    }
+
+    #[test]
+    fn window_start_zero_when_window_is_zero() {
+        assert_eq!(window_start(5, 100, 0), 0);
     }
 }

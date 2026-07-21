@@ -368,44 +368,17 @@ impl Store {
         let mut results = Vec::new();
 
         for meta in self.docs.values() {
-            // Track the single best-scoring field for this document. A `None`
-            // score from `nucleo` means the field did not match at all; a
-            // document whose fields all score `None` is dropped (the score
-            // floor). Strict `>` keeps the earliest field on ties, so field
-            // selection is deterministic regardless of `docs` iteration order.
-            let mut best: Option<(u32, &'static str, String)> = None;
-
-            let mut consider = |score: u32, field: &'static str, snippet: &dyn Fn() -> String| {
-                if best.as_ref().is_none_or(|(b, _, _)| score > *b) {
-                    best = Some((score, field, snippet()));
-                }
-            };
-
-            if let Some(score) = pattern.score(Utf32Str::new(&meta.title, &mut buf), &mut matcher) {
-                consider(score, "title", &|| meta.title.clone());
-            }
-
-            for tag in &meta.tags {
-                if let Some(score) = pattern.score(Utf32Str::new(tag, &mut buf), &mut matcher) {
-                    consider(score, "tag", &|| tag.clone());
-                }
-            }
-
-            let path_str = meta.path.to_string_lossy();
-            if let Some(score) = pattern.score(Utf32Str::new(&path_str, &mut buf), &mut matcher) {
-                consider(score, "path", &|| path_str.to_string());
-            }
-
-            if let Some(body) = self.cached_or_read_body(&meta.path, fs) {
-                let mut indices: Vec<u32> = Vec::new();
-                if let Some(score) =
-                    pattern.indices(Utf32Str::new(&body, &mut buf), &mut matcher, &mut indices)
-                {
-                    consider(score, "body", &|| body_snippet(&body, &indices, query));
-                }
-            }
-
-            if let Some((score, match_field, snippet)) = best {
+            let body = self.cached_or_read_body(&meta.path, fs);
+            if let Some((score, match_field, snippet)) = score_doc_fields(
+                &pattern,
+                &mut matcher,
+                &mut buf,
+                query,
+                &meta.title,
+                &meta.tags,
+                &meta.path,
+                body.as_deref(),
+            ) {
                 results.push(SearchResult {
                     doc: meta,
                     match_field,
@@ -421,6 +394,24 @@ impl Store {
                 .then_with(|| a.doc.path.cmp(&b.doc.path))
         });
         results
+    }
+
+    /// An owned snapshot of every doc's searchable fields, so a background
+    /// thread can run [`SearchCorpus::search`] without borrowing the store.
+    /// Bodies come through the same memoizing cache as [`Store::search`], so a
+    /// warm snapshot is a plain clone of in-memory strings.
+    pub fn search_corpus(&self, fs: &dyn FileSystem) -> SearchCorpus {
+        let docs = self
+            .docs
+            .values()
+            .map(|meta| CorpusDoc {
+                path: meta.path.clone(),
+                title: meta.title.clone(),
+                tags: meta.tags.clone(),
+                body: self.cached_or_read_body(&meta.path, fs),
+            })
+            .collect();
+        SearchCorpus { docs }
     }
 
     /// Body text for `path`, served from the in-memory body cache when present
@@ -439,6 +430,116 @@ impl Store {
     }
 }
 
+/// Score one document's fields against a parsed pattern, returning the single
+/// best-scoring `(score, field, snippet)` or `None` when nothing matches (the
+/// score floor). Strict `>` keeps the earliest field on ties, so field
+/// selection is deterministic. Shared by [`Store::search`] and
+/// [`SearchCorpus::search`] so both paths rank identically.
+#[allow(clippy::too_many_arguments)]
+fn score_doc_fields(
+    pattern: &Pattern,
+    matcher: &mut Matcher,
+    buf: &mut Vec<char>,
+    query: &str,
+    title: &str,
+    tags: &[String],
+    path: &Path,
+    body: Option<&str>,
+) -> Option<(u32, &'static str, String)> {
+    let mut best: Option<(u32, &'static str, String)> = None;
+
+    let mut consider = |score: u32, field: &'static str, snippet: &dyn Fn() -> String| {
+        if best.as_ref().is_none_or(|(b, _, _)| score > *b) {
+            best = Some((score, field, snippet()));
+        }
+    };
+
+    if let Some(score) = pattern.score(Utf32Str::new(title, buf), matcher) {
+        consider(score, "title", &|| title.to_string());
+    }
+
+    for tag in tags {
+        if let Some(score) = pattern.score(Utf32Str::new(tag, buf), matcher) {
+            consider(score, "tag", &|| tag.clone());
+        }
+    }
+
+    let path_str = path.to_string_lossy();
+    if let Some(score) = pattern.score(Utf32Str::new(&path_str, buf), matcher) {
+        consider(score, "path", &|| path_str.to_string());
+    }
+
+    if let Some(body) = body {
+        let mut indices: Vec<u32> = Vec::new();
+        if let Some(score) = pattern.indices(Utf32Str::new(body, buf), matcher, &mut indices) {
+            consider(score, "body", &|| body_snippet(body, &indices, query));
+        }
+    }
+
+    best
+}
+
+#[derive(Clone)]
+struct CorpusDoc {
+    path: PathBuf,
+    title: String,
+    tags: Vec<String>,
+    body: Option<String>,
+}
+
+/// An owned, `Send` snapshot of the store's searchable fields, built by
+/// [`Store::search_corpus`]. Lets a background worker run the engine's fuzzy
+/// ranking off the UI thread; scoring stays here so no frontend ever owns the
+/// matching algorithm (RFC-043 principle 3).
+#[derive(Clone)]
+pub struct SearchCorpus {
+    docs: Vec<CorpusDoc>,
+}
+
+/// [`SearchResult`] without the `&DocMeta` borrow: what a corpus search can
+/// hand across a thread boundary.
+#[derive(Debug, Clone)]
+pub struct CorpusSearchResult {
+    pub path: PathBuf,
+    pub match_field: &'static str,
+    pub snippet: String,
+    pub score: u32,
+}
+
+impl SearchCorpus {
+    /// Identical ranking to [`Store::search`]: same pattern config, score
+    /// floor, best-field selection, and score-desc / path-asc ordering.
+    pub fn search(&self, query: &str) -> Vec<CorpusSearchResult> {
+        let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+        let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
+        let mut buf: Vec<char> = Vec::new();
+        let mut results = Vec::new();
+
+        for doc in &self.docs {
+            if let Some((score, match_field, snippet)) = score_doc_fields(
+                &pattern,
+                &mut matcher,
+                &mut buf,
+                query,
+                &doc.title,
+                &doc.tags,
+                &doc.path,
+                doc.body.as_deref(),
+            ) {
+                results.push(CorpusSearchResult {
+                    path: doc.path.clone(),
+                    match_field,
+                    snippet,
+                    score,
+                });
+            }
+        }
+
+        results.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.path.cmp(&b.path)));
+        results
+    }
+}
+
 /// Char indices within `text` that `query` fuzzy-matches, using the same matcher
 /// configuration as [`Store::search`]. Empty when `query` is empty or does not
 /// match `text`, so a caller can highlight exactly the matched characters of a
@@ -447,22 +548,49 @@ impl Store {
 /// Lives beside `search` so both surfaces (CLI, TUI) share one matcher config;
 /// the TUI must never own the scoring/matching algorithm (RFC-043 principle 3).
 pub fn match_indices(query: &str, text: &str) -> Vec<u32> {
-    if query.is_empty() {
-        return Vec::new();
+    IndexMatcher::new(query).indices(text)
+}
+
+/// Reusable form of [`match_indices`]: parses the query pattern and builds the
+/// matcher once, so a caller highlighting many texts against one query (e.g.
+/// every visible row of the TUI search overlay, per frame) pays the setup cost
+/// once instead of per text. Same semantics as [`match_indices`].
+pub struct IndexMatcher {
+    pattern: Option<Pattern>,
+    matcher: Matcher,
+    buf: Vec<char>,
+}
+
+impl IndexMatcher {
+    pub fn new(query: &str) -> Self {
+        let pattern = (!query.is_empty())
+            .then(|| Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart));
+        Self {
+            pattern,
+            matcher: Matcher::new(NucleoConfig::DEFAULT),
+            buf: Vec::new(),
+        }
     }
-    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
-    let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
-    let mut buf: Vec<char> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
-    if pattern
-        .indices(Utf32Str::new(text, &mut buf), &mut matcher, &mut indices)
-        .is_some()
-    {
-        indices.sort_unstable();
-        indices.dedup();
-        indices
-    } else {
-        Vec::new()
+
+    pub fn indices(&mut self, text: &str) -> Vec<u32> {
+        let Some(pattern) = &self.pattern else {
+            return Vec::new();
+        };
+        let mut indices: Vec<u32> = Vec::new();
+        if pattern
+            .indices(
+                Utf32Str::new(text, &mut self.buf),
+                &mut self.matcher,
+                &mut indices,
+            )
+            .is_some()
+        {
+            indices.sort_unstable();
+            indices.dedup();
+            indices
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -947,6 +1075,42 @@ mod tests {
         assert_eq!(results[0].score, tag_only[0].score);
     }
 
+    // AC (BUG-011): the owned corpus ranks exactly like the borrowing search --
+    // same order, path, field, snippet, and score -- across queries that hit the
+    // title (scattered and exact), tag-vs-title best-field selection, the score
+    // floor, a body-only match, and the path tie-break.
+    #[test]
+    fn corpus_search_matches_store_search_results_and_order() {
+        let (store, fs) = search_store(&[
+            ("RFC-001-x.md", "xfxuxzxzxyx", &[], "x"),
+            ("RFC-002-y.md", "fuzzy", &[], "y"),
+            (
+                "RFC-003-m.md",
+                "custom order rebuild engine",
+                &["core"],
+                "unrelated body text",
+            ),
+            ("RFC-004-c.md", "hello", &[], "the fuzzy matcher lives here"),
+            ("RFC-005-a.md", "alpha", &[], "body one"),
+            ("RFC-006-b.md", "alpha", &[], "body two"),
+        ]);
+
+        let corpus = store.search_corpus(&fs);
+
+        for query in ["fuzzy", "core", "alpha", "enfz", "zzqqww"] {
+            let expected = store.search(query, &fs);
+            let actual = corpus.search(query);
+
+            assert_eq!(expected.len(), actual.len(), "query {query:?}");
+            for (e, a) in expected.iter().zip(actual.iter()) {
+                assert_eq!(e.doc.path, a.path, "query {query:?}");
+                assert_eq!(e.match_field, a.match_field, "query {query:?}");
+                assert_eq!(e.snippet, a.snippet, "query {query:?}");
+                assert_eq!(e.score, a.score, "query {query:?}");
+            }
+        }
+    }
+
     #[test]
     fn match_indices_returns_the_matched_subsequence_positions() {
         // `tff` matches "tui fuzzy filter" as t(0) f(4) f(10): non-contiguous.
@@ -965,6 +1129,21 @@ mod tests {
     fn match_indices_empty_when_no_match_or_empty_query() {
         assert!(match_indices("zzz", "hello world").is_empty());
         assert!(match_indices("", "hello world").is_empty());
+    }
+
+    #[test]
+    fn index_matcher_reused_across_texts_agrees_with_match_indices() {
+        let texts = ["tui fuzzy filter", "hello world", "", "Fuzzy TUI Frontend"];
+        for query in ["tff", "hello", "zzz", ""] {
+            let mut reused = IndexMatcher::new(query);
+            for text in texts {
+                assert_eq!(
+                    reused.indices(text),
+                    match_indices(query, text),
+                    "query {query:?} text {text:?}"
+                );
+            }
+        }
     }
 
     #[test]

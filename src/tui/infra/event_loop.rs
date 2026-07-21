@@ -571,6 +571,12 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                 }
             }
         }
+        AppEvent::SearchResults {
+            generation,
+            results,
+        } => {
+            app.apply_search_results(generation, results);
+        }
         AppEvent::CreateStarted => {}
         AppEvent::CreateProgress { message, state } => {
             if app.create_form.active && app.create_form.loading {
@@ -667,6 +673,38 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
 
     let (tx, rx) = crossbeam_channel::unbounded();
     app.event_tx = tx.clone();
+
+    // Background search worker (BUG-011): fuzzy-scoring every doc body takes
+    // tens of milliseconds, which blocked the event loop when run per keystroke.
+    // The worker owns each request's corpus snapshot (DICTUM-007: threads never
+    // touch App state; messages only) and drains the channel to the newest
+    // request before searching, so a burst of keystrokes costs one search.
+    // Results carry their generation; the handler drops stale ones.
+    let (search_tx, search_rx) = crossbeam_channel::unbounded::<crate::tui::state::SearchRequest>();
+    app.search_tx = search_tx;
+    let search_result_tx = tx.clone();
+    std::thread::spawn(move || {
+        while let Ok(mut req) = search_rx.recv() {
+            while let Ok(newer) = search_rx.try_recv() {
+                req = newer;
+            }
+            let results: Vec<std::path::PathBuf> = req
+                .corpus
+                .search(&req.query)
+                .into_iter()
+                .map(|r| r.path)
+                .collect();
+            if search_result_tx
+                .send(AppEvent::SearchResults {
+                    generation: req.generation,
+                    results,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
 
     let shared_gh_store: Option<Arc<Mutex<GithubIssuesStore>>> =
         if crate::tui::has_pollable_types(&config) {

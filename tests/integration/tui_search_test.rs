@@ -32,6 +32,33 @@ fn setup_app_with_docs() -> (TestFixture, App) {
     (fixture, app)
 }
 
+/// Search is async in production (BUG-011): `update_search` only dispatches to
+/// a worker. Drive the same sequence minus the thread: dispatch, run the
+/// corpus search inline the way the worker does, and apply under the live
+/// generation.
+fn run_search(app: &mut App) {
+    app.update_search();
+    if app.search_query.is_empty() {
+        return;
+    }
+    assert!(
+        app.search_pending,
+        "non-empty query must mark search in flight"
+    );
+    let results: Vec<PathBuf> = app
+        .store
+        .search_corpus(&*app.fs)
+        .search(&app.search_query)
+        .into_iter()
+        .map(|r| r.path)
+        .collect();
+    app.apply_search_results(app.search_generation, results);
+    assert!(
+        !app.search_pending,
+        "applied results must clear the pending flag"
+    );
+}
+
 #[test]
 fn test_enter_search() {
     let (_fixture, mut app) = setup_app_with_docs();
@@ -50,7 +77,7 @@ fn test_exit_search() {
 
     app.enter_search();
     app.search_query.push_str("alpha");
-    app.update_search();
+    run_search(&mut app);
     assert!(!app.search_results.is_empty());
 
     app.exit_search();
@@ -67,7 +94,7 @@ fn test_update_search_filters_by_title() {
 
     app.enter_search();
     app.search_query.push_str("unique");
-    app.update_search();
+    run_search(&mut app);
 
     assert_eq!(app.search_results.len(), 1);
     assert!(app.search_results[0]
@@ -81,13 +108,17 @@ fn test_update_search_empty_query_clears_results() {
 
     app.enter_search();
     app.search_query.push_str("alpha");
-    app.update_search();
+    run_search(&mut app);
     assert!(!app.search_results.is_empty());
 
     app.search_query.clear();
     app.update_search();
 
     assert!(app.search_results.is_empty());
+    assert!(
+        !app.search_pending,
+        "empty query clears synchronously without dispatching a search"
+    );
 }
 
 #[test]
@@ -96,13 +127,13 @@ fn test_update_search_resets_selected() {
 
     app.enter_search();
     app.search_query.push_str("rfc");
-    app.update_search();
+    run_search(&mut app);
     assert!(app.search_results.len() >= 2);
     app.search_selected = 1;
 
     app.search_query.clear();
     app.search_query.push_str("alpha");
-    app.update_search();
+    run_search(&mut app);
 
     assert_eq!(app.search_selected, 0);
 }
@@ -113,7 +144,7 @@ fn test_select_search_result_navigates_to_doc() {
 
     app.enter_search();
     app.search_query.push_str("unique");
-    app.update_search();
+    run_search(&mut app);
     assert_eq!(app.search_results.len(), 1);
 
     app.select_search_result();

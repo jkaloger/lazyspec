@@ -72,6 +72,12 @@ test-support = []
 [profile.dev]
 debug = "line-tables-only"
 
+[profile.dev.package.nucleo]
+opt-level = 3
+
+[profile.dev.package.nucleo-matcher]
+opt-level = 3
+
 [profile.test]
 debug = "line-tables-only"
 
