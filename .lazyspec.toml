@@ -117,6 +117,14 @@ icon = "🏁"
 store = "github-milestones"
 intent = "A GitHub milestone authored as structured markdown"
 
+[[types]]
+name = "clickup"
+plural = "clickups"
+dir = "docs/clickups"
+prefix = "CLICKUP"
+store = "clickup-tasks"
+clickup_list_id = "901615772121"
+
 [[relationships]]
 name = "implements"
 inverse = "implemented-by"
