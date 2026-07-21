@@ -1,7 +1,7 @@
 ---
 title: Post and read comments live via a git-ref store
 type: story
-status: draft
+status: rejected
 author: jack
 date: 2026-07-21
 tags: []

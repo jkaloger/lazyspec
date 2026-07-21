@@ -1,7 +1,7 @@
 ---
 title: Catch up on comments since a revision
 type: story
-status: draft
+status: rejected
 author: jack
 date: 2026-07-21
 tags: []

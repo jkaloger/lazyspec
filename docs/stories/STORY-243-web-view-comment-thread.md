@@ -1,7 +1,7 @@
 ---
 title: Web-view comment thread
 type: story
-status: draft
+status: rejected
 author: jack
 date: 2026-07-21
 tags: []

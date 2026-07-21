@@ -1,7 +1,7 @@
 ---
 title: Fetch materializes git-ref comments to markdown
 type: story
-status: draft
+status: rejected
 author: jack
 date: 2026-07-21
 tags: []

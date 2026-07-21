@@ -1,7 +1,7 @@
 ---
 title: Tag a comment with project vocabulary
 type: story
-status: draft
+status: rejected
 author: jack
 date: 2026-07-21
 tags: []

@@ -1,13 +1,15 @@
 ---
 title: Post a comment on a document and read it back
 type: story
-status: accepted
+status: rejected
 author: jack
 date: 2026-07-21
 tags: []
 related:
-- implements: RFC-060
----## Story
+  - implements: RFC-060
+---
+
+## Story
 
 As a document author or reviewer, I want to post an attributed comment on a document and read it back, so that I can annotate the document without rewriting its body.
 
