@@ -6,7 +6,8 @@ use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{AttrDef, Config, TypeDef};
 use crate::engine::document::{AttrValue, DocMeta, Relation, RelationType, Status};
 use crate::engine::gh::{
-    search_issue_numbers_by_type, GhGraphql, GhIssue, GhIssueReader, ISSUE_TYPE_SEARCH_PAGE_SIZE,
+    search_issue_numbers_by_type, GhGraphql, GhIssue, GhIssueDependencyApi, GhIssueReader,
+    ISSUE_TYPE_SEARCH_PAGE_SIZE,
 };
 use crate::engine::gh_schema;
 use crate::engine::gh_subissue;
@@ -336,6 +337,7 @@ impl IssueCache {
         type_def: &TypeDef,
         gh: &dyn GhIssueReader,
         gh_graphql: &dyn GhGraphql,
+        gh_dependency: &dyn GhIssueDependencyApi,
         repo: &str,
         issue_map: &mut IssueMap,
         known_types: &[TypeMatchRule],
@@ -417,6 +419,52 @@ impl IssueCache {
         // flat layout for the affected parent; it never aborts the fetch.
         let (parentage, subissue_warnings) = fetch_subissue_parentage(gh_graphql, &node_to_doc);
         warnings.extend(subissue_warnings);
+
+        // Best-effort: read each issue's native blocked-by dependencies and
+        // inject the declared inverse relation (`blocked-by`) toward each
+        // blocking issue's doc. Mirrors the milestone read-back -- the forward
+        // `blocks` edge on the blocker is derived virtually in `build_links`,
+        // never stored. A per-issue read failure warns and skips that issue.
+        if let Some(dep_rel) = config
+            .relationship_by_github_native("dependency")
+            .and_then(|r| r.inverse.as_deref())
+        {
+            // number -> doc id for the current fetch batch, so same-type
+            // blockers resolve before the batch is written into the issue map
+            // (cross-type blockers resolve via the map once their type fetches,
+            // the same ordering caveat milestones carry).
+            let batch: std::collections::HashMap<u64, String> = issues
+                .iter()
+                .zip(parsed.iter())
+                .map(|(issue, p)| (issue.number, p.id.clone()))
+                .collect();
+            for (issue, p) in issues.iter().zip(parsed.iter_mut()) {
+                let blockers = match gh_dependency.list_blocked_by(repo, issue.number) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        warnings.push(RefreshWarning {
+                            message: format!(
+                                "could not read native dependencies for issue #{}, skipping: {}",
+                                issue.number, e
+                            ),
+                        });
+                        continue;
+                    }
+                };
+                for blocker in blockers {
+                    let target = batch
+                        .get(&blocker)
+                        .cloned()
+                        .or_else(|| issue_map.shorthand_for_number(blocker).map(String::from));
+                    if let Some(target) = target {
+                        p.meta.related.push(Relation {
+                            rel_type: RelationType::new(dep_rel),
+                            target,
+                        });
+                    }
+                }
+            }
+        }
 
         // child doc id -> (parent id, order, sibling count) for nested children.
         let mut child_layout: std::collections::HashMap<String, (String, usize, usize)> =
@@ -856,7 +904,9 @@ mod tests {
     use super::*;
     use crate::engine::config::{NumberingStrategy, StoreBackend};
     use crate::engine::document::DocType;
-    use crate::engine::gh::{GhAuthor, GhGraphql, GhIssueReader, GhLabel, GqlVar};
+    use crate::engine::gh::{
+        GhAuthor, GhGraphql, GhIssueDependencyApi, GhIssueReader, GhLabel, GqlVar,
+    };
     use anyhow::Result;
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1095,6 +1145,21 @@ mod tests {
             _repo: &str,
             _number: u64,
         ) -> Result<Vec<crate::engine::gh::GhComment>> {
+            unimplemented!()
+        }
+    }
+
+    /// No native dependencies: the dependency read-back is exercised in its own
+    /// test; every other `fetch_all` test uses a `Config::default()` that
+    /// declares no `dependency` relation, so this reader is never called.
+    impl GhIssueDependencyApi for MockReader {
+        fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
+            Ok(vec![])
+        }
+        fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
+            unimplemented!()
+        }
+        fn remove_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
             unimplemented!()
         }
     }
@@ -1595,6 +1660,7 @@ mod tests {
                 &type_def,
                 &gh,
                 &gh,
+                &gh,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -1685,6 +1751,7 @@ mod tests {
                 &story_type,
                 &gh,
                 &gh,
+                &gh,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -1696,6 +1763,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &ticket_type,
+                &gh,
                 &gh,
                 &gh,
                 "owner/repo",
@@ -1751,6 +1819,7 @@ mod tests {
                 &story_type,
                 &seed_gh,
                 &seed_gh,
+                &seed_gh,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -1761,6 +1830,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &ticket_type,
+                &seed_gh,
                 &seed_gh,
                 &seed_gh,
                 "owner/repo",
@@ -1898,6 +1968,7 @@ mod tests {
                 &type_def,
                 &gh,
                 &gh,
+                &gh,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -1934,6 +2005,7 @@ mod tests {
                 &type_def,
                 &initial_gh,
                 &initial_gh,
+                &initial_gh,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -1955,6 +2027,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
+                &updated_gh,
                 &updated_gh,
                 &updated_gh,
                 "owner/repo",
@@ -2005,6 +2078,7 @@ mod tests {
                 &type_def,
                 &gh,
                 &gh,
+                &gh,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -2050,6 +2124,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
+                &gh,
                 &gh,
                 &gh,
                 "owner/repo",
@@ -2119,6 +2194,7 @@ mod tests {
                 &type_def,
                 &gh,
                 &gh,
+                &gh,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -2163,6 +2239,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
+                &gh,
                 &gh,
                 &gh,
                 "owner/repo",
@@ -2211,6 +2288,7 @@ mod tests {
                 &type_def,
                 &gh,
                 &gh,
+                &gh,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -2241,6 +2319,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
+                &gh,
                 &gh,
                 &gh,
                 "owner/repo",
@@ -2582,6 +2661,7 @@ mod tests {
                 &type_def,
                 &gh,
                 &gh,
+                &gh,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -2792,6 +2872,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
+                &gh,
                 &gh,
                 &gh,
                 "owner/repo",
@@ -3227,6 +3308,7 @@ mod tests {
                 &type_def,
                 &gh,
                 &gh,
+                &gh,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -3355,6 +3437,18 @@ mod tests {
         }
     }
 
+    impl GhIssueDependencyApi for NestingReader {
+        fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
+            Ok(vec![])
+        }
+        fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
+            unimplemented!()
+        }
+        fn remove_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
     fn issue_with_node(number: u64, node: &str) -> GhIssue {
         let mut i = make_gh_issue(number, "title", "body", &["lazyspec:story"]);
         i.id = node.to_string();
@@ -3371,6 +3465,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &story_type_def(),
+                gh,
                 gh,
                 gh,
                 "owner/repo",
@@ -3684,6 +3779,7 @@ mod tests {
                 &type_def,
                 &gh,
                 &gh,
+                &gh,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -3725,6 +3821,7 @@ mod tests {
                 &type_def,
                 &gh,
                 &gh,
+                &gh,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -3749,6 +3846,7 @@ mod tests {
         let result = cache.fetch_all(
             tmp.path(),
             &type_def,
+            &gh,
             &gh,
             &gh,
             "owner/repo",

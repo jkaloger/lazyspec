@@ -2,7 +2,7 @@ use crate::engine::clickup::ClickupClient;
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::document::split_frontmatter;
-use crate::engine::gh::{GhCli, GhGraphql, GhIssueReader, GhMilestoneApi};
+use crate::engine::gh::{GhCli, GhGraphql, GhIssueDependencyApi, GhIssueReader, GhMilestoneApi};
 use crate::engine::git_ref::{GitCli, GitRefOps};
 use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::issue_body::TypeMatchRule;
@@ -304,6 +304,7 @@ fn poll_sync(
     gh_reader: &dyn GhIssueReader,
     gh_graphql: &dyn GhGraphql,
     gh_milestone: &dyn GhMilestoneApi,
+    gh_dependency: &dyn GhIssueDependencyApi,
     git_ops: &dyn GitRefOps,
     clickup: &dyn ClickupClient,
     clickup_token: Option<&str>,
@@ -372,6 +373,7 @@ fn poll_sync(
                 syncers.issue = Some(GhIssueSync {
                     reader: gh_reader,
                     graphql: gh_graphql,
+                    dependency: gh_dependency,
                     repo,
                     type_rules,
                 });
@@ -898,6 +900,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                             &gh,
                             &gh,
                             &gh,
+                            &gh,
                             &git_ops,
                             &clickup,
                             clickup_token.as_ref().map(|t| t.expose()),
@@ -1350,6 +1353,7 @@ mod tests {
             &reader,
             &reader,
             &milestone,
+            &reader,
             &git,
             &clickup,
             Some("pk_x"),
@@ -1385,6 +1389,7 @@ mod tests {
             &reader,
             &reader,
             &milestone,
+            &reader,
             &git,
             &clickup,
             Some("pk_x"),
@@ -1447,6 +1452,7 @@ mod tests {
             &gh,
             &gh,
             &milestone,
+            &gh,
             &git,
             &clickup,
             None,

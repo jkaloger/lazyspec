@@ -10,8 +10,8 @@ use lazyspec::engine::config::{
     Config, GithubConfig, NumberingStrategy, RelationshipDef, StoreBackend, TypeDef,
 };
 use lazyspec::engine::gh::{
-    GhComment, GhFieldValueInput, GhGraphql, GhIssue, GhIssueMilestone, GhIssueReader,
-    GhIssueWriter, GhMilestone, GhMilestoneApi, GqlVar, ProjectFieldValue,
+    GhComment, GhFieldValueInput, GhGraphql, GhIssue, GhIssueDependencyApi, GhIssueMilestone,
+    GhIssueReader, GhIssueWriter, GhMilestone, GhMilestoneApi, GqlVar, ProjectFieldValue,
 };
 use lazyspec::engine::git_ref::GitCli;
 use tempfile::TempDir;
@@ -150,6 +150,18 @@ impl GhMilestoneApi for MilestoneGh {
         unreachable!()
     }
     fn issue_set_milestone(&self, _: &str, _: u64, _: Option<u64>) -> Result<()> {
+        unreachable!()
+    }
+}
+
+impl GhIssueDependencyApi for MilestoneGh {
+    fn list_blocked_by(&self, _: &str, _: u64) -> Result<Vec<u64>> {
+        Ok(vec![])
+    }
+    fn add_blocked_by(&self, _: &str, _: u64, _: u64) -> Result<()> {
+        unreachable!()
+    }
+    fn remove_blocked_by(&self, _: &str, _: u64, _: u64) -> Result<()> {
         unreachable!()
     }
 }

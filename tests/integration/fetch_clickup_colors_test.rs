@@ -7,7 +7,8 @@ use lazyspec::engine::clickup::{ClickupStatus, FakeClickupClient};
 use lazyspec::engine::config::Config;
 use lazyspec::engine::credentials::Token;
 use lazyspec::engine::gh::{
-    GhGraphql, GhIssue, GhIssueReader, GhIssueWriter, GhMilestone, GhMilestoneApi, GqlVar,
+    GhGraphql, GhIssue, GhIssueDependencyApi, GhIssueReader, GhIssueWriter, GhMilestone,
+    GhMilestoneApi, GqlVar,
 };
 use lazyspec::engine::git_ref::GitCli;
 use lazyspec::engine::status_colors::StatusColors;
@@ -157,6 +158,18 @@ impl GhMilestoneApi for NoopGh {
         _issue_number: u64,
         _milestone: Option<u64>,
     ) -> Result<()> {
+        unreachable!("not used in this test (clickup types only)")
+    }
+}
+
+impl GhIssueDependencyApi for NoopGh {
+    fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
+        Ok(vec![])
+    }
+    fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
+        unreachable!("not used in this test (clickup types only)")
+    }
+    fn remove_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
         unreachable!("not used in this test (clickup types only)")
     }
 }

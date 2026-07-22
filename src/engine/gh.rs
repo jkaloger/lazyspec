@@ -304,6 +304,34 @@ pub fn build_remove_blocked_by_args(
     ]
 }
 
+/// Pure argv builder for listing an issue's native blocked-by dependencies
+/// (`GET repos/{repo}/issues/{n}/dependencies/blocked_by`). The response is an
+/// array of issue objects; only their `number` is used downstream to resolve
+/// each blocking issue to its doc.
+pub fn build_list_blocked_by_args(repo: &str, blocked_number: u64) -> Vec<String> {
+    vec![
+        "api".to_string(),
+        format!(
+            "repos/{}/issues/{}/dependencies/blocked_by",
+            repo, blocked_number
+        ),
+    ]
+}
+
+#[derive(Deserialize)]
+struct BlockedByIssue {
+    number: u64,
+}
+
+/// Parse a `dependencies/blocked_by` response (an array of issue objects) into
+/// the blocking issues' display numbers. Only `number` is read; every other
+/// field of the issue objects is ignored.
+pub fn parse_blocked_by_numbers(stdout: &str) -> Result<Vec<u64>> {
+    let issues: Vec<BlockedByIssue> = serde_json::from_str(stdout)
+        .map_err(|e| anyhow::anyhow!("failed to parse blocked_by JSON: {}", e))?;
+    Ok(issues.into_iter().map(|i| i.number).collect())
+}
+
 // --- Label helpers ---
 
 pub fn type_label(type_name: &str) -> String {
@@ -425,6 +453,12 @@ pub trait GhMilestoneApi {
 /// resolves that id from the number, since the issue map carries only the
 /// display number and GraphQL node id.
 pub trait GhIssueDependencyApi {
+    /// List the display numbers of the issues that block `blocked_number`
+    /// (`GET issues/{blocked_number}/dependencies/blocked_by`, an array of issue
+    /// objects). The read side of the native dependency graph; the caller maps
+    /// each number to its doc via the issue map.
+    fn list_blocked_by(&self, repo: &str, blocked_number: u64) -> Result<Vec<u64>>;
+
     /// Record that issue `blocked_number` is blocked by issue `blocking_number`
     /// (`POST issues/{blocked_number}/dependencies/blocked_by`, body
     /// `issue_id=<blocking issue database id>`). Idempotent on GitHub's side.
@@ -727,6 +761,10 @@ impl<T: GhMilestoneApi + ?Sized> GhMilestoneApi for &T {
 }
 
 impl<T: GhIssueDependencyApi + ?Sized> GhIssueDependencyApi for &T {
+    fn list_blocked_by(&self, repo: &str, blocked_number: u64) -> Result<Vec<u64>> {
+        (**self).list_blocked_by(repo, blocked_number)
+    }
+
     fn add_blocked_by(&self, repo: &str, blocked_number: u64, blocking_number: u64) -> Result<()> {
         (**self).add_blocked_by(repo, blocked_number, blocking_number)
     }
@@ -1297,6 +1335,12 @@ impl GhCli {
 }
 
 impl GhIssueDependencyApi for GhCli {
+    fn list_blocked_by(&self, repo: &str, blocked_number: u64) -> Result<Vec<u64>> {
+        let args = build_list_blocked_by_args(repo, blocked_number);
+        let stdout = self.run_gh_checked(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        parse_blocked_by_numbers(&stdout)
+    }
+
     fn add_blocked_by(&self, repo: &str, blocked_number: u64, blocking_number: u64) -> Result<()> {
         let blocking_id = self.issue_database_id(repo, blocking_number)?;
         let args = build_add_blocked_by_args(repo, blocked_number, blocking_id);
@@ -1762,6 +1806,21 @@ pub mod test_support {
         }
     }
 
+    /// No native dependencies: lets a `MockGhClient` double as the dependency
+    /// reader on fetch paths that thread a single client. Dependency-specific
+    /// behaviour is faked with [`MockGhDependencyClient`] instead.
+    impl GhIssueDependencyApi for MockGhClient {
+        fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
+            Ok(vec![])
+        }
+        fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
+            Ok(())
+        }
+        fn remove_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
+            Ok(())
+        }
+    }
+
     /// In-memory fake for [`GhMilestoneApi`]. create/edit mutate the backing vec
     /// so a subsequent view round-trips the change; `last_set_milestone` records
     /// the most recent issue->milestone association write. Zero network.
@@ -1944,9 +2003,12 @@ pub mod test_support {
 
     /// In-memory fake for [`GhIssueDependencyApi`]. Records each add/remove as a
     /// `(blocked_number, blocking_number)` pair so a test can assert the native
-    /// edge (and its direction) without touching GitHub. Zero network.
+    /// edge (and its direction) without touching GitHub. `blocked_by` holds the
+    /// canned read-back set: `blocked_by[n]` is the list of issue numbers that
+    /// block issue `n` (returned by `list_blocked_by`). Zero network.
     #[derive(Default)]
     pub struct MockGhDependencyClient {
+        pub blocked_by: RefCell<std::collections::HashMap<u64, Vec<u64>>>,
         pub added: RefCell<Vec<(u64, u64)>>,
         pub removed: RefCell<Vec<(u64, u64)>>,
     }
@@ -1955,9 +2017,27 @@ pub mod test_support {
         pub fn new() -> Self {
             Self::default()
         }
+
+        /// Seed the canned read-back set: issue `blocked_number` is blocked by
+        /// each number in `blocking_numbers`.
+        pub fn with_blocked_by(self, blocked_number: u64, blocking_numbers: Vec<u64>) -> Self {
+            self.blocked_by
+                .borrow_mut()
+                .insert(blocked_number, blocking_numbers);
+            self
+        }
     }
 
     impl GhIssueDependencyApi for MockGhDependencyClient {
+        fn list_blocked_by(&self, _repo: &str, blocked_number: u64) -> Result<Vec<u64>> {
+            Ok(self
+                .blocked_by
+                .borrow()
+                .get(&blocked_number)
+                .cloned()
+                .unwrap_or_default())
+        }
+
         fn add_blocked_by(
             &self,
             _repo: &str,
@@ -1987,6 +2067,10 @@ pub mod test_support {
     /// an `FnOnce` factory while the original handle remains inspectable after
     /// (mirrors the milestone-client Rc impl).
     impl GhIssueDependencyApi for std::rc::Rc<MockGhDependencyClient> {
+        fn list_blocked_by(&self, repo: &str, blocked_number: u64) -> Result<Vec<u64>> {
+            (**self).list_blocked_by(repo, blocked_number)
+        }
+
         fn add_blocked_by(
             &self,
             repo: &str,
@@ -2833,6 +2917,48 @@ mod tests {
         client.remove_blocked_by("o/r", 12, 7).unwrap();
         assert_eq!(*client.added.borrow(), vec![(12, 7)]);
         assert_eq!(*client.removed.borrow(), vec![(12, 7)]);
+    }
+
+    // --- Issue-dependency read-back (STORY-244 AC3/AC6) ---
+
+    // The list GET targets the blocked issue's number under the blocked_by
+    // collection, with no method flag (a plain read).
+    #[test]
+    fn build_list_blocked_by_args_gets_the_blocked_by_collection() {
+        let args = build_list_blocked_by_args("o/r", 12);
+        assert_eq!(
+            args,
+            vec![
+                "api".to_string(),
+                "repos/o/r/issues/12/dependencies/blocked_by".to_string(),
+            ]
+        );
+    }
+
+    // The response is an array of issue objects; only their `number` is read.
+    #[test]
+    fn parse_blocked_by_numbers_extracts_numbers_ignoring_other_fields() {
+        let json = r#"[
+            {"number": 7, "title": "blocker", "state": "open"},
+            {"number": 9, "title": "other blocker", "state": "closed"}
+        ]"#;
+        assert_eq!(parse_blocked_by_numbers(json).unwrap(), vec![7, 9]);
+    }
+
+    #[test]
+    fn parse_blocked_by_numbers_empty_array_is_empty() {
+        assert_eq!(parse_blocked_by_numbers("[]").unwrap(), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn mock_dependency_returns_canned_blocked_by_set() {
+        let client = MockGhDependencyClient::new().with_blocked_by(12, vec![7]);
+        assert_eq!(client.list_blocked_by("o/r", 12).unwrap(), vec![7]);
+        // An issue with no seeded blockers reads back empty, never errors.
+        assert_eq!(
+            client.list_blocked_by("o/r", 99).unwrap(),
+            Vec::<u64>::new()
+        );
     }
 
     #[test]

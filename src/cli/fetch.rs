@@ -2,7 +2,9 @@ use crate::engine::clickup::ClickupClient;
 use crate::engine::config::{Config, Lifecycle, StoreBackend};
 use crate::engine::config_write::write_config_in_place;
 use crate::engine::credentials::Token;
-use crate::engine::gh::{GhGraphql, GhIssueReader, GhIssueWriter, GhMilestoneApi};
+use crate::engine::gh::{
+    GhGraphql, GhIssueDependencyApi, GhIssueReader, GhIssueWriter, GhMilestoneApi,
+};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::github::resolve_repo;
 use crate::engine::issue_body::TypeMatchRule;
@@ -20,7 +22,7 @@ use std::path::Path;
 pub fn run(
     root: &Path,
     config: &Config,
-    gh: &(impl GhIssueReader + GhIssueWriter + GhGraphql + GhMilestoneApi),
+    gh: &(impl GhIssueReader + GhIssueWriter + GhGraphql + GhMilestoneApi + GhIssueDependencyApi),
     git_ref_ops: &dyn GitRefOps,
     clickup: &dyn ClickupClient,
     clickup_token: Option<&Token>,
@@ -173,6 +175,7 @@ pub fn run(
             syncers.issue = Some(GhIssueSync {
                 reader: gh,
                 graphql: gh,
+                dependency: gh,
                 repo: repo
                     .clone()
                     .expect("repo resolved when an issue type fetches"),
@@ -809,6 +812,18 @@ name = "related-to"
             unimplemented!()
         }
         fn issue_set_milestone(&self, _: &str, _: u64, _: Option<u64>) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
+    impl crate::engine::gh::GhIssueDependencyApi for StubGh {
+        fn list_blocked_by(&self, _: &str, _: u64) -> Result<Vec<u64>> {
+            unimplemented!()
+        }
+        fn add_blocked_by(&self, _: &str, _: u64, _: u64) -> Result<()> {
+            unimplemented!()
+        }
+        fn remove_blocked_by(&self, _: &str, _: u64, _: u64) -> Result<()> {
             unimplemented!()
         }
     }

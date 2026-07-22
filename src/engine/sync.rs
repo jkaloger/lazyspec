@@ -14,7 +14,7 @@ use crate::engine::cache_lock::CacheLock;
 use crate::engine::clickup::ClickupClient;
 use crate::engine::clickup_cache;
 use crate::engine::config::{Config, Lifecycle, StoreBackend, TypeDef};
-use crate::engine::gh::{GhGraphql, GhIssueReader, GhMilestoneApi};
+use crate::engine::gh::{GhGraphql, GhIssueDependencyApi, GhIssueReader, GhMilestoneApi};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::issue_body::TypeMatchRule;
 use crate::engine::issue_cache::IssueCache;
@@ -129,6 +129,7 @@ impl TypeSync for GhMilestoneSync<'_> {
 pub struct GhIssueSync<'c> {
     pub reader: &'c dyn GhIssueReader,
     pub graphql: &'c dyn GhGraphql,
+    pub dependency: &'c dyn GhIssueDependencyApi,
     pub repo: String,
     pub type_rules: Vec<TypeMatchRule>,
 }
@@ -150,6 +151,7 @@ impl TypeSync for GhIssueSync<'_> {
             td,
             self.reader,
             self.graphql,
+            self.dependency,
             &self.repo,
             maps.issue_map,
             &self.type_rules,
@@ -518,7 +520,9 @@ mod tests {
     use crate::engine::config::{
         Config, NumberingStrategy, RelationshipDef, StoreBackend, TypeDef,
     };
-    use crate::engine::gh::test_support::{MockGhClient, MockGhMilestoneClient};
+    use crate::engine::gh::test_support::{
+        MockGhClient, MockGhDependencyClient, MockGhMilestoneClient,
+    };
     use crate::engine::gh::{
         GhAuthor, GhIssue, GhIssueMilestone, GhLabel, GhMilestone, ProjectFieldValue,
     };
@@ -556,6 +560,15 @@ mod tests {
             name: "targets".to_string(),
             inverse: Some("targeted-by".to_string()),
             github_native: Some("milestone".to_string()),
+            traversal: None,
+        }
+    }
+
+    fn dependency_relationship() -> RelationshipDef {
+        RelationshipDef {
+            name: "blocks".to_string(),
+            inverse: Some("blocked-by".to_string()),
+            github_native: Some("dependency".to_string()),
             traversal: None,
         }
     }
@@ -631,6 +644,7 @@ mod tests {
             issue: Some(GhIssueSync {
                 reader: &issue_client,
                 graphql: &issue_client,
+                dependency: &issue_client,
                 repo: "owner/repo".to_string(),
                 type_rules: config
                     .documents
@@ -656,6 +670,94 @@ mod tests {
             story.contains("targets: MILESTONE-7"),
             "issue must resolve its milestone relation after ordered fetch, got:\n{story}"
         );
+    }
+
+    // STORY-244 AC3/AC6: a native "A blocked_by B" set on GitHub surfaces on
+    // fetch as `A blocked-by B` on A's doc (the declared inverse), and the
+    // resolved graph carries `B blocks A` as the derived inverse -- exercised
+    // entirely through the dependency fake, with no output-shape change.
+    #[test]
+    fn fetch_reads_native_blocked_by_into_graph_with_inverse_direction() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        let mut config = Config::default();
+        config.documents.types = vec![type_def("story", "STORY", StoreBackend::GithubIssues)];
+        config.relationships = vec![dependency_relationship()];
+
+        // Issue #42 (STORY-42) is blocked by issue #7 (STORY-7); both are
+        // fetched in the same run, so #7 resolves via the in-flight batch.
+        let issue_client = MockGhClient::new()
+            .with_list_result(vec![gh_issue_no_milestone(42), gh_issue_no_milestone(7)]);
+        let dependency_client = MockGhDependencyClient::new().with_blocked_by(42, vec![7]);
+
+        let mut issue_map = IssueMap::load(root).unwrap();
+        let mut ctx = SyncContext {
+            gh: Some(GhMaps {
+                issue_map: &mut issue_map,
+            }),
+            clickup: None,
+        };
+        let mut syncers = Syncers {
+            issue: Some(GhIssueSync {
+                reader: &issue_client,
+                graphql: &issue_client,
+                dependency: &dependency_client,
+                repo: "owner/repo".to_string(),
+                type_rules: config
+                    .documents
+                    .types
+                    .iter()
+                    .map(TypeMatchRule::from)
+                    .collect(),
+            }),
+            ..Default::default()
+        };
+
+        let outcomes = sync_all(root, &config, &mut ctx, &mut syncers, None);
+        assert!(outcomes.iter().all(|o| o.error.is_none()), "{:?}", outcomes);
+
+        // The blocked doc stores the declared inverse toward its blocker; this
+        // is exactly the `related` entry `show --json` / `status --json`
+        // serialize (no new fields).
+        let blocked =
+            std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-42.md")).unwrap();
+        assert!(
+            blocked.contains("blocked-by: STORY-7"),
+            "blocked issue must surface the native dependency as `blocked-by`, got:\n{blocked}"
+        );
+        // The blocker's doc stores nothing: `B blocks A` is the derived inverse,
+        // never written (mirrors the virtual milestone `targeted-by`).
+        let blocker =
+            std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(
+            !blocker.contains("blocks:") && !blocker.contains("blocked-by:"),
+            "blocker must not store a relation; `blocks` is the virtual inverse, got:\n{blocker}"
+        );
+
+        // The resolved graph carries both directions: STORY-42 blocked-by
+        // STORY-7 (forward), and STORY-7 referenced by STORY-42 (the inverse
+        // `blocks` edge, per config).
+        let store = crate::engine::store::Store::load(root, &config).unwrap();
+        // Loaded doc paths are relative to the root (see the store loader).
+        let a_path = std::path::PathBuf::from(".lazyspec/cache/story/STORY-42.md");
+        let b_path = std::path::PathBuf::from(".lazyspec/cache/story/STORY-7.md");
+        assert!(
+            store
+                .related_to(&a_path)
+                .iter()
+                .any(|(rel, tgt)| rel.as_str() == "blocked-by" && **tgt == b_path),
+            "graph must resolve STORY-42 blocked-by STORY-7"
+        );
+        assert!(
+            store
+                .referenced_by(&b_path)
+                .iter()
+                .any(|(rel, src)| rel.as_str() == "blocked-by" && **src == a_path),
+            "graph must resolve the inverse: STORY-7 is blocked-by-referenced by STORY-42 \
+             (i.e. STORY-7 blocks STORY-42)"
+        );
+        assert_eq!(config.inverse_of("blocks"), Some("blocked-by"));
     }
 
     /// A GitHub client fake whose project-field GraphQL always errors, to drive
@@ -721,6 +823,18 @@ mod tests {
         }
     }
 
+    impl crate::engine::gh::GhIssueDependencyApi for FailingInjectClient {
+        fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
+            Ok(vec![])
+        }
+        fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
+            unimplemented!()
+        }
+        fn remove_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
     // AC (STORY-202): a project-field GraphQL injection failure is a warning, not
     // an error -- the cached doc keeps its other fields and the outcome carries
     // no `error` (so the CLI exits zero on warnings alone in ITERATION-286).
@@ -760,6 +874,7 @@ mod tests {
             issue: Some(GhIssueSync {
                 reader: &issue_client,
                 graphql: &issue_client,
+                dependency: &issue_client,
                 repo: "owner/repo".to_string(),
                 type_rules: config
                     .documents
@@ -918,6 +1033,7 @@ mod tests {
             issue: Some(GhIssueSync {
                 reader: &issue_client,
                 graphql: &issue_client,
+                dependency: &issue_client,
                 repo: "owner/repo".to_string(),
                 type_rules: vec![],
             }),
@@ -970,6 +1086,7 @@ mod tests {
             issue: Some(GhIssueSync {
                 reader: &issue_client,
                 graphql: &issue_client,
+                dependency: &issue_client,
                 repo: "owner/repo".to_string(),
                 type_rules: config
                     .documents

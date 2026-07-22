@@ -1,7 +1,8 @@
 use anyhow::Result;
 use lazyspec::engine::config::{Config, StoreBackend, TypeDef};
 use lazyspec::engine::gh::{
-    GhGraphql, GhIssue, GhIssueReader, GhIssueWriter, GhMilestone, GhMilestoneApi, GqlVar,
+    GhGraphql, GhIssue, GhIssueDependencyApi, GhIssueReader, GhIssueWriter, GhMilestone,
+    GhMilestoneApi, GqlVar,
 };
 use lazyspec::engine::git_ref::{GitCli, GitRefOps};
 use lazyspec::engine::git_ref_store::GitRefStore;
@@ -154,6 +155,18 @@ impl GhMilestoneApi for NoopGh {
         _issue_number: u64,
         _milestone: Option<u64>,
     ) -> Result<()> {
+        unreachable!("not used in this test")
+    }
+}
+
+impl GhIssueDependencyApi for NoopGh {
+    fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
+        Ok(vec![])
+    }
+    fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
+        unreachable!("not used in this test")
+    }
+    fn remove_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
         unreachable!("not used in this test")
     }
 }

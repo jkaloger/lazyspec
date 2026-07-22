@@ -8,8 +8,8 @@
 use anyhow::Result;
 use lazyspec::engine::config::{Config, GithubConfig, StoreBackend};
 use lazyspec::engine::gh::{
-    GhAuthor, GhComment, GhFieldValueInput, GhGraphql, GhIssue, GhIssueReader, GhIssueWriter,
-    GhLabel, GhMilestone, GhMilestoneApi, GqlVar, ProjectFieldValue,
+    GhAuthor, GhComment, GhFieldValueInput, GhGraphql, GhIssue, GhIssueDependencyApi,
+    GhIssueReader, GhIssueWriter, GhLabel, GhMilestone, GhMilestoneApi, GqlVar, ProjectFieldValue,
 };
 use lazyspec::engine::git_ref::GitCli;
 use lazyspec::engine::store::{Filter, Store};
@@ -228,6 +228,18 @@ impl GhMilestoneApi for NestingGh {
         _issue_number: u64,
         _milestone: Option<u64>,
     ) -> Result<()> {
+        unreachable!()
+    }
+}
+
+impl GhIssueDependencyApi for NestingGh {
+    fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
+        Ok(vec![])
+    }
+    fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
+        unreachable!()
+    }
+    fn remove_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
         unreachable!()
     }
 }
