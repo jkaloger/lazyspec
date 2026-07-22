@@ -137,6 +137,7 @@ inverse = "superseded-by"
 [[relationships]]
 name = "blocks"
 inverse = "blocked-by"
+github_native = "dependency"
 
 [[relationships]]
 name = "related-to"

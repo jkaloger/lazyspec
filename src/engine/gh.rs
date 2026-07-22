@@ -260,6 +260,50 @@ pub fn build_set_assignee_args(
     args
 }
 
+/// Pure argv builder for adding a native issue-dependency
+/// (`POST repos/{repo}/issues/{blocked_number}/dependencies/blocked_by`). The
+/// blocking issue is named in the body by its REST *database id*
+/// (`blocking_issue_id`), NOT its display number, and `-F` sends it as a typed
+/// JSON int — both are what the dependencies API requires. Mirrors
+/// [`build_set_milestone_args`]' REST-path discipline.
+pub fn build_add_blocked_by_args(
+    repo: &str,
+    blocked_number: u64,
+    blocking_issue_id: u64,
+) -> Vec<String> {
+    vec![
+        "api".to_string(),
+        "-X".to_string(),
+        "POST".to_string(),
+        format!(
+            "repos/{}/issues/{}/dependencies/blocked_by",
+            repo, blocked_number
+        ),
+        "-F".to_string(),
+        format!("issue_id={}", blocking_issue_id),
+    ]
+}
+
+/// Pure argv builder for removing a native issue-dependency
+/// (`DELETE repos/{repo}/issues/{blocked_number}/dependencies/blocked_by/{blocking_issue_id}`).
+/// The blocking issue's REST database id is the final path segment, not a body
+/// field.
+pub fn build_remove_blocked_by_args(
+    repo: &str,
+    blocked_number: u64,
+    blocking_issue_id: u64,
+) -> Vec<String> {
+    vec![
+        "api".to_string(),
+        "-X".to_string(),
+        "DELETE".to_string(),
+        format!(
+            "repos/{}/issues/{}/dependencies/blocked_by/{}",
+            repo, blocked_number, blocking_issue_id
+        ),
+    ]
+}
+
 // --- Label helpers ---
 
 pub fn type_label(type_name: &str) -> String {
@@ -368,6 +412,31 @@ pub trait GhMilestoneApi {
         repo: &str,
         issue_number: u64,
         milestone: Option<u64>,
+    ) -> Result<()>;
+}
+
+/// REST seam for GitHub issue dependencies (the native blocked-by / blocking
+/// graph), kept separate from [`GhMilestoneApi`] so it can be faked
+/// independently. Dependencies are REST
+/// (`gh api repos/{repo}/issues/{n}/dependencies/blocked_by`), not GraphQL.
+///
+/// Endpoints take a blocked issue by its display `number` (the path segment)
+/// and identify the blocking issue by its REST *database id* — the real impl
+/// resolves that id from the number, since the issue map carries only the
+/// display number and GraphQL node id.
+pub trait GhIssueDependencyApi {
+    /// Record that issue `blocked_number` is blocked by issue `blocking_number`
+    /// (`POST issues/{blocked_number}/dependencies/blocked_by`, body
+    /// `issue_id=<blocking issue database id>`). Idempotent on GitHub's side.
+    fn add_blocked_by(&self, repo: &str, blocked_number: u64, blocking_number: u64) -> Result<()>;
+
+    /// Drop the blocked-by edge [`add_blocked_by`] created
+    /// (`DELETE issues/{blocked_number}/dependencies/blocked_by/{blocking issue database id}`).
+    fn remove_blocked_by(
+        &self,
+        repo: &str,
+        blocked_number: u64,
+        blocking_number: u64,
     ) -> Result<()>;
 }
 
@@ -654,6 +723,21 @@ impl<T: GhMilestoneApi + ?Sized> GhMilestoneApi for &T {
         milestone: Option<u64>,
     ) -> Result<()> {
         (**self).issue_set_milestone(repo, issue_number, milestone)
+    }
+}
+
+impl<T: GhIssueDependencyApi + ?Sized> GhIssueDependencyApi for &T {
+    fn add_blocked_by(&self, repo: &str, blocked_number: u64, blocking_number: u64) -> Result<()> {
+        (**self).add_blocked_by(repo, blocked_number, blocking_number)
+    }
+
+    fn remove_blocked_by(
+        &self,
+        repo: &str,
+        blocked_number: u64,
+        blocking_number: u64,
+    ) -> Result<()> {
+        (**self).remove_blocked_by(repo, blocked_number, blocking_number)
     }
 }
 
@@ -1190,6 +1274,44 @@ impl GhMilestoneApi for GhCli {
         milestone: Option<u64>,
     ) -> Result<()> {
         let args = build_set_milestone_args(repo, issue_number, milestone);
+        self.run_gh_checked(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        Ok(())
+    }
+}
+
+impl GhCli {
+    /// Resolve an issue's REST database id (distinct from its display number)
+    /// via `gh api repos/{repo}/issues/{n} --jq .id`. The dependencies API
+    /// identifies the blocking issue by this id, not its number.
+    fn issue_database_id(&self, repo: &str, number: u64) -> Result<u64> {
+        let endpoint = format!("repos/{}/issues/{}", repo, number);
+        let stdout = self.run_gh_checked(&["api", &endpoint, "--jq", ".id"])?;
+        stdout.trim().parse::<u64>().map_err(|e| {
+            anyhow::anyhow!(
+                "failed to parse issue database id from '{}': {}",
+                stdout.trim(),
+                e
+            )
+        })
+    }
+}
+
+impl GhIssueDependencyApi for GhCli {
+    fn add_blocked_by(&self, repo: &str, blocked_number: u64, blocking_number: u64) -> Result<()> {
+        let blocking_id = self.issue_database_id(repo, blocking_number)?;
+        let args = build_add_blocked_by_args(repo, blocked_number, blocking_id);
+        self.run_gh_checked(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        Ok(())
+    }
+
+    fn remove_blocked_by(
+        &self,
+        repo: &str,
+        blocked_number: u64,
+        blocking_number: u64,
+    ) -> Result<()> {
+        let blocking_id = self.issue_database_id(repo, blocking_number)?;
+        let args = build_remove_blocked_by_args(repo, blocked_number, blocking_id);
         self.run_gh_checked(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
         Ok(())
     }
@@ -1820,6 +1942,70 @@ pub mod test_support {
         }
     }
 
+    /// In-memory fake for [`GhIssueDependencyApi`]. Records each add/remove as a
+    /// `(blocked_number, blocking_number)` pair so a test can assert the native
+    /// edge (and its direction) without touching GitHub. Zero network.
+    #[derive(Default)]
+    pub struct MockGhDependencyClient {
+        pub added: RefCell<Vec<(u64, u64)>>,
+        pub removed: RefCell<Vec<(u64, u64)>>,
+    }
+
+    impl MockGhDependencyClient {
+        pub fn new() -> Self {
+            Self::default()
+        }
+    }
+
+    impl GhIssueDependencyApi for MockGhDependencyClient {
+        fn add_blocked_by(
+            &self,
+            _repo: &str,
+            blocked_number: u64,
+            blocking_number: u64,
+        ) -> Result<()> {
+            self.added
+                .borrow_mut()
+                .push((blocked_number, blocking_number));
+            Ok(())
+        }
+
+        fn remove_blocked_by(
+            &self,
+            _repo: &str,
+            blocked_number: u64,
+            blocking_number: u64,
+        ) -> Result<()> {
+            self.removed
+                .borrow_mut()
+                .push((blocked_number, blocking_number));
+            Ok(())
+        }
+    }
+
+    /// Delegating impl so a shared `Rc<MockGhDependencyClient>` can be moved into
+    /// an `FnOnce` factory while the original handle remains inspectable after
+    /// (mirrors the milestone-client Rc impl).
+    impl GhIssueDependencyApi for std::rc::Rc<MockGhDependencyClient> {
+        fn add_blocked_by(
+            &self,
+            repo: &str,
+            blocked_number: u64,
+            blocking_number: u64,
+        ) -> Result<()> {
+            (**self).add_blocked_by(repo, blocked_number, blocking_number)
+        }
+
+        fn remove_blocked_by(
+            &self,
+            repo: &str,
+            blocked_number: u64,
+            blocking_number: u64,
+        ) -> Result<()> {
+            (**self).remove_blocked_by(repo, blocked_number, blocking_number)
+        }
+    }
+
     /// Delegating impls so a shared `Rc<MockGhClient>` can be moved into an
     /// `FnOnce` factory while the original handle remains inspectable after
     /// (mirrors the milestone-client Rc impl). The issue reader/writer impls let
@@ -2119,7 +2305,7 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{MockGhClient, MockGhMilestoneClient};
+    use super::test_support::{MockGhClient, MockGhDependencyClient, MockGhMilestoneClient};
     use super::*;
 
     // --- JSON parsing tests ---
@@ -2599,6 +2785,54 @@ mod tests {
         let args = build_set_milestone_args("o/r", 12, Some(5));
         let pos = args.iter().position(|a| a == "milestone=5").unwrap();
         assert_eq!(args[pos - 1], "-F", "must use -F so value is a typed int");
+    }
+
+    // --- Issue-dependency argv builders (STORY-244 AC1/AC2) ---
+
+    // The add POST targets the blocked issue's number in the path and carries
+    // the blocking issue's REST database id in the body as a typed int (`-F`),
+    // never its display number.
+    #[test]
+    fn build_add_blocked_by_args_posts_issue_id_as_typed_int() {
+        let args = build_add_blocked_by_args("o/r", 12, 9876543);
+        assert!(args.contains(&"POST".to_string()));
+        assert!(args.contains(&"repos/o/r/issues/12/dependencies/blocked_by".to_string()));
+        let pos = args.iter().position(|a| a == "issue_id=9876543").unwrap();
+        assert_eq!(
+            args[pos - 1],
+            "-F",
+            "issue_id must be sent with -F as a typed JSON int"
+        );
+        assert!(
+            !args.iter().any(|a| a == "-f"),
+            "must not use -f (would send issue_id as a string)"
+        );
+    }
+
+    // The remove DELETE puts the blocking issue's database id in the path, not a
+    // body field.
+    #[test]
+    fn build_remove_blocked_by_args_deletes_with_id_path_segment() {
+        let args = build_remove_blocked_by_args("o/r", 12, 9876543);
+        assert!(args.contains(&"DELETE".to_string()));
+        assert!(
+            args.contains(&"repos/o/r/issues/12/dependencies/blocked_by/9876543".to_string()),
+            "database id must be the final path segment, got: {:?}",
+            args
+        );
+        assert!(
+            !args.iter().any(|a| a.starts_with("issue_id=")),
+            "delete carries no body field"
+        );
+    }
+
+    #[test]
+    fn mock_dependency_records_add_and_remove_pairs() {
+        let client = MockGhDependencyClient::new();
+        client.add_blocked_by("o/r", 12, 7).unwrap();
+        client.remove_blocked_by("o/r", 12, 7).unwrap();
+        assert_eq!(*client.added.borrow(), vec![(12, 7)]);
+        assert_eq!(*client.removed.borrow(), vec![(12, 7)]);
     }
 
     #[test]

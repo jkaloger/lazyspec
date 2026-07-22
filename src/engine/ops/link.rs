@@ -4,7 +4,9 @@ use crate::engine::config::{Config, StoreBackend, CLICKUP_RELATIONS_FIELD};
 use crate::engine::credentials::{CredentialStore, LayeredCredentialStore, Token};
 use crate::engine::document::{rewrite_frontmatter, DocMeta, RelationType};
 use crate::engine::fs::FileSystem;
-use crate::engine::gh::{GhCli, GhGraphql, GhIssueReader, GhIssueWriter, GhMilestoneApi, GqlVar};
+use crate::engine::gh::{
+    GhCli, GhGraphql, GhIssueDependencyApi, GhIssueReader, GhIssueWriter, GhMilestoneApi, GqlVar,
+};
 use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
@@ -51,6 +53,7 @@ pub fn link_with_config(
         GhCli::new,
         GhCli::new,
         GhCli::new,
+        GhCli::new,
     )
 }
 
@@ -59,6 +62,7 @@ fn link_inner<
     G: GhIssueReader + GhIssueWriter + GhGraphql + Send + 'static,
     M: GhMilestoneApi,
     P: GhGraphql + 'static,
+    D: GhIssueDependencyApi,
 >(
     root: &Path,
     store: &Store,
@@ -70,6 +74,7 @@ fn link_inner<
     client_factory: impl FnOnce() -> G,
     milestone_factory: impl FnOnce() -> M,
     projects_factory: impl FnOnce() -> P,
+    dependency_factory: impl FnOnce() -> D,
 ) -> Result<LinkOutcome> {
     let config = config.ok_or_else(|| {
         anyhow!("link requires a loaded config to resolve relationships from [[relationships]]")
@@ -104,6 +109,15 @@ fn link_inner<
         &to_id,
         true,
         projects_factory,
+    )? || apply_native_dependency(
+        root,
+        config,
+        store,
+        &rel_str,
+        &from_id,
+        &to_id,
+        true,
+        dependency_factory,
     )?;
 
     // Push-first: the remote merge (or native resync) lands BEFORE the cache is
@@ -321,6 +335,76 @@ fn apply_native_membership<P: GhGraphql + 'static>(
     Ok(true)
 }
 
+/// If `rel_str` declares `github_native = "dependency"`, opportunistically write
+/// the native GitHub issue-dependency edge. Unlike milestone/membership (which
+/// are native-*only* and reject non-issue endpoints), `blocks` is a universal
+/// semantic relation that gains an *optional* native edge: the dependency fires
+/// only when BOTH endpoints resolve to github-issues docs (necessarily the same
+/// repo under lazyspec's one-repo-per-store model). Otherwise — filesystem,
+/// cross-store, or a non-dependency relation — it is a no-op with no error, and
+/// the relation stays comment/graph-backed as before.
+///
+/// Canonical direction is `source blocks target`, i.e. `target` is blocked_by
+/// `source`, so the edge is written on the target's issue. `set` true adds it
+/// (link), false removes it (unlink).
+///
+/// Returns `true` when a native dependency call was actually performed (so the
+/// caller routes the cache mirror through the conflict-free resync), `false` for
+/// the opportunistic no-op.
+#[allow(clippy::too_many_arguments)]
+fn apply_native_dependency<D: GhIssueDependencyApi>(
+    root: &Path,
+    config: &Config,
+    store: &Store,
+    rel_str: &str,
+    source_id: &str,
+    target_id: &str,
+    set: bool,
+    dependency_factory: impl FnOnce() -> D,
+) -> Result<bool> {
+    let is_dependency_rel = config
+        .relationship_by_name(rel_str)
+        .and_then(|r| r.github_native.as_deref())
+        == Some("dependency");
+    if !is_dependency_rel {
+        return Ok(false);
+    }
+
+    // Opportunistic: the native edge fires only when both endpoints are
+    // github-issues docs. A filesystem, cross-store, or cross-repo endpoint
+    // falls through to the ordinary comment/graph-backed record.
+    let both_issues = store_of(config, store, source_id) == Some(StoreBackend::GithubIssues)
+        && store_of(config, store, target_id) == Some(StoreBackend::GithubIssues);
+    if !both_issues {
+        return Ok(false);
+    }
+
+    let repo = config
+        .documents
+        .github
+        .as_ref()
+        .and_then(|g| g.repo.as_ref())
+        .ok_or_else(|| anyhow!("github_native dependency relations require [github].repo"))?;
+
+    let issue_map = IssueMap::load(root)?;
+    let blocking_number = issue_map
+        .get(source_id)
+        .map(|e| e.issue_number)
+        .ok_or_else(|| anyhow!("source '{}' has no GitHub issue number", source_id))?;
+    let blocked_number = issue_map
+        .get(target_id)
+        .map(|e| e.issue_number)
+        .ok_or_else(|| anyhow!("target '{}' has no GitHub issue number", target_id))?;
+
+    let client = dependency_factory();
+    if set {
+        client.add_blocked_by(repo, blocked_number, blocking_number)?;
+    } else {
+        client.remove_blocked_by(repo, blocked_number, blocking_number)?;
+    }
+    Ok(true)
+}
+
 /// The store a document id resolves to, via its type's `[[types]]` declaration.
 /// `None` when the id resolves to no doc or its type is undeclared -- the caller
 /// treats an unresolved store as non-milestone (the guard only fires on the
@@ -402,6 +486,7 @@ pub fn unlink_with_config(
         GhCli::new,
         GhCli::new,
         GhCli::new,
+        GhCli::new,
     )
 }
 
@@ -410,6 +495,7 @@ fn unlink_inner<
     G: GhIssueReader + GhIssueWriter + GhGraphql + Send + 'static,
     M: GhMilestoneApi,
     P: GhGraphql + 'static,
+    D: GhIssueDependencyApi,
 >(
     root: &Path,
     store: &Store,
@@ -421,6 +507,7 @@ fn unlink_inner<
     client_factory: impl FnOnce() -> G,
     milestone_factory: impl FnOnce() -> M,
     projects_factory: impl FnOnce() -> P,
+    dependency_factory: impl FnOnce() -> D,
 ) -> Result<LinkOutcome> {
     let config = config.ok_or_else(|| {
         anyhow!("unlink requires a loaded config to resolve relationships from [[relationships]]")
@@ -453,6 +540,15 @@ fn unlink_inner<
         &to_id,
         false,
         projects_factory,
+    )? || apply_native_dependency(
+        root,
+        config,
+        store,
+        &rel_str,
+        &from_id,
+        &to_id,
+        false,
+        dependency_factory,
     )?;
 
     // Push-first: remote retain-drop (or native resync) lands BEFORE the cache
@@ -743,7 +839,7 @@ mod tests {
     use crate::engine::config::{Config, GithubConfig, NumberingStrategy, StoreBackend, TypeDef};
     use crate::engine::fs::RealFileSystem;
     use crate::engine::gh::{
-        test_support::{MockGhClient, MockGhMilestoneClient},
+        test_support::{MockGhClient, MockGhDependencyClient, MockGhMilestoneClient},
         GhIssue, GhLabel,
     };
     use crate::engine::git_ref::GitRefOps;
@@ -863,6 +959,7 @@ mod tests {
             MockGhClient::new,
             || recorder.clone(),
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .unwrap();
 
@@ -890,6 +987,7 @@ mod tests {
             MockGhClient::new,
             || recorder2.clone(),
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .unwrap();
         assert_eq!(*recorder2.last_set_milestone.borrow(), Some((7, None)));
@@ -951,6 +1049,7 @@ mod tests {
             MockGhClient::new,
             || recorder.clone(),
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .expect("legal targets link must succeed");
 
@@ -987,6 +1086,7 @@ mod tests {
             MockGhClient::new,
             || recorder.clone(),
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .expect("inverse `targeted-by` from a milestone must succeed");
 
@@ -1031,6 +1131,7 @@ mod tests {
             MockGhClient::new,
             || recorder.clone(),
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .expect_err("ordinary relation to a milestone must be rejected");
         assert!(
@@ -1070,6 +1171,7 @@ mod tests {
             MockGhClient::new,
             || recorder.clone(),
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .expect_err("a milestone source must be rejected even via targets");
         assert!(
@@ -1108,6 +1210,7 @@ mod tests {
             MockGhClient::new,
             || recorder.clone(),
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .expect_err("targets to a non-milestone target must be rejected");
         assert!(
@@ -1213,6 +1316,7 @@ mod tests {
             MockGhClient::new,
             || bad.clone(),
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .expect_err("unlink from a milestone source must be rejected");
         assert!(
@@ -1237,6 +1341,7 @@ mod tests {
             MockGhClient::new,
             || recorder.clone(),
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .expect("legal unlink must succeed");
         assert_eq!(*recorder.last_set_milestone.borrow(), Some((7, None)));
@@ -1316,6 +1421,7 @@ mod tests {
             || MockGhClient::new().with_view_issue(view_issue_at(7, "2026-06-26T11:00:00Z")),
             || recorder.clone(),
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .expect("native milestone link must not abort on an out-of-band updated_at bump");
 
@@ -1378,6 +1484,7 @@ mod tests {
             || MockGhClient::new().with_view_issue(view_issue_at(7, "2026-06-26T11:00:00Z")),
             || recorder.clone(),
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .expect("native milestone unlink must not abort on an out-of-band updated_at bump");
 
@@ -1487,6 +1594,7 @@ mod tests {
             MockGhClient::new,
             MockGhMilestoneClient::new,
             || recorder.clone(),
+            MockGhDependencyClient::new,
         )
         .unwrap();
 
@@ -1558,6 +1666,7 @@ mod tests {
             MockGhClient::new,
             MockGhMilestoneClient::new,
             || rec1.clone(),
+            MockGhDependencyClient::new,
         )
         .unwrap();
 
@@ -1577,6 +1686,7 @@ mod tests {
             MockGhClient::new,
             MockGhMilestoneClient::new,
             || rec2.clone(),
+            MockGhDependencyClient::new,
         )
         .unwrap();
 
@@ -1658,6 +1768,7 @@ mod tests {
             MockGhClient::new,
             MockGhMilestoneClient::new,
             || recorder.clone(),
+            MockGhDependencyClient::new,
         )
         .unwrap();
 
@@ -1732,6 +1843,7 @@ mod tests {
             || MockGhClient::new().with_view_issue(view_issue_at(7, "2026-06-26T11:00:00Z")),
             MockGhMilestoneClient::new,
             || recorder.clone(),
+            MockGhDependencyClient::new,
         )
         .expect("native membership link must not abort on an out-of-band updated_at bump");
 
@@ -1906,6 +2018,7 @@ mod tests {
             || MockGhClient::new().with_view_issue(view_issue),
             MockGhMilestoneClient::new,
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .unwrap();
 
@@ -2005,6 +2118,7 @@ mod tests {
             },
             MockGhMilestoneClient::new,
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .expect("ordinary relation link must not abort on an out-of-band updated_at bump");
 
@@ -2058,6 +2172,7 @@ mod tests {
             || recorder.clone(),
             MockGhMilestoneClient::new,
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .unwrap();
 
@@ -2107,6 +2222,7 @@ mod tests {
             },
             MockGhMilestoneClient::new,
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .unwrap();
 
@@ -2153,6 +2269,7 @@ mod tests {
             || recorder.clone(),
             MockGhMilestoneClient::new,
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .unwrap();
 
@@ -2204,6 +2321,7 @@ mod tests {
             },
             MockGhMilestoneClient::new,
             MockGhClient::new,
+            MockGhDependencyClient::new,
         );
 
         assert!(result.is_err(), "failed push must propagate an error");
@@ -2276,6 +2394,7 @@ mod tests {
             || recorder.clone(),
             MockGhMilestoneClient::new,
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .expect("ordinary unlink must not abort on an out-of-band updated_at bump");
 
@@ -2444,6 +2563,7 @@ mod tests {
             MockGhClient::new,
             MockGhMilestoneClient::new,
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .unwrap();
 
@@ -2532,6 +2652,7 @@ mod tests {
             MockGhClient::new,
             MockGhMilestoneClient::new,
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .unwrap();
 
@@ -2868,6 +2989,7 @@ mod tests {
             MockGhClient::new,
             MockGhMilestoneClient::new,
             MockGhClient::new,
+            MockGhDependencyClient::new,
         )
         .expect("link into a doc with bare `related:` must succeed");
 
@@ -2897,5 +3019,324 @@ mod tests {
         )
         .unwrap();
         assert!(calls.borrow().is_empty());
+    }
+
+    // --- github_native = "dependency" (STORY-244 / ITERATION-345) ---
+
+    // Two github-issues types and one filesystem type, with `blocks` bound to the
+    // native dependency edge and an ordinary `implements` alongside it (to prove
+    // the guard only fires for the dependency relation).
+    fn dependency_config() -> Config {
+        let issue = |name: &str, store: StoreBackend| TypeDef::test_fixture(name, store);
+        let mut config = Config::default();
+        config.documents.types = vec![
+            issue("story", StoreBackend::GithubIssues),
+            issue("spec", StoreBackend::Filesystem),
+        ];
+        config.documents.github = Some(GithubConfig {
+            repo: Some("owner/repo".to_string()),
+            cache_ttl: 60,
+        });
+        config.relationships = vec![
+            crate::engine::config::RelationshipDef {
+                name: "blocks".to_string(),
+                inverse: Some("blocked-by".to_string()),
+                github_native: Some("dependency".to_string()),
+                traversal: None,
+            },
+            crate::engine::config::RelationshipDef {
+                name: "implements".to_string(),
+                inverse: Some("implemented-by".to_string()),
+                github_native: None,
+                traversal: None,
+            },
+        ];
+        config
+    }
+
+    // AC1: linking two same-repo github-issues docs via a
+    // github_native="dependency" relation writes the native blocked-by edge on
+    // the TARGET issue (`A blocks B` => B blocked_by A), records the relation, and
+    // fires the resync (proven by the issue-map baseline reconciling to the
+    // remote's fresh updated_at, the milestone/membership resync signature).
+    #[test]
+    fn link_dependency_writes_native_blocked_by_and_resyncs() {
+        let root = tmp_root("link_dependency");
+        let config = dependency_config();
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story"),
+            "STORY-7.md",
+            "My Story",
+            "story",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story"),
+            "STORY-8.md",
+            "Blocked",
+            "story",
+        );
+
+        // STORY-7 last fetched at 10:00; remote (returned by the resync view) 11:00.
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "2026-06-26T10:00:00Z", "I_node7");
+        issue_map.insert("STORY-8", 8, "", "I_node8");
+        issue_map.save(&root).unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+        let recorder = std::rc::Rc::new(MockGhDependencyClient::new());
+
+        link_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "blocks",
+            "STORY-8",
+            &fs,
+            Some(&config),
+            || MockGhClient::new().with_view_issue(view_issue_at(7, "2026-06-26T11:00:00Z")),
+            MockGhMilestoneClient::new,
+            MockGhClient::new,
+            || recorder.clone(),
+        )
+        .expect("native dependency link must succeed");
+
+        // Native blocked_by edge on the target (8), blocked by the source (7).
+        assert_eq!(*recorder.added.borrow(), vec![(8, 7)]);
+        assert!(
+            recorder.removed.borrow().is_empty(),
+            "link must not remove any edge"
+        );
+
+        // The relation is recorded on the source frontmatter.
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(
+            updated.contains("blocks: STORY-8"),
+            "frontmatter should carry the relation, got:\n{updated}"
+        );
+
+        // Resync fired: the baseline reconciled to the remote's fresh timestamp.
+        let reloaded = IssueMap::load(&root).unwrap();
+        assert_eq!(
+            reloaded.get("STORY-7").unwrap().updated_at,
+            "2026-06-26T11:00:00Z",
+            "resync_after_native_edge should record the remote's current updated_at"
+        );
+    }
+
+    // AC2: unlink removes the native blocked-by edge (same direction as the add)
+    // and drops the relation from the cache frontmatter.
+    #[test]
+    fn unlink_dependency_removes_native_blocked_by() {
+        let root = tmp_root("unlink_dependency");
+        let config = dependency_config();
+
+        // STORY-7 already blocks STORY-8 in the cache.
+        std::fs::create_dir_all(root.join(".lazyspec/cache/story")).unwrap();
+        let content = "---\ntitle: My Story\ntype: story\nstatus: draft\nauthor: a\ndate: 2026-03-27\ntags: []\nrelated:\n- blocks: STORY-8\n---\nbody\n";
+        std::fs::write(root.join(".lazyspec/cache/story/STORY-7.md"), content).unwrap();
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story"),
+            "STORY-8.md",
+            "Blocked",
+            "story",
+        );
+
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "2026-06-26T10:00:00Z", "I_node7");
+        issue_map.insert("STORY-8", 8, "", "I_node8");
+        issue_map.save(&root).unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+        let recorder = std::rc::Rc::new(MockGhDependencyClient::new());
+
+        unlink_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "blocks",
+            "STORY-8",
+            &fs,
+            Some(&config),
+            || MockGhClient::new().with_view_issue(view_issue_at(7, "2026-06-26T11:00:00Z")),
+            MockGhMilestoneClient::new,
+            MockGhClient::new,
+            || recorder.clone(),
+        )
+        .expect("native dependency unlink must succeed");
+
+        assert_eq!(*recorder.removed.borrow(), vec![(8, 7)]);
+        assert!(
+            recorder.added.borrow().is_empty(),
+            "unlink must not add any edge"
+        );
+
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(
+            !updated.contains("blocks: STORY-8"),
+            "cache relation should be removed, got:\n{updated}"
+        );
+    }
+
+    // AC5 regression: a filesystem-only `blocks` link/unlink makes ZERO native
+    // calls -- the opportunistic guard sees non-issue endpoints and records the
+    // relation comment/graph-backed exactly as before, with no error.
+    #[test]
+    fn link_dependency_filesystem_only_makes_no_native_call() {
+        let root = tmp_root("link_dependency_fs");
+        let config = dependency_config();
+
+        let dir = root.join("docs/spec");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SPEC-1.md"),
+            "---\ntitle: A\ntype: spec\nstatus: draft\nauthor: a\ndate: 2026-03-27\ntags: []\n---\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("SPEC-2.md"),
+            "---\ntitle: B\ntype: spec\nstatus: draft\nauthor: a\ndate: 2026-03-27\ntags: []\n---\nbody\n",
+        )
+        .unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+        let recorder = std::rc::Rc::new(MockGhDependencyClient::new());
+
+        link_inner(
+            &root,
+            &store,
+            "SPEC-1",
+            "blocks",
+            "SPEC-2",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            MockGhMilestoneClient::new,
+            MockGhClient::new,
+            || recorder.clone(),
+        )
+        .expect("filesystem blocks link must succeed");
+
+        // Relation recorded, but no native dependency call fired.
+        let updated = std::fs::read_to_string(dir.join("SPEC-1.md")).unwrap();
+        assert!(
+            updated.contains("blocks: SPEC-2"),
+            "filesystem relation should be recorded, got:\n{updated}"
+        );
+        assert!(
+            recorder.added.borrow().is_empty() && recorder.removed.borrow().is_empty(),
+            "no native call for a filesystem endpoint"
+        );
+
+        // Unlink is symmetric: still no native call.
+        let store = Store::load(&root, &config).unwrap();
+        let recorder2 = std::rc::Rc::new(MockGhDependencyClient::new());
+        unlink_inner(
+            &root,
+            &store,
+            "SPEC-1",
+            "blocks",
+            "SPEC-2",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            MockGhMilestoneClient::new,
+            MockGhClient::new,
+            || recorder2.clone(),
+        )
+        .expect("filesystem blocks unlink must succeed");
+        assert!(
+            recorder2.added.borrow().is_empty() && recorder2.removed.borrow().is_empty(),
+            "no native call for a filesystem endpoint on unlink"
+        );
+    }
+
+    // The native edge is opportunistic on the RELATION too: an ordinary relation
+    // (no github_native) between two github-issues docs makes no dependency call.
+    #[test]
+    fn apply_native_dependency_non_dependency_relation_returns_false() {
+        let root = tmp_root("dep_guard_rel");
+        let config = dependency_config();
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story"),
+            "STORY-7.md",
+            "My Story",
+            "story",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story"),
+            "STORY-8.md",
+            "Other",
+            "story",
+        );
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "", "I_node7");
+        issue_map.insert("STORY-8", 8, "", "I_node8");
+        issue_map.save(&root).unwrap();
+        let store = Store::load(&root, &config).unwrap();
+        let recorder = std::rc::Rc::new(MockGhDependencyClient::new());
+
+        let fired = apply_native_dependency(
+            &root,
+            &config,
+            &store,
+            "implements",
+            "STORY-7",
+            "STORY-8",
+            true,
+            || recorder.clone(),
+        )
+        .unwrap();
+
+        assert!(
+            !fired,
+            "a non-dependency relation must not fire the native edge"
+        );
+        assert!(recorder.added.borrow().is_empty());
+    }
+
+    // Opportunistic guard: a non-issue (filesystem) endpoint returns false with no
+    // native call and no error, even though the relation IS the dependency one.
+    #[test]
+    fn apply_native_dependency_non_issue_endpoint_returns_false() {
+        let root = tmp_root("dep_guard_endpoint");
+        let config = dependency_config();
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story"),
+            "STORY-7.md",
+            "My Story",
+            "story",
+        );
+        let dir = root.join("docs/spec");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SPEC-1.md"),
+            "---\ntitle: A\ntype: spec\nstatus: draft\nauthor: a\ndate: 2026-03-27\ntags: []\n---\nbody\n",
+        )
+        .unwrap();
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "", "I_node7");
+        issue_map.save(&root).unwrap();
+        let store = Store::load(&root, &config).unwrap();
+        let recorder = std::rc::Rc::new(MockGhDependencyClient::new());
+
+        let fired = apply_native_dependency(
+            &root,
+            &config,
+            &store,
+            "blocks",
+            "STORY-7",
+            "SPEC-1",
+            true,
+            || recorder.clone(),
+        )
+        .unwrap();
+
+        assert!(!fired, "a non-issue endpoint must not fire the native edge");
+        assert!(recorder.added.borrow().is_empty());
     }
 }
