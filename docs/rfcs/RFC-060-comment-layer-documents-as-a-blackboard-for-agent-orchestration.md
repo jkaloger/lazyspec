@@ -1,14 +1,13 @@
 ---
-title: "Comment layer: attributed append-only annotations on documents"
+title: 'Comment layer: attributed append-only annotations on documents'
 type: rfc
-status: draft
-author: "jack"
+status: rejected
+author: jack
 date: 2026-07-12
 tags: []
-related: []
----
-
-## Summary
+related:
+- blocks: RFC-064
+---## Summary
 
 Add a comment layer to lazyspec documents: attributed, append-only, immutable annotations posted against a document or a section of it. This is the same primitive as a review comment on a spec, a margin note on an RFC, or a discussion thread on a story — a fine-grained contribution that lives beside the document without rewriting it. Each comment carries a small engine-owned envelope (id, author, timestamp, reply-to) plus a **project-configurable attribute map** — the vocabulary (`kind`, `confidence`, `anchor`, …) is declared in config, exactly as document types already are, not hard-coded in the engine. Thread structure and resolution state are *derived* by folding the append-only stream, never stored as mutable fields. Storage is a filesystem comment-per-file (maildir) layout: still just markdown on disk, PR-reviewable, `cat`-able. Every operation has `--json`, so both humans and agents consume the same interface.
 
@@ -164,7 +163,9 @@ Engine: `CommentStore` trait + `Comment` type (envelope + opaque attribute map);
 
 ## Stories
 
-1. `Comment` type (envelope + opaque attribute map) + `CommentStore` trait + filesystem (maildir) impl + fold logic. Engine + `comment add --attr` / `comments` CLI with both `--json` and pretty thread-tree output.
+> This is the original informal decomposition. The authored, vertically-sliced backlog is STORY-232 … STORY-243 (each `implements` this RFC); where they diverge, the stories are authoritative. Notably the `CommentStore` trait is **not** in the walking skeleton — the filesystem impl stays inline until the git-ref store makes it a second concrete use (convention principle 6), so the trait is extracted in the git-ref story, not story 1.
+
+1. **Walking skeleton** — `Comment` envelope + opaque attribute map + filesystem (maildir) impl + ordering fold. `comment add --body`/`--body-file` and `comments` CLI with `--json` and a pretty (flat) list. No `CommentStore` trait, no `--attr`, no thread tree yet — those are stories 2–3.
 2. Attribute-schema config (`[comments.attributes]` + `resolution`) with shipped defaults; validation at the `append` boundary; config-driven resolution fold.
 3. Git-ref `CommentStore` impl (blob + namespaced ref, CAS on `update-ref`). Reuse reservation-ref machinery.
 4. `comment_store` config wiring; project default + per-type override.
@@ -182,4 +183,5 @@ Engine: `CommentStore` trait + `Comment` type (envelope + opaque attribute map);
 - **Anchor stability.** Line anchors break on edit; section-slug anchors survive better. Accept slug granularity; whole-doc anchor allowed.
 - **Configurable-attribute cost.** Generic attributes mean the engine can't rely on `kind`/`confidence` existing, and remote adapters must map native fields onto whatever the schema declares. Mitigated by shipping a sensible default schema and validating at `append`; the flexibility matches how document `[[types]]` already work, so it is consistent, not novel surface area.
 - **Scope creep.** This must stay a doc primitive, not become an orchestration engine. The non-goals fence this: no scheduler, no runner, no push daemon.
+
 

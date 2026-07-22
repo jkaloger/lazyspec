@@ -1,7 +1,7 @@
 ---
 title: TUI fuzzy filter with match highlight
 type: story
-status: draft
+status: in-progress
 author: jkaloger
 date: 2026-06-18
 tags: []

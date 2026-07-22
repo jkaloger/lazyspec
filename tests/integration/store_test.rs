@@ -256,9 +256,13 @@ fn store_search_matches_tags() {
     let fixture = setup_fixture();
     let store = fixture.store();
 
+    // "events" is an exact tag on the ADR; under fuzzy matching it is also a
+    // subsequence of the RFC title ("event sourcing"), so both docs surface.
+    // The tag-carrying doc must be among the matches.
     let results = store.search("events", &lazyspec::engine::fs::RealFileSystem);
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].doc.title, "Adopt Event Sourcing");
+    assert!(results
+        .iter()
+        .any(|r| r.doc.title == "Adopt Event Sourcing"));
 }
 
 #[test]

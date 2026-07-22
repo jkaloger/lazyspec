@@ -1,7 +1,7 @@
 ---
 title: "Animated spinner and mascot system for CLI and TUI loading states"
 type: rfc
-status: draft
+status: accepted
 author: "Jack Kaloger"
 date: 2026-07-20
 tags: [tui, cli, ux]

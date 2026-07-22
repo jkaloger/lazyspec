@@ -56,6 +56,7 @@ dirs = { version = "6", optional = true }
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls"] }
 keyring = { version = "4.1.4", features = ["apple-native-keyring-store"] }
 dialoguer = "0.11"
+nucleo = "0.5.0"
 
 [build-dependencies]
 tauri-build = { version = "2", optional = true }
@@ -70,6 +71,12 @@ test-support = []
 
 [profile.dev]
 debug = "line-tables-only"
+
+[profile.dev.package.nucleo]
+opt-level = 3
+
+[profile.dev.package.nucleo-matcher]
+opt-level = 3
 
 [profile.test]
 debug = "line-tables-only"

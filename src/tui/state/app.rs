@@ -240,14 +240,19 @@ fn rule_write(rule: &mut ValidationRule, key: &RuleKey, value: SettingsValue) {
     }
 }
 
-pub struct SearchEntry {
-    pub path: PathBuf,
-    pub searchable: String, // pre-lowercased "title\0tag1\0tag2\0path"
-}
-
 pub struct CreateResult {
     pub path: PathBuf,
     pub doc_type: DocType,
+}
+
+/// One keystroke's worth of work for the background search worker. Carries its
+/// own corpus snapshot so freshness is trivial: every request searches the
+/// store exactly as it stood when the key was handled, and the worker never
+/// borrows `Store` (which lives on the UI thread).
+pub struct SearchRequest {
+    pub corpus: crate::engine::store::SearchCorpus,
+    pub query: String,
+    pub generation: u64,
 }
 
 pub enum AppEvent {
@@ -269,6 +274,10 @@ pub enum AppEvent {
     },
     CreateComplete {
         result: Result<CreateResult, String>,
+    },
+    SearchResults {
+        generation: u64,
+        results: Vec<PathBuf>,
     },
     CacheRefresh {
         warnings: Vec<String>,
@@ -507,6 +516,17 @@ pub struct App {
     pub search_query: String,
     pub search_results: Vec<std::path::PathBuf>,
     pub search_selected: usize,
+    /// True while a search request is in flight on the worker; the overlay
+    /// renders a spinner until the matching-generation results land.
+    pub search_pending: bool,
+    /// Monotonic id stamped onto each dispatched search; results carrying an
+    /// older generation are dropped so a slow search never overwrites a newer
+    /// query's results.
+    pub search_generation: u64,
+    /// Sender to the background search worker (BUG-011). Like `event_tx`, a
+    /// throwaway channel at construction; the event loop rebinds it when it
+    /// spawns the worker, so state code just sends and ignores errors.
+    pub search_tx: crossbeam_channel::Sender<SearchRequest>,
     pub show_help: bool,
     pub help_scroll: u16,
     /// Maximum legal `help_scroll` for the current help content + viewport,
@@ -591,7 +611,6 @@ pub struct App {
         Vec<crate::tui::content::diagram::DiagramBlock>,
     )>,
     pub filtered_docs_cache: Option<Vec<PathBuf>>,
-    pub search_index: Vec<SearchEntry>,
     pub git_branch: Option<String>,
     pub git_status_cache: GitStatusCache,
     pub gh_conflict_message: Option<String>,
@@ -665,6 +684,7 @@ impl App {
         fs: Box<dyn FileSystem>,
     ) -> Self {
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
+        let (search_tx, _search_rx) = crossbeam_channel::unbounded();
         let git_branch = query_git_branch(store.root());
         let git_status_cache = GitStatusCache::new(store.root());
         #[cfg(feature = "agent")]
@@ -693,6 +713,9 @@ impl App {
             search_query: String::new(),
             search_results: Vec::new(),
             search_selected: 0,
+            search_pending: false,
+            search_generation: 0,
+            search_tx,
             show_help: false,
             help_scroll: 0,
             help_max_scroll: 0,
@@ -760,7 +783,6 @@ impl App {
             ascii_diagrams: false,
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
-            search_index: Vec::new(),
             git_branch,
             git_status_cache,
             gh_conflict_message: None,
@@ -795,7 +817,6 @@ impl App {
             frame_idx: 0,
         };
         app.apply_config(config);
-        app.rebuild_search_index();
         app.refresh_available_tags();
         app.build_doc_tree();
         app
@@ -852,7 +873,6 @@ impl App {
         self.validation_warnings
             .extend(self.gh_fetch_warnings.iter().cloned());
         self.filtered_docs_cache = None;
-        self.rebuild_search_index();
     }
 
     pub fn cycle_mode(&mut self) {
@@ -1820,27 +1840,6 @@ impl App {
         self.refresh_available_tags();
     }
 
-    pub fn rebuild_search_index(&mut self) {
-        self.search_index = self
-            .store
-            .all_docs()
-            .iter()
-            .map(|doc| {
-                let mut searchable = doc.title.to_lowercase();
-                for tag in &doc.tags {
-                    searchable.push('\0');
-                    searchable.push_str(&tag.to_lowercase());
-                }
-                searchable.push('\0');
-                searchable.push_str(&doc.path.to_string_lossy().to_lowercase());
-                SearchEntry {
-                    path: doc.path.clone(),
-                    searchable,
-                }
-            })
-            .collect();
-    }
-
     pub fn reset_filters(&mut self) {
         self.filter_status = None;
         self.filter_tag = None;
@@ -2218,6 +2217,8 @@ impl App {
         self.search_query.clear();
         self.search_results.clear();
         self.search_selected = 0;
+        self.search_pending = false;
+        self.search_generation = self.search_generation.wrapping_add(1);
     }
 
     pub fn exit_search(&mut self) {
@@ -2225,25 +2226,67 @@ impl App {
         self.search_query.clear();
         self.search_results.clear();
         self.search_selected = 0;
+        self.search_pending = false;
+        self.search_generation = self.search_generation.wrapping_add(1);
     }
 
+    /// Dispatch the current query to the background search worker (BUG-011):
+    /// scoring 700+ full bodies per keystroke blocked the event loop, so the UI
+    /// thread only snapshots the corpus (a cheap clone via the engine body
+    /// cache) and stamps a fresh generation; results arrive later as
+    /// [`AppEvent::SearchResults`] and are applied by [`apply_search_results`].
+    /// The generation bump on an empty query invalidates any in-flight search
+    /// so its late results cannot repopulate a cleared list.
+    ///
+    /// Fuzzy, ranked results still come from the shared engine scorer
+    /// (STORY-129): the TUI never owns the matching algorithm.
     pub fn update_search(&mut self) {
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_selected = 0;
+
         if self.search_query.is_empty() {
             self.search_results.clear();
-            self.search_selected = 0;
+            self.search_pending = false;
             return;
         }
 
-        let query = self.search_query.to_lowercase();
-        let mut results: Vec<_> = self
-            .search_index
-            .iter()
-            .filter(|e| e.searchable.contains(&query))
-            .map(|e| e.path.clone())
-            .collect();
-        results.sort();
+        self.search_pending = true;
+        let corpus = self.store.search_corpus(&*self.fs);
+        let _ = self.search_tx.send(SearchRequest {
+            corpus,
+            query: self.search_query.clone(),
+            generation: self.search_generation,
+        });
+    }
+
+    /// Apply worker results, dropping them silently when the generation is
+    /// stale (a newer keystroke has already superseded the query).
+    pub fn apply_search_results(&mut self, generation: u64, results: Vec<std::path::PathBuf>) {
+        if generation != self.search_generation {
+            return;
+        }
         self.search_results = results;
         self.search_selected = 0;
+        self.search_pending = false;
+    }
+
+    /// Test-only synchronous search: dispatch, then run the corpus search
+    /// inline and apply, so ranking tests exercise the exact production path
+    /// (corpus snapshot -> engine scorer -> apply) without a worker thread.
+    #[cfg(test)]
+    pub(crate) fn run_search_now(&mut self) {
+        self.update_search();
+        if self.search_query.is_empty() {
+            return;
+        }
+        let results = self
+            .store
+            .search_corpus(&*self.fs)
+            .search(&self.search_query)
+            .into_iter()
+            .map(|r| r.path)
+            .collect();
+        self.apply_search_results(self.search_generation, results);
     }
 
     pub fn select_search_result(&mut self) {
@@ -2573,7 +2616,6 @@ impl App {
         // Reload again to pick up the relation changes
         let _ = self.store.reload_file(root, &relative, &*self.fs);
         self.filtered_docs_cache = None;
-        self.rebuild_search_index();
 
         let doc_type = self.create_form.doc_type.clone();
         if let Some(type_idx) = self.doc_types.iter().position(|t| *t == doc_type) {
@@ -2626,7 +2668,6 @@ impl App {
         )?;
         self.store.remove_file(&doc_path);
         self.filtered_docs_cache = None;
-        self.rebuild_search_index();
 
         self.close_delete_confirm();
         self.build_doc_tree();
@@ -2916,7 +2957,6 @@ impl App {
         }
         self.store.reload_file(root, &doc_path, &*self.fs)?;
         self.filtered_docs_cache = None;
-        self.rebuild_search_index();
         self.build_doc_tree();
         self.status_picker.error = None;
         self.close_status_picker();
@@ -3088,7 +3128,6 @@ impl App {
 
         self.store.reload_file(root, &doc_path, &*self.fs)?;
         self.filtered_docs_cache = None;
-        self.rebuild_search_index();
         self.build_doc_tree();
         self.close_provenance_editor();
         Ok(())
@@ -3202,7 +3241,6 @@ impl App {
         // not the viewed doc. Reload whichever file actually changed.
         self.store.reload_file(root, &outcome.source, &*self.fs)?;
         self.filtered_docs_cache = None;
-        self.rebuild_search_index();
         self.build_doc_tree();
         self.link_editor.error = None;
         self.close_link_editor();
@@ -3448,6 +3486,7 @@ pub(crate) mod parity_seed {
         let tmp = TempDir::new().unwrap();
         let store = Store::load(tmp.path(), &Config::default()).unwrap();
         let (tx, _rx) = crossbeam_channel::unbounded();
+        let (search_tx, _search_rx) = crossbeam_channel::unbounded();
         #[cfg(feature = "agent")]
         let agent_spawner = AgentSpawner::new(store.root());
         let config = Config::default();
@@ -3467,6 +3506,9 @@ pub(crate) mod parity_seed {
             search_query: String::new(),
             search_results: Vec::new(),
             search_selected: 0,
+            search_pending: false,
+            search_generation: 0,
+            search_tx,
             show_help: false,
             help_scroll: 0,
             help_max_scroll: 0,
@@ -3534,7 +3576,6 @@ pub(crate) mod parity_seed {
             ascii_diagrams: false,
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
-            search_index: Vec::new(),
             git_branch: None,
             git_status_cache: GitStatusCache::new(tmp.path()),
             gh_conflict_message: None,
@@ -3615,7 +3656,6 @@ pub(crate) mod parity_seed {
         }
 
         app.store = Store::load(&root, &Config::default()).unwrap();
-        app.rebuild_search_index();
         app.build_doc_tree();
     }
 
@@ -3720,7 +3760,7 @@ pub(crate) mod parity_seed {
                 populate_docs(&mut app);
                 app.search_mode = true;
                 app.search_query = "title".to_string();
-                app.update_search(); // results non-empty
+                app.run_search_now(); // results non-empty (search is async in prod)
                 app.search_selected = 1; // middle: Up and Down both move
             }
             KeyContext::Fullscreen => {
@@ -3922,9 +3962,11 @@ mod tests {
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
             related_relationships: vec!["related-to".to_string()],
+            body_cache: std::sync::Mutex::new(HashMap::new()),
         };
 
         let (tx, _rx) = crossbeam_channel::unbounded();
+        let (search_tx, _search_rx) = crossbeam_channel::unbounded();
         let config = Config::default();
 
         #[cfg(feature = "agent")]
@@ -3946,6 +3988,9 @@ mod tests {
             search_query: String::new(),
             search_results: Vec::new(),
             search_selected: 0,
+            search_pending: false,
+            search_generation: 0,
+            search_tx,
             show_help: false,
             help_scroll: 0,
             help_max_scroll: 0,
@@ -4013,7 +4058,6 @@ mod tests {
             ascii_diagrams: false,
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
-            search_index: Vec::new(),
             git_branch: None,
             git_status_cache: GitStatusCache::new(Path::new(".")),
             gh_conflict_message: None,
@@ -4258,6 +4302,7 @@ mod tests {
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
             related_relationships: vec!["related-to".to_string()],
+            body_cache: std::sync::Mutex::new(HashMap::new()),
         };
 
         let meta_a = DocMeta {
@@ -5127,6 +5172,226 @@ mod tests {
         let mut app = make_test_app(0);
         app.store = store;
         (tmp, app)
+    }
+
+    /// An rfc doc with an explicit `title` and `body` and no tags, so a search
+    /// test controls exactly which surface (title vs body) a query can match.
+    fn titled_doc(title: &str, body: &str) -> String {
+        format!(
+            "---\ntitle: \"{title}\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\n---\n\n{body}\n"
+        )
+    }
+
+    /// Titles of the current `search_results`, in result order.
+    fn result_titles(app: &App) -> Vec<String> {
+        app.search_results
+            .iter()
+            .map(|p| app.store.get(p).unwrap().title.clone())
+            .collect()
+    }
+
+    // AC: a query whose chars appear in a title in order but not contiguously
+    // ("tff" in "tui fuzzy filter") is kept -- the old `.contains()` filter would
+    // have dropped it.
+    #[test]
+    fn update_search_keeps_non_contiguous_title_subsequence() {
+        let (_tmp, mut app) = app_with_store(&[(
+            "docs/rfcs/RFC-001-a.md",
+            &titled_doc("tui fuzzy filter", "unrelated body"),
+        )]);
+
+        app.search_query = "tff".to_string();
+        app.run_search_now();
+
+        assert_eq!(result_titles(&app), vec!["tui fuzzy filter".to_string()]);
+    }
+
+    // AC: rows are ordered by relevance score descending. The strong (exact)
+    // match sits at the LATER-sorting path, so leading it proves the order comes
+    // from score, not the path tie-break.
+    #[test]
+    fn update_search_orders_by_relevance_score_descending() {
+        let (_tmp, mut app) = app_with_store(&[
+            ("docs/rfcs/RFC-001-a.md", &titled_doc("xfxuxzxzxyx", "b1")),
+            ("docs/rfcs/RFC-002-b.md", &titled_doc("fuzzy", "b2")),
+        ]);
+
+        app.search_query = "fuzzy".to_string();
+        app.run_search_now();
+
+        assert_eq!(
+            result_titles(&app),
+            vec!["fuzzy".to_string(), "xfxuxzxzxyx".to_string()]
+        );
+    }
+
+    // AC: a query that fuzzy-matches only within a body (not title/tags/path)
+    // still surfaces the document.
+    #[test]
+    fn update_search_surfaces_body_only_match() {
+        let (_tmp, mut app) = app_with_store(&[(
+            "docs/rfcs/RFC-001-a.md",
+            &titled_doc("hello", "the quadratic solver lives here"),
+        )]);
+
+        app.search_query = "quadratic".to_string();
+        app.run_search_now();
+
+        assert_eq!(result_titles(&app), vec!["hello".to_string()]);
+    }
+
+    // AC: a query nothing fuzzy-matches yields an empty list -- non-matches are
+    // dropped by the engine's score floor, not shown unhighlighted.
+    #[test]
+    fn update_search_empty_when_nothing_matches() {
+        let (_tmp, mut app) =
+            app_with_store(&[("docs/rfcs/RFC-001-a.md", &titled_doc("hello", "world body"))]);
+
+        app.search_query = "zzqqww".to_string();
+        app.run_search_now();
+
+        assert!(app.search_results.is_empty());
+    }
+
+    // AC (BUG-011 a): each dispatch marks the search pending and bumps the
+    // generation, and the request lands on the worker channel with that
+    // generation and the current query.
+    #[test]
+    fn update_search_marks_pending_and_bumps_generation() {
+        let (_tmp, mut app) =
+            app_with_store(&[("docs/rfcs/RFC-001-a.md", &titled_doc("hello", "body"))]);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.search_tx = tx;
+
+        let before = app.search_generation;
+        app.search_query = "hel".to_string();
+        app.update_search();
+
+        assert!(app.search_pending);
+        assert_eq!(app.search_generation, before + 1);
+        let req = rx.try_recv().expect("a request is dispatched");
+        assert_eq!(req.query, "hel");
+        assert_eq!(req.generation, app.search_generation);
+    }
+
+    // AC (BUG-011 b): results stamped with a stale generation are dropped
+    // silently -- current results and the pending flag stay untouched.
+    #[test]
+    fn stale_generation_results_are_dropped() {
+        let (_tmp, mut app) =
+            app_with_store(&[("docs/rfcs/RFC-001-a.md", &titled_doc("hello", "body"))]);
+
+        app.search_query = "hel".to_string();
+        app.update_search();
+        app.search_query = "hell".to_string();
+        app.update_search();
+
+        let stale = app.search_generation - 1;
+        app.apply_search_results(stale, vec![PathBuf::from("docs/rfcs/RFC-001-a.md")]);
+
+        assert!(app.search_results.is_empty(), "stale results not applied");
+        assert!(app.search_pending, "still waiting on the live generation");
+    }
+
+    // AC (BUG-011 c): matching-generation results are applied and clear the
+    // pending flag (which also clears the overlay spinner).
+    #[test]
+    fn matching_generation_results_apply_and_clear_pending() {
+        let (_tmp, mut app) =
+            app_with_store(&[("docs/rfcs/RFC-001-a.md", &titled_doc("hello", "body"))]);
+
+        app.search_query = "hel".to_string();
+        app.update_search();
+        app.search_selected = 3;
+
+        let path = PathBuf::from("docs/rfcs/RFC-001-a.md");
+        app.apply_search_results(app.search_generation, vec![path.clone()]);
+
+        assert_eq!(app.search_results, vec![path]);
+        assert!(!app.search_pending);
+        assert_eq!(app.search_selected, 0);
+    }
+
+    // AC (BUG-011 d): an empty query clears results immediately without going
+    // pending or dispatching to the worker; the generation bump invalidates any
+    // in-flight search so its late results cannot repopulate the cleared list.
+    #[test]
+    fn empty_query_clears_results_without_pending() {
+        let (_tmp, mut app) =
+            app_with_store(&[("docs/rfcs/RFC-001-a.md", &titled_doc("hello", "body"))]);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.search_tx = tx;
+
+        app.search_query = "hel".to_string();
+        app.run_search_now();
+        assert!(!app.search_results.is_empty());
+        let in_flight = app.search_generation;
+        let _ = rx.try_recv();
+
+        app.search_query.clear();
+        app.update_search();
+
+        assert!(app.search_results.is_empty());
+        assert!(!app.search_pending);
+        assert!(rx.try_recv().is_err(), "empty query dispatches nothing");
+
+        app.apply_search_results(in_flight, vec![PathBuf::from("docs/rfcs/RFC-001-a.md")]);
+        assert!(
+            app.search_results.is_empty(),
+            "late results for the pre-clear query stay dropped"
+        );
+    }
+
+    // AC: the characters that matched are visually highlighted in the rendered
+    // row. The matched title chars render bold + yellow; an unmatched title char
+    // does not.
+    #[test]
+    fn search_overlay_highlights_matched_title_chars() {
+        use crate::tui::views::StatusPalette;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (_tmp, mut app) =
+            app_with_store(&[("docs/rfcs/RFC-001-a.md", &titled_doc("fuzzy", "body"))]);
+        app.search_mode = true;
+        app.search_query = "fzy".to_string(); // matches f(0) z(2) y(4) of "fuzzy"
+        app.run_search_now();
+        assert_eq!(app.search_results.len(), 1);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let palette = StatusPalette::default();
+        terminal
+            .draw(|f| crate::tui::views::overlays::draw_search_overlay(f, &app, &palette))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let mut matched_cells = 0usize;
+        let mut plain_u = false;
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = buffer.cell((x, y)).unwrap();
+                let sym = cell.symbol();
+                let highlighted = cell.fg == ratatui::style::Color::Yellow
+                    && cell.modifier.contains(ratatui::style::Modifier::BOLD);
+                if (sym == "f" || sym == "z" || sym == "y") && highlighted {
+                    matched_cells += 1;
+                }
+                // The 'u' at index 1 of "fuzzy" is NOT part of the match, so it
+                // must render without the highlight style.
+                if sym == "u" && !highlighted {
+                    plain_u = true;
+                }
+            }
+        }
+
+        assert!(
+            matched_cells >= 3,
+            "matched title chars f/z/y should render highlighted (yellow+bold)"
+        );
+        assert!(
+            plain_u,
+            "the unmatched 'u' should render without the highlight style"
+        );
     }
 
     /// The `DocMeta` whose id matches, cloned out of the store.

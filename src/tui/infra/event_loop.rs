@@ -482,7 +482,6 @@ fn reload_session(
     app.refresh_validation(config);
     // Mirror the cache resets the CacheRefresh and GhPushResult(Ok) arms perform.
     app.filtered_docs_cache = None;
-    app.rebuild_search_index();
     app.build_doc_tree();
     app.git_status_cache.invalidate();
     app.expanded_body_cache.clear();
@@ -552,7 +551,6 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
             app.last_sync = Some(Instant::now());
             app.gh_fetch_warnings = warnings;
             app.filtered_docs_cache = None;
-            app.rebuild_search_index();
             app.refresh_validation(config);
         }
         AppEvent::GhPushResult(result) => {
@@ -564,7 +562,6 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                         app.store = refreshed;
                     }
                     app.filtered_docs_cache = None;
-                    app.rebuild_search_index();
                     app.refresh_validation(config);
                     app.expanded_body_cache.clear();
                     app.disk_cache.clear();
@@ -573,6 +570,12 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                     app.gh_conflict_message = Some(msg);
                 }
             }
+        }
+        AppEvent::SearchResults {
+            generation,
+            results,
+        } => {
+            app.apply_search_results(generation, results);
         }
         AppEvent::CreateStarted => {}
         AppEvent::CreateProgress { message, state } => {
@@ -589,7 +592,6 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                 Ok(create_result) => {
                     let _ = app.store.reload_file(root, &create_result.path, &*app.fs);
                     app.filtered_docs_cache = None;
-                    app.rebuild_search_index();
                     if let Some(type_idx) = app
                         .doc_types
                         .iter()
@@ -671,6 +673,38 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
 
     let (tx, rx) = crossbeam_channel::unbounded();
     app.event_tx = tx.clone();
+
+    // Background search worker (BUG-011): fuzzy-scoring every doc body takes
+    // tens of milliseconds, which blocked the event loop when run per keystroke.
+    // The worker owns each request's corpus snapshot (DICTUM-007: threads never
+    // touch App state; messages only) and drains the channel to the newest
+    // request before searching, so a burst of keystrokes costs one search.
+    // Results carry their generation; the handler drops stale ones.
+    let (search_tx, search_rx) = crossbeam_channel::unbounded::<crate::tui::state::SearchRequest>();
+    app.search_tx = search_tx;
+    let search_result_tx = tx.clone();
+    std::thread::spawn(move || {
+        while let Ok(mut req) = search_rx.recv() {
+            while let Ok(newer) = search_rx.try_recv() {
+                req = newer;
+            }
+            let results: Vec<std::path::PathBuf> = req
+                .corpus
+                .search(&req.query)
+                .into_iter()
+                .map(|r| r.path)
+                .collect();
+            if search_result_tx
+                .send(AppEvent::SearchResults {
+                    generation: req.generation,
+                    results,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
 
     let shared_gh_store: Option<Arc<Mutex<GithubIssuesStore>>> =
         if crate::tui::has_pollable_types(&config) {

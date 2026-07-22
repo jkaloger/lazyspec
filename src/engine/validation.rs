@@ -1260,6 +1260,7 @@ mod attr_schema_tests {
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
             related_relationships: vec!["related-to".to_string()],
+            body_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -1355,6 +1356,7 @@ mod attr_schema_tests {
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
             related_relationships: vec!["related-to".to_string()],
+            body_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -1502,6 +1504,7 @@ mod unknown_relationship_tests {
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
             related_relationships: vec!["related-to".to_string()],
+            body_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -1590,6 +1593,7 @@ mod parent_link_chain_tests {
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
             related_relationships: vec!["related-to".to_string()],
+            body_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
