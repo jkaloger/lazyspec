@@ -1,7 +1,7 @@
 ---
 title: GitHub-native blocks read-back on fetch
 type: iteration
-status: in-progress
+status: complete
 author: jkaloger
 date: 2026-07-22
 tags: []
