@@ -1,7 +1,7 @@
 ---
 title: Sub-issue native write path via link/unlink
 type: iteration
-status: in-progress
+status: complete
 author: unknown
 date: 2026-07-24
 tags: []

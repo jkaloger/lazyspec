@@ -414,11 +414,25 @@ impl IssueCache {
             parsed.push(Parsed { id, meta, body });
         }
 
+        // Native sub-issue edges split by this type's shape. A flat (non-subdir)
+        // type with a sub-issue-native relationship reads the edge back as that
+        // relation (child holds the forward name toward its parent) instead of
+        // nesting; every other type keeps materializing nested docs
+        // (ITERATION-224). The two are mutually exclusive, so nesting is skipped
+        // entirely in relation-injection mode.
+        let subissue_rel = config.relationship_by_github_native("sub-issue");
+        let inject_subissue_relation = subissue_rel.is_some() && !type_def.subdirectory;
+
         // Best-effort: learn remote native sub-issue parentage so we can write
         // the nested cache layout. A GraphQL failure warns and falls back to a
         // flat layout for the affected parent; it never aborts the fetch.
-        let (parentage, subissue_warnings) = fetch_subissue_parentage(gh_graphql, &node_to_doc);
-        warnings.extend(subissue_warnings);
+        let parentage = if inject_subissue_relation {
+            ParentageMap::new()
+        } else {
+            let (parentage, subissue_warnings) = fetch_subissue_parentage(gh_graphql, &node_to_doc);
+            warnings.extend(subissue_warnings);
+            parentage
+        };
 
         // Best-effort: read each issue's native blocked-by dependencies and
         // inject the declared inverse relation (`blocked-by`) toward each
@@ -462,6 +476,42 @@ impl IssueCache {
                             target,
                         });
                     }
+                }
+            }
+        }
+
+        // Flat-doc read-back: inject the sub-issue-native relation on each child
+        // toward its remote parent (the forward name; the parent's inverse is
+        // derived in the graph, never stored -- mirrors the dependency path). A
+        // dropped remote edge simply yields no parent on re-fetch, so the
+        // relation vanishes with the authoritative rebuild, no duplicates.
+        if let Some(rel) = subissue_rel.filter(|_| inject_subissue_relation) {
+            let (parent_by_child, parent_warnings) =
+                fetch_subissue_parent_numbers(gh_graphql, &node_to_doc);
+            warnings.extend(parent_warnings);
+            // number -> doc id for the in-flight batch, so a same-type parent
+            // resolves before the batch is written into the issue map; cross-type
+            // parents resolve via the map once their type has fetched (the same
+            // ordering caveat milestones and dependencies carry).
+            let batch: std::collections::HashMap<u64, String> = issues
+                .iter()
+                .zip(parsed.iter())
+                .map(|(issue, p)| (issue.number, p.id.clone()))
+                .collect();
+            for (issue, p) in issues.iter().zip(parsed.iter_mut()) {
+                let Some(parent_number) = parent_by_child.get(&issue.id) else {
+                    continue;
+                };
+                let target = batch.get(parent_number).cloned().or_else(|| {
+                    issue_map
+                        .shorthand_for_number(*parent_number)
+                        .map(String::from)
+                });
+                if let Some(target) = target {
+                    p.meta.related.push(Relation {
+                        rel_type: RelationType::new(&rel.name),
+                        target,
+                    });
                 }
             }
         }
@@ -685,6 +735,32 @@ fn fetch_subissue_parentage(
             if !children.is_empty() {
                 map.insert(parent_doc.clone(), children);
             }
+        }
+    }
+    (map, warnings)
+}
+
+/// Best-effort batched read of each fetched issue's native sub-issue parent
+/// number, keyed by the child's node id. Chunked to `SUB_ISSUE_BATCH_MAX`; a
+/// chunk's GraphQL failure warns and skips that chunk rather than aborting the
+/// fetch. Feeds the flat-doc relation read-back, mirroring the dependency path.
+fn fetch_subissue_parent_numbers(
+    gh_graphql: &dyn GhGraphql,
+    node_to_doc: &std::collections::HashMap<String, String>,
+) -> (std::collections::HashMap<String, u64>, Vec<RefreshWarning>) {
+    let mut map = std::collections::HashMap::new();
+    let mut warnings = Vec::new();
+    let child_nodes: Vec<String> = node_to_doc.keys().cloned().collect();
+    for chunk in child_nodes.chunks(gh_subissue::SUB_ISSUE_BATCH_MAX) {
+        match gh_subissue::fetch_sub_issue_parent_numbers_batch(gh_graphql, chunk) {
+            Ok(m) => map.extend(m),
+            Err(e) => warnings.push(RefreshWarning {
+                message: format!(
+                    "could not read sub-issue parents for {} issues, skipping relation injection: {}",
+                    chunk.len(),
+                    e
+                ),
+            }),
         }
     }
     (map, warnings)
@@ -3687,6 +3763,291 @@ mod tests {
         let mut ids = cache.list_cached("story");
         ids.sort();
         assert_eq!(ids, vec!["STORY-100", "STORY-11"]);
+    }
+
+    // --- STORY-245: relationship read-back for flat (non-subdir) docs ---
+
+    /// GhIssueReader + GhGraphql fake for the flat-doc relation read-back path.
+    /// Answers the batched `parent { number }` query, mapping each requested
+    /// child node to its remote parent's issue number; a query without an `ids`
+    /// var is the schema-snapshot refresh and returns an empty issue-types
+    /// response. Mirrors `NestingReader` but walks the parent edge.
+    struct ParentReader {
+        issues: Vec<GhIssue>,
+        parent_number_by_node: std::collections::HashMap<String, u64>,
+    }
+
+    impl ParentReader {
+        fn new(issues: Vec<GhIssue>, parents: &[(&str, u64)]) -> Self {
+            Self {
+                issues,
+                parent_number_by_node: parents
+                    .iter()
+                    .map(|(node, num)| (node.to_string(), *num))
+                    .collect(),
+            }
+        }
+    }
+
+    impl GhIssueReader for ParentReader {
+        fn issue_list(
+            &self,
+            _repo: &str,
+            _labels: &[String],
+            _json_fields: &[String],
+            _limit: Option<u64>,
+        ) -> Result<Vec<GhIssue>> {
+            Ok(self.issues.clone())
+        }
+        fn issue_view(&self, _repo: &str, _number: u64) -> Result<GhIssue> {
+            unimplemented!()
+        }
+        fn issue_comments(
+            &self,
+            _repo: &str,
+            _number: u64,
+        ) -> Result<Vec<crate::engine::gh::GhComment>> {
+            unimplemented!()
+        }
+    }
+
+    impl GhGraphql for ParentReader {
+        fn graphql(&self, _query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+            let ids = vars
+                .iter()
+                .find(|(k, _)| *k == "ids")
+                .and_then(|(_, v)| match v {
+                    GqlVar::StrList(l) => Some(l.clone()),
+                    _ => None,
+                });
+            let Some(ids) = ids else {
+                return Ok(empty_issue_types_response());
+            };
+            let nodes: Vec<serde_json::Value> = ids
+                .iter()
+                .map(|node| match self.parent_number_by_node.get(node) {
+                    Some(num) => serde_json::json!({"id": node, "parent": {"number": num}}),
+                    None => serde_json::json!({"id": node, "parent": null}),
+                })
+                .collect();
+            Ok(serde_json::json!({"data": {"nodes": nodes}}))
+        }
+        fn project_item_fields(
+            &self,
+            _repo: &str,
+            _content_node_id: &str,
+        ) -> Result<Vec<crate::engine::gh::ProjectFieldValue>> {
+            Ok(vec![])
+        }
+        fn update_project_v2_item_field_value(
+            &self,
+            _project_id: &str,
+            _item_id: &str,
+            _field_id: &str,
+            _value: &crate::engine::gh::GhFieldValueInput,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn clear_project_field(
+            &self,
+            _project_id: &str,
+            _item_id: &str,
+            _field_id: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl GhIssueDependencyApi for ParentReader {
+        fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
+            Ok(vec![])
+        }
+        fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
+            unimplemented!()
+        }
+        fn remove_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
+    fn subissue_relationship() -> crate::engine::config::RelationshipDef {
+        crate::engine::config::RelationshipDef {
+            name: "implements".to_string(),
+            inverse: Some("implemented-by".to_string()),
+            github_native: Some("sub-issue".to_string()),
+            traversal: None,
+        }
+    }
+
+    fn subdir_story_type_def() -> TypeDef {
+        TypeDef {
+            subdirectory: true,
+            ..story_type_def()
+        }
+    }
+
+    fn config_with_subissue_rel(type_def: TypeDef) -> Config {
+        let mut config = Config::default();
+        config.documents.types = vec![type_def];
+        config.relationships = vec![subissue_relationship()];
+        config
+    }
+
+    fn fetch_typed<R>(
+        cache: &IssueCache,
+        tmp: &TempDir,
+        gh: &R,
+        issue_map: &mut IssueMap,
+        type_def: TypeDef,
+        config: &Config,
+    ) -> FetchResult
+    where
+        R: GhIssueReader + GhGraphql + GhIssueDependencyApi,
+    {
+        cache
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                gh,
+                gh,
+                gh,
+                "owner/repo",
+                issue_map,
+                &[story_match_rule()],
+                config,
+            )
+            .unwrap()
+    }
+
+    // AC4: a native sub-issue edge between two flat docs reads back as the
+    // configured relation on the child (forward name toward its parent), and the
+    // docs stay flat -- no subdir nesting.
+    #[test]
+    fn fetch_injects_subissue_relation_on_flat_child_instead_of_nesting() {
+        let (cache, tmp) = make_cache();
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        // STORY-11 (I_a) is a native sub-issue of STORY-100 (#100).
+        let gh = ParentReader::new(
+            vec![issue_with_node(100, "I_parent"), issue_with_node(11, "I_a")],
+            &[("I_a", 100)],
+        );
+        let config = config_with_subissue_rel(story_type_def());
+        fetch_typed(&cache, &tmp, &gh, &mut issue_map, story_type_def(), &config);
+
+        let story_dir = tmp.path().join(".lazyspec/cache/story");
+        assert!(story_dir.join("STORY-11.md").is_file(), "child stays flat");
+        assert!(
+            story_dir.join("STORY-100.md").is_file(),
+            "parent stays flat"
+        );
+        assert!(
+            !story_dir.join("STORY-100").exists(),
+            "no nesting folder is created"
+        );
+
+        // The child carries the forward relation toward its parent.
+        let child = std::fs::read_to_string(story_dir.join("STORY-11.md")).unwrap();
+        assert!(
+            child.contains("implements: STORY-100"),
+            "child must carry the forward sub-issue relation, got:\n{child}"
+        );
+        // The parent stores nothing: its `implemented-by` inverse is virtual.
+        let parent = std::fs::read_to_string(story_dir.join("STORY-100.md")).unwrap();
+        assert!(
+            !parent.contains("implemented-by") && !parent.contains("implements:"),
+            "parent must not store the relation, got:\n{parent}"
+        );
+    }
+
+    // AC5: a subdir-type parent keeps materializing nested docs even when a
+    // sub-issue-native relationship is configured -- the subdir path wins.
+    #[test]
+    fn fetch_subdir_type_still_nests_even_with_subissue_relation() {
+        let (cache, tmp) = make_cache();
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let gh = NestingReader::new(
+            vec![issue_with_node(100, "I_parent"), issue_with_node(11, "I_a")],
+            &[("I_parent", &["I_a"])],
+        );
+        let config = config_with_subissue_rel(subdir_story_type_def());
+        fetch_typed(
+            &cache,
+            &tmp,
+            &gh,
+            &mut issue_map,
+            subdir_story_type_def(),
+            &config,
+        );
+
+        let story_dir = tmp.path().join(".lazyspec/cache/story");
+        assert!(
+            story_dir.join("STORY-100/index.md").is_file(),
+            "parent index.md materialized"
+        );
+        assert!(
+            story_dir.join("STORY-100/00-STORY-11.md").is_file(),
+            "child nested under parent"
+        );
+        // Nested, not related: no injected relation on the child.
+        let child = std::fs::read_to_string(story_dir.join("STORY-100/00-STORY-11.md")).unwrap();
+        assert!(
+            !child.contains("implements:"),
+            "subdir child must not carry an injected relation, got:\n{child}"
+        );
+    }
+
+    // AC4 (drop case): a native sub-issue edge removed on the remote drops the
+    // injected relation on re-fetch, with no duplicate cache entries.
+    #[test]
+    fn refetch_drops_subissue_relation_when_edge_removed_no_duplicates() {
+        let (cache, tmp) = make_cache();
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let config = config_with_subissue_rel(story_type_def());
+        let story_dir = tmp.path().join(".lazyspec/cache/story");
+
+        // First fetch: STORY-11 is a native sub-issue of STORY-100.
+        let first = ParentReader::new(
+            vec![issue_with_node(100, "I_parent"), issue_with_node(11, "I_a")],
+            &[("I_a", 100)],
+        );
+        fetch_typed(
+            &cache,
+            &tmp,
+            &first,
+            &mut issue_map,
+            story_type_def(),
+            &config,
+        );
+        assert!(std::fs::read_to_string(story_dir.join("STORY-11.md"))
+            .unwrap()
+            .contains("implements: STORY-100"));
+
+        // Second fetch: the edge is gone on the remote.
+        let second = ParentReader::new(
+            vec![issue_with_node(100, "I_parent"), issue_with_node(11, "I_a")],
+            &[],
+        );
+        fetch_typed(
+            &cache,
+            &tmp,
+            &second,
+            &mut issue_map,
+            story_type_def(),
+            &config,
+        );
+
+        let child = std::fs::read_to_string(story_dir.join("STORY-11.md")).unwrap();
+        assert!(
+            !child.contains("implements"),
+            "relation dropped on re-fetch, got:\n{child}"
+        );
+        let mut ids = cache.list_cached("story");
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["STORY-100", "STORY-11"],
+            "no duplicate cache entries"
+        );
     }
 
     // --- STORY-209: crash-safe persistence ---
