@@ -858,25 +858,42 @@ fn parse_issue(
         return (meta, body);
     }
 
-    let status = if issue.state.eq_ignore_ascii_case("open") {
-        Status::new(open_status)
+    let mut meta = fallback_meta(issue, &ctx);
+    insert_issue_type(&mut meta, issue);
+    inject_milestone_target(&mut meta, issue, milestone_rel, issue_map);
+    inject_assignee(&mut meta, issue);
+
+    (meta, issue.body.clone())
+}
+
+/// Meta synthesized from the remote issue's own fields, for bodies that carry
+/// no lazyspec HTML comment (e.g. GitHub-authored issues): labels drive type +
+/// tags, open/closed state drives the lifecycle status, and `related` starts
+/// empty.
+pub(crate) fn fallback_meta(issue: &GhIssue, ctx: &IssueContext) -> DocMeta {
+    let status = if ctx.is_open {
+        Status::new(&ctx.open_status)
     } else {
-        Status::new(closed_status)
+        Status::new(&ctx.closed_status)
     };
 
     let (doc_type, tags) = issue_body::extract_type_and_tags(
         &ctx.labels,
-        known_types,
+        &ctx.known_types,
         issue.issue_type.as_deref(),
-        type_name,
+        &ctx.default_type,
     );
 
-    let mut meta = DocMeta {
+    DocMeta {
         path: PathBuf::new(),
         title: issue.title.clone(),
         doc_type,
         status,
-        author: author.clone(),
+        author: issue
+            .author
+            .as_ref()
+            .map(|a| format!("@{}", a.login))
+            .unwrap_or_else(|| "unknown".to_string()),
         date: parse_created_date(&issue.created_at),
         tags,
         provenance: vec![],
@@ -886,12 +903,7 @@ fn parse_issue(
         assignee: None,
         attributes: Default::default(),
         id: String::new(),
-    };
-    insert_issue_type(&mut meta, issue);
-    inject_milestone_target(&mut meta, issue, milestone_rel, issue_map);
-    inject_assignee(&mut meta, issue);
-
-    (meta, issue.body.clone())
+    }
 }
 
 /// Surface an issue's native GitHub milestone as a forward relation (the

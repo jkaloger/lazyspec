@@ -11,7 +11,7 @@ use crate::engine::document::{compose_frontmatter, AttrValue, DocMeta, DocType, 
 use crate::engine::gh::{self, GhClient, GhGraphql, GhMilestoneClient, GhProjectsClient, GqlVar};
 use crate::engine::gh_schema::{try_org_then_user, GhSchemaSnapshot};
 use crate::engine::issue_body;
-use crate::engine::issue_cache::IssueCache;
+use crate::engine::issue_cache::{self, IssueCache};
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store::{self, Store};
 use crate::engine::task_map::TaskMap;
@@ -688,7 +688,16 @@ impl GithubIssuesStore {
                 .to_string(),
             closed_status: type_def.effective_lifecycle().terminal_status().to_string(),
         };
-        let (mut remote_meta, remote_prose) = issue_body::deserialize(&remote_issue.body, &ctx)?;
+        // A body without a lazyspec comment (GitHub-authored issue) is adopted:
+        // synthesize meta from the issue's own fields and keep the whole body
+        // as prose, so this write plants the comment.
+        let (mut remote_meta, remote_prose) = issue_body::deserialize(&remote_issue.body, &ctx)
+            .unwrap_or_else(|_| {
+                (
+                    issue_cache::fallback_meta(&remote_issue, &ctx),
+                    remote_issue.body.clone(),
+                )
+            });
 
         let rel_type = crate::engine::document::RelationType::new(rel_str);
         let already_present = remote_meta
@@ -5275,6 +5284,245 @@ mod tests {
         assert!(
             gh_store.mock().last_edit_body.borrow().is_none(),
             "already-present relation must not trigger an issue_edit"
+        );
+    }
+
+    // BUG-014 / AC1: a remote issue whose body has NO lazyspec comment (empty /
+    // null body, e.g. a GitHub-authored issue) must still accept an ordinary
+    // relation link -- the merge synthesizes meta from the remote issue fields
+    // and pushes a body carrying the lazyspec comment plus the relation.
+    #[test]
+    fn merge_relation_to_remote_empty_body_gains_comment_and_relation() {
+        let root = tmp_root("merge_rel_empty_body");
+        let view_issue = GhIssue {
+            number: 42,
+            id: "I_node42".to_string(),
+            url: String::new(),
+            title: "My RFC".to_string(),
+            body: String::new(),
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T11:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+            issue_type: None,
+            milestone: None,
+            assignees: vec![],
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
+
+        let mut gh_store = GithubIssuesStore {
+            client: Box::new(client),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        gh_store
+            .merge_relation_to_remote(&td, "RFC-001", "related-to", "STORY-001", true)
+            .expect("merge must not fail on a body without a lazyspec comment");
+
+        let pushed = gh_store.mock().last_edit_body.borrow();
+        let pushed = pushed.as_ref().expect("issue_edit should run");
+        assert!(pushed.contains("<!-- lazyspec"), "got:\n{pushed}");
+        assert!(pushed.contains("- related-to: STORY-001"), "got:\n{pushed}");
+    }
+
+    // BUG-014 / AC3: a remote issue whose body is plain prose with NO lazyspec
+    // comment must still accept an ordinary relation link -- the merge pushes a
+    // body carrying the lazyspec comment plus the relation, with the original
+    // prose preserved verbatim beneath the new comment.
+    #[test]
+    fn merge_relation_to_remote_prose_only_body_keeps_prose_under_comment() {
+        let root = tmp_root("merge_rel_prose_only");
+        let prose = "This issue was filed straight on GitHub.\n\nIt has two prose paragraphs and zero lazyspec markers.";
+        let view_issue = GhIssue {
+            number: 42,
+            id: "I_node42".to_string(),
+            url: String::new(),
+            title: "My RFC".to_string(),
+            body: prose.to_string(),
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T11:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+            issue_type: None,
+            milestone: None,
+            assignees: vec![],
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
+
+        let mut gh_store = GithubIssuesStore {
+            client: Box::new(client),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        gh_store
+            .merge_relation_to_remote(&td, "RFC-001", "related-to", "STORY-001", true)
+            .expect("merge must not fail on a prose-only body without a lazyspec comment");
+
+        let pushed = gh_store.mock().last_edit_body.borrow();
+        let pushed = pushed.as_ref().expect("issue_edit should run");
+        assert!(pushed.contains("<!-- lazyspec"), "got:\n{pushed}");
+        assert!(pushed.contains("- related-to: STORY-001"), "got:\n{pushed}");
+
+        let comment_end = pushed
+            .find("-->")
+            .expect("pushed body should carry a closed lazyspec comment");
+        let prose_start = pushed
+            .find(prose)
+            .unwrap_or_else(|| panic!("prose not preserved verbatim, got:\n{pushed}"));
+        assert!(
+            prose_start > comment_end,
+            "prose must sit beneath the lazyspec comment, got:\n{pushed}"
+        );
+    }
+
+    // BUG-014 / AC2: unlinking a relation on an adopted issue (body already
+    // carries the lazyspec comment with the relation) removes the relation from
+    // the pushed comment.
+    #[test]
+    fn merge_relation_to_remote_unlink_removes_relation_from_comment() {
+        use crate::engine::document::{Relation, RelationType};
+        let root = tmp_root("merge_rel_unlink_adopted");
+        let meta = DocMeta {
+            path: PathBuf::new(),
+            title: "My RFC".to_string(),
+            doc_type: DocType::new("rfc"),
+            status: Status::new("draft"),
+            author: "agent-7".to_string(),
+            date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related: vec![Relation {
+                rel_type: RelationType::new("related-to"),
+                target: "STORY-001".to_string(),
+            }],
+            validate_ignore: false,
+            virtual_doc: false,
+            assignee: None,
+            attributes: Default::default(),
+            id: "RFC-001".to_string(),
+        };
+        let body = issue_body::serialize(&meta, "ADOPTED PROSE LINE");
+        let view_issue = GhIssue {
+            number: 42,
+            id: "I_node42".to_string(),
+            url: String::new(),
+            title: "My RFC".to_string(),
+            body,
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T11:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+            issue_type: None,
+            milestone: None,
+            assignees: vec![],
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
+
+        let mut gh_store = GithubIssuesStore {
+            client: Box::new(client),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        gh_store
+            .merge_relation_to_remote(&td, "RFC-001", "related-to", "STORY-001", false)
+            .expect("unlink on an adopted issue must succeed");
+
+        let pushed = gh_store.mock().last_edit_body.borrow();
+        let pushed = pushed.as_ref().expect("issue_edit should run");
+        assert!(pushed.contains("<!-- lazyspec"), "got:\n{pushed}");
+        assert!(
+            !pushed.contains("- related-to: STORY-001"),
+            "relation must be removed from the pushed comment, got:\n{pushed}"
+        );
+        assert!(pushed.contains("ADOPTED PROSE LINE"), "got:\n{pushed}");
+    }
+
+    // BUG-014 / AC2 (comment-less remote): unlink rides the same merge path, so
+    // a remote body with NO lazyspec comment (relation only in the local cache)
+    // must not hard-fail -- the merge synthesizes meta from the remote issue
+    // fields and pushes a comment-bearing body without the relation.
+    #[test]
+    fn merge_relation_to_remote_unlink_comment_less_body_succeeds() {
+        let root = tmp_root("merge_rel_unlink_no_comment");
+        let view_issue = GhIssue {
+            number: 42,
+            id: "I_node42".to_string(),
+            url: String::new(),
+            title: "My RFC".to_string(),
+            body: "Filed straight on GitHub, no lazyspec markers.".to_string(),
+            labels: vec![GhLabel {
+                name: "lazyspec:rfc".to_string(),
+                color: String::new(),
+            }],
+            state: "OPEN".to_string(),
+            updated_at: "2026-03-27T11:00:00Z".to_string(),
+            created_at: "2026-03-27T10:00:00Z".to_string(),
+            author: None,
+            issue_type: None,
+            milestone: None,
+            assignees: vec![],
+        };
+
+        let client = MockGhClient::new().with_view_issue(view_issue);
+        let mut map = IssueMap::load(&root).unwrap();
+        map.insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
+
+        let mut gh_store = GithubIssuesStore {
+            client: Box::new(client),
+            root: root.clone(),
+            repo: "owner/repo".to_string(),
+            config: Config::default(),
+            issue_map: map,
+            issue_cache: IssueCache::new(&root),
+        };
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        gh_store
+            .merge_relation_to_remote(&td, "RFC-001", "related-to", "STORY-001", false)
+            .expect("unlink must not fail on a body without a lazyspec comment");
+
+        let pushed = gh_store.mock().last_edit_body.borrow();
+        let pushed = pushed.as_ref().expect("issue_edit should run");
+        assert!(pushed.contains("<!-- lazyspec"), "got:\n{pushed}");
+        assert!(
+            !pushed.contains("- related-to: STORY-001"),
+            "unlinked relation must not appear in the pushed comment, got:\n{pushed}"
         );
     }
 
