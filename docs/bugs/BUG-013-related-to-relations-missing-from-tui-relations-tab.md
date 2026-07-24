@@ -1,7 +1,7 @@
 ---
 title: "related-to relations missing from TUI Relations tab"
 type: bug
-status: reported
+status: fixed
 author: "unknown"
 date: 2026-07-21
 tags: []

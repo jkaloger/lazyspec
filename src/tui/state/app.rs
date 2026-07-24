@@ -2320,10 +2320,11 @@ impl App {
     /// engine [`resolve_chain`](crate::engine::context::resolve_chain) so the
     /// navigable list and the rendered list share one source of truth.
     pub fn relation_sections(&self, doc: &DocMeta) -> RelationSections {
-        let resolved = match crate::engine::context::resolve_chain(&self.store, &doc.id, 1) {
+        let mut resolved = match crate::engine::context::resolve_chain(&self.store, &doc.id, 1) {
             Ok(r) => r,
             Err(_) => return RelationSections::default(),
         };
+        crate::engine::context::merge_declared_related(&self.store, &mut resolved);
 
         let chain = resolved
             .nodes
@@ -5162,13 +5163,17 @@ mod tests {
     /// Build an `App` wrapping a real `Store` loaded from in-memory files under
     /// a fresh TempDir. The TempDir is returned so it outlives the store.
     fn app_with_store(files: &[(&str, &str)]) -> (tempfile::TempDir, App) {
+        app_with_store_config(files, &Config::default())
+    }
+
+    fn app_with_store_config(files: &[(&str, &str)], config: &Config) -> (tempfile::TempDir, App) {
         let tmp = tempfile::TempDir::new().unwrap();
         for (rel_path, contents) in files {
             let full = tmp.path().join(rel_path);
             std::fs::create_dir_all(full.parent().unwrap()).unwrap();
             std::fs::write(&full, contents).unwrap();
         }
-        let store = Store::load(tmp.path(), &Config::default()).unwrap();
+        let store = Store::load(tmp.path(), config).unwrap();
         let mut app = make_test_app(0);
         app.store = store;
         (tmp, app)
@@ -5530,6 +5535,72 @@ mod tests {
                 .collect();
         assert!(item_ids.contains("RFC-002"));
         assert!(!item_ids.contains("RFC-003"));
+    }
+
+    // AC (BUG-013): a related-to relation declared in frontmatter surfaces in
+    // the Relations tab even when the config's `related-to` entry carries no
+    // `traversal = "related"` marker.
+    #[test]
+    fn relation_sections_includes_related_without_traversal_marker() {
+        let mut config = Config::default();
+        config
+            .relationships
+            .iter_mut()
+            .find(|r| r.name == "related-to")
+            .unwrap()
+            .traversal = None;
+
+        let (_tmp, app) = app_with_store_config(
+            &[
+                (
+                    "docs/rfcs/RFC-001-anchor.md",
+                    &relations_doc_md("Anchor", "rfc", "- related-to: RFC-002"),
+                ),
+                (
+                    "docs/rfcs/RFC-002-near.md",
+                    &relations_doc_md("Near", "rfc", "[]"),
+                ),
+            ],
+            &config,
+        );
+
+        let doc = doc_by_id(&app, "RFC-001");
+        let sections = app.relation_sections(&doc);
+        let ids: std::collections::BTreeSet<String> =
+            ids_for_paths(&app, &sections.related).into_iter().collect();
+
+        assert!(
+            ids.contains("RFC-002"),
+            "declared related-to must appear without the traversal marker, got {ids:?}"
+        );
+    }
+
+    // AC (BUG-013 guard): with the default config's `traversal = "related"`
+    // marker in place, a declared related-to relation must appear exactly once
+    // in the related section -- merging the declared list must not duplicate
+    // what the related BFS already found.
+    #[test]
+    fn relation_sections_related_with_traversal_marker_appears_once() {
+        let (_tmp, app) = app_with_store(&[
+            (
+                "docs/rfcs/RFC-001-anchor.md",
+                &relations_doc_md("Anchor", "rfc", "- related-to: RFC-002"),
+            ),
+            (
+                "docs/rfcs/RFC-002-near.md",
+                &relations_doc_md("Near", "rfc", "[]"),
+            ),
+        ]);
+
+        let doc = doc_by_id(&app, "RFC-001");
+        let sections = app.relation_sections(&doc);
+        let ids = ids_for_paths(&app, &sections.related);
+
+        let occurrences = ids.iter().filter(|id| *id == "RFC-002").count();
+        assert_eq!(
+            occurrences, 1,
+            "related-to target must appear exactly once in related, got {ids:?}"
+        );
     }
 
     #[test]

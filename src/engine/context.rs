@@ -175,6 +175,44 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
     })
 }
 
+/// Merge the target's own declared relations into `resolved.related`, so
+/// relations whose type carries no traversal marker still surface (BUG-013).
+/// Chain-typed relations and targets already on the chain stay excluded --
+/// they belong to the chain/forward sections -- and entries the related BFS
+/// already found dedupe on (relation type, target path). Callers that layer
+/// `doc.related` themselves (the web view) must not call this.
+pub fn merge_declared_related<'a>(store: &'a Store, resolved: &mut ResolvedContext<'a>) {
+    let chain_paths: HashSet<&PathBuf> = resolved.nodes.iter().map(|n| &n.doc.path).collect();
+    let mut seen: HashSet<(String, PathBuf)> = resolved
+        .related
+        .iter()
+        .map(|r| (r.relation.to_string(), r.doc.path.clone()))
+        .collect();
+
+    let target = resolved.target;
+    let declared: Vec<RelatedRef<'a>> = target
+        .related
+        .iter()
+        .filter(|rel| {
+            !store
+                .chain_relationships
+                .iter()
+                .any(|c| c.as_str() == rel.rel_type.as_str())
+        })
+        .filter_map(|rel| store.resolve_relation_target(&rel.target).map(|d| (rel, d)))
+        .filter(|(_, d)| !chain_paths.contains(&d.path))
+        .filter(|(rel, d)| seen.insert((rel.rel_type.to_string(), d.path.clone())))
+        .map(|(rel, d)| RelatedRef {
+            doc: d,
+            relation: rel.rel_type.clone(),
+            distance: 1,
+            via: target.path.clone(),
+        })
+        .collect();
+
+    resolved.related.extend(declared);
+}
+
 /// Context forest, roots-first. When `anchor` is `None`, discovers every
 /// document and, for each, its in-graph parents (resolved via
 /// [`Store::resolve_relation_target`] over the configured parent-child
@@ -722,6 +760,87 @@ mod tests {
         assert!(
             resolved.related.is_empty(),
             "no related markers => no related"
+        );
+    }
+
+    // --- merge_declared_related ---------------------------------------------
+
+    #[test]
+    fn merge_declared_related_surfaces_relation_without_traversal_marker() {
+        // `blocks` carries no traversal marker in the starter config, so the
+        // related BFS drops it; the merge must surface it, rel type intact.
+        let (_tmp, store) = store_from(&[
+            (
+                "docs/rfcs/RFC-001-anchor.md",
+                &doc_md("Anchor", "rfc", "- blocks: RFC-002"),
+            ),
+            ("docs/rfcs/RFC-002-near.md", &doc_md("Near", "rfc", "[]")),
+        ]);
+
+        let mut resolved = resolve_chain(&store, "RFC-001", 1).unwrap();
+        assert!(resolved.related.is_empty(), "BFS drops unmarked relations");
+
+        merge_declared_related(&store, &mut resolved);
+
+        assert_eq!(resolved.related.len(), 1);
+        assert_eq!(resolved.related[0].doc.id, "RFC-002");
+        assert_eq!(resolved.related[0].relation.as_str(), "blocks");
+        assert_eq!(resolved.related[0].distance, 1);
+    }
+
+    #[test]
+    fn merge_declared_related_dedupes_on_relation_type_and_target() {
+        // RFC-002 is declared under both `related-to` (already found by the
+        // BFS) and `blocks` (unmarked): the merge must not re-add the BFS
+        // entry, but the second rel type is its own entry.
+        let (_tmp, store) = store_from(&[
+            (
+                "docs/rfcs/RFC-001-anchor.md",
+                &doc_md("Anchor", "rfc", "- related-to: RFC-002\n- blocks: RFC-002"),
+            ),
+            ("docs/rfcs/RFC-002-near.md", &doc_md("Near", "rfc", "[]")),
+        ]);
+
+        let mut resolved = resolve_chain(&store, "RFC-001", 1).unwrap();
+        merge_declared_related(&store, &mut resolved);
+
+        let pairs: Vec<(String, String)> = resolved
+            .related
+            .iter()
+            .map(|r| (r.relation.to_string(), r.doc.id.clone()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("related-to".to_string(), "RFC-002".to_string()),
+                ("blocks".to_string(), "RFC-002".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_declared_related_skips_chain_relations_and_chain_members() {
+        // `implements: RFC-001` is a chain relation (already in nodes) and a
+        // declared `related-to` pointing at a chain member is skipped too, so
+        // the related section stays disjoint from the chain.
+        let (_tmp, store) = store_from(&[
+            ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
+            (
+                "docs/stories/STORY-001-mid.md",
+                &doc_md(
+                    "Mid",
+                    "story",
+                    "- implements: RFC-001\n- related-to: RFC-001",
+                ),
+            ),
+        ]);
+
+        let mut resolved = resolve_chain(&store, "STORY-001", 1).unwrap();
+        merge_declared_related(&store, &mut resolved);
+
+        assert!(
+            resolved.related.is_empty(),
+            "chain relations and chain members must not leak into related"
         );
     }
 

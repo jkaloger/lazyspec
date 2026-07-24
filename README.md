@@ -565,7 +565,7 @@ Projects whose `[[types]]` predate the lifecycle axis can backfill the default l
 
 The relationship vocabulary is config-driven, just like document types. Each `[[relationships]]` block declares a relationship `name` and an optional `inverse` keyword. A directional relationship declares its inverse (for example `implements` / `implemented-by`); a relationship with no `inverse` is symmetric (for example `related-to`). `link`/`unlink` resolve the keyword you type against this registry: a canonical `name` links in the stated direction, while a declared `inverse` flips it and stores the canonical relation on the target. `validate` flags any document carrying a relationship name not declared here.
 
-A relationship may also declare `traversal`, which governs how it participates in context traversal: `chain` relationships form the parent-child hierarchy that `parent-child` validation rules and the context chain walk follow, while `related` relationships form the symmetric related-context neighbourhood. A relationship with no `traversal` participates in neither.
+A relationship may also declare `traversal`, which governs how it participates in context traversal: `chain` relationships form the parent-child hierarchy that `parent-child` validation rules and the context chain walk follow, while `related` relationships form the symmetric related-context neighbourhood. A relationship with no `traversal` participates in neither walk, but the target document's own declared relations still surface in the related section of `context` (and the TUI Relations tab) at one hop.
 
 ```toml
 [[relationships]]

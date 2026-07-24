@@ -9,11 +9,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub use crate::engine::context::{
-    resolve_chain, resolve_forest, ContextNode, RelatedRef, ResolvedContext,
+    merge_declared_related, resolve_chain, resolve_forest, ContextNode, RelatedRef, ResolvedContext,
 };
 
 pub fn run_json(store: &Store, id: &str, depth: usize) -> Result<String> {
-    let resolved = resolve_chain(store, id, depth)?;
+    let mut resolved = resolve_chain(store, id, depth)?;
+    merge_declared_related(store, &mut resolved);
     let chain: Vec<_> = resolved
         .nodes
         .iter()
@@ -326,7 +327,8 @@ pub fn run_forest_human(store: &Store, anchor: Option<&str>) -> Result<String> {
 }
 
 pub fn run_human(store: &Store, id: &str, depth: usize) -> Result<String> {
-    let resolved = resolve_chain(store, id, depth)?;
+    let mut resolved = resolve_chain(store, id, depth)?;
+    merge_declared_related(store, &mut resolved);
     let colors = StatusColors::load(store.root()).unwrap_or_default();
     let mut output = String::new();
 

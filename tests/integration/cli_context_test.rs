@@ -353,6 +353,60 @@ fn json_related_empty() {
     );
 }
 
+fn setup_with_unmarked_relation() -> TestFixture {
+    // `blocks` carries no traversal marker in the starter config, so the
+    // related BFS drops it (BUG-013); the declared relation must still surface.
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-anchor.md",
+        "---\ntitle: \"Anchor RFC\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- blocks: docs/rfcs/RFC-002-near.md\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-002-near.md",
+        "---\ntitle: \"Near RFC\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated: []\n---\n\nbody\n",
+    );
+    fixture
+}
+
+#[test]
+fn json_related_includes_unmarked_declared_relation() {
+    let fixture = setup_with_unmarked_relation();
+    let store = fixture.store();
+    let output = lazyspec::cli::context::run_json(&store, "RFC-001", 1).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    let related = parsed["related"].as_array().unwrap();
+    let entry = related
+        .iter()
+        .find(|e| e["title"] == "Near RFC")
+        .unwrap_or_else(|| panic!("unmarked declared relation should surface; got: {}", output));
+    assert_eq!(entry["relation"], "blocks");
+    assert_eq!(entry["distance"], 1);
+    assert_eq!(
+        entry["via"].as_str().unwrap(),
+        "docs/rfcs/RFC-001-anchor.md",
+        "declared relation is reached through the target"
+    );
+}
+
+#[test]
+fn human_related_includes_unmarked_declared_relation() {
+    let fixture = setup_with_unmarked_relation();
+    let store = fixture.store();
+    let output = lazyspec::cli::context::run_human(&store, "RFC-001", 1).unwrap();
+
+    assert!(
+        output.contains("related"),
+        "output should contain the related section header; got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Near RFC"),
+        "output should contain the unmarked-relation target title; got:\n{}",
+        output
+    );
+}
+
 #[test]
 fn no_forward_children_for_leaf() {
     let fixture = setup();
