@@ -46,9 +46,9 @@ const SUB_ISSUES_BATCH_QUERY: &str =
 /// GitHub caps a single `nodes(ids:)` selection at 100 ids.
 pub const SUB_ISSUE_BATCH_MAX: usize = 100;
 
-const ADD_SUB_ISSUE_MUTATION: &str = "mutation($issueId: ID!, $subIssueId: ID!) { addSubIssue(input: {issueId: $issueId, subIssueId: $subIssueId}) { issue { id } } }";
+pub(crate) const ADD_SUB_ISSUE_MUTATION: &str = "mutation($issueId: ID!, $subIssueId: ID!) { addSubIssue(input: {issueId: $issueId, subIssueId: $subIssueId}) { issue { id } } }";
 
-const REMOVE_SUB_ISSUE_MUTATION: &str = "mutation($issueId: ID!, $subIssueId: ID!) { removeSubIssue(input: {issueId: $issueId, subIssueId: $subIssueId}) { issue { id } } }";
+pub(crate) const REMOVE_SUB_ISSUE_MUTATION: &str = "mutation($issueId: ID!, $subIssueId: ID!) { removeSubIssue(input: {issueId: $issueId, subIssueId: $subIssueId}) { issue { id } } }";
 
 const REPRIORITIZE_SUB_ISSUE_MUTATION: &str = "mutation($issueId: ID!, $subIssueId: ID!, $afterId: ID!) { reprioritizeSubIssue(input: {issueId: $issueId, subIssueId: $subIssueId, afterId: $afterId}) { issue { id } } }";
 

@@ -7,6 +7,7 @@ use crate::engine::fs::FileSystem;
 use crate::engine::gh::{
     GhCli, GhGraphql, GhIssueDependencyApi, GhIssueReader, GhIssueWriter, GhMilestoneApi, GqlVar,
 };
+use crate::engine::gh_subissue::{ADD_SUB_ISSUE_MUTATION, REMOVE_SUB_ISSUE_MUTATION};
 use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
@@ -101,9 +102,10 @@ fn link_inner<
         &to_id,
         true,
         milestone_factory,
-    )? || apply_native_membership(
+    )? || apply_native_graphql_edge(
         root,
         config,
+        store,
         &rel_str,
         &from_id,
         &to_id,
@@ -405,6 +407,177 @@ fn apply_native_dependency<D: GhIssueDependencyApi>(
     Ok(true)
 }
 
+const SUB_ISSUE_PARENT_QUERY: &str =
+    "query($id: ID!) { node(id: $id) { ... on Issue { parent { id number } } } }";
+
+/// Route a GraphQL-only native edge (`membership` / `sub-issue`) to its writer,
+/// consuming the single `GhGraphql` factory exactly once. Both relations use the
+/// same seam and are mutually exclusive per relationship, so the dispatch is by
+/// the relation's declared `github_native`. A no-op (`Ok(false)`) for any other
+/// relation, leaving the factory unused.
+#[allow(clippy::too_many_arguments)]
+fn apply_native_graphql_edge<P: GhGraphql + 'static>(
+    root: &Path,
+    config: &Config,
+    store: &Store,
+    rel_str: &str,
+    source_id: &str,
+    target_id: &str,
+    set: bool,
+    projects_factory: impl FnOnce() -> P,
+) -> Result<bool> {
+    match config
+        .relationship_by_name(rel_str)
+        .and_then(|r| r.github_native.as_deref())
+    {
+        Some("membership") => apply_native_membership(
+            root,
+            config,
+            rel_str,
+            source_id,
+            target_id,
+            set,
+            projects_factory,
+        ),
+        Some("sub-issue") => apply_native_subissue(
+            root,
+            config,
+            store,
+            rel_str,
+            source_id,
+            target_id,
+            set,
+            projects_factory,
+        ),
+        _ => Ok(false),
+    }
+}
+
+/// If `rel_str` declares `github_native = "sub-issue"`, opportunistically write
+/// the native GitHub sub-issue edge. Like `blocks`/dependency, this is a
+/// universal semantic relation that gains an *optional* native edge: it fires
+/// only when BOTH endpoints resolve to github-issues docs (necessarily the same
+/// repo under lazyspec's one-repo-per-store model). Otherwise — filesystem,
+/// cross-store, or a non-sub-issue relation — it is a no-op with no error, and
+/// the relation stays comment/graph-backed as before.
+///
+/// Direction: `source implements target` makes `source` the child and `target`
+/// the parent, i.e. `addSubIssue(issueId: target-node, subIssueId: source-node)`.
+/// `set` true adds the edge (link), false removes it (unlink). Node ids come
+/// from the issue map; an empty node id (legacy map) is a clear error telling the
+/// user to re-fetch, with no mutation. Before adding, the child's existing native
+/// parent is queried: if it already has a *different* parent the link fails
+/// naming it (single-parent; reparenting is explicit unlink+link).
+///
+/// Returns `true` when a native sub-issue mutation was performed (so the caller
+/// routes the cache mirror through the conflict-free resync), `false` for the
+/// opportunistic no-op.
+#[allow(clippy::too_many_arguments)]
+fn apply_native_subissue<P: GhGraphql>(
+    root: &Path,
+    config: &Config,
+    store: &Store,
+    rel_str: &str,
+    source_id: &str,
+    target_id: &str,
+    set: bool,
+    subissue_factory: impl FnOnce() -> P,
+) -> Result<bool> {
+    let is_subissue_rel = config
+        .relationship_by_name(rel_str)
+        .and_then(|r| r.github_native.as_deref())
+        == Some("sub-issue");
+    if !is_subissue_rel {
+        return Ok(false);
+    }
+
+    // Opportunistic: the native edge fires only when both endpoints are
+    // github-issues docs. A filesystem, cross-store, or cross-repo endpoint
+    // falls through to the ordinary comment/graph-backed record.
+    let both_issues = store_of(config, store, source_id) == Some(StoreBackend::GithubIssues)
+        && store_of(config, store, target_id) == Some(StoreBackend::GithubIssues);
+    if !both_issues {
+        return Ok(false);
+    }
+
+    let issue_map = IssueMap::load(root)?;
+    let child_node = issue_map
+        .get(source_id)
+        .map(|e| e.node_id.clone())
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| {
+            anyhow!(
+                "source '{}' has no GitHub issue node id in the issue map; \
+                 run `lazyspec fetch` to populate it before linking sub-issues",
+                source_id
+            )
+        })?;
+    let parent_node = issue_map
+        .get(target_id)
+        .map(|e| e.node_id.clone())
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| {
+            anyhow!(
+                "target '{}' has no GitHub issue node id in the issue map; \
+                 run `lazyspec fetch` to populate it before linking sub-issues",
+                target_id
+            )
+        })?;
+
+    let client = subissue_factory();
+
+    if set {
+        // Single-parent: a child already nested under a different parent must be
+        // unlinked first; we never silently reparent.
+        let resp = client.graphql(
+            SUB_ISSUE_PARENT_QUERY,
+            &[("id", GqlVar::Str(child_node.clone()))],
+        )?;
+        if let Some(parent) = resp.pointer("/data/node/parent").filter(|p| !p.is_null()) {
+            let existing_node = parent
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if existing_node != parent_node {
+                let existing_name = parent
+                    .get("number")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|n| issue_map.shorthand_for_number(n).map(str::to_string))
+                    .or_else(|| {
+                        parent
+                            .get("number")
+                            .and_then(|v| v.as_u64())
+                            .map(|n| format!("#{n}"))
+                    })
+                    .unwrap_or_else(|| existing_node.to_string());
+                return Err(anyhow!(
+                    "'{}' is already a native sub-issue of '{}'; unlink it before linking to '{}' \
+                     (reparenting is an explicit unlink + link)",
+                    source_id,
+                    existing_name,
+                    target_id
+                ));
+            }
+        }
+        client.graphql(
+            ADD_SUB_ISSUE_MUTATION,
+            &[
+                ("issueId", GqlVar::Str(parent_node)),
+                ("subIssueId", GqlVar::Str(child_node)),
+            ],
+        )?;
+    } else {
+        client.graphql(
+            REMOVE_SUB_ISSUE_MUTATION,
+            &[
+                ("issueId", GqlVar::Str(parent_node)),
+                ("subIssueId", GqlVar::Str(child_node)),
+            ],
+        )?;
+    }
+    Ok(true)
+}
+
 /// The store a document id resolves to, via its type's `[[types]]` declaration.
 /// `None` when the id resolves to no doc or its type is undeclared -- the caller
 /// treats an unresolved store as non-milestone (the guard only fires on the
@@ -532,9 +705,10 @@ fn unlink_inner<
         &to_id,
         false,
         milestone_factory,
-    )? || apply_native_membership(
+    )? || apply_native_graphql_edge(
         root,
         config,
+        store,
         &rel_str,
         &from_id,
         &to_id,
@@ -3338,5 +3512,539 @@ mod tests {
 
         assert!(!fired, "a non-issue endpoint must not fire the native edge");
         assert!(recorder.added.borrow().is_empty());
+    }
+
+    // --- github_native = "sub-issue" (STORY-245 / ITERATION-347) ---
+
+    // Two github-issues types (story = child, feature = parent) and one filesystem
+    // type, with `implements` bound to the native sub-issue edge and an ordinary
+    // `mentions` alongside it (to prove the guard only fires for the sub-issue
+    // relation).
+    fn subissue_config() -> Config {
+        let issue = |name: &str, store: StoreBackend| TypeDef::test_fixture(name, store);
+        let mut config = Config::default();
+        config.documents.types = vec![
+            issue("story", StoreBackend::GithubIssues),
+            issue("feature", StoreBackend::GithubIssues),
+            issue("spec", StoreBackend::Filesystem),
+        ];
+        config.documents.github = Some(GithubConfig {
+            repo: Some("owner/repo".to_string()),
+            cache_ttl: 60,
+        });
+        config.relationships = vec![
+            crate::engine::config::RelationshipDef {
+                name: "implements".to_string(),
+                inverse: Some("implemented-by".to_string()),
+                github_native: Some("sub-issue".to_string()),
+                traversal: None,
+            },
+            crate::engine::config::RelationshipDef {
+                name: "mentions".to_string(),
+                inverse: Some("mentioned-by".to_string()),
+                github_native: None,
+                traversal: None,
+            },
+        ];
+        config
+    }
+
+    fn no_parent() -> serde_json::Value {
+        serde_json::json!({"data": {"node": {"parent": null}}})
+    }
+
+    fn parent_ref(node: &str, number: u64) -> serde_json::Value {
+        serde_json::json!({"data": {"node": {"parent": {"id": node, "number": number}}}})
+    }
+
+    fn subissue_mutation_ok() -> serde_json::Value {
+        serde_json::json!({"data": {"addSubIssue": {"issue": {"id": "I_x"}}}})
+    }
+
+    // AC1: linking two same-repo github-issues docs via a github_native="sub-issue"
+    // relation writes addSubIssue with the PARENT as issueId and the CHILD as
+    // subIssueId (source = child, target = parent), records the relation on the
+    // child, and fires the resync (proven by the issue-map baseline reconciling to
+    // the remote's fresh updated_at).
+    #[test]
+    fn link_subissue_writes_native_edge_and_resyncs() {
+        let root = tmp_root("link_subissue");
+        let config = subissue_config();
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story"),
+            "STORY-7.md",
+            "My Story",
+            "story",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/feature"),
+            "FEATURE-3.md",
+            "Parent",
+            "feature",
+        );
+
+        // STORY-7 last fetched at 10:00; remote (returned by the resync view) 11:00.
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "2026-06-26T10:00:00Z", "I_node7");
+        issue_map.insert("FEATURE-3", 3, "", "I_node3");
+        issue_map.save(&root).unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+        // The graphql seam: first the parent lookup (no existing parent), then the
+        // addSubIssue mutation.
+        let recorder = std::rc::Rc::new(
+            MockGhClient::new().with_graphql_responses(vec![no_parent(), subissue_mutation_ok()]),
+        );
+
+        link_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "implements",
+            "FEATURE-3",
+            &fs,
+            Some(&config),
+            || MockGhClient::new().with_view_issue(view_issue_at(7, "2026-06-26T11:00:00Z")),
+            MockGhMilestoneClient::new,
+            || recorder.clone(),
+            MockGhDependencyClient::new,
+        )
+        .expect("native sub-issue link must succeed");
+
+        let calls = recorder.graphql_calls.borrow();
+        let adds: Vec<_> = calls
+            .iter()
+            .filter(|(q, _)| q.contains("addSubIssue"))
+            .collect();
+        assert_eq!(adds.len(), 1, "one addSubIssue, got: {:?}", *calls);
+        let (_, vars) = adds[0];
+        assert!(
+            vars.contains(&("issueId".to_string(), GqlVar::Str("I_node3".to_string()))),
+            "parent (FEATURE-3) is the issueId, got: {vars:?}"
+        );
+        assert!(
+            vars.contains(&("subIssueId".to_string(), GqlVar::Str("I_node7".to_string()))),
+            "child (STORY-7) is the subIssueId, got: {vars:?}"
+        );
+
+        // The relation is recorded on the child's frontmatter.
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(
+            updated.contains("implements: FEATURE-3"),
+            "frontmatter should carry the relation, got:\n{updated}"
+        );
+
+        // Resync fired: the baseline reconciled to the remote's fresh timestamp.
+        let reloaded = IssueMap::load(&root).unwrap();
+        assert_eq!(
+            reloaded.get("STORY-7").unwrap().updated_at,
+            "2026-06-26T11:00:00Z",
+            "resync_after_native_edge should record the remote's current updated_at"
+        );
+    }
+
+    // AC2: unlink removes the native sub-issue edge (removeSubIssue, same
+    // parent/child direction) and drops the relation from the cache frontmatter.
+    // No parent lookup on unlink.
+    #[test]
+    fn unlink_subissue_removes_native_edge() {
+        let root = tmp_root("unlink_subissue");
+        let config = subissue_config();
+
+        std::fs::create_dir_all(root.join(".lazyspec/cache/story")).unwrap();
+        let content = "---\ntitle: My Story\ntype: story\nstatus: draft\nauthor: a\ndate: 2026-03-27\ntags: []\nrelated:\n- implements: FEATURE-3\n---\nbody\n";
+        std::fs::write(root.join(".lazyspec/cache/story/STORY-7.md"), content).unwrap();
+        write_cache_doc(
+            &root.join(".lazyspec/cache/feature"),
+            "FEATURE-3.md",
+            "Parent",
+            "feature",
+        );
+
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "2026-06-26T10:00:00Z", "I_node7");
+        issue_map.insert("FEATURE-3", 3, "", "I_node3");
+        issue_map.save(&root).unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+        let recorder = std::rc::Rc::new(
+            MockGhClient::new().with_graphql_responses(vec![subissue_mutation_ok()]),
+        );
+
+        unlink_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "implements",
+            "FEATURE-3",
+            &fs,
+            Some(&config),
+            || MockGhClient::new().with_view_issue(view_issue_at(7, "2026-06-26T11:00:00Z")),
+            MockGhMilestoneClient::new,
+            || recorder.clone(),
+            MockGhDependencyClient::new,
+        )
+        .expect("native sub-issue unlink must succeed");
+
+        let calls = recorder.graphql_calls.borrow();
+        let removes: Vec<_> = calls
+            .iter()
+            .filter(|(q, _)| q.contains("removeSubIssue"))
+            .collect();
+        assert_eq!(removes.len(), 1, "one removeSubIssue, got: {:?}", *calls);
+        let (_, vars) = removes[0];
+        assert!(vars.contains(&("issueId".to_string(), GqlVar::Str("I_node3".to_string()))));
+        assert!(vars.contains(&("subIssueId".to_string(), GqlVar::Str("I_node7".to_string()))));
+        assert!(
+            calls.iter().all(|(q, _)| !q.contains("addSubIssue")),
+            "unlink must not add"
+        );
+
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(
+            !updated.contains("implements: FEATURE-3"),
+            "cache relation should be removed, got:\n{updated}"
+        );
+    }
+
+    // AC3: linking a child that already has a DIFFERENT native parent fails with an
+    // error naming the existing parent, and no addSubIssue mutation fires.
+    #[test]
+    fn link_subissue_single_parent_conflict_rejected() {
+        let root = tmp_root("link_subissue_conflict");
+        let config = subissue_config();
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story"),
+            "STORY-7.md",
+            "My Story",
+            "story",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/feature"),
+            "FEATURE-3.md",
+            "Old Parent",
+            "feature",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/feature"),
+            "FEATURE-9.md",
+            "New Parent",
+            "feature",
+        );
+
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "", "I_node7");
+        issue_map.insert("FEATURE-3", 3, "", "I_node3");
+        issue_map.insert("FEATURE-9", 9, "", "I_node9");
+        issue_map.save(&root).unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+        // The parent lookup returns FEATURE-3 (node I_node3, number 3) as the
+        // existing parent -- different from the requested FEATURE-9.
+        let recorder = std::rc::Rc::new(
+            MockGhClient::new().with_graphql_responses(vec![parent_ref("I_node3", 3)]),
+        );
+
+        let err = link_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "implements",
+            "FEATURE-9",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            MockGhMilestoneClient::new,
+            || recorder.clone(),
+            MockGhDependencyClient::new,
+        )
+        .expect_err("linking a child with a different existing parent must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("STORY-7"), "names the child, got: {msg}");
+        assert!(
+            msg.contains("FEATURE-3"),
+            "names the existing parent, got: {msg}"
+        );
+
+        let calls = recorder.graphql_calls.borrow();
+        assert!(
+            calls.iter().all(|(q, _)| !q.contains("addSubIssue")),
+            "no addSubIssue on a single-parent conflict, got: {:?}",
+            *calls
+        );
+        // Cache untouched.
+        let updated =
+            std::fs::read_to_string(root.join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(
+            !updated.contains("implements: FEATURE-9"),
+            "cache must be unchanged after a rejected link, got:\n{updated}"
+        );
+    }
+
+    // Re-linking to the SAME parent is idempotent: the parent lookup returns the
+    // requested parent, so the addSubIssue still fires (GitHub treats it as a
+    // no-op) and no single-parent error is raised.
+    #[test]
+    fn link_subissue_same_parent_is_allowed() {
+        let root = tmp_root("link_subissue_same");
+        let config = subissue_config();
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story"),
+            "STORY-7.md",
+            "My Story",
+            "story",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/feature"),
+            "FEATURE-3.md",
+            "Parent",
+            "feature",
+        );
+
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "2026-06-26T10:00:00Z", "I_node7");
+        issue_map.insert("FEATURE-3", 3, "", "I_node3");
+        issue_map.save(&root).unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+        let recorder = std::rc::Rc::new(
+            MockGhClient::new()
+                .with_graphql_responses(vec![parent_ref("I_node3", 3), subissue_mutation_ok()]),
+        );
+
+        link_inner(
+            &root,
+            &store,
+            "STORY-7",
+            "implements",
+            "FEATURE-3",
+            &fs,
+            Some(&config),
+            || MockGhClient::new().with_view_issue(view_issue_at(7, "2026-06-26T11:00:00Z")),
+            MockGhMilestoneClient::new,
+            || recorder.clone(),
+            MockGhDependencyClient::new,
+        )
+        .expect("re-linking to the same parent must succeed");
+
+        let calls = recorder.graphql_calls.borrow();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(q, _)| q.contains("addSubIssue"))
+                .count(),
+            1,
+            "addSubIssue fires when the parent already matches, got: {:?}",
+            *calls
+        );
+    }
+
+    // AC6 regression: a filesystem-only `implements` link/unlink makes ZERO native
+    // calls -- the opportunistic guard sees non-issue endpoints and records the
+    // relation comment/graph-backed exactly as before, with no error.
+    #[test]
+    fn link_subissue_filesystem_only_makes_no_native_call() {
+        let root = tmp_root("link_subissue_fs");
+        let config = subissue_config();
+
+        let dir = root.join("docs/spec");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SPEC-1.md"),
+            "---\ntitle: A\ntype: spec\nstatus: draft\nauthor: a\ndate: 2026-03-27\ntags: []\n---\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("SPEC-2.md"),
+            "---\ntitle: B\ntype: spec\nstatus: draft\nauthor: a\ndate: 2026-03-27\ntags: []\n---\nbody\n",
+        )
+        .unwrap();
+
+        let store = Store::load(&root, &config).unwrap();
+        let fs = RealFileSystem;
+        // No graphql responses seeded: any graphql call would panic ("no canned
+        // response"), proving none fires.
+        let recorder = std::rc::Rc::new(MockGhClient::new());
+
+        link_inner(
+            &root,
+            &store,
+            "SPEC-1",
+            "implements",
+            "SPEC-2",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            MockGhMilestoneClient::new,
+            || recorder.clone(),
+            MockGhDependencyClient::new,
+        )
+        .expect("filesystem implements link must succeed");
+
+        let updated = std::fs::read_to_string(dir.join("SPEC-1.md")).unwrap();
+        assert!(
+            updated.contains("implements: SPEC-2"),
+            "filesystem relation should be recorded, got:\n{updated}"
+        );
+        assert!(
+            recorder.graphql_calls.borrow().is_empty(),
+            "no native call for a filesystem endpoint"
+        );
+
+        // Unlink is symmetric: still no native call.
+        let store = Store::load(&root, &config).unwrap();
+        let recorder2 = std::rc::Rc::new(MockGhClient::new());
+        unlink_inner(
+            &root,
+            &store,
+            "SPEC-1",
+            "implements",
+            "SPEC-2",
+            &fs,
+            Some(&config),
+            MockGhClient::new,
+            MockGhMilestoneClient::new,
+            || recorder2.clone(),
+            MockGhDependencyClient::new,
+        )
+        .expect("filesystem implements unlink must succeed");
+        assert!(
+            recorder2.graphql_calls.borrow().is_empty(),
+            "no native call for a filesystem endpoint on unlink"
+        );
+    }
+
+    // An ordinary relation (no github_native) between two github-issues docs makes
+    // no sub-issue call: the native edge is opportunistic on the RELATION too.
+    #[test]
+    fn apply_native_subissue_non_subissue_relation_returns_false() {
+        let root = tmp_root("subissue_guard_rel");
+        let config = subissue_config();
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story"),
+            "STORY-7.md",
+            "My Story",
+            "story",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/feature"),
+            "FEATURE-3.md",
+            "Parent",
+            "feature",
+        );
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "", "I_node7");
+        issue_map.insert("FEATURE-3", 3, "", "I_node3");
+        issue_map.save(&root).unwrap();
+        let store = Store::load(&root, &config).unwrap();
+        let recorder = std::rc::Rc::new(MockGhClient::new());
+
+        let fired = apply_native_subissue(
+            &root,
+            &config,
+            &store,
+            "mentions",
+            "STORY-7",
+            "FEATURE-3",
+            true,
+            || recorder.clone(),
+        )
+        .unwrap();
+
+        assert!(!fired, "a non-sub-issue relation must not fire the edge");
+        assert!(recorder.graphql_calls.borrow().is_empty());
+    }
+
+    // Opportunistic guard: a non-issue (filesystem) endpoint returns false with no
+    // native call and no error, even though the relation IS the sub-issue one.
+    #[test]
+    fn apply_native_subissue_non_issue_endpoint_returns_false() {
+        let root = tmp_root("subissue_guard_endpoint");
+        let config = subissue_config();
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story"),
+            "STORY-7.md",
+            "My Story",
+            "story",
+        );
+        let dir = root.join("docs/spec");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SPEC-1.md"),
+            "---\ntitle: A\ntype: spec\nstatus: draft\nauthor: a\ndate: 2026-03-27\ntags: []\n---\nbody\n",
+        )
+        .unwrap();
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "", "I_node7");
+        issue_map.save(&root).unwrap();
+        let store = Store::load(&root, &config).unwrap();
+        let recorder = std::rc::Rc::new(MockGhClient::new());
+
+        let fired = apply_native_subissue(
+            &root,
+            &config,
+            &store,
+            "implements",
+            "STORY-7",
+            "SPEC-1",
+            true,
+            || recorder.clone(),
+        )
+        .unwrap();
+
+        assert!(!fired, "a non-issue endpoint must not fire the edge");
+        assert!(recorder.graphql_calls.borrow().is_empty());
+    }
+
+    // An empty node id in the issue map (legacy map) is a clear error telling the
+    // user to re-fetch, and no mutation fires.
+    #[test]
+    fn link_subissue_empty_node_id_errors_without_mutation() {
+        let root = tmp_root("subissue_empty_node");
+        let config = subissue_config();
+        write_cache_doc(
+            &root.join(".lazyspec/cache/story"),
+            "STORY-7.md",
+            "My Story",
+            "story",
+        );
+        write_cache_doc(
+            &root.join(".lazyspec/cache/feature"),
+            "FEATURE-3.md",
+            "Parent",
+            "feature",
+        );
+        // STORY-7 has a REST number but an EMPTY node id (legacy map).
+        let mut issue_map = IssueMap::load(&root).unwrap();
+        issue_map.insert("STORY-7", 7, "", "");
+        issue_map.insert("FEATURE-3", 3, "", "I_node3");
+        issue_map.save(&root).unwrap();
+        let store = Store::load(&root, &config).unwrap();
+        let recorder = std::rc::Rc::new(MockGhClient::new());
+
+        let err = apply_native_subissue(
+            &root,
+            &config,
+            &store,
+            "implements",
+            "STORY-7",
+            "FEATURE-3",
+            true,
+            || recorder.clone(),
+        )
+        .expect_err("an empty node id must be a clear error");
+        let msg = err.to_string();
+        assert!(msg.contains("STORY-7"), "names the doc, got: {msg}");
+        assert!(
+            msg.contains("fetch"),
+            "tells the user to re-fetch, got: {msg}"
+        );
+        assert!(recorder.graphql_calls.borrow().is_empty());
     }
 }

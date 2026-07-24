@@ -1090,6 +1090,19 @@ impl Config {
             ),
         };
 
+        let sub_issue_rels: Vec<&str> = relationships
+            .iter()
+            .filter(|r| r.github_native.as_deref() == Some("sub-issue"))
+            .map(|r| r.name.as_str())
+            .collect();
+        if sub_issue_rels.len() > 1 {
+            bail!(
+                "at most one relationship may declare github_native = \"sub-issue\" \
+                 (GitHub sub-issues are single-parent); found {}",
+                sub_issue_rels.join(", ")
+            );
+        }
+
         let rules = raw.rules.unwrap_or_default();
 
         let any_sqids = types
@@ -1861,6 +1874,67 @@ name = "related-to"
         assert!(
             emitted.contains("github_native = \"membership\""),
             "{emitted}"
+        );
+    }
+
+    // STORY-245 AC7: at most one relationship may declare
+    // github_native = "sub-issue" -- GitHub sub-issues are single-parent, so two
+    // competing relations would fight over the edge. Config load must reject it
+    // with a message naming both offending relationships.
+    #[test]
+    fn two_sub_issue_native_relationships_rejected() {
+        let toml_str = r#"
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+github_native = "sub-issue"
+
+[[relationships]]
+name = "parent-of"
+inverse = "child-of"
+github_native = "sub-issue"
+"#;
+        let err = Config::parse(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sub-issue"),
+            "error should mention sub-issue, got: {msg}"
+        );
+        assert!(
+            msg.contains("implements") && msg.contains("parent-of"),
+            "error should name both offending relationships, got: {msg}"
+        );
+    }
+
+    // A single sub-issue-native relationship is fine.
+    #[test]
+    fn one_sub_issue_native_relationship_ok() {
+        let toml_str = r#"
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+github_native = "sub-issue"
+"#;
+        let config = Config::parse(toml_str).unwrap();
+        assert_eq!(
+            config
+                .relationship_by_name("implements")
+                .unwrap()
+                .github_native
+                .as_deref(),
+            Some("sub-issue")
         );
     }
 
