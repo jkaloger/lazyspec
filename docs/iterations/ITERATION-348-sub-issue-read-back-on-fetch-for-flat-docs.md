@@ -1,7 +1,7 @@
 ---
 title: Sub-issue read-back on fetch for flat docs
 type: iteration
-status: in-progress
+status: complete
 author: unknown
 date: 2026-07-24
 tags: []

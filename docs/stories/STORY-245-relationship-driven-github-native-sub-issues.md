@@ -1,7 +1,7 @@
 ---
 title: Relationship-driven GitHub-native sub-issues
 type: story
-status: in-progress
+status: complete
 author: unknown
 date: 2026-07-24
 tags: []
