@@ -3,6 +3,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{GfmSegment, GfmTable};
 
@@ -17,12 +18,26 @@ fn admonition_color(kind: &str) -> Color {
     }
 }
 
-fn align_text(text: &str, width: usize, alignment: &Alignment) -> String {
-    let text_len = text.len();
-    if text_len >= width {
-        return text[..width].to_string();
+fn truncate_to_width(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width > width {
+            break;
+        }
+        out.push(ch);
+        used += ch_width;
     }
-    let padding = width - text_len;
+    out
+}
+
+fn align_text(text: &str, width: usize, alignment: &Alignment) -> String {
+    let text_width = UnicodeWidthStr::width(text);
+    if text_width >= width {
+        return truncate_to_width(text, width);
+    }
+    let padding = width - text_width;
     match alignment {
         Alignment::Right => format!("{}{}", " ".repeat(padding), text),
         Alignment::Center => {

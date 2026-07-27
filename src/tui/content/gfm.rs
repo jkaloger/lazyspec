@@ -27,6 +27,7 @@ mod tests {
     use pulldown_cmark::Alignment;
     use ratatui::style::Modifier;
     use ratatui::text::Line;
+    use unicode_width::UnicodeWidthStr;
 
     #[test]
     fn test_extract_plain_markdown() {
@@ -675,6 +676,28 @@ More text at the end.
             "first row visual line should contain 'short', got {:?}",
             first_row_line
         );
+    }
+
+    #[test]
+    fn table_truncation_respects_char_boundaries() {
+        let table = GfmTable {
+            headers: vec!["h".into()],
+            alignments: vec![Alignment::None],
+            rows: vec![vec!["aaa—bbb—ccc—ddd—eee—fff".into()]],
+        };
+
+        let max_width: u16 = 10;
+        let lines = render_table(&table, max_width);
+
+        for (i, line) in lines.iter().enumerate().skip(2) {
+            let text = line_text(line);
+            let display_width = UnicodeWidthStr::width(text.as_str());
+            assert!(
+                display_width <= max_width as usize,
+                "row visual line {i} display width {display_width} exceeded max_width {max_width}: {:?}",
+                text
+            );
+        }
     }
 
     #[test]
