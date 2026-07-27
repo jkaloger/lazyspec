@@ -346,24 +346,26 @@ fn ensure_github_labels(config: &Config, root: &Path) {
 
     let client = GhCli::new();
     for type_name in &gh_types {
-        let label = match config.type_by_name(type_name) {
-            Some(type_def) => type_def.github_label(),
+        let labels = match config.type_by_name(type_name) {
+            Some(type_def) => type_def.github_create_labels(),
             None => continue,
         };
         let color = deterministic_color(type_name);
         let description = format!("lazyspec document type: {}", type_name);
-        match client.label_ensure(&repo, &label, &description, &color) {
-            Ok(()) => println!("  created label: {}", label),
-            Err(e) => {
-                if let Some(gh_err) = e.downcast_ref::<GhError>() {
-                    if matches!(gh_err, GhError::NotInstalled) {
-                        eprintln!(
-                            "warning: gh CLI not found; skipping label creation for github-issues types"
-                        );
-                        return;
+        for label in &labels {
+            match client.label_ensure(&repo, label, &description, &color) {
+                Ok(()) => println!("  created label: {}", label),
+                Err(e) => {
+                    if let Some(gh_err) = e.downcast_ref::<GhError>() {
+                        if matches!(gh_err, GhError::NotInstalled) {
+                            eprintln!(
+                                "warning: gh CLI not found; skipping label creation for github-issues types"
+                            );
+                            return;
+                        }
                     }
+                    eprintln!("warning: failed to create label {}: {}", label, e);
                 }
-                eprintln!("warning: failed to create label {}: {}", label, e);
             }
         }
     }
