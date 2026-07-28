@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/jkaloger/lazyspec/compare/v0.10.0...v0.11.0) - 2026-07-27
+
+### Added
+
+- *(github)* relationship-driven native sub-issues, ordinary relations on GitHub-authored issues ([#90](https://github.com/jkaloger/lazyspec/pull/90))
+- *(github)* read native blocks/blocked-by back on fetch
+- *(github)* native blocks/blocked-by write path via issue dependencies
+- [**breaking**] ranked fuzzy search across engine, TUI, and CLI ([#86](https://github.com/jkaloger/lazyspec/pull/86))
+- interactive config wizard, spinners, and mascot ([#84](https://github.com/jkaloger/lazyspec/pull/84))
+
+### Fixed
+
+- *(github)* honour github_issue_tag as create label without issue type
+- table truncation causing panic
+
+### Other
+
+- update iter status
+- more readme updates
+- readme updates
+- doc updates
+
 ## [0.10.0](https://github.com/jkaloger/lazyspec/compare/v0.9.2...v0.10.0) - 2026-07-18
 
 ### Added
