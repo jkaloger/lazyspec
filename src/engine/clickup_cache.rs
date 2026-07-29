@@ -19,7 +19,7 @@ use chrono::{DateTime, Utc};
 use crate::engine::clickup::{
     ClickupClient, ClickupStatus, ClickupTask, TaskAssigneeUpdate, TaskCreate, TaskUpdate,
 };
-use crate::engine::config::{Lifecycle, TypeDef, CLICKUP_RELATIONS_FIELD};
+use crate::engine::config::{AttrKind, Lifecycle, TypeDef, CLICKUP_RELATIONS_FIELD};
 use crate::engine::document::{self, AttrValue, DocMeta, DocType, Relation, Status};
 use crate::engine::store_dispatch::write_cache_file;
 use crate::engine::task_map::TaskMap;
@@ -444,7 +444,8 @@ pub(crate) fn build_task_create(
 ///   the value is a numeric user id -- username->id mapping is out of scope).
 ///
 /// Any other key (a non-native attribute or a relation) has no native field and
-/// routes to a custom field in a later RFC-056 story; it is ignored here.
+/// routes to a custom field instead ([`NATIVE_UPDATE_KEYS`] is the split the
+/// store partitions on); it is ignored here.
 pub(crate) fn build_task_update(updates: &[(&str, &str)]) -> TaskUpdate {
     let mut payload = TaskUpdate::default();
     for &(key, value) in updates {
@@ -473,6 +474,49 @@ pub(crate) fn build_task_update(updates: &[(&str, &str)]) -> TaskUpdate {
         }
     }
     payload
+}
+
+/// The update keys [`build_task_update`] has a native ClickUp field for. Every
+/// other key is a non-native attribute and takes the custom-field write path
+/// (RFC-056 §Field mapping), so the two sets must stay in step -- a key added to
+/// `build_task_update`'s match and not to this list would be written twice.
+pub(crate) const NATIVE_UPDATE_KEYS: &[&str] = &[
+    "title", "body", "status", "priority", "due", "estimate", "assignee",
+];
+
+pub(crate) fn is_native_update_key(key: &str) -> bool {
+    NATIVE_UPDATE_KEYS.contains(&key)
+}
+
+/// Encode an `--attr` string value as the JSON value ClickUp's custom-field
+/// endpoint expects for that field, using the attribute's declared `kind`
+/// (RFC-056 §Field mapping). ClickUp types its custom fields: a `number` field
+/// rejects `"5"` where it accepts `5`, so a numeric or boolean kind is parsed
+/// rather than passed through, and an unparseable value is an error -- silently
+/// sending a string to a number field would fail mid-write with ClickUp's own
+/// opaque 400. An undeclared attribute has no kind to go on and is sent as text.
+pub(crate) fn encode_custom_field_value(
+    name: &str,
+    kind: Option<AttrKind>,
+    value: &str,
+) -> Result<serde_json::Value> {
+    let trimmed = value.trim();
+    let parsed = match kind {
+        Some(AttrKind::Int) => trimmed
+            .parse::<i64>()
+            .map(serde_json::Value::from)
+            .map_err(|_| anyhow::anyhow!("attr '{name}' is declared int; '{value}' is not")),
+        Some(AttrKind::Float) => trimmed
+            .parse::<f64>()
+            .map(serde_json::Value::from)
+            .map_err(|_| anyhow::anyhow!("attr '{name}' is declared float; '{value}' is not")),
+        Some(AttrKind::Bool) => trimmed
+            .parse::<bool>()
+            .map(serde_json::Value::from)
+            .map_err(|_| anyhow::anyhow!("attr '{name}' is declared bool; '{value}' is not")),
+        _ => Ok(serde_json::Value::String(value.to_string())),
+    }?;
+    Ok(parsed)
 }
 
 /// Map a ClickUp priority *name* to the bare integer the write API expects

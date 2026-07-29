@@ -446,12 +446,16 @@ pub trait ClickupClient {
     /// serializes a doc's complete relation set into the configured text custom
     /// field and writes the whole block on every link/unlink. One custom field per
     /// request (ClickUp offers no batch on this endpoint).
+    ///
+    /// `value` is a JSON value, not a string: ClickUp types its custom fields, so
+    /// a `number` field rejects `"5"` where it accepts `5`. Text-shaped writes
+    /// (the relations block) pass a [`serde_json::Value::String`].
     fn set_custom_field(
         &self,
         token: &str,
         task_id: &str,
         field_id: &str,
-        value: &str,
+        value: &serde_json::Value,
     ) -> Result<(), ClickupError>;
 }
 
@@ -630,7 +634,7 @@ impl ClickupClient for ClickupHttpClient {
         token: &str,
         task_id: &str,
         field_id: &str,
-        value: &str,
+        value: &serde_json::Value,
     ) -> Result<(), ClickupError> {
         let url = format!("{}/task/{}/field/{}", self.base_url, task_id, field_id);
         let response = self
@@ -689,7 +693,7 @@ pub struct FakeClickupClient {
     /// Every `set_custom_field` call recorded as `(task_id, field_id, value)`,
     /// shared behind an `Rc` so a link test can read back the serialized relations
     /// block the write path built and the field id it targeted.
-    set_field_calls: std::rc::Rc<std::cell::RefCell<Vec<(String, String, String)>>>,
+    set_field_calls: std::rc::Rc<std::cell::RefCell<Vec<(String, String, serde_json::Value)>>>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -878,7 +882,7 @@ impl FakeClickupClient {
     /// serialized relations block and the field id the relation write targeted.
     pub fn set_field_calls(
         &self,
-    ) -> std::rc::Rc<std::cell::RefCell<Vec<(String, String, String)>>> {
+    ) -> std::rc::Rc<std::cell::RefCell<Vec<(String, String, serde_json::Value)>>> {
         std::rc::Rc::clone(&self.set_field_calls)
     }
 
@@ -993,12 +997,12 @@ impl ClickupClient for FakeClickupClient {
         _token: &str,
         task_id: &str,
         field_id: &str,
-        value: &str,
+        value: &serde_json::Value,
     ) -> Result<(), ClickupError> {
         self.set_field_calls.borrow_mut().push((
             task_id.to_string(),
             field_id.to_string(),
-            value.to_string(),
+            value.clone(),
         ));
         self.set_field.clone()
     }
@@ -1498,7 +1502,12 @@ mod tests {
         let calls = client.set_field_calls();
 
         client
-            .set_custom_field("pk_x", "90abc", "uuid-rel", "- implements: RFC-056")
+            .set_custom_field(
+                "pk_x",
+                "90abc",
+                "uuid-rel",
+                &serde_json::json!("- implements: RFC-056"),
+            )
             .unwrap();
 
         let recorded = calls.borrow();
@@ -1513,7 +1522,7 @@ mod tests {
         let client = FakeClickupClient::valid(user(1))
             .failing_set_field(ClickupError::Upstream { status: 500 });
         let err = client
-            .set_custom_field("pk_x", "90abc", "uuid-rel", "v")
+            .set_custom_field("pk_x", "90abc", "uuid-rel", &serde_json::json!("v"))
             .unwrap_err();
         assert_eq!(err, ClickupError::Upstream { status: 500 });
     }

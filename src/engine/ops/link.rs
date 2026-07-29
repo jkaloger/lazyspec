@@ -876,7 +876,12 @@ fn push_if_clickup_backed<C: ClickupClient>(
     })?;
 
     let client = clickup_factory();
-    client.set_custom_field(token.expose(), &task_id, &field_id, &value)?;
+    client.set_custom_field(
+        token.expose(),
+        &task_id,
+        &field_id,
+        &serde_json::Value::String(value),
+    )?;
     Ok(())
 }
 

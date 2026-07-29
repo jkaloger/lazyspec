@@ -5,6 +5,7 @@ use anyhow::{bail, Result};
 use chrono::Local;
 use serde::Serialize;
 
+use crate::engine::clickup::TaskUpdate;
 use crate::engine::clickup_cache;
 use crate::engine::config::{Config, Lifecycle, StoreBackend, TypeDef};
 use crate::engine::document::{compose_frontmatter, AttrValue, DocMeta, DocType, Status};
@@ -217,6 +218,48 @@ impl ClickupTasksStore {
 
         Ok(())
     }
+
+    /// Resolve non-native `--attr` changes to `(field_id, json value)` pairs for
+    /// the custom-field write path (RFC-056 §Field mapping). Each name is looked
+    /// up in the type's `clickup_custom_field_map` and its value encoded against
+    /// the attribute's declared kind. An unmapped name errors: ClickUp has nowhere
+    /// to put it, and silently dropping it would report a successful update that
+    /// changed nothing (and would then be wiped from the cache by the
+    /// re-materialize).
+    fn resolve_custom_field_writes(
+        &self,
+        type_def: &TypeDef,
+        custom: &[(&str, &str)],
+    ) -> Result<Vec<(String, serde_json::Value)>> {
+        custom
+            .iter()
+            .map(|(name, value)| {
+                if *name == crate::engine::config::CLICKUP_RELATIONS_FIELD {
+                    bail!(
+                        "'{}' is the relations custom field for type '{}'; use `lazyspec link` \
+                         rather than --attr",
+                        name,
+                        type_def.name
+                    );
+                }
+                let field_id = type_def.clickup_field_id(name).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "attr '{}' has no ClickUp field: add it to type '{}'s \
+                         clickup_custom_field_map (name = \"<custom field uuid>\")",
+                        name,
+                        type_def.name
+                    )
+                })?;
+                let kind = type_def
+                    .attributes
+                    .iter()
+                    .find(|attr| attr.name == *name)
+                    .map(|attr| attr.kind);
+                let encoded = clickup_cache::encode_custom_field_value(name, kind, value)?;
+                Ok((field_id.to_string(), encoded))
+            })
+            .collect()
+    }
 }
 
 impl DocumentStore for ClickupTasksStore {
@@ -293,6 +336,12 @@ impl DocumentStore for ClickupTasksStore {
     /// `advance`) rides the same path: it maps to the payload's raw status
     /// string, is `PUT` verbatim, and re-materializes from ClickUp's echo
     /// (RFC-056 §Status handling); lazyspec applies no local transition gate.
+    ///
+    /// A non-native attr (`--attr est_low=5`) has no native field and instead
+    /// writes the custom field its type's `clickup_custom_field_map` names, one
+    /// `POST /task/{id}/field/{uuid}` per attr (ClickUp offers no batch on edit).
+    /// Such an edit re-reads the task rather than trusting the PUT echo, which
+    /// predates the field writes.
     fn update(
         &mut self,
         type_def: &TypeDef,
@@ -315,19 +364,52 @@ impl DocumentStore for ClickupTasksStore {
                 )
             })?;
 
+        // Native fields ride the task PUT; everything else is a non-native attr
+        // that lives in a ClickUp custom field, one request each.
+        type Changes<'a> = Vec<(&'a str, &'a str)>;
+        let (native, custom): (Changes, Changes) = updates
+            .iter()
+            .copied()
+            .partition(|(key, _)| clickup_cache::is_native_update_key(key));
+
+        // Resolve and encode every custom-field write *before* any request fires:
+        // an unmapped attr or a value that contradicts its declared kind is a
+        // config/input error, and failing here leaves the task untouched rather
+        // than half-written.
+        let field_writes = self.resolve_custom_field_writes(type_def, &custom)?;
+
         // Optimistic lock: reject before the PUT if ClickUp has moved on since
         // our recorded baseline, so a stale local doc never clobbers a concurrent
         // external change. Applies equally to an `advance` (a status-only update).
         self.check_optimistic_lock(token.expose(), doc_id, &task_id, &baseline)?;
 
-        let payload = clickup_cache::build_task_update(updates);
-        let task = self
-            .client
-            .update_task(token.expose(), &task_id, &payload)?;
+        let payload = clickup_cache::build_task_update(&native);
+        let native_echo = if payload == TaskUpdate::default() {
+            // Nothing native changed (a custom-field-only edit): skip the PUT
+            // rather than send an empty one, which would bump `date_updated` for
+            // no change and invalidate every other client's lock baseline.
+            None
+        } else {
+            Some(
+                self.client
+                    .update_task(token.expose(), &task_id, &payload)?,
+            )
+        };
+
+        for (field_id, value) in &field_writes {
+            self.client
+                .set_custom_field(token.expose(), &task_id, field_id, value)?;
+        }
 
         // Re-materialize from the task ClickUp echoed back: the round-trip AC
         // wants the cache (and a subsequent read) to reflect the updated native
-        // fields, and this keeps the same doc id.
+        // fields, and this keeps the same doc id. A custom-field write returns no
+        // task, so once one has fired the echo is stale on exactly the fields
+        // that changed -- re-read the task instead.
+        let task = match native_echo {
+            Some(echo) if field_writes.is_empty() => echo,
+            _ => self.client.get_task(token.expose(), &task_id)?,
+        };
         let id = doc_id.to_string();
         let (meta, doc_body) = clickup_cache::task_to_doc(&task, type_def, &id);
         write_cache_file(&self.root, type_def, &meta, &doc_body)?;
@@ -3077,6 +3159,245 @@ mod tests {
         let entry = map.get("TASK-90abc").unwrap();
         assert_eq!(entry.task_id, "90abc");
         assert_eq!(entry.updated_at, "1774587145901");
+    }
+
+    /// A clickup-tasks type mapping the float attr `est_low` to a custom-field
+    /// uuid -- the village `feature` type's shape.
+    fn clickup_type_def_with_field_map() -> TypeDef {
+        use crate::engine::config::{AttrDef, AttrKind};
+
+        let mut td = clickup_type_def(Some("list123"));
+        td.clickup_custom_field_map = Some(
+            [("est_low".to_string(), "uuid-est-low".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        td.attributes = vec![AttrDef {
+            name: "est_low".to_string(),
+            kind: AttrKind::Float,
+            required: false,
+            values: Vec::new(),
+        }];
+        td
+    }
+
+    // A mapped non-native attr (`--attr est_low=5`) writes the configured custom
+    // field, typed by the attr's declared kind, and lands back in the cache. No
+    // task PUT fires: nothing native changed.
+    #[test]
+    fn clickup_update_writes_mapped_custom_field_attr() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_attr_custom_field");
+        let td = clickup_type_def_with_field_map();
+
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1700000000000");
+        map.save(&root).unwrap();
+
+        // The fake serves one scripted `get_task`, used both for the pre-write lock
+        // check (its date_updated matches the baseline, so the write proceeds) and
+        // for the post-write re-read, where it stands in for ClickUp returning the
+        // field at its new value.
+        let remote = scripted_task(
+            r#"{"id":"90abc","name":"My task","status":{"status":"open"},
+                "date_updated":"1700000000000",
+                "custom_fields":[{"id":"uuid-est-low","name":"est_low","value":5}]}"#,
+        );
+        let fake = FakeClickupClient::valid(clickup_user()).with_viewed_task(remote);
+        let field_calls = fake.set_field_calls();
+        let put_calls = fake.update_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        store
+            .update(&td, "TASK-90abc", &[("est_low", "5")])
+            .unwrap();
+
+        let fields = field_calls.borrow();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].0, "90abc");
+        assert_eq!(fields[0].1, "uuid-est-low");
+        // A float attr is sent as a JSON number: ClickUp's number fields reject "5".
+        assert_eq!(fields[0].2, serde_json::json!(5.0));
+        assert!(
+            put_calls.borrow().is_empty(),
+            "a custom-field-only edit must not PUT the task: {:?}",
+            put_calls.borrow()
+        );
+
+        let cache = root.join(".lazyspec/cache/task/TASK-90abc.md");
+        let content = std::fs::read_to_string(&cache).unwrap();
+        assert!(content.contains("est_low: 5"), "got:\n{content}");
+    }
+
+    // Native and non-native changes in one update: the task PUT carries the native
+    // fields, the custom field takes its own request.
+    #[test]
+    fn clickup_update_mixes_native_fields_and_custom_field_attrs() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_attr_mixed");
+        let td = clickup_type_def_with_field_map();
+
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1700000000000");
+        map.save(&root).unwrap();
+
+        let remote = scripted_task(
+            r#"{"id":"90abc","name":"Renamed","status":{"status":"open"},
+                "date_updated":"1700000000000",
+                "custom_fields":[{"id":"uuid-est-low","name":"est_low","value":2.5}]}"#,
+        );
+        let echo = scripted_task(
+            r#"{"id":"90abc","name":"Renamed","status":{"status":"open"},
+                "date_updated":"1774587145901"}"#,
+        );
+        let fake = FakeClickupClient::valid(clickup_user())
+            .with_viewed_task(remote)
+            .with_updated_task(echo);
+        let field_calls = fake.set_field_calls();
+        let put_calls = fake.update_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        store
+            .update(
+                &td,
+                "TASK-90abc",
+                &[("title", "Renamed"), ("est_low", "2.5")],
+            )
+            .unwrap();
+
+        let puts = put_calls.borrow();
+        assert_eq!(puts.len(), 1);
+        assert_eq!(puts[0].1.name, Some("Renamed".to_string()));
+        let fields = field_calls.borrow();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].2, serde_json::json!(2.5));
+    }
+
+    // An attr with no entry in clickup_custom_field_map has nowhere to go: error
+    // before any request, rather than report a successful no-op.
+    #[test]
+    fn clickup_update_unmapped_attr_errors_before_any_write() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_attr_unmapped");
+        let td = clickup_type_def_with_field_map();
+
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1700000000000");
+        map.save(&root).unwrap();
+
+        let fake = FakeClickupClient::valid(clickup_user());
+        let field_calls = fake.set_field_calls();
+        let put_calls = fake.update_calls();
+        let view_calls = fake.view_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        let err = store
+            .update(&td, "TASK-90abc", &[("owner", "jkaloger")])
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("clickup_custom_field_map"),
+            "got: {err}"
+        );
+        assert!(field_calls.borrow().is_empty());
+        assert!(put_calls.borrow().is_empty());
+        assert!(
+            view_calls.borrow().is_empty(),
+            "no request before the error"
+        );
+    }
+
+    // A value contradicting the attr's declared kind fails up front: ClickUp would
+    // otherwise reject it mid-write with an opaque 400.
+    #[test]
+    fn clickup_update_attr_value_wrong_for_declared_kind_errors() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_attr_bad_kind");
+        let td = clickup_type_def_with_field_map();
+
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1700000000000");
+        map.save(&root).unwrap();
+
+        let fake = FakeClickupClient::valid(clickup_user());
+        let field_calls = fake.set_field_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        let err = store
+            .update(&td, "TASK-90abc", &[("est_low", "cheap")])
+            .unwrap_err();
+
+        assert!(err.to_string().contains("declared float"), "got: {err}");
+        assert!(field_calls.borrow().is_empty());
+    }
+
+    // The relations field is `link`'s to own: an --attr aimed at it would clobber
+    // the whole serialized relation set.
+    #[test]
+    fn clickup_update_rejects_attr_on_relations_field() {
+        use crate::engine::clickup::FakeClickupClient;
+        use crate::engine::credentials::Token;
+
+        let root = tmp_root("clickup_attr_relations");
+        let mut td = clickup_type_def(Some("list123"));
+        td.clickup_custom_field_map = Some(
+            [("relations".to_string(), "uuid-rel".to_string())]
+                .into_iter()
+                .collect(),
+        );
+
+        let mut map = TaskMap::load(&root).unwrap();
+        map.insert("TASK-90abc", "90abc", "1700000000000");
+        map.save(&root).unwrap();
+
+        let fake = FakeClickupClient::valid(clickup_user());
+        let field_calls = fake.set_field_calls();
+
+        let mut store = ClickupTasksStore {
+            client: Box::new(fake),
+            root: root.clone(),
+            config: Config::default(),
+            token: Some(Token::new("pk_x")),
+        };
+
+        let err = store
+            .update(&td, "TASK-90abc", &[("relations", "- implements: RFC-1")])
+            .unwrap_err();
+
+        assert!(err.to_string().contains("lazyspec link"), "got: {err}");
+        assert!(field_calls.borrow().is_empty());
     }
 
     #[test]
