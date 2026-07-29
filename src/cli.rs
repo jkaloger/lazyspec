@@ -235,7 +235,9 @@ pub enum Commands {
     ///
     /// With an ID, shows that document's chain. With no ID, emits the
     /// whole-store context forest; pass `--anchor <type>` to re-root the forest
-    /// on documents of that type, emitting each anchor plus its descendants.
+    /// on documents of that type, emitting each anchor with its chain
+    /// descendants nested below it and its chain ancestors below it too as an
+    /// inverted subtree (marked `↑` in the tree, `reverse_in_context` in JSON).
     Context {
         /// Document path or shorthand ID (e.g. ITERATION-001). Omit to emit the context forest.
         #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]

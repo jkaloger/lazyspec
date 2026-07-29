@@ -285,9 +285,11 @@ pub struct NotFoundPage {
 
 /// One node in the rendered `/graph` tree: the doc identity plus its nested
 /// children. Built from the engine's flat `Vec<GraphNode>` via [`GraphTreeNode::nest`].
-/// A diamond re-emission is a child row with no children of its own (its subtree
-/// was drawn under the first parent), so the depth-based nesting drops it as a
-/// leaf — matching the TUI's "plain doc row, no subtree" rule.
+/// A forward diamond re-emission is a child row the engine emits with no children
+/// of its own (its subtree was drawn under the first parent), so it lands as a leaf
+/// — matching the TUI's "plain doc row, no subtree" rule. A REVERSE re-emission
+/// (STORY-247) does carry children, since each anchor shows its whole upward
+/// lineage, and nests them like any other subtree.
 #[derive(Template)]
 #[template(path = "graph_node.html")]
 pub struct GraphTreeNode {
@@ -298,6 +300,10 @@ pub struct GraphTreeNode {
     pub status_color: Option<String>,
     pub depth: usize,
     pub related: Vec<String>,
+    /// The row was reached by an inverted chain edge: it is a chain ancestor of
+    /// its rendered parent, not a descendant (STORY-247). Only anchored forests
+    /// set it, and never on a depth-0 row.
+    pub reverse: bool,
     pub children: Vec<GraphTreeNode>,
 }
 
@@ -335,6 +341,7 @@ impl GraphTreeNode {
                     .map(str::to_string),
                 depth: node.depth,
                 related: node.related.clone(),
+                reverse: node.reverse,
                 children: Vec::new(),
             };
 
@@ -412,6 +419,7 @@ mod tests {
             depth: 0,
             related: Vec::new(),
             attributes: Default::default(),
+            reverse: false,
         }
     }
 
@@ -445,6 +453,86 @@ mod tests {
         let html = roots[0].render().unwrap();
         assert!(!html.contains("--status-color"), "{html}");
         assert!(html.contains("data-status=\"pending\""), "{html}");
+    }
+
+    /// A flattened row with a distinct id, so nesting and per-row markers are
+    /// observable.
+    fn graph_row(id: &str, depth: usize, reverse: bool) -> GraphNode {
+        GraphNode {
+            path: PathBuf::from(format!("docs/story/{id}-x.md")),
+            depth,
+            reverse,
+            ..graph_node("story", "draft")
+        }
+    }
+
+    #[test]
+    fn nest_marks_a_reverse_child_row_but_not_its_anchor() {
+        let roots = GraphTreeNode::nest(
+            &[
+                graph_row("ITERATION-001", 0, false),
+                graph_row("STORY-001", 1, true),
+            ],
+            &StatusColors::default(),
+        );
+
+        assert!(!roots[0].reverse);
+        assert!(roots[0].children[0].reverse);
+
+        let html = roots[0].children[0].render().unwrap();
+        assert!(html.contains("data-reverse"), "{html}");
+        assert!(html.contains("&#x2191;"), "{html}");
+        assert!(!html.contains("&#x25b2;"), "{html}");
+    }
+
+    #[test]
+    fn graph_node_template_omits_the_marker_on_a_depth_zero_row() {
+        // The marker is keyed on the edge and the connector on depth, independently:
+        // a rootless-cycle forest can re-root a doc that is an ancestor, and a root
+        // row was reached by no edge, so it shows no upward marker.
+        let roots = GraphTreeNode::nest(&[graph_row("RFC-001", 0, true)], &StatusColors::default());
+
+        let html = roots[0].render().unwrap();
+        assert!(!html.contains("data-reverse"), "{html}");
+        assert!(!html.contains("&#x2191;"), "{html}");
+    }
+
+    #[test]
+    fn nest_rebuilds_a_reverse_subtree_repeated_under_each_anchor() {
+        // A reverse ancestor recurses under every anchor that reaches it, so the
+        // same subtree arrives twice in the flat list -- and unlike a forward
+        // diamond repeat, each occurrence carries its own children.
+        let roots = GraphTreeNode::nest(
+            &[
+                graph_row("ITERATION-001", 0, false),
+                graph_row("STORY-001", 1, true),
+                graph_row("RFC-001", 2, true),
+                graph_row("ITERATION-002", 0, false),
+                graph_row("STORY-001", 1, true),
+                graph_row("RFC-001", 2, true),
+            ],
+            &StatusColors::default(),
+        );
+
+        assert_eq!(
+            roots.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["ITERATION-001", "ITERATION-002"]
+        );
+        for root in &roots {
+            let story = &root.children;
+            assert_eq!(story.len(), 1, "{} has one ancestor row", root.id);
+            assert_eq!(story[0].id, "STORY-001");
+            assert_eq!(
+                story[0]
+                    .children
+                    .iter()
+                    .map(|c| c.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["RFC-001"],
+                "the repeated ancestor keeps its own lineage under {}",
+                root.id
+            );
+        }
     }
 
     fn temp_store() -> (tempfile::TempDir, Store) {

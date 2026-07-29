@@ -19,8 +19,9 @@ fn setup() -> TestFixture {
 
 #[test]
 fn context_forest_anchor_emits_anchored_subtree() {
-    // AC3: --anchor story emits the anchored forest (stories as roots plus
-    // their iteration descendants); no flag emits the whole store.
+    // AC3: --anchor story emits the anchored forest (stories as roots, their
+    // iteration descendants nested and their RFC ancestors inverted beneath them);
+    // no flag emits the whole store.
     let fixture = setup();
     let store = fixture.store();
 
@@ -47,8 +48,8 @@ fn context_forest_anchor_emits_anchored_subtree() {
         anchored
     );
     assert!(
-        !has_path(forest, "RFC-001"),
-        "ancestor RFC pruned under story anchor; got {}",
+        has_path(forest, "RFC-001"),
+        "ancestor RFC emitted under the story anchor as reverse chain (STORY-247); got {}",
         anchored
     );
 
@@ -61,6 +62,387 @@ fn context_forest_anchor_emits_anchored_subtree() {
             && has_path(forest_whole, "ITERATION-001"),
         "whole-store forest includes every doc; got {}",
         whole
+    );
+}
+
+/// How many mini-cards in a tree render carry `title`. Excludes the `├─`/`└─`
+/// forward-children lines each card lists, which repeat titles that are also
+/// drawn as cards elsewhere in the tree.
+fn card_count(output: &str, title: &str) -> usize {
+    output
+        .lines()
+        .filter(|l| l.contains(title) && !l.contains('\u{251C}') && !l.contains('\u{2514}'))
+        .count()
+}
+
+#[test]
+fn context_forest_anchor_json_marks_inverted_ancestor_edges() {
+    // STORY-247 AC2 (CLI half): anchoring on the leaf type emits each anchor's
+    // ancestors below it with the edge inverted, so those nodes carry the reverse
+    // marker and their anchor-side edge under `inverted_parents_in_context` --
+    // `implements_in_context` never holds an inverted edge.
+    let fixture = setup();
+    let store = fixture.store();
+
+    let output = lazyspec::cli::context::run_forest_json(&store, Some("iteration")).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let forest = parsed["forest"].as_array().unwrap();
+    let node = |needle: &str| -> &serde_json::Value {
+        forest
+            .iter()
+            .find(|n| n["path"].as_str().unwrap_or_default().contains(needle))
+            .unwrap_or_else(|| panic!("{} in the anchored forest; got {}", needle, output))
+    };
+    let paths = |n: &serde_json::Value, key: &str| -> Vec<String> {
+        n[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{} should be an array; got {}", key, n))
+            .iter()
+            .map(|p| p.as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let anchor = node("ITERATION-001");
+    assert_eq!(anchor["reverse_in_context"], serde_json::Value::Bool(false));
+    assert!(paths(anchor, "inverted_parents_in_context").is_empty());
+
+    for (id, hangs_under) in [("STORY-001", "ITERATION-001"), ("RFC-001", "STORY-001")] {
+        let ancestor = node(id);
+        assert_eq!(
+            ancestor["reverse_in_context"],
+            serde_json::Value::Bool(true),
+            "{} is reached by an inverted edge; got {}",
+            id,
+            ancestor
+        );
+        let inverted = paths(ancestor, "inverted_parents_in_context");
+        assert_eq!(inverted.len(), 1, "got {:?}", inverted);
+        assert!(
+            inverted[0].contains(hangs_under),
+            "{} hangs under {}; got {:?}",
+            id,
+            hangs_under,
+            inverted
+        );
+        assert!(
+            paths(ancestor, "implements_in_context").is_empty(),
+            "an inverted edge is never asserted as `implements`; got {}",
+            ancestor
+        );
+    }
+}
+
+#[test]
+fn context_forest_anchor_json_inverted_parents_lists_edges_not_implementers() {
+    // `inverted_parents_in_context` is named for the EDGE, not for who implements
+    // whom. Pivoting on `story` leaves STORY-001's implementing iteration a FORWARD
+    // child, so the story's inverted-parent list is empty even though a doc does
+    // implement it, and the only populated list on the story is the forward one.
+    let fixture = setup();
+    let store = fixture.store();
+
+    let output = lazyspec::cli::context::run_forest_json(&store, Some("story")).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let story = parsed["forest"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["path"].as_str().unwrap().contains("STORY-001"))
+        .unwrap();
+
+    assert_eq!(
+        story["inverted_parents_in_context"],
+        serde_json::json!([]),
+        "the anchor hangs under nothing, inverted or otherwise; got {}",
+        story
+    );
+    assert_eq!(
+        story["implements_in_context"],
+        serde_json::json!([]),
+        "its RFC parent was inverted away from the forward list; got {}",
+        story
+    );
+    let iteration = parsed["forest"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["path"].as_str().unwrap().contains("ITERATION-001"))
+        .unwrap();
+    assert_eq!(
+        iteration["implements_in_context"],
+        serde_json::json!(["docs/stories/STORY-001-auth-impl.md"]),
+        "the implementer's edge is forward, which is why it is absent above; got {}",
+        iteration
+    );
+}
+
+#[test]
+fn context_forest_unanchored_json_omits_the_reverse_keys() {
+    // AC6: the whole-store forest has no inverted edges, so it carries no marker
+    // keys at all and its `implements_in_context` edges are unchanged.
+    let fixture = setup();
+    let store = fixture.store();
+
+    let output = lazyspec::cli::context::run_forest_json(&store, None).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    for node in parsed["forest"].as_array().unwrap() {
+        assert!(
+            node.get("reverse_in_context").is_none(),
+            "unanchored forest carries no reverse marker; got {}",
+            node
+        );
+        assert!(
+            node.get("inverted_parents_in_context").is_none(),
+            "unanchored forest carries no inverted edge list; got {}",
+            node
+        );
+        assert!(node["implements_in_context"].is_array(), "got {}", node);
+    }
+
+    let story = parsed["forest"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["path"].as_str().unwrap().contains("STORY-001"))
+        .unwrap();
+    let edges: Vec<&str> = story["implements_in_context"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    assert_eq!(edges, vec!["docs/rfcs/RFC-001-auth.md"]);
+}
+
+#[test]
+fn context_forest_anchor_human_marks_reverse_rows() {
+    // AC2/AC8 parity: a row reached by an inverted edge carries `↑` in the tree
+    // connector position, so the leaf pivot reads ITERATION -> STORY -> RFC
+    // top-down with the anchor unmarked at depth 0.
+    let fixture = setup();
+    let store = fixture.store();
+
+    let output = lazyspec::cli::context::run_forest_human(&store, Some("iteration")).unwrap();
+    let line_for = |needle: &str| -> &str {
+        output
+            .lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("no line for {}; output:\n{}", needle, output))
+    };
+
+    assert!(
+        !line_for("Auth Sprint 1").contains('\u{2191}'),
+        "the depth-0 anchor was reached by no edge; got:\n{}",
+        output
+    );
+    assert!(
+        line_for("Auth Implementation").starts_with("\u{2191} "),
+        "the depth-1 ancestor's marker sits in its indent unit; got:\n{}",
+        output
+    );
+    assert!(
+        line_for("Auth Redesign").starts_with("  \u{2191} "),
+        "the depth-2 ancestor stays aligned one level deeper; got:\n{}",
+        output
+    );
+    assert!(
+        !output.contains('\u{25B2}'),
+        "`▲` is the story type icon, not the reverse marker; got:\n{}",
+        output
+    );
+    assert_eq!(
+        output.matches('\u{2191}').count(),
+        2,
+        "exactly the two inverted rows are marked; got:\n{}",
+        output
+    );
+}
+
+#[test]
+fn context_forest_unanchored_human_has_no_reverse_marker() {
+    let fixture = setup();
+    let store = fixture.store();
+
+    let output = lazyspec::cli::context::run_forest_human(&store, None).unwrap();
+
+    assert!(output.contains("Auth Redesign"), "got:\n{}", output);
+    assert!(
+        !output.contains('\u{2191}'),
+        "the whole-store forest has no inverted edges; got:\n{}",
+        output
+    );
+}
+
+#[test]
+fn context_forest_anchor_human_redraws_ancestor_lineage_under_each_anchor() {
+    // Two iterations share one story, which implements one RFC. Each anchor must
+    // show its whole upward lineage rather than a `(see above)` stub, matching the
+    // graph views: a reverse re-encounter recurses, a forward one does not.
+    let fixture = setup();
+    fixture.write_doc(
+        "docs/iterations/ITERATION-002-auth-sprint-2.md",
+        "---\ntitle: \"Auth Sprint 2\"\ntype: iteration\nstatus: draft\nauthor: agent\ndate: 2026-03-04\ntags: []\nrelated:\n- implements: docs/stories/STORY-001-auth-impl.md\n---\n\nIteration body.\n",
+    );
+    let store = fixture.store();
+
+    let output = lazyspec::cli::context::run_forest_human(&store, Some("iteration")).unwrap();
+
+    assert_eq!(
+        card_count(&output, "Auth Implementation"),
+        2,
+        "the shared ancestor is drawn under each anchor; got:\n{}",
+        output
+    );
+    assert_eq!(
+        card_count(&output, "Auth Redesign"),
+        2,
+        "and keeps its own lineage each time; got:\n{}",
+        output
+    );
+    assert!(
+        !output.contains("(see above)"),
+        "a reverse re-encounter recurses instead of truncating; got:\n{}",
+        output
+    );
+}
+
+#[test]
+fn context_forest_forward_diamond_keeps_the_see_above_shorthand() {
+    // The forward rule is unchanged: a descendant reached from two anchors is
+    // drawn once, then referenced.
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/stories/STORY-001-left.md",
+        "---\ntitle: \"Western Wing\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated: []\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/stories/STORY-002-right.md",
+        "---\ntitle: \"Eastern Wing\"\ntype: story\nstatus: draft\nauthor: jkaloger\ndate: 2026-03-02\ntags: []\nrelated: []\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/iterations/ITERATION-001-bottom.md",
+        "---\ntitle: \"Keystone Sprint\"\ntype: iteration\nstatus: draft\nauthor: agent\ndate: 2026-03-03\ntags: []\nrelated:\n- implements: docs/stories/STORY-001-left.md\n- implements: docs/stories/STORY-002-right.md\n---\n\nbody\n",
+    );
+    let store = fixture.store();
+
+    let output = lazyspec::cli::context::run_forest_human(&store, Some("story")).unwrap();
+
+    assert_eq!(
+        card_count(&output, "Keystone Sprint"),
+        1,
+        "the shared descendant's card is drawn once; got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("\u{21B3} ITERATION-001 (see above)"),
+        "the second forward encounter is a shorthand reference; got:\n{}",
+        output
+    );
+}
+
+#[test]
+fn context_forest_anchor_human_terminates_on_a_cycle_above_the_anchor() {
+    // AC7 for the CLI tree: reverse recursion re-walks ancestors, so a chain cycle
+    // above an anchor must be stopped by the DFS-path guard rather than looping.
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-a.md",
+        "---\ntitle: \"Cycle Alpha\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-002-b.md\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-002-b.md",
+        "---\ntitle: \"Cycle Beta\"\ntype: rfc\nstatus: accepted\nauthor: jkaloger\ndate: 2026-03-01\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-a.md\n---\n\nbody\n",
+    );
+    fixture.write_doc(
+        "docs/iterations/ITERATION-001-anchor.md",
+        "---\ntitle: \"Cycle Anchor\"\ntype: iteration\nstatus: draft\nauthor: agent\ndate: 2026-03-03\ntags: []\nrelated:\n- implements: docs/rfcs/RFC-001-a.md\n---\n\nbody\n",
+    );
+    let store = fixture.store();
+
+    let output = lazyspec::cli::context::run_forest_human(&store, Some("iteration")).unwrap();
+
+    for title in ["Cycle Anchor", "Cycle Alpha", "Cycle Beta"] {
+        assert!(
+            card_count(&output, title) >= 1,
+            "{} should be drawn; got:\n{}",
+            title,
+            output
+        );
+    }
+    assert!(
+        output.contains("(see above)"),
+        "the edge closing the cycle is truncated, not followed; got:\n{}",
+        output
+    );
+}
+
+#[test]
+fn context_forest_anchor_human_bounds_a_pathological_reverse_expansion() {
+    // Redrawing an ancestor's lineage under every anchor has no edge-count bound:
+    // 20 levels of two stories each implementing both stories above give 2^20
+    // distinct upward paths from the one anchor, ~2.1M cards unbudgeted. The render
+    // must degrade to truncated lineages instead of hanging the command.
+    const LEVELS: usize = 20;
+    let story_id = |level: usize, side: usize| format!("STORY-{:03}", level * 2 + side + 1);
+    let implements_level = |level: usize| {
+        if level < LEVELS {
+            format!(
+                "- implements: {}\n- implements: {}",
+                story_id(level, 0),
+                story_id(level, 1)
+            )
+        } else {
+            "[]".to_string()
+        }
+    };
+    let doc = |id: &str, doc_type: &str, level: usize| {
+        let related = implements_level(level);
+        let block = if related == "[]" {
+            "related: []".to_string()
+        } else {
+            format!("related:\n{related}")
+        };
+        format!(
+            "---\ntitle: \"{id}\"\ntype: {doc_type}\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\n{block}\n---\n\nbody\n"
+        )
+    };
+
+    let fixture = TestFixture::new();
+    for level in 0..LEVELS {
+        for side in 0..2 {
+            let id = story_id(level, side);
+            fixture.write_doc(
+                &format!("docs/stories/{id}-node.md"),
+                &doc(&id, "story", level + 1),
+            );
+        }
+    }
+    fixture.write_doc(
+        "docs/iterations/ITERATION-001-anchor.md",
+        &doc("Anchor", "iteration", 0),
+    );
+    let store = fixture.store();
+
+    let started = std::time::Instant::now();
+    let output = lazyspec::cli::context::run_forest_human(&store, Some("iteration")).unwrap();
+    let elapsed = started.elapsed();
+
+    let cards = output.matches("story [draft]").count();
+    assert!(
+        cards > 9_000,
+        "the store must actually reach the card budget or this test proves nothing; got {} cards",
+        cards
+    );
+    assert!(
+        cards < 15_000,
+        "the budget must cap the expansion well below its 2^20 unbudgeted size; got {} cards",
+        cards
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "the render must return promptly under the budget, took {:?}",
+        elapsed
     );
 }
 

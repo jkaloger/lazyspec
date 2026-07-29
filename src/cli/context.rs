@@ -1,6 +1,7 @@
 use crate::cli::json::doc_to_json_with_family;
 use crate::cli::style::{bold, dim, styled_status};
 use crate::engine::document::DocMeta;
+use crate::engine::graph::MAX_REVERSE_EXPANSION_ROWS;
 use crate::engine::status_colors::StatusColors;
 use crate::engine::store::Store;
 use anyhow::Result;
@@ -60,21 +61,51 @@ pub fn run_json(store: &Store, id: &str, depth: usize) -> Result<String> {
 /// Emit the context forest as JSON. `anchor` re-roots on a document type; `None`
 /// yields the whole-store forest. Each node carries its in-context parent edges
 /// under `implements_in_context`, matching the chain JSON shape.
+///
+/// An anchored forest also emits each anchor's chain ANCESTORS below it with the
+/// edge inverted (STORY-247), so those nodes hang under a doc they do not
+/// implement — it implements them. Their edges are therefore emitted under
+/// `inverted_parents_in_context` instead, leaving `implements_in_context` to mean
+/// only ever what its name says. The name is deliberately about the EDGE and not
+/// about who implements whom: it holds a node's inverted parent edges, which is not
+/// the same as "the docs that implement this one" — on `--anchor story` a story's
+/// implementing iterations are FORWARD children, so they never appear in it and the
+/// list is empty. `reverse_in_context` is the per-node marker AC2 asks for, and is
+/// the engine's `ContextNode::parents_inverted`. Anchoring puts a doc on the
+/// descendant side or the ancestor side, never both, so exactly one of the two lists
+/// is non-empty per node and their union is the node's rendered parents. Both keys
+/// are present on every node of an anchored forest and absent from the unanchored
+/// one, whose output is byte-identical to before the reverse chain existed
+/// (STORY-247 AC6).
 pub fn run_forest_json(store: &Store, anchor: Option<&str>) -> Result<String> {
     let forest = resolve_forest(store, anchor);
+    let anchored = anchor.is_some();
     let nodes: Vec<_> = forest
         .iter()
         .map(|n| {
             let mut value = doc_to_json_with_family(n.doc, store);
-            let edges: Vec<_> = n
-                .parents
-                .iter()
-                .map(|p| serde_json::Value::String(p.to_string_lossy().to_string()))
-                .collect();
-            value.as_object_mut().unwrap().insert(
-                "implements_in_context".to_string(),
-                serde_json::Value::Array(edges),
-            );
+            let edges = |paths: &[PathBuf]| {
+                serde_json::Value::Array(
+                    paths
+                        .iter()
+                        .map(|p| serde_json::Value::String(p.to_string_lossy().to_string()))
+                        .collect(),
+                )
+            };
+            let (forward, inverted): (&[PathBuf], &[PathBuf]) = if n.parents_inverted {
+                (&[], &n.parents)
+            } else {
+                (&n.parents, &[])
+            };
+            let obj = value.as_object_mut().unwrap();
+            obj.insert("implements_in_context".to_string(), edges(forward));
+            if anchored {
+                obj.insert("inverted_parents_in_context".to_string(), edges(inverted));
+                obj.insert(
+                    "reverse_in_context".to_string(),
+                    serde_json::Value::Bool(n.parents_inverted),
+                );
+            }
             value
         })
         .collect();
@@ -158,11 +189,40 @@ fn render_stack(
     }
 }
 
+/// Marker for a row reached by an anchoring-INVERTED chain edge: the row is a
+/// chain ancestor of the card above it, not a descendant (STORY-247). It replaces
+/// the row's last indent unit, so a marked card stays aligned with its forward
+/// siblings — the same trade the TUI makes swapping `└─▶ ` for `└─↑ `. `▲` is the
+/// `story` type icon in both other renderers, so the glyph is `↑` here too.
+const REVERSE_MARKER: &str = "\u{2191} ";
+
+/// Mutable state threaded through the tree render: which docs have been drawn,
+/// which are on the current DFS path (the cycle guard), and how many reverse
+/// re-encounters have been reached (the reverse-recursion budget).
+///
+/// [`render_tree`] walks the forest itself rather than `flatten_forest`'s output, so
+/// it enforces the engine's [`MAX_REVERSE_EXPANSION_ROWS`] against its own count —
+/// and counts the same thing the engine does: a reverse re-encounter, whether it goes
+/// on to be redrawn in full or degrades to the `(see above)` shorthand. Cards the
+/// render would emit anyway (first encounters, forward diamonds) never count, so a
+/// merely large store cannot reach the cap; only the 2^L upward-path blow-up L
+/// stacked chain diamonds above an anchor produce can. Unlike the graph views, the
+/// degraded row here is visibly a stub.
+struct TreeWalk {
+    drawn: HashSet<PathBuf>,
+    on_stack: HashSet<PathBuf>,
+    reverse_rows: usize,
+}
+
 /// Render the backward node set as an indented tree for a multi-parent DAG.
 /// Roots (nodes with no in-graph parents) are drawn first, then their children
 /// descend with increasing indentation. A node reached more than once (a
-/// diamond) is drawn fully on first visit; later encounters emit a one-line
-/// shorthand reference and do not recurse, so each node is drawn exactly once.
+/// diamond) is drawn fully on first visit; a later FORWARD encounter emits a
+/// one-line shorthand reference and does not recurse, since the subtree below it
+/// was already drawn under the first parent. A later REVERSE encounter (an
+/// anchored forest's inverted ancestor edge) IS redrawn in full and recurses, so
+/// every anchor carries its own upward lineage instead of a truncated one —
+/// matching `flatten_forest`'s split for the TUI and web trees.
 fn render_tree(
     resolved: &ResolvedContext,
     store: &Store,
@@ -191,23 +251,41 @@ fn render_tree(
     let by_path: HashMap<&PathBuf, &ContextNode> =
         resolved.nodes.iter().map(|n| (&n.doc.path, n)).collect();
 
-    let mut drawn: HashSet<PathBuf> = HashSet::new();
+    let mut walk = TreeWalk {
+        drawn: HashSet::new(),
+        on_stack: HashSet::new(),
+        reverse_rows: 0,
+    };
     for root in roots {
         render_tree_node(
-            root, 0, resolved, store, colors, &children, &by_path, &mut drawn, output,
+            root, 0, false, resolved, store, colors, &children, &by_path, &mut walk, output,
         );
     }
 
     // Cyclic input can leave a strongly-connected component with no root, so
     // the root traversal never reaches it. Draw any still-undrawn node as a
-    // depth-0 subtree (in topological/path order) so the render is complete;
-    // the drawn-set still guarantees each node is drawn exactly once.
+    // depth-0 subtree (in topological/path order) so the render is complete.
+    // Like a root it carries no reverse marker: it was reached by no edge, and
+    // anchoring can only re-root an inverted ancestor here when the anchor that
+    // owns it sits in a rootless cycle.
     for node in &resolved.nodes {
-        if !drawn.contains(&node.doc.path) {
+        if !walk.drawn.contains(&node.doc.path) {
             render_tree_node(
-                node, 0, resolved, store, colors, &children, &by_path, &mut drawn, output,
+                node, 0, false, resolved, store, colors, &children, &by_path, &mut walk, output,
             );
         }
+    }
+}
+
+/// A tree row's leading whitespace, with the last indent unit replaced by
+/// [`REVERSE_MARKER`] when the row was reached by an inverted edge. Depth and the
+/// marker are keyed independently: a depth-0 row has no indent unit to mark and is
+/// never reverse, since it was reached by no edge at all.
+fn tree_indent(depth: usize, reverse: bool) -> String {
+    if reverse && depth > 0 {
+        format!("{}{}", "  ".repeat(depth - 1), REVERSE_MARKER)
+    } else {
+        "  ".repeat(depth)
     }
 }
 
@@ -215,53 +293,70 @@ fn render_tree(
 fn render_tree_node(
     node: &ContextNode,
     depth: usize,
+    reverse: bool,
     resolved: &ResolvedContext,
     store: &Store,
     colors: &StatusColors,
     children: &HashMap<&PathBuf, Vec<&PathBuf>>,
     by_path: &HashMap<&PathBuf, &ContextNode>,
-    drawn: &mut HashSet<PathBuf>,
+    walk: &mut TreeWalk,
     output: &mut String,
 ) {
     let indent = "  ".repeat(depth);
+    let marked_indent = tree_indent(depth, reverse);
     let doc = node.doc;
 
-    if drawn.contains(&doc.path) {
-        // Diamond re-encounter: shorthand reference, no full card, no recurse.
-        output.push_str(&format!(
-            "{}\u{21B3} {} (see above)\n",
-            indent,
-            doc.id.to_uppercase()
-        ));
-        return;
+    if walk.drawn.contains(&doc.path) {
+        // A reverse re-encounter is redrawn in full below, so this anchor gets the
+        // ancestor's own lineage too — unless the edge closes a cycle (the node is
+        // still on the DFS path, which is what makes the walk terminate) or the
+        // budget is spent. Everything else is a forward diamond: shorthand
+        // reference, no full card, no recurse.
+        let re_encounter = reverse && !walk.on_stack.contains(&doc.path);
+        if re_encounter {
+            walk.reverse_rows += 1;
+        }
+        if !re_encounter || walk.reverse_rows >= MAX_REVERSE_EXPANSION_ROWS {
+            output.push_str(&format!(
+                "{}\u{21B3} {} (see above)\n",
+                marked_indent,
+                doc.id.to_uppercase()
+            ));
+            return;
+        }
     }
-    drawn.insert(doc.path.clone());
+    walk.drawn.insert(doc.path.clone());
 
     let card = mini_card(colors, doc, doc.path == resolved.target.path);
-    for line in card.lines() {
-        output.push_str(&indent);
+    for (i, line) in card.lines().enumerate() {
+        // `mini_card`'s second line is its title line, where the marker reads as
+        // an edge into the card the way the TUI's connector does.
+        output.push_str(if i == 1 { &marked_indent } else { &indent });
         output.push_str(line);
         output.push('\n');
     }
     push_card_children(store, colors, &doc.path, &indent, output);
 
+    walk.on_stack.insert(doc.path.clone());
     if let Some(kids) = children.get(&doc.path) {
         for child_path in kids {
             if let Some(child) = by_path.get(child_path) {
                 render_tree_node(
                     child,
                     depth + 1,
+                    child.parents_inverted,
                     resolved,
                     store,
                     colors,
                     children,
                     by_path,
-                    drawn,
+                    walk,
                     output,
                 );
             }
         }
     }
+    walk.on_stack.remove(&doc.path);
 }
 
 /// Emit the forward (`implements`-pointing) children of `path` as `├─`/`└─`

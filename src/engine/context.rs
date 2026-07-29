@@ -7,6 +7,14 @@ use std::path::PathBuf;
 pub struct ContextNode<'a> {
     pub doc: &'a DocMeta,
     pub parents: Vec<PathBuf>,
+    /// True when anchoring INVERTED this node's parent edges: the node is a chain
+    /// ancestor of every doc in `parents`, re-parented under it so an anchored
+    /// pivot reads top-down in traversal order (STORY-247). Anchoring puts a doc on
+    /// the descendant side of the anchors or the ancestor side, never both, so the
+    /// flag covers ALL of `parents` or none of them — one bool, not a per-edge set.
+    /// Always false for the unanchored forest and for `resolve_chain`, where every
+    /// edge points the declared way.
+    pub parents_inverted: bool,
 }
 
 /// A document surfaced alongside the chain, tagged with how it was reached:
@@ -221,11 +229,15 @@ pub fn merge_declared_related<'a>(store: &'a Store, resolved: &mut ResolvedConte
 /// (docs with no resolvable in-graph parent) come first.
 ///
 /// When `anchor` is `Some(type)`, the forest is re-rooted on documents whose
-/// `doc_type` matches `type`: roots become the anchor-type docs and only their
-/// chain-descendant subtrees are emitted. Ancestors above an anchor (and any
-/// doc not reachable downward from an anchor) are pruned. A descendant reachable
-/// from two anchor-type docs is retained once with both anchor-side parents, so
-/// it appears under each anchor in a tree render without looping.
+/// `doc_type` matches `type`: roots become the anchor-type docs, with their
+/// chain-descendant subtrees nested below them and their chain ancestors emitted
+/// as INVERTED subtrees below them too (see [`resolve_forest_anchored`]). A doc
+/// on neither side of an anchor's lineage is pruned. A descendant reachable from
+/// two anchor-type docs is retained once with both anchor-side parents, so it
+/// appears under each anchor in a tree render without looping; a shared ancestor
+/// behaves the same way with inverted edges (the tree render then re-walks the
+/// repeated ancestor, so each anchor shows the whole lineage above it — see
+/// [`crate::engine::graph::flatten_forest`]).
 ///
 /// Parents are sourced from each doc's own declared `related`, NOT from
 /// `forward_links`: `propagate_parent_links` copies a parent's forward links
@@ -251,9 +263,9 @@ pub fn resolve_forest<'a>(store: &'a Store, anchor: Option<&str>) -> Vec<Context
 }
 
 /// Context forest re-rooted on documents carrying `tag`: roots become the
-/// tag-bearing docs and only their chain-descendant subtrees are emitted, just
-/// like [`resolve_forest`]'s type anchor but with a tag predicate. Used by the
-/// graph view's tag pivots.
+/// tag-bearing docs, with their chain descendants and inverted chain ancestors
+/// below them — [`resolve_forest`]'s type anchor with a tag predicate, sharing the
+/// same [`resolve_forest_anchored`] traversal. Used by the graph view's tag pivots.
 pub fn resolve_forest_by_tag<'a>(store: &'a Store, tag: &str) -> Vec<ContextNode<'a>> {
     let all_parents = chain_parents(store);
     let anchor_roots: Vec<PathBuf> = store
@@ -295,9 +307,27 @@ fn chain_parents(store: &Store) -> HashMap<PathBuf, Vec<PathBuf>> {
 
 /// Re-root the forest on `anchor_roots`: BFS down the chain edges from each
 /// anchor doc, keep the union of descendant subtrees, and retain only the parent
-/// edges that stay inside that subtree so the anchors surface as roots and pruned
-/// ancestors do not reattach. A descendant reachable from two anchors is kept
-/// once with both anchor-side parents.
+/// edges that stay inside that subtree so the anchors surface as roots. A
+/// descendant reachable from two anchors is kept once with both anchor-side
+/// parents.
+///
+/// The extent is then widened UPWARD (STORY-247): each anchor's chain ancestors
+/// are emitted too, with their edges INVERTED — the ancestor becomes a child of
+/// the anchor-side node it was reached from — so an anchored pivot reads top-down
+/// in traversal order (`ITERATION-246 → STORY-184 → RFC-058`) with the anchor
+/// still the root. Without this, pivoting on a leaf type renders a flat list,
+/// since leaves have no chain descendants.
+///
+/// The upward walk starts only at the anchor docs and only re-parents; it never
+/// descends from an ancestor, so an ancestor's OTHER children (an anchor's
+/// siblings/cousins) stay out of the forest. An ancestor already in the downward
+/// subtree keeps its forward edge and is not re-parented, so one doc never carries
+/// both directions of the same edge — and the ascent HALTS there rather than
+/// stepping over it, so chain parents ABOVE an in-subtree ancestor are left out of
+/// the forest entirely. That is not a loss against the old descendants-only extent
+/// (which pruned every ancestor), and it only bites where the upward path has
+/// re-entered the anchors' own downward subtree — the ancestor it stops at is
+/// already on screen as an anchor-side node.
 fn resolve_forest_anchored<'a>(
     store: &'a Store,
     all_parents: &HashMap<PathBuf, Vec<PathBuf>>,
@@ -318,7 +348,7 @@ fn resolve_forest_anchored<'a>(
     // BFS down from every anchor doc, collecting the union of descendant
     // subtrees. The seen-set dedups diamonds and guards against cycles.
     let mut subtree: HashSet<PathBuf> = HashSet::new();
-    let mut queue: VecDeque<PathBuf> = anchor_roots.into_iter().collect();
+    let mut queue: VecDeque<PathBuf> = anchor_roots.iter().cloned().collect();
     for path in &queue {
         subtree.insert(path.clone());
     }
@@ -332,32 +362,78 @@ fn resolve_forest_anchored<'a>(
         }
     }
 
+    // BFS up the chain parents from every anchor doc, inverting each edge:
+    // `inverted[ancestor]` collects the anchor-side nodes the ancestor was reached
+    // from, which become its parents in the emitted forest. Ancestors already in
+    // the downward subtree are left alone (their forward edge stands). Every
+    // anchor-side node that reaches an ancestor records an edge, so the ancestor
+    // renders under each — mirroring a shared descendant keeping both anchor-side
+    // parents — but the walk continues upward only on first discovery, so a
+    // diamond or a cycle above the anchor is traversed once.
+    let mut inverted: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    let mut walked_up: HashSet<PathBuf> = HashSet::new();
+    let mut up: VecDeque<PathBuf> = anchor_roots.into_iter().collect();
+    while let Some(current) = up.pop_front() {
+        let Some(parents) = all_parents.get(&current) else {
+            continue;
+        };
+        for parent in parents {
+            if subtree.contains(parent) {
+                continue;
+            }
+            let edges = inverted.entry(parent.clone()).or_default();
+            if !edges.contains(&current) {
+                edges.push(current.clone());
+            }
+            if walked_up.insert(parent.clone()) {
+                up.push_back(parent.clone());
+            }
+        }
+    }
+    // Which anchor reaches an ancestor first depends on `store.docs` iteration
+    // order (a HashMap), so path-sort each inverted edge list to keep the emitted
+    // parent lists stable across runs. The edge SET is already order-independent:
+    // every node is processed exactly once and records an edge to each of its
+    // out-of-subtree chain parents.
+    for edges in inverted.values_mut() {
+        edges.sort();
+    }
+
     let discovered: HashMap<PathBuf, &DocMeta> = store
         .docs
         .values()
-        .filter(|d| subtree.contains(&d.path))
+        .filter(|d| subtree.contains(&d.path) || inverted.contains_key(&d.path))
         .map(|d| (d.path.clone(), d))
         .collect();
 
-    // Keep only parent edges that stay within the pruned subtree, so anchors
-    // surface as roots and pruned ancestors do not reattach.
+    // A subtree node keeps only the parent edges that stay within the subtree, so
+    // the anchors surface as roots; an inverted node's parents are exactly the
+    // anchor-side nodes it was re-parented under (its own chain parents are its
+    // children here, one hop further up).
     let node_parents: HashMap<PathBuf, Vec<PathBuf>> = discovered
         .keys()
         .map(|path| {
-            let parents = all_parents
-                .get(path)
-                .map(|ps| {
-                    ps.iter()
-                        .filter(|p| subtree.contains(*p))
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default();
+            let parents = match inverted.get(path) {
+                Some(edges) => edges.clone(),
+                None => all_parents
+                    .get(path)
+                    .map(|ps| {
+                        ps.iter()
+                            .filter(|p| subtree.contains(*p))
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            };
             (path.clone(), parents)
         })
         .collect();
 
-    topo_order(&discovered, &node_parents)
+    let mut ordered = topo_order(&discovered, &node_parents);
+    for node in &mut ordered {
+        node.parents_inverted = inverted.contains_key(&node.doc.path);
+    }
+    ordered
 }
 
 /// Deterministic topological ordering of the discovered DAG, root-first.
@@ -432,6 +508,7 @@ fn topo_order<'a>(
         .map(|path| ContextNode {
             doc: discovered[&path],
             parents: node_parents.get(&path).cloned().unwrap_or_default(),
+            parents_inverted: false,
         })
         .collect()
 }
@@ -495,7 +572,34 @@ mod tests {
             .iter()
             .find(|n| n.doc.id == id)
             .unwrap_or_else(|| panic!("node {id} not in chain"));
-        node.parents
+        ids_of_paths(&node.parents)
+    }
+
+    /// The parents of the node with the given id, as doc ids IN EMITTED ORDER, for
+    /// asserting the determinism of a parent list.
+    fn ordered_parents_of(nodes: &[ContextNode], id: &str) -> Vec<String> {
+        let node = nodes
+            .iter()
+            .find(|n| n.doc.id == id)
+            .unwrap_or_else(|| panic!("node {id} not in chain"));
+        ids_in_order(&node.parents)
+    }
+
+    /// Whether anchoring inverted the parent edges of the node with the given id.
+    fn parents_inverted_of(nodes: &[ContextNode], id: &str) -> bool {
+        nodes
+            .iter()
+            .find(|n| n.doc.id == id)
+            .unwrap_or_else(|| panic!("node {id} not in chain"))
+            .parents_inverted
+    }
+
+    fn ids_of_paths(paths: &[PathBuf]) -> BTreeSet<String> {
+        ids_in_order(paths).into_iter().collect()
+    }
+
+    fn ids_in_order(paths: &[PathBuf]) -> Vec<String> {
+        paths
             .iter()
             .map(|p| p.file_stem().unwrap().to_string_lossy().to_string())
             .map(|stem| crate::engine::store::extract_id_from_name(&stem))
@@ -963,9 +1067,11 @@ mod tests {
     // --- resolve_forest anchored -------------------------------------------
 
     #[test]
-    fn forest_anchor_roots_on_type_and_prunes_ancestors() {
-        // AC1: anchor=story -> roots are all stories with their iteration
-        // descendants, no parent rfc above.
+    fn forest_anchor_roots_on_type_with_descendants_nested() {
+        // anchor=story -> roots are all stories with their iteration descendants.
+        // The shared parent RFC is no longer pruned (STORY-247): it hangs under
+        // each story as an inverted edge, asserted in the reverse-chain tests
+        // below. What matters here is that the stories are the ROOTS.
         let (_tmp, store) = store_from(&[
             ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
             (
@@ -990,10 +1096,10 @@ mod tests {
                 "STORY-001".to_string(),
                 "STORY-002".to_string(),
                 "ITERATION-001".to_string(),
-            ]),
-            "anchored forest excludes the parent RFC and includes the iteration descendant"
+                "RFC-001".to_string(),
+            ])
         );
-        // Stories are roots (no in-graph parents after pruning).
+        // Stories are roots: their own chain parents were inverted, not kept.
         assert!(forest
             .iter()
             .find(|n| n.doc.id == "STORY-001")
@@ -1082,16 +1188,14 @@ mod tests {
             BTreeSet::from(["STORY-001".to_string(), "STORY-002".to_string()]),
             "descendant retains both anchor-type parents"
         );
-        assert!(
-            !forest.iter().any(|n| n.doc.id == "RFC-001"),
-            "ancestor RFC pruned"
-        );
     }
 
     #[test]
     fn forest_by_tag_reroots_on_tagged_docs() {
-        // A tagged story becomes a root and pulls in its descendant subtree; the
-        // untagged ancestor RFC and an unrelated untagged story are pruned.
+        // A tagged story becomes a root and pulls in its descendant subtree plus
+        // its inverted ancestor chain. STORY-002 stays pruned even though it
+        // implements the same RFC: the upward walk re-parents ancestors, it does
+        // not descend from them.
         let tagged_story = "---\ntitle: \"Tagged\"\ntype: story\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags:\n- alpha\nrelated:\n- implements: RFC-001\n---\n\nbody\n";
         let (_tmp, store) = store_from(&[
             ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
@@ -1110,8 +1214,13 @@ mod tests {
 
         assert_eq!(
             node_ids(&forest),
-            BTreeSet::from(["STORY-001".to_string(), "ITERATION-001".to_string()]),
-            "tag anchor keeps the tagged story and its descendant, prunes the rest"
+            BTreeSet::from([
+                "STORY-001".to_string(),
+                "ITERATION-001".to_string(),
+                "RFC-001".to_string(),
+            ]),
+            "tag anchor keeps the tagged story, its descendant and its ancestor; \
+             the sibling story is pruned"
         );
         assert!(
             forest
@@ -1120,7 +1229,7 @@ mod tests {
                 .unwrap()
                 .parents
                 .is_empty(),
-            "the tagged story is a root (its untagged RFC parent is pruned)"
+            "the tagged story is a root (its RFC parent edge was inverted)"
         );
     }
 
@@ -1136,5 +1245,290 @@ mod tests {
 
         let forest = resolve_forest_by_tag(&store, "nonexistent");
         assert!(forest.is_empty(), "no roots -> empty forest");
+    }
+
+    // --- anchored reverse chain (STORY-247) --------------------------------
+
+    /// `ITERATION-001 implements STORY-001 implements RFC-001` — the 3-deep chain
+    /// the reverse-chain tests pivot on.
+    fn linear_chain_store() -> (TempDir, Store) {
+        store_from(&[
+            ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
+            (
+                "docs/stories/STORY-001-mid.md",
+                &doc_md("Mid", "story", "- implements: RFC-001"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-leaf.md",
+                &doc_md("Leaf", "iteration", "- implements: STORY-001"),
+            ),
+        ])
+    }
+
+    #[test]
+    fn forest_anchor_leaf_type_inverts_the_whole_ancestor_chain() {
+        // AC1: pivoting on the leaf type used to yield a flat list. Now the
+        // iteration is the root and each ancestor hangs below the node it was
+        // reached from, its edge recorded as inverted.
+        let (_tmp, store) = linear_chain_store();
+
+        let forest = resolve_forest(&store, Some("iteration"));
+
+        assert_eq!(
+            node_ids(&forest),
+            BTreeSet::from([
+                "ITERATION-001".to_string(),
+                "STORY-001".to_string(),
+                "RFC-001".to_string(),
+            ])
+        );
+        let anchor = forest.iter().find(|n| n.doc.id == "ITERATION-001").unwrap();
+        assert!(anchor.parents.is_empty(), "the anchor is the root");
+        assert!(!anchor.parents_inverted);
+
+        assert_eq!(
+            parents_of(&forest, "STORY-001"),
+            BTreeSet::from(["ITERATION-001".to_string()]),
+            "the anchor's chain parent is re-parented under the anchor"
+        );
+        assert!(parents_inverted_of(&forest, "STORY-001"));
+        assert_eq!(
+            parents_of(&forest, "RFC-001"),
+            BTreeSet::from(["STORY-001".to_string()]),
+            "the walk continues up: the grandparent hangs under the parent"
+        );
+        assert!(parents_inverted_of(&forest, "RFC-001"));
+    }
+
+    #[test]
+    fn forest_anchor_mid_chain_emits_descendants_forward_and_ancestors_inverted() {
+        // AC3: a story anchor has both directions. Its iteration keeps a forward
+        // edge (no reverse marker), its RFC gets an inverted one, and neither is
+        // emitted twice.
+        let (_tmp, store) = linear_chain_store();
+
+        let forest = resolve_forest(&store, Some("story"));
+
+        assert_eq!(forest.len(), 3, "no node emitted twice");
+        assert!(forest
+            .iter()
+            .find(|n| n.doc.id == "STORY-001")
+            .unwrap()
+            .parents
+            .is_empty());
+        assert_eq!(
+            parents_of(&forest, "ITERATION-001"),
+            BTreeSet::from(["STORY-001".to_string()])
+        );
+        assert!(
+            !parents_inverted_of(&forest, "ITERATION-001"),
+            "a descendant edge is not inverted"
+        );
+        assert_eq!(
+            parents_of(&forest, "RFC-001"),
+            BTreeSet::from(["STORY-001".to_string()])
+        );
+        assert!(
+            parents_inverted_of(&forest, "RFC-001"),
+            "an ancestor edge is"
+        );
+    }
+
+    #[test]
+    fn forest_anchor_forked_lineage_keeps_both_upward_branches() {
+        // AC4: a story implementing two RFCs renders both, each an inverted child
+        // of the anchor.
+        let (_tmp, store) = store_from(&[
+            ("docs/rfcs/RFC-001-a.md", &doc_md("A", "rfc", "[]")),
+            ("docs/rfcs/RFC-002-b.md", &doc_md("B", "rfc", "[]")),
+            (
+                "docs/stories/STORY-001-fork.md",
+                &doc_md(
+                    "Fork",
+                    "story",
+                    "- implements: RFC-001\n- implements: RFC-002",
+                ),
+            ),
+        ]);
+
+        let forest = resolve_forest(&store, Some("story"));
+
+        for rfc in ["RFC-001", "RFC-002"] {
+            assert_eq!(
+                parents_of(&forest, rfc),
+                BTreeSet::from(["STORY-001".to_string()]),
+                "{rfc} hangs under the anchor"
+            );
+            assert!(parents_inverted_of(&forest, rfc));
+        }
+    }
+
+    #[test]
+    fn forest_anchor_shared_ancestor_kept_once_with_its_own_lineage_above_it() {
+        // Three anchors fanning into one story that is itself under an RFC. The
+        // shared ancestor is kept once carrying an inverted edge to each anchor
+        // (mirroring how a shared DESCENDANT keeps both anchor-side parents), and
+        // the walk still climbs past it, so no anchor's lineage is cut short.
+        let (_tmp, store) = store_from(&[
+            ("docs/rfcs/RFC-001-top.md", &doc_md("Top", "rfc", "[]")),
+            (
+                "docs/stories/STORY-001-mid.md",
+                &doc_md("Mid", "story", "- implements: RFC-001"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-a.md",
+                &doc_md("A", "iteration", "- implements: STORY-001"),
+            ),
+            (
+                "docs/iterations/ITERATION-002-b.md",
+                &doc_md("B", "iteration", "- implements: STORY-001"),
+            ),
+            (
+                "docs/iterations/ITERATION-003-c.md",
+                &doc_md("C", "iteration", "- implements: STORY-001"),
+            ),
+        ]);
+
+        let forest = resolve_forest(&store, Some("iteration"));
+
+        assert_eq!(
+            forest.iter().filter(|n| n.doc.id == "STORY-001").count(),
+            1,
+            "the shared ancestor is kept once"
+        );
+        // Which anchor reaches the ancestor first depends on `store.docs` iteration
+        // order (a HashMap), so the inverted edge list is path-sorted: these parents
+        // must come out in exactly this order on every run.
+        assert_eq!(
+            ordered_parents_of(&forest, "STORY-001"),
+            vec![
+                "ITERATION-001".to_string(),
+                "ITERATION-002".to_string(),
+                "ITERATION-003".to_string(),
+            ],
+            "one inverted edge per anchor, path-sorted"
+        );
+        assert!(parents_inverted_of(&forest, "STORY-001"));
+        assert_eq!(
+            ordered_parents_of(&forest, "RFC-001"),
+            vec!["STORY-001".to_string()],
+            "the shared ancestor's own ancestor is reached too"
+        );
+        assert!(parents_inverted_of(&forest, "RFC-001"));
+    }
+
+    #[test]
+    fn forest_by_tag_inverts_ancestor_chain_like_the_type_anchor() {
+        // AC5: the tag pivot shares resolve_forest_anchored, so the reverse chain
+        // is identical to the type pivot over the same anchor doc.
+        let tagged_iteration = "---\ntitle: \"Leaf\"\ntype: iteration\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags:\n- alpha\nrelated:\n- implements: STORY-001\n---\n\nbody\n";
+        let (_tmp, store) = store_from(&[
+            ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
+            (
+                "docs/stories/STORY-001-mid.md",
+                &doc_md("Mid", "story", "- implements: RFC-001"),
+            ),
+            ("docs/iterations/ITERATION-001-leaf.md", tagged_iteration),
+        ]);
+
+        let by_tag = resolve_forest_by_tag(&store, "alpha");
+        let by_type = resolve_forest(&store, Some("iteration"));
+
+        assert_eq!(node_ids(&by_tag), node_ids(&by_type));
+        assert_eq!(
+            parents_of(&by_tag, "STORY-001"),
+            BTreeSet::from(["ITERATION-001".to_string()])
+        );
+        assert!(parents_inverted_of(&by_tag, "STORY-001"));
+        assert_eq!(
+            parents_of(&by_tag, "RFC-001"),
+            BTreeSet::from(["STORY-001".to_string()])
+        );
+        assert!(parents_inverted_of(&by_tag, "RFC-001"));
+    }
+
+    #[test]
+    fn forest_by_tag_anchor_inside_a_higher_anchors_subtree_inverts_nothing() {
+        // AC5, the case a type pivot cannot produce: one tag on an RFC and on an
+        // iteration three hops below it. Mixed-level tag anchors on DIVERGENT
+        // branches do still invert; what inverts nothing is a lower anchor sitting
+        // INSIDE a higher anchor's downward subtree, as here. The higher anchor's BFS
+        // covers the lower one, so every ancestor the upward walk sees is inside the
+        // subtree and NOTHING is inverted — the pivot is the plain forward chain
+        // rooted on the RFC. The story between them is pulled in as a descendant of
+        // the RFC even though it carries no tag.
+        let tagged_rfc = "---\ntitle: \"Top\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags:\n- alpha\nrelated: []\n---\n\nbody\n";
+        let tagged_iteration = "---\ntitle: \"Leaf\"\ntype: iteration\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags:\n- alpha\nrelated:\n- implements: STORY-001\n---\n\nbody\n";
+        let (_tmp, store) = store_from(&[
+            ("docs/rfcs/RFC-001-top.md", tagged_rfc),
+            (
+                "docs/stories/STORY-001-mid.md",
+                &doc_md("Mid", "story", "- implements: RFC-001"),
+            ),
+            ("docs/iterations/ITERATION-001-leaf.md", tagged_iteration),
+        ]);
+
+        let forest = resolve_forest_by_tag(&store, "alpha");
+
+        assert_eq!(
+            forest.iter().map(|n| n.doc.id.as_str()).collect::<Vec<_>>(),
+            vec!["RFC-001", "STORY-001", "ITERATION-001"],
+            "the forward chain, root-first"
+        );
+        assert!(
+            forest.iter().all(|n| !n.parents_inverted),
+            "an ancestor inside the anchors' own subtree is never re-parented"
+        );
+        assert_eq!(
+            ordered_parents_of(&forest, "ITERATION-001"),
+            vec!["STORY-001".to_string()],
+            "the lower anchor keeps its forward parent edge"
+        );
+    }
+
+    #[test]
+    fn forest_anchor_upward_cycle_terminates_each_node_once() {
+        // AC7: STORY-001 and STORY-002 implement each other above the anchor. The
+        // upward walk's seen-set stops the loop; every node is still present once.
+        let (_tmp, store) = store_from(&[
+            (
+                "docs/stories/STORY-001-a.md",
+                &doc_md("A", "story", "- implements: STORY-002"),
+            ),
+            (
+                "docs/stories/STORY-002-b.md",
+                &doc_md("B", "story", "- implements: STORY-001"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-leaf.md",
+                &doc_md("Leaf", "iteration", "- implements: STORY-001"),
+            ),
+        ]);
+
+        let forest = resolve_forest(&store, Some("iteration"));
+
+        assert_eq!(
+            node_ids(&forest),
+            BTreeSet::from([
+                "ITERATION-001".to_string(),
+                "STORY-001".to_string(),
+                "STORY-002".to_string(),
+            ])
+        );
+        assert_eq!(forest.len(), 3, "cycle must not duplicate nodes");
+    }
+
+    #[test]
+    fn forest_unanchored_never_inverts_an_edge() {
+        // AC6: the All forest is unchanged -- no reverse edges anywhere.
+        let (_tmp, store) = linear_chain_store();
+
+        let forest = resolve_forest(&store, None);
+
+        assert!(forest.iter().all(|n| !n.parents_inverted));
+        assert_eq!(
+            forest.iter().map(|n| n.doc.id.as_str()).collect::<Vec<_>>(),
+            vec!["RFC-001", "STORY-001", "ITERATION-001"]
+        );
     }
 }

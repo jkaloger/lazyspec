@@ -1,5 +1,5 @@
-<li data-id="{{ id }}" data-depth="{{ depth }}">
-<a href="/doc/{{ id }}">{{ title }}</a>
+<li data-id="{{ id }}" data-depth="{{ depth }}"{% if reverse && depth > 0 %} data-reverse{% endif %}>
+{% if reverse && depth > 0 %}<span class="graph-reverse" aria-hidden="true">&#x2191;</span>{% endif %}<a href="/doc/{{ id }}">{{ title }}</a>
 <span class="graph-type">{{ doc_type }}</span>
 <span class="graph-status" data-status="{{ status }}"><span class="status-swatch"{% if let Some(c) = status_color %} style="--status-color: {{ c }}"{% endif %}></span>{{ status }}</span>
 {% if !related.is_empty() %}<span class="graph-related">{% for r in related %}&#x2504;&#x25b7; <a href="/doc/{{ r }}">{{ r }}</a>{% if !loop.last %} {% endif %}{% endfor %}</span>{% endif %}

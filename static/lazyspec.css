@@ -764,6 +764,25 @@ ul.search-results .doc-tags {
   padding: var(--sp-1) 0;
 }
 
+/* A reverse row hangs a chain ANCESTOR under its anchor (STORY-247), so its edge
+   runs back up the tree. The marker sits in the indent gutter on the guide
+   hairline rather than in the row, so titles stay aligned with forward siblings —
+   the TUI keeps its `↑` in the connector slot for the same reason. It is one step
+   up the ink scale from the hairline and bold, while forward guides keep their dim
+   structural weight. `↑` not `▲`, which is the story type icon. */
+.graph-tree li[data-reverse] {
+  position: relative;
+}
+
+.graph-tree .graph-reverse {
+  position: absolute;
+  left: calc(-1 * var(--sp-4));
+  top: var(--sp-1);
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--ink-faint);
+}
+
 .graph-tree li > a {
   color: var(--ink);
   text-decoration: underline;

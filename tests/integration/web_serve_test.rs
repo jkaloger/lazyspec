@@ -661,17 +661,18 @@ async fn graph_pivot_type_reroots_on_that_type() {
         "type:rfc pivot must root on the rfc:\n{body}"
     );
 
-    // Now anchor on story: the rfc ancestor is pruned, the story becomes a root.
+    // Now anchor on story: the story becomes the root, its iteration nests below
+    // it and its rfc ancestor follows as a reverse-chain row (STORY-247).
     let (_s, body) = get(store(&fixture), "/graph?pivot=type:story").await;
     let ids = graph_ids_in_order(&body);
-    assert!(
-        !ids.contains(&"RFC-001".to_string()),
-        "type:story pivot prunes the ancestor rfc:\n{body}"
-    );
     assert_eq!(
-        ids.first().map(String::as_str),
-        Some("STORY-001"),
-        "type:story pivot roots on the story:\n{body}"
+        ids,
+        vec![
+            "STORY-001".to_string(),
+            "ITERATION-001".to_string(),
+            "RFC-001".to_string()
+        ],
+        "type:story pivot roots on the story with both directions below it:\n{body}"
     );
 }
 
@@ -682,11 +683,80 @@ async fn graph_pivot_tag_reroots_on_tagged_docs() {
 
     assert_eq!(status, StatusCode::OK);
     let ids = graph_ids_in_order(&body);
-    // The tagged story re-roots; its untagged ancestor rfc is pruned.
+    // The tagged story re-roots, with its descendant and its inverted ancestor.
     assert_eq!(
         ids,
-        vec!["STORY-001".to_string(), "ITERATION-001".to_string()],
-        "tag:alpha pivot keeps the tagged story and its descendant only:\n{body}"
+        vec![
+            "STORY-001".to_string(),
+            "ITERATION-001".to_string(),
+            "RFC-001".to_string()
+        ],
+        "tag:alpha pivot keeps the tagged story, its descendant and its ancestor:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn graph_pivot_marks_reverse_chain_rows() {
+    // AC9: pivoting on the leaf type inverts the chain above the anchor, so the
+    // story and the rfc hang under ITERATION-001 as reverse rows. Each must carry
+    // the marker the TUI draws as an upward arrowhead, so the two views read the
+    // same; the anchor itself is a root and carries none.
+    let fixture = pivot_fixture();
+    let (status, body) = get(store(&fixture), "/graph?pivot=type:iteration").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        graph_ids_in_order(&body),
+        vec![
+            "ITERATION-001".to_string(),
+            "STORY-001".to_string(),
+            "RFC-001".to_string()
+        ],
+        "type:iteration pivot roots on the iteration with its lineage below it:\n{body}"
+    );
+    assert!(
+        body.contains("<li data-id=\"ITERATION-001\" data-depth=\"0\">"),
+        "the anchor row is a root and is never marked:\n{body}"
+    );
+    assert!(
+        body.contains("<li data-id=\"STORY-001\" data-depth=\"1\" data-reverse>"),
+        "the anchor's story ancestor is a marked reverse row:\n{body}"
+    );
+    assert!(
+        body.contains("<li data-id=\"RFC-001\" data-depth=\"2\" data-reverse>"),
+        "the rfc above it nests one level deeper, also marked:\n{body}"
+    );
+    assert_eq!(
+        body.matches("&#x2191;").count(),
+        2,
+        "each reverse row carries the upward glyph, and only those rows:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn graph_unpivoted_marks_no_reverse_rows() {
+    // AC9's other half: the unanchored forest has no inverted edges, so no row
+    // carries the marker.
+    let fixture = pivot_fixture();
+    let (status, body) = get(store(&fixture), "/graph").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        graph_ids_in_order(&body),
+        vec![
+            "RFC-001".to_string(),
+            "STORY-001".to_string(),
+            "ITERATION-001".to_string()
+        ],
+        "the unanchored forest roots on the rfc:\n{body}"
+    );
+    assert!(
+        !body.contains("data-reverse"),
+        "an unanchored forest marks no reverse rows:\n{body}"
+    );
+    assert!(
+        !body.contains("&#x2191;"),
+        "an unanchored forest draws no upward glyph:\n{body}"
     );
 }
 

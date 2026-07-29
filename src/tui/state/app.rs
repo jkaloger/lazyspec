@@ -8975,15 +8975,21 @@ sort = "estimate"
         app.graph_anchor = GraphAnchor::Type(type_index(&app, "story"));
         app.rebuild_graph();
 
-        // The parent RFC is pruned above the story anchor.
-        let ids: Vec<String> = app
+        // The parent RFC is no longer pruned above the story anchor (STORY-247):
+        // it hangs under it as a reverse-chain row, never as a root.
+        let rfc_rows: Vec<&GraphNode> = app
             .graph_nodes
             .iter()
-            .filter_map(|n| app.store.get(&n.path).map(|d| d.id.clone()))
+            .filter(|n| {
+                app.store
+                    .get(&n.path)
+                    .is_some_and(|d| d.id.as_str() == "RFC-001")
+            })
             .collect();
+        assert!(!rfc_rows.is_empty(), "the ancestor RFC is emitted");
         assert!(
-            !ids.iter().any(|id| id == "RFC-001"),
-            "anchored forest prunes the ancestor RFC, got {ids:?}"
+            rfc_rows.iter().all(|n| n.reverse && n.depth > 0),
+            "the ancestor RFC is a marked reverse row below the anchor"
         );
         // Every depth-0 (root) node is of the anchor type 'story'.
         for node in app.graph_nodes.iter().filter(|n| n.depth == 0) {

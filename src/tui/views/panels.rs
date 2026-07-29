@@ -1835,6 +1835,13 @@ fn compute_stems(nodes: &[GraphNode]) -> Vec<Vec<bool>> {
 /// tree art preserved from the original render), then the type icon + title.
 /// Status and related/attribute columns are rendered as separate table cells
 /// (ITERATION-209), so they are NOT included here.
+///
+/// A `reverse` row is a chain ANCESTOR of the row it hangs under, emitted by an
+/// anchored forest (STORY-247), so its edge points back up the tree: the
+/// arrowhead flips and the connector brightens. `↑` rather than `▲` because `▲`
+/// is the default `story` type icon — the dominant ancestor type of the
+/// iteration pivot, which would render `▲ ▲ Title` — and the header's sort-
+/// direction arrow; `↑` reads as direction alone in both spots.
 pub(super) fn graph_doc_cell_spans(
     node: &GraphNode,
     type_icon: &str,
@@ -1852,11 +1859,23 @@ pub(super) fn graph_doc_cell_spans(
                 stem_str.push_str("   ");
             }
         }
-        let connector = if is_last { "└─▶ " } else { "├─▶ " };
-        spans.push(Span::styled(
-            format!("{}{}", stem_str, connector),
-            Style::default().fg(Color::DarkGray),
-        ));
+        if !stem_str.is_empty() {
+            spans.push(Span::styled(stem_str, Style::default().fg(Color::DarkGray)));
+        }
+        let (connector, style) = if node.reverse {
+            (
+                if is_last { "└─↑ " } else { "├─↑ " },
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            (
+                if is_last { "└─▶ " } else { "├─▶ " },
+                Style::default().fg(Color::DarkGray),
+            )
+        };
+        spans.push(Span::styled(connector, style));
     }
 
     spans.push(Span::styled(
@@ -3682,6 +3701,7 @@ mod tests {
             depth,
             related,
             attributes: std::collections::BTreeMap::new(),
+            reverse: false,
         }
     }
 
@@ -3762,6 +3782,109 @@ mod tests {
         let node = graph_node_fixture(0, vec![]);
         let text = spans_text(&graph_node_spans(&node, "◆", true, &[]));
         assert_eq!(text, "\u{25C6} Design draft");
+    }
+
+    /// A reverse row: a chain ancestor re-parented under its anchor by an
+    /// anchored forest (STORY-247).
+    fn reverse_graph_node_fixture(depth: usize, title: &str) -> GraphNode {
+        GraphNode {
+            reverse: true,
+            title: title.to_string(),
+            ..graph_node_fixture(depth, vec![])
+        }
+    }
+
+    #[test]
+    fn graph_reverse_row_flips_the_arrowhead_upward() {
+        let node = reverse_graph_node_fixture(1, "Design");
+        let text = spans_text(&graph_doc_cell_spans(&node, "\u{25C6}", true, &[]));
+
+        assert_eq!(text, "\u{2514}\u{2500}\u{2191} \u{25C6} Design");
+        assert!(
+            !text.contains('\u{25B6}'),
+            "an upward edge keeps no forward arrowhead, got: {text}"
+        );
+        assert!(
+            !text.contains('\u{25B2}'),
+            "the marker must not read as the story icon or the header sort arrow, got: {text}"
+        );
+    }
+
+    #[test]
+    fn graph_reverse_and_forward_siblings_render_distinct_connectors() {
+        // The mid-chain (`story`) pivot shape: an anchor with one forward child and
+        // one inverted ancestor, both at depth 1 -- the pair AC8 asks to be
+        // distinguishable.
+        let nodes = vec![
+            GraphNode {
+                title: "Story".to_string(),
+                ..graph_node_fixture(0, vec![])
+            },
+            GraphNode {
+                title: "Iteration".to_string(),
+                ..graph_node_fixture(1, vec![])
+            },
+            reverse_graph_node_fixture(1, "Rfc"),
+        ];
+        let stems = compute_stems(&nodes);
+
+        let cells: Vec<Vec<Span>> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| graph_doc_cell_spans(n, "\u{25C6}", is_last_child(&nodes, i), &stems[i]))
+            .collect();
+
+        assert_eq!(
+            cells.iter().map(|c| spans_text(c)).collect::<Vec<_>>(),
+            vec![
+                "\u{25C6} Story",
+                "\u{251C}\u{2500}\u{25B6} \u{25C6} Iteration",
+                "\u{2514}\u{2500}\u{2191} \u{25C6} Rfc",
+            ]
+        );
+
+        let connector_style = |cell: &[Span]| cell[0].style;
+        assert_ne!(
+            connector_style(&cells[2]),
+            connector_style(&cells[1]),
+            "the upward marker is styled apart from the forward connector"
+        );
+    }
+
+    #[test]
+    fn graph_reverse_chain_indents_each_ancestor_one_level_deeper() {
+        // The leaf (`iteration`) pivot's read: anchor, then its story, then its RFC.
+        let nodes = vec![
+            GraphNode {
+                title: "Iteration".to_string(),
+                ..graph_node_fixture(0, vec![])
+            },
+            reverse_graph_node_fixture(1, "Story"),
+            reverse_graph_node_fixture(2, "Rfc"),
+        ];
+        let stems = compute_stems(&nodes);
+
+        let lines: Vec<String> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                spans_text(&graph_doc_cell_spans(
+                    n,
+                    "\u{25C6}",
+                    is_last_child(&nodes, i),
+                    &stems[i],
+                ))
+            })
+            .collect();
+
+        assert_eq!(
+            lines,
+            vec![
+                "\u{25C6} Iteration",
+                "\u{2514}\u{2500}\u{2191} \u{25C6} Story",
+                "   \u{2514}\u{2500}\u{2191} \u{25C6} Rfc",
+            ]
+        );
     }
 
     #[test]

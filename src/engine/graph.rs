@@ -38,7 +38,43 @@ pub struct GraphNode {
     /// nested-table renderer and the sibling-sort comparator can read attribute
     /// cells without re-fetching from the store.
     pub attributes: std::collections::BTreeMap<String, AttrValue>,
+    /// True when the EDGE this row was reached by is an anchoring-inverted chain
+    /// edge (STORY-247): the row is a chain ancestor of its rendered parent, not a
+    /// descendant. Anchoring puts a doc on the descendant side of the anchors or
+    /// the ancestor side, never both, and inverts either ALL of its parent edges or
+    /// none (`ContextNode::parents_inverted`) — so every row emitted for one doc BY
+    /// AN EDGE carries the same value. Depth-0 rows were reached by no edge at all
+    /// and are never reverse, so one doc CAN carry an unmarked depth-0 row and
+    /// marked deeper rows (see
+    /// `flatten_anchored_rootless_cycle_re_roots_an_ancestor_unmarked`). The
+    /// unanchored forest never sets it.
+    pub reverse: bool,
 }
+
+/// Budget for an anchored forest's reverse RE-EXPANSION: the rows
+/// [`flatten_forest`] spends re-walking an ancestor it has already emitted, past
+/// which a reverse re-encounter stops recursing. It counts ONLY those rows — a row
+/// emitted on a first encounter never consumes it, forward or reverse, because the
+/// `drawn` set already caps first encounters at one per node and forward repeats at
+/// one per edge. So store size alone cannot exhaust the budget; only re-expansion
+/// can.
+///
+/// Re-expansion is the one part of the walk with no edge-count bound: a reverse
+/// re-encounter recurses (that is what gives every anchor its whole lineage), so L
+/// stacked chain diamonds above an anchor have 2^L distinct upward paths and every
+/// one is re-drawn — 41 docs in 20 levels emit 2,097,151 rows. Real backlogs are
+/// nowhere near that: on this 751-doc repo the largest pivot (`iteration`) emits 973
+/// rows, of which 360 are re-expansion rows — ~2.8 rows per anchor over lineages at
+/// most 4 rows deep. But the TUI re-flattens on every pivot keystroke, so an
+/// unbounded walk is a UI hang waiting for a pathological store.
+///
+/// 10_000 is ~28x this repo's re-expansion count: far above any hand-authored
+/// backlog, far below the point where re-flattening is perceptible. Crossing it is
+/// NOT signalled to the viewer — a truncated reverse re-encounter renders as a
+/// childless row, indistinguishable from a genuine chain root, with no marker and no
+/// message. That silence is exactly why the budget ignores forest size: a store has
+/// to be pathologically SHAPED, not merely large, to reach it.
+pub const MAX_REVERSE_EXPANSION_ROWS: usize = 10_000;
 
 /// The active sibling sort: the column id (`path`, `status`, or an attribute
 /// name) and whether it is reversed. Presentation-only (ITERATION-209): the
@@ -163,14 +199,51 @@ fn compare_siblings(a: &DocMeta, b: &DocMeta, sort: &GraphSort) -> Ordering {
 /// in-graph `implements` parent) sorted by path, children sorted by path, with
 /// `depth` assigned by tree level.
 ///
-/// A node reachable by more than one parent (a diamond) is drawn in full on
-/// first encounter, and on subsequent encounters is re-emitted as the plain doc
-/// row (full title/status/attrs, never a "see above" back-reference) WITHOUT
-/// recursing — its subtree was already drawn under the first parent. A
-/// re-encounter that closes a cycle (the node is still on the current DFS path)
-/// is dropped entirely: cycles never render a back-edge row. Cyclic SCCs with no
-/// root are emitted as depth-0 subtrees after the root pass, so the render is
-/// complete and terminates.
+/// Each row's `reverse` flag is decided AT THE EDGE it was reached by, from the
+/// child's `parents_inverted` flag (an anchored forest inverts ancestor edges —
+/// STORY-247). Depth-0 rows carry no marker because they were reached by no edge:
+/// that covers the roots and the leftover cycle pass below, which can only
+/// re-root a node when every parent that would mark it is itself unreachable from
+/// a root, and which draws that node's marked row anyway once the walk reaches it
+/// through such a parent.
+///
+/// A node reachable by more than one parent (a diamond) is drawn in full on first
+/// encounter. On a later FORWARD encounter it is re-emitted as the plain doc row
+/// (full title/status/attrs, never a "see above" back-reference) WITHOUT
+/// recursing — its descendant subtree was already drawn under the first parent.
+/// On a later REVERSE encounter it DOES recurse, so every anchor shows its whole
+/// upward lineage instead of a childless ancestor row; repeating an ancestor under
+/// each anchor is the point of an upward pivot (a leaf pivot is otherwise a flat
+/// list). `drawn` therefore means only "emitted at least once" — it no longer
+/// implies the subtree below the node has been drawn.
+///
+/// The output contract is therefore: every forest node is emitted at least once,
+/// and a node reached by a REVERSE edge is drawn in full — its row plus the lineage
+/// below it — once per rendered PARENT ROW. A 3-cycle above four anchors draws each
+/// of its nodes four times, once under each anchor. Uniqueness is likewise per
+/// parent ROW, not per parent DOC: the same (parent doc, child doc) pair recurs
+/// whenever the parent doc itself recurs under a different anchor (61 pairs do on
+/// this repo's `iteration` pivot, one of them 7 times), and what never happens is
+/// one emitted parent row listing the same child twice.
+///
+/// Termination rests on `on_stack` alone: a re-encounter of a node still on the
+/// current DFS path is dropped entirely (cycles never render a back-edge row), so
+/// no DFS path can hold a node twice and every path is bounded by the node count.
+/// Reverse recursion re-walks ancestor chains only, never descendant subtrees (an
+/// inverted node's forest children are themselves inverted) — but that bounds the
+/// re-walked REGION, not the work inside it: stacked chain diamonds in that region
+/// multiply upward paths as 2^L, so unlike the `drawn`-capped forward walk the row
+/// count has no edge-count bound. [`MAX_REVERSE_EXPANSION_ROWS`] caps it, counting
+/// only the rows a reverse RE-encounter emits: past that many, a reverse
+/// re-encounter truncates like a forward one, so a pathological store degrades to
+/// short lineages instead of hanging the caller. A truncated row is not flagged — it
+/// is a childless row that reads exactly like a genuine chain root — so the budget
+/// deliberately excludes first-encounter rows, leaving forest size unable to trigger
+/// that silent degradation on its own. No store under the budget renders
+/// differently, and which rows lose their lineage is deterministic — the walk order
+/// is the sorted root and sibling order, not a HashMap's. Cyclic SCCs with no root
+/// are emitted as depth-0 subtrees after the root pass, so the render is complete
+/// and terminates.
 ///
 /// Each full node also carries its depth-1 `related-to` neighbours as a
 /// display-only annotation set (RFC-006 Graph mode Phase 1), sourced from the
@@ -246,36 +319,46 @@ pub fn flatten_forest(forest: &[ContextNode], store: &Store, sort: &GraphSort) -
     let mut out: Vec<GraphNode> = Vec::with_capacity(forest.len());
     let mut drawn: HashSet<PathBuf> = HashSet::new();
     let mut on_stack: HashSet<PathBuf> = HashSet::new();
+    let mut reverse_rows: usize = 0;
 
     for root in roots {
         walk(
             root,
             0,
+            false,
             &children,
             &by_path,
             &lineage,
             store,
             &mut drawn,
             &mut on_stack,
+            &mut reverse_rows,
             &mut out,
         );
     }
 
     // Cyclic input can leave a strongly-connected component with no root, so
     // the root pass never reaches it. Emit any still-undrawn node as a depth-0
-    // subtree (forest order is topological/path-broken) so the render is
-    // complete; the drawn-set still guarantees each node is drawn once in full.
+    // subtree (forest order is topological/path-broken) so the render is complete.
+    // `drawn` now means only "emitted at least once", so this pass covers exactly
+    // the nodes no row mentions yet — not "not yet drawn in full".
+    // `reverse: false` like a root: a node re-rooted here was reached by no edge.
+    // Anchoring can make that node an inverted ancestor (only when the anchor that
+    // owns it sits in a rootless cycle), and it then gets its marked row too, once
+    // the walk descends to it from that anchor.
     for node in forest {
         if !drawn.contains(&node.doc.path) {
             walk(
                 node,
                 0,
+                false,
                 &children,
                 &by_path,
                 &lineage,
                 store,
                 &mut drawn,
                 &mut on_stack,
+                &mut reverse_rows,
                 &mut out,
             );
         }
@@ -372,39 +455,28 @@ fn related_annotations(path: &Path, lineage: &HashSet<PathBuf>, store: &Store) -
 fn walk(
     node: &ContextNode,
     depth: usize,
+    reverse: bool,
     children: &HashMap<PathBuf, Vec<PathBuf>>,
     by_path: &HashMap<&PathBuf, &ContextNode>,
     lineage: &HashMap<&PathBuf, HashSet<PathBuf>>,
     store: &Store,
     drawn: &mut HashSet<PathBuf>,
     on_stack: &mut HashSet<PathBuf>,
+    // Rows emitted so far by a reverse RE-encounter: the only rows
+    // MAX_REVERSE_EXPANSION_ROWS budgets.
+    reverse_rows: &mut usize,
     out: &mut Vec<GraphNode>,
 ) {
     let doc = node.doc;
     let node_lineage = lineage.get(&doc.path);
     let empty = HashSet::new();
 
-    if drawn.contains(&doc.path) {
-        // Re-encounter. If the node is on the current DFS path it closes a
-        // cycle: drop it entirely (no back-edge row). Otherwise it is a
-        // diamond/multi-parent re-encounter, drawn earlier on a different
-        // branch — render it again as the plain doc (full row, no "see above"),
-        // but do NOT recurse, since its subtree was emitted at first encounter.
-        if !on_stack.contains(&doc.path) {
-            out.push(GraphNode {
-                path: doc.path.clone(),
-                title: doc.title.clone(),
-                doc_type: doc.doc_type.clone(),
-                status: doc.status.clone(),
-                depth,
-                related: related_annotations(&doc.path, node_lineage.unwrap_or(&empty), store),
-                attributes: doc.attributes.clone(),
-            });
-        }
+    // A node still on the current DFS path closes a cycle: drop it entirely, no
+    // back-edge row. This guard is what makes the walk terminate.
+    if on_stack.contains(&doc.path) {
         return;
     }
-    drawn.insert(doc.path.clone());
-    on_stack.insert(doc.path.clone());
+    let repeat = !drawn.insert(doc.path.clone());
 
     out.push(GraphNode {
         path: doc.path.clone(),
@@ -414,7 +486,24 @@ fn walk(
         depth,
         related: related_annotations(&doc.path, node_lineage.unwrap_or(&empty), store),
         attributes: doc.attributes.clone(),
+        reverse,
     });
+
+    // A FORWARD re-encounter (a diamond) stops here: the row stands alone because
+    // the node's descendant subtree was already drawn under the first parent. A
+    // REVERSE re-encounter recurses again so this anchor shows the ancestor's own
+    // ancestors too, rather than a truncated lineage — until the re-expansion budget
+    // is spent, past which it truncates like a forward one so a pathological store
+    // cannot run away. The row just pushed is itself re-expansion work, so it counts
+    // against the budget whether or not it goes on to recurse; rows the walk would
+    // emit anyway (first encounters, forward repeats) never do.
+    if repeat && reverse {
+        *reverse_rows += 1;
+    }
+    if repeat && (!reverse || *reverse_rows >= MAX_REVERSE_EXPANSION_ROWS) {
+        return;
+    }
+    on_stack.insert(doc.path.clone());
 
     if let Some(kids) = children.get(&doc.path) {
         for child_path in kids {
@@ -422,12 +511,14 @@ fn walk(
                 walk(
                     child,
                     depth + 1,
+                    child.parents_inverted,
                     children,
                     by_path,
                     lineage,
                     store,
                     drawn,
                     on_stack,
+                    reverse_rows,
                     out,
                 );
             }
@@ -482,6 +573,14 @@ mod tests {
     /// assertions.
     fn triples(nodes: &[GraphNode]) -> Vec<(String, usize)> {
         nodes.iter().map(|n| (id_of(n), n.depth)).collect()
+    }
+
+    /// Like [`triples`] plus the reverse-edge marker, for anchored forests.
+    fn marked_rows(nodes: &[GraphNode]) -> Vec<(String, usize, bool)> {
+        nodes
+            .iter()
+            .map(|n| (id_of(n), n.depth, n.reverse))
+            .collect()
     }
 
     #[test]
@@ -978,6 +1077,471 @@ mod tests {
             context_related.contains("RFC-009"),
             "resolve_chain surfaces the ancestor's related-to link, so the sets differ"
         );
+    }
+
+    // --- anchored reverse chain (STORY-247) -------------------------------
+
+    /// `ITERATION-001 implements STORY-001 implements RFC-001`, the chain the
+    /// reverse-chain tests pivot on.
+    fn linear_chain_store() -> (TempDir, Store) {
+        store_from(&[
+            ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
+            (
+                "docs/stories/STORY-001-mid.md",
+                &doc_md("Mid", "story", "- implements: RFC-001"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-leaf.md",
+                &doc_md("Leaf", "iteration", "- implements: STORY-001"),
+            ),
+        ])
+    }
+
+    #[test]
+    fn flatten_iteration_anchor_renders_ancestors_as_inverted_subtree() {
+        // AC1 + AC2: the anchor is the root at depth 0, its story depth 1 and its
+        // RFC depth 2, with the marker set on the reverse rows only.
+        let (_tmp, store) = linear_chain_store();
+
+        let nodes = flatten_forest(
+            &resolve_forest(&store, Some("iteration")),
+            &store,
+            &GraphSort::default(),
+        );
+
+        assert_eq!(
+            marked_rows(&nodes),
+            vec![
+                ("ITERATION-001".to_string(), 0, false),
+                ("STORY-001".to_string(), 1, true),
+                ("RFC-001".to_string(), 2, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn flatten_story_anchor_marks_ancestor_row_but_not_descendant_row() {
+        // AC3: both directions under one anchor, each row once, only the upward
+        // one marked.
+        let (_tmp, store) = linear_chain_store();
+
+        let nodes = flatten_forest(
+            &resolve_forest(&store, Some("story")),
+            &store,
+            &GraphSort::default(),
+        );
+
+        assert_eq!(
+            marked_rows(&nodes),
+            vec![
+                ("STORY-001".to_string(), 0, false),
+                ("ITERATION-001".to_string(), 1, false),
+                ("RFC-001".to_string(), 1, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn flatten_shared_ancestor_repeats_with_full_lineage_under_each_anchor() {
+        // The dominant leaf-pivot shape: two iterations over one story over one RFC.
+        // A shared ancestor re-encountered on a REVERSE edge is re-emitted AND
+        // re-walked, so the second anchor shows RFC-001 too -- a childless
+        // `STORY-001` row there would truncate exactly the lineage the pivot exists
+        // to answer ("what story and RFC does each of these serve?").
+        let (_tmp, store) = store_from(&[
+            ("docs/rfcs/RFC-001-top.md", &doc_md("Top", "rfc", "[]")),
+            (
+                "docs/stories/STORY-001-mid.md",
+                &doc_md("Mid", "story", "- implements: RFC-001"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-a.md",
+                &doc_md("A", "iteration", "- implements: STORY-001"),
+            ),
+            (
+                "docs/iterations/ITERATION-002-b.md",
+                &doc_md("B", "iteration", "- implements: STORY-001"),
+            ),
+        ]);
+
+        let nodes = flatten_forest(
+            &resolve_forest(&store, Some("iteration")),
+            &store,
+            &GraphSort::default(),
+        );
+
+        assert_eq!(
+            marked_rows(&nodes),
+            vec![
+                ("ITERATION-001".to_string(), 0, false),
+                ("STORY-001".to_string(), 1, true),
+                ("RFC-001".to_string(), 2, true),
+                ("ITERATION-002".to_string(), 0, false),
+                ("STORY-001".to_string(), 1, true),
+                ("RFC-001".to_string(), 2, true),
+            ],
+            "the (STORY-001, RFC-001) parent/child pair repeats because STORY-001's \
+             own row repeats: the no-duplicates guarantee is per parent ROW, not per \
+             parent DOC"
+        );
+    }
+
+    #[test]
+    fn flatten_forward_diamond_repeat_still_does_not_redraw_its_subtree() {
+        // The other half of the re-encounter rule, unchanged by STORY-247: a FORWARD
+        // re-encounter is a bare repeat row. ITERATION-001 is shared by both stories
+        // and has a child of its own, which is drawn only under the first story.
+        let (_tmp, store) = store_from(&[
+            ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
+            (
+                "docs/stories/STORY-001-left.md",
+                &doc_md("Left", "story", "- implements: RFC-001"),
+            ),
+            (
+                "docs/stories/STORY-002-right.md",
+                &doc_md("Right", "story", "- implements: RFC-001"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-shared.md",
+                &doc_md(
+                    "Shared",
+                    "iteration",
+                    "- implements: STORY-001\n- implements: STORY-002",
+                ),
+            ),
+            (
+                "docs/iterations/ITERATION-002-child.md",
+                &doc_md("Child", "iteration", "- implements: ITERATION-001"),
+            ),
+        ]);
+
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
+
+        assert_eq!(
+            marked_rows(&nodes),
+            vec![
+                ("RFC-001".to_string(), 0, false),
+                ("STORY-001".to_string(), 1, false),
+                ("ITERATION-001".to_string(), 2, false),
+                ("ITERATION-002".to_string(), 3, false),
+                ("STORY-002".to_string(), 1, false),
+                ("ITERATION-001".to_string(), 2, false),
+            ],
+            "the repeat under STORY-002 carries no subtree"
+        );
+    }
+
+    #[test]
+    fn flatten_unanchored_forest_marks_nothing() {
+        // AC6.
+        let (_tmp, store) = linear_chain_store();
+
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
+
+        assert_eq!(
+            marked_rows(&nodes),
+            vec![
+                ("RFC-001".to_string(), 0, false),
+                ("STORY-001".to_string(), 1, false),
+                ("ITERATION-001".to_string(), 2, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn flatten_anchored_upward_cycle_terminates_each_node_once() {
+        // AC7: the two stories above the anchor implement each other. The inverted
+        // edges close a loop, which the existing on_stack guard drops.
+        let (_tmp, store) = store_from(&[
+            (
+                "docs/stories/STORY-001-a.md",
+                &doc_md("A", "story", "- implements: STORY-002"),
+            ),
+            (
+                "docs/stories/STORY-002-b.md",
+                &doc_md("B", "story", "- implements: STORY-001"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-leaf.md",
+                &doc_md("Leaf", "iteration", "- implements: STORY-001"),
+            ),
+        ]);
+
+        let nodes = flatten_forest(
+            &resolve_forest(&store, Some("iteration")),
+            &store,
+            &GraphSort::default(),
+        );
+
+        assert_eq!(
+            marked_rows(&nodes),
+            vec![
+                ("ITERATION-001".to_string(), 0, false),
+                ("STORY-001".to_string(), 1, true),
+                ("STORY-002".to_string(), 2, true),
+            ],
+            "each node full once, the back-edge dropped"
+        );
+    }
+
+    #[test]
+    fn flatten_anchored_rootless_cycle_re_roots_an_ancestor_unmarked() {
+        // The one shape where the leftover cycle pass touches an inverted node: the
+        // two anchors implement each other, so neither is a root and the pass
+        // re-roots whatever comes first in forest (path) order -- here the ancestor
+        // RFC-001, at depth 0 and unmarked, because a depth-0 row was reached by no
+        // edge. Its marked row still follows under the anchor that owns it.
+        let (_tmp, store) = store_from(&[
+            ("docs/rfcs/RFC-001-top.md", &doc_md("Top", "rfc", "[]")),
+            (
+                "docs/stories/STORY-001-a.md",
+                &doc_md(
+                    "A",
+                    "story",
+                    "- implements: STORY-002\n- implements: RFC-001",
+                ),
+            ),
+            (
+                "docs/stories/STORY-002-b.md",
+                &doc_md("B", "story", "- implements: STORY-001"),
+            ),
+        ]);
+
+        let nodes = flatten_forest(
+            &resolve_forest(&store, Some("story")),
+            &store,
+            &GraphSort::default(),
+        );
+
+        assert_eq!(
+            marked_rows(&nodes),
+            vec![
+                ("RFC-001".to_string(), 0, false),
+                ("STORY-001".to_string(), 0, false),
+                ("RFC-001".to_string(), 1, true),
+                ("STORY-002".to_string(), 1, false),
+            ]
+        );
+    }
+
+    /// Levels of the stacked-diamond store below. Two stories per level, each
+    /// implementing BOTH stories one level up, so the reverse expansion has 2^L
+    /// distinct upward paths from the anchor and re-walks every one: 2^(L+1) - 1
+    /// rows unbudgeted, 2,097,151 at 20 levels (41 docs). Chosen as the smallest
+    /// shape that leaves a wide margin over [`MAX_REVERSE_EXPANSION_ROWS`], so the
+    /// row assertion below fails loudly if the budget ever stops being applied.
+    const DIAMOND_LEVELS: usize = 20;
+
+    /// `ITERATION-001` under `DIAMOND_LEVELS` levels of two stories, every story
+    /// implementing both stories of the level above. Nothing exotic: one relation
+    /// (`implements`), declared twice per doc.
+    fn stacked_diamond_store() -> (TempDir, Store) {
+        let story_id = |level: usize, side: usize| format!("STORY-{:03}", level * 2 + side + 1);
+        // The `related` block implementing both stories of `level`, or none when
+        // `level` is past the top of the ladder.
+        let implements_level = |level: usize| {
+            if level < DIAMOND_LEVELS {
+                format!(
+                    "- implements: {}\n- implements: {}",
+                    story_id(level, 0),
+                    story_id(level, 1)
+                )
+            } else {
+                "[]".to_string()
+            }
+        };
+
+        let mut files: Vec<(String, String)> = Vec::new();
+        for level in 0..DIAMOND_LEVELS {
+            for side in 0..2 {
+                let id = story_id(level, side);
+                files.push((
+                    format!("docs/stories/{id}-node.md"),
+                    doc_md(&id, "story", &implements_level(level + 1)),
+                ));
+            }
+        }
+        files.push((
+            "docs/iterations/ITERATION-001-anchor.md".to_string(),
+            doc_md("Anchor", "iteration", &implements_level(0)),
+        ));
+
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(p, c)| (p.as_str(), c.as_str()))
+            .collect();
+        store_from(&refs)
+    }
+
+    #[test]
+    fn flatten_anchored_reverse_expansion_stops_recursing_at_the_row_budget() {
+        // Reverse recursion has no edge-count bound, so a pathological store must
+        // degrade (truncated lineages) rather than run away: the TUI re-flattens on
+        // every pivot keystroke.
+        let (_tmp, store) = stacked_diamond_store();
+        let forest = resolve_forest(&store, Some("iteration"));
+        let edges: usize = forest.iter().map(|n| n.parents.len()).sum();
+
+        let started = std::time::Instant::now();
+        let nodes = flatten_forest(&forest, &store, &GraphSort::default());
+        let elapsed = started.elapsed();
+
+        assert!(
+            nodes.len() >= MAX_REVERSE_EXPANSION_ROWS,
+            "the store must actually cross the budget or this test proves nothing, got {} rows",
+            nodes.len()
+        );
+        // Every row here but the 41 first encounters is re-expansion work, so the
+        // budget bounds nearly the whole output: the rows the walk would emit anyway
+        // (one per node, plus one per repeat edge) plus the frames already on the DFS
+        // stack unwinding, each pending sibling emitting its own row.
+        assert!(
+            nodes.len() <= MAX_REVERSE_EXPANSION_ROWS + forest.len() + edges,
+            "budget exceeded by more than the unwinding walk can add: {} rows",
+            nodes.len()
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "flatten_forest must return promptly under the budget, took {elapsed:?}"
+        );
+
+        // Deterministic degradation: which rows lose their lineage must follow the
+        // sorted walk order, never HashMap iteration order. Re-resolving is part of
+        // the check -- a fresh `HashMap` gets a fresh iteration order.
+        let again = flatten_forest(
+            &resolve_forest(&store, Some("iteration")),
+            &store,
+            &GraphSort::default(),
+        );
+        assert_eq!(
+            marked_rows(&nodes),
+            marked_rows(&again),
+            "the same store must always truncate the same rows"
+        );
+    }
+
+    /// Stories in the wide-forward store below, each an anchor under the `story`
+    /// pivot and each re-emitting every iteration as a forward repeat.
+    const STORY_FANOUT: usize = 100;
+
+    /// Iterations in the wide-forward store below, each implementing EVERY story.
+    /// `STORY_FANOUT * ITERATION_FANOUT` forward rows must exceed
+    /// [`MAX_REVERSE_EXPANSION_ROWS`] for the test to bite.
+    const ITERATION_FANOUT: usize = 105;
+
+    /// A store whose FORWARD rows alone outnumber [`MAX_REVERSE_EXPANSION_ROWS`]
+    /// while its reverse re-expansion stays tiny: `STORY_FANOUT` stories, all
+    /// implementing `RFC-001` which implements `RFC-002`, under `ITERATION_FANOUT`
+    /// iterations that each implement EVERY story. Under the `story` pivot every
+    /// story is an anchor/root, so each iteration is re-emitted as a forward repeat
+    /// beneath every one of them — the superlinear-but-legitimate row count a
+    /// few-thousand-doc backlog also reaches — while the upward lineage each anchor
+    /// re-expands is only two rows.
+    fn wide_forward_store() -> (TempDir, Store) {
+        let story_id = |i: usize| format!("STORY-{:03}", i + 1);
+        let implements_every_story = (0..STORY_FANOUT)
+            .map(|i| format!("- implements: {}", story_id(i)))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut files: Vec<(String, String)> = vec![
+            (
+                "docs/rfcs/RFC-001-mid.md".to_string(),
+                doc_md("Mid", "rfc", "- implements: RFC-002"),
+            ),
+            (
+                "docs/rfcs/RFC-002-top.md".to_string(),
+                doc_md("Top", "rfc", "[]"),
+            ),
+        ];
+        for i in 0..STORY_FANOUT {
+            files.push((
+                format!("docs/stories/{}-anchor.md", story_id(i)),
+                doc_md("Anchor", "story", "- implements: RFC-001"),
+            ));
+        }
+        for i in 0..ITERATION_FANOUT {
+            files.push((
+                format!("docs/iterations/ITERATION-{:03}-leaf.md", i + 1),
+                doc_md("Leaf", "iteration", &implements_every_story),
+            ));
+        }
+
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(p, c)| (p.as_str(), c.as_str()))
+            .collect();
+        store_from(&refs)
+    }
+
+    #[test]
+    fn flatten_reverse_budget_ignores_forward_rows_so_a_wide_store_keeps_its_lineage() {
+        // The budget must cover reverse RE-EXPANSION only. A store big enough to emit
+        // more than the budget's worth of ordinary forward rows must still show every
+        // anchor its whole lineage: a budget counting TOTAL rows would silently drop
+        // the tail anchors' `RFC-002` row, which renders as a childless `RFC-001` and
+        // reads exactly like a story with no RFC above it.
+        let (_tmp, store) = wide_forward_store();
+        let forest = resolve_forest(&store, Some("story"));
+
+        let nodes = flatten_forest(&forest, &store, &GraphSort::default());
+
+        assert!(
+            nodes.len() > MAX_REVERSE_EXPANSION_ROWS,
+            "the store must emit more than the budget in forward rows or this test \
+             proves nothing, got {} rows",
+            nodes.len()
+        );
+        let occurrences = |id: &str| nodes.iter().filter(|n| id_of(n) == id).count();
+        assert_eq!(
+            occurrences("RFC-001"),
+            STORY_FANOUT,
+            "each anchor draws its inverted parent RFC"
+        );
+        assert_eq!(
+            occurrences("RFC-002"),
+            STORY_FANOUT,
+            "and re-expands it to the row above, for EVERY anchor: forward rows must \
+             not consume the reverse budget"
+        );
+        assert!(
+            nodes
+                .iter()
+                .filter(|n| id_of(n) == "RFC-002")
+                .all(|n| n.reverse && n.depth == 2),
+            "every RFC-002 row is a marked depth-2 ancestor of its anchor"
+        );
+    }
+
+    #[test]
+    fn annotation_still_excludes_lineage_across_an_inverted_edge() {
+        // An ancestor drawn as an inverted tree edge is still on the node's
+        // lineage, so a related-to link along it is not re-surfaced as
+        // cross-cutting (STORY-247 non-functional note). The lineage walk is
+        // direction-agnostic: it reads the anchored forest's own parent edges.
+        let (_tmp, store) = store_from(&[
+            (
+                "docs/stories/STORY-001-mid.md",
+                &doc_md("Mid", "story", "[]"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-leaf.md",
+                &doc_md(
+                    "Leaf",
+                    "iteration",
+                    "- implements: STORY-001\n- related-to: STORY-001",
+                ),
+            ),
+        ]);
+
+        let nodes = flatten_forest(
+            &resolve_forest(&store, Some("iteration")),
+            &store,
+            &GraphSort::default(),
+        );
+
+        assert!(related_of(&nodes, "ITERATION-001").is_empty());
+        assert!(related_of(&nodes, "STORY-001").is_empty());
     }
 
     // --- ITERATION-209 sibling sort ---------------------------------------
