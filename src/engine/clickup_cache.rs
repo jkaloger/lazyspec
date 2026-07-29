@@ -1052,6 +1052,60 @@ mod tests {
         assert_eq!(payload.assignees, None);
     }
 
+    // Every key the native list claims must actually reach a field in
+    // build_task_update -- otherwise the store partitions it away from the custom
+    // field path and it goes nowhere.
+    #[test]
+    fn every_native_update_key_maps_to_a_native_field() {
+        for key in NATIVE_UPDATE_KEYS {
+            let value = match *key {
+                "priority" => "high",
+                "due" | "estimate" => "1748541600000",
+                "assignee" => "183",
+                _ => "x",
+            };
+            assert_ne!(
+                build_task_update(&[(key, value)]),
+                TaskUpdate::default(),
+                "native key '{key}' maps to no field"
+            );
+        }
+    }
+
+    // A declared kind decides the JSON type ClickUp receives: number fields reject
+    // a quoted "5", text fields take the value verbatim.
+    #[test]
+    fn encode_custom_field_value_types_by_declared_kind() {
+        let cases = [
+            (Some(AttrKind::Int), "5", serde_json::json!(5)),
+            (Some(AttrKind::Float), " 2.5 ", serde_json::json!(2.5)),
+            (Some(AttrKind::Bool), "true", serde_json::json!(true)),
+            (Some(AttrKind::Str), "5", serde_json::json!("5")),
+            (Some(AttrKind::Enum), "high", serde_json::json!("high")),
+            (
+                Some(AttrKind::Date),
+                "2026-07-29",
+                serde_json::json!("2026-07-29"),
+            ),
+            // Undeclared: no kind to go on, so text.
+            (None, "anything", serde_json::json!("anything")),
+        ];
+        for (kind, raw, expected) in cases {
+            let got = encode_custom_field_value("a", kind, raw).unwrap();
+            assert_eq!(got, expected, "kind {kind:?} value {raw}");
+        }
+    }
+
+    #[test]
+    fn encode_custom_field_value_rejects_value_contradicting_its_kind() {
+        let err = encode_custom_field_value("est_low", Some(AttrKind::Float), "cheap").unwrap_err();
+        assert!(err.to_string().contains("declared float"), "got: {err}");
+        let err = encode_custom_field_value("n", Some(AttrKind::Int), "1.5").unwrap_err();
+        assert!(err.to_string().contains("declared int"), "got: {err}");
+        let err = encode_custom_field_value("b", Some(AttrKind::Bool), "yes").unwrap_err();
+        assert!(err.to_string().contains("declared bool"), "got: {err}");
+    }
+
     #[test]
     fn build_task_update_ignores_non_native_keys() {
         // A non-native attr routes to a custom field in a later story; it has no
