@@ -1,7 +1,7 @@
 use crate::engine::document::{DocMeta, RelationType};
 use crate::engine::store::{ResolveError, Store};
 use anyhow::Result;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 pub struct ContextNode<'a> {
@@ -443,71 +443,87 @@ fn resolve_forest_anchored<'a>(
 /// old `chain` order (root first, target last). Cyclic input has no valid
 /// topological order, so any remaining nodes are appended path-ordered; the
 /// node set is still complete (each node once).
+///
+/// Kahn's algorithm over a path-ordered ready frontier, O(V + E log V). The
+/// frontier is the whole point: an earlier version re-derived the ready set from
+/// scratch each step — rescan every indegree, sort the entire ready set to take
+/// its minimum, then linear-search every node's parent list to decrement — three
+/// O(V) passes per emitted node. That is O(V^2 log V), and since the TUI
+/// re-resolves the forest on the UI thread whenever the graph view opens or its
+/// pivot/sort changes (`tui::state::app::rebuild_graph`), it showed up as a
+/// visible stutter (145ms on a 751-doc store). See
+/// `forest_topo_order_is_near_linear_in_forest_size`.
 fn topo_order<'a>(
     discovered: &HashMap<PathBuf, &'a DocMeta>,
     node_parents: &HashMap<PathBuf, Vec<PathBuf>>,
 ) -> Vec<ContextNode<'a>> {
-    let mut remaining_parents: HashMap<PathBuf, usize> = discovered
-        .keys()
-        .map(|path| {
-            let count = node_parents
-                .get(path)
-                .map(|parents| {
-                    parents
-                        .iter()
-                        .filter(|p| discovered.contains_key(*p))
-                        .count()
-                })
-                .unwrap_or(0);
-            (path.clone(), count)
-        })
-        .collect();
-
-    let mut ordered: Vec<PathBuf> = Vec::with_capacity(discovered.len());
-    let mut emitted: HashSet<PathBuf> = HashSet::new();
-
-    while ordered.len() < discovered.len() {
-        let mut ready: Vec<&PathBuf> = remaining_parents
-            .iter()
-            .filter(|(path, count)| **count == 0 && !emitted.contains(*path))
-            .map(|(path, _)| path)
-            .collect();
-
-        if ready.is_empty() {
-            // Cycle: no node with all parents satisfied. Emit the remaining
-            // nodes path-ordered to guarantee termination and completeness.
-            let mut leftover: Vec<PathBuf> = discovered
-                .keys()
-                .filter(|p| !emitted.contains(*p))
-                .cloned()
-                .collect();
-            leftover.sort();
-            for path in leftover {
-                emitted.insert(path.clone());
-                ordered.push(path);
-            }
-            break;
-        }
-
-        ready.sort();
-        let next = ready[0].clone();
-        emitted.insert(next.clone());
-        ordered.push(next.clone());
-
-        for (child, parents) in node_parents {
-            if parents.contains(&next) {
-                if let Some(count) = remaining_parents.get_mut(child) {
-                    *count = count.saturating_sub(1);
+    // Indegree counts each node's DISTINCT in-graph parents and `children` is the
+    // matching forward edge list, both built from the same deduped parent set so
+    // every counted edge has exactly one decrement. (Callers already dedupe, but
+    // deriving both from one set means a repeated parent cannot strand a node
+    // above zero and silently divert it to the cycle branch.)
+    let mut indegree: HashMap<&PathBuf, usize> = HashMap::with_capacity(discovered.len());
+    let mut children: HashMap<&PathBuf, Vec<&PathBuf>> = HashMap::new();
+    for path in discovered.keys() {
+        let mut parents: Vec<&PathBuf> = Vec::new();
+        if let Some(declared) = node_parents.get(path) {
+            for parent in declared {
+                // Re-borrow the parent path out of `discovered` so the adjacency
+                // keys share its lifetime rather than `node_parents`'.
+                if let Some((key, _)) = discovered.get_key_value(parent) {
+                    if !parents.contains(&key) {
+                        parents.push(key);
+                    }
                 }
             }
         }
+        indegree.insert(path, parents.len());
+        for parent in parents {
+            children.entry(parent).or_default().push(path);
+        }
+    }
+
+    // A `BTreeSet` frontier makes "smallest ready path" a pop rather than a sort,
+    // preserving the exact tiebreak the callers' order assertions pin.
+    let mut frontier: BTreeSet<&PathBuf> = indegree
+        .iter()
+        .filter(|(_, degree)| **degree == 0)
+        .map(|(path, _)| *path)
+        .collect();
+
+    let mut ordered: Vec<&PathBuf> = Vec::with_capacity(discovered.len());
+    while let Some(next) = frontier.pop_first() {
+        ordered.push(next);
+        for child in children.get(next).into_iter().flatten() {
+            let degree = indegree
+                .get_mut(*child)
+                .expect("children are keyed from discovered");
+            *degree -= 1;
+            if *degree == 0 {
+                frontier.insert(*child);
+            }
+        }
+    }
+
+    // Cyclic input has no valid topological order. A node is emitted exactly when
+    // its indegree reaches zero, so the nodes still holding a positive indegree
+    // are precisely the ones the drain never reached: append them path-ordered so
+    // the node set stays complete.
+    if ordered.len() < discovered.len() {
+        let mut leftover: Vec<&PathBuf> = indegree
+            .iter()
+            .filter(|(_, degree)| **degree > 0)
+            .map(|(path, _)| *path)
+            .collect();
+        leftover.sort();
+        ordered.extend(leftover);
     }
 
     ordered
         .into_iter()
         .map(|path| ContextNode {
-            doc: discovered[&path],
-            parents: node_parents.get(&path).cloned().unwrap_or_default(),
+            doc: discovered[path],
+            parents: node_parents.get(path).cloned().unwrap_or_default(),
             parents_inverted: false,
         })
         .collect()
@@ -1062,6 +1078,54 @@ mod tests {
             BTreeSet::from(["RFC-001".to_string(), "RFC-002".to_string()])
         );
         assert_eq!(forest.len(), 2, "cycle must not duplicate nodes");
+    }
+
+    /// `topo_order` must stay near-linear in the forest size. It once re-derived
+    /// the ready set from scratch on every step — rescan every indegree, sort the
+    /// whole ready set to take its minimum, then linear-search every parent list
+    /// to decrement — three O(N) passes per emitted node, so O(N^2 log N). That
+    /// cost 145ms on the 751-doc lazyspec repo, and since the TUI re-resolves the
+    /// forest synchronously on the UI thread when the graph view opens and on
+    /// every pivot/sort keystroke (`tui::state::app::rebuild_graph`), it showed up
+    /// as a visible stutter rather than merely a slow function.
+    ///
+    /// 800 docs over 400 chain edges, with a 400-wide initial ready frontier to
+    /// load the ready-set sort. This asserts a complexity class, not a latency
+    /// budget: measured in a debug build, the quadratic order took 1.08s here and
+    /// the near-linear one takes single-digit ms, so the 250ms bound sits ~4x
+    /// under the regression and ~25x over the fix — wide enough on either side
+    /// that a slow CI box cannot flip the verdict.
+    #[test]
+    fn forest_topo_order_is_near_linear_in_forest_size() {
+        const ROOTS: usize = 400;
+        let mut files: Vec<(String, String)> = Vec::with_capacity(ROOTS * 2);
+        for i in 1..=ROOTS {
+            files.push((
+                format!("docs/rfcs/RFC-{i:03}-root.md"),
+                doc_md("Root", "rfc", "[]"),
+            ));
+            files.push((
+                format!("docs/stories/STORY-{i:03}-leaf.md"),
+                doc_md("Leaf", "story", &format!("- implements: RFC-{i:03}")),
+            ));
+        }
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(p, c)| (p.as_str(), c.as_str()))
+            .collect();
+        let (_tmp, store) = store_from(&refs);
+
+        let start = std::time::Instant::now();
+        let forest = resolve_forest(&store, None);
+        let elapsed = start.elapsed();
+
+        assert_eq!(forest.len(), ROOTS * 2, "every doc is emitted exactly once");
+        assert!(
+            elapsed < std::time::Duration::from_millis(250),
+            "resolve_forest over {} docs took {elapsed:?}; topo_order has regressed \
+             to a quadratic scan-per-emitted-node",
+            ROOTS * 2
+        );
     }
 
     // --- resolve_forest anchored -------------------------------------------
