@@ -9,7 +9,7 @@ use anyhow::Result;
 use lazyspec::engine::config::{Config, GithubConfig, StoreBackend};
 use lazyspec::engine::gh::{
     GhAuthor, GhComment, GhFieldValueInput, GhGraphql, GhIssue, GhIssueDependencyApi,
-    GhIssueReader, GhIssueWriter, GhLabel, GhMilestone, GhMilestoneApi, GqlVar, ProjectFieldValue,
+    GhIssueReader, GhIssueWriter, GhLabel, GhMilestone, GhMilestoneApi, GqlVar, ProjectItem,
 };
 use lazyspec::engine::git_ref::GitCli;
 use lazyspec::engine::store::{Filter, Store};
@@ -108,11 +108,7 @@ impl GhGraphql for NestingGh {
             })),
         }
     }
-    fn project_item_fields(
-        &self,
-        _repo: &str,
-        _content_node_id: &str,
-    ) -> Result<Vec<ProjectFieldValue>> {
+    fn project_items(&self, _repo: &str, _content_node_id: &str) -> Result<Vec<ProjectItem>> {
         Ok(vec![])
     }
     fn update_project_v2_item_field_value(

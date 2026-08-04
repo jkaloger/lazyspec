@@ -125,7 +125,7 @@ impl TypeSync for GhMilestoneSync<'_> {
 }
 
 /// Refreshes a `github-issues` type, then folds in the per-item project-field
-/// injection (best-effort) so both surfaces inject identically.
+/// reconcile (best-effort) so both surfaces resolve identically.
 pub struct GhIssueSync<'c> {
     pub reader: &'c dyn GhIssueReader,
     pub graphql: &'c dyn GhGraphql,
@@ -162,7 +162,7 @@ impl TypeSync for GhIssueSync<'_> {
         };
 
         let mut warnings: Vec<String> = result.warnings.into_iter().map(|w| w.message).collect();
-        warnings.extend(inject_project_fields_into_cache(
+        warnings.extend(reconcile_project_fields_into_cache(
             root,
             self.graphql,
             &self.repo,
@@ -458,11 +458,13 @@ pub(crate) fn fetch_git_ref(
 }
 
 /// For every cached doc of `type_def`, inject the per-item project field values
-/// as `PROJECT-n.<field>` attributes, rewriting the cache file. Best-effort: a
+/// as `PROJECT-n.<field>` attributes -- plus, for a `status_authority`-bound
+/// type, the status read off that board's `Status` cell, adding the doc to that
+/// board when it is not yet an item -- rewriting the cache file. Best-effort: a
 /// per-doc failure is returned as a warning and the rest still process (the
 /// engine emits no stderr, so warnings flow back to the caller via the outcome).
 /// Relocated from `cli::fetch::inject_project_fields_into_cache` (RFC-057).
-fn inject_project_fields_into_cache(
+fn reconcile_project_fields_into_cache(
     root: &Path,
     client: &dyn GhGraphql,
     repo: &str,
@@ -472,15 +474,8 @@ fn inject_project_fields_into_cache(
 ) -> Vec<String> {
     let mut warnings = Vec::new();
     let cache_dir = root.join(".lazyspec/cache").join(&type_def.name);
-    let entries = match std::fs::read_dir(&cache_dir) {
-        Ok(e) => e,
-        Err(_) => return warnings,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("md") {
-            continue;
-        }
+    let mut board_ids = store_dispatch::BoardNodeIds::default();
+    for path in cache_doc_paths(&cache_dir) {
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -491,27 +486,60 @@ fn inject_project_fields_into_cache(
             continue;
         };
         // github-issues cache files carry no `id:` in their frontmatter, so the
-        // canonical doc id is the filename stem. Derive it when missing so the
-        // issue-map lookup resolves and write_cache_file does not bail on empty id.
+        // canonical doc id comes from the path -- which for a nested doc means the
+        // parent folder (`index.md`) or the stem minus its `NN-` order prefix.
+        // Derive it when missing so the issue-map lookup resolves and
+        // write_cache_file does not bail on empty id.
         if meta.id.is_empty() {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                meta.id = crate::engine::store::extract_id_from_name(stem);
-            }
+            meta.id = crate::engine::store::extract_id(&path);
         }
-        if let Err(e) = store_dispatch::inject_project_fields_for_meta(
-            client, repo, issue_map, config, &mut meta,
+        match store_dispatch::reconcile_project_fields_for_meta(
+            client,
+            repo,
+            issue_map,
+            config,
+            &mut board_ids,
+            &mut meta,
         ) {
-            warnings.push(format!(
-                "could not read project fields for {}: {}",
-                meta.id, e
-            ));
-            continue;
+            Ok(w) => warnings.extend(w),
+            Err(e) => {
+                warnings.push(format!(
+                    "could not read project fields for {}: {}",
+                    meta.id, e
+                ));
+                continue;
+            }
         }
         if let Err(e) = store_dispatch::write_cache_file(root, type_def, &meta, &body) {
             warnings.push(format!("could not rewrite cache for {}: {}", meta.id, e));
         }
     }
     warnings
+}
+
+/// Every cached doc of one type: the flat `<id>.md` files plus the one nesting
+/// level the cache uses for native sub-issues (`<parent-id>/index.md` and
+/// `<parent-id>/NN-<child-id>.md`). A nested doc is board-bound like any other, so
+/// a flat walk would silently leave it off its authority board.
+fn cache_doc_paths(cache_dir: &Path) -> Vec<std::path::PathBuf> {
+    let is_md = |p: &Path| p.extension().and_then(|s| s.to_str()) == Some("md");
+    let Ok(entries) = std::fs::read_dir(cache_dir) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let Ok(nested) = std::fs::read_dir(&path) else {
+                continue;
+            };
+            paths.extend(nested.flatten().map(|e| e.path()).filter(|p| is_md(p)));
+        } else if is_md(&path) {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths
 }
 
 #[cfg(test)]
@@ -524,7 +552,7 @@ mod tests {
         MockGhClient, MockGhDependencyClient, MockGhMilestoneClient,
     };
     use crate::engine::gh::{
-        GhAuthor, GhIssue, GhIssueMilestone, GhLabel, GhMilestone, ProjectFieldValue,
+        GhAuthor, GhIssue, GhIssueMilestone, GhLabel, GhMilestone, ProjectFieldValue, ProjectItem,
     };
     use crate::engine::gh::{GhFieldKind, GhFieldValueRepr};
     use tempfile::TempDir;
@@ -762,7 +790,7 @@ mod tests {
     }
 
     /// A GitHub client fake whose project-field GraphQL always errors, to drive
-    /// the injection-failure path (MockGhClient's `project_item_fields` cannot
+    /// the injection-failure path (MockGhClient's `project_items` cannot
     /// fail). Everything else is inert.
     struct FailingInjectClient {
         issues: Vec<GhIssue>,
@@ -798,11 +826,7 @@ mod tests {
         ) -> Result<serde_json::Value> {
             anyhow::bail!("graphql unreachable")
         }
-        fn project_item_fields(
-            &self,
-            _repo: &str,
-            _content_node_id: &str,
-        ) -> Result<Vec<ProjectFieldValue>> {
+        fn project_items(&self, _repo: &str, _content_node_id: &str) -> Result<Vec<ProjectItem>> {
             anyhow::bail!("project fields unreachable")
         }
         fn update_project_v2_item_field_value(
@@ -1106,5 +1130,73 @@ mod tests {
             doc.contains("PROJECT-1.Status: In Progress"),
             "expected injected project field, got:\n{doc}"
         );
+    }
+
+    /// A `story` type whose lifecycle is board 7's columns.
+    fn authority_config() -> Config {
+        let mut config = Config::default();
+        config.documents.types = vec![TypeDef {
+            status_authority: Some("PROJECT-7".to_string()),
+            ..type_def("story", "STORY", StoreBackend::GithubIssues)
+        }];
+        config
+    }
+
+    fn board_status_item(board: u64, status: &str) -> ProjectItem {
+        ProjectItem {
+            project_number: board,
+            item_id: format!("PVTI_{}", board),
+            fields: vec![ProjectFieldValue {
+                project_number: board,
+                field_name: "Status".into(),
+                kind: GhFieldKind::SingleSelect,
+                value: GhFieldValueRepr::OptionName(status.into()),
+            }],
+        }
+    }
+
+    fn cached_story_status(path: &Path) -> String {
+        let content = std::fs::read_to_string(path).unwrap();
+        crate::engine::document::DocMeta::parse(&content)
+            .unwrap()
+            .status
+            .as_str()
+            .to_string()
+    }
+
+    // A nested cache doc (a native sub-issue, materialized under its parent's
+    // folder) is board-bound like any other, so the pass must reach it: skipping
+    // it leaves the type reporting two lifecycles with no warning.
+    #[test]
+    fn nested_cache_docs_take_their_status_from_the_authority_board() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let config = authority_config();
+        let td = &config.documents.types[0];
+
+        let child = root.join(".lazyspec/cache/story/STORY-100");
+        std::fs::create_dir_all(&child).unwrap();
+        let child_file = child.join("01-STORY-12.md");
+        std::fs::write(
+            &child_file,
+            "---\ntitle: \"Child\"\ntype: story\nstatus: \"\"\nauthor: \"@octocat\"\ndate: 2026-01-01\ntags: []\n---\nbody\n",
+        )
+        .unwrap();
+
+        let mut issue_map = IssueMap::load(root).unwrap();
+        issue_map.insert("STORY-12", 12, "", "I_node12");
+        let client = MockGhClient::new().with_project_items(vec![board_status_item(7, "Review")]);
+
+        let warnings = reconcile_project_fields_into_cache(
+            root,
+            &client,
+            "owner/repo",
+            &issue_map,
+            &config,
+            td,
+        );
+
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+        assert_eq!(cached_story_status(&child_file), "review");
     }
 }

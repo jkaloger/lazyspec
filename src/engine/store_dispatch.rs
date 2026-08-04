@@ -9,7 +9,9 @@ use crate::engine::clickup::TaskUpdate;
 use crate::engine::clickup_cache;
 use crate::engine::config::{Config, Lifecycle, StoreBackend, TypeDef};
 use crate::engine::document::{compose_frontmatter, AttrValue, DocMeta, DocType, Status};
-use crate::engine::gh::{self, GhClient, GhGraphql, GhMilestoneClient, GhProjectsClient, GqlVar};
+use crate::engine::gh::{
+    self, missing_project_scope, GhClient, GhGraphql, GhMilestoneClient, GhProjectsClient, GqlVar,
+};
 use crate::engine::gh_schema::{try_org_then_user, GhSchemaSnapshot};
 use crate::engine::issue_body;
 use crate::engine::issue_cache::{self, IssueCache};
@@ -588,39 +590,171 @@ fn membership_board_numbers(config: &Config, meta: &DocMeta) -> Vec<u64> {
         .collect()
 }
 
+/// The board number a doc's type nominates as its lifecycle authority, if any.
+fn authority_board_for(config: &Config, meta: &DocMeta) -> Option<u64> {
+    config
+        .type_by_name(meta.doc_type.as_str())
+        .and_then(|t| t.status_authority.as_deref())
+        .and_then(|id| board_number(id).ok())
+}
+
+/// What `board` says about this issue's lifecycle. Neither miss can name a
+/// lifecycle state, so both leave the status unset -- but they are different
+/// situations with different fixes, so they stay distinguishable for the warning.
+enum AuthorityCell<'a> {
+    /// The board's item for this issue carries a `Status` option.
+    Set(&'a str),
+    /// The issue is an item of the board, but its `Status` cell is empty.
+    Empty,
+    /// The issue is not an item of the board at all.
+    NotAnItem,
+}
+
+fn authority_status_cell(items: &[gh::ProjectItem], board: u64) -> AuthorityCell<'_> {
+    let Some(item) = items.iter().find(|i| i.project_number == board) else {
+        return AuthorityCell::NotAnItem;
+    };
+    item.fields
+        .iter()
+        .find(|v| v.field_name == "Status")
+        .and_then(|v| match &v.value {
+            gh::GhFieldValueRepr::OptionName(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .map_or(AuthorityCell::Empty, AuthorityCell::Set)
+}
+
 /// Read the per-item project field values for `meta` across every board it is a
 /// member of and inject them into `meta.attributes` keyed
-/// `PROJECT-{number}.{field_name}`. Standalone (no store) so read-path callers
-/// that only hold a borrowed graphql client (e.g. the fetch loop) can inject
-/// without owning a client. A missing node id or zero memberships is a no-op.
-pub fn inject_project_fields_for_meta(
+/// `PROJECT-{number}.{field_name}`; then, when `meta`'s type nominates a
+/// `status_authority` board, set `meta.status` from that board's `Status` cell.
+/// Standalone (no store) so read-path callers that only hold a borrowed graphql
+/// client (e.g. the fetch loop) can reconcile without owning a client.
+///
+/// The authority board's `Status` is the ONLY thing that may set the status; a
+/// second board's `Status` stays a plain `PROJECT-n.Status` attribute.
+///
+/// It *reconciles* rather than injects because of one write: a doc of an
+/// authority-bound type whose issue is not an item of that board is added to it
+/// (`addProjectV2ItemById`), the single mutation fetch performs. Without it the
+/// type would report two disjoint lifecycles at once -- board columns for its
+/// members and nothing for everyone else -- so membership is repaired rather
+/// than merely reported. The new item's `Status` cell is left empty (the story
+/// chose unset-plus-warning over fabricating a first column), so the doc lands
+/// in the same unset-plus-warning state an empty cell produces. A member with an
+/// empty cell is NOT added: it is already on the board. A failed add is
+/// non-fatal -- it warns, leaves the status the caller brought in, and the run
+/// carries on.
+///
+/// `board_ids` memoizes the authority board's node id across the docs of one
+/// pass; see [`BoardNodeIds`].
+///
+/// A missing node id, or a doc with neither memberships nor an authority board,
+/// is a no-op.
+pub fn reconcile_project_fields_for_meta(
     client: &dyn GhGraphql,
     repo: &str,
     issue_map: &IssueMap,
     config: &Config,
+    board_ids: &mut BoardNodeIds,
     meta: &mut DocMeta,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let boards = membership_board_numbers(config, meta);
-    if boards.is_empty() {
-        return Ok(());
+    let authority = authority_board_for(config, meta);
+    if boards.is_empty() && authority.is_none() {
+        return Ok(Vec::new());
     }
     let Some(node_id) = issue_map
         .get(&meta.id)
         .map(|e| e.node_id.clone())
         .filter(|n| !n.is_empty())
     else {
-        return Ok(());
+        return Ok(Vec::new());
     };
 
-    let values = client.project_item_fields(repo, &node_id)?;
-    for v in &values {
-        if !boards.contains(&v.project_number) {
-            continue;
+    let items = client.project_items(repo, &node_id)?;
+    for item in &items {
+        for v in &item.fields {
+            if !boards.contains(&v.project_number) {
+                continue;
+            }
+            let key = format!("PROJECT-{}.{}", v.project_number, v.field_name);
+            meta.attributes.insert(key, gh::gh_field_to_attr(&v.value));
         }
-        let key = format!("PROJECT-{}.{}", v.project_number, v.field_name);
-        meta.attributes.insert(key, gh::gh_field_to_attr(&v.value));
     }
-    Ok(())
+
+    let mut warnings = Vec::new();
+    if let Some(board) = authority {
+        match authority_status_cell(&items, board) {
+            AuthorityCell::Set(name) => meta.status = Status::new(name),
+            AuthorityCell::Empty => {
+                meta.status = Status::new("");
+                warnings.push(format!(
+                    "{} has an empty Status cell on authority board PROJECT-{}; status left unset",
+                    meta.id, board
+                ));
+            }
+            AuthorityCell::NotAnItem => {
+                match add_to_authority_board(client, repo, issue_map, board_ids, &node_id, board) {
+                    Ok(()) => {
+                        meta.status = Status::new("");
+                        warnings.push(format!(
+                            "{} was added to authority board PROJECT-{} with an empty Status cell; status left unset",
+                            meta.id, board
+                        ));
+                    }
+                    // A failed add leaves the doc off the board, so the board has
+                    // said nothing about its lifecycle -- blanking the status here
+                    // would wipe a good one on a transient failure. A failed board
+                    // READ preserves it the same way
+                    // (`issue_cache::board_owned_status`).
+                    Err(reason) => warnings.push(format!(
+                        "could not add {} to authority board PROJECT-{}: {}; keeping the last known status",
+                        meta.id, board, reason
+                    )),
+                }
+            }
+        }
+    }
+    Ok(warnings)
+}
+
+/// Put the issue `content_node_id` on authority board `board`, so the type has
+/// one lifecycle rather than two. `Err` carries why the add did not happen; the
+/// add is best-effort like the rest of this path, so the caller warns rather than
+/// failing.
+///
+/// `gh` exits zero on a GraphQL response that carries an `errors` array and no
+/// data, so success is read off the payload the mutation is supposed to return,
+/// never off the process exit -- the same rule board creation applies.
+fn add_to_authority_board(
+    client: &dyn GhGraphql,
+    repo: &str,
+    issue_map: &IssueMap,
+    board_ids: &mut BoardNodeIds,
+    content_node_id: &str,
+    board: u64,
+) -> std::result::Result<(), String> {
+    let project_id = board_ids.resolve(issue_map, repo, client, board)?;
+    let resp = client
+        .graphql(
+            ADD_PROJECT_ITEM_MUTATION,
+            &[
+                ("projectId", GqlVar::Str(project_id)),
+                ("contentId", GqlVar::Str(content_node_id.to_string())),
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    if resp.pointer("/data/addProjectV2ItemById/item/id").is_some() {
+        return Ok(());
+    }
+    if missing_project_scope(&resp) {
+        return Err(
+            "adding an issue to a board needs the `project` token scope; run `gh auth refresh -s project`"
+                .to_string(),
+        );
+    }
+    Err("addProjectV2ItemById returned no item".to_string())
 }
 
 pub struct GithubIssuesStore {
@@ -1016,22 +1150,6 @@ impl GithubIssuesStore {
         Ok((issue.number, issue.id))
     }
 
-    /// Read the per-item project field values for this doc across every board it
-    /// is a member of, and inject them into `meta.attributes` keyed
-    /// `PROJECT-{number}.{field_name}`. The issue's GraphQL node id comes from
-    /// the issue map; a missing node id or zero memberships is a no-op. Values
-    /// are coerced [`AttrValue`]s (never `Raw`); the board number namespaces the
-    /// key so the same field name on two boards cannot collide.
-    pub fn inject_project_fields(&self, meta: &mut DocMeta) -> Result<()> {
-        inject_project_fields_for_meta(
-            self.client.as_graphql(),
-            &self.repo,
-            &self.issue_map,
-            &self.config,
-            meta,
-        )
-    }
-
     /// Write (or clear) one `PROJECT-{number}.{field}` project field for the
     /// issue. Resolution order, all ids never names:
     ///   1. field id (+ option/iteration id) FROM the `gh-schema.json` snapshot
@@ -1135,20 +1253,76 @@ impl GithubIssuesStore {
         }
     }
 
+    /// Find the card the status write will move: the authority board's project
+    /// node id plus this doc's item id on that board.
+    ///
+    /// The item id comes from the board memberships `project_items` already
+    /// reports, so this costs the one membership read rather than the separate
+    /// item lookup [`Self::resolve_project_item_id`] does for named-field writes.
+    ///
+    /// A doc that is not an item of the board has no cell to write; fetch is what
+    /// repairs that, so the error says so. Resolving is separate from writing so
+    /// the caller can raise that rejection BEFORE it pushes the issue body:
+    /// otherwise a non-member's body would already carry the new `status:` line
+    /// while the card never moved.
+    fn resolve_authority_status_target(
+        &self,
+        doc_id: &str,
+        write: &AuthorityStatusWrite,
+    ) -> Result<AuthorityStatusTarget> {
+        let content_node_id = self.existing_node_id(doc_id);
+        if content_node_id.is_empty() {
+            bail!(
+                "{} has no GitHub node id; cannot move its card on authority board PROJECT-{}",
+                doc_id,
+                write.board
+            );
+        }
+        let items = self.client.project_items(&self.repo, &content_node_id)?;
+        let item_id = items
+            .iter()
+            .find(|item| item.project_number == write.board)
+            .map(|item| item.item_id.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} is not an item of authority board PROJECT-{}; run `lazyspec fetch` to add it",
+                    doc_id,
+                    write.board
+                )
+            })?;
+        let project_id = self.resolve_project_node_id(write.board)?;
+        Ok(AuthorityStatusTarget {
+            project_id,
+            item_id,
+        })
+    }
+
+    /// Move the doc's card into the column `write` names: one
+    /// `updateProjectV2ItemFieldValue` against the authority board's `Status`
+    /// field, reusing the same single-key `value` object every project-field write
+    /// goes through.
+    fn write_authority_status(
+        &self,
+        target: &AuthorityStatusTarget,
+        write: &AuthorityStatusWrite,
+    ) -> Result<()> {
+        self.client.update_project_v2_item_field_value(
+            &target.project_id,
+            &target.item_id,
+            &write.field_id,
+            &gh::GhFieldValueInput::SingleSelect(write.option_id.clone()),
+        )
+    }
+
     /// The project node id for `project_number`: reused from the issue map
     /// binding (`PROJECT-n`) when present, else a fresh org-then-user lookup.
     fn resolve_project_node_id(&self, project_number: u64) -> Result<String> {
-        let board_doc_id = format!("PROJECT-{}", project_number);
-        if let Some(id) = self
-            .issue_map
-            .get(&board_doc_id)
-            .map(|e| e.node_id.clone())
-            .filter(|n| !n.is_empty())
-        {
-            return Ok(id);
-        }
-        let owner = owner_of(&self.repo)?;
-        resolve_project_id_live(self.client.as_graphql(), owner, project_number)
+        resolve_board_node_id(
+            &self.issue_map,
+            &self.repo,
+            self.client.as_graphql(),
+            project_number,
+        )
     }
 
     /// The project item id for the issue (`content_node_id`) on the board with
@@ -1321,9 +1495,130 @@ pub fn parse_project_field_key(key: &str) -> Option<(u64, &str)> {
 
 const PROJECT_ITEM_ID_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on Issue { projectItems(first: 100) { nodes { id project { id } } } } } }";
 
+/// The card an [`AuthorityStatusWrite`] moves, resolved over the network before
+/// anything is written.
+#[derive(Debug)]
+struct AuthorityStatusTarget {
+    project_id: String,
+    item_id: String,
+}
+
+/// The board `Status` cell write a `--status` change resolves to on a type that
+/// nominates a `status_authority` board.
+#[derive(Debug)]
+pub(crate) struct AuthorityStatusWrite {
+    pub board: u64,
+    pub field_id: String,
+    pub option_id: String,
+    /// The board column's name lowercased: the state the doc ends up carrying,
+    /// and what the local transition gate is asked about.
+    pub state: String,
+}
+
+/// Resolve a requested `--status` value against the type's authority board,
+/// entirely from the cached schema snapshot -- no network.
+///
+/// `Ok(None)` for a type nominating no board: its status is nobody's business but
+/// the lifecycle's, and today's behaviour stands. `Err` when the type nominates a
+/// board but the value names no column on it, so the rejection happens before any
+/// remote call. That is what lets `validate` and the TUI status picker work
+/// offline.
+pub(crate) fn resolve_authority_status_write(
+    root: &std::path::Path,
+    type_def: &TypeDef,
+    requested: &str,
+) -> Result<Option<AuthorityStatusWrite>> {
+    let Some(board_id) = type_def.status_authority.as_deref() else {
+        return Ok(None);
+    };
+    let board = board_number(board_id)?;
+    let snapshot = GhSchemaSnapshot::load(root);
+    let Some(option) = snapshot.status_option(board, requested) else {
+        let columns = snapshot.status_option_names(board);
+        if columns.is_empty() {
+            bail!(
+                "type \"{}\" takes its statuses from authority board {}, whose Status columns are not cached; run `lazyspec fetch` to refresh the schema snapshot",
+                type_def.name,
+                board_id
+            );
+        }
+        bail!(
+            "invalid status \"{}\" for type \"{}\": authority board {} has no such Status column (valid columns: {})",
+            requested,
+            type_def.name,
+            board_id,
+            columns.join(", ")
+        );
+    };
+    Ok(Some(AuthorityStatusWrite {
+        board,
+        field_id: option.field_id.clone(),
+        option_id: option.id.clone(),
+        state: option.name.to_lowercase(),
+    }))
+}
+
+/// The one `addProjectV2ItemById` mutation. Shared by `ops::link`'s explicit
+/// membership write and by fetch's authority-board repair, so both put an issue
+/// on a board the same way.
+pub(crate) const ADD_PROJECT_ITEM_MUTATION: &str = "mutation($projectId: ID!, $contentId: ID!) { addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) { item { id } } }";
+
+/// A per-pass memo of board number -> project node id, so a fetch that has to
+/// add many docs to the same authority board resolves that board ONCE rather than
+/// once per doc. A board created in the GitHub UI has no `PROJECT-n` issue-map
+/// binding to resolve offline, so without this a type with N non-members costs N
+/// live org/user lookups -- enough to trip GitHub's secondary rate limits, every
+/// fetch. Failures memoize too: a board that did not resolve for the first doc
+/// will not resolve for the rest, and re-asking would repeat the failing query
+/// per doc.
+#[derive(Default)]
+pub struct BoardNodeIds(HashMap<u64, std::result::Result<String, String>>);
+
+impl BoardNodeIds {
+    /// The board's node id, resolved on first use and reused after.
+    fn resolve(
+        &mut self,
+        issue_map: &IssueMap,
+        repo: &str,
+        client: &dyn GhGraphql,
+        board: u64,
+    ) -> std::result::Result<String, String> {
+        self.0
+            .entry(board)
+            .or_insert_with(|| {
+                resolve_board_node_id(issue_map, repo, client, board).map_err(|e| e.to_string())
+            })
+            .clone()
+    }
+}
+
+/// The project node id for board `project_number`: the `PROJECT-n` binding
+/// already cached in the issue map when present, else a fresh live org-then-user
+/// lookup. Shared by the field-write path and fetch's authority-board add.
+/// [`GithubProjectsStore::resolve_board`] (what `link --member-of` uses) resolves
+/// an explicit owner with no issue map to consult, so it shares the live half,
+/// [`resolve_project_id_live`], rather than this.
+pub(crate) fn resolve_board_node_id(
+    issue_map: &IssueMap,
+    repo: &str,
+    client: &dyn GhGraphql,
+    project_number: u64,
+) -> Result<String> {
+    let board_doc_id = format!("PROJECT-{}", project_number);
+    if let Some(id) = issue_map
+        .get(&board_doc_id)
+        .map(|e| e.node_id.clone())
+        .filter(|n| !n.is_empty())
+    {
+        return Ok(id);
+    }
+    resolve_project_id_live(client, owner_of(repo)?, project_number)
+}
+
 /// Live org-then-user resolve of a Projects v2 board number to its node id.
-/// Used by the issue store's field-write path when the issue map has no cached
-/// board binding.
+/// Used by [`resolve_board_node_id`] when the issue map has no cached board
+/// binding, and by [`GithubProjectsStore::resolve_board`], which has no issue map.
+/// NEVER issues a create mutation.
 fn resolve_project_id_live(client: &dyn GhGraphql, owner: &str, number: u64) -> Result<String> {
     let (_kind, id_node) = try_org_then_user(
         client,
@@ -1471,6 +1766,17 @@ impl DocumentStore for GithubIssuesStore {
         doc_id: &str,
         updates: &[(&str, &str)],
     ) -> Result<PushOutcome> {
+        // A `status_authority` type moves its card on the board instead of mapping
+        // the status onto issue open/closed. Every id comes from the cached
+        // snapshot, so a column the board does not have rejects here -- before
+        // `check_lock`'s pre-flight issue view, let alone any write.
+        let authority_status = updates
+            .iter()
+            .find(|(key, _)| *key == "status")
+            .map(|(_, value)| resolve_authority_status_write(&self.root, type_def, value))
+            .transpose()?
+            .flatten();
+
         let (issue_number, remote_issue) = self.check_lock(doc_id)?;
 
         let ctx = issue_body::IssueContext {
@@ -1576,11 +1882,46 @@ impl DocumentStore for GithubIssuesStore {
             None => None,
         };
 
+        // STORY-248: on a board-bound type nothing on the ISSUE may set the
+        // status. `deserialize` falls back to the open/closed bit whenever the
+        // body's `status:` line disagrees with it or is absent, so an update
+        // carrying no status of its own would re-derive one from open/closed --
+        // the exact drift the read path refuses
+        // (`issue_cache::board_owned_status`, which is what reports the status
+        // the board last placed the doc at). A status change of its own moves the
+        // doc to the column the write resolved, never to the raw requested value.
+        match &authority_status {
+            Some(write) => meta.status = Status::new(&write.state),
+            None => {
+                if let Some(board_owned) =
+                    issue_cache::board_owned_status(&self.root, type_def, doc_id)
+                {
+                    meta.status = board_owned;
+                }
+            }
+        }
+
+        // The membership check is a read, and it can reject: resolve the card
+        // before the body push so a doc that is not an item of the authority board
+        // fails with nothing written remotely.
+        let authority_write = match &authority_status {
+            Some(write) => Some((self.resolve_authority_status_target(doc_id, write)?, write)),
+            None => None,
+        };
+
         let new_body = issue_body::serialize(&meta, &body);
         self.client
             .issue_edit(&self.repo, issue_number, None, Some(&new_body), &[], &[])?;
 
-        if let Some(status) = new_status {
+        if let Some((target, write)) = &authority_write {
+            self.write_authority_status(target, write)?;
+        } else if let Some(status) = new_status {
+            // Only reached by a type nominating no authority board: with one, a
+            // status change always resolved an `authority_status` above (or the
+            // whole update bailed). The issue's open/closed state is deliberately
+            // left alone for those types, in both directions -- "the last column
+            // closes the issue" is the board's own Projects automation to express,
+            // and asserting it here would fight that automation (STORY-248 AC7).
             let should_be_open = issue_body::status_maps_to_open(
                 status.as_str(),
                 type_def.effective_lifecycle().terminal_status(),
@@ -2026,30 +2367,6 @@ fn resolve_owner_node_id(client: &dyn GhGraphql, owner: &str) -> Result<String> 
         .ok_or_else(|| anyhow::anyhow!("owner '{}' not found as org or user", owner))
 }
 
-/// True when a GraphQL response signals the `project` token scope is missing:
-/// a top-level `errors[]` entry whose type or message names insufficient
-/// scopes, the `project` scope, an inaccessible resource, or a missing
-/// permission. Board creation needs the `project` scope, which `repo` does not
-/// grant.
-fn missing_project_scope(resp: &serde_json::Value) -> bool {
-    let Some(errors) = resp.pointer("/errors").and_then(|v| v.as_array()) else {
-        return false;
-    };
-    errors.iter().any(|e| {
-        let kind = e.get("type").and_then(|v| v.as_str()).unwrap_or_default();
-        let msg = e
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_lowercase();
-        kind == "INSUFFICIENT_SCOPES"
-            || msg.contains("`project` scope")
-            || msg.contains("project scope")
-            || msg.contains("resource not accessible")
-            || msg.contains("does not have permission")
-    })
-}
-
 /// Parse the `owner` half of a `owner/repo` string. The github-projects backend
 /// resolves boards under this owner.
 fn owner_of(repo: &str) -> Result<&str> {
@@ -2111,42 +2428,10 @@ impl GithubProjectsStore {
 
     /// Resolve a Projects v2 board number to its GraphQL node id. Tries the
     /// organization root first, then the user root. A board number that exists
-    /// under neither (both `projectV2` null) is a not-found error. NEVER issues a
-    /// create mutation.
+    /// under neither (both `projectV2` null) is a not-found error. The one live
+    /// resolve, shared with the issue-backed paths.
     pub fn resolve_board(&self, owner: &str, number: u64) -> Result<String> {
-        let org_resp = self.client.graphql(
-            PROJECT_NODE_ID_ORG_QUERY,
-            &[
-                ("owner", GqlVar::Str(owner.to_string())),
-                ("number", GqlVar::Int(number as i64)),
-            ],
-        )?;
-        if let Some(id) = org_resp
-            .pointer("/data/organization/projectV2/id")
-            .and_then(|v| v.as_str())
-        {
-            return Ok(id.to_string());
-        }
-
-        let user_resp = self.client.graphql(
-            PROJECT_NODE_ID_USER_QUERY,
-            &[
-                ("owner", GqlVar::Str(owner.to_string())),
-                ("number", GqlVar::Int(number as i64)),
-            ],
-        )?;
-        if let Some(id) = user_resp
-            .pointer("/data/user/projectV2/id")
-            .and_then(|v| v.as_str())
-        {
-            return Ok(id.to_string());
-        }
-
-        bail!(
-            "Projects v2 board #{} not found under owner '{}'",
-            number,
-            owner
-        )
+        resolve_project_id_live(self.client.as_graphql(), owner, number)
     }
 
     /// Resolve a board doc id to its node id and materialize a cache file holding
@@ -7830,7 +8115,9 @@ mod tests {
 
     use crate::engine::config::RelationshipDef;
     use crate::engine::document::{Relation, RelationType};
-    use crate::engine::gh::{GhFieldKind, GhFieldValueInput, GhFieldValueRepr, ProjectFieldValue};
+    use crate::engine::gh::{
+        GhFieldKind, GhFieldValueInput, GhFieldValueRepr, ProjectFieldValue, ProjectItem,
+    };
     use crate::engine::gh_schema::{OptionId, ProjectFieldId};
 
     fn membership_relationship_config() -> Config {
@@ -7882,10 +8169,32 @@ mod tests {
         }
     }
 
+    /// One doc's worth of a fetch's reconcile pass: the free function with its own
+    /// board memo, the way a single-doc pass behaves.
+    fn reconcile_one(store: &GithubIssuesStore, meta: &mut DocMeta) -> Result<Vec<String>> {
+        reconcile_with(store, &mut BoardNodeIds::default(), meta)
+    }
+
+    /// One doc of a multi-doc pass, sharing the pass's board memo.
+    fn reconcile_with(
+        store: &GithubIssuesStore,
+        board_ids: &mut BoardNodeIds,
+        meta: &mut DocMeta,
+    ) -> Result<Vec<String>> {
+        reconcile_project_fields_for_meta(
+            store.client.as_graphql(),
+            &store.repo,
+            &store.issue_map,
+            &store.config,
+            board_ids,
+            meta,
+        )
+    }
+
     // AC1: each field kind surfaces as the right coerced AttrValue under the
     // namespaced key.
     #[test]
-    fn inject_project_fields_surfaces_all_kinds() {
+    fn reconcile_project_fields_surfaces_all_kinds() {
         let root = tmp_root("iter217_inject_kinds");
         let values = vec![
             ProjectFieldValue {
@@ -7926,7 +8235,7 @@ mod tests {
         store.issue_map.insert("STORY-7", 7, "", "I_issue7");
 
         let mut meta = member_meta("STORY-7", &[1]);
-        store.inject_project_fields(&mut meta).unwrap();
+        reconcile_one(&store, &mut meta).unwrap();
 
         assert_eq!(
             meta.attributes["PROJECT-1.Status"],
@@ -7950,7 +8259,7 @@ mod tests {
     // AC2: same field name on two boards yields two distinct namespaced keys,
     // neither overwriting the other.
     #[test]
-    fn inject_project_fields_namespaces_per_board_no_collision() {
+    fn reconcile_project_fields_namespaces_per_board_no_collision() {
         let root = tmp_root("iter217_namespace");
         let values = vec![
             ProjectFieldValue {
@@ -7971,7 +8280,7 @@ mod tests {
         store.issue_map.insert("STORY-7", 7, "", "I_issue7");
 
         let mut meta = member_meta("STORY-7", &[1, 2]);
-        store.inject_project_fields(&mut meta).unwrap();
+        reconcile_one(&store, &mut meta).unwrap();
 
         assert_eq!(
             meta.attributes["PROJECT-1.Status"],
@@ -7981,6 +8290,703 @@ mod tests {
             meta.attributes["PROJECT-2.Status"],
             AttrValue::Str("Done".into())
         );
+    }
+
+    // --- ITERATION-353: the authority board's Status cell drives the status ---
+
+    /// The membership relationship plus a `story` type handing its lifecycle to
+    /// board 7.
+    fn authority_config() -> Config {
+        let mut config = membership_relationship_config();
+        config.documents.types = vec![TypeDef {
+            name: "story".to_string(),
+            plural: "stories".to_string(),
+            dir: "docs/stories".to_string(),
+            prefix: "STORY".to_string(),
+            status_authority: Some("PROJECT-7".to_string()),
+            ..test_type_def(StoreBackend::GithubIssues)
+        }];
+        config
+    }
+
+    fn authority_store(root: &std::path::Path, client: MockGhClient) -> GithubIssuesStore {
+        GithubIssuesStore {
+            config: authority_config(),
+            ..issues_store_with(root, client)
+        }
+    }
+
+    fn status_item(board: u64, status: Option<&str>) -> ProjectItem {
+        ProjectItem {
+            project_number: board,
+            item_id: format!("PVTI_{}", board),
+            fields: status
+                .map(|s| ProjectFieldValue {
+                    project_number: board,
+                    field_name: "Status".into(),
+                    kind: GhFieldKind::SingleSelect,
+                    value: GhFieldValueRepr::OptionName(s.into()),
+                })
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    // AC2: the cell sets the status, lowercased so it matches the board-derived
+    // lifecycle states. The doc holds no membership relation, proving the
+    // authority read no longer depends on one.
+    #[test]
+    fn reconcile_project_fields_reads_status_from_the_authority_board_cell() {
+        let root = tmp_root("iter353_authority_cell");
+        let client =
+            MockGhClient::new().with_project_items(vec![status_item(7, Some("In Progress"))]);
+        let mut store = authority_store(&root, client);
+        store.issue_map.insert("STORY-7", 7, "", "I_issue7");
+
+        let mut meta = member_meta("STORY-7", &[]);
+        let warnings = reconcile_one(&store, &mut meta).unwrap();
+
+        assert_eq!(meta.status, Status::new("in progress"));
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+        assert!(
+            store.mock().graphql_calls.borrow().is_empty(),
+            "an item already on the board must not be added again, got: {:?}",
+            store.mock().graphql_calls.borrow()
+        );
+    }
+
+    // AC3: an item on the board with an empty cell -- status unset, one warning
+    // naming the doc and the board, and nothing written back to the board.
+    #[test]
+    fn reconcile_project_fields_warns_and_unsets_status_for_an_empty_authority_cell() {
+        let root = tmp_root("iter353_empty_cell");
+        let client = MockGhClient::new().with_project_items(vec![status_item(7, None)]);
+        let mut store = authority_store(&root, client);
+        store.issue_map.insert("STORY-7", 7, "", "I_issue7");
+
+        let mut meta = member_meta("STORY-7", &[]);
+        let warnings = reconcile_one(&store, &mut meta).unwrap();
+
+        assert_eq!(meta.status, Status::new(""));
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert_eq!(
+            warnings[0],
+            "STORY-7 has an empty Status cell on authority board PROJECT-7; status left unset"
+        );
+        assert!(store.mock().field_updates.borrow().is_empty());
+        assert!(store.mock().field_clears.borrow().is_empty());
+        // ITERATION-354: an empty cell is already-a-member. Adding it again would
+        // be both wrong and non-idempotent.
+        assert!(
+            store.mock().graphql_calls.borrow().is_empty(),
+            "a member with a blank cell must not be added, got: {:?}",
+            store.mock().graphql_calls.borrow()
+        );
+    }
+
+    // --- ITERATION-354: fetch adds a non-member to the authority board ---
+
+    /// Bind `PROJECT-{number}` to a board node id in the issue map, the shape a
+    /// prior board create or membership sync leaves behind, so the add resolves
+    /// the project id offline.
+    fn bind_board(store: &mut GithubIssuesStore, number: u64, node_id: &str) {
+        store.issue_map.insert_kind(
+            format!("PROJECT-{}", number),
+            number,
+            "",
+            node_id,
+            crate::engine::issue_map::EntryKind::Project,
+        );
+    }
+
+    fn add_item_response() -> serde_json::Value {
+        serde_json::json!({"data": {"addProjectV2ItemById": {"item": {"id": "PVTI_new"}}}})
+    }
+
+    // AC4: a doc that is not an item of the authority board is added to it via
+    // `addProjectV2ItemById`, carrying the board's project node id and the
+    // issue's content node id -- and its status stays unset with a warning,
+    // because a freshly added item has an empty `Status` cell. No open/closed
+    // fallback.
+    #[test]
+    fn reconcile_project_fields_adds_a_non_member_to_the_authority_board() {
+        let root = tmp_root("iter354_adds_non_member");
+        let client = MockGhClient::new()
+            .with_project_items(vec![status_item(9, Some("Triage"))])
+            .with_graphql_responses(vec![add_item_response()]);
+        let mut store = authority_store(&root, client);
+        store.issue_map.insert("STORY-7", 7, "", "I_issue7");
+        bind_board(&mut store, 7, "PVT_board7");
+
+        let mut meta = member_meta("STORY-7", &[9]);
+        let warnings = reconcile_one(&store, &mut meta).unwrap();
+
+        let calls = store.mock().graphql_calls.borrow();
+        assert_eq!(calls.len(), 1, "got: {calls:?}");
+        assert!(
+            calls[0].0.contains("addProjectV2ItemById"),
+            "got: {}",
+            calls[0].0
+        );
+        assert_eq!(str_var(&calls[0].1, "projectId"), Some("PVT_board7"));
+        assert_eq!(str_var(&calls[0].1, "contentId"), Some("I_issue7"));
+
+        assert_eq!(meta.status, Status::new(""));
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert_eq!(
+            warnings[0],
+            "STORY-7 was added to authority board PROJECT-7 with an empty Status cell; status left unset"
+        );
+    }
+
+    // The board id resolution shared with the field-write path: no issue-map
+    // binding falls back to the live org lookup, and the add uses what it found.
+    #[test]
+    fn reconcile_project_fields_falls_back_to_a_live_board_lookup_for_the_add() {
+        let root = tmp_root("iter354_live_board_lookup");
+        let client = MockGhClient::new()
+            .with_project_items(vec![])
+            .with_graphql_responses(vec![org_board_response("PVT_live7"), add_item_response()]);
+        let mut store = authority_store(&root, client);
+        store.issue_map.insert("STORY-7", 7, "", "I_issue7");
+
+        let mut meta = member_meta("STORY-7", &[]);
+        let warnings = reconcile_one(&store, &mut meta).unwrap();
+
+        let calls = store.mock().graphql_calls.borrow();
+        assert_eq!(calls.len(), 2, "got: {calls:?}");
+        let add = calls
+            .iter()
+            .find(|(q, _)| q.contains("addProjectV2ItemById"))
+            .expect("the add mutation");
+        assert_eq!(str_var(&add.1, "projectId"), Some("PVT_live7"));
+        assert_eq!(meta.status, Status::new(""));
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+    }
+
+    // AC4: the add is best-effort like the rest of this path -- a failure warns
+    // naming the doc and the board, and is not an error. The status the doc came in
+    // with stands: the board never took the doc, so it has said nothing about it.
+    #[test]
+    fn reconcile_project_fields_warns_and_carries_on_when_the_board_add_fails() {
+        let root = tmp_root("iter354_add_fails");
+        // No canned graphql response: both the board lookup and the add fail.
+        let client = MockGhClient::new().with_project_items(vec![status_item(9, Some("Triage"))]);
+        let mut store = authority_store(&root, client);
+        store.issue_map.insert("STORY-7", 7, "", "I_issue7");
+
+        let mut meta = member_meta("STORY-7", &[9]);
+        let warnings = reconcile_one(&store, &mut meta).unwrap();
+
+        assert_eq!(meta.status, Status::new("draft"));
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(
+            warnings[0].starts_with("could not add STORY-7 to authority board PROJECT-7"),
+            "got: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("keeping the last known status"),
+            "got: {}",
+            warnings[0]
+        );
+    }
+
+    // `gh` exits zero on a GraphQL response carrying an `errors` array and no data,
+    // so the add's success has to be read off the item payload. Without that a
+    // scope failure reports a repair that never happened -- and blanks the status.
+    #[test]
+    fn reconcile_project_fields_treats_an_errors_array_as_a_failed_add() {
+        let root = tmp_root("iter354_add_errors_array");
+        let scope_error = serde_json::json!({
+            "data": {"addProjectV2ItemById": serde_json::Value::Null},
+            "errors": [{"type": "INSUFFICIENT_SCOPES", "message": "requires the `project` scope"}]
+        });
+        let client = MockGhClient::new()
+            .with_project_items(vec![])
+            .with_graphql_responses(vec![scope_error]);
+        let mut store = authority_store(&root, client);
+        store.issue_map.insert("STORY-7", 7, "", "I_issue7");
+        bind_board(&mut store, 7, "PVT_board7");
+
+        let mut meta = member_meta("STORY-7", &[]);
+        let warnings = reconcile_one(&store, &mut meta).unwrap();
+
+        assert_eq!(meta.status, Status::new("draft"));
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(
+            warnings[0].starts_with("could not add STORY-7 to authority board PROJECT-7"),
+            "got: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("gh auth refresh -s project"),
+            "the scope hint must reach the user, got: {}",
+            warnings[0]
+        );
+    }
+
+    // Two non-member docs in one pass resolve the authority board ONCE and are
+    // both added: the resolve is per pass, the add per doc.
+    #[test]
+    fn reconcile_project_fields_resolves_the_authority_board_once_per_pass() {
+        let root = tmp_root("iter354_board_resolved_once");
+        let client = MockGhClient::new()
+            .with_project_items(vec![])
+            .with_graphql_responses(vec![
+                org_board_response("PVT_live7"),
+                add_item_response(),
+                add_item_response(),
+            ]);
+        let mut store = authority_store(&root, client);
+        store.issue_map.insert("STORY-7", 7, "", "I_issue7");
+        store.issue_map.insert("STORY-8", 8, "", "I_issue8");
+
+        let mut board_ids = BoardNodeIds::default();
+        for id in ["STORY-7", "STORY-8"] {
+            let mut meta = member_meta(id, &[]);
+            reconcile_with(&store, &mut board_ids, &mut meta).unwrap();
+        }
+
+        let calls = store.mock().graphql_calls.borrow();
+        let lookups = calls
+            .iter()
+            .filter(|(q, _)| q.contains("projectV2(number: $number) { id }"))
+            .count();
+        let adds: Vec<_> = calls
+            .iter()
+            .filter(|(q, _)| q.contains("addProjectV2ItemById"))
+            .collect();
+        assert_eq!(lookups, 1, "got: {calls:?}");
+        assert_eq!(adds.len(), 2, "got: {calls:?}");
+        assert_eq!(str_var(&adds[0].1, "contentId"), Some("I_issue7"));
+        assert_eq!(str_var(&adds[1].1, "contentId"), Some("I_issue8"));
+    }
+
+    // AC9: a second board's `Status` stays a plain namespaced attribute; only the
+    // authority board's cell reaches the lifecycle.
+    #[test]
+    fn reconcile_project_fields_lets_only_the_authority_board_drive_status() {
+        let root = tmp_root("iter353_two_boards");
+        let client = MockGhClient::new().with_project_items(vec![
+            status_item(7, Some("Review")),
+            status_item(9, Some("Triage")),
+        ]);
+        let mut store = authority_store(&root, client);
+        store.issue_map.insert("STORY-7", 7, "", "I_issue7");
+
+        let mut meta = member_meta("STORY-7", &[7, 9]);
+        let warnings = reconcile_one(&store, &mut meta).unwrap();
+
+        assert_eq!(meta.status, Status::new("review"));
+        assert_eq!(
+            meta.attributes["PROJECT-9.Status"],
+            AttrValue::Str("Triage".into())
+        );
+        assert_eq!(
+            meta.attributes["PROJECT-7.Status"],
+            AttrValue::Str("Review".into())
+        );
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+    }
+
+    // AC10 regression: a type nominating no authority board keeps the status it
+    // parsed, whatever its boards say.
+    #[test]
+    fn reconcile_project_fields_leaves_status_untouched_without_an_authority_board() {
+        let root = tmp_root("iter353_no_authority");
+        let client = MockGhClient::new().with_project_items(vec![status_item(7, Some("Review"))]);
+        let mut store = issues_store_with(&root, client);
+        store.issue_map.insert("STORY-7", 7, "", "I_issue7");
+
+        let mut meta = member_meta("STORY-7", &[7]);
+        let warnings = reconcile_one(&store, &mut meta).unwrap();
+
+        assert_eq!(meta.status, Status::new("draft"));
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+    }
+
+    // --- ITERATION-355: update --status moves the card on the authority board ---
+
+    const BOARD_COLUMNS: [&str; 4] = ["Ready To Start", "In Progress", "Review", "Done"];
+
+    /// Board 7's `Status` columns as a fetched schema snapshot: the offline source
+    /// every id on the write path comes from.
+    fn board_status_snapshot(root: &std::path::Path) {
+        GhSchemaSnapshot {
+            project_fields: vec![ProjectFieldId {
+                project_number: 7,
+                field_name: "Status".into(),
+                id: "F_status7".into(),
+                data_type: "SINGLE_SELECT".into(),
+            }],
+            single_select_options: BOARD_COLUMNS
+                .iter()
+                .map(|name| OptionId {
+                    field_id: "F_status7".into(),
+                    name: (*name).to_string(),
+                    id: format!("opt_{}", name.to_lowercase().replace(' ', "_")),
+                })
+                .collect(),
+            ..Default::default()
+        }
+        .save(root)
+        .unwrap();
+    }
+
+    /// A type handing its lifecycle to board 7, with the states a fetch would
+    /// have persisted from that board -- lowercased, board order, no edges.
+    fn board_bound_type_def() -> TypeDef {
+        TypeDef {
+            status_authority: Some("PROJECT-7".to_string()),
+            lifecycle: Lifecycle {
+                states: BOARD_COLUMNS.iter().map(|c| c.to_lowercase()).collect(),
+                edges: vec![],
+            },
+            ..test_type_def(StoreBackend::GithubIssues)
+        }
+    }
+
+    /// RFC-001 (#42) in `issue_state`, an item of authority board 7 sitting in
+    /// `Ready To Start`, with the board bound in the issue map so no live lookup
+    /// is needed and board 7's columns cached in the snapshot.
+    fn board_bound_update_store(root: &std::path::Path, issue_state: &str) -> GithubIssuesStore {
+        board_status_snapshot(root);
+        let client = MockGhClient::new()
+            .with_project_items(vec![status_item(7, Some("Ready To Start"))])
+            .with_view_issue(GhIssue {
+                number: 42,
+                id: "I_node42".into(),
+                url: String::new(),
+                title: "My RFC".into(),
+                body: make_issue_body("agent-7", "2026-03-27", None, ""),
+                labels: vec![GhLabel {
+                    name: "lazyspec:rfc".into(),
+                    color: String::new(),
+                }],
+                state: issue_state.into(),
+                updated_at: "2026-03-27T10:00:00Z".into(),
+                created_at: "2026-03-27T10:00:00Z".into(),
+                author: None,
+                issue_type: None,
+                milestone: None,
+                assignees: vec![],
+            });
+        let mut store = issues_store_with(root, client);
+        store
+            .issue_map
+            .insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
+        bind_board(&mut store, 7, "PVT_board7");
+        store.issue_map.save(root).unwrap();
+        store
+    }
+
+    fn cached_status(root: &std::path::Path, doc_id: &str) -> String {
+        let path = root
+            .join(".lazyspec/cache/rfc")
+            .join(format!("{doc_id}.md"));
+        let content = std::fs::read_to_string(path).expect("the doc is cached");
+        DocMeta::parse(&content).unwrap().status.to_string()
+    }
+
+    // AC5: the status change becomes ONE `updateProjectV2ItemFieldValue` on the
+    // authority board's `Status` field, carrying a value object with exactly the
+    // `singleSelectOptionId` key -- and the cached status is the column lowercased.
+    // `In Progress` and `in progress` are the same column: both must resolve the
+    // same option id, since a doc's status can only ever hold the lowercased form.
+    #[test]
+    fn update_status_moves_the_card_on_the_authority_board() {
+        // Any casing of the column: the doc ends up carrying the column the write
+        // RESOLVED, not the requested string.
+        for requested in ["In Progress", "in progress", "IN PROGRESS"] {
+            let root = tmp_root(&format!("iter355_move_{}", requested.replace(' ', "_")));
+            let mut store = board_bound_update_store(&root, "OPEN");
+
+            store
+                .update(&board_bound_type_def(), "RFC-001", &[("status", requested)])
+                .unwrap();
+
+            let updates = store.mock().field_updates.borrow();
+            assert_eq!(updates.len(), 1, "one board write, got: {updates:?}");
+            let (project_id, item_id, field_id, value) = &updates[0];
+            assert_eq!(project_id, "PVT_board7");
+            assert_eq!(item_id, "PVTI_7");
+            assert_eq!(field_id, "F_status7");
+            assert_eq!(
+                serde_json::to_value(value).unwrap(),
+                serde_json::json!({"singleSelectOptionId": "opt_in_progress"}),
+                "the value object carries exactly one key"
+            );
+            assert!(store.mock().field_clears.borrow().is_empty());
+            assert_eq!(cached_status(&root, "RFC-001"), "in progress");
+        }
+    }
+
+    // AC6, defence in depth behind `ops::update`'s gate: a column the board does
+    // not have rejects offline, naming the valid columns, with NO remote call of
+    // any kind -- not even the pre-flight issue view.
+    #[test]
+    fn update_status_rejects_a_column_the_authority_board_lacks_before_any_call() {
+        let root = tmp_root("iter355_reject_unknown_column");
+        let mut store = board_bound_update_store(&root, "OPEN");
+
+        let err = store
+            .update(&board_bound_type_def(), "RFC-001", &[("status", "Blocked")])
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("Blocked"), "got: {err}");
+        assert!(err.contains("PROJECT-7"), "got: {err}");
+        for column in BOARD_COLUMNS {
+            assert!(err.contains(column), "got: {err}");
+        }
+        assert!(store.mock().field_updates.borrow().is_empty());
+        assert!(store.mock().graphql_calls.borrow().is_empty());
+        assert!(store.mock().project_field_calls.borrow().is_empty());
+        assert!(store.mock().last_edit_body.borrow().is_none());
+        assert!(!store.mock().closed.get());
+        assert!(!store.mock().reopened.get());
+    }
+
+    // AC7: the LAST column in board order is where the hazard lives -- it is the
+    // lifecycle's terminal status, so the ordinary write-through would close the
+    // issue. A board-bound type must leave open/closed alone; "Done closes the
+    // issue" is the board's own Projects automation to express.
+    #[test]
+    fn update_status_to_the_last_column_never_closes_the_issue() {
+        let root = tmp_root("iter355_last_column_no_close");
+        let mut store = board_bound_update_store(&root, "OPEN");
+
+        store
+            .update(&board_bound_type_def(), "RFC-001", &[("status", "Done")])
+            .unwrap();
+
+        assert!(
+            !store.mock().closed.get(),
+            "reaching the last column must not close the issue"
+        );
+        assert!(!store.mock().reopened.get());
+        assert_eq!(store.mock().field_updates.borrow().len(), 1);
+        assert_eq!(cached_status(&root, "RFC-001"), "done");
+    }
+
+    // AC7, the other direction: leaving the last column does not reopen a closed
+    // issue either. Board and issue state stay independent both ways.
+    #[test]
+    fn update_status_out_of_the_last_column_never_reopens_the_issue() {
+        let root = tmp_root("iter355_leaving_last_column_no_reopen");
+        let mut store = board_bound_update_store(&root, "CLOSED");
+
+        store
+            .update(&board_bound_type_def(), "RFC-001", &[("status", "Review")])
+            .unwrap();
+
+        assert!(
+            !store.mock().reopened.get(),
+            "leaving the last column must not reopen the issue"
+        );
+        assert!(!store.mock().closed.get());
+        assert_eq!(cached_status(&root, "RFC-001"), "review");
+    }
+
+    // The board write needs the doc to be an item of the board. Fetch repairs
+    // that; the error says so rather than silently doing nothing.
+    #[test]
+    fn update_status_errors_when_the_doc_is_not_an_item_of_the_authority_board() {
+        let root = tmp_root("iter355_not_an_item");
+        board_status_snapshot(&root);
+        let client = MockGhClient::new()
+            .with_project_items(vec![status_item(9, Some("Triage"))])
+            .with_view_issue(GhIssue {
+                number: 42,
+                id: "I_node42".into(),
+                url: String::new(),
+                title: "My RFC".into(),
+                body: make_issue_body("agent-7", "2026-03-27", None, ""),
+                labels: vec![GhLabel {
+                    name: "lazyspec:rfc".into(),
+                    color: String::new(),
+                }],
+                state: "OPEN".into(),
+                updated_at: "2026-03-27T10:00:00Z".into(),
+                created_at: "2026-03-27T10:00:00Z".into(),
+                author: None,
+                issue_type: None,
+                milestone: None,
+                assignees: vec![],
+            });
+        let mut store = issues_store_with(&root, client);
+        store
+            .issue_map
+            .insert("RFC-001", 42, "2026-03-27T10:00:00Z", "I_node42");
+        bind_board(&mut store, 7, "PVT_board7");
+        store.issue_map.save(&root).unwrap();
+
+        let err = store
+            .update(&board_bound_type_def(), "RFC-001", &[("status", "Review")])
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("not an item"), "got: {err}");
+        assert!(err.contains("PROJECT-7"), "got: {err}");
+        assert!(store.mock().field_updates.borrow().is_empty());
+        // The rejection has to precede the one remote write it can precede: an
+        // already-pushed body would carry the new `status:` line while the card
+        // never moved, and the local cache is never written on this path.
+        assert!(
+            store.mock().last_edit_body.borrow().is_none(),
+            "the issue body must not be pushed before the membership check, got: {:?}",
+            store.mock().last_edit_body.borrow()
+        );
+    }
+
+    /// The cache file a previous fetch left behind: `RFC-001` sitting at `status`,
+    /// which on a board-bound type is the board's last word on it.
+    fn seed_cached_rfc(root: &std::path::Path, type_def: &TypeDef, status: &str) {
+        let meta = DocMeta {
+            doc_type: DocType::new(&type_def.name),
+            status: Status::new(status),
+            ..cache_meta("RFC-001")
+        };
+        write_cache_file(root, type_def, &meta, "plain body").unwrap();
+    }
+
+    // A board-bound doc's status is the board's to set, so an update carrying no
+    // status of its own must leave it exactly where the cache holds it -- and must
+    // not re-derive it from the issue's open/closed bit. The hazard: the issue is
+    // CLOSED, so the open/closed fallback would write the terminal status `done`
+    // over a doc the board has in `in progress`, both into the cache and into the
+    // body pushed to the issue.
+    #[test]
+    fn update_without_a_status_keeps_a_board_bound_docs_cached_status() {
+        let root = tmp_root("iter355_non_status_update_keeps_board_status");
+        let mut store = board_bound_update_store(&root, "CLOSED");
+        let type_def = board_bound_type_def();
+        seed_cached_rfc(&root, &type_def, "in progress");
+
+        store
+            .update(&type_def, "RFC-001", &[("title", "New title")])
+            .unwrap();
+
+        assert_eq!(cached_status(&root, "RFC-001"), "in progress");
+        let pushed = store
+            .mock()
+            .last_edit_body
+            .borrow()
+            .clone()
+            .expect("the body was pushed");
+        assert!(
+            pushed.contains("status: in progress"),
+            "the pushed body must carry the board's status, got: {pushed}"
+        );
+        assert!(
+            !pushed.contains("done"),
+            "the pushed body must not claim the terminal status, got: {pushed}"
+        );
+        assert!(
+            store.mock().field_updates.borrow().is_empty(),
+            "no status change means no board write"
+        );
+    }
+
+    // A type nominating no board keeps the pre-STORY-248 behaviour: the body's
+    // `status:` line (or the open/closed fallback) still decides, so a non-status
+    // update cannot be made to read a cache file that may not exist.
+    #[test]
+    fn update_without_a_status_still_reads_the_issue_for_a_type_with_no_authority_board() {
+        let root = tmp_root("iter355_non_status_update_no_authority");
+        let mut store = board_bound_update_store(&root, "CLOSED");
+        let type_def = test_type_def(StoreBackend::GithubIssues);
+        seed_cached_rfc(&root, &type_def, "in progress");
+
+        store
+            .update(&type_def, "RFC-001", &[("title", "New title")])
+            .unwrap();
+
+        assert_eq!(
+            cached_status(&root, "RFC-001"),
+            type_def.effective_lifecycle().terminal_status(),
+            "a closed issue still maps to the terminal status without an authority board"
+        );
+    }
+
+    // A board write GitHub rejects in band (HTTP 200 plus an `errors` array and no
+    // payload, which `gh` exits zero on) is a failure: reporting it as success
+    // would write the new column into the cache while the card never moved.
+    #[test]
+    fn update_status_rejected_by_the_board_fails_and_leaves_the_cache_alone() {
+        let root = tmp_root("iter355_board_write_rejected");
+        let type_def = board_bound_type_def();
+        let mut store = board_bound_update_store(&root, "OPEN");
+        seed_cached_rfc(&root, &type_def, "ready to start");
+        *store.mock().project_write_response.borrow_mut() = Some(serde_json::json!({
+            "data": { "updateProjectV2ItemFieldValue": serde_json::Value::Null },
+            "errors": [{
+                "type": "INSUFFICIENT_SCOPES",
+                "message": "Your token has not been granted the required scopes to execute this query."
+            }]
+        }));
+
+        let err = store
+            .update(&type_def, "RFC-001", &[("status", "Review")])
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("`project` token scope"), "got: {err}");
+        assert!(err.contains("gh auth refresh -s project"), "got: {err}");
+        assert_eq!(
+            cached_status(&root, "RFC-001"),
+            "ready to start",
+            "a rejected board write must not move the doc locally"
+        );
+    }
+
+    // The offline resolution the gate and the write share: a display-cased column
+    // and its lowercased state resolve one option id, and the state is what the
+    // doc ends up carrying.
+    #[test]
+    fn resolve_authority_status_write_resolves_either_casing_to_one_option() {
+        let root = tmp_root("iter355_resolve_either_casing");
+        board_status_snapshot(&root);
+        let td = board_bound_type_def();
+
+        for requested in ["In Progress", "in progress", "IN PROGRESS"] {
+            let write = resolve_authority_status_write(&root, &td, requested)
+                .unwrap()
+                .expect("a board-bound type resolves its column");
+            assert_eq!(write.board, 7);
+            assert_eq!(write.field_id, "F_status7");
+            assert_eq!(write.option_id, "opt_in_progress");
+            assert_eq!(write.state, "in progress");
+        }
+    }
+
+    // AC10 regression: a type nominating no board has no board column to resolve,
+    // so the resolution is a no-op and the caller keeps today's behaviour.
+    #[test]
+    fn resolve_authority_status_write_is_a_no_op_without_an_authority_board() {
+        let root = tmp_root("iter355_resolve_no_authority");
+        board_status_snapshot(&root);
+        let td = test_type_def(StoreBackend::GithubIssues);
+
+        assert!(resolve_authority_status_write(&root, &td, "complete")
+            .unwrap()
+            .is_none());
+    }
+
+    // With no cached columns there is nothing to validate against and no option id
+    // to write, so the rejection points at the fix rather than naming an empty set.
+    #[test]
+    fn resolve_authority_status_write_with_no_cached_columns_says_to_fetch() {
+        let root = tmp_root("iter355_resolve_no_snapshot");
+        let td = board_bound_type_def();
+
+        let err = resolve_authority_status_write(&root, &td, "review")
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("PROJECT-7"), "got: {err}");
+        assert!(err.contains("fetch"), "got: {err}");
     }
 
     fn write_status_snapshot(root: &std::path::Path) {

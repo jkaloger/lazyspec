@@ -215,22 +215,7 @@ pub fn run(
     }
 
     if json {
-        let json_out: Vec<serde_json::Value> = outcomes
-            .iter()
-            .map(|o| {
-                let mut entry = serde_json::json!({
-                    "type": o.type_name,
-                    "fetched": o.fetched,
-                    "new": o.new,
-                    "removed": o.removed,
-                });
-                if let Some(err) = &o.error {
-                    entry["error"] = serde_json::Value::String(err.clone());
-                }
-                entry
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&json_out)?);
+        println!("{}", outcomes_json(&outcomes)?);
     } else {
         for o in &outcomes {
             match &o.error {
@@ -270,6 +255,33 @@ pub fn run(
     }
 
     Ok(())
+}
+
+/// One JSON entry per fetched type. `warnings` carries the same messages the
+/// human run prints to stderr (a doc with no `Status` on its authority board, a
+/// stale-cache fallback, a truncated search) and is present only when the type
+/// produced some, mirroring the mutation commands' `warnings` array. `error` is
+/// present only for a type whose fetch failed.
+pub fn outcomes_json(outcomes: &[crate::engine::sync::SyncOutcome]) -> Result<String> {
+    let entries: Vec<serde_json::Value> = outcomes
+        .iter()
+        .map(|o| {
+            let mut entry = serde_json::json!({
+                "type": o.type_name,
+                "fetched": o.fetched,
+                "new": o.new,
+                "removed": o.removed,
+            });
+            if !o.warnings.is_empty() {
+                entry["warnings"] = serde_json::json!(o.warnings);
+            }
+            if let Some(err) = &o.error {
+                entry["error"] = serde_json::Value::String(err.clone());
+            }
+            entry
+        })
+        .collect();
+    Ok(serde_json::to_string_pretty(&entries)?)
 }
 
 /// Write each `(type, lifecycle)` derived from a bound List's status set back
@@ -359,7 +371,7 @@ mod tests {
     use crate::engine::clickup::{ClickupUser, FakeClickupClient};
     use crate::engine::config::{NumberingStrategy, StoreBackend, TypeDef};
     use crate::engine::gh::{
-        GhComment, GhFieldValueInput, GhIssue, GhMilestone, GqlVar, ProjectFieldValue,
+        GhComment, GhFieldValueInput, GhIssue, GhMilestone, GqlVar, ProjectItem,
     };
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use tempfile::TempDir;
@@ -987,7 +999,7 @@ name = "related-to"
         fn graphql(&self, _: &str, _: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
             unimplemented!()
         }
-        fn project_item_fields(&self, _: &str, _: &str) -> Result<Vec<ProjectFieldValue>> {
+        fn project_items(&self, _: &str, _: &str) -> Result<Vec<ProjectItem>> {
             unimplemented!()
         }
         fn update_project_v2_item_field_value(

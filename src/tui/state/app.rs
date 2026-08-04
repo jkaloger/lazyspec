@@ -2915,12 +2915,32 @@ impl App {
         // Offer only the moves the lifecycle permits: the current status (a
         // no-op, so the list is never empty and shows where the doc sits) plus
         // every state reachable from it by a declared edge.
+        //
+        // An unset status is not a state -- it is a board-bound doc the
+        // authority board has not placed (STORY-248) -- so leading with it would
+        // offer a blank first row and no edges lead out of it. Such a doc can
+        // move anywhere in the lifecycle.
         let current = doc.status.as_str().to_string();
-        let mut states = vec![current.clone()];
+        let unset = current.is_empty();
+        let mut states = if unset {
+            Vec::new()
+        } else {
+            vec![current.clone()]
+        };
         if let Some(type_def) = config.type_by_name(doc.doc_type.as_str()) {
-            for target in type_def.effective_lifecycle().targets_from(&current) {
-                if !states.iter().any(|s| s == target) {
-                    states.push(target.to_string());
+            let lifecycle = type_def.effective_lifecycle();
+            let candidates: Vec<String> = if unset {
+                lifecycle.states.clone()
+            } else {
+                lifecycle
+                    .targets_from(&current)
+                    .into_iter()
+                    .map(String::from)
+                    .collect()
+            };
+            for target in candidates {
+                if !states.contains(&target) {
+                    states.push(target);
                 }
             }
         }
@@ -5118,6 +5138,53 @@ mod tests {
             }
             app.close_status_picker();
         }
+    }
+
+    // A doc whose status is unset -- a board-bound doc the authority board has
+    // not placed (STORY-248) -- has no current state to lead with and no edges
+    // out of one, so the picker offers the whole lifecycle instead of a blank row.
+    #[test]
+    fn open_status_picker_offers_every_state_for_an_unset_status() {
+        use crate::engine::document::DocMeta;
+        use chrono::NaiveDate;
+
+        let mut app = make_test_app(1);
+        let path = PathBuf::from("docs/rfcs/RFC-001.md");
+        let config = Config::default();
+
+        app.store.docs.insert(
+            path.clone(),
+            DocMeta {
+                path: path.clone(),
+                title: "Test".to_string(),
+                doc_type: DocType::new("rfc"),
+                status: Status::new(""),
+                id: "RFC-001".to_string(),
+                tags: Vec::new(),
+                provenance: Vec::new(),
+                author: String::new(),
+                date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+                related: Vec::new(),
+                validate_ignore: false,
+                virtual_doc: false,
+                assignee: None,
+                attributes: Default::default(),
+            },
+        );
+        app.doc_tree[0].path = path.clone();
+        app.selected_doc = 0;
+
+        app.open_status_picker(&config);
+
+        assert_eq!(
+            app.status_picker.states,
+            config.type_by_name("rfc").unwrap().lifecycle.states
+        );
+        assert!(
+            !app.status_picker.states.iter().any(|s| s.is_empty()),
+            "no blank row, got: {:?}",
+            app.status_picker.states
+        );
     }
 
     #[test]

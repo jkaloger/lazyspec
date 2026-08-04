@@ -524,6 +524,17 @@ pub struct ProjectFieldValue {
     pub value: GhFieldValueRepr,
 }
 
+/// One Projects v2 item: an issue's membership of a single board, plus whatever
+/// field values are set on it. An item with an empty `fields` vec is still a
+/// membership — "on the board with nothing filled in" is a different state from
+/// "not on the board", and only this type can tell them apart.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectItem {
+    pub project_number: u64,
+    pub item_id: String,
+    pub fields: Vec<ProjectFieldValue>,
+}
+
 /// Map a read field value to the typed [`AttrValue`] carried in `DocMeta`.
 /// Single-select -> option name string, iteration -> title string, number ->
 /// `Int` when integral else `Float`, date -> `Date`, text -> string. Always a
@@ -587,30 +598,116 @@ impl Serialize for GhFieldValueInput {
 pub trait GhGraphql {
     fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value>;
 
-    /// Read every project field value set on the item for issue node
-    /// `content_node_id`, across the boards the issue belongs to. Returns one
-    /// [`ProjectFieldValue`] per set field (unset fields are omitted).
-    fn project_item_fields(
-        &self,
-        repo: &str,
-        content_node_id: &str,
-    ) -> Result<Vec<ProjectFieldValue>>;
+    /// Read the project items for issue node `content_node_id`: one
+    /// [`ProjectItem`] per board the issue belongs to, each carrying the set
+    /// field values (unset fields are omitted).
+    fn project_items(&self, repo: &str, content_node_id: &str) -> Result<Vec<ProjectItem>>;
 
     /// Set one project field value on an item (`updateProjectV2ItemFieldValue`).
     /// All ids must already be resolved (project node id, item id, field id, and
     /// the single-select option / iteration id inside `value`).
+    ///
+    /// Implemented once over [`GhGraphql::graphql`], so every client that speaks
+    /// GraphQL inherits the payload check in [`require_project_item`].
     fn update_project_v2_item_field_value(
         &self,
         project_id: &str,
         item_id: &str,
         field_id: &str,
         value: &GhFieldValueInput,
-    ) -> Result<()>;
+    ) -> Result<()> {
+        // `gh` cannot pass a JSON-object GraphQL variable via -f/-F, so the
+        // single-key value object is inlined into the mutation literally.
+        let value_json = serde_json::to_string(value)?;
+        let query = UPDATE_PROJECT_FIELD_MUTATION.replace("__VALUE__", &value_json);
+        let resp = self.graphql(
+            &query,
+            &[
+                ("projectId", GqlVar::Str(project_id.to_string())),
+                ("itemId", GqlVar::Str(item_id.to_string())),
+                ("fieldId", GqlVar::Str(field_id.to_string())),
+            ],
+        )?;
+        require_project_item(&resp, "updateProjectV2ItemFieldValue")
+    }
 
     /// Clear one project field value on an item (`clearProjectV2ItemFieldValue`).
     /// A distinct mutation from the setter: GitHub rejects an empty-string text
     /// write as a "clear".
-    fn clear_project_field(&self, project_id: &str, item_id: &str, field_id: &str) -> Result<()>;
+    fn clear_project_field(&self, project_id: &str, item_id: &str, field_id: &str) -> Result<()> {
+        let resp = self.graphql(
+            CLEAR_PROJECT_FIELD_MUTATION,
+            &[
+                ("projectId", GqlVar::Str(project_id.to_string())),
+                ("itemId", GqlVar::Str(item_id.to_string())),
+                ("fieldId", GqlVar::Str(field_id.to_string())),
+            ],
+        )?;
+        require_project_item(&resp, "clearProjectV2ItemFieldValue")
+    }
+}
+
+/// A project-field mutation moved the cell only if GitHub echoed the item back.
+/// `gh` exits zero on a response carrying an `errors` array and no data -- what a
+/// token without the `project` scope gets -- so the payload the mutation is
+/// supposed to return, never the process exit, is what says the write happened.
+/// Both field mutations return `projectV2Item { id }`.
+pub(crate) fn require_project_item(resp: &serde_json::Value, mutation: &str) -> Result<()> {
+    if resp
+        .pointer(&format!("/data/{}/projectV2Item/id", mutation))
+        .is_some()
+    {
+        return Ok(());
+    }
+    if missing_project_scope(resp) {
+        bail!(
+            "writing a project field needs the `project` token scope; run `gh auth refresh -s project`"
+        );
+    }
+    let detail = graphql_error_messages(resp);
+    if detail.is_empty() {
+        bail!("{} returned no project item", mutation);
+    }
+    bail!("{} returned no project item: {}", mutation, detail)
+}
+
+/// True when a GraphQL response signals the `project` token scope is missing:
+/// a top-level `errors[]` entry whose type or message names insufficient
+/// scopes, the `project` scope, an inaccessible resource, or a missing
+/// permission. Everything Projects v2 needs that scope, which `repo` does not
+/// grant.
+pub(crate) fn missing_project_scope(resp: &serde_json::Value) -> bool {
+    let Some(errors) = resp.pointer("/errors").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    errors.iter().any(|e| {
+        let kind = e.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+        let msg = e
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        kind == "INSUFFICIENT_SCOPES"
+            || msg.contains("`project` scope")
+            || msg.contains("project scope")
+            || msg.contains("resource not accessible")
+            || msg.contains("does not have permission")
+    })
+}
+
+/// The `message` of every top-level GraphQL error, joined -- empty when the
+/// response carries no `errors` array.
+fn graphql_error_messages(resp: &serde_json::Value) -> String {
+    resp.pointer("/errors")
+        .and_then(|v| v.as_array())
+        .map(|errors| {
+            errors
+                .iter()
+                .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .unwrap_or_default()
 }
 
 // Forward the issue/graphql seams through shared references so callers holding a
@@ -691,12 +788,8 @@ impl<T: GhGraphql + ?Sized> GhGraphql for &T {
         (**self).graphql(query, vars)
     }
 
-    fn project_item_fields(
-        &self,
-        repo: &str,
-        content_node_id: &str,
-    ) -> Result<Vec<ProjectFieldValue>> {
-        (**self).project_item_fields(repo, content_node_id)
+    fn project_items(&self, repo: &str, content_node_id: &str) -> Result<Vec<ProjectItem>> {
+        (**self).project_items(repo, content_node_id)
     }
 
     fn update_project_v2_item_field_value(
@@ -827,17 +920,19 @@ impl<T: GhGraphql + AsAny> GhProjectsClient for T {
     }
 }
 
-const PROJECT_ITEM_FIELDS_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on Issue { projectItems(first: 50) { nodes { project { number } fieldValues(first: 50) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldIterationValue { title field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } } } } } } } }";
+const PROJECT_ITEM_FIELDS_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on Issue { projectItems(first: 50) { nodes { id project { number } fieldValues(first: 50) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldIterationValue { title field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } } } } } } } }";
 
 const UPDATE_PROJECT_FIELD_MUTATION: &str = "mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) { updateProjectV2ItemFieldValue(input: {projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: __VALUE__}) { projectV2Item { id } } }";
 
 const CLEAR_PROJECT_FIELD_MUTATION: &str = "mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) { clearProjectV2ItemFieldValue(input: {projectId: $projectId, itemId: $itemId, fieldId: $fieldId}) { projectV2Item { id } } }";
 
 /// Parse the `projectItems.nodes` of a [`PROJECT_ITEM_FIELDS_QUERY`] response
-/// into one [`ProjectFieldValue`] per set field value. Unset fields and field
-/// values with no resolvable name/typename are skipped.
-pub fn parse_project_item_fields(resp: &serde_json::Value) -> Vec<ProjectFieldValue> {
-    let mut out = Vec::new();
+/// into one [`ProjectItem`] per board membership, each carrying one
+/// [`ProjectFieldValue`] per set field value. Unset fields and field values with
+/// no resolvable name/typename are skipped; an item whose board number is
+/// missing is skipped entirely, but an item with no field values is kept.
+pub fn parse_project_items(resp: &serde_json::Value) -> Vec<ProjectItem> {
+    let mut out: Vec<ProjectItem> = Vec::new();
     let Some(items) = resp
         .pointer("/data/node/projectItems/nodes")
         .and_then(|v| v.as_array())
@@ -849,12 +944,17 @@ pub fn parse_project_item_fields(resp: &serde_json::Value) -> Vec<ProjectFieldVa
         let Some(number) = item.pointer("/project/number").and_then(|v| v.as_u64()) else {
             continue;
         };
-        let Some(values) = item
+        let item_id = item
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let mut fields = Vec::new();
+        let values = item
             .pointer("/fieldValues/nodes")
             .and_then(|v| v.as_array())
-        else {
-            continue;
-        };
+            .map(|v| v.as_slice())
+            .unwrap_or_default();
         for fv in values {
             let Some(field_name) = fv.pointer("/field/name").and_then(|v| v.as_str()) else {
                 continue;
@@ -893,7 +993,7 @@ pub fn parse_project_item_fields(resp: &serde_json::Value) -> Vec<ProjectFieldVa
                 _ => None,
             };
             if let Some((kind, value)) = parsed {
-                out.push(ProjectFieldValue {
+                fields.push(ProjectFieldValue {
                     project_number: number,
                     field_name: field_name.to_string(),
                     kind,
@@ -901,6 +1001,11 @@ pub fn parse_project_item_fields(resp: &serde_json::Value) -> Vec<ProjectFieldVa
                 });
             }
         }
+        out.push(ProjectItem {
+            project_number: number,
+            item_id,
+            fields,
+        });
     }
     out
 }
@@ -1080,7 +1185,7 @@ const ISSUE_TYPE_SEARCH_QUERY: &str =
     "query($searchQuery: String!) { search(query: $searchQuery, type: ISSUE, first: 100) { nodes { ... on Issue { number } } } }";
 
 /// Extract issue numbers from an [`ISSUE_TYPE_SEARCH_QUERY`] response. Defensive
-/// like [`parse_project_item_fields`]: a missing or malformed `nodes` array
+/// like [`parse_project_items`]: a missing or malformed `nodes` array
 /// yields an empty vec rather than erroring.
 fn parse_search_issue_numbers(resp: &serde_json::Value) -> Vec<u64> {
     resp.pointer("/data/search/nodes")
@@ -1406,50 +1511,12 @@ impl GhGraphql for GhCli {
             .map_err(|e| anyhow::anyhow!("failed to parse graphql response: {}", e))
     }
 
-    fn project_item_fields(
-        &self,
-        _repo: &str,
-        content_node_id: &str,
-    ) -> Result<Vec<ProjectFieldValue>> {
+    fn project_items(&self, _repo: &str, content_node_id: &str) -> Result<Vec<ProjectItem>> {
         let resp = self.graphql(
             PROJECT_ITEM_FIELDS_QUERY,
             &[("id", GqlVar::Str(content_node_id.to_string()))],
         )?;
-        Ok(parse_project_item_fields(&resp))
-    }
-
-    fn update_project_v2_item_field_value(
-        &self,
-        project_id: &str,
-        item_id: &str,
-        field_id: &str,
-        value: &GhFieldValueInput,
-    ) -> Result<()> {
-        // `gh` cannot pass a JSON-object GraphQL variable via -f/-F, so the
-        // single-key value object is inlined into the mutation literally.
-        let value_json = serde_json::to_string(value)?;
-        let query = UPDATE_PROJECT_FIELD_MUTATION.replace("__VALUE__", &value_json);
-        self.graphql(
-            &query,
-            &[
-                ("projectId", GqlVar::Str(project_id.to_string())),
-                ("itemId", GqlVar::Str(item_id.to_string())),
-                ("fieldId", GqlVar::Str(field_id.to_string())),
-            ],
-        )?;
-        Ok(())
-    }
-
-    fn clear_project_field(&self, project_id: &str, item_id: &str, field_id: &str) -> Result<()> {
-        self.graphql(
-            CLEAR_PROJECT_FIELD_MUTATION,
-            &[
-                ("projectId", GqlVar::Str(project_id.to_string())),
-                ("itemId", GqlVar::Str(item_id.to_string())),
-                ("fieldId", GqlVar::Str(field_id.to_string())),
-            ],
-        )?;
-        Ok(())
+        Ok(parse_project_items(&resp))
     }
 }
 
@@ -1562,10 +1629,15 @@ pub mod test_support {
         pub graphql_calls: RefCell<Vec<GraphqlCall>>,
         pub view_comments: RefCell<Vec<GhComment>>,
         pub comments_call_count: Cell<usize>,
-        pub project_field_values: RefCell<Vec<ProjectFieldValue>>,
+        pub project_items: RefCell<Vec<ProjectItem>>,
         pub project_field_calls: RefCell<Vec<String>>,
         pub field_updates: RefCell<Vec<(String, String, String, GhFieldValueInput)>>,
         pub field_clears: RefCell<Vec<(String, String, String)>>,
+        /// A canned GraphQL response for project-field writes, handed to the same
+        /// [`require_project_item`] check the graphql-backed clients apply -- so a
+        /// test can drive an in-band GitHub rejection (HTTP 200 plus an `errors`
+        /// array and no payload). `None`: the write succeeds.
+        pub project_write_response: RefCell<Option<serde_json::Value>>,
     }
 
     impl Default for MockGhClient {
@@ -1602,15 +1674,46 @@ pub mod test_support {
                 graphql_calls: RefCell::new(vec![]),
                 view_comments: RefCell::new(vec![]),
                 comments_call_count: Cell::new(0),
-                project_field_values: RefCell::new(vec![]),
+                project_items: RefCell::new(vec![]),
                 project_field_calls: RefCell::new(vec![]),
                 field_updates: RefCell::new(vec![]),
                 field_clears: RefCell::new(vec![]),
+                project_write_response: RefCell::new(None),
             }
         }
 
+        /// Answer every project-field write with `resp` instead of an implicit
+        /// success, so a test can reproduce what GitHub returns for a write it
+        /// rejected.
+        pub fn with_project_write_response(self, resp: serde_json::Value) -> Self {
+            *self.project_write_response.borrow_mut() = Some(resp);
+            self
+        }
+
+        /// Group loose field values into one item per board (in first-seen board
+        /// order) with a synthetic item id, for tests that only care about the
+        /// values and not about membership or item ids.
         pub fn with_project_field_values(mut self, values: Vec<ProjectFieldValue>) -> Self {
-            self.project_field_values = RefCell::new(values);
+            let mut items: Vec<ProjectItem> = Vec::new();
+            for value in values {
+                match items
+                    .iter_mut()
+                    .find(|i| i.project_number == value.project_number)
+                {
+                    Some(item) => item.fields.push(value),
+                    None => items.push(ProjectItem {
+                        project_number: value.project_number,
+                        item_id: format!("PVTI_{}", value.project_number),
+                        fields: vec![value],
+                    }),
+                }
+            }
+            self.project_items = RefCell::new(items);
+            self
+        }
+
+        pub fn with_project_items(mut self, items: Vec<ProjectItem>) -> Self {
+            self.project_items = RefCell::new(items);
             self
         }
 
@@ -2174,12 +2277,8 @@ pub mod test_support {
             (**self).graphql(query, vars)
         }
 
-        fn project_item_fields(
-            &self,
-            repo: &str,
-            content_node_id: &str,
-        ) -> Result<Vec<ProjectFieldValue>> {
-            (**self).project_item_fields(repo, content_node_id)
+        fn project_items(&self, repo: &str, content_node_id: &str) -> Result<Vec<ProjectItem>> {
+            (**self).project_items(repo, content_node_id)
         }
 
         fn update_project_v2_item_field_value(
@@ -2295,14 +2394,8 @@ pub mod test_support {
         fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
             self.lock().unwrap().graphql(query, vars)
         }
-        fn project_item_fields(
-            &self,
-            repo: &str,
-            content_node_id: &str,
-        ) -> Result<Vec<ProjectFieldValue>> {
-            self.lock()
-                .unwrap()
-                .project_item_fields(repo, content_node_id)
+        fn project_items(&self, repo: &str, content_node_id: &str) -> Result<Vec<ProjectItem>> {
+            self.lock().unwrap().project_items(repo, content_node_id)
         }
         fn update_project_v2_item_field_value(
             &self,
@@ -2344,15 +2437,11 @@ pub mod test_support {
             Ok(responses.remove(0))
         }
 
-        fn project_item_fields(
-            &self,
-            _repo: &str,
-            content_node_id: &str,
-        ) -> Result<Vec<ProjectFieldValue>> {
+        fn project_items(&self, _repo: &str, content_node_id: &str) -> Result<Vec<ProjectItem>> {
             self.project_field_calls
                 .borrow_mut()
                 .push(content_node_id.to_string());
-            Ok(self.project_field_values.borrow().clone())
+            Ok(self.project_items.borrow().clone())
         }
 
         fn update_project_v2_item_field_value(
@@ -2368,7 +2457,10 @@ pub mod test_support {
                 field_id.to_string(),
                 value.clone(),
             ));
-            Ok(())
+            match self.project_write_response.borrow().as_ref() {
+                Some(resp) => require_project_item(resp, "updateProjectV2ItemFieldValue"),
+                None => Ok(()),
+            }
         }
 
         fn clear_project_field(
@@ -2382,7 +2474,10 @@ pub mod test_support {
                 item_id.to_string(),
                 field_id.to_string(),
             ));
-            Ok(())
+            match self.project_write_response.borrow().as_ref() {
+                Some(resp) => require_project_item(resp, "clearProjectV2ItemFieldValue"),
+                None => Ok(()),
+            }
         }
     }
 }
@@ -3092,10 +3187,10 @@ mod tests {
     // --- project item fields parse ---
 
     #[test]
-    fn parse_project_item_fields_all_kinds() {
+    fn parse_project_items_all_kinds() {
         let resp = serde_json::json!({
             "data": {"node": {"projectItems": {"nodes": [
-                {"project": {"number": 1}, "fieldValues": {"nodes": [
+                {"id": "PVTI_abc", "project": {"number": 1}, "fieldValues": {"nodes": [
                     {"__typename": "ProjectV2ItemFieldSingleSelectValue", "name": "In Progress", "field": {"name": "Status"}},
                     {"__typename": "ProjectV2ItemFieldNumberValue", "number": 5.0, "field": {"name": "Estimate"}},
                     {"__typename": "ProjectV2ItemFieldDateValue", "date": "2026-06-25", "field": {"name": "Due"}},
@@ -3105,7 +3200,11 @@ mod tests {
                 ]}}
             ]}}}
         });
-        let vals = parse_project_item_fields(&resp);
+        let items = parse_project_items(&resp);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].project_number, 1);
+        assert_eq!(items[0].item_id, "PVTI_abc");
+        let vals = &items[0].fields;
         assert_eq!(vals.len(), 5, "label value should be skipped: {:?}", vals);
         let status = vals.iter().find(|v| v.field_name == "Status").unwrap();
         assert_eq!(status.project_number, 1);
@@ -3114,6 +3213,29 @@ mod tests {
             status.value,
             GhFieldValueRepr::OptionName("In Progress".to_string())
         );
+    }
+
+    #[test]
+    fn parse_project_items_keeps_membership_with_no_field_values() {
+        let resp = serde_json::json!({
+            "data": {"node": {"projectItems": {"nodes": [
+                {"id": "PVTI_empty", "project": {"number": 7}, "fieldValues": {"nodes": []}},
+                {"project": {"number": 8}, "fieldValues": {"nodes": []}},
+                {"id": "PVTI_orphan", "fieldValues": {"nodes": []}}
+            ]}}}
+        });
+        let items = parse_project_items(&resp);
+        assert_eq!(
+            items.len(),
+            2,
+            "item without a project number is skipped: {:?}",
+            items
+        );
+        assert_eq!(items[0].project_number, 7);
+        assert_eq!(items[0].item_id, "PVTI_empty");
+        assert!(items[0].fields.is_empty());
+        assert_eq!(items[1].project_number, 8);
+        assert_eq!(items[1].item_id, "", "missing id leaves item_id empty");
     }
 
     #[test]
@@ -3150,19 +3272,34 @@ mod tests {
     }
 
     #[test]
-    fn mock_project_item_fields_returns_canned_and_records_node() {
+    fn mock_project_items_returns_canned_and_records_node() {
         let client = MockGhClient::new().with_project_field_values(vec![ProjectFieldValue {
             project_number: 1,
             field_name: "Status".to_string(),
             kind: GhFieldKind::SingleSelect,
             value: GhFieldValueRepr::OptionName("Todo".to_string()),
         }]);
-        let got = client.project_item_fields("o/r", "I_node1").unwrap();
+        let got = client.project_items("o/r", "I_node1").unwrap();
         assert_eq!(got.len(), 1);
+        assert_eq!(got[0].project_number, 1);
+        assert_eq!(got[0].fields.len(), 1);
         assert_eq!(
             *client.project_field_calls.borrow(),
             vec!["I_node1".to_string()]
         );
+    }
+
+    #[test]
+    fn mock_project_items_builder_carries_explicit_membership() {
+        let client = MockGhClient::new().with_project_items(vec![ProjectItem {
+            project_number: 4,
+            item_id: "PVTI_explicit".to_string(),
+            fields: vec![],
+        }]);
+        let got = client.project_items("o/r", "I_node1").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].item_id, "PVTI_explicit");
+        assert!(got[0].fields.is_empty());
     }
 
     #[test]
@@ -3191,5 +3328,85 @@ mod tests {
         ]);
         assert_eq!(client.graphql("q", &[]).unwrap()["n"], 1);
         assert_eq!(client.graphql("q", &[]).unwrap()["n"], 2);
+    }
+
+    /// A graphql-only client: it answers every query with one canned response and
+    /// inherits the project-field writes from [`GhGraphql`]'s defaults, which is
+    /// the seam under test.
+    struct CannedGraphql(serde_json::Value);
+
+    impl GhGraphql for CannedGraphql {
+        fn graphql(&self, _query: &str, _vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+            Ok(self.0.clone())
+        }
+        fn project_items(&self, _repo: &str, _content_node_id: &str) -> Result<Vec<ProjectItem>> {
+            unreachable!("the field-write path reads no memberships")
+        }
+    }
+
+    fn set_status(client: &dyn GhGraphql) -> Result<()> {
+        client.update_project_v2_item_field_value(
+            "PVT_7",
+            "PVTI_7",
+            "F_status7",
+            &GhFieldValueInput::SingleSelect("opt_done".to_string()),
+        )
+    }
+
+    // A token without the `project` scope makes GitHub answer the mutation with
+    // HTTP 200 plus an `errors` array and no payload, which `gh` exits zero on.
+    // That is a rejected write, and reporting it as a success would claim a card
+    // moved that never did.
+    #[test]
+    fn a_scopeless_project_field_write_is_not_a_success() {
+        let client = CannedGraphql(serde_json::json!({
+            "data": { "updateProjectV2ItemFieldValue": serde_json::Value::Null },
+            "errors": [{
+                "type": "INSUFFICIENT_SCOPES",
+                "message": "Your token has not been granted the required scopes to execute this query."
+            }]
+        }));
+
+        let err = set_status(&client).unwrap_err().to_string();
+
+        assert!(err.contains("`project` token scope"), "got: {err}");
+        assert!(err.contains("gh auth refresh -s project"), "got: {err}");
+
+        let err = client
+            .clear_project_field("PVT_7", "PVTI_7", "F_status7")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("gh auth refresh -s project"), "got: {err}");
+    }
+
+    // Any other in-band rejection names the mutation and carries GitHub's own
+    // message, so the failure is diagnosable.
+    #[test]
+    fn an_in_band_project_field_error_names_the_mutation_and_the_reason() {
+        let client = CannedGraphql(serde_json::json!({
+            "errors": [{ "message": "Could not resolve to a node with the global id of 'PVTI_7'." }]
+        }));
+
+        let err = set_status(&client).unwrap_err().to_string();
+
+        assert!(err.contains("updateProjectV2ItemFieldValue"), "got: {err}");
+        assert!(err.contains("Could not resolve to a node"), "got: {err}");
+    }
+
+    // The success shape: the item the mutation echoes back is what says the cell
+    // moved.
+    #[test]
+    fn a_project_field_write_echoing_the_item_succeeds() {
+        let update = CannedGraphql(serde_json::json!({
+            "data": { "updateProjectV2ItemFieldValue": { "projectV2Item": { "id": "PVTI_7" } } }
+        }));
+        set_status(&update).unwrap();
+
+        let clear = CannedGraphql(serde_json::json!({
+            "data": { "clearProjectV2ItemFieldValue": { "projectV2Item": { "id": "PVTI_7" } } }
+        }));
+        clear
+            .clear_project_field("PVT_7", "PVTI_7", "F_status7")
+            .unwrap();
     }
 }
