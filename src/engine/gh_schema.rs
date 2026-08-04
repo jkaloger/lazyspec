@@ -94,6 +94,38 @@ impl GhSchemaSnapshot {
             .map(|o| o.id.as_str())
     }
 
+    /// The board's `Status` option whose name matches `status` ignoring case.
+    ///
+    /// Case-insensitive where [`Self::option_id`] is exact, because the two are
+    /// asked different questions: a `PROJECT-n.<field>` write carries the option
+    /// name as the user typed it, while a lazyspec
+    /// [`Status`](crate::engine::document::Status) is always lowercased, so
+    /// `In Progress` can only ever arrive here as `in progress`. Lowercasing both
+    /// sides (rather than `eq_ignore_ascii_case`) matches exactly the
+    /// transformation [`Self::status_lifecycle`] applies to derive the states.
+    pub fn status_option(&self, project_number: u64, status: &str) -> Option<&OptionId> {
+        let field_id = self.field_id(project_number, "Status")?;
+        let wanted = status.to_lowercase();
+        self.single_select_options
+            .iter()
+            .find(|o| o.field_id == field_id && o.name.to_lowercase() == wanted)
+    }
+
+    /// The board's `Status` option names as the board spells them, in board
+    /// order. Empty when the board (or its `Status` field) is not in the
+    /// snapshot. For naming the valid columns when a requested status matches
+    /// none of them.
+    pub fn status_option_names(&self, project_number: u64) -> Vec<&str> {
+        let Some(field_id) = self.field_id(project_number, "Status") else {
+            return Vec::new();
+        };
+        self.single_select_options
+            .iter()
+            .filter(|o| o.field_id == field_id)
+            .map(|o| o.name.as_str())
+            .collect()
+    }
+
     pub fn iteration_id(&self, field_id: &str, title: &str) -> Option<&str> {
         self.iterations
             .iter()
@@ -428,6 +460,56 @@ mod tests {
             vec!["ready to start", "in progress", "review", "done"]
         );
         assert!(lifecycle.edges.is_empty());
+    }
+
+    // AC5: the write path recovers the option id from a status that has already
+    // been lowercased, so the match must ignore the board's display casing.
+    #[test]
+    fn status_option_matches_a_lowercased_status_against_a_display_cased_column() {
+        let snapshot = snapshot_with_boards(&[(
+            7,
+            status_field_response("PVTSSF_b7", &["Ready To Start", "In Progress"]),
+        )]);
+
+        let option = snapshot
+            .status_option(7, "in progress")
+            .expect("the lowercased status resolves its column");
+
+        assert_eq!(option.id, "opt_in_progress");
+        assert_eq!(option.field_id, "PVTSSF_b7");
+        // The value as typed on the command line resolves the same option.
+        assert_eq!(snapshot.status_option(7, "In Progress"), Some(option));
+    }
+
+    #[test]
+    fn status_option_misses_an_unknown_column_and_an_unknown_board() {
+        let snapshot = snapshot_with_boards(&[(
+            7,
+            status_field_response("PVTSSF_b7", &["Ready To Start", "In Progress"]),
+        )]);
+
+        assert_eq!(snapshot.status_option(7, "blocked"), None);
+        assert_eq!(snapshot.status_option(9, "in progress"), None);
+    }
+
+    // AC6: the rejection names the columns as the board spells them, in board
+    // order, so the message is something a user can copy.
+    #[test]
+    fn status_option_names_lists_the_boards_columns_in_board_order() {
+        let snapshot = snapshot_with_boards(&[
+            (
+                7,
+                status_field_response("PVTSSF_b7", &["Ready To Start", "In Progress", "Done"]),
+            ),
+            (9, status_field_response("PVTSSF_b9", &["Triage"])),
+        ]);
+
+        assert_eq!(
+            snapshot.status_option_names(7),
+            vec!["Ready To Start", "In Progress", "Done"]
+        );
+        assert_eq!(snapshot.status_option_names(9), vec!["Triage"]);
+        assert!(snapshot.status_option_names(11).is_empty());
     }
 
     #[test]

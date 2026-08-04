@@ -61,7 +61,20 @@ pub fn run_with_config(
         let type_name = doc.doc_type.as_str();
         if let Some(type_def) = config.type_by_name(type_name) {
             if let Some((_, target)) = updates.iter().find(|(k, _)| *k == "status") {
-                gate_status_transition(type_def, doc.status.as_str(), target)?;
+                // A type whose lifecycle is an authority board's columns is gated
+                // on the state that board column resolves to, and rejects a value
+                // naming no column at all -- both offline, from the cached schema
+                // snapshot, before any store (and so any client) is built. That is
+                // what makes the rejection reachable with no network.
+                let board_state = crate::engine::store_dispatch::resolve_authority_status_write(
+                    root, type_def, target,
+                )?
+                .map(|write| write.state);
+                gate_status_transition(
+                    type_def,
+                    doc.status.as_str(),
+                    board_state.as_deref().unwrap_or(target),
+                )?;
             }
             // Non-filesystem backends dispatch through the store registry; a new
             // backend routes here by being registered in `build_registry`, not by
@@ -115,6 +128,23 @@ mod tests {
         // The default test fixture lifecycle carries no draft->accepted edge.
         let err = gate_status_transition(&td, "draft", "accepted").unwrap_err();
         assert!(err.to_string().contains("invalid transition"), "got: {err}");
+    }
+
+    // Why the authority resolution has to run BEFORE the gate: the gate compares
+    // the target verbatim against the type's states, which a board lifecycle holds
+    // lowercased. `--status "In Progress"` therefore only survives the gate as the
+    // state the board column resolved to.
+    #[test]
+    fn gate_rejects_board_display_casing_but_accepts_the_resolved_state() {
+        let mut td = TypeDef::test_fixture("ticket", StoreBackend::GithubIssues);
+        td.status_authority = Some("PROJECT-7".to_string());
+        td.lifecycle = crate::engine::config::Lifecycle {
+            states: vec!["ready to start".into(), "in progress".into()],
+            edges: vec![],
+        };
+
+        assert!(gate_status_transition(&td, "ready to start", "In Progress").is_err());
+        gate_status_transition(&td, "ready to start", "in progress").unwrap();
     }
 
     // A ClickUp-backed type bypasses the local gate entirely: any status target

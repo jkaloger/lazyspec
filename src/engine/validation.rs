@@ -1,4 +1,6 @@
-use crate::engine::config::{AttrKind, Config, Severity, TypeDef, ValidationRule as ConfigRule};
+use crate::engine::config::{
+    AttrKind, Config, Severity, StoreBackend, TypeDef, ValidationRule as ConfigRule,
+};
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -104,6 +106,15 @@ pub enum ValidationIssue {
         allowed: Vec<String>,
     },
     StatusAuthorityLifecycleConflict {
+        type_name: String,
+        status_authority: String,
+    },
+    StatusAuthorityWrongStore {
+        type_name: String,
+        store: String,
+        status_authority: String,
+    },
+    StatusAuthorityNotABoard {
         type_name: String,
         status_authority: String,
     },
@@ -339,6 +350,27 @@ impl std::fmt::Display for ValidationIssue {
                     f,
                     "status_authority conflict: type \"{}\" declares a lifecycle board {} could not have produced; the nominated board owns this type's states, so a declared lifecycle does not survive fetch",
                     type_name, status_authority
+                )
+            }
+            ValidationIssue::StatusAuthorityWrongStore {
+                type_name,
+                store,
+                status_authority,
+            } => {
+                write!(
+                    f,
+                    "status_authority = \"{}\" on type \"{}\" needs store = \"github-issues\", but this type's store is \"{}\": only a github issue can be an item of a Projects v2 board, so no status of this type could ever reach the board",
+                    status_authority, type_name, store
+                )
+            }
+            ValidationIssue::StatusAuthorityNotABoard {
+                type_name,
+                status_authority,
+            } => {
+                write!(
+                    f,
+                    "status_authority = \"{}\" on type \"{}\" names no Projects v2 board; the key takes a board number (e.g. \"PROJECT-7\"), and a value that does not silently behaves as no authority at all",
+                    status_authority, type_name
                 )
             }
         }
@@ -929,6 +961,32 @@ impl Checker for TypeConstraintChecker {
             }
 
             if let Some(board_id) = &type_def.status_authority {
+                // Only a github issue can be an item of a Projects v2 board. On
+                // any other store the key resolves and rejects every `--status`
+                // against the board's columns offline while no board write can
+                // ever happen.
+                if type_def.store != StoreBackend::GithubIssues {
+                    issues.push((
+                        Severity::Error,
+                        ValidationIssue::StatusAuthorityWrongStore {
+                            type_name: type_def.name.clone(),
+                            store: type_def.store.to_string(),
+                            status_authority: board_id.clone(),
+                        },
+                    ));
+                }
+                // A value naming no board number behaves as "no authority", which
+                // also suppresses the open/closed status mapping: every doc of the
+                // type then caches with an empty status.
+                if crate::engine::store_dispatch::board_number(board_id).is_err() {
+                    issues.push((
+                        Severity::Error,
+                        ValidationIssue::StatusAuthorityNotABoard {
+                            type_name: type_def.name.clone(),
+                            status_authority: board_id.clone(),
+                        },
+                    ));
+                }
                 if declared_lifecycle_cannot_be_the_boards(&store.root, type_def, board_id) {
                     issues.push((
                         Severity::Error,
@@ -1726,6 +1784,12 @@ mod status_authority_tests {
     /// block carries `keys` verbatim, so each test declares only the
     /// `status_authority`/`lifecycle` pair it is about.
     fn ticket_config(keys: &str) -> Config {
+        ticket_config_stored("github-issues", keys)
+    }
+
+    /// The same one-type project on an arbitrary `store`, for the types that have
+    /// no board to nominate.
+    fn ticket_config_stored(store: &str, keys: &str) -> Config {
         Config::parse(&format!(
             r#"[naming]
 pattern = "{{type}}-{{n:03}}-{{title}}.md"
@@ -1741,7 +1805,7 @@ name = "ticket"
 plural = "tickets"
 dir = "docs/tickets"
 prefix = "TICKET"
-store = "github-issues"
+store = "{store}"
 {keys}
 
 [[relationships]]
@@ -1849,6 +1913,64 @@ lifecycle = { states = ["ready to start", "in progress", "review", "done", "bloc
             r#"status_authority = "PROJECT-7"
 lifecycle = { states = ["triage", "shipped"], edges = [] }"#,
         );
+
+        let found = issues(&config, tmp.path());
+
+        assert!(found.is_empty(), "got: {:?}", found);
+    }
+
+    // Only a github issue can be an item of a Projects v2 board, so on any other
+    // store the key is unsatisfiable: every `--status` would be resolved and
+    // rejected against the board's columns offline while no board write could ever
+    // happen.
+    #[test]
+    fn status_authority_on_a_type_that_is_not_github_issues_is_an_error() {
+        for store in ["filesystem", "github-milestones", "clickup-tasks"] {
+            let tmp = TempDir::new().unwrap();
+            let config = ticket_config_stored(store, r#"status_authority = "PROJECT-7""#);
+
+            let found = issues(&config, tmp.path());
+
+            assert_eq!(found.len(), 1, "{store}, got: {found:?}");
+            let (severity, issue) = &found[0];
+            assert!(matches!(severity, Severity::Error));
+            let rendered = issue.to_string();
+            assert!(rendered.contains("status_authority"), "got: {rendered}");
+            assert!(rendered.contains("ticket"), "got: {rendered}");
+            assert!(rendered.contains("PROJECT-7"), "got: {rendered}");
+            assert!(rendered.contains(store), "got: {rendered}");
+        }
+    }
+
+    // A value naming no board number silently behaves as "no authority": it also
+    // suppresses the open/closed status mapping, so every doc of the type caches
+    // with an empty status.
+    #[test]
+    fn status_authority_that_names_no_board_number_is_an_error() {
+        let tmp = TempDir::new().unwrap();
+        let config = ticket_config(r#"status_authority = "PROJECT-seven""#);
+
+        let found = issues(&config, tmp.path());
+
+        assert_eq!(found.len(), 1, "got: {:?}", found);
+        let (severity, issue) = &found[0];
+        assert!(matches!(severity, Severity::Error));
+        assert!(matches!(
+            issue,
+            ValidationIssue::StatusAuthorityNotABoard { .. }
+        ));
+        let rendered = issue.to_string();
+        assert!(rendered.contains("status_authority"), "got: {rendered}");
+        assert!(rendered.contains("ticket"), "got: {rendered}");
+        assert!(rendered.contains("PROJECT-seven"), "got: {rendered}");
+    }
+
+    // The shape the key is for: a `github-issues` type naming a real board number
+    // is clean, so neither new error fires on the steady state.
+    #[test]
+    fn status_authority_naming_a_board_on_a_github_issues_type_is_not_an_error() {
+        let tmp = TempDir::new().unwrap();
+        let config = ticket_config(r#"status_authority = "PROJECT-7""#);
 
         let found = issues(&config, tmp.path());
 
