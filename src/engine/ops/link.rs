@@ -14,7 +14,7 @@ use crate::engine::issue_map::IssueMap;
 use crate::engine::ops::resolve::{resolve_to_id, resolve_to_path};
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::{
-    board_number, GithubIssuesStore, GithubProjectsStore, PushOutcome,
+    board_number, GithubIssuesStore, GithubProjectsStore, PushOutcome, ADD_PROJECT_ITEM_MUTATION,
 };
 use crate::engine::task_map::TaskMap;
 use anyhow::{anyhow, Result};
@@ -235,8 +235,6 @@ fn apply_native_milestone<M: GhMilestoneApi>(
     client.issue_set_milestone(repo, issue_number, value)?;
     Ok(true)
 }
-
-const ADD_PROJECT_ITEM_MUTATION: &str = "mutation($projectId: ID!, $contentId: ID!) { addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) { item { id } } }";
 
 const DELETE_PROJECT_ITEM_MUTATION: &str = "mutation($projectId: ID!, $itemId: ID!) { deleteProjectV2Item(input: {projectId: $projectId, itemId: $itemId}) { deletedItemId } }";
 

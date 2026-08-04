@@ -359,9 +359,12 @@ pub struct TypeDef {
     /// The id of a `github-projects`-backed document (e.g. `PROJECT-7`) whose
     /// board's `Status` single-select field is the authority for this type's
     /// lifecycle. That field's options become the type's `lifecycle` states,
-    /// persisted at fetch. Only the nominated board is authoritative: any other
-    /// board a document belongs to still contributes plain `PROJECT-n.<field>`
-    /// attributes and does not affect lifecycle. Unused by other stores.
+    /// persisted at fetch, and each document's status is its own `Status` cell on
+    /// that board -- so fetch adds a document of the type that is not yet an item
+    /// of the board to it, leaving the new item's cell empty. Only the nominated
+    /// board is authoritative: any other board a document belongs to still
+    /// contributes plain `PROJECT-n.<field>` attributes and does not affect
+    /// lifecycle. Unused by other stores.
     #[serde(default)]
     pub status_authority: Option<String>,
     /// The ClickUp List id this type binds to, for `clickup-tasks`-backed types.
