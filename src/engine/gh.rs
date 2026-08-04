@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::process::Command;
@@ -595,6 +596,26 @@ impl Serialize for GhFieldValueInput {
     }
 }
 
+impl GhFieldValueInput {
+    /// Render as a GraphQL input-object literal for splicing into a query
+    /// string. Unlike `Serialize` (JSON, quoted keys), a GraphQL literal key is
+    /// a bare name -- `{singleSelectOptionId: "opt_abc"}`, not
+    /// `{"singleSelectOptionId": "opt_abc"}` -- so this cannot reuse
+    /// `serde_json::to_string`. Values are still rendered through
+    /// `serde_json` so string escaping matches GraphQL's JSON-compatible
+    /// string literal syntax.
+    fn to_graphql_literal(&self) -> String {
+        let (key, value) = match self {
+            GhFieldValueInput::SingleSelect(id) => ("singleSelectOptionId", json!(id)),
+            GhFieldValueInput::Iteration(id) => ("iterationId", json!(id)),
+            GhFieldValueInput::Number(n) => ("number", json!(n)),
+            GhFieldValueInput::Date(d) => ("date", json!(d.format("%Y-%m-%d").to_string())),
+            GhFieldValueInput::Text(s) => ("text", json!(s)),
+        };
+        format!("{{{}: {}}}", key, value)
+    }
+}
+
 pub trait GhGraphql {
     fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value>;
 
@@ -617,9 +638,10 @@ pub trait GhGraphql {
         value: &GhFieldValueInput,
     ) -> Result<()> {
         // `gh` cannot pass a JSON-object GraphQL variable via -f/-F, so the
-        // single-key value object is inlined into the mutation literally.
-        let value_json = serde_json::to_string(value)?;
-        let query = UPDATE_PROJECT_FIELD_MUTATION.replace("__VALUE__", &value_json);
+        // single-key value object is inlined into the mutation literally --
+        // as a GraphQL literal (bare key), not JSON (quoted key).
+        let value_literal = value.to_graphql_literal();
+        let query = UPDATE_PROJECT_FIELD_MUTATION.replace("__VALUE__", &value_literal);
         let resp = self.graphql(
             &query,
             &[
@@ -1506,7 +1528,26 @@ impl GhAuth for GhCli {
 impl GhGraphql for GhCli {
     fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
         let args = build_graphql_args(query, vars);
-        let stdout = self.run_gh_checked(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        let output = self.run_gh(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        // `gh api graphql` exits non-zero whenever the response carries a
+        // GraphQL `errors` array -- e.g. an org-rooted query against a user
+        // account -- even though the body's `data` still tells callers like
+        // `try_org_then_user` which root resolved. Parse stdout first so that
+        // signal survives; only fall back to the exit-code failure path when
+        // stdout is not a GraphQL response at all.
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
+            if json.get("data").is_some() {
+                return Ok(json);
+            }
+        }
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(classify_gh_error(stderr.trim()));
+        }
+
         serde_json::from_str(&stdout)
             .map_err(|e| anyhow::anyhow!("failed to parse graphql response: {}", e))
     }

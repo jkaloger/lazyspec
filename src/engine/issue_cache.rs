@@ -295,6 +295,11 @@ impl IssueCache {
     /// On GraphQL failure, the prior snapshot on disk is left untouched and a
     /// warning is returned; offline validation still works against it. Per-board
     /// failures are individually non-fatal, hence one warning each.
+    ///
+    /// Issue types are an org-only GitHub feature (a user-owned repo has none),
+    /// so that query failing is expected there and must not block the board
+    /// loop below it -- the two are unrelated schema pieces fetched in one
+    /// pass, not a single all-or-nothing call.
     fn refresh_schema_snapshot(
         &self,
         gh_graphql: &dyn GhGraphql,
@@ -302,22 +307,26 @@ impl IssueCache {
         config: &Config,
     ) -> Vec<RefreshWarning> {
         let prior = gh_schema::GhSchemaSnapshot::load(&self.root);
+        let mut warnings = Vec::new();
         let mut snapshot = match gh_schema::fetch_snapshot(gh_graphql, repo) {
             Ok(snapshot) => snapshot,
             Err(e) => {
-                return vec![RefreshWarning {
+                warnings.push(RefreshWarning {
                     message: format!(
-                        "could not refresh gh schema snapshot (keeping prior, projects need `gh auth refresh -s project`): {}",
+                        "could not refresh gh schema snapshot (keeping prior issue types, projects need `gh auth refresh -s project`): {}",
                         e
                     ),
-                }]
+                });
+                gh_schema::GhSchemaSnapshot {
+                    issue_types: prior.issue_types.clone(),
+                    ..Default::default()
+                }
             }
         };
         snapshot.project_fields = prior.project_fields;
         snapshot.single_select_options = prior.single_select_options;
         snapshot.iterations = prior.iterations;
 
-        let mut warnings = Vec::new();
         for number in store_dispatch::authority_board_numbers(config) {
             match gh_schema::fetch_project_fields(gh_graphql, repo, number) {
                 Ok((fields, options, iterations)) => {
