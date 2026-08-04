@@ -1,7 +1,7 @@
 ---
 title: Board Status as the lifecycle authority for a github-issues type
 type: story
-status: in-progress
+status: complete
 author: jkaloger
 date: 2026-08-04
 tags: []
