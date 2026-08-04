@@ -1,5 +1,6 @@
 mod common;
 
+mod board_lifecycle_surfaces_test;
 mod cli_child_context_test;
 mod cli_child_test;
 mod cli_completions_test;

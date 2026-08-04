@@ -514,6 +514,8 @@ Every `[[types]]` block has a `store` (default `filesystem`) that decides where 
 
 Remote-backed types cache into `.lazyspec/cache/` and refresh with `lazyspec fetch [--type <name>]`. `fetch` refreshes every remote type in one pass; a per-type failure still refreshes the rest, reports the error, and exits non-zero. `git-ref` mutations push live with `--force-with-lease`; if the remote is unreachable the change stays local and prints a `warning:`.
 
+`fetch` prints every warning to stderr as `warning: <message>` in both modes. `fetch --json` also prints one entry per type on stdout: `{ "type", "fetched", "new", "removed" }`, plus a `"warnings"` array repeating that type's warnings (a stale-cache fallback, a truncated search, a document whose `Status` the authority board does not set) when it produced any, and an `"error"` string when its fetch failed.
+
 GitHub native fields (issue types, Projects v2 boards, milestone associations) need the `project` scope on your token:
 
 ```sh
@@ -527,7 +529,7 @@ lazyspec setup clickup                       # prompt (no echo)
 lazyspec setup clickup --token pk_XXXXXXXX    # non-interactive
 ```
 
-Deeper per-store behaviour (write-through, optimistic locking, label/tag matching, relation and custom-field mapping via keys like `github_issue_tag`, `github_label`, `clickup_list_id`, `clickup_custom_field_map`, and `github_native`) is described by `lazyspec config schema` and the relevant command's `--help`.
+Deeper per-store behaviour (write-through, optimistic locking, label/tag matching, relation and custom-field mapping via keys like `github_issue_tag`, `github_label`, `status_authority`, `clickup_list_id`, `clickup_custom_field_map`, and `github_native`) is described by `lazyspec config schema` and the relevant command's `--help`.
 
 ### Custom types
 
@@ -561,6 +563,26 @@ name = "rfc"
 prefix = "RFC"
 lifecycle = { states = ["draft", "review", "accepted", "in-progress", "complete", "rejected", "superseded"], edges = [{ from = "draft", to = "review" }, { from = "review", to = "accepted" }, { from = "accepted", to = "in-progress" }, { from = "in-progress", to = "complete" }, { from = "*", to = "rejected" }, { from = "*", to = "superseded" }] }
 ```
+
+**Board-derived states.** A `github-issues` type may hand its lifecycle to one Projects v2 board by naming a `github-projects` document in `status_authority`. That board's `Status` single-select options become the type's `lifecycle` states — lowercased, in board order, with no transition edges — written into `.lazyspec.toml` by `lazyspec fetch`. No `config` subcommand sets the key; edit it by hand.
+
+```toml
+[[types]]
+name = "ticket"
+prefix = "TICKET"
+store = "github-issues"
+status_authority = "PROJECT-7"
+```
+
+Only the nominated board is authoritative. A document can belong to several boards; every other board's fields, including its own `Status`, stay plain `PROJECT-n.<field>` attributes and do not affect the lifecycle. A type that sets no `status_authority` is unaffected: it keeps its declared lifecycle, or, for `github-issues` and `github-milestones` types that declare none, the canonical `open`/`closed` pair.
+
+Each document of a board-bound type also takes its own status from that board: `fetch` reads the document's `Status` cell on the authority board, and nothing on the issue itself — neither its open/closed state nor the status stored in its body — contributes one. A closed issue sitting in the board's `In Progress` column is therefore `in progress`, not `closed`. `fetch` makes exactly one write to the board: a document of the type whose issue is not yet an item is added to it, so the type cannot report one lifecycle for its board members and another for everyone else. No `Status` value is ever written — the added item's cell starts empty, which leaves the document with no status and a warning, as does an existing item whose cell is empty. The two warnings are worded differently because the fixes differ, and a failed add warns as well without failing the fetch. A `fetch` that cannot read the board (a token without the `project` scope) warns and leaves each document at the status it last read off the board.
+
+`update --status` on a board-bound type moves the card: it writes the document's `Status` cell on the authority board, matching the value you pass against the board's column names case-insensitively, so `--status "In Progress"` and `--status "in progress"` are the same move. The column names and their ids come from the cached schema snapshot, so a value naming no column on the board is rejected offline — naming the valid columns — before anything is written. The GitHub issue's `open`/`closed` state is deliberately left untouched, in both directions: reaching the board's last column does not close the issue and leaving it does not reopen it. Express that coupling as Projects automation on the board itself, where the rest of your team's board rules live. The TUI status picker offers the same columns and writes through the same path.
+
+An `update` that changes anything else on a board-bound document — its title, body or an attribute — leaves the status alone: it stays whatever the board last reported, and the issue's open/closed state cannot move it. A document whose issue is not an item of the authority board has no cell to write, so `update --status` rejects it (run `fetch`, which adds it) before touching the issue. A board write GitHub rejects — most often a token without the `project` scope, which GitHub answers with an error and HTTP 200 — fails the update rather than reporting a move that did not happen.
+
+Because `fetch` overwrites `lifecycle`, `validate` reports a declared lifecycle the nominated board could not have produced: one carrying transition `edges`, or (once the board's columns are cached) states that are not the board's. It also reports a `status_authority` that cannot work at all: one set on a type whose `store` is not `github-issues` (only a GitHub issue can be a board item), and one whose value names no board number.
 
 Projects whose `[[types]]` predate the lifecycle axis can backfill the default lifecycle with `lazyspec fix --config` (see _Migrating an existing config_).
 

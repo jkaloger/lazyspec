@@ -356,6 +356,17 @@ pub struct TypeDef {
     /// `github_create_labels`).
     #[serde(default)]
     pub github_issue_type: Option<String>,
+    /// The id of a `github-projects`-backed document (e.g. `PROJECT-7`) whose
+    /// board's `Status` single-select field is the authority for this type's
+    /// lifecycle. That field's options become the type's `lifecycle` states,
+    /// persisted at fetch, and each document's status is its own `Status` cell on
+    /// that board -- so fetch adds a document of the type that is not yet an item
+    /// of the board to it, leaving the new item's cell empty. Only the nominated
+    /// board is authoritative: any other board a document belongs to still
+    /// contributes plain `PROJECT-n.<field>` attributes and does not affect
+    /// lifecycle. Unused by other stores.
+    #[serde(default)]
+    pub status_authority: Option<String>,
     /// The ClickUp List id this type binds to, for `clickup-tasks`-backed types.
     /// Each such type materializes exactly one bound List's tasks. Unused by
     /// other stores.
@@ -868,6 +879,7 @@ pub fn starter_types() -> Vec<TypeDef> {
         label_override: None,
         github_issue_tag: None,
         github_issue_type: None,
+        status_authority: None,
         clickup_list_id: None,
         clickup_task_type: None,
         clickup_custom_field_map: None,
@@ -903,6 +915,7 @@ pub fn starter_types() -> Vec<TypeDef> {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            status_authority: None,
             clickup_list_id: None,
             clickup_task_type: None,
             clickup_custom_field_map: None,
@@ -926,6 +939,7 @@ pub fn starter_types() -> Vec<TypeDef> {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            status_authority: None,
             clickup_list_id: None,
             clickup_task_type: None,
             clickup_custom_field_map: None,
@@ -1401,6 +1415,7 @@ impl TypeDef {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            status_authority: None,
             clickup_list_id: None,
             clickup_task_type: None,
             clickup_custom_field_map: None,
@@ -2932,6 +2947,47 @@ clickup_task_type = 1001
         assert_eq!(td.clickup_task_type, None);
         let json = serde_json::to_value(td).unwrap();
         assert_eq!(json["clickup_task_type"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn toml_status_authority_parses_and_round_trips() {
+        let toml_str = format!(
+            "{}{RELATIONSHIPS}",
+            r#"
+[github]
+repo = "owner/repo"
+
+[[types]]
+name = "bug"
+plural = "bugs"
+dir = "docs/bugs"
+prefix = "BUG"
+store = "github-issues"
+status_authority = "PROJECT-7"
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        let td = config.type_by_name("bug").unwrap();
+        assert_eq!(td.status_authority.as_deref(), Some("PROJECT-7"));
+
+        // `to_toml` does not emit `[github]` (the field is `serde(skip)`), so the
+        // section is restored for the strict reparse.
+        let emitted = config.to_toml().unwrap();
+        let reparsed =
+            Config::parse(&format!("{emitted}\n[github]\nrepo = \"owner/repo\"\n")).unwrap();
+        let td = reparsed.type_by_name("bug").unwrap();
+        assert_eq!(td.status_authority.as_deref(), Some("PROJECT-7"));
+        let json = serde_json::to_value(td).unwrap();
+        assert_eq!(json["status_authority"], serde_json::json!("PROJECT-7"));
+    }
+
+    #[test]
+    fn toml_without_status_authority_leaves_it_none() {
+        let config = Config::parse(TYPES).unwrap();
+        let td = config.type_by_name("rfc").unwrap();
+        assert_eq!(td.status_authority, None);
+        let json = serde_json::to_value(td).unwrap();
+        assert_eq!(json["status_authority"], serde_json::Value::Null);
     }
 
     #[test]

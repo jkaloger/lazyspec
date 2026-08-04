@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::engine::cache_lock::CacheLock;
-use crate::engine::config::{AttrDef, Config, TypeDef};
+use crate::engine::config::{AttrDef, Config, Lifecycle, TypeDef};
 use crate::engine::document::{AttrValue, DocMeta, Relation, RelationType, Status};
 use crate::engine::gh::{
     search_issue_numbers_by_type, GhGraphql, GhIssue, GhIssueDependencyApi, GhIssueReader,
@@ -224,6 +224,7 @@ impl IssueCache {
         let mut write_warnings = Vec::new();
 
         let lifecycle = type_def.effective_lifecycle();
+        let (open_status, closed_status) = open_closed_statuses(type_def, &lifecycle);
         for issue in &issues {
             let (meta, body) = parse_issue(
                 issue,
@@ -232,8 +233,8 @@ impl IssueCache {
                 &type_def.attributes,
                 milestone_rel,
                 issue_map,
-                lifecycle.first_active_status(),
-                lifecycle.terminal_status(),
+                open_status,
+                closed_status,
             );
             let id = type_def.make_id(issue.number);
             let meta = DocMeta {
@@ -242,6 +243,15 @@ impl IssueCache {
             };
 
             let existing = self.read_stale(&id, &type_def.name);
+
+            // The TTL path never reads the authority board, so a board-bound
+            // doc's status is carried over wholesale rather than re-derived from
+            // the issue; a background refresh must not silently move a doc.
+            let meta = match board_owned_status(root, type_def, &id) {
+                Some(status) => DocMeta { status, ..meta },
+                None => meta,
+            };
+
             let new_content = build_cache_content(&meta, &body);
 
             if existing.as_deref() == Some(&new_content) {
@@ -267,7 +277,7 @@ impl IssueCache {
         if search_truncated {
             warnings.push(search_truncation_warning(&type_def.name));
         }
-        warnings.extend(self.refresh_schema_snapshot(gh_graphql, repo));
+        warnings.extend(self.refresh_schema_snapshot(gh_graphql, repo, config));
 
         Ok(RefreshResult {
             refreshed,
@@ -276,30 +286,67 @@ impl IssueCache {
         })
     }
 
-    /// Best-effort fetch + persist of the native field schema snapshot.
+    /// Best-effort fetch + persist of the native field schema snapshot: org
+    /// issue types, plus the project fields of every board a type nominates as
+    /// its status authority. A merge, not an overwrite -- boards that are not
+    /// re-fetched keep the ids they already had, so offline resolution never
+    /// regresses because of a board this call did not touch.
+    ///
     /// On GraphQL failure, the prior snapshot on disk is left untouched and a
-    /// warning is returned; offline validation still works against it.
+    /// warning is returned; offline validation still works against it. Per-board
+    /// failures are individually non-fatal, hence one warning each.
+    ///
+    /// Issue types are an org-only GitHub feature (a user-owned repo has none),
+    /// so that query failing is expected there and must not block the board
+    /// loop below it -- the two are unrelated schema pieces fetched in one
+    /// pass, not a single all-or-nothing call.
     fn refresh_schema_snapshot(
         &self,
         gh_graphql: &dyn GhGraphql,
         repo: &str,
-    ) -> Option<RefreshWarning> {
-        match gh_schema::fetch_snapshot(gh_graphql, repo) {
-            Ok(snapshot) => {
-                if let Err(e) = snapshot.save(&self.root) {
-                    return Some(RefreshWarning {
-                        message: format!("could not persist gh schema snapshot: {}", e),
-                    });
+        config: &Config,
+    ) -> Vec<RefreshWarning> {
+        let prior = gh_schema::GhSchemaSnapshot::load(&self.root);
+        let mut warnings = Vec::new();
+        let mut snapshot = match gh_schema::fetch_snapshot(gh_graphql, repo) {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                warnings.push(RefreshWarning {
+                    message: format!(
+                        "could not refresh gh schema snapshot (keeping prior issue types, projects need `gh auth refresh -s project`): {}",
+                        e
+                    ),
+                });
+                gh_schema::GhSchemaSnapshot {
+                    issue_types: prior.issue_types.clone(),
+                    ..Default::default()
                 }
-                None
             }
-            Err(e) => Some(RefreshWarning {
-                message: format!(
-                    "could not refresh gh schema snapshot (keeping prior, projects need `gh auth refresh -s project`): {}",
-                    e
-                ),
-            }),
+        };
+        snapshot.project_fields = prior.project_fields;
+        snapshot.single_select_options = prior.single_select_options;
+        snapshot.iterations = prior.iterations;
+
+        for number in store_dispatch::authority_board_numbers(config) {
+            match gh_schema::fetch_project_fields(gh_graphql, repo, number) {
+                Ok((fields, options, iterations)) => {
+                    snapshot.replace_board_fields(number, fields, options, iterations)
+                }
+                Err(e) => warnings.push(RefreshWarning {
+                    message: format!(
+                        "could not refresh field schema for board {} (keeping prior, projects need `gh auth refresh -s project`): {}",
+                        number, e
+                    ),
+                }),
+            }
         }
+
+        if let Err(e) = snapshot.save(&self.root) {
+            warnings.push(RefreshWarning {
+                message: format!("could not persist gh schema snapshot: {}", e),
+            });
+        }
+        warnings
     }
 
     pub fn list_cached(&self, doc_type: &str) -> Vec<String> {
@@ -392,6 +439,7 @@ impl IssueCache {
             .relationship_by_github_native("milestone")
             .map(|r| r.name.as_str());
         let lifecycle = type_def.effective_lifecycle();
+        let (open_status, closed_status) = open_closed_statuses(type_def, &lifecycle);
         for issue in &issues {
             let (meta, body) = parse_issue(
                 issue,
@@ -400,13 +448,22 @@ impl IssueCache {
                 &type_def.attributes,
                 milestone_rel,
                 issue_map,
-                lifecycle.first_active_status(),
-                lifecycle.terminal_status(),
+                open_status,
+                closed_status,
             );
             let id = type_def.make_id(issue.number);
             let meta = DocMeta {
                 id: id.clone(),
                 ..meta
+            };
+            // The project-field pass that follows this fetch overwrites a
+            // board-bound doc's status with the live cell -- but it can fail
+            // (a token without the `project` scope), and then only what is
+            // written here survives. Keep the last known board status rather
+            // than blanking every doc of the type on a warned-about failure.
+            let meta = match board_owned_status(root, type_def, &id) {
+                Some(status) => DocMeta { status, ..meta },
+                None => meta,
             };
             if !issue.id.is_empty() {
                 node_to_doc.insert(issue.id.clone(), id.clone());
@@ -608,7 +665,7 @@ impl IssueCache {
 
         lock.save(&self.root)?;
 
-        warnings.extend(self.refresh_schema_snapshot(gh_graphql, repo));
+        warnings.extend(self.refresh_schema_snapshot(gh_graphql, repo, config));
 
         Ok(FetchResult {
             fetched: issues.len(),
@@ -821,6 +878,62 @@ fn parse_created_date(created_at: &str) -> chrono::NaiveDate {
         .unwrap_or_else(|_| Utc::now().date_naive())
 }
 
+/// The board number a type's `status_authority` nominates, if it nominates one.
+/// A value that names no board number nominates no authority at all -- the same
+/// predicate the read path applies (`store_dispatch::authority_board_for`), so a
+/// typo like `PROJECT-seven` must not suppress the ordinary lifecycle in exchange
+/// for a board nothing will ever consult.
+fn authority_board(type_def: &TypeDef) -> Option<u64> {
+    type_def
+        .status_authority
+        .as_deref()
+        .and_then(|id| store_dispatch::board_number(id).ok())
+}
+
+/// The first-active / terminal lifecycle states an issue's open/closed bit maps
+/// to. Both are empty for a `status_authority`-bound type: its lifecycle is the
+/// board's columns, and open/closed is a second, disjoint lifecycle that would
+/// otherwise write `open`/`closed` over a doc the board never placed there
+/// (STORY-248). Such a type takes its status from the board's `Status` cell
+/// alone, so a bodyless issue simply parses with no status.
+fn open_closed_statuses<'a>(type_def: &TypeDef, lifecycle: &'a Lifecycle) -> (&'a str, &'a str) {
+    if authority_board(type_def).is_some() {
+        ("", "")
+    } else {
+        (lifecycle.first_active_status(), lifecycle.terminal_status())
+    }
+}
+
+/// The status to give an authority-bound doc parsed off an issue: whatever the
+/// cache file already holds, or unset when the cache has never seen the doc.
+/// `None` for a type that nominates no board, leaving the parsed status alone.
+///
+/// Nothing on the issue may set a board-bound doc's status. Not the open/closed
+/// bit (see [`open_closed_statuses`]), and not the `status:` line lazyspec
+/// embeds in the issue body either: that line is a snapshot of what the board
+/// said when the doc was last written, so honouring it would revert a doc the
+/// board has since moved -- the exact drift STORY-248 removes. Only the
+/// project-field pass after a full fetch reads the board, so until it runs the
+/// last value the cache holds stands.
+///
+/// Located with the same lookup `write_cache_file` uses, so a slugged or nested
+/// cache file is read rather than treated as a doc the cache has never seen.
+///
+/// The write path applies the same rule: an `update` that carries no status of
+/// its own leaves a board-bound doc at the status this reports
+/// (`GithubIssuesStore::update`).
+pub(crate) fn board_owned_status(root: &Path, type_def: &TypeDef, id: &str) -> Option<Status> {
+    authority_board(type_def)?;
+    let cache_dir = root.join(".lazyspec/cache").join(&type_def.name);
+    Some(
+        store_dispatch::find_cache_file(&cache_dir, id)
+            .and_then(|p| fs::read_to_string(p).ok())
+            .and_then(|c| DocMeta::parse(&c).ok())
+            .map(|m| m.status)
+            .unwrap_or_else(|| Status::new("")),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn parse_issue(
     issue: &GhIssue,
@@ -993,7 +1106,8 @@ mod tests {
     use crate::engine::config::{NumberingStrategy, StoreBackend};
     use crate::engine::document::DocType;
     use crate::engine::gh::{
-        GhAuthor, GhGraphql, GhIssueDependencyApi, GhIssueReader, GhLabel, GqlVar,
+        test_support::MockGhClient, GhAuthor, GhGraphql, GhIssueDependencyApi, GhIssueReader,
+        GhLabel, GqlVar,
     };
     use anyhow::Result;
     use std::cell::RefCell;
@@ -1026,6 +1140,7 @@ mod tests {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            status_authority: None,
             clickup_list_id: None,
             clickup_task_type: None,
             clickup_custom_field_map: None,
@@ -1055,6 +1170,7 @@ mod tests {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            status_authority: None,
             clickup_list_id: None,
             clickup_task_type: None,
             clickup_custom_field_map: None,
@@ -1176,11 +1292,11 @@ mod tests {
             Ok(responses.remove(0))
         }
 
-        fn project_item_fields(
+        fn project_items(
             &self,
             _repo: &str,
             _content_node_id: &str,
-        ) -> Result<Vec<crate::engine::gh::ProjectFieldValue>> {
+        ) -> Result<Vec<crate::engine::gh::ProjectItem>> {
             Ok(vec![])
         }
 
@@ -1446,6 +1562,169 @@ mod tests {
 
         let snapshot = gh_schema::GhSchemaSnapshot::load(tmp.path());
         assert_eq!(snapshot.issue_type_id("Bug"), Some("IT_kwBug"));
+    }
+
+    fn bug_issue_types_response() -> serde_json::Value {
+        serde_json::json!({
+            "data": { "organization": { "issueTypes": {
+                "nodes": [{"id": "IT_kwBug", "name": "Bug"}]
+            } } }
+        })
+    }
+
+    fn board_fields_response(field_id: &str, options: &[&str]) -> serde_json::Value {
+        let opts: Vec<serde_json::Value> = options
+            .iter()
+            .map(|name| {
+                serde_json::json!({
+                    "id": format!("opt_{}", name.to_lowercase().replace(' ', "_")),
+                    "name": name
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "data": {"organization": {"projectV2": {"fields": {"nodes": [
+                {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": field_id,
+                    "name": "Status",
+                    "dataType": "SINGLE_SELECT",
+                    "options": opts
+                }
+            ]}}}}
+        })
+    }
+
+    fn config_with_status_authority(authority: Option<&str>) -> Config {
+        let mut config = Config::default();
+        config.documents.types = vec![TypeDef {
+            status_authority: authority.map(String::from),
+            ..story_type_def()
+        }];
+        config
+    }
+
+    fn write_board_7_snapshot(root: &Path, option_name: &str) {
+        gh_schema::GhSchemaSnapshot {
+            project_fields: vec![gh_schema::ProjectFieldId {
+                project_number: 7,
+                field_name: "Status".to_string(),
+                id: "PVTSSF_prior".to_string(),
+                data_type: "SINGLE_SELECT".to_string(),
+            }],
+            single_select_options: vec![gh_schema::OptionId {
+                field_id: "PVTSSF_prior".to_string(),
+                name: option_name.to_string(),
+                id: "opt_prior".to_string(),
+            }],
+            ..Default::default()
+        }
+        .save(root)
+        .unwrap();
+    }
+
+    #[test]
+    fn refresh_schema_snapshot_merges_authority_board_fields() {
+        let (cache, tmp) = make_cache();
+        let gh = MockGhClient::new().with_graphql_responses(vec![
+            bug_issue_types_response(),
+            board_fields_response(
+                "PVTSSF_b7",
+                &["Ready To Start", "In Progress", "Review", "Done"],
+            ),
+        ]);
+
+        let warnings = cache.refresh_schema_snapshot(
+            &gh,
+            "octo-org/repo",
+            &config_with_status_authority(Some("PROJECT-7")),
+        );
+
+        assert!(warnings.is_empty(), "warnings: {:?}", warnings);
+        let saved = gh_schema::GhSchemaSnapshot::load(tmp.path());
+        assert_eq!(saved.issue_type_id("Bug"), Some("IT_kwBug"));
+        assert_eq!(saved.field_id(7, "Status"), Some("PVTSSF_b7"));
+        assert_eq!(
+            saved.option_id("PVTSSF_b7", "In Progress"),
+            Some("opt_in_progress")
+        );
+        assert_eq!(
+            saved.status_lifecycle(7).unwrap().states,
+            vec!["ready to start", "in progress", "review", "done"]
+        );
+    }
+
+    #[test]
+    fn refresh_schema_snapshot_makes_no_project_calls_without_status_authority() {
+        let (cache, tmp) = make_cache();
+        let gh = MockGhClient::new().with_graphql_responses(vec![bug_issue_types_response()]);
+
+        let warnings = cache.refresh_schema_snapshot(
+            &gh,
+            "octo-org/repo",
+            &config_with_status_authority(None),
+        );
+
+        assert!(warnings.is_empty(), "warnings: {:?}", warnings);
+        assert_eq!(gh.graphql_calls.borrow().len(), 1);
+        let saved = gh_schema::GhSchemaSnapshot::load(tmp.path());
+        assert!(saved.project_fields.is_empty());
+    }
+
+    #[test]
+    fn refresh_schema_snapshot_keeps_prior_board_fields_when_project_fetch_fails() {
+        let (cache, tmp) = make_cache();
+        write_board_7_snapshot(tmp.path(), "Review");
+
+        // Only the issue-types response is canned; the project-fields query then
+        // runs out of responses and errors.
+        let gh = MockGhClient::new().with_graphql_responses(vec![bug_issue_types_response()]);
+
+        let warnings = cache.refresh_schema_snapshot(
+            &gh,
+            "octo-org/repo",
+            &config_with_status_authority(Some("PROJECT-7")),
+        );
+
+        assert_eq!(warnings.len(), 1, "warnings: {:?}", warnings);
+        assert!(
+            warnings[0].message.contains('7'),
+            "warning should name the board: {}",
+            warnings[0].message
+        );
+        let saved = gh_schema::GhSchemaSnapshot::load(tmp.path());
+        assert_eq!(saved.issue_type_id("Bug"), Some("IT_kwBug"));
+        assert_eq!(saved.field_id(7, "Status"), Some("PVTSSF_prior"));
+        assert_eq!(saved.status_lifecycle(7).unwrap().states, vec!["review"]);
+    }
+
+    #[test]
+    fn refresh_schema_snapshot_replaces_a_boards_stale_options() {
+        let (cache, tmp) = make_cache();
+        write_board_7_snapshot(tmp.path(), "Retired Column");
+
+        let gh = MockGhClient::new().with_graphql_responses(vec![
+            bug_issue_types_response(),
+            board_fields_response("PVTSSF_b7", &["Review", "Done"]),
+        ]);
+
+        let warnings = cache.refresh_schema_snapshot(
+            &gh,
+            "octo-org/repo",
+            &config_with_status_authority(Some("PROJECT-7")),
+        );
+
+        assert!(warnings.is_empty(), "warnings: {:?}", warnings);
+        let saved = gh_schema::GhSchemaSnapshot::load(tmp.path());
+        assert_eq!(
+            saved.status_lifecycle(7).unwrap().states,
+            vec!["review", "done"]
+        );
+        assert!(saved
+            .single_select_options
+            .iter()
+            .all(|o| o.name != "Retired Column"));
+        assert_eq!(saved.project_fields.len(), 1);
     }
 
     #[test]
@@ -2766,6 +3045,340 @@ mod tests {
         );
     }
 
+    // --- ITERATION-353: open/closed never drives a board-bound type ---
+
+    fn authority_story_type_def() -> TypeDef {
+        TypeDef {
+            status_authority: Some("PROJECT-7".to_string()),
+            lifecycle: Lifecycle {
+                states: vec![
+                    "ready to start".to_string(),
+                    "in progress".to_string(),
+                    "review".to_string(),
+                    "done".to_string(),
+                ],
+                edges: vec![],
+            },
+            ..story_type_def()
+        }
+    }
+
+    fn cached_status(tmp: &TempDir, id: &str) -> String {
+        let path = tmp
+            .path()
+            .join(".lazyspec/cache/story")
+            .join(format!("{}.md", id));
+        let content = std::fs::read_to_string(path).unwrap();
+        DocMeta::parse(&content)
+            .unwrap()
+            .status
+            .as_str()
+            .to_string()
+    }
+
+    // AC2: a bodyless CLOSED issue on a board-bound type parses with NO status --
+    // the board's Status cell (injected right after the fetch) is the only
+    // lifecycle, so open/closed must not write a second, disjoint one.
+    #[test]
+    fn fetch_all_gives_a_board_bound_type_no_status_from_open_closed() {
+        let (cache, tmp) = make_cache();
+        let type_def = authority_story_type_def();
+
+        let mut issue = make_gh_issue(10, "Closed on GitHub", "plain body", &["lazyspec:story"]);
+        issue.state = "CLOSED".to_string();
+        let gh = MockReader::new(vec![issue]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        cache
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        assert_eq!(cached_status(&tmp, "STORY-10"), "");
+    }
+
+    // A `status_authority` that names no board number nominates no board: the
+    // read path consults none, so suppressing open/closed as well would leave
+    // every doc of the type with no status at all and nothing to explain it.
+    #[test]
+    fn fetch_all_derives_open_closed_for_an_unparseable_status_authority() {
+        let (cache, tmp) = make_cache();
+        let type_def = TypeDef {
+            status_authority: Some("PROJECT-seven".to_string()),
+            ..story_type_def()
+        };
+
+        let mut issue = make_gh_issue(10, "Closed on GitHub", "plain body", &["lazyspec:story"]);
+        issue.state = "CLOSED".to_string();
+        let gh = MockReader::new(vec![issue]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        cache
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        assert_eq!(cached_status(&tmp, "STORY-10"), "closed");
+    }
+
+    // AC10 regression: a type nominating no authority board still maps the
+    // open/closed bit onto its lifecycle exactly as before.
+    #[test]
+    fn fetch_all_still_derives_open_closed_without_a_status_authority() {
+        let (cache, tmp) = make_cache();
+        let type_def = story_type_def();
+
+        let mut issue = make_gh_issue(10, "Closed on GitHub", "plain body", &["lazyspec:story"]);
+        issue.state = "CLOSED".to_string();
+        let gh = MockReader::new(vec![issue]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        cache
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        assert_eq!(cached_status(&tmp, "STORY-10"), "closed");
+    }
+
+    // The TTL path reads no board, so it must leave the status the last full
+    // fetch read off the board standing rather than blanking it.
+    #[test]
+    fn refresh_stale_carries_over_the_board_status_for_a_board_bound_type() {
+        let (cache, tmp) = make_cache();
+        let type_def = authority_story_type_def();
+        let ttl = Duration::seconds(60);
+
+        cache
+            .write(
+                "STORY-10",
+                "story",
+                "---\ntitle: \"Work\"\ntype: story\nstatus: review\nauthor: \"@octocat\"\ndate: 2026-01-01\ntags: []\n---\nplain body\n",
+            )
+            .unwrap();
+        backdate_all(&cache, &["STORY-10"]);
+
+        let mut issue = make_gh_issue(10, "Work", "plain body", &["lazyspec:story"]);
+        issue.state = "CLOSED".to_string();
+        let gh =
+            MockReader::new(vec![issue]).with_graphql_responses(vec![empty_issue_types_response()]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        cache
+            .refresh_stale(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                ttl,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        assert_eq!(cached_status(&tmp, "STORY-10"), "review");
+    }
+
+    // AC2 on the TTL path: lazyspec embeds `status:` in the issue body, so an
+    // issue the board has since moved still advertises the status it held when
+    // last written. The body must not win over what the board last said.
+    #[test]
+    fn refresh_stale_ignores_the_body_status_for_a_board_bound_type() {
+        let (cache, tmp) = make_cache();
+        let type_def = authority_story_type_def();
+        let ttl = Duration::seconds(60);
+
+        cache
+            .write(
+                "STORY-10",
+                "story",
+                "---\ntitle: \"Work\"\ntype: story\nstatus: done\nauthor: \"@octocat\"\ndate: 2026-01-01\ntags: []\n---\nplain body\n",
+            )
+            .unwrap();
+        backdate_all(&cache, &["STORY-10"]);
+
+        let issue = make_gh_issue(
+            10,
+            "Work",
+            "<!-- lazyspec\n---\nstatus: ready to start\ndate: 2026-01-01\n---\n-->\n\nplain body",
+            &["lazyspec:story"],
+        );
+        let gh =
+            MockReader::new(vec![issue]).with_graphql_responses(vec![empty_issue_types_response()]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        cache
+            .refresh_stale(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                ttl,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        assert_eq!(cached_status(&tmp, "STORY-10"), "done");
+    }
+
+    // The mirror of the above: with no authority board the body's status is the
+    // doc's status, exactly as before this slice.
+    #[test]
+    fn refresh_stale_takes_the_body_status_without_a_status_authority() {
+        let (cache, tmp) = make_cache();
+        let type_def = TypeDef {
+            lifecycle: Lifecycle {
+                states: vec![
+                    "ready to start".to_string(),
+                    "in progress".to_string(),
+                    "done".to_string(),
+                ],
+                edges: vec![],
+            },
+            ..story_type_def()
+        };
+        let ttl = Duration::seconds(60);
+
+        cache
+            .write(
+                "STORY-10",
+                "story",
+                "---\ntitle: \"Work\"\ntype: story\nstatus: done\nauthor: \"@octocat\"\ndate: 2026-01-01\ntags: []\n---\nplain body\n",
+            )
+            .unwrap();
+        backdate_all(&cache, &["STORY-10"]);
+
+        let issue = make_gh_issue(
+            10,
+            "Work",
+            "<!-- lazyspec\n---\nstatus: ready to start\ndate: 2026-01-01\n---\n-->\n\nplain body",
+            &["lazyspec:story"],
+        );
+        let gh =
+            MockReader::new(vec![issue]).with_graphql_responses(vec![empty_issue_types_response()]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        cache
+            .refresh_stale(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                ttl,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        assert_eq!(cached_status(&tmp, "STORY-10"), "ready to start");
+    }
+
+    // The project-field pass that follows a full fetch can fail (a token without
+    // the `project` scope). Blanking every board-bound doc's status on the way in
+    // would turn that warning into data loss, so the last known board status is
+    // kept for the pass to overwrite.
+    #[test]
+    fn fetch_all_keeps_the_last_known_board_status_for_the_injection_pass() {
+        let (cache, tmp) = make_cache();
+        let type_def = authority_story_type_def();
+
+        cache
+            .write(
+                "STORY-10",
+                "story",
+                "---\ntitle: \"Work\"\ntype: story\nstatus: in progress\nauthor: \"@octocat\"\ndate: 2026-01-01\ntags: []\n---\nplain body\n",
+            )
+            .unwrap();
+
+        let issue = make_gh_issue(10, "Work", "plain body", &["lazyspec:story"]);
+        let gh = MockReader::new(vec![issue]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        cache
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        assert_eq!(cached_status(&tmp, "STORY-10"), "in progress");
+    }
+
+    // Nothing to carry over: a doc the cache has never seen at a board column
+    // stays unset rather than inheriting `closed`.
+    #[test]
+    fn refresh_stale_leaves_an_uncached_board_bound_doc_unset() {
+        let (cache, tmp) = make_cache();
+        let type_def = authority_story_type_def();
+        let ttl = Duration::seconds(60);
+
+        cache.write("STORY-10", "story", "old content").unwrap();
+        backdate_all(&cache, &["STORY-10"]);
+
+        let mut issue = make_gh_issue(10, "Work", "plain body", &["lazyspec:story"]);
+        issue.state = "CLOSED".to_string();
+        let gh =
+            MockReader::new(vec![issue]).with_graphql_responses(vec![empty_issue_types_response()]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        cache
+            .refresh_stale(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                ttl,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        assert_eq!(cached_status(&tmp, "STORY-10"), "");
+    }
+
     #[test]
     fn parse_issue_uses_created_at_for_date() {
         let mut issue = make_gh_issue(1, "Test issue", "Just a plain body", &["lazyspec:story"]);
@@ -3244,11 +3857,11 @@ mod tests {
             Ok(serde_json::json!({"data": {"nodes": nodes}}))
         }
 
-        fn project_item_fields(
+        fn project_items(
             &self,
             _repo: &str,
             _content_node_id: &str,
-        ) -> Result<Vec<crate::engine::gh::ProjectFieldValue>> {
+        ) -> Result<Vec<crate::engine::gh::ProjectItem>> {
             Ok(vec![])
         }
 
@@ -3499,11 +4112,11 @@ mod tests {
                 .collect();
             Ok(serde_json::json!({"data": {"nodes": nodes}}))
         }
-        fn project_item_fields(
+        fn project_items(
             &self,
             _repo: &str,
             _content_node_id: &str,
-        ) -> Result<Vec<crate::engine::gh::ProjectFieldValue>> {
+        ) -> Result<Vec<crate::engine::gh::ProjectItem>> {
             Ok(vec![])
         }
         fn update_project_v2_item_field_value(
@@ -3844,11 +4457,11 @@ mod tests {
                 .collect();
             Ok(serde_json::json!({"data": {"nodes": nodes}}))
         }
-        fn project_item_fields(
+        fn project_items(
             &self,
             _repo: &str,
             _content_node_id: &str,
-        ) -> Result<Vec<crate::engine::gh::ProjectFieldValue>> {
+        ) -> Result<Vec<crate::engine::gh::ProjectItem>> {
             Ok(vec![])
         }
         fn update_project_v2_item_field_value(

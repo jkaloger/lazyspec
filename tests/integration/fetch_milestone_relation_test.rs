@@ -11,7 +11,7 @@ use lazyspec::engine::config::{
 };
 use lazyspec::engine::gh::{
     GhComment, GhFieldValueInput, GhGraphql, GhIssue, GhIssueDependencyApi, GhIssueMilestone,
-    GhIssueReader, GhIssueWriter, GhMilestone, GhMilestoneApi, GqlVar, ProjectFieldValue,
+    GhIssueReader, GhIssueWriter, GhMilestone, GhMilestoneApi, GqlVar, ProjectItem,
 };
 use lazyspec::engine::git_ref::GitCli;
 use tempfile::TempDir;
@@ -55,11 +55,7 @@ impl GhGraphql for MilestoneGh {
             "data": { "organization": { "issueTypes": { "nodes": [] } } }
         }))
     }
-    fn project_item_fields(
-        &self,
-        _repo: &str,
-        _content_node_id: &str,
-    ) -> Result<Vec<ProjectFieldValue>> {
+    fn project_items(&self, _repo: &str, _content_node_id: &str) -> Result<Vec<ProjectItem>> {
         Ok(vec![])
     }
     fn update_project_v2_item_field_value(
@@ -186,6 +182,7 @@ fn ticket_type() -> TypeDef {
         label_override: None,
         github_issue_tag: None,
         github_issue_type: None,
+        status_authority: None,
         clickup_list_id: None,
         clickup_task_type: None,
         clickup_custom_field_map: None,

@@ -217,6 +217,7 @@ fn type_def_from_parts(
         label_override: None,
         github_issue_tag: github_issue_tag.map(str::to_string),
         github_issue_type: github_issue_type.map(str::to_string),
+        status_authority: None,
         clickup_list_id: clickup_list_id.map(str::to_string),
         clickup_task_type,
         clickup_custom_field_map: None,

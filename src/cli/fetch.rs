@@ -5,11 +5,13 @@ use crate::engine::credentials::Token;
 use crate::engine::gh::{
     GhGraphql, GhIssueDependencyApi, GhIssueReader, GhIssueWriter, GhMilestoneApi,
 };
+use crate::engine::gh_schema::GhSchemaSnapshot;
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::github::resolve_repo;
 use crate::engine::issue_body::TypeMatchRule;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::status_colors::StatusColors;
+use crate::engine::store_dispatch;
 use crate::engine::sync::{
     sync_all, ClickupMaps, ClickupSync, GhIssueSync, GhMaps, GhMilestoneSync, GitRefSync,
     SyncContext, Syncers,
@@ -213,22 +215,7 @@ pub fn run(
     }
 
     if json {
-        let json_out: Vec<serde_json::Value> = outcomes
-            .iter()
-            .map(|o| {
-                let mut entry = serde_json::json!({
-                    "type": o.type_name,
-                    "fetched": o.fetched,
-                    "new": o.new,
-                    "removed": o.removed,
-                });
-                if let Some(err) = &o.error {
-                    entry["error"] = serde_json::Value::String(err.clone());
-                }
-                entry
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&json_out)?);
+        println!("{}", outcomes_json(&outcomes)?);
     } else {
         for o in &outcomes {
             match &o.error {
@@ -258,6 +245,7 @@ pub fn run(
         .filter_map(|o| o.lifecycle.clone().map(|l| (o.type_name.clone(), l)))
         .collect();
     persist_clickup_lifecycles(root, &lifecycles)?;
+    persist_board_lifecycles(root, config)?;
 
     // Continue-then-exit-non-zero: a per-type failure fails the run, but only
     // after every other type refreshed and its cache was saved. A warnings-only
@@ -269,11 +257,75 @@ pub fn run(
     Ok(())
 }
 
+/// One JSON entry per fetched type. `warnings` carries the same messages the
+/// human run prints to stderr (a doc with no `Status` on its authority board, a
+/// stale-cache fallback, a truncated search) and is present only when the type
+/// produced some, mirroring the mutation commands' `warnings` array. `error` is
+/// present only for a type whose fetch failed.
+pub fn outcomes_json(outcomes: &[crate::engine::sync::SyncOutcome]) -> Result<String> {
+    let entries: Vec<serde_json::Value> = outcomes
+        .iter()
+        .map(|o| {
+            let mut entry = serde_json::json!({
+                "type": o.type_name,
+                "fetched": o.fetched,
+                "new": o.new,
+                "removed": o.removed,
+            });
+            if !o.warnings.is_empty() {
+                entry["warnings"] = serde_json::json!(o.warnings);
+            }
+            if let Some(err) = &o.error {
+                entry["error"] = serde_json::Value::String(err.clone());
+            }
+            entry
+        })
+        .collect();
+    Ok(serde_json::to_string_pretty(&entries)?)
+}
+
 /// Write each `(type, lifecycle)` derived from a bound List's status set back
 /// into `.lazyspec.toml`, so the type's effective lifecycle reflects the live
-/// List. Rewrites the config in place (preserving decor/comments) only when a
-/// lifecycle actually changed, so an unchanged sync leaves the file untouched.
+/// List.
 fn persist_clickup_lifecycles(root: &Path, lifecycles: &[(String, Lifecycle)]) -> Result<()> {
+    rewrite_lifecycles(root, lifecycles)
+}
+
+/// Write the lifecycle each `status_authority`-bound type derives from its
+/// board's `Status` column set back into `.lazyspec.toml`, so
+/// [`TypeDef::effective_lifecycle`](crate::engine::config::TypeDef::effective_lifecycle)
+/// serves the board's columns through its declared-states branch and every
+/// surface picks them up unchanged.
+///
+/// Reads the schema snapshot from disk, so it must run after the sync phase that
+/// writes it.
+fn persist_board_lifecycles(root: &Path, config: &Config) -> Result<()> {
+    let snapshot = GhSchemaSnapshot::load(root);
+    let lifecycles: Vec<(String, Lifecycle)> = config
+        .documents
+        .types
+        .iter()
+        .filter_map(|type_def| {
+            let number =
+                store_dispatch::board_number(type_def.status_authority.as_deref()?).ok()?;
+            // A board with no resolvable `Status` column yields None, which is
+            // dropped rather than persisted as an empty lifecycle: writing one
+            // would wipe the states the type already declares.
+            let lifecycle = snapshot.status_lifecycle(number)?;
+            Some((type_def.name.clone(), lifecycle))
+        })
+        .collect();
+    rewrite_lifecycles(root, &lifecycles)
+}
+
+/// Apply each `(type, lifecycle)` to `.lazyspec.toml`, rewriting the file only
+/// when a lifecycle actually changed so an unchanged fetch leaves it untouched.
+///
+/// `write_config_in_place` is mandatory here, not a nicety: `[github]` and
+/// `[[types]]` are `serde(skip)`/`skip_deserializing`, so serializing the whole
+/// `Config` would drop them and leave the file unparseable. The in-place writer
+/// is the only lossless path, and it preserves comments and formatting.
+fn rewrite_lifecycles(root: &Path, lifecycles: &[(String, Lifecycle)]) -> Result<()> {
     if lifecycles.is_empty() {
         return Ok(());
     }
@@ -319,7 +371,7 @@ mod tests {
     use crate::engine::clickup::{ClickupUser, FakeClickupClient};
     use crate::engine::config::{NumberingStrategy, StoreBackend, TypeDef};
     use crate::engine::gh::{
-        GhComment, GhFieldValueInput, GhIssue, GhMilestone, GqlVar, ProjectFieldValue,
+        GhComment, GhFieldValueInput, GhIssue, GhMilestone, GqlVar, ProjectItem,
     };
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use tempfile::TempDir;
@@ -343,6 +395,189 @@ lifecycle = { states = ["stale"], edges = [] }
 [[relationships]]
 name = "related-to"
 "#;
+
+    /// A `github-issues` type nominating board 7 as its status authority, with no
+    /// `lifecycle` key of its own. The comment above the type block makes decor
+    /// preservation provable, and `[github]` is required by strict parse.
+    const GH_AUTHORITY_CONFIG_SRC: &str = r#"[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[templates]
+dir = ".lazyspec/templates"
+
+[github]
+repo = "octo-org/repo"
+
+# ticket type follows
+[[types]]
+name = "ticket"
+plural = "tickets"
+dir = "docs/tickets"
+prefix = "TICKET"
+store = "github-issues"
+status_authority = "PROJECT-7"
+
+[[relationships]]
+name = "related-to"
+"#;
+
+    /// The same type, already declaring exactly the lifecycle board 7 derives.
+    const GH_AUTHORITY_CONFIG_IN_SYNC_SRC: &str = r#"[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[templates]
+dir = ".lazyspec/templates"
+
+[github]
+repo = "octo-org/repo"
+
+# ticket type follows
+[[types]]
+name = "ticket"
+plural = "tickets"
+dir = "docs/tickets"
+prefix = "TICKET"
+store = "github-issues"
+status_authority = "PROJECT-7"
+lifecycle = { states = ["ready to start", "in progress", "review", "done"], edges = [] }
+
+[[relationships]]
+name = "related-to"
+"#;
+
+    /// A `github-issues` type that nominates no authority board (STORY-224's
+    /// shape), so nothing about it may change.
+    const GH_NO_AUTHORITY_CONFIG_SRC: &str = r#"[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[templates]
+dir = ".lazyspec/templates"
+
+[github]
+repo = "octo-org/repo"
+
+# ticket type follows
+[[types]]
+name = "ticket"
+plural = "tickets"
+dir = "docs/tickets"
+prefix = "TICKET"
+store = "github-issues"
+
+[[relationships]]
+name = "related-to"
+"#;
+
+    /// Write a schema snapshot holding one board whose single field is
+    /// `field_name`, carrying `options` in the given order.
+    fn write_board_snapshot(root: &Path, project_number: u64, field_name: &str, options: &[&str]) {
+        use crate::engine::gh_schema::{GhSchemaSnapshot, OptionId, ProjectFieldId};
+        let field_id = format!("PVTSSF_b{}", project_number);
+        let snapshot = GhSchemaSnapshot {
+            project_fields: vec![ProjectFieldId {
+                project_number,
+                field_name: field_name.to_string(),
+                id: field_id.clone(),
+                data_type: "SINGLE_SELECT".to_string(),
+            }],
+            single_select_options: options
+                .iter()
+                .map(|name| OptionId {
+                    field_id: field_id.clone(),
+                    name: (*name).to_string(),
+                    id: format!("opt_{}", name.to_lowercase().replace(' ', "_")),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        snapshot.save(root).unwrap();
+    }
+
+    #[test]
+    fn persist_board_lifecycles_writes_derived_states_into_config() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".lazyspec.toml"), GH_AUTHORITY_CONFIG_SRC).unwrap();
+        write_board_snapshot(
+            root,
+            7,
+            "Status",
+            &["Ready To Start", "In Progress", "Review", "Done"],
+        );
+
+        let config = Config::parse(GH_AUTHORITY_CONFIG_SRC).unwrap();
+        persist_board_lifecycles(root, &config).unwrap();
+
+        let out = std::fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
+        assert!(out.contains("# ticket type follows"), "got:\n{out}");
+        let reparsed = Config::parse(&out).unwrap();
+        let td = reparsed.type_by_name("ticket").unwrap();
+        assert_eq!(
+            td.lifecycle.states,
+            vec!["ready to start", "in progress", "review", "done"]
+        );
+        assert!(td.lifecycle.edges.is_empty());
+        assert_eq!(td.status_authority.as_deref(), Some("PROJECT-7"));
+    }
+
+    #[test]
+    fn persist_board_lifecycles_leaves_config_untouched_when_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".lazyspec.toml"), GH_AUTHORITY_CONFIG_IN_SYNC_SRC).unwrap();
+        write_board_snapshot(
+            root,
+            7,
+            "Status",
+            &["Ready To Start", "In Progress", "Review", "Done"],
+        );
+
+        let config = Config::parse(GH_AUTHORITY_CONFIG_IN_SYNC_SRC).unwrap();
+        persist_board_lifecycles(root, &config).unwrap();
+
+        let out = std::fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
+        assert_eq!(out, GH_AUTHORITY_CONFIG_IN_SYNC_SRC);
+    }
+
+    // An unresolvable board must never wipe the states the type already has, so
+    // the subject here is the config that declares four of them.
+    #[test]
+    fn persist_board_lifecycles_skips_a_board_with_no_status_field() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".lazyspec.toml"), GH_AUTHORITY_CONFIG_IN_SYNC_SRC).unwrap();
+        write_board_snapshot(root, 7, "Sprint", &[]);
+
+        let config = Config::parse(GH_AUTHORITY_CONFIG_IN_SYNC_SRC).unwrap();
+        persist_board_lifecycles(root, &config).unwrap();
+
+        let out = std::fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
+        assert_eq!(out, GH_AUTHORITY_CONFIG_IN_SYNC_SRC);
+    }
+
+    // STORY-248 AC10: STORY-224's canonical open/closed path is untouched -- a
+    // type nominating no authority board gets no derived lifecycle, even with a
+    // populated snapshot on disk.
+    #[test]
+    fn persist_board_lifecycles_ignores_types_without_status_authority() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".lazyspec.toml"), GH_NO_AUTHORITY_CONFIG_SRC).unwrap();
+        write_board_snapshot(root, 7, "Status", &["Review", "Done"]);
+
+        let config = Config::parse(GH_NO_AUTHORITY_CONFIG_SRC).unwrap();
+        persist_board_lifecycles(root, &config).unwrap();
+
+        let out = std::fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
+        assert_eq!(out, GH_NO_AUTHORITY_CONFIG_SRC);
+        let reparsed = Config::parse(&out).unwrap();
+        assert!(reparsed
+            .type_by_name("ticket")
+            .unwrap()
+            .lifecycle
+            .states
+            .is_empty());
+    }
 
     #[test]
     fn persist_clickup_lifecycles_writes_derived_states_into_config() {
@@ -578,6 +813,7 @@ name = "related-to"
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            status_authority: None,
             clickup_list_id: None,
             clickup_task_type: None,
             clickup_custom_field_map: None,
@@ -763,7 +999,7 @@ name = "related-to"
         fn graphql(&self, _: &str, _: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
             unimplemented!()
         }
-        fn project_item_fields(&self, _: &str, _: &str) -> Result<Vec<ProjectFieldValue>> {
+        fn project_items(&self, _: &str, _: &str) -> Result<Vec<ProjectItem>> {
             unimplemented!()
         }
         fn update_project_v2_item_field_value(
