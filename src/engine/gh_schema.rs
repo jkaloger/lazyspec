@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::engine::config::Lifecycle;
 use crate::engine::gh::{GhGraphql, GqlVar};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +99,67 @@ impl GhSchemaSnapshot {
             .iter()
             .find(|i| i.field_id == field_id && i.title == title)
             .map(|i| i.id.as_str())
+    }
+
+    /// Derive a [`Lifecycle`] from a board's `Status` column set: the states are
+    /// the option names lowercased, in board order, and there are no edges --
+    /// GitHub enforces no transition rules, so lazyspec adds no local gating
+    /// (the same empty-edge posture `derive_lifecycle` takes for ClickUp).
+    ///
+    /// Lowercasing is required, not cosmetic: [`Status`](crate::engine::document::Status)
+    /// lowercases on construction and on deserialize, so a state declared as
+    /// `In Progress` could never be matched by any status a doc actually carries.
+    ///
+    /// Board order is the stored `Vec` order and is deliberately NOT sorted --
+    /// `OptionId` carries no index to sort by, so sorting would replace the
+    /// board's column order with alphabetical noise.
+    ///
+    /// `None` (rather than an empty lifecycle) when the board has no `Status`
+    /// field or that field has no options, so a caller persisting the result
+    /// cannot silently wipe a type's states.
+    pub fn status_lifecycle(&self, project_number: u64) -> Option<Lifecycle> {
+        let field_id = self.field_id(project_number, "Status")?;
+        let states: Vec<String> = self
+            .single_select_options
+            .iter()
+            .filter(|o| o.field_id == field_id)
+            .map(|o| o.name.to_lowercase())
+            .collect();
+        if states.is_empty() {
+            return None;
+        }
+        Some(Lifecycle {
+            states,
+            edges: Vec::new(),
+        })
+    }
+
+    /// Swap one board's cached field ids for a freshly fetched set. The board's
+    /// prior fields and everything keyed off them go first, so a column that was
+    /// renamed or deleted on GitHub does not linger alongside its replacement.
+    pub fn replace_board_fields(
+        &mut self,
+        project_number: u64,
+        fields: Vec<ProjectFieldId>,
+        options: Vec<OptionId>,
+        iterations: Vec<IterationId>,
+    ) {
+        let stale: std::collections::HashSet<String> = self
+            .project_fields
+            .iter()
+            .filter(|f| f.project_number == project_number)
+            .map(|f| f.id.clone())
+            .collect();
+
+        self.project_fields
+            .retain(|f| f.project_number != project_number);
+        self.single_select_options
+            .retain(|o| !stale.contains(&o.field_id));
+        self.iterations.retain(|i| !stale.contains(&i.field_id));
+
+        self.project_fields.extend(fields);
+        self.single_select_options.extend(options);
+        self.iterations.extend(iterations);
     }
 }
 
@@ -293,6 +355,111 @@ mod tests {
                 }
             }
         })
+    }
+
+    /// A one-board field set whose `Status` single-select carries `options` in
+    /// the given order. `field_id` distinguishes boards within one snapshot.
+    fn status_field_response(field_id: &str, options: &[&str]) -> serde_json::Value {
+        let opts: Vec<serde_json::Value> = options
+            .iter()
+            .map(|name| {
+                serde_json::json!({
+                    "id": format!("opt_{}", name.to_lowercase().replace(' ', "_")),
+                    "name": name
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "data": {"organization": {"projectV2": {"fields": {"nodes": [
+                {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": field_id,
+                    "name": "Status",
+                    "dataType": "SINGLE_SELECT",
+                    "options": opts
+                }
+            ]}}}}
+        })
+    }
+
+    fn sprint_only_response() -> serde_json::Value {
+        serde_json::json!({
+            "data": {"organization": {"projectV2": {"fields": {"nodes": [
+                {
+                    "__typename": "ProjectV2IterationField",
+                    "id": "PVTIF_sprint",
+                    "name": "Sprint",
+                    "dataType": "ITERATION",
+                    "configuration": {"iterations": [{"id": "iter_1", "title": "Sprint 1"}]}
+                }
+            ]}}}}
+        })
+    }
+
+    /// Build a snapshot by parsing each board's canned field response, so the
+    /// vector order under test is the order GraphQL actually produced.
+    fn snapshot_with_boards(boards: &[(u64, serde_json::Value)]) -> GhSchemaSnapshot {
+        let mut snapshot = GhSchemaSnapshot::default();
+        for (number, resp) in boards {
+            let gh = MockGhClient::new().with_graphql_responses(vec![resp.clone()]);
+            let (fields, options, iterations) =
+                fetch_project_fields(&gh, "octo-org/repo", *number).unwrap();
+            snapshot.project_fields.extend(fields);
+            snapshot.single_select_options.extend(options);
+            snapshot.iterations.extend(iterations);
+        }
+        snapshot
+    }
+
+    #[test]
+    fn status_lifecycle_lowercases_option_names_in_board_order() {
+        let snapshot = snapshot_with_boards(&[(
+            7,
+            status_field_response(
+                "PVTSSF_b7",
+                &["Ready To Start", "In Progress", "Review", "Done"],
+            ),
+        )]);
+
+        let lifecycle = snapshot.status_lifecycle(7).expect("board 7 has a Status");
+
+        assert_eq!(
+            lifecycle.states,
+            vec!["ready to start", "in progress", "review", "done"]
+        );
+        assert!(lifecycle.edges.is_empty());
+    }
+
+    #[test]
+    fn status_lifecycle_returns_none_when_board_has_no_status_field() {
+        let snapshot = snapshot_with_boards(&[(7, sprint_only_response())]);
+        assert_eq!(snapshot.status_lifecycle(7), None);
+    }
+
+    #[test]
+    fn status_lifecycle_returns_none_when_status_field_has_no_options() {
+        let snapshot = snapshot_with_boards(&[(7, status_field_response("PVTSSF_b7", &[]))]);
+        assert_eq!(snapshot.status_lifecycle(7), None);
+    }
+
+    #[test]
+    fn status_lifecycle_reads_only_the_named_boards_status() {
+        let snapshot = snapshot_with_boards(&[
+            (7, status_field_response("PVTSSF_b7", &["Review", "Done"])),
+            (
+                9,
+                status_field_response("PVTSSF_b9", &["Triage", "Shipped"]),
+            ),
+        ]);
+
+        assert_eq!(
+            snapshot.status_lifecycle(7).unwrap().states,
+            vec!["review", "done"]
+        );
+        assert_eq!(
+            snapshot.status_lifecycle(9).unwrap().states,
+            vec!["triage", "shipped"]
+        );
     }
 
     fn project_fields_response() -> serde_json::Value {

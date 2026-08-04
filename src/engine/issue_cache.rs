@@ -267,7 +267,7 @@ impl IssueCache {
         if search_truncated {
             warnings.push(search_truncation_warning(&type_def.name));
         }
-        warnings.extend(self.refresh_schema_snapshot(gh_graphql, repo));
+        warnings.extend(self.refresh_schema_snapshot(gh_graphql, repo, config));
 
         Ok(RefreshResult {
             refreshed,
@@ -276,30 +276,58 @@ impl IssueCache {
         })
     }
 
-    /// Best-effort fetch + persist of the native field schema snapshot.
+    /// Best-effort fetch + persist of the native field schema snapshot: org
+    /// issue types, plus the project fields of every board a type nominates as
+    /// its status authority. A merge, not an overwrite -- boards that are not
+    /// re-fetched keep the ids they already had, so offline resolution never
+    /// regresses because of a board this call did not touch.
+    ///
     /// On GraphQL failure, the prior snapshot on disk is left untouched and a
-    /// warning is returned; offline validation still works against it.
+    /// warning is returned; offline validation still works against it. Per-board
+    /// failures are individually non-fatal, hence one warning each.
     fn refresh_schema_snapshot(
         &self,
         gh_graphql: &dyn GhGraphql,
         repo: &str,
-    ) -> Option<RefreshWarning> {
-        match gh_schema::fetch_snapshot(gh_graphql, repo) {
-            Ok(snapshot) => {
-                if let Err(e) = snapshot.save(&self.root) {
-                    return Some(RefreshWarning {
-                        message: format!("could not persist gh schema snapshot: {}", e),
-                    });
-                }
-                None
+        config: &Config,
+    ) -> Vec<RefreshWarning> {
+        let prior = gh_schema::GhSchemaSnapshot::load(&self.root);
+        let mut snapshot = match gh_schema::fetch_snapshot(gh_graphql, repo) {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                return vec![RefreshWarning {
+                    message: format!(
+                        "could not refresh gh schema snapshot (keeping prior, projects need `gh auth refresh -s project`): {}",
+                        e
+                    ),
+                }]
             }
-            Err(e) => Some(RefreshWarning {
-                message: format!(
-                    "could not refresh gh schema snapshot (keeping prior, projects need `gh auth refresh -s project`): {}",
-                    e
-                ),
-            }),
+        };
+        snapshot.project_fields = prior.project_fields;
+        snapshot.single_select_options = prior.single_select_options;
+        snapshot.iterations = prior.iterations;
+
+        let mut warnings = Vec::new();
+        for number in store_dispatch::authority_board_numbers(config) {
+            match gh_schema::fetch_project_fields(gh_graphql, repo, number) {
+                Ok((fields, options, iterations)) => {
+                    snapshot.replace_board_fields(number, fields, options, iterations)
+                }
+                Err(e) => warnings.push(RefreshWarning {
+                    message: format!(
+                        "could not refresh field schema for board {} (keeping prior, projects need `gh auth refresh -s project`): {}",
+                        number, e
+                    ),
+                }),
+            }
         }
+
+        if let Err(e) = snapshot.save(&self.root) {
+            warnings.push(RefreshWarning {
+                message: format!("could not persist gh schema snapshot: {}", e),
+            });
+        }
+        warnings
     }
 
     pub fn list_cached(&self, doc_type: &str) -> Vec<String> {
@@ -608,7 +636,7 @@ impl IssueCache {
 
         lock.save(&self.root)?;
 
-        warnings.extend(self.refresh_schema_snapshot(gh_graphql, repo));
+        warnings.extend(self.refresh_schema_snapshot(gh_graphql, repo, config));
 
         Ok(FetchResult {
             fetched: issues.len(),
@@ -993,7 +1021,8 @@ mod tests {
     use crate::engine::config::{NumberingStrategy, StoreBackend};
     use crate::engine::document::DocType;
     use crate::engine::gh::{
-        GhAuthor, GhGraphql, GhIssueDependencyApi, GhIssueReader, GhLabel, GqlVar,
+        test_support::MockGhClient, GhAuthor, GhGraphql, GhIssueDependencyApi, GhIssueReader,
+        GhLabel, GqlVar,
     };
     use anyhow::Result;
     use std::cell::RefCell;
@@ -1026,6 +1055,7 @@ mod tests {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            status_authority: None,
             clickup_list_id: None,
             clickup_task_type: None,
             clickup_custom_field_map: None,
@@ -1055,6 +1085,7 @@ mod tests {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            status_authority: None,
             clickup_list_id: None,
             clickup_task_type: None,
             clickup_custom_field_map: None,
@@ -1446,6 +1477,169 @@ mod tests {
 
         let snapshot = gh_schema::GhSchemaSnapshot::load(tmp.path());
         assert_eq!(snapshot.issue_type_id("Bug"), Some("IT_kwBug"));
+    }
+
+    fn bug_issue_types_response() -> serde_json::Value {
+        serde_json::json!({
+            "data": { "organization": { "issueTypes": {
+                "nodes": [{"id": "IT_kwBug", "name": "Bug"}]
+            } } }
+        })
+    }
+
+    fn board_fields_response(field_id: &str, options: &[&str]) -> serde_json::Value {
+        let opts: Vec<serde_json::Value> = options
+            .iter()
+            .map(|name| {
+                serde_json::json!({
+                    "id": format!("opt_{}", name.to_lowercase().replace(' ', "_")),
+                    "name": name
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "data": {"organization": {"projectV2": {"fields": {"nodes": [
+                {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": field_id,
+                    "name": "Status",
+                    "dataType": "SINGLE_SELECT",
+                    "options": opts
+                }
+            ]}}}}
+        })
+    }
+
+    fn config_with_status_authority(authority: Option<&str>) -> Config {
+        let mut config = Config::default();
+        config.documents.types = vec![TypeDef {
+            status_authority: authority.map(String::from),
+            ..story_type_def()
+        }];
+        config
+    }
+
+    fn write_board_7_snapshot(root: &Path, option_name: &str) {
+        gh_schema::GhSchemaSnapshot {
+            project_fields: vec![gh_schema::ProjectFieldId {
+                project_number: 7,
+                field_name: "Status".to_string(),
+                id: "PVTSSF_prior".to_string(),
+                data_type: "SINGLE_SELECT".to_string(),
+            }],
+            single_select_options: vec![gh_schema::OptionId {
+                field_id: "PVTSSF_prior".to_string(),
+                name: option_name.to_string(),
+                id: "opt_prior".to_string(),
+            }],
+            ..Default::default()
+        }
+        .save(root)
+        .unwrap();
+    }
+
+    #[test]
+    fn refresh_schema_snapshot_merges_authority_board_fields() {
+        let (cache, tmp) = make_cache();
+        let gh = MockGhClient::new().with_graphql_responses(vec![
+            bug_issue_types_response(),
+            board_fields_response(
+                "PVTSSF_b7",
+                &["Ready To Start", "In Progress", "Review", "Done"],
+            ),
+        ]);
+
+        let warnings = cache.refresh_schema_snapshot(
+            &gh,
+            "octo-org/repo",
+            &config_with_status_authority(Some("PROJECT-7")),
+        );
+
+        assert!(warnings.is_empty(), "warnings: {:?}", warnings);
+        let saved = gh_schema::GhSchemaSnapshot::load(tmp.path());
+        assert_eq!(saved.issue_type_id("Bug"), Some("IT_kwBug"));
+        assert_eq!(saved.field_id(7, "Status"), Some("PVTSSF_b7"));
+        assert_eq!(
+            saved.option_id("PVTSSF_b7", "In Progress"),
+            Some("opt_in_progress")
+        );
+        assert_eq!(
+            saved.status_lifecycle(7).unwrap().states,
+            vec!["ready to start", "in progress", "review", "done"]
+        );
+    }
+
+    #[test]
+    fn refresh_schema_snapshot_makes_no_project_calls_without_status_authority() {
+        let (cache, tmp) = make_cache();
+        let gh = MockGhClient::new().with_graphql_responses(vec![bug_issue_types_response()]);
+
+        let warnings = cache.refresh_schema_snapshot(
+            &gh,
+            "octo-org/repo",
+            &config_with_status_authority(None),
+        );
+
+        assert!(warnings.is_empty(), "warnings: {:?}", warnings);
+        assert_eq!(gh.graphql_calls.borrow().len(), 1);
+        let saved = gh_schema::GhSchemaSnapshot::load(tmp.path());
+        assert!(saved.project_fields.is_empty());
+    }
+
+    #[test]
+    fn refresh_schema_snapshot_keeps_prior_board_fields_when_project_fetch_fails() {
+        let (cache, tmp) = make_cache();
+        write_board_7_snapshot(tmp.path(), "Review");
+
+        // Only the issue-types response is canned; the project-fields query then
+        // runs out of responses and errors.
+        let gh = MockGhClient::new().with_graphql_responses(vec![bug_issue_types_response()]);
+
+        let warnings = cache.refresh_schema_snapshot(
+            &gh,
+            "octo-org/repo",
+            &config_with_status_authority(Some("PROJECT-7")),
+        );
+
+        assert_eq!(warnings.len(), 1, "warnings: {:?}", warnings);
+        assert!(
+            warnings[0].message.contains('7'),
+            "warning should name the board: {}",
+            warnings[0].message
+        );
+        let saved = gh_schema::GhSchemaSnapshot::load(tmp.path());
+        assert_eq!(saved.issue_type_id("Bug"), Some("IT_kwBug"));
+        assert_eq!(saved.field_id(7, "Status"), Some("PVTSSF_prior"));
+        assert_eq!(saved.status_lifecycle(7).unwrap().states, vec!["review"]);
+    }
+
+    #[test]
+    fn refresh_schema_snapshot_replaces_a_boards_stale_options() {
+        let (cache, tmp) = make_cache();
+        write_board_7_snapshot(tmp.path(), "Retired Column");
+
+        let gh = MockGhClient::new().with_graphql_responses(vec![
+            bug_issue_types_response(),
+            board_fields_response("PVTSSF_b7", &["Review", "Done"]),
+        ]);
+
+        let warnings = cache.refresh_schema_snapshot(
+            &gh,
+            "octo-org/repo",
+            &config_with_status_authority(Some("PROJECT-7")),
+        );
+
+        assert!(warnings.is_empty(), "warnings: {:?}", warnings);
+        let saved = gh_schema::GhSchemaSnapshot::load(tmp.path());
+        assert_eq!(
+            saved.status_lifecycle(7).unwrap().states,
+            vec!["review", "done"]
+        );
+        assert!(saved
+            .single_select_options
+            .iter()
+            .all(|o| o.name != "Retired Column"));
+        assert_eq!(saved.project_fields.len(), 1);
     }
 
     #[test]

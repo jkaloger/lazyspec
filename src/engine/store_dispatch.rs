@@ -2068,6 +2068,23 @@ pub fn board_number(doc_id: &str) -> Result<u64> {
         .map_err(|_| anyhow::anyhow!("'{}' does not name a Projects v2 board number", doc_id))
 }
 
+/// The Projects v2 board numbers nominated as status authorities across every
+/// configured type, deduped and ascending so a fetch over them is deterministic
+/// (two types may nominate the same board). A `status_authority` that does not
+/// name a board number is skipped, so it yields no lifecycle.
+pub fn authority_board_numbers(config: &Config) -> Vec<u64> {
+    let mut numbers: Vec<u64> = config
+        .documents
+        .types
+        .iter()
+        .filter_map(|t| t.status_authority.as_deref())
+        .filter_map(|id| board_number(id).ok())
+        .collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+    numbers
+}
+
 /// A project-board document store backed by GitHub Projects v2 (GraphQL).
 /// `create` authors a board via `createProjectV2` and binds the returned number
 /// as the doc id (`PROJECT-n`); `delete` bails (boards are removed on GitHub).
@@ -2725,6 +2742,7 @@ mod tests {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            status_authority: None,
             clickup_list_id: None,
             clickup_task_type: None,
             clickup_custom_field_map: None,
@@ -2740,6 +2758,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn authority_board_numbers_dedupes_and_sorts() {
+        let nominate = |name: &str, authority: Option<&str>| TypeDef {
+            name: name.to_string(),
+            status_authority: authority.map(String::from),
+            ..test_type_def(StoreBackend::GithubIssues)
+        };
+        let mut config = Config::default();
+        config.documents.types = vec![
+            nominate("story", Some("PROJECT-9")),
+            nominate("ticket", Some("PROJECT-7")),
+            nominate("bug", Some("PROJECT-7")),
+            nominate("rfc", None),
+            nominate("epic", Some("PROJEKT-seven")),
+        ];
+
+        assert_eq!(authority_board_numbers(&config), vec![7, 9]);
     }
 
     #[test]
@@ -4240,6 +4277,7 @@ mod tests {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            status_authority: None,
             clickup_list_id: None,
             clickup_task_type: None,
             clickup_custom_field_map: None,

@@ -184,6 +184,7 @@ fn create_with_parent_cross_store_rejected_before_mutation() {
         label_override: None,
         github_issue_tag: None,
         github_issue_type: None,
+        status_authority: None,
         clickup_list_id: None,
         clickup_task_type: None,
         clickup_custom_field_map: None,

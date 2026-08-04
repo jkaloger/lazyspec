@@ -96,6 +96,7 @@ fn update_type_table(entry: &mut Table, def: &TypeDef) {
     );
     set_opt_str(entry, "github_issue_tag", def.github_issue_tag.as_deref());
     set_opt_str(entry, "github_issue_type", def.github_issue_type.as_deref());
+    set_opt_str(entry, "status_authority", def.status_authority.as_deref());
     set_opt_str(entry, "clickup_list_id", def.clickup_list_id.as_deref());
     set_opt_int(entry, "clickup_task_type", def.clickup_task_type);
     set_lifecycle(entry, &def.lifecycle);
@@ -1134,6 +1135,7 @@ require_parent_status = "accepted"
                 label_override: None,
                 github_issue_tag: None,
                 github_issue_type: None,
+                status_authority: None,
                 clickup_list_id: None,
                 clickup_task_type: None,
                 clickup_custom_field_map: None,
@@ -1227,6 +1229,7 @@ name = "related-to"
                 label_override: None,
                 github_issue_tag: None,
                 github_issue_type: None,
+                status_authority: None,
                 clickup_list_id: None,
                 clickup_task_type: None,
                 clickup_custom_field_map: None,
@@ -1557,6 +1560,53 @@ inverse = "implemented-by"
         assert!(!out.contains("severity"));
         let reparsed = Config::parse(&out).unwrap();
         assert!(reparsed.documents.types[0].attributes.is_empty());
+    }
+
+    #[test]
+    fn unchanged_status_authority_survives_a_rewrite_with_its_decor() {
+        const AUTHORITY_SRC: &str = r#"[github]
+repo = "owner/repo"
+
+[[types]]
+name = "bug"
+plural = "bugs"
+dir = "docs/bugs"
+prefix = "BUG"
+store = "github-issues"
+# the board that owns this type's lifecycle
+status_authority = "PROJECT-7"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+"#;
+        let buffer = Config::parse(AUTHORITY_SRC).unwrap();
+
+        let out = write_config_in_place(AUTHORITY_SRC, &buffer).unwrap();
+
+        assert_eq!(out, AUTHORITY_SRC);
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(
+            reparsed.documents.types[0].status_authority.as_deref(),
+            Some("PROJECT-7")
+        );
+    }
+
+    #[test]
+    fn setting_status_authority_writes_the_key() {
+        let buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.documents.types[0].status_authority = Some("PROJECT-7".to_string());
+            c
+        };
+
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(
+            reparsed.documents.types[0].status_authority.as_deref(),
+            Some("PROJECT-7")
+        );
     }
 
     // A freshly appended type carries its attributes in the same render.
