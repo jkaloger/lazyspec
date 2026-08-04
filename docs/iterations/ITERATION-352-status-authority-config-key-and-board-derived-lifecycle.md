@@ -1,7 +1,7 @@
 ---
 title: status_authority config key and board-derived lifecycle
 type: iteration
-status: in-progress
+status: complete
 author: jkaloger
 date: 2026-08-04
 tags: []

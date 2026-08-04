@@ -1,7 +1,7 @@
 ---
 title: Doc status reads from the authority board Status cell
 type: iteration
-status: accepted
+status: complete
 author: jkaloger
 date: 2026-08-04
 tags: []

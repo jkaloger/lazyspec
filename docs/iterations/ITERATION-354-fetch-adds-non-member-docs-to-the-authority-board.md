@@ -1,7 +1,7 @@
 ---
 title: Fetch adds non-member docs to the authority board
 type: iteration
-status: accepted
+status: complete
 author: jkaloger
 date: 2026-08-04
 tags: []
