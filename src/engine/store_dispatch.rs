@@ -624,6 +624,29 @@ fn authority_status_cell(items: &[gh::ProjectItem], board: u64) -> AuthorityCell
         .map_or(AuthorityCell::Empty, AuthorityCell::Set)
 }
 
+/// Whether `meta` needs its project-item board memberships read at all, and
+/// under what content node id -- the same predicate
+/// [`reconcile_project_fields_for_meta`] applies before its own read, factored
+/// out so a caller can resolve every target in a doc set up front and fetch
+/// them in one batched [`GhGraphql::project_items_batch`] call instead of one
+/// [`GhGraphql::project_items`] call per doc (see
+/// `sync::reconcile_project_fields_into_cache`).
+pub fn reconcile_target_node_id(
+    config: &Config,
+    issue_map: &IssueMap,
+    meta: &DocMeta,
+) -> Option<String> {
+    let boards = membership_board_numbers(config, meta);
+    let authority = authority_board_for(config, meta);
+    if boards.is_empty() && authority.is_none() {
+        return None;
+    }
+    issue_map
+        .get(&meta.id)
+        .map(|e| e.node_id.clone())
+        .filter(|n| !n.is_empty())
+}
+
 /// Read the per-item project field values for `meta` across every board it is a
 /// member of and inject them into `meta.attributes` keyed
 /// `PROJECT-{number}.{field_name}`; then, when `meta`'s type nominates a
@@ -651,6 +674,12 @@ fn authority_status_cell(items: &[gh::ProjectItem], board: u64) -> AuthorityCell
 ///
 /// A missing node id, or a doc with neither memberships nor an authority board,
 /// is a no-op.
+///
+/// The read is a single [`GhGraphql::project_items`] call, so a caller
+/// reconciling many docs at once should not call this in a loop over an
+/// unbounded doc set -- see [`reconcile_target_node_id`], which factors out the
+/// same "does this doc need a read, and under what node id" predicate so that
+/// read can go out batched (`GhGraphql::project_items_batch`) instead.
 pub fn reconcile_project_fields_for_meta(
     client: &dyn GhGraphql,
     repo: &str,
@@ -661,14 +690,7 @@ pub fn reconcile_project_fields_for_meta(
 ) -> Result<Vec<String>> {
     let boards = membership_board_numbers(config, meta);
     let authority = authority_board_for(config, meta);
-    if boards.is_empty() && authority.is_none() {
-        return Ok(Vec::new());
-    }
-    let Some(node_id) = issue_map
-        .get(&meta.id)
-        .map(|e| e.node_id.clone())
-        .filter(|n| !n.is_empty())
-    else {
+    let Some(node_id) = reconcile_target_node_id(config, issue_map, meta) else {
         return Ok(Vec::new());
     };
 

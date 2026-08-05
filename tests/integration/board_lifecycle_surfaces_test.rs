@@ -758,11 +758,13 @@ fn an_unreadable_board_keeps_the_last_known_status_and_warns() {
         cached_ticket(&tmp, &config).status,
         Status::new("in progress")
     );
+    // The board read is one batched call for the whole fetch, so the warning
+    // reports the affected issue count rather than naming each doc.
     assert!(
         outcomes[0]
             .warnings
             .iter()
-            .any(|w| w.contains("TICKET-42") && w.contains("project fields")),
+            .any(|w| w.contains("project fields") && w.contains("1 issues")),
         "got: {:?}",
         outcomes[0].warnings
     );

@@ -464,6 +464,15 @@ pub(crate) fn fetch_git_ref(
 /// per-doc failure is returned as a warning and the rest still process (the
 /// engine emits no stderr, so warnings flow back to the caller via the outcome).
 /// Relocated from `cli::fetch::inject_project_fields_into_cache` (RFC-057).
+///
+/// The board-membership read is one batched [`GhGraphql::project_items_batch`]
+/// call across every doc that needs it, not one [`GhGraphql::project_items`]
+/// call per doc: every doc is parsed first so the full target set (and its
+/// content node ids) is known before any network call, then
+/// [`store_dispatch::reconcile_project_fields_for_meta`] runs per doc unchanged,
+/// served out of that batch via [`PrefetchedProjectItems`]. A doc whose target
+/// falls in a chunk that failed to fetch is left unwritten this pass, exactly
+/// as a per-doc read failure was before batching.
 fn reconcile_project_fields_into_cache(
     root: &Path,
     client: &dyn GhGraphql,
@@ -474,7 +483,12 @@ fn reconcile_project_fields_into_cache(
 ) -> Vec<String> {
     let mut warnings = Vec::new();
     let cache_dir = root.join(".lazyspec/cache").join(&type_def.name);
-    let mut board_ids = store_dispatch::BoardNodeIds::default();
+
+    struct Loaded {
+        meta: crate::engine::document::DocMeta,
+        body: String,
+    }
+    let mut loaded: Vec<Loaded> = Vec::new();
     for path in cache_doc_paths(&cache_dir) {
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
@@ -493,28 +507,105 @@ fn reconcile_project_fields_into_cache(
         if meta.id.is_empty() {
             meta.id = crate::engine::store::extract_id(&path);
         }
+        loaded.push(Loaded { meta, body });
+    }
+
+    let targets: Vec<(usize, String)> = loaded
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            store_dispatch::reconcile_target_node_id(config, issue_map, &l.meta).map(|n| (i, n))
+        })
+        .collect();
+
+    let mut skip: HashSet<usize> = HashSet::new();
+    let items_by_node = if targets.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        let node_ids: Vec<String> = targets.iter().map(|(_, n)| n.clone()).collect();
+        match client.project_items_batch(repo, &node_ids) {
+            Ok(m) => m,
+            Err(e) => {
+                warnings.push(format!(
+                    "could not read project fields for {} issues, skipping: {}",
+                    targets.len(),
+                    e
+                ));
+                skip.extend(targets.iter().map(|(i, _)| *i));
+                std::collections::HashMap::new()
+            }
+        }
+    };
+    let served = PrefetchedProjectItems {
+        inner: client,
+        items: items_by_node,
+    };
+
+    let mut board_ids = store_dispatch::BoardNodeIds::default();
+    for (i, _) in &targets {
+        if skip.contains(i) {
+            continue;
+        }
+        let l = &mut loaded[*i];
         match store_dispatch::reconcile_project_fields_for_meta(
-            client,
+            &served,
             repo,
             issue_map,
             config,
             &mut board_ids,
-            &mut meta,
+            &mut l.meta,
         ) {
             Ok(w) => warnings.extend(w),
             Err(e) => {
                 warnings.push(format!(
                     "could not read project fields for {}: {}",
-                    meta.id, e
+                    l.meta.id, e
                 ));
-                continue;
+                skip.insert(*i);
             }
         }
-        if let Err(e) = store_dispatch::write_cache_file(root, type_def, &meta, &body) {
-            warnings.push(format!("could not rewrite cache for {}: {}", meta.id, e));
+    }
+
+    for (i, l) in loaded.iter().enumerate() {
+        if skip.contains(&i) {
+            continue;
+        }
+        if let Err(e) = store_dispatch::write_cache_file(root, type_def, &l.meta, &l.body) {
+            warnings.push(format!("could not rewrite cache for {}: {}", l.meta.id, e));
         }
     }
     warnings
+}
+
+/// Wraps a real [`GhGraphql`] client so [`GhGraphql::project_items`] serves a
+/// pre-fetched batch (keyed by content node id) instead of issuing its own
+/// per-doc call -- the seam that lets
+/// [`store_dispatch::reconcile_project_fields_for_meta`] run unmodified, one doc
+/// at a time, against a read that already happened once for the whole batch.
+/// Every other method, notably the authority-board-add mutation
+/// `reconcile_project_fields_for_meta` can trigger, passes straight through to
+/// `inner`.
+struct PrefetchedProjectItems<'a> {
+    inner: &'a dyn GhGraphql,
+    items: std::collections::HashMap<String, Vec<crate::engine::gh::ProjectItem>>,
+}
+
+impl GhGraphql for PrefetchedProjectItems<'_> {
+    fn graphql(
+        &self,
+        query: &str,
+        vars: &[(&str, crate::engine::gh::GqlVar)],
+    ) -> Result<serde_json::Value> {
+        self.inner.graphql(query, vars)
+    }
+
+    fn project_items(
+        &self,
+        _repo: &str,
+        content_node_id: &str,
+    ) -> Result<Vec<crate::engine::gh::ProjectItem>> {
+        Ok(self.items.get(content_node_id).cloned().unwrap_or_default())
+    }
 }
 
 /// Every cached doc of one type: the flat `<id>.md` files plus the one nesting

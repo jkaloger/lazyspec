@@ -3,6 +3,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::process::Command;
 use std::time::Duration;
@@ -473,6 +474,27 @@ pub trait GhIssueDependencyApi {
         blocked_number: u64,
         blocking_number: u64,
     ) -> Result<()>;
+
+    /// Batched variant of [`list_blocked_by`](GhIssueDependencyApi::list_blocked_by):
+    /// resolve native `blocked-by` edges for many issues at once. `issues`
+    /// pairs each issue's content node id with its number -- the node id is
+    /// what the real GraphQL batch keys on (`nodes(ids:)`), the number is
+    /// what every caller and the REST fallback both already index by. The
+    /// default loops one `list_blocked_by` REST call per issue (correct,
+    /// serial, and what every test double gets for free); `GhCli` overrides it
+    /// with a single `blockedBy` query per [`GH_NODES_BATCH_MAX`]-sized chunk
+    /// of node ids.
+    fn list_blocked_by_batch(
+        &self,
+        repo: &str,
+        issues: &[(String, u64)],
+    ) -> Result<HashMap<u64, Vec<u64>>> {
+        let mut out = HashMap::new();
+        for (_, number) in issues {
+            out.insert(*number, self.list_blocked_by(repo, *number)?);
+        }
+        Ok(out)
+    }
 }
 
 pub trait GhAuth {
@@ -666,6 +688,25 @@ pub trait GhGraphql {
             ],
         )?;
         require_project_item(&resp, "clearProjectV2ItemFieldValue")
+    }
+
+    /// Batched variant of [`project_items`](GhGraphql::project_items): resolve
+    /// board memberships for many issues in as few round trips as the backend
+    /// can manage. The default loops one `project_items` call per id -- correct
+    /// but serial, and what every test double gets for free. `GhCli` overrides
+    /// this with a single `nodes(ids:)` query per `GH_NODES_BATCH_MAX`-sized
+    /// chunk, so a multi-doc pass (`sync::reconcile_project_fields_into_cache`)
+    /// stops paying one `gh` subprocess per doc.
+    fn project_items_batch(
+        &self,
+        repo: &str,
+        content_node_ids: &[String],
+    ) -> Result<HashMap<String, Vec<ProjectItem>>> {
+        let mut out = HashMap::new();
+        for id in content_node_ids {
+            out.insert(id.clone(), self.project_items(repo, id)?);
+        }
+        Ok(out)
     }
 }
 
@@ -944,6 +985,26 @@ impl<T: GhGraphql + AsAny> GhProjectsClient for T {
 
 const PROJECT_ITEM_FIELDS_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on Issue { projectItems(first: 50) { nodes { id project { number } fieldValues(first: 50) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldIterationValue { title field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } } } } } } } }";
 
+/// GitHub caps a single `nodes(ids:)` selection at 100 ids (mirrors
+/// `gh_subissue::SUB_ISSUE_BATCH_MAX`). Shared by every `nodes(ids:)` batch in
+/// this file -- project items and native blocked-by alike -- since the cap is
+/// GitHub's, not a property of either feature.
+pub const GH_NODES_BATCH_MAX: usize = 100;
+
+/// Batched variant of [`PROJECT_ITEM_FIELDS_QUERY`]: the same field selection,
+/// resolved for many issues at once via `nodes(ids:)`.
+const PROJECT_ITEM_FIELDS_BATCH_QUERY: &str = "query($ids: [ID!]!) { nodes(ids: $ids) { ... on Issue { id projectItems(first: 50) { nodes { id project { number } fieldValues(first: 50) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldIterationValue { title field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } } } } } } } }";
+
+/// Batched read of native `blockedBy` edges via `nodes(ids:)`. GitHub's
+/// GraphQL schema exposes `blockedBy`/`blocking` directly on `Issue`
+/// (`gh issue` surfaced them as of CLI 2.94.0), so the dependency read-back
+/// batches the same way sub-issue parentage does, even though its write side
+/// ([`GhIssueDependencyApi::list_blocked_by`]) stays REST -- GitHub's REST
+/// dependency endpoints have no bulk form. The outer `number` is selected so
+/// results key by issue number directly, without a separate node-id -> number
+/// map at the call site.
+const BLOCKED_BY_BATCH_QUERY: &str = "query($ids: [ID!]!) { nodes(ids: $ids) { ... on Issue { number blockedBy(first: 100) { nodes { number } } } } }";
+
 const UPDATE_PROJECT_FIELD_MUTATION: &str = "mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) { updateProjectV2ItemFieldValue(input: {projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: __VALUE__}) { projectV2Item { id } } }";
 
 const CLEAR_PROJECT_FIELD_MUTATION: &str = "mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) { clearProjectV2ItemFieldValue(input: {projectId: $projectId, itemId: $itemId, fieldId: $fieldId}) { projectV2Item { id } } }";
@@ -954,14 +1015,74 @@ const CLEAR_PROJECT_FIELD_MUTATION: &str = "mutation($projectId: ID!, $itemId: I
 /// no resolvable name/typename are skipped; an item whose board number is
 /// missing is skipped entirely, but an item with no field values is kept.
 pub fn parse_project_items(resp: &serde_json::Value) -> Vec<ProjectItem> {
-    let mut out: Vec<ProjectItem> = Vec::new();
     let Some(items) = resp
         .pointer("/data/node/projectItems/nodes")
         .and_then(|v| v.as_array())
     else {
+        return Vec::new();
+    };
+    parse_project_items_array(items)
+}
+
+/// Parse the `projectItems.nodes` of a [`PROJECT_ITEM_FIELDS_BATCH_QUERY`]
+/// response into `content_node_id -> its project items`. A node absent from
+/// GitHub's response (non-Issue, inaccessible, or dropped by a failed chunk
+/// upstream) is simply absent from the map, mirroring
+/// `gh_subissue::fetch_sub_issue_nodes_batch`.
+fn parse_project_items_batch(resp: &serde_json::Value) -> HashMap<String, Vec<ProjectItem>> {
+    let mut out = HashMap::new();
+    let Some(nodes) = resp.pointer("/data/nodes").and_then(|v| v.as_array()) else {
         return out;
     };
+    for node in nodes {
+        let Some(id) = node.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let items = node
+            .pointer("/projectItems/nodes")
+            .and_then(|v| v.as_array())
+            .map(|arr| parse_project_items_array(arr))
+            .unwrap_or_default();
+        out.insert(id.to_string(), items);
+    }
+    out
+}
 
+/// Parse a [`BLOCKED_BY_BATCH_QUERY`] response into `issue number -> the
+/// numbers of the issues blocking it`. A node with no resolvable `number`
+/// (non-Issue, inaccessible, or dropped by a failed chunk upstream) is simply
+/// absent from the map.
+fn parse_blocked_by_batch(resp: &serde_json::Value) -> HashMap<u64, Vec<u64>> {
+    let mut out = HashMap::new();
+    let Some(nodes) = resp.pointer("/data/nodes").and_then(|v| v.as_array()) else {
+        return out;
+    };
+    for node in nodes {
+        let Some(number) = node.get("number").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        let blockers = node
+            .pointer("/blockedBy/nodes")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|n| n.get("number").and_then(|v| v.as_u64()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.insert(number, blockers);
+    }
+    out
+}
+
+/// Shared per-item parse behind both [`parse_project_items`] and
+/// [`parse_project_items_batch`]: one [`ProjectItem`] per board membership,
+/// each carrying one [`ProjectFieldValue`] per set field value. Unset fields
+/// and field values with no resolvable name/typename are skipped; an item
+/// whose board number is missing is skipped entirely, but an item with no
+/// field values is kept.
+fn parse_project_items_array(items: &[serde_json::Value]) -> Vec<ProjectItem> {
+    let mut out: Vec<ProjectItem> = Vec::new();
     for item in items {
         let Some(number) = item.pointer("/project/number").and_then(|v| v.as_u64()) else {
             continue;
@@ -1486,6 +1607,23 @@ impl GhIssueDependencyApi for GhCli {
         self.run_gh_checked(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
         Ok(())
     }
+
+    fn list_blocked_by_batch(
+        &self,
+        _repo: &str,
+        issues: &[(String, u64)],
+    ) -> Result<HashMap<u64, Vec<u64>>> {
+        let node_ids: Vec<String> = issues.iter().map(|(id, _)| id.clone()).collect();
+        let mut out = HashMap::new();
+        for chunk in node_ids.chunks(GH_NODES_BATCH_MAX) {
+            let resp = self.graphql(
+                BLOCKED_BY_BATCH_QUERY,
+                &[("ids", GqlVar::StrList(chunk.to_vec()))],
+            )?;
+            out.extend(parse_blocked_by_batch(&resp));
+        }
+        Ok(out)
+    }
 }
 
 impl GhAuth for GhCli {
@@ -1558,6 +1696,22 @@ impl GhGraphql for GhCli {
             &[("id", GqlVar::Str(content_node_id.to_string()))],
         )?;
         Ok(parse_project_items(&resp))
+    }
+
+    fn project_items_batch(
+        &self,
+        _repo: &str,
+        content_node_ids: &[String],
+    ) -> Result<HashMap<String, Vec<ProjectItem>>> {
+        let mut out = HashMap::new();
+        for chunk in content_node_ids.chunks(GH_NODES_BATCH_MAX) {
+            let resp = self.graphql(
+                PROJECT_ITEM_FIELDS_BATCH_QUERY,
+                &[("ids", GqlVar::StrList(chunk.to_vec()))],
+            )?;
+            out.extend(parse_project_items_batch(&resp));
+        }
+        Ok(out)
     }
 }
 

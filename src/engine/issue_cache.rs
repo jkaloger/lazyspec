@@ -495,7 +495,11 @@ impl IssueCache {
         // inject the declared inverse relation (`blocked-by`) toward each
         // blocking issue's doc. Mirrors the milestone read-back -- the forward
         // `blocks` edge on the blocker is derived virtually in `build_links`,
-        // never stored. A per-issue read failure warns and skips that issue.
+        // never stored. One batched read for the whole fetch
+        // (`GhIssueDependencyApi::list_blocked_by_batch`, chunked to
+        // `gh::GH_NODES_BATCH_MAX`) rather than one request per issue; a
+        // chunk's failure warns and skips every issue in that chunk, same as a
+        // single-issue read failure did before batching.
         if let Some(dep_rel) = config
             .relationship_by_github_native("dependency")
             .and_then(|r| r.inverse.as_deref())
@@ -509,30 +513,40 @@ impl IssueCache {
                 .zip(parsed.iter())
                 .map(|(issue, p)| (issue.number, p.id.clone()))
                 .collect();
-            for (issue, p) in issues.iter().zip(parsed.iter_mut()) {
-                let blockers = match gh_dependency.list_blocked_by(repo, issue.number) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        warnings.push(RefreshWarning {
-                            message: format!(
-                                "could not read native dependencies for issue #{}, skipping: {}",
-                                issue.number, e
-                            ),
-                        });
-                        continue;
+            // An issue with no node id can't key the GraphQL batch -- the same
+            // constraint the sub-issue parentage read above already accepts.
+            let pairs: Vec<(String, u64)> = issues
+                .iter()
+                .filter(|i| !i.id.is_empty())
+                .map(|i| (i.id.clone(), i.number))
+                .collect();
+            match gh_dependency.list_blocked_by_batch(repo, &pairs) {
+                Ok(blocked_by) => {
+                    for (issue, p) in issues.iter().zip(parsed.iter_mut()) {
+                        let Some(blockers) = blocked_by.get(&issue.number) else {
+                            continue;
+                        };
+                        for &blocker in blockers {
+                            let target = batch.get(&blocker).cloned().or_else(|| {
+                                issue_map.shorthand_for_number(blocker).map(String::from)
+                            });
+                            if let Some(target) = target {
+                                p.meta.related.push(Relation {
+                                    rel_type: RelationType::new(dep_rel),
+                                    target,
+                                });
+                            }
+                        }
                     }
-                };
-                for blocker in blockers {
-                    let target = batch
-                        .get(&blocker)
-                        .cloned()
-                        .or_else(|| issue_map.shorthand_for_number(blocker).map(String::from));
-                    if let Some(target) = target {
-                        p.meta.related.push(Relation {
-                            rel_type: RelationType::new(dep_rel),
-                            target,
-                        });
-                    }
+                }
+                Err(e) => {
+                    warnings.push(RefreshWarning {
+                        message: format!(
+                            "could not read native dependencies for {} issues, skipping: {}",
+                            pairs.len(),
+                            e
+                        ),
+                    });
                 }
             }
         }
