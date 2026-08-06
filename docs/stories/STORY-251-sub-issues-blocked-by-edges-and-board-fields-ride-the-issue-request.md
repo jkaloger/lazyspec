@@ -1,7 +1,7 @@
 ---
 title: Sub-issues, blocked-by edges and board fields ride the issue request
 type: story
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-08-06
 tags: []

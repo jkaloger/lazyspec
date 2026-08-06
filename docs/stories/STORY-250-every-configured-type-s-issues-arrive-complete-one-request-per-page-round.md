@@ -1,7 +1,7 @@
 ---
 title: Every configured type's issues arrive complete, one request per page round
 type: story
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-08-06
 tags: []
