@@ -2,9 +2,9 @@ use anyhow::Result;
 use lazyspec::engine::config::Config;
 use lazyspec::engine::document::Status;
 use lazyspec::engine::gh::{
-    GhAuthor, GhComment, GhFieldKind, GhFieldValueInput, GhFieldValueRepr, GhGraphql, GhIssue,
-    GhIssueDependencyApi, GhIssueReader, GhIssueWriter, GhLabel, GqlVar, ProjectFieldValue,
-    ProjectItem,
+    test_support, GhAuthor, GhComment, GhFieldKind, GhFieldValueInput, GhFieldValueRepr, GhGraphql,
+    GhIssue, GhIssueDependencyApi, GhIssueReader, GhIssueWriter, GhLabel, GqlVar,
+    ProjectFieldValue, ProjectItem,
 };
 use lazyspec::engine::gh_schema::{GhSchemaSnapshot, OptionId, ProjectFieldId};
 use lazyspec::engine::issue_body::TypeMatchRule;
@@ -12,7 +12,7 @@ use lazyspec::engine::issue_cache::IssueCache;
 use lazyspec::engine::issue_map::IssueMap;
 use lazyspec::engine::store::Store;
 use lazyspec::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
-use lazyspec::engine::sync::{sync_all, GhIssueSync, GhMaps, SyncContext, SyncOutcome, Syncers};
+use lazyspec::engine::sync::{sync_all, GhMaps, GhRound, SyncContext, SyncOutcome, Syncers};
 use lazyspec::tui::state::App;
 use std::cell::RefCell;
 use std::fs;
@@ -409,6 +409,9 @@ fn status_item(board: u64, status: &str) -> ProjectItem {
     }
 }
 
+/// `issue_list` panics: a fetch reads every type's issues off the composed
+/// round now (RFC-065), so any REST list call is the regression this asserts
+/// against. `issue_view` stays -- a mutation's read-back is correctly one read.
 impl GhIssueReader for BoardGh {
     fn issue_list(
         &self,
@@ -417,7 +420,7 @@ impl GhIssueReader for BoardGh {
         _json_fields: &[String],
         _limit: Option<u64>,
     ) -> Result<Vec<GhIssue>> {
-        Ok(self.issues.clone())
+        unreachable!("a fetch reads issues off the composed round, never REST")
     }
     fn issue_view(&self, _repo: &str, number: u64) -> Result<GhIssue> {
         self.remote_calls
@@ -484,6 +487,27 @@ impl GhIssueWriter for BoardGh {
 impl GhGraphql for BoardGh {
     fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
         self.remote_calls.borrow_mut().push("graphql".to_string());
+        if lazyspec::engine::gh_fetch::is_round_query(query) {
+            let mut resp = test_support::with_issue_pages(
+                query,
+                test_support::round_response(&[], &[], &[]),
+                &self.issues,
+            );
+            if self.items_unreadable {
+                return Ok(test_support::without_project_items(
+                    resp,
+                    "your token has not been granted the required scopes: project",
+                ));
+            }
+            for (node_id, items) in &self.items {
+                resp = test_support::with_project_items_edge(
+                    resp,
+                    node_id,
+                    test_support::project_items_edge(items),
+                );
+            }
+            return Ok(resp);
+        }
         if query.contains("mutation") {
             self.mutations.borrow_mut().push(query.to_string());
         }
@@ -526,6 +550,8 @@ impl GhGraphql for BoardGh {
         }
         Ok(serde_json::json!({ "data": { "nodes": [] } }))
     }
+    /// The write path's read-back only: a fetch takes board memberships off the
+    /// composed round, so a call here during a fetch is the regression.
     fn project_items(&self, _repo: &str, content_node_id: &str) -> Result<Vec<ProjectItem>> {
         self.remote_calls
             .borrow_mut()
@@ -565,9 +591,6 @@ impl GhGraphql for BoardGh {
 }
 
 impl GhIssueDependencyApi for BoardGh {
-    fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
-        Ok(vec![])
-    }
     fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
         unreachable!("no dependency writes on the fetch read path")
     }
@@ -585,20 +608,24 @@ fn sync_tickets(tmp: &TempDir, config: &Config, gh: &BoardGh) -> Vec<SyncOutcome
             issue_map: &mut issue_map,
         }),
         clickup: None,
+        fetch: None,
+    };
+    let round = GhRound {
+        gh,
+        repo: "octo-org/repo".to_string(),
     };
     let mut syncers = Syncers {
-        issue: Some(GhIssueSync {
-            reader: gh,
-            graphql: gh,
-            dependency: gh,
-            repo: "octo-org/repo".to_string(),
-            type_rules: config
-                .documents
-                .types
-                .iter()
-                .map(TypeMatchRule::from)
-                .collect(),
-        }),
+        issue: Some(
+            round.issue_sync(
+                config
+                    .documents
+                    .types
+                    .iter()
+                    .map(TypeMatchRule::from)
+                    .collect(),
+            ),
+        ),
+        round: Some(round),
         ..Default::default()
     };
     sync_all(tmp.path(), config, &mut ctx, &mut syncers, None)
@@ -758,11 +785,14 @@ fn an_unreadable_board_keeps_the_last_known_status_and_warns() {
         cached_ticket(&tmp, &config).status,
         Status::new("in progress")
     );
+    // The memberships ride the round, so the warning is the round's -- one for
+    // the whole read, naming the scope that withheld it.
     assert!(
         outcomes[0]
             .warnings
             .iter()
-            .any(|w| w.contains("TICKET-42") && w.contains("project fields")),
+            .any(|w| w.contains("could not read project fields")
+                && w.contains("gh auth refresh -s project")),
         "got: {:?}",
         outcomes[0].warnings
     );

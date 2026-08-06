@@ -2,9 +2,7 @@ use crate::engine::clickup::ClickupClient;
 use crate::engine::config::{Config, Lifecycle, StoreBackend};
 use crate::engine::config_write::write_config_in_place;
 use crate::engine::credentials::Token;
-use crate::engine::gh::{
-    GhGraphql, GhIssueDependencyApi, GhIssueReader, GhIssueWriter, GhMilestoneApi,
-};
+use crate::engine::gh::GhGraphql;
 use crate::engine::gh_schema::GhSchemaSnapshot;
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::github::resolve_repo;
@@ -13,8 +11,8 @@ use crate::engine::issue_map::IssueMap;
 use crate::engine::status_colors::StatusColors;
 use crate::engine::store_dispatch;
 use crate::engine::sync::{
-    sync_all, ClickupMaps, ClickupSync, GhIssueSync, GhMaps, GhMilestoneSync, GitRefSync,
-    SyncContext, Syncers,
+    sync_all, ClickupMaps, ClickupSync, GhMaps, GhMilestoneSync, GhRound, GitRefSync, SyncContext,
+    Syncers,
 };
 use crate::engine::task_map::TaskMap;
 use anyhow::{bail, Context, Result};
@@ -24,7 +22,7 @@ use std::path::Path;
 pub fn run(
     root: &Path,
     config: &Config,
-    gh: &(impl GhIssueReader + GhIssueWriter + GhGraphql + GhMilestoneApi + GhIssueDependencyApi),
+    gh: &dyn GhGraphql,
     git_ref_ops: &dyn GitRefOps,
     clickup: &dyn ClickupClient,
     clickup_token: Option<&Token>,
@@ -162,27 +160,19 @@ pub fn run(
                 }),
                 _ => None,
             },
+            fetch: None,
         };
 
         let mut syncers = Syncers::default();
-        if !fetch_milestones.is_empty() {
-            syncers.milestone = Some(GhMilestoneSync {
-                gh,
-                repo: repo
-                    .clone()
-                    .expect("repo resolved when a milestone type fetches"),
-            });
+        if let Some(repo) = repo.clone() {
+            let round = GhRound { gh, repo };
+            if !fetch_gh.is_empty() {
+                syncers.issue = Some(round.issue_sync(type_rules));
+            }
+            syncers.round = Some(round);
         }
-        if !fetch_gh.is_empty() {
-            syncers.issue = Some(GhIssueSync {
-                reader: gh,
-                graphql: gh,
-                dependency: gh,
-                repo: repo
-                    .clone()
-                    .expect("repo resolved when an issue type fetches"),
-                type_rules,
-            });
+        if !fetch_milestones.is_empty() {
+            syncers.milestone = Some(GhMilestoneSync);
         }
         if !fetch_gitref.is_empty() {
             syncers.git_ref = Some(GitRefSync {
@@ -371,7 +361,9 @@ mod tests {
     use crate::engine::clickup::{ClickupUser, FakeClickupClient};
     use crate::engine::config::{NumberingStrategy, StoreBackend, TypeDef};
     use crate::engine::gh::{
-        GhComment, GhFieldValueInput, GhIssue, GhMilestone, GqlVar, ProjectItem,
+        test_support::{assert_one_composed_round, ten_type_config_src, GhRequestCounter},
+        GhComment, GhFieldValueInput, GhIssue, GhIssueReader, GhIssueWriter, GhMilestone,
+        GhMilestoneApi, GqlVar, ProjectItem,
     };
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use tempfile::TempDir;
@@ -491,6 +483,34 @@ name = "related-to"
             ..Default::default()
         };
         snapshot.save(root).unwrap();
+    }
+
+    // STORY-249 AC1/AC2 and STORY-251, on the CLI surface: milestones, org issue
+    // types, every authority board's field schema, and the issue enrichment all
+    // arrive together. Twelve types' worth of that work costs one composed
+    // request, and no other GraphQL document is issued at all.
+    #[test]
+    fn milestone_issue_type_and_board_schema_work_costs_one_composed_request() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let src = ten_type_config_src();
+        std::fs::write(root.join(".lazyspec.toml"), &src).unwrap();
+        let config = Config::parse(&src).unwrap();
+
+        let gh = GhRequestCounter::for_ten_type_config();
+        run(
+            root,
+            &config,
+            &gh,
+            &MockGitRefClient::new(),
+            &fake_clickup(),
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+
+        assert_one_composed_round(&gh, root);
     }
 
     #[test]
@@ -1017,9 +1037,6 @@ name = "related-to"
     }
 
     impl GhMilestoneApi for StubGh {
-        fn milestone_list(&self, _: &str) -> Result<Vec<GhMilestone>> {
-            unimplemented!()
-        }
         fn milestone_view(&self, _: &str, _: u64) -> Result<GhMilestone> {
             unimplemented!()
         }
@@ -1053,9 +1070,6 @@ name = "related-to"
     }
 
     impl crate::engine::gh::GhIssueDependencyApi for StubGh {
-        fn list_blocked_by(&self, _: &str, _: u64) -> Result<Vec<u64>> {
-            unimplemented!()
-        }
         fn add_blocked_by(&self, _: &str, _: u64, _: u64) -> Result<()> {
             unimplemented!()
         }

@@ -205,11 +205,6 @@ pub fn parse_milestone_json(stdout: &str) -> Result<GhMilestone> {
         .map_err(|e| anyhow::anyhow!("failed to parse milestone JSON: {}", e))
 }
 
-pub fn parse_milestone_list_json(stdout: &str) -> Result<Vec<GhMilestone>> {
-    serde_json::from_str(stdout)
-        .map_err(|e| anyhow::anyhow!("failed to parse milestone list JSON: {}", e))
-}
-
 /// Pure argv builder for `issue_set_milestone`. `None` clears the milestone and
 /// MUST emit `-F milestone=null` (a JSON null, not the string `"null"`);
 /// `Some(n)` emits `-F milestone=<n>` (a typed int). `-F` (not `-f`) is what
@@ -305,34 +300,6 @@ pub fn build_remove_blocked_by_args(
     ]
 }
 
-/// Pure argv builder for listing an issue's native blocked-by dependencies
-/// (`GET repos/{repo}/issues/{n}/dependencies/blocked_by`). The response is an
-/// array of issue objects; only their `number` is used downstream to resolve
-/// each blocking issue to its doc.
-pub fn build_list_blocked_by_args(repo: &str, blocked_number: u64) -> Vec<String> {
-    vec![
-        "api".to_string(),
-        format!(
-            "repos/{}/issues/{}/dependencies/blocked_by",
-            repo, blocked_number
-        ),
-    ]
-}
-
-#[derive(Deserialize)]
-struct BlockedByIssue {
-    number: u64,
-}
-
-/// Parse a `dependencies/blocked_by` response (an array of issue objects) into
-/// the blocking issues' display numbers. Only `number` is read; every other
-/// field of the issue objects is ignored.
-pub fn parse_blocked_by_numbers(stdout: &str) -> Result<Vec<u64>> {
-    let issues: Vec<BlockedByIssue> = serde_json::from_str(stdout)
-        .map_err(|e| anyhow::anyhow!("failed to parse blocked_by JSON: {}", e))?;
-    Ok(issues.into_iter().map(|i| i.number).collect())
-}
-
 // --- Label helpers ---
 
 pub fn type_label(type_name: &str) -> String {
@@ -409,8 +376,6 @@ pub trait GhIssueWriter {
 /// can be faked independently. Milestones use the REST API (`gh api
 /// repos/{repo}/milestones`), not GraphQL.
 pub trait GhMilestoneApi {
-    fn milestone_list(&self, repo: &str) -> Result<Vec<GhMilestone>>;
-
     fn milestone_view(&self, repo: &str, number: u64) -> Result<GhMilestone>;
 
     fn milestone_create(
@@ -444,22 +409,18 @@ pub trait GhMilestoneApi {
     ) -> Result<()>;
 }
 
-/// REST seam for GitHub issue dependencies (the native blocked-by / blocking
-/// graph), kept separate from [`GhMilestoneApi`] so it can be faked
-/// independently. Dependencies are REST
-/// (`gh api repos/{repo}/issues/{n}/dependencies/blocked_by`), not GraphQL.
+/// REST seam for writing GitHub issue dependencies (the native blocked-by /
+/// blocking graph), kept separate from [`GhMilestoneApi`] so it can be faked
+/// independently. Dependency writes are REST
+/// (`gh api repos/{repo}/issues/{n}/dependencies/blocked_by`), not GraphQL; the
+/// read side rides the composed fetch round's inline `blockedBy` connection
+/// instead ([`crate::engine::gh_fetch`]).
 ///
 /// Endpoints take a blocked issue by its display `number` (the path segment)
 /// and identify the blocking issue by its REST *database id* — the real impl
 /// resolves that id from the number, since the issue map carries only the
 /// display number and GraphQL node id.
 pub trait GhIssueDependencyApi {
-    /// List the display numbers of the issues that block `blocked_number`
-    /// (`GET issues/{blocked_number}/dependencies/blocked_by`, an array of issue
-    /// objects). The read side of the native dependency graph; the caller maps
-    /// each number to its doc via the issue map.
-    fn list_blocked_by(&self, repo: &str, blocked_number: u64) -> Result<Vec<u64>>;
-
     /// Record that issue `blocked_number` is blocked by issue `blocking_number`
     /// (`POST issues/{blocked_number}/dependencies/blocked_by`, body
     /// `issue_id=<blocking issue database id>`). Idempotent on GitHub's side.
@@ -830,10 +791,6 @@ impl<T: GhGraphql + ?Sized> GhGraphql for &T {
 }
 
 impl<T: GhMilestoneApi + ?Sized> GhMilestoneApi for &T {
-    fn milestone_list(&self, repo: &str) -> Result<Vec<GhMilestone>> {
-        (**self).milestone_list(repo)
-    }
-
     fn milestone_view(&self, repo: &str, number: u64) -> Result<GhMilestone> {
         (**self).milestone_view(repo, number)
     }
@@ -876,10 +833,6 @@ impl<T: GhMilestoneApi + ?Sized> GhMilestoneApi for &T {
 }
 
 impl<T: GhIssueDependencyApi + ?Sized> GhIssueDependencyApi for &T {
-    fn list_blocked_by(&self, repo: &str, blocked_number: u64) -> Result<Vec<u64>> {
-        (**self).list_blocked_by(repo, blocked_number)
-    }
-
     fn add_blocked_by(&self, repo: &str, blocked_number: u64, blocking_number: u64) -> Result<()> {
         (**self).add_blocked_by(repo, blocked_number, blocking_number)
     }
@@ -942,26 +895,56 @@ impl<T: GhGraphql + AsAny> GhProjectsClient for T {
     }
 }
 
-const PROJECT_ITEM_FIELDS_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on Issue { projectItems(first: 50) { nodes { id project { number } fieldValues(first: 50) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldIterationValue { title field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } } } } } } } }";
+/// One inline fragment per project-field value type, naming the field it belongs
+/// to. This is the exact shape [`parse_project_items_array`] reads, so every
+/// query that wants project field values -- the single-issue read below and the
+/// composed fetch round's inline `fieldValues` (`gh_fetch`) -- selects it from
+/// here rather than spelling it out a second time.
+pub(crate) const PROJECT_FIELD_VALUE_SELECTION: &str = "__typename \
+     ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } \
+     ... on ProjectV2ItemFieldIterationValue { title field { ... on ProjectV2FieldCommon { name } } } \
+     ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } } \
+     ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2FieldCommon { name } } } \
+     ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } }";
+
+/// One issue's board memberships and field cells. The read-back after a
+/// project-field write, where one issue is genuinely one request; a fetch reads
+/// the same shape inline on the composed round instead.
+fn project_item_fields_query() -> String {
+    format!(
+        "query($id: ID!) {{ node(id: $id) {{ ... on Issue {{ \
+         projectItems(first: 50) {{ nodes {{ id project {{ number }} \
+         fieldValues(first: 50) {{ nodes {{ {PROJECT_FIELD_VALUE_SELECTION} }} }} }} }} }} }} }}"
+    )
+}
 
 const UPDATE_PROJECT_FIELD_MUTATION: &str = "mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) { updateProjectV2ItemFieldValue(input: {projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: __VALUE__}) { projectV2Item { id } } }";
 
 const CLEAR_PROJECT_FIELD_MUTATION: &str = "mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) { clearProjectV2ItemFieldValue(input: {projectId: $projectId, itemId: $itemId, fieldId: $fieldId}) { projectV2Item { id } } }";
 
-/// Parse the `projectItems.nodes` of a [`PROJECT_ITEM_FIELDS_QUERY`] response
+/// Parse the `projectItems.nodes` of a [`project_item_fields_query`] response
 /// into one [`ProjectItem`] per board membership, each carrying one
 /// [`ProjectFieldValue`] per set field value. Unset fields and field values with
 /// no resolvable name/typename are skipped; an item whose board number is
 /// missing is skipped entirely, but an item with no field values is kept.
 pub fn parse_project_items(resp: &serde_json::Value) -> Vec<ProjectItem> {
-    let mut out: Vec<ProjectItem> = Vec::new();
     let Some(items) = resp
         .pointer("/data/node/projectItems/nodes")
         .and_then(|v| v.as_array())
     else {
-        return out;
+        return Vec::new();
     };
+    parse_project_items_array(items)
+}
 
+/// The per-item parse, over the `projectItems.nodes` array wherever it was
+/// selected -- the single-issue read back or the composed round's inline
+/// connection. One [`ProjectItem`] per board membership, each carrying one
+/// [`ProjectFieldValue`] per set field value. Unset fields and field values with
+/// no resolvable name/typename are skipped; an item whose board number is
+/// missing is skipped entirely, but an item with no field values is kept.
+pub(crate) fn parse_project_items_array(items: &[serde_json::Value]) -> Vec<ProjectItem> {
+    let mut out: Vec<ProjectItem> = Vec::new();
     for item in items {
         let Some(number) = item.pointer("/project/number").and_then(|v| v.as_u64()) else {
             continue;
@@ -1199,46 +1182,6 @@ fn parse_issue_type_name(resp: &serde_json::Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// Page size of [`ISSUE_TYPE_SEARCH_QUERY`] (`search(... first:)`). Kept in sync
-/// with the literal in that query by hand; used to detect a truncated result.
-pub const ISSUE_TYPE_SEARCH_PAGE_SIZE: usize = 100;
-
-const ISSUE_TYPE_SEARCH_QUERY: &str =
-    "query($searchQuery: String!) { search(query: $searchQuery, type: ISSUE, first: 100) { nodes { ... on Issue { number } } } }";
-
-/// Extract issue numbers from an [`ISSUE_TYPE_SEARCH_QUERY`] response. Defensive
-/// like [`parse_project_items`]: a missing or malformed `nodes` array
-/// yields an empty vec rather than erroring.
-fn parse_search_issue_numbers(resp: &serde_json::Value) -> Vec<u64> {
-    resp.pointer("/data/search/nodes")
-        .and_then(|v| v.as_array())
-        .map(|nodes| {
-            nodes
-                .iter()
-                .filter_map(|n| n.pointer("/number").and_then(|v| v.as_u64()))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Discover the issue numbers in `repo` classified under the native GitHub issue
-/// type `issue_type`, via the GraphQL `search` API (there is no REST list filter
-/// for issue type). Capped at [`ISSUE_TYPE_SEARCH_PAGE_SIZE`]; callers detect a
-/// full page as a truncated result. A free function over the generic
-/// [`GhGraphql::graphql`] seam, mirroring `issue_view`'s ad hoc GraphQL use.
-pub fn search_issue_numbers_by_type(
-    gh_graphql: &dyn GhGraphql,
-    repo: &str,
-    issue_type: &str,
-) -> Result<Vec<u64>> {
-    let search_query = format!("repo:{} is:issue type:\"{}\"", repo, issue_type);
-    let resp = gh_graphql.graphql(
-        ISSUE_TYPE_SEARCH_QUERY,
-        &[("searchQuery", GqlVar::Str(search_query))],
-    )?;
-    Ok(parse_search_issue_numbers(&resp))
-}
-
 impl GhIssueWriter for GhCli {
     fn issue_create(
         &self,
@@ -1353,12 +1296,6 @@ impl GhIssueWriter for GhCli {
 }
 
 impl GhMilestoneApi for GhCli {
-    fn milestone_list(&self, repo: &str) -> Result<Vec<GhMilestone>> {
-        let endpoint = format!("repos/{}/milestones?state=all", repo);
-        let stdout = self.run_gh_checked(&["api", &endpoint])?;
-        parse_milestone_list_json(&stdout)
-    }
-
     fn milestone_view(&self, repo: &str, number: u64) -> Result<GhMilestone> {
         let endpoint = format!("repos/{}/milestones/{}", repo, number);
         let stdout = self.run_gh_checked(&["api", &endpoint])?;
@@ -1462,12 +1399,6 @@ impl GhCli {
 }
 
 impl GhIssueDependencyApi for GhCli {
-    fn list_blocked_by(&self, repo: &str, blocked_number: u64) -> Result<Vec<u64>> {
-        let args = build_list_blocked_by_args(repo, blocked_number);
-        let stdout = self.run_gh_checked(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
-        parse_blocked_by_numbers(&stdout)
-    }
-
     fn add_blocked_by(&self, repo: &str, blocked_number: u64, blocking_number: u64) -> Result<()> {
         let blocking_id = self.issue_database_id(repo, blocking_number)?;
         let args = build_add_blocked_by_args(repo, blocked_number, blocking_id);
@@ -1533,10 +1464,10 @@ impl GhGraphql for GhCli {
 
         // `gh api graphql` exits non-zero whenever the response carries a
         // GraphQL `errors` array -- e.g. an org-rooted query against a user
-        // account -- even though the body's `data` still tells callers like
-        // `try_org_then_user` which root resolved. Parse stdout first so that
-        // signal survives; only fall back to the exit-code failure path when
-        // stdout is not a GraphQL response at all.
+        // account, or one failed subtree of a composed round -- even though the
+        // body's `data` still carries everything that did resolve. Parse stdout
+        // first so that signal survives; only fall back to the exit-code failure
+        // path when stdout is not a GraphQL response at all.
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
             if json.get("data").is_some() {
                 return Ok(json);
@@ -1554,7 +1485,7 @@ impl GhGraphql for GhCli {
 
     fn project_items(&self, _repo: &str, content_node_id: &str) -> Result<Vec<ProjectItem>> {
         let resp = self.graphql(
-            PROJECT_ITEM_FIELDS_QUERY,
+            &project_item_fields_query(),
             &[("id", GqlVar::Str(content_node_id.to_string()))],
         )?;
         Ok(parse_project_items(&resp))
@@ -1640,12 +1571,616 @@ fn extract_after(text: &str, needle: &str) -> Option<String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::*;
     use std::cell::{Cell, RefCell};
 
     type GraphqlCall = (String, Vec<(String, GqlVar)>);
+
+    /// A composed fetch-round response ([`crate::engine::gh_fetch`]) in the shape
+    /// GitHub returns it, so a double answering a round drives the real parser
+    /// rather than a hand-built [`crate::engine::gh_fetch::FetchSnapshot`].
+    /// Org-owned: `issueTypes` only ever resolves under the Organization
+    /// fragment.
+    pub fn round_response(
+        milestones: &[GhMilestone],
+        issue_types: &[crate::engine::gh_schema::IssueTypeId],
+        boards: &[(u64, Vec<String>)],
+    ) -> serde_json::Value {
+        let milestone_nodes: Vec<_> = milestones
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "number": m.number,
+                    "title": m.title,
+                    "description": m.description,
+                    "dueOn": m.due_on,
+                    "state": m.state.to_uppercase(),
+                    "url": m.url,
+                    "openIssues": {"totalCount": m.open_issues},
+                    "closedIssues": {"totalCount": m.closed_issues}
+                })
+            })
+            .collect();
+        let issue_type_nodes: Vec<_> = issue_types
+            .iter()
+            .map(|t| serde_json::json!({"id": t.id, "name": t.name}))
+            .collect();
+        let mut owner = serde_json::json!({
+            "__typename": "Organization",
+            "issueTypes": {"nodes": issue_type_nodes}
+        });
+        for (number, columns) in boards {
+            let field_id = format!("PVTSSF_b{}", number);
+            let options: Vec<_> = columns
+                .iter()
+                .map(|name| {
+                    serde_json::json!({
+                        "id": format!("{}_{}", field_id, name.to_lowercase()),
+                        "name": name
+                    })
+                })
+                .collect();
+            owner[format!("b{}", number)] = serde_json::json!({"fields": {"nodes": [{
+                "__typename": "ProjectV2SingleSelectField",
+                "id": field_id,
+                "name": "Status",
+                "dataType": "SINGLE_SELECT",
+                "options": options
+            }]}});
+        }
+        serde_json::json!({"data": {"repository": {
+            "milestones": {"nodes": milestone_nodes},
+            "owner": owner
+        }}})
+    }
+
+    /// Answer every issue alias `query` composed with one finished page holding
+    /// `issues`. `Repository.issues` is non-null, so a double that leaves an
+    /// alias out is telling the parser that type's list failed; an empty page
+    /// says "this type has none", which is what an empty `issues` gives.
+    pub fn with_issue_pages(
+        query: &str,
+        mut resp: serde_json::Value,
+        issues: &[GhIssue],
+    ) -> serde_json::Value {
+        let nodes: Vec<serde_json::Value> = issues.iter().map(issue_node).collect();
+        let mut index = 0;
+        while query.contains(&format!("t{}: issues(", index)) {
+            resp["data"]["repository"][format!("t{}", index)] = serde_json::json!({
+                "pageInfo": {"hasNextPage": false, "endCursor": serde_json::Value::Null},
+                "nodes": nodes
+            });
+            index += 1;
+        }
+        resp
+    }
+
+    /// An issue's sub-issue children as the round selects them inline. Use
+    /// [`with_sub_issues`] to attach one to a round response.
+    pub fn sub_issue_edge(children: &[&str]) -> serde_json::Value {
+        edge(
+            children
+                .iter()
+                .map(|id| serde_json::json!({"id": id}))
+                .collect(),
+            false,
+        )
+    }
+
+    /// The numbers blocking an issue, as the round selects them inline.
+    pub fn blocked_by_edge(blockers: &[u64]) -> serde_json::Value {
+        edge(
+            blockers
+                .iter()
+                .map(|number| serde_json::json!({"number": number}))
+                .collect(),
+            false,
+        )
+    }
+
+    /// An issue's board memberships and field cells, rendered back into the
+    /// GraphQL shape the round selects, so a double drives the real parser
+    /// rather than handing [`ProjectItem`]s straight to the snapshot.
+    pub fn project_items_edge(items: &[ProjectItem]) -> serde_json::Value {
+        edge(items.iter().map(project_item_node).collect(), false)
+    }
+
+    fn project_item_node(item: &ProjectItem) -> serde_json::Value {
+        serde_json::json!({
+            "id": item.item_id,
+            "project": {"number": item.project_number},
+            "fieldValues": edge(item.fields.iter().map(field_value_node).collect(), false)
+        })
+    }
+
+    fn field_value_node(value: &ProjectFieldValue) -> serde_json::Value {
+        let field = serde_json::json!({"name": value.field_name});
+        match &value.value {
+            GhFieldValueRepr::OptionName(name) => serde_json::json!({
+                "__typename": "ProjectV2ItemFieldSingleSelectValue", "name": name, "field": field
+            }),
+            GhFieldValueRepr::IterationTitle(title) => serde_json::json!({
+                "__typename": "ProjectV2ItemFieldIterationValue", "title": title, "field": field
+            }),
+            GhFieldValueRepr::Number(number) => serde_json::json!({
+                "__typename": "ProjectV2ItemFieldNumberValue", "number": number, "field": field
+            }),
+            GhFieldValueRepr::Date(date) => serde_json::json!({
+                "__typename": "ProjectV2ItemFieldDateValue",
+                "date": date.format("%Y-%m-%d").to_string(),
+                "field": field
+            }),
+            GhFieldValueRepr::Text(text) => serde_json::json!({
+                "__typename": "ProjectV2ItemFieldTextValue", "text": text, "field": field
+            }),
+        }
+    }
+
+    fn edge(nodes: Vec<serde_json::Value>, has_next_page: bool) -> serde_json::Value {
+        serde_json::json!({"pageInfo": {"hasNextPage": has_next_page}, "nodes": nodes})
+    }
+
+    /// Replace the `subIssues` connection of the issue with node id `node_id` on
+    /// every alias of a round response. Doubles answer the round's inline
+    /// connections this way rather than the retired `nodes(ids:)` batch.
+    pub fn with_sub_issues(
+        resp: serde_json::Value,
+        node_id: &str,
+        edge: serde_json::Value,
+    ) -> serde_json::Value {
+        with_issue_edge(resp, node_id, "subIssues", edge)
+    }
+
+    /// As [`with_sub_issues`], for the `blockedBy` connection.
+    pub fn with_blocked_by(
+        resp: serde_json::Value,
+        node_id: &str,
+        edge: serde_json::Value,
+    ) -> serde_json::Value {
+        with_issue_edge(resp, node_id, "blockedBy", edge)
+    }
+
+    /// The round as a token without the `project` scope gets it: every issue's
+    /// `projectItems` null, with one `errors[]` entry naming the path. The issue
+    /// lists and the other inline connections come back intact beside it, which
+    /// is the partial-failure shape the round is built to survive.
+    pub fn without_project_items(mut resp: serde_json::Value, message: &str) -> serde_json::Value {
+        let mut paths = Vec::new();
+        if let Some(repo) = resp
+            .pointer_mut("/data/repository")
+            .and_then(|v| v.as_object_mut())
+        {
+            for (alias, value) in repo.iter_mut() {
+                let Some(nodes) = value.get_mut("nodes").and_then(|v| v.as_array_mut()) else {
+                    continue;
+                };
+                for (index, node) in nodes.iter_mut().enumerate() {
+                    node["projectItems"] = serde_json::Value::Null;
+                    paths.push(serde_json::json!([
+                        "repository",
+                        alias,
+                        "nodes",
+                        index,
+                        "projectItems"
+                    ]));
+                }
+            }
+        }
+        resp["errors"] = paths
+            .into_iter()
+            .map(|path| serde_json::json!({"type": "INSUFFICIENT_SCOPES", "message": message, "path": path}))
+            .collect();
+        resp
+    }
+
+    /// As [`with_sub_issues`], for the `projectItems` connection.
+    pub fn with_project_items_edge(
+        resp: serde_json::Value,
+        node_id: &str,
+        edge: serde_json::Value,
+    ) -> serde_json::Value {
+        with_issue_edge(resp, node_id, "projectItems", edge)
+    }
+
+    fn with_issue_edge(
+        mut resp: serde_json::Value,
+        node_id: &str,
+        field: &str,
+        edge: serde_json::Value,
+    ) -> serde_json::Value {
+        let Some(repo) = resp
+            .pointer_mut("/data/repository")
+            .and_then(|v| v.as_object_mut())
+        else {
+            return resp;
+        };
+        for (_, alias) in repo.iter_mut() {
+            let Some(nodes) = alias.get_mut("nodes").and_then(|v| v.as_array_mut()) else {
+                continue;
+            };
+            for node in nodes {
+                if node.get("id").and_then(|v| v.as_str()) == Some(node_id) {
+                    node[field] = edge.clone();
+                }
+            }
+        }
+        resp
+    }
+
+    /// One issue as `repository.issues.nodes` carries it: REST's fields, with
+    /// `labels` and `assignees` in the `nodes` connection GraphQL wraps them in,
+    /// and the inline edge connections empty until a test attaches one.
+    pub fn issue_node(issue: &GhIssue) -> serde_json::Value {
+        serde_json::json!({
+            "id": issue.id,
+            "number": issue.number,
+            "url": issue.url,
+            "title": issue.title,
+            "body": issue.body,
+            "state": issue.state,
+            "updatedAt": issue.updated_at,
+            "createdAt": issue.created_at,
+            "author": issue.author.as_ref().map(|a| serde_json::json!({"login": a.login})),
+            "issueType": issue.issue_type.as_ref().map(|t| serde_json::json!({"name": t})),
+            "milestone": issue.milestone.as_ref().map(|m| serde_json::json!({"number": m.number})),
+            "labels": {"nodes": issue.labels.iter()
+                .map(|l| serde_json::json!({"name": l.name}))
+                .collect::<Vec<_>>()},
+            "assignees": {"nodes": issue.assignees.iter()
+                .map(|a| serde_json::json!({"login": a.login}))
+                .collect::<Vec<_>>()},
+            "subIssues": sub_issue_edge(&[]),
+            "blockedBy": blocked_by_edge(&[]),
+            "projectItems": project_items_edge(&[])
+        })
+    }
+
+    /// The board [`ten_type_config_src`] hands `t0`'s lifecycle to, and the
+    /// `Status` columns its schema declares.
+    const AUTHORITY_BOARD: u64 = 7;
+    const AUTHORITY_COLUMNS: [&str; 2] = ["Review", "Done"];
+
+    /// The config RFC-065's request budget is measured against: ten
+    /// `github-issues` types spanning all four discovery rules -- plain label,
+    /// tag, native issue type, and both -- so the round composes every alias
+    /// shape rather than ten copies of one, plus a `github-milestones` type and
+    /// a board nominated as `t0`'s status authority.
+    ///
+    /// Prefixes take a letter rather than the type name's digit: a digit stops
+    /// `extract_id_from_name` at the prefix itself, so `T0-1` would resolve as
+    /// `T0` and the cached doc would never match its issue-map entry.
+    ///
+    /// `blocks` is declared so the round's inline `blockedBy` edge is actually
+    /// consumed -- that enrichment costs no request only means something when
+    /// the enrichment happens.
+    pub fn ten_type_config_src() -> String {
+        let mut src = String::from(
+            "[naming]\npattern = \"{type}-{n:03}-{title}.md\"\n\n\
+             [templates]\ndir = \".lazyspec/templates\"\n\n\
+             [github]\nrepo = \"octo-org/repo\"\n\n\
+             [[types]]\nname = \"release\"\nplural = \"releases\"\n\
+             dir = \"docs/releases\"\nprefix = \"RELEASE\"\nstore = \"github-milestones\"\n\n",
+        );
+        for (n, prefix) in ('A'..='J').enumerate() {
+            let authority = if n == 0 {
+                format!("status_authority = \"PROJECT-{AUTHORITY_BOARD}\"\n")
+            } else {
+                String::new()
+            };
+            let rule = match n % 4 {
+                1 => "github_issue_tag = \"triage\"\n",
+                2 => "github_issue_type = \"Bug\"\n",
+                3 => "github_issue_tag = \"triage\"\ngithub_issue_type = \"Bug\"\n",
+                _ => "",
+            };
+            src.push_str(&format!(
+                "[[types]]\nname = \"t{n}\"\nplural = \"t{n}s\"\ndir = \"docs/t{n}\"\n\
+                 prefix = \"T{prefix}\"\nstore = \"github-issues\"\n{authority}{rule}\n"
+            ));
+        }
+        src.push_str("[[relationships]]\nname = \"related-to\"\n\n");
+        src.push_str(
+            "[[relationships]]\nname = \"blocks\"\ninverse = \"blocked-by\"\n\
+             github_native = \"dependency\"\n",
+        );
+        src
+    }
+
+    /// Everything one composed round over [`ten_type_config_src`] must have
+    /// carried, asserted against the cache a fetch left under `root`: the count
+    /// itself, then the sub-issue parentage, the dependency edge, the authority
+    /// board's cell and its field schema -- each of which used to cost a request
+    /// of its own.
+    ///
+    /// Both surfaces that pay for a fetch -- `cli::fetch::run` and the TUI's
+    /// `poll_sync` -- are held to this, each through its own test.
+    pub fn assert_one_composed_round(gh: &GhRequestCounter, root: &std::path::Path) {
+        assert_eq!(
+            gh.round_queries.borrow().len(),
+            1,
+            "one composed round for the whole fetch"
+        );
+        assert!(
+            gh.other_queries.borrow().is_empty(),
+            "no probe survives the round: {:?}",
+            gh.other_queries.borrow()
+        );
+        assert!(
+            root.join(".lazyspec/cache/t0/TA-1/00-TA-2.md").is_file(),
+            "sub-issue parentage must materialize off the round"
+        );
+
+        let parent = std::fs::read_to_string(root.join(".lazyspec/cache/t0/TA-1/index.md"))
+            .expect("the round's parent issue must have been cached");
+        assert!(
+            parent.contains("blocked-by: TA-2"),
+            "dependency edges must come off the round, got:\n{parent}"
+        );
+        assert!(
+            parent.contains(&format!(
+                "status: {}",
+                GhRequestCounter::COUNTED_STATUS.to_lowercase()
+            )),
+            "the authority board's cell must come off the round, got:\n{parent}"
+        );
+
+        let saved = crate::engine::gh_schema::GhSchemaSnapshot::load(root);
+        assert_eq!(
+            saved.field_id(AUTHORITY_BOARD, "Status"),
+            Some(format!("PVTSSF_b{AUTHORITY_BOARD}").as_str())
+        );
+        assert_eq!(
+            saved.status_lifecycle(AUTHORITY_BOARD).unwrap().states,
+            AUTHORITY_COLUMNS
+                .iter()
+                .map(|c| c.to_lowercase())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// What one fetch costs at the GitHub seams, counted rather than stubbed.
+    ///
+    /// Every trait a fetch reaches through is implemented here so one double can
+    /// drive both surfaces -- `cli::fetch::run` and the TUI's `poll_sync` -- and
+    /// they can be held to the same count. Reads answer with the configured
+    /// round and nothing else: what is under test is how many requests a fetch
+    /// makes, not what comes back.
+    #[derive(Default)]
+    pub struct GhRequestCounter {
+        pub round_queries: RefCell<Vec<String>>,
+        /// Every GraphQL document that was not a composed round. The point of
+        /// the round is that this stays empty.
+        pub other_queries: RefCell<Vec<String>>,
+        pub board_columns: Vec<(u64, Vec<String>)>,
+        /// Whether the round answers with issues carrying sub-issue and
+        /// blocked-by edges. See [`GhRequestCounter::with_enriched_issues`].
+        enriched: bool,
+    }
+
+    impl GhRequestCounter {
+        /// A counter whose round answers `board` with the given `Status` columns.
+        pub fn with_board(number: u64, columns: &[&str]) -> Self {
+            Self {
+                board_columns: vec![(
+                    number,
+                    columns.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                )],
+                ..Default::default()
+            }
+        }
+
+        /// Answer every alias with a parent issue `#1`, its sub-issue child `#2`,
+        /// a `blockedBy` edge from `#1` to `#2`, and membership of every
+        /// configured board with its `Status` cell set -- so a fetch that still
+        /// read any of that through a query of its own, or wrote a membership it
+        /// wrongly read as missing, would land in `other_queries`.
+        pub fn with_enriched_issues(mut self) -> Self {
+            self.enriched = true;
+            self
+        }
+
+        /// The `Status` cell the counter's boards answer with, which must be one
+        /// of the columns the same board's schema declares.
+        pub const COUNTED_STATUS: &'static str = "Review";
+
+        /// A counter wired to answer the board [`ten_type_config_src`] nominates
+        /// as `t0`'s status authority, with the enrichment
+        /// [`assert_one_composed_round`] looks for.
+        pub fn for_ten_type_config() -> Self {
+            Self::with_board(AUTHORITY_BOARD, &AUTHORITY_COLUMNS).with_enriched_issues()
+        }
+
+        fn round_project_items(&self) -> Vec<ProjectItem> {
+            self.board_columns
+                .iter()
+                .map(|(number, _)| ProjectItem {
+                    project_number: *number,
+                    item_id: format!("PVTI_b{}", number),
+                    fields: vec![ProjectFieldValue {
+                        project_number: *number,
+                        field_name: "Status".to_string(),
+                        kind: GhFieldKind::SingleSelect,
+                        value: GhFieldValueRepr::OptionName(Self::COUNTED_STATUS.to_string()),
+                    }],
+                })
+                .collect()
+        }
+
+        fn round_issues(&self) -> Vec<GhIssue> {
+            if !self.enriched {
+                return Vec::new();
+            }
+            [1u64, 2]
+                .iter()
+                .map(|&number| counted_issue(number))
+                .collect()
+        }
+    }
+
+    fn counted_issue(number: u64) -> GhIssue {
+        GhIssue {
+            number,
+            id: format!("I_{}", number),
+            url: String::new(),
+            title: format!("issue {}", number),
+            body: String::new(),
+            labels: Vec::new(),
+            state: "OPEN".to_string(),
+            updated_at: "2026-08-01T00:00:00Z".to_string(),
+            created_at: "2026-08-01T00:00:00Z".to_string(),
+            author: None,
+            issue_type: None,
+            milestone: None,
+            assignees: Vec::new(),
+        }
+    }
+
+    impl GhGraphql for GhRequestCounter {
+        fn graphql(&self, query: &str, _vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+            if !crate::engine::gh_fetch::is_round_query(query) {
+                self.other_queries.borrow_mut().push(query.to_string());
+                bail!("GhRequestCounter answers composed rounds only");
+            }
+            self.round_queries.borrow_mut().push(query.to_string());
+            let mut resp = with_issue_pages(
+                query,
+                round_response(&[], &[], &self.board_columns),
+                &self.round_issues(),
+            );
+            if self.enriched {
+                resp = with_sub_issues(resp, "I_1", sub_issue_edge(&["I_2"]));
+                resp = with_blocked_by(resp, "I_1", blocked_by_edge(&[2]));
+                let items = project_items_edge(&self.round_project_items());
+                for issue in self.round_issues() {
+                    resp = with_project_items_edge(resp, &issue.id, items.clone());
+                }
+            }
+            Ok(resp)
+        }
+
+        fn project_items(&self, _repo: &str, _content_node_id: &str) -> Result<Vec<ProjectItem>> {
+            Ok(Vec::new())
+        }
+
+        fn update_project_v2_item_field_value(
+            &self,
+            _project_id: &str,
+            _item_id: &str,
+            _field_id: &str,
+            _value: &GhFieldValueInput,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear_project_field(&self, _: &str, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Both REST issue reads panic rather than count: a fetch resolves every
+    /// type's list from the composed round, so reaching this seam at all is the
+    /// regression, and the trait says so louder than an assertion downstream.
+    impl GhIssueReader for GhRequestCounter {
+        fn issue_list(
+            &self,
+            _repo: &str,
+            _labels: &[String],
+            _json_fields: &[String],
+            _limit: Option<u64>,
+        ) -> Result<Vec<GhIssue>> {
+            unreachable!("a fetch reads issues off the composed round, never REST")
+        }
+
+        fn issue_view(&self, _repo: &str, _number: u64) -> Result<GhIssue> {
+            unreachable!("a fetch reads issues off the composed round, never REST")
+        }
+
+        fn issue_comments(&self, _repo: &str, _number: u64) -> Result<Vec<GhComment>> {
+            Ok(Vec::new())
+        }
+    }
+
+    impl GhMilestoneApi for GhRequestCounter {
+        fn milestone_view(&self, _repo: &str, _number: u64) -> Result<GhMilestone> {
+            bail!("no milestone reads under test")
+        }
+
+        fn milestone_create(
+            &self,
+            _repo: &str,
+            _title: &str,
+            _description: &str,
+            _due_on: Option<&str>,
+            _state: &str,
+        ) -> Result<GhMilestone> {
+            bail!("no milestone writes under test")
+        }
+
+        fn milestone_edit(
+            &self,
+            _repo: &str,
+            _number: u64,
+            _title: Option<&str>,
+            _description: Option<&str>,
+            _due_on: Option<&str>,
+            _state: Option<&str>,
+        ) -> Result<GhMilestone> {
+            bail!("no milestone writes under test")
+        }
+
+        fn milestone_delete(&self, _repo: &str, _number: u64) -> Result<()> {
+            bail!("no milestone writes under test")
+        }
+
+        fn issue_set_milestone(&self, _: &str, _: u64, _: Option<u64>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl GhIssueDependencyApi for GhRequestCounter {
+        fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
+            Ok(())
+        }
+        fn remove_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Only here to satisfy the bound `cli::fetch::run` declares. A fetch writes
+    /// nothing, so every method failing loudly is the assertion.
+    impl GhIssueWriter for GhRequestCounter {
+        fn issue_create(&self, _: &str, _: &str, _: &str, _: &[String]) -> Result<GhIssue> {
+            bail!("a fetch must not write issues")
+        }
+        fn issue_edit(
+            &self,
+            _: &str,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &[String],
+            _: &[String],
+        ) -> Result<()> {
+            bail!("a fetch must not write issues")
+        }
+        fn issue_close(&self, _: &str, _: u64) -> Result<()> {
+            bail!("a fetch must not write issues")
+        }
+        fn issue_reopen(&self, _: &str, _: u64) -> Result<()> {
+            bail!("a fetch must not write issues")
+        }
+        fn issue_set_assignee(&self, _: &str, _: u64, _: &[String], _: &[String]) -> Result<()> {
+            bail!("a fetch must not write issues")
+        }
+        fn label_create(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
+            bail!("a fetch must not write labels")
+        }
+        fn label_ensure(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
+            bail!("a fetch must not write labels")
+        }
+    }
 
     pub struct MockGhClient {
         pub auth: AuthStatus,
@@ -1668,6 +2203,14 @@ pub mod test_support {
         pub next_issue_number: Cell<u64>,
         pub graphql_responses: RefCell<Vec<serde_json::Value>>,
         pub graphql_calls: RefCell<Vec<GraphqlCall>>,
+        /// What a composed fetch round resolves. Answered off to the side of
+        /// `graphql_responses` so a test seeding a specific query's response
+        /// does not have to account for the round the fetch path now runs.
+        pub round_milestones: RefCell<Vec<GhMilestone>>,
+        pub round_issue_types: RefCell<Vec<crate::engine::gh_schema::IssueTypeId>>,
+        /// The `blockedBy` edges a composed round answers inline, per issue node
+        /// id. Empty on every issue unless a test sets one.
+        pub round_blocked_by: RefCell<Vec<(String, Vec<u64>)>>,
         pub view_comments: RefCell<Vec<GhComment>>,
         pub comments_call_count: Cell<usize>,
         pub project_items: RefCell<Vec<ProjectItem>>,
@@ -1713,6 +2256,9 @@ pub mod test_support {
                 next_issue_number: Cell::new(1),
                 graphql_responses: RefCell::new(vec![]),
                 graphql_calls: RefCell::new(vec![]),
+                round_milestones: RefCell::new(vec![]),
+                round_issue_types: RefCell::new(vec![]),
+                round_blocked_by: RefCell::new(vec![]),
                 view_comments: RefCell::new(vec![]),
                 comments_call_count: Cell::new(0),
                 project_items: RefCell::new(vec![]),
@@ -1765,6 +2311,30 @@ pub mod test_support {
 
         pub fn with_graphql_responses(mut self, responses: Vec<serde_json::Value>) -> Self {
             self.graphql_responses = RefCell::new(responses);
+            self
+        }
+
+        /// The milestones a composed fetch round resolves for this client.
+        pub fn with_milestones(mut self, milestones: Vec<GhMilestone>) -> Self {
+            self.round_milestones = RefCell::new(milestones);
+            self
+        }
+
+        /// The org issue types a composed fetch round resolves for this client.
+        pub fn with_issue_types(
+            mut self,
+            issue_types: Vec<crate::engine::gh_schema::IssueTypeId>,
+        ) -> Self {
+            self.round_issue_types = RefCell::new(issue_types);
+            self
+        }
+
+        /// The numbers blocking the issue with node id `node_id`, as the round
+        /// selects them inline on that issue.
+        pub fn with_round_blocked_by(self, node_id: &str, blockers: Vec<u64>) -> Self {
+            self.round_blocked_by
+                .borrow_mut()
+                .push((node_id.to_string(), blockers));
             self
         }
 
@@ -1954,9 +2524,6 @@ pub mod test_support {
     /// reader on fetch paths that thread a single client. Dependency-specific
     /// behaviour is faked with [`MockGhDependencyClient`] instead.
     impl GhIssueDependencyApi for MockGhClient {
-        fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
-            Ok(vec![])
-        }
         fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
             Ok(())
         }
@@ -2012,10 +2579,6 @@ pub mod test_support {
     }
 
     impl GhMilestoneApi for MockGhMilestoneClient {
-        fn milestone_list(&self, _repo: &str) -> Result<Vec<GhMilestone>> {
-            Ok(self.milestones.borrow().clone())
-        }
-
         fn milestone_view(&self, _repo: &str, number: u64) -> Result<GhMilestone> {
             self.milestones
                 .borrow()
@@ -2105,9 +2668,6 @@ pub mod test_support {
     /// Delegating impl so a shared `Rc<MockGhMilestoneClient>` can be moved into
     /// an `FnOnce` factory while the original handle remains inspectable after.
     impl GhMilestoneApi for std::rc::Rc<MockGhMilestoneClient> {
-        fn milestone_list(&self, repo: &str) -> Result<Vec<GhMilestone>> {
-            (**self).milestone_list(repo)
-        }
         fn milestone_view(&self, repo: &str, number: u64) -> Result<GhMilestone> {
             (**self).milestone_view(repo, number)
         }
@@ -2147,12 +2707,9 @@ pub mod test_support {
 
     /// In-memory fake for [`GhIssueDependencyApi`]. Records each add/remove as a
     /// `(blocked_number, blocking_number)` pair so a test can assert the native
-    /// edge (and its direction) without touching GitHub. `blocked_by` holds the
-    /// canned read-back set: `blocked_by[n]` is the list of issue numbers that
-    /// block issue `n` (returned by `list_blocked_by`). Zero network.
+    /// edge (and its direction) without touching GitHub. Zero network.
     #[derive(Default)]
     pub struct MockGhDependencyClient {
-        pub blocked_by: RefCell<std::collections::HashMap<u64, Vec<u64>>>,
         pub added: RefCell<Vec<(u64, u64)>>,
         pub removed: RefCell<Vec<(u64, u64)>>,
     }
@@ -2161,27 +2718,9 @@ pub mod test_support {
         pub fn new() -> Self {
             Self::default()
         }
-
-        /// Seed the canned read-back set: issue `blocked_number` is blocked by
-        /// each number in `blocking_numbers`.
-        pub fn with_blocked_by(self, blocked_number: u64, blocking_numbers: Vec<u64>) -> Self {
-            self.blocked_by
-                .borrow_mut()
-                .insert(blocked_number, blocking_numbers);
-            self
-        }
     }
 
     impl GhIssueDependencyApi for MockGhDependencyClient {
-        fn list_blocked_by(&self, _repo: &str, blocked_number: u64) -> Result<Vec<u64>> {
-            Ok(self
-                .blocked_by
-                .borrow()
-                .get(&blocked_number)
-                .cloned()
-                .unwrap_or_default())
-        }
-
         fn add_blocked_by(
             &self,
             _repo: &str,
@@ -2211,10 +2750,6 @@ pub mod test_support {
     /// an `FnOnce` factory while the original handle remains inspectable after
     /// (mirrors the milestone-client Rc impl).
     impl GhIssueDependencyApi for std::rc::Rc<MockGhDependencyClient> {
-        fn list_blocked_by(&self, repo: &str, blocked_number: u64) -> Result<Vec<u64>> {
-            (**self).list_blocked_by(repo, blocked_number)
-        }
-
         fn add_blocked_by(
             &self,
             repo: &str,
@@ -2470,6 +3005,32 @@ pub mod test_support {
             self.graphql_calls
                 .borrow_mut()
                 .push((query.to_string(), recorded));
+
+            if crate::engine::gh_fetch::is_round_query(query) {
+                let mut resp = with_issue_pages(
+                    query,
+                    round_response(
+                        &self.round_milestones.borrow(),
+                        &self.round_issue_types.borrow(),
+                        &[],
+                    ),
+                    &self.list_result,
+                );
+                for (node_id, blockers) in self.round_blocked_by.borrow().iter() {
+                    resp = with_blocked_by(resp, node_id, blocked_by_edge(blockers));
+                }
+                // Board memberships ride the round now, so the items this mock
+                // was given answer there rather than through `project_items`.
+                // Every issue carries the same set: a test that wants them apart
+                // reaches for `with_project_items_edge`.
+                let items = self.project_items.borrow();
+                if !items.is_empty() {
+                    for issue in &self.list_result {
+                        resp = with_project_items_edge(resp, &issue.id, project_items_edge(&items));
+                    }
+                }
+                return Ok(resp);
+            }
 
             let mut responses = self.graphql_responses.borrow_mut();
             if responses.is_empty() {
@@ -2976,18 +3537,6 @@ mod tests {
         assert_eq!(m.url, "https://github.com/o/r/milestone/3");
     }
 
-    #[test]
-    fn parse_milestone_list_and_null_due_on() {
-        let json = r#"[
-            {"number": 1, "title": "a", "due_on": null, "state": "closed"},
-            {"number": 2, "title": "b", "state": "open"}
-        ]"#;
-        let list = parse_milestone_list_json(json).unwrap();
-        assert_eq!(list.len(), 2);
-        assert!(list[0].due_on.is_none());
-        assert_eq!(list[0].state, "closed");
-    }
-
     // AC4 (real-client edge): clearing the milestone emits `-F milestone=null`
     // (a JSON null), not the string "null"; -F is required so gh sends raw JSON.
     #[test]
@@ -3053,48 +3602,6 @@ mod tests {
         client.remove_blocked_by("o/r", 12, 7).unwrap();
         assert_eq!(*client.added.borrow(), vec![(12, 7)]);
         assert_eq!(*client.removed.borrow(), vec![(12, 7)]);
-    }
-
-    // --- Issue-dependency read-back (STORY-244 AC3/AC6) ---
-
-    // The list GET targets the blocked issue's number under the blocked_by
-    // collection, with no method flag (a plain read).
-    #[test]
-    fn build_list_blocked_by_args_gets_the_blocked_by_collection() {
-        let args = build_list_blocked_by_args("o/r", 12);
-        assert_eq!(
-            args,
-            vec![
-                "api".to_string(),
-                "repos/o/r/issues/12/dependencies/blocked_by".to_string(),
-            ]
-        );
-    }
-
-    // The response is an array of issue objects; only their `number` is read.
-    #[test]
-    fn parse_blocked_by_numbers_extracts_numbers_ignoring_other_fields() {
-        let json = r#"[
-            {"number": 7, "title": "blocker", "state": "open"},
-            {"number": 9, "title": "other blocker", "state": "closed"}
-        ]"#;
-        assert_eq!(parse_blocked_by_numbers(json).unwrap(), vec![7, 9]);
-    }
-
-    #[test]
-    fn parse_blocked_by_numbers_empty_array_is_empty() {
-        assert_eq!(parse_blocked_by_numbers("[]").unwrap(), Vec::<u64>::new());
-    }
-
-    #[test]
-    fn mock_dependency_returns_canned_blocked_by_set() {
-        let client = MockGhDependencyClient::new().with_blocked_by(12, vec![7]);
-        assert_eq!(client.list_blocked_by("o/r", 12).unwrap(), vec![7]);
-        // An issue with no seeded blockers reads back empty, never errors.
-        assert_eq!(
-            client.list_blocked_by("o/r", 99).unwrap(),
-            Vec::<u64>::new()
-        );
     }
 
     #[test]
@@ -3277,39 +3784,6 @@ mod tests {
         assert!(items[0].fields.is_empty());
         assert_eq!(items[1].project_number, 8);
         assert_eq!(items[1].item_id, "", "missing id leaves item_id empty");
-    }
-
-    #[test]
-    fn parse_search_issue_numbers_extracts_numbers_in_order() {
-        let resp = serde_json::json!({
-            "data": {"search": {"nodes": [{"number": 42}, {"number": 7}]}}
-        });
-        assert_eq!(parse_search_issue_numbers(&resp), vec![42, 7]);
-    }
-
-    #[test]
-    fn parse_search_issue_numbers_missing_or_malformed_nodes_is_empty() {
-        let missing = serde_json::json!({"data": {"search": {}}});
-        assert!(parse_search_issue_numbers(&missing).is_empty());
-        let malformed = serde_json::json!({"data": {"search": {"nodes": "nope"}}});
-        assert!(parse_search_issue_numbers(&malformed).is_empty());
-    }
-
-    #[test]
-    fn search_issue_numbers_by_type_sends_repo_and_type_qualified_query() {
-        let client = MockGhClient::new().with_graphql_responses(vec![serde_json::json!({
-            "data": {"search": {"nodes": [{"number": 1}, {"number": 2}]}}
-        })]);
-        let numbers = search_issue_numbers_by_type(&client, "owner/repo", "Bug").unwrap();
-        assert_eq!(numbers, vec![1, 2]);
-        let calls = client.graphql_calls.borrow();
-        assert_eq!(
-            calls[0].1,
-            vec![(
-                "searchQuery".to_string(),
-                GqlVar::Str("repo:owner/repo is:issue type:\"Bug\"".to_string())
-            )]
-        );
     }
 
     #[test]

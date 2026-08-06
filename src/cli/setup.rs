@@ -1,11 +1,12 @@
 use crate::engine::clickup::ClickupClient;
 use crate::engine::config::Config;
 use crate::engine::credentials::{CredentialLocation, CredentialStore, Token};
-use crate::engine::gh::{AuthStatus, GhAuth, GhGraphql, GhIssueDependencyApi, GhIssueReader};
+use crate::engine::gh::{AuthStatus, GhAuth, GhGraphql};
 use crate::engine::github::resolve_repo;
 use crate::engine::issue_body::TypeMatchRule;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
+use crate::engine::store_dispatch;
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use serde::Serialize;
@@ -102,11 +103,7 @@ fn prompt_token() -> Result<String> {
     Ok(line)
 }
 
-pub fn run(
-    root: &Path,
-    config: &Config,
-    gh: &(impl GhIssueReader + GhAuth + GhGraphql + GhIssueDependencyApi),
-) -> Result<()> {
+pub fn run(root: &Path, config: &Config, gh: &(impl GhAuth + GhGraphql)) -> Result<()> {
     let gh_types = config.documents.github_issues_types();
     if gh_types.is_empty() {
         println!("No github-issues types configured; nothing to set up.");
@@ -134,6 +131,16 @@ pub fn run(
     )?;
     let mut issue_map = IssueMap::load(root)?;
     let cache = IssueCache::new(root);
+    // One composed read for the whole setup fetch, not one per type.
+    let round = crate::engine::gh_fetch::fetch_all_pages(
+        gh,
+        &repo,
+        &crate::engine::gh_fetch::issue_rules(config),
+        &store_dispatch::authority_board_numbers(config),
+    );
+    for w in &round.warnings {
+        eprintln!("warning: {}", w.message);
+    }
 
     for type_name in &gh_types {
         let type_def = config
@@ -149,10 +156,7 @@ pub fn run(
         let result = cache.fetch_all(
             root,
             type_def,
-            gh,
-            gh,
-            gh,
-            &repo,
+            Some(&round),
             &mut issue_map,
             &all_type_rules,
             config,

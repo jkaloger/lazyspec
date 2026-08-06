@@ -8,7 +8,7 @@
 use anyhow::Result;
 use lazyspec::engine::config::{Config, GithubConfig, StoreBackend};
 use lazyspec::engine::gh::{
-    GhAuthor, GhComment, GhFieldValueInput, GhGraphql, GhIssue, GhIssueDependencyApi,
+    test_support, GhAuthor, GhComment, GhFieldValueInput, GhGraphql, GhIssue, GhIssueDependencyApi,
     GhIssueReader, GhIssueWriter, GhLabel, GhMilestone, GhMilestoneApi, GqlVar, ProjectItem,
 };
 use lazyspec::engine::git_ref::GitCli;
@@ -16,10 +16,9 @@ use lazyspec::engine::store::{Filter, Store};
 use std::collections::HashMap;
 use tempfile::TempDir;
 
-/// A gh mock that exposes flat issues via `issue_list` and native sub-issue
-/// parentage via `graphql` (the `subIssues` query, keyed on the node `id` var).
-/// A graphql call with no `id` var is the schema-snapshot refresh and returns an
-/// empty issue-types response. All write/milestone calls are unused here.
+/// A gh mock whose composed round answers the issues it holds plus the
+/// `subIssues` connection selected inline on each of them -- the whole read a
+/// fetch makes. All write/milestone calls are unused here.
 struct NestingGh {
     issues: Vec<GhIssue>,
     sub_issues_by_node: HashMap<String, Vec<String>>,
@@ -50,7 +49,7 @@ impl GhIssueReader for NestingGh {
         _json_fields: &[String],
         _limit: Option<u64>,
     ) -> Result<Vec<GhIssue>> {
-        Ok(self.issues.clone())
+        unreachable!("a fetch reads issues off the composed round, never REST")
     }
     fn issue_view(&self, _repo: &str, _number: u64) -> Result<GhIssue> {
         unreachable!("issue_view not used in this test")
@@ -61,52 +60,25 @@ impl GhIssueReader for NestingGh {
 }
 
 impl GhGraphql for NestingGh {
-    fn graphql(&self, _query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
-        // Batched parentage query: `ids: [parent_node, ...]` -> `data.nodes`,
-        // each `{ id, subIssues: { nodes: [{ id }] } }`.
-        if let Some((_, GqlVar::StrList(ids))) = vars.iter().find(|(k, _)| *k == "ids") {
-            let nodes: Vec<_> = ids
-                .iter()
-                .map(|parent| {
-                    let kids = self
-                        .sub_issues_by_node
-                        .get(parent)
-                        .cloned()
-                        .unwrap_or_default();
-                    let child_nodes: Vec<_> = kids
-                        .iter()
-                        .map(|n| serde_json::json!({ "id": n }))
-                        .collect();
-                    serde_json::json!({ "id": parent, "subIssues": { "nodes": child_nodes } })
-                })
-                .collect();
-            return Ok(serde_json::json!({ "data": { "nodes": nodes } }));
+    fn graphql(&self, query: &str, _vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+        assert!(
+            lazyspec::engine::gh_fetch::is_round_query(query),
+            "a fetch issues nothing but the composed round, got: {query}"
+        );
+        let mut resp = test_support::with_issue_pages(
+            query,
+            test_support::round_response(&[], &[], &[]),
+            &self.issues,
+        );
+        for (parent, children) in &self.sub_issues_by_node {
+            let children: Vec<&str> = children.iter().map(String::as_str).collect();
+            resp = test_support::with_sub_issues(
+                resp,
+                parent,
+                test_support::sub_issue_edge(&children),
+            );
         }
-
-        let id = vars
-            .iter()
-            .find(|(k, _)| *k == "id")
-            .and_then(|(_, v)| match v {
-                GqlVar::Str(s) => Some(s.clone()),
-                _ => None,
-            });
-        match id {
-            Some(node) => {
-                let kids = self
-                    .sub_issues_by_node
-                    .get(&node)
-                    .cloned()
-                    .unwrap_or_default();
-                let nodes: Vec<_> = kids
-                    .iter()
-                    .map(|n| serde_json::json!({ "id": n }))
-                    .collect();
-                Ok(serde_json::json!({ "data": { "node": { "subIssues": { "nodes": nodes } } } }))
-            }
-            None => Ok(serde_json::json!({
-                "data": { "organization": { "issueTypes": { "nodes": [] } } }
-            })),
-        }
+        Ok(resp)
     }
     fn project_items(&self, _repo: &str, _content_node_id: &str) -> Result<Vec<ProjectItem>> {
         Ok(vec![])
@@ -188,9 +160,6 @@ impl GhIssueWriter for NestingGh {
 }
 
 impl GhMilestoneApi for NestingGh {
-    fn milestone_list(&self, _repo: &str) -> Result<Vec<GhMilestone>> {
-        Ok(vec![])
-    }
     fn milestone_view(&self, _repo: &str, _number: u64) -> Result<GhMilestone> {
         unreachable!()
     }
@@ -229,9 +198,6 @@ impl GhMilestoneApi for NestingGh {
 }
 
 impl GhIssueDependencyApi for NestingGh {
-    fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
-        Ok(vec![])
-    }
     fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
         unreachable!()
     }
@@ -384,13 +350,11 @@ fn fetch_cli_nests_via_subissue_and_keeps_implements_relation() {
 
     run_fetch(root, &config, &gh).expect("fetch should succeed");
 
-    // Nests via the native sub-issue.
     let store = Store::load(root, &config).unwrap();
     let parent = story_doc(&store, "STORY-100");
     let children = store.children_of(&parent.path);
     assert_eq!(children.len(), 1, "child nests via native sub-issue");
 
-    // The `implements` relation survives into the child's `related`.
     let child = store_doc_at(&store, &children[0]);
     let implements: Vec<_> = child
         .related

@@ -10,8 +10,9 @@ use lazyspec::engine::config::{
     Config, GithubConfig, NumberingStrategy, RelationshipDef, StoreBackend, TypeDef,
 };
 use lazyspec::engine::gh::{
-    GhComment, GhFieldValueInput, GhGraphql, GhIssue, GhIssueDependencyApi, GhIssueMilestone,
-    GhIssueReader, GhIssueWriter, GhMilestone, GhMilestoneApi, GqlVar, ProjectItem,
+    test_support, GhComment, GhFieldValueInput, GhGraphql, GhIssue, GhIssueDependencyApi,
+    GhIssueMilestone, GhIssueReader, GhIssueWriter, GhMilestone, GhMilestoneApi, GqlVar,
+    ProjectItem,
 };
 use lazyspec::engine::git_ref::GitCli;
 use tempfile::TempDir;
@@ -32,7 +33,7 @@ impl GhIssueReader for MilestoneGh {
         _json_fields: &[String],
         _limit: Option<u64>,
     ) -> Result<Vec<GhIssue>> {
-        Ok(self.issues.clone())
+        unreachable!("a fetch reads issues off the composed round, never REST")
     }
     fn issue_view(&self, _repo: &str, _number: u64) -> Result<GhIssue> {
         unreachable!("issue_view not used")
@@ -43,13 +44,13 @@ impl GhIssueReader for MilestoneGh {
 }
 
 impl GhGraphql for MilestoneGh {
-    fn graphql(&self, _query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
-        if let Some((_, GqlVar::StrList(ids))) = vars.iter().find(|(k, _)| *k == "ids") {
-            let nodes: Vec<_> = ids
-                .iter()
-                .map(|p| serde_json::json!({ "id": p, "subIssues": { "nodes": [] } }))
-                .collect();
-            return Ok(serde_json::json!({ "data": { "nodes": nodes } }));
+    fn graphql(&self, query: &str, _vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+        if lazyspec::engine::gh_fetch::is_round_query(query) {
+            return Ok(test_support::with_issue_pages(
+                query,
+                test_support::round_response(&self.milestones, &[], &[]),
+                &self.issues,
+            ));
         }
         Ok(serde_json::json!({
             "data": { "organization": { "issueTypes": { "nodes": [] } } }
@@ -111,9 +112,6 @@ impl GhIssueWriter for MilestoneGh {
 }
 
 impl GhMilestoneApi for MilestoneGh {
-    fn milestone_list(&self, _repo: &str) -> Result<Vec<GhMilestone>> {
-        Ok(self.milestones.clone())
-    }
     fn milestone_view(&self, _repo: &str, number: u64) -> Result<GhMilestone> {
         self.milestones
             .iter()
@@ -151,9 +149,6 @@ impl GhMilestoneApi for MilestoneGh {
 }
 
 impl GhIssueDependencyApi for MilestoneGh {
-    fn list_blocked_by(&self, _: &str, _: u64) -> Result<Vec<u64>> {
-        Ok(vec![])
-    }
     fn add_blocked_by(&self, _: &str, _: u64, _: u64) -> Result<()> {
         unreachable!()
     }

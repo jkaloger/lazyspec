@@ -5,7 +5,7 @@
 //! in through a borrowed [`SyncContext`]. Adding a backend or a fetch step then
 //! happens in one place, so the CLI and TUI stay in lockstep by construction.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
@@ -14,7 +14,8 @@ use crate::engine::cache_lock::CacheLock;
 use crate::engine::clickup::ClickupClient;
 use crate::engine::clickup_cache;
 use crate::engine::config::{Config, Lifecycle, StoreBackend, TypeDef};
-use crate::engine::gh::{GhGraphql, GhIssueDependencyApi, GhIssueReader, GhMilestoneApi};
+use crate::engine::gh::{GhGraphql, ProjectItem};
+use crate::engine::gh_fetch::{self, FetchSnapshot};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::issue_body::TypeMatchRule;
 use crate::engine::issue_cache::IssueCache;
@@ -42,6 +43,10 @@ pub struct ClickupMaps<'a> {
 pub struct SyncContext<'a> {
     pub gh: Option<GhMaps<'a>>,
     pub clickup: Option<ClickupMaps<'a>>,
+    /// What the composed GitHub read returned this run. Callers construct this
+    /// `None`; [`sync_all`] runs the round once and fills it in before the
+    /// backend loop, so every GitHub syncer reads one request's worth of data.
+    pub fetch: Option<FetchSnapshot>,
 }
 
 /// The result of syncing one type. Never a `Result`: a per-type failure is an
@@ -86,14 +91,12 @@ pub trait TypeSync {
     ) -> SyncOutcome;
 }
 
-/// Refreshes a `github-milestones` type. Milestones must be synced before
-/// issues so an issue's native milestone resolves to its `MILESTONE-n` doc.
-pub struct GhMilestoneSync<'c> {
-    pub gh: &'c dyn GhMilestoneApi,
-    pub repo: String,
-}
+/// Refreshes a `github-milestones` type from the round's milestones. Milestones
+/// must be synced before issues so an issue's native milestone resolves to its
+/// `MILESTONE-n` doc.
+pub struct GhMilestoneSync;
 
-impl TypeSync for GhMilestoneSync<'_> {
+impl TypeSync for GhMilestoneSync {
     fn sync(
         &mut self,
         ctx: &mut SyncContext,
@@ -101,16 +104,22 @@ impl TypeSync for GhMilestoneSync<'_> {
         td: &TypeDef,
         _cfg: &Config,
     ) -> SyncOutcome {
+        // The round is the type's only source, and authoritative for all of it:
+        // without it an empty list would read as "every milestone was deleted"
+        // and wipe the cache. So the cache is left alone *and* the outcome
+        // fails, because `fetched: 0` would report a read that never happened
+        // as a clean success.
+        let Some(milestones) = ctx.fetch.as_ref().and_then(|f| f.milestones.as_deref()) else {
+            return SyncOutcome::failed(
+                &td.name,
+                "the github fetch round did not resolve milestones; the cache was left unchanged",
+            );
+        };
         let Some(maps) = ctx.gh.as_mut() else {
             return SyncOutcome::failed(&td.name, "github maps not provided in SyncContext");
         };
-        match crate::engine::milestone_cache::fetch_milestones(
-            root,
-            td,
-            &self.gh,
-            &self.repo,
-            maps.issue_map,
-        ) {
+        match crate::engine::milestone_cache::fetch_milestones(root, td, milestones, maps.issue_map)
+        {
             Ok(r) => SyncOutcome {
                 type_name: td.name.clone(),
                 fetched: r.fetched,
@@ -126,12 +135,13 @@ impl TypeSync for GhMilestoneSync<'_> {
 
 /// Refreshes a `github-issues` type, then folds in the per-item project-field
 /// reconcile (best-effort) so both surfaces resolve identically.
+///
+/// Built only by [`GhRound::issue_sync`]: the client and repo it writes through
+/// are the round's own, so a run cannot read one repo and write another's cache.
 pub struct GhIssueSync<'c> {
-    pub reader: &'c dyn GhIssueReader,
-    pub graphql: &'c dyn GhGraphql,
-    pub dependency: &'c dyn GhIssueDependencyApi,
-    pub repo: String,
-    pub type_rules: Vec<TypeMatchRule>,
+    graphql: &'c dyn GhGraphql,
+    repo: String,
+    type_rules: Vec<TypeMatchRule>,
 }
 
 impl TypeSync for GhIssueSync<'_> {
@@ -142,21 +152,13 @@ impl TypeSync for GhIssueSync<'_> {
         td: &TypeDef,
         cfg: &Config,
     ) -> SyncOutcome {
+        let fetch = ctx.fetch.as_ref();
+        let project_items = fetch.and_then(|f| f.project_items.as_ref());
         let Some(maps) = ctx.gh.as_mut() else {
             return SyncOutcome::failed(&td.name, "github maps not provided in SyncContext");
         };
         let cache = IssueCache::new(root);
-        let result = match cache.fetch_all(
-            root,
-            td,
-            self.reader,
-            self.graphql,
-            self.dependency,
-            &self.repo,
-            maps.issue_map,
-            &self.type_rules,
-            cfg,
-        ) {
+        let result = match cache.fetch_all(root, td, fetch, maps.issue_map, &self.type_rules, cfg) {
             Ok(r) => r,
             Err(e) => return SyncOutcome::failed(&td.name, e.to_string()),
         };
@@ -169,6 +171,7 @@ impl TypeSync for GhIssueSync<'_> {
             maps.issue_map,
             cfg,
             td,
+            project_items,
         ));
 
         SyncOutcome {
@@ -260,12 +263,35 @@ impl TypeSync for ClickupSync<'_> {
     }
 }
 
+/// The transport for the one composed GitHub read [`sync_all`] runs before the
+/// backend loop (RFC-065). Injected like any other client, and `None` when no
+/// GitHub backend is being fetched.
+pub struct GhRound<'c> {
+    pub gh: &'c dyn GhGraphql,
+    pub repo: String,
+}
+
+impl<'c> GhRound<'c> {
+    /// The issue syncer that belongs to this round. The repo string is stated
+    /// once, here, rather than once per syncer: the two used to be independent
+    /// fields that nothing held together, so a mismatch would have fetched one
+    /// repo and reconciled another's boards into its cache.
+    pub fn issue_sync(&self, type_rules: Vec<TypeMatchRule>) -> GhIssueSync<'c> {
+        GhIssueSync {
+            graphql: self.gh,
+            repo: self.repo.clone(),
+            type_rules,
+        }
+    }
+}
+
 /// A caller's per-backend syncers. Typed `Option` fields (not a slice) so
 /// "backend not configured" is a `None` the dispatch reads directly rather than
 /// a runtime scan that could silently lack a needed syncer.
 #[derive(Default)]
 pub struct Syncers<'c> {
-    pub milestone: Option<GhMilestoneSync<'c>>,
+    pub round: Option<GhRound<'c>>,
+    pub milestone: Option<GhMilestoneSync>,
     pub issue: Option<GhIssueSync<'c>>,
     pub git_ref: Option<GitRefSync<'c>>,
     pub clickup: Option<ClickupSync<'c>>,
@@ -276,6 +302,11 @@ pub struct Syncers<'c> {
 /// aborts: a per-type fetch failure -- or a missing syncer for a configured
 /// backend -- is recorded in that type's `error` and the run continues. The
 /// ordering rule (milestones before issues) lives here, in one place.
+///
+/// The one composed GitHub read runs first, once, and its result is lent to the
+/// GitHub syncers via [`SyncContext::fetch`] (RFC-065). One request is one
+/// failure domain, so whatever it could not resolve becomes a warning on every
+/// GitHub-backed outcome and each syncer keeps its prior cache.
 pub fn sync_all(
     root: &Path,
     config: &Config,
@@ -290,18 +321,77 @@ pub fn sync_all(
         StoreBackend::ClickupTasks,
     ];
 
+    let mut round_warnings = RoundWarnings::default();
+    if let Some(round) = syncers.round.as_ref() {
+        let snapshot = gh_fetch::fetch_all_pages(
+            round.gh,
+            &round.repo,
+            &gh_fetch::issue_rules(config),
+            &store_dispatch::authority_board_numbers(config),
+        );
+        round_warnings = RoundWarnings::from(&snapshot);
+        ctx.fetch = Some(snapshot);
+    }
+
     let mut outcomes = Vec::new();
     for backend in order {
         for td in config.documents.types.iter().filter(|t| t.store == backend) {
             if filter.is_some_and(|f| f != td.name) {
                 continue;
             }
-            if let Some(outcome) = dispatch(syncers, ctx, root, td, config) {
-                outcomes.push(outcome);
+            let Some(mut outcome) = dispatch(syncers, ctx, root, td, config) else {
+                continue;
+            };
+            if is_github_backend(&td.store) {
+                outcome.warnings.extend(round_warnings.heard_by(&td.name));
             }
+            outcomes.push(outcome);
         }
     }
     outcomes
+}
+
+/// The composed round's warnings, split by who should hear them. One request is
+/// one failure domain, so a round-wide loss lands on every GitHub-backed
+/// outcome -- but a loss the round attributed to one alias belongs to that type
+/// alone, and repeating it once per configured type would say the same sentence
+/// ten times for one failure.
+#[derive(Default)]
+struct RoundWarnings {
+    round_wide: Vec<String>,
+    by_type: HashMap<String, Vec<String>>,
+}
+
+impl RoundWarnings {
+    fn from(snapshot: &gh_fetch::FetchSnapshot) -> Self {
+        let mut split = Self::default();
+        for w in &snapshot.warnings {
+            match &w.about_type {
+                Some(type_name) => split
+                    .by_type
+                    .entry(type_name.clone())
+                    .or_default()
+                    .push(w.message.clone()),
+                None => split.round_wide.push(w.message.clone()),
+            }
+        }
+        split
+    }
+
+    fn heard_by(&self, type_name: &str) -> Vec<String> {
+        let mine = self.by_type.get(type_name).into_iter().flatten();
+        self.round_wide.iter().chain(mine).cloned().collect()
+    }
+}
+
+fn is_github_backend(backend: &StoreBackend) -> bool {
+    match backend {
+        StoreBackend::GithubMilestones | StoreBackend::GithubIssues => true,
+        StoreBackend::GithubProjects
+        | StoreBackend::GitRef
+        | StoreBackend::ClickupTasks
+        | StoreBackend::Filesystem => false,
+    }
 }
 
 /// The one site the compiler forces open when a `StoreBackend` variant is added.
@@ -464,6 +554,17 @@ pub(crate) fn fetch_git_ref(
 /// per-doc failure is returned as a warning and the rest still process (the
 /// engine emits no stderr, so warnings flow back to the caller via the outcome).
 /// Relocated from `cli::fetch::inject_project_fields_into_cache` (RFC-057).
+///
+/// The board memberships cost no read here: they rode the composed fetch round
+/// (RFC-065) and arrive as `project_items`, keyed by issue node id.
+/// [`store_dispatch::reconcile_project_fields_for_meta`] then runs per doc,
+/// fed the entry for its own issue. `client` is still needed for the one write
+/// that pass can trigger -- adding a doc to its authority board.
+///
+/// A round that could not read memberships at all hands `None`, and nothing is
+/// written: every doc keeps the attributes and the board-derived status it
+/// already had, which is what a token without the `project` scope should cost.
+/// A doc the round did not return is skipped the same way, one doc at a time.
 fn reconcile_project_fields_into_cache(
     root: &Path,
     client: &dyn GhGraphql,
@@ -471,10 +572,19 @@ fn reconcile_project_fields_into_cache(
     issue_map: &IssueMap,
     config: &Config,
     type_def: &TypeDef,
+    project_items: Option<&HashMap<String, Vec<ProjectItem>>>,
 ) -> Vec<String> {
+    let Some(items_by_node) = project_items else {
+        return Vec::new();
+    };
     let mut warnings = Vec::new();
     let cache_dir = root.join(".lazyspec/cache").join(&type_def.name);
-    let mut board_ids = store_dispatch::BoardNodeIds::default();
+
+    struct Loaded {
+        meta: crate::engine::document::DocMeta,
+        body: String,
+    }
+    let mut loaded: Vec<Loaded> = Vec::new();
     for path in cache_doc_paths(&cache_dir) {
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
@@ -493,28 +603,44 @@ fn reconcile_project_fields_into_cache(
         if meta.id.is_empty() {
             meta.id = crate::engine::store::extract_id(&path);
         }
-        match store_dispatch::reconcile_project_fields_for_meta(
+        loaded.push(Loaded { meta, body });
+    }
+
+    let mut board_ids = store_dispatch::BoardNodeIds::default();
+    for l in &mut loaded {
+        let Some(items) = round_items(items_by_node, issue_map, &l.meta.id) else {
+            continue;
+        };
+        warnings.extend(store_dispatch::reconcile_project_fields_for_meta(
             client,
             repo,
             issue_map,
             config,
             &mut board_ids,
-            &mut meta,
-        ) {
-            Ok(w) => warnings.extend(w),
-            Err(e) => {
-                warnings.push(format!(
-                    "could not read project fields for {}: {}",
-                    meta.id, e
-                ));
-                continue;
-            }
-        }
-        if let Err(e) = store_dispatch::write_cache_file(root, type_def, &meta, &body) {
-            warnings.push(format!("could not rewrite cache for {}: {}", meta.id, e));
+            &mut l.meta,
+            items,
+        ));
+    }
+
+    for l in &loaded {
+        if let Err(e) = store_dispatch::write_cache_file(root, type_def, &l.meta, &l.body) {
+            warnings.push(format!("could not rewrite cache for {}: {}", l.meta.id, e));
         }
     }
     warnings
+}
+
+/// What the round read for the doc's own issue, or `None` when it did not read
+/// it -- an unmapped doc, or one whose type's list failed this round. `None` is
+/// what keeps a doc off the "not on the board" path, which would otherwise add
+/// it to its authority board on the strength of an answer nobody gave.
+fn round_items<'a>(
+    items_by_node: &'a HashMap<String, Vec<ProjectItem>>,
+    issue_map: &IssueMap,
+    doc_id: &str,
+) -> Option<&'a [ProjectItem]> {
+    let node_id = &issue_map.get(doc_id)?.node_id;
+    items_by_node.get(node_id).map(Vec::as_slice)
 }
 
 /// Every cached doc of one type: the flat `<id>.md` files plus the one nesting
@@ -548,13 +674,11 @@ mod tests {
     use crate::engine::config::{
         Config, NumberingStrategy, RelationshipDef, StoreBackend, TypeDef,
     };
-    use crate::engine::gh::test_support::{
-        MockGhClient, MockGhDependencyClient, MockGhMilestoneClient,
-    };
+    use crate::engine::gh::test_support::MockGhClient;
     use crate::engine::gh::{
         GhAuthor, GhIssue, GhIssueMilestone, GhLabel, GhMilestone, ProjectFieldValue, ProjectItem,
     };
-    use crate::engine::gh::{GhFieldKind, GhFieldValueRepr};
+    use crate::engine::gh::{GhFieldKind, GhFieldValueRepr, GqlVar};
     use tempfile::TempDir;
 
     fn type_def(name: &str, prefix: &str, store: StoreBackend) -> TypeDef {
@@ -627,6 +751,343 @@ mod tests {
         }
     }
 
+    fn v1_milestone() -> GhMilestone {
+        GhMilestone {
+            number: 7,
+            title: "v1".to_string(),
+            description: "first".to_string(),
+            due_on: None,
+            state: "open".to_string(),
+            open_issues: 1,
+            closed_issues: 0,
+            url: String::new(),
+        }
+    }
+
+    fn round_query_count(client: &MockGhClient) -> usize {
+        client
+            .graphql_calls
+            .borrow()
+            .iter()
+            .filter(|(query, _)| gh_fetch::is_round_query(query))
+            .count()
+    }
+
+    /// A round transport that never resolves, to drive the one-failure-domain
+    /// path: whatever the round could not read, no syncer may overwrite.
+    struct UnreachableRound;
+
+    impl GhGraphql for UnreachableRound {
+        fn graphql(
+            &self,
+            _query: &str,
+            _vars: &[(&str, crate::engine::gh::GqlVar)],
+        ) -> Result<serde_json::Value> {
+            anyhow::bail!("could not connect to api.github.com")
+        }
+        fn project_items(&self, _repo: &str, _content_node_id: &str) -> Result<Vec<ProjectItem>> {
+            unreachable!("the round only speaks graphql")
+        }
+    }
+
+    /// A round transport answering with one handwritten payload, so a test can
+    /// drive the real parser with exactly the bytes GitHub sends.
+    struct CannedRound(serde_json::Value);
+
+    impl GhGraphql for CannedRound {
+        fn graphql(
+            &self,
+            _query: &str,
+            _vars: &[(&str, crate::engine::gh::GqlVar)],
+        ) -> Result<serde_json::Value> {
+            Ok(self.0.clone())
+        }
+        fn project_items(&self, _repo: &str, _content_node_id: &str) -> Result<Vec<ProjectItem>> {
+            unreachable!("the round only speaks graphql")
+        }
+    }
+
+    fn milestones_only_config() -> Config {
+        let mut config = Config::default();
+        config.documents.types = vec![type_def(
+            "milestone",
+            "MILESTONE",
+            StoreBackend::GithubMilestones,
+        )];
+        config
+    }
+
+    /// One healthy round against `client`, banking whatever it resolves.
+    fn seed_cache(root: &Path, config: &Config, client: &dyn GhGraphql, issue_map: &mut IssueMap) {
+        let mut ctx = SyncContext {
+            gh: Some(GhMaps { issue_map }),
+            clickup: None,
+            fetch: None,
+        };
+        let mut syncers = Syncers {
+            round: Some(GhRound {
+                gh: client,
+                repo: "owner/repo".to_string(),
+            }),
+            milestone: Some(GhMilestoneSync),
+            ..Default::default()
+        };
+        sync_all(root, config, &mut ctx, &mut syncers, None);
+    }
+
+    // A timed-out or rate-limited query answers with `data` present, the
+    // milestone connection nulled, and an `errors[]` entry naming no path. Taken
+    // as an empty list it reads as "every milestone was deleted" and the cache
+    // is pruned to nothing -- silent data loss reported as a success.
+    #[test]
+    fn a_pathless_graphql_error_leaves_the_milestone_cache_intact() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let config = milestones_only_config();
+
+        let mut issue_map = IssueMap::load(root).unwrap();
+        let healthy = MockGhClient::new().with_milestones(vec![v1_milestone()]);
+        seed_cache(root, &config, &healthy, &mut issue_map);
+        let milestone_doc = root.join(".lazyspec/cache/milestone/MILESTONE-7.md");
+        assert!(milestone_doc.exists(), "the healthy round seeds the cache");
+
+        let timed_out = CannedRound(serde_json::json!({
+            "data": {"repository": {
+                "milestones": null,
+                "owner": {"__typename": "Organization", "issueTypes": {"nodes": []}}
+            }},
+            "errors": [{"message": "Something went wrong while executing your query."}]
+        }));
+
+        let mut ctx = SyncContext {
+            gh: Some(GhMaps {
+                issue_map: &mut issue_map,
+            }),
+            clickup: None,
+            fetch: None,
+        };
+        let mut syncers = Syncers {
+            round: Some(GhRound {
+                gh: &timed_out,
+                repo: "owner/repo".to_string(),
+            }),
+            milestone: Some(GhMilestoneSync),
+            ..Default::default()
+        };
+
+        let outcomes = sync_all(root, &config, &mut ctx, &mut syncers, None);
+
+        assert!(milestone_doc.exists(), "a pathless error must not prune");
+        assert!(issue_map.get("MILESTONE-7").is_some());
+        assert_eq!(outcomes[0].removed, 0);
+        assert!(
+            outcomes[0]
+                .warnings
+                .iter()
+                .any(|w| w.contains("could not refresh milestones")),
+            "{:?}",
+            outcomes[0].warnings
+        );
+    }
+
+    // A round that never landed is not a read that found nothing: the milestone
+    // type has no other source, so its outcome must carry an error and the run
+    // must exit non-zero rather than report `fetched: 0` as a clean success.
+    #[test]
+    fn a_failed_round_fails_the_milestone_outcome() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let config = milestones_only_config();
+
+        let mut issue_map = IssueMap::load(root).unwrap();
+        let mut ctx = SyncContext {
+            gh: Some(GhMaps {
+                issue_map: &mut issue_map,
+            }),
+            clickup: None,
+            fetch: None,
+        };
+        let mut syncers = Syncers {
+            round: Some(GhRound {
+                gh: &UnreachableRound,
+                repo: "owner/repo".to_string(),
+            }),
+            milestone: Some(GhMilestoneSync),
+            ..Default::default()
+        };
+
+        let outcomes = sync_all(root, &config, &mut ctx, &mut syncers, None);
+
+        assert_eq!(outcomes.len(), 1);
+        assert!(
+            outcomes[0].error.is_some(),
+            "an unresolved round must fail the type: {:?}",
+            outcomes[0]
+        );
+        assert_eq!(outcomes[0].fetched, 0);
+        assert!(outcomes[0]
+            .warnings
+            .iter()
+            .any(|w| w.contains("github fetch round failed")));
+    }
+
+    // RFC-065's whole point: the composed read is per round, not per type, so
+    // adding types costs no extra request for milestones or issue types.
+    #[test]
+    fn sync_all_reads_the_composed_round_once_however_many_types_are_configured() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        let mut config = Config::default();
+        config.documents.types = vec![
+            type_def("milestone", "MILESTONE", StoreBackend::GithubMilestones),
+            type_def("story", "STORY", StoreBackend::GithubIssues),
+            type_def("ticket", "TICKET", StoreBackend::GithubIssues),
+        ];
+
+        let client = MockGhClient::new().with_milestones(vec![v1_milestone()]);
+
+        let mut issue_map = IssueMap::load(root).unwrap();
+        let mut ctx = SyncContext {
+            gh: Some(GhMaps {
+                issue_map: &mut issue_map,
+            }),
+            clickup: None,
+            fetch: None,
+        };
+        let mut syncers = Syncers {
+            round: Some(GhRound {
+                gh: &client,
+                repo: "owner/repo".to_string(),
+            }),
+            milestone: Some(GhMilestoneSync),
+            issue: Some(GhIssueSync {
+                graphql: &client,
+                repo: "owner/repo".to_string(),
+                type_rules: config
+                    .documents
+                    .types
+                    .iter()
+                    .map(TypeMatchRule::from)
+                    .collect(),
+            }),
+            ..Default::default()
+        };
+
+        let outcomes = sync_all(root, &config, &mut ctx, &mut syncers, None);
+
+        assert!(outcomes.iter().all(|o| o.error.is_none()), "{:?}", outcomes);
+        assert_eq!(round_query_count(&client), 1);
+        assert!(root
+            .join(".lazyspec/cache/milestone/MILESTONE-7.md")
+            .exists());
+    }
+
+    // One request is one failure domain, so a round that never landed must warn
+    // on every GitHub-backed type and leave every GitHub-backed cache exactly as
+    // it was -- an empty round is not "everything was deleted".
+    #[test]
+    fn a_failed_round_warns_on_every_github_type_and_leaves_the_caches_alone() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        let mut config = Config::default();
+        config.documents.types = vec![
+            type_def("milestone", "MILESTONE", StoreBackend::GithubMilestones),
+            type_def("story", "STORY", StoreBackend::GithubIssues),
+            type_def("doc", "DOC", StoreBackend::Filesystem),
+        ];
+        let type_rules: Vec<TypeMatchRule> = config
+            .documents
+            .types
+            .iter()
+            .map(TypeMatchRule::from)
+            .collect();
+
+        let client = MockGhClient::new().with_milestones(vec![v1_milestone()]);
+        let mut issue_map = IssueMap::load(root).unwrap();
+
+        // A first, healthy round banks MILESTONE-7.
+        {
+            let mut ctx = SyncContext {
+                gh: Some(GhMaps {
+                    issue_map: &mut issue_map,
+                }),
+                clickup: None,
+                fetch: None,
+            };
+            let mut syncers = Syncers {
+                round: Some(GhRound {
+                    gh: &client,
+                    repo: "owner/repo".to_string(),
+                }),
+                milestone: Some(GhMilestoneSync),
+                ..Default::default()
+            };
+            sync_all(root, &config, &mut ctx, &mut syncers, None);
+        }
+        let milestone_doc = root.join(".lazyspec/cache/milestone/MILESTONE-7.md");
+        assert!(milestone_doc.exists(), "the healthy round seeds the cache");
+
+        let mut ctx = SyncContext {
+            gh: Some(GhMaps {
+                issue_map: &mut issue_map,
+            }),
+            clickup: None,
+            fetch: None,
+        };
+        let mut syncers = Syncers {
+            round: Some(GhRound {
+                gh: &UnreachableRound,
+                repo: "owner/repo".to_string(),
+            }),
+            milestone: Some(GhMilestoneSync),
+            issue: Some(GhIssueSync {
+                graphql: &client,
+                repo: "owner/repo".to_string(),
+                type_rules,
+            }),
+            ..Default::default()
+        };
+
+        let outcomes = sync_all(root, &config, &mut ctx, &mut syncers, None);
+
+        assert!(milestone_doc.exists(), "a failed round must not prune");
+        for outcome in &outcomes {
+            assert!(
+                outcome
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("github fetch round failed")),
+                "{} should carry the round warning: {:?}",
+                outcome.type_name,
+                outcome.warnings
+            );
+        }
+        assert_eq!(outcomes.len(), 2, "filesystem types produce no outcome");
+    }
+
+    // A round-wide loss is every GitHub-backed type's business, but one the
+    // round pinned on a single alias is not: fanning it out prints the same
+    // sentence once per configured type for one failure.
+    #[test]
+    fn a_warning_the_round_pinned_on_one_type_reaches_only_that_type() {
+        let round_wide = "could not refresh milestones (keeping prior): FORBIDDEN";
+        let per_type = "could not refresh issues for type 'story' (keeping prior): FORBIDDEN";
+        let snapshot = FetchSnapshot {
+            warnings: vec![
+                crate::engine::issue_cache::RefreshWarning::new(round_wide.to_string()),
+                crate::engine::issue_cache::RefreshWarning::for_type("story", per_type.to_string()),
+            ],
+            ..Default::default()
+        };
+
+        let split = RoundWarnings::from(&snapshot);
+
+        assert_eq!(split.heard_by("story"), vec![round_wide, per_type]);
+        assert_eq!(split.heard_by("epic"), vec![round_wide]);
+    }
+
     // AC (STORY-202): milestones are fetched before issues, so an issue whose
     // native milestone points at a just-synced milestone resolves its forward
     // `targets` relation. The ordering rule lives in sync_all; if issue fetch
@@ -645,18 +1106,18 @@ mod tests {
         ];
         config.relationships = vec![milestone_relationship()];
 
-        let milestone_client = MockGhMilestoneClient::with_milestones(vec![GhMilestone {
-            number: 7,
-            title: "v1".to_string(),
-            description: "first".to_string(),
-            due_on: None,
-            state: "open".to_string(),
-            open_issues: 1,
-            closed_issues: 0,
-            url: String::new(),
-        }]);
-        let issue_client =
-            MockGhClient::new().with_list_result(vec![gh_issue_with_milestone(42, 7)]);
+        let issue_client = MockGhClient::new()
+            .with_list_result(vec![gh_issue_with_milestone(42, 7)])
+            .with_milestones(vec![GhMilestone {
+                number: 7,
+                title: "v1".to_string(),
+                description: "first".to_string(),
+                due_on: None,
+                state: "open".to_string(),
+                open_issues: 1,
+                closed_issues: 0,
+                url: String::new(),
+            }]);
 
         let mut issue_map = IssueMap::load(root).unwrap();
         let mut ctx = SyncContext {
@@ -664,16 +1125,16 @@ mod tests {
                 issue_map: &mut issue_map,
             }),
             clickup: None,
+            fetch: None,
         };
         let mut syncers = Syncers {
-            milestone: Some(GhMilestoneSync {
-                gh: &milestone_client,
+            round: Some(GhRound {
+                gh: &issue_client,
                 repo: "owner/repo".to_string(),
             }),
+            milestone: Some(GhMilestoneSync),
             issue: Some(GhIssueSync {
-                reader: &issue_client,
                 graphql: &issue_client,
-                dependency: &issue_client,
                 repo: "owner/repo".to_string(),
                 type_rules: config
                     .documents
@@ -703,8 +1164,8 @@ mod tests {
 
     // STORY-244 AC3/AC6: a native "A blocked_by B" set on GitHub surfaces on
     // fetch as `A blocked-by B` on A's doc (the declared inverse), and the
-    // resolved graph carries `B blocks A` as the derived inverse -- exercised
-    // entirely through the dependency fake, with no output-shape change.
+    // resolved graph carries `B blocks A` as the derived inverse -- read off the
+    // composed round, with no output-shape change.
     #[test]
     fn fetch_reads_native_blocked_by_into_graph_with_inverse_direction() {
         let tmp = TempDir::new().unwrap();
@@ -715,10 +1176,11 @@ mod tests {
         config.relationships = vec![dependency_relationship()];
 
         // Issue #42 (STORY-42) is blocked by issue #7 (STORY-7); both are
-        // fetched in the same run, so #7 resolves via the in-flight batch.
+        // fetched in the same run, so #7 resolves via the in-flight batch. The
+        // edge rides the round's `blockedBy` connection, not a read of its own.
         let issue_client = MockGhClient::new()
-            .with_list_result(vec![gh_issue_no_milestone(42), gh_issue_no_milestone(7)]);
-        let dependency_client = MockGhDependencyClient::new().with_blocked_by(42, vec![7]);
+            .with_list_result(vec![gh_issue_no_milestone(42), gh_issue_no_milestone(7)])
+            .with_round_blocked_by("I_node42", vec![7]);
 
         let mut issue_map = IssueMap::load(root).unwrap();
         let mut ctx = SyncContext {
@@ -726,12 +1188,15 @@ mod tests {
                 issue_map: &mut issue_map,
             }),
             clickup: None,
+            fetch: None,
         };
         let mut syncers = Syncers {
+            round: Some(GhRound {
+                gh: &issue_client,
+                repo: "owner/repo".to_string(),
+            }),
             issue: Some(GhIssueSync {
-                reader: &issue_client,
                 graphql: &issue_client,
-                dependency: &dependency_client,
                 repo: "owner/repo".to_string(),
                 type_rules: config
                     .documents
@@ -796,38 +1261,27 @@ mod tests {
         issues: Vec<GhIssue>,
     }
 
-    impl GhIssueReader for FailingInjectClient {
-        fn issue_list(
-            &self,
-            _repo: &str,
-            _labels: &[String],
-            _fields: &[String],
-            _limit: Option<u64>,
-        ) -> Result<Vec<GhIssue>> {
-            Ok(self.issues.clone())
-        }
-        fn issue_view(&self, _repo: &str, number: u64) -> Result<GhIssue> {
-            Ok(gh_issue_no_milestone(number))
-        }
-        fn issue_comments(
-            &self,
-            _repo: &str,
-            _number: u64,
-        ) -> Result<Vec<crate::engine::gh::GhComment>> {
-            Ok(vec![])
-        }
-    }
-
     impl GhGraphql for FailingInjectClient {
         fn graphql(
             &self,
-            _query: &str,
+            query: &str,
             _vars: &[(&str, crate::engine::gh::GqlVar)],
         ) -> Result<serde_json::Value> {
+            if gh_fetch::is_round_query(query) {
+                let resp = crate::engine::gh::test_support::with_issue_pages(
+                    query,
+                    crate::engine::gh::test_support::round_response(&[], &[], &[]),
+                    &self.issues,
+                );
+                return Ok(crate::engine::gh::test_support::without_project_items(
+                    resp,
+                    "your token has not been granted the required scopes: project",
+                ));
+            }
             anyhow::bail!("graphql unreachable")
         }
         fn project_items(&self, _repo: &str, _content_node_id: &str) -> Result<Vec<ProjectItem>> {
-            anyhow::bail!("project fields unreachable")
+            unreachable!("a fetch reads board memberships off the composed round")
         }
         fn update_project_v2_item_field_value(
             &self,
@@ -849,9 +1303,6 @@ mod tests {
     }
 
     impl crate::engine::gh::GhIssueDependencyApi for FailingInjectClient {
-        fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
-            Ok(vec![])
-        }
         fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
             unimplemented!()
         }
@@ -877,8 +1328,8 @@ mod tests {
             traversal: None,
         }];
 
-        // An issue whose body declares a board membership, so injection attempts
-        // the project-field GraphQL -- which this client fails -> a warning.
+        // An issue whose body declares a board membership, whose `projectItems`
+        // the round could not read -> a warning, and the doc still caches.
         let issue = GhIssue {
             body: issue_body_with_membership(),
             ..gh_issue_no_milestone(42)
@@ -894,12 +1345,15 @@ mod tests {
                 issue_map: &mut issue_map,
             }),
             clickup: None,
+            fetch: None,
         };
         let mut syncers = Syncers {
+            round: Some(GhRound {
+                gh: &issue_client,
+                repo: "owner/repo".to_string(),
+            }),
             issue: Some(GhIssueSync {
-                reader: &issue_client,
                 graphql: &issue_client,
-                dependency: &issue_client,
                 repo: "owner/repo".to_string(),
                 type_rules: config
                     .documents
@@ -985,6 +1439,7 @@ mod tests {
                 issue_map: &mut issue_map,
             }),
             clickup: None,
+            fetch: None,
         };
         // No milestone syncer configured.
         let mut syncers = Syncers::default();
@@ -1017,6 +1472,7 @@ mod tests {
                 issue_map: &mut issue_map,
             }),
             clickup: None,
+            fetch: None,
         };
         let mut syncers = Syncers::default();
 
@@ -1040,7 +1496,6 @@ mod tests {
             type_def("story", "STORY", StoreBackend::GithubIssues),
         ];
 
-        let milestone_client = MockGhMilestoneClient::with_milestones(vec![]);
         let issue_client = MockGhClient::new();
 
         let mut issue_map = IssueMap::load(root).unwrap();
@@ -1049,16 +1504,16 @@ mod tests {
                 issue_map: &mut issue_map,
             }),
             clickup: None,
+            fetch: None,
         };
         let mut syncers = Syncers {
-            milestone: Some(GhMilestoneSync {
-                gh: &milestone_client,
+            round: Some(GhRound {
+                gh: &issue_client,
                 repo: "owner/repo".to_string(),
             }),
+            milestone: Some(GhMilestoneSync),
             issue: Some(GhIssueSync {
-                reader: &issue_client,
                 graphql: &issue_client,
-                dependency: &issue_client,
                 repo: "owner/repo".to_string(),
                 type_rules: vec![],
             }),
@@ -1106,12 +1561,15 @@ mod tests {
                 issue_map: &mut issue_map,
             }),
             clickup: None,
+            fetch: None,
         };
         let mut syncers = Syncers {
+            round: Some(GhRound {
+                gh: &issue_client,
+                repo: "owner/repo".to_string(),
+            }),
             issue: Some(GhIssueSync {
-                reader: &issue_client,
                 graphql: &issue_client,
-                dependency: &issue_client,
                 repo: "owner/repo".to_string(),
                 type_rules: config
                     .documents
@@ -1185,7 +1643,7 @@ mod tests {
 
         let mut issue_map = IssueMap::load(root).unwrap();
         issue_map.insert("STORY-12", 12, "", "I_node12");
-        let client = MockGhClient::new().with_project_items(vec![board_status_item(7, "Review")]);
+        let client = MockGhClient::new();
 
         let warnings = reconcile_project_fields_into_cache(
             root,
@@ -1194,9 +1652,166 @@ mod tests {
             &issue_map,
             &config,
             td,
+            Some(&round_items_for(&[(
+                "I_node12",
+                vec![board_status_item(7, "Review")],
+            )])),
         );
 
         assert!(warnings.is_empty(), "got: {warnings:?}");
         assert_eq!(cached_story_status(&child_file), "review");
+    }
+
+    // The round reads one repo and the issue syncer writes to one repo, and they
+    // are the same string by construction. Nothing used to hold the two
+    // together, so a caller could fetch `a/repo` and resolve the authority board
+    // under `b`'s owner -- silently reconciling one repo's boards into another
+    // repo's cache.
+    #[test]
+    fn the_issue_syncer_resolves_boards_under_the_repo_the_round_read() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let config = authority_config();
+
+        let client = MockGhClient::new().with_list_result(vec![gh_issue_no_milestone(7)]);
+        let mut issue_map = IssueMap::load(root).unwrap();
+        let mut ctx = SyncContext {
+            gh: Some(GhMaps {
+                issue_map: &mut issue_map,
+            }),
+            clickup: None,
+            fetch: None,
+        };
+
+        let round = GhRound {
+            gh: &client,
+            repo: "round-owner/repo".to_string(),
+        };
+        let mut syncers = Syncers {
+            issue: Some(
+                round.issue_sync(
+                    config
+                        .documents
+                        .types
+                        .iter()
+                        .map(TypeMatchRule::from)
+                        .collect(),
+                ),
+            ),
+            round: Some(round),
+            ..Default::default()
+        };
+
+        sync_all(root, &config, &mut ctx, &mut syncers, None);
+
+        let calls = client.graphql_calls.borrow();
+        let board_owners: Vec<&str> = calls
+            .iter()
+            .filter(|(query, _)| !gh_fetch::is_round_query(query))
+            .flat_map(|(_, vars)| vars.iter())
+            .filter(|(name, _)| name == "owner")
+            .filter_map(|(_, value)| match value {
+                GqlVar::Str(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !board_owners.is_empty(),
+            "the authority-board add must have resolved the board under an owner"
+        );
+        assert!(
+            board_owners.iter().all(|o| *o == "round-owner"),
+            "got: {board_owners:?}"
+        );
+    }
+
+    /// The round's board memberships, keyed by issue node id, as the snapshot
+    /// hands them over.
+    fn round_items_for(entries: &[(&str, Vec<ProjectItem>)]) -> HashMap<String, Vec<ProjectItem>> {
+        entries
+            .iter()
+            .map(|(node_id, items)| (node_id.to_string(), items.clone()))
+            .collect()
+    }
+
+    // A round that could not read board memberships at all -- a token without
+    // the `project` scope -- must leave every doc exactly as it was rather than
+    // read "on no board" into a cache and, for an authority-bound type, put the
+    // doc back on its board off the strength of it.
+    #[test]
+    fn an_unread_project_scope_leaves_every_board_bound_doc_untouched() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let config = authority_config();
+        let td = &config.documents.types[0];
+
+        let cache = root.join(".lazyspec/cache/story");
+        std::fs::create_dir_all(&cache).unwrap();
+        let doc = cache.join("STORY-12.md");
+        std::fs::write(
+            &doc,
+            "---\ntitle: \"Story\"\ntype: story\nstatus: \"review\"\nauthor: \"@octocat\"\ndate: 2026-01-01\ntags: []\n---\nbody\n",
+        )
+        .unwrap();
+
+        let mut issue_map = IssueMap::load(root).unwrap();
+        issue_map.insert("STORY-12", 12, "", "I_node12");
+        let client = MockGhClient::new();
+
+        let warnings = reconcile_project_fields_into_cache(
+            root,
+            &client,
+            "owner/repo",
+            &issue_map,
+            &config,
+            td,
+            None,
+        );
+
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+        assert_eq!(cached_story_status(&doc), "review");
+        assert!(
+            client.graphql_calls.borrow().is_empty(),
+            "an unknown membership must not trigger a board add, got: {:?}",
+            client.graphql_calls.borrow()
+        );
+    }
+
+    // A doc the round never returned is not "on no board": it was not read.
+    // Acting on its absence would add it to its authority board and blank the
+    // status it still legitimately holds.
+    #[test]
+    fn a_doc_the_round_did_not_return_keeps_its_board_status() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let config = authority_config();
+        let td = &config.documents.types[0];
+
+        let cache = root.join(".lazyspec/cache/story");
+        std::fs::create_dir_all(&cache).unwrap();
+        let doc = cache.join("STORY-12.md");
+        std::fs::write(
+            &doc,
+            "---\ntitle: \"Story\"\ntype: story\nstatus: \"review\"\nauthor: \"@octocat\"\ndate: 2026-01-01\ntags: []\n---\nbody\n",
+        )
+        .unwrap();
+
+        let mut issue_map = IssueMap::load(root).unwrap();
+        issue_map.insert("STORY-12", 12, "", "I_node12");
+        let client = MockGhClient::new();
+
+        let warnings = reconcile_project_fields_into_cache(
+            root,
+            &client,
+            "owner/repo",
+            &issue_map,
+            &config,
+            td,
+            Some(&round_items_for(&[("I_other", vec![])])),
+        );
+
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+        assert_eq!(cached_story_status(&doc), "review");
+        assert!(client.graphql_calls.borrow().is_empty());
     }
 }

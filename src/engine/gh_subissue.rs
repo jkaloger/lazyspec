@@ -5,8 +5,6 @@
 //! GraphQL node ids (`I_*`), never REST numbers. Only structural children of a
 //! subdir parent route here; semantic relations stay in the issue-body comment.
 
-use std::collections::HashMap;
-
 use anyhow::{bail, Context, Result};
 
 use crate::engine::config::StoreBackend;
@@ -36,22 +34,6 @@ pub struct SubIssuePlan {
 
 const SUB_ISSUES_QUERY: &str =
     "query($id: ID!) { node(id: $id) { ... on Issue { subIssues(first: 100) { nodes { id } } } } }";
-
-/// Batched variant: resolve many parents' sub-issues in one request via
-/// `nodes(ids:)`. `id` is selected on each node so results re-key by parent
-/// regardless of array order; non-Issue / inaccessible ids come back `null`.
-const SUB_ISSUES_BATCH_QUERY: &str =
-    "query($ids: [ID!]!) { nodes(ids: $ids) { ... on Issue { id subIssues(first: 100) { nodes { id } } } } }";
-
-/// Batched read of each child issue's native sub-issue PARENT number via
-/// `nodes(ids:)`. The mirror image of [`SUB_ISSUES_BATCH_QUERY`]: it walks the
-/// `parent` edge (child -> parent) so a flat doc can read back which issue it is
-/// a sub-issue of. `parent` is `null` for top-level issues.
-const SUB_ISSUE_PARENT_BATCH_QUERY: &str =
-    "query($ids: [ID!]!) { nodes(ids: $ids) { ... on Issue { id parent { number } } } }";
-
-/// GitHub caps a single `nodes(ids:)` selection at 100 ids.
-pub const SUB_ISSUE_BATCH_MAX: usize = 100;
 
 pub(crate) const ADD_SUB_ISSUE_MUTATION: &str = "mutation($issueId: ID!, $subIssueId: ID!) { addSubIssue(input: {issueId: $issueId, subIssueId: $subIssueId}) { issue { id } } }";
 
@@ -177,72 +159,6 @@ pub fn fetch_remote_sub_issue_nodes(gql: &dyn GhGraphql, parent_node: &str) -> R
         })
         .unwrap_or_default();
     Ok(nodes)
-}
-
-/// Resolve sub-issue child node ids for up to `SUB_ISSUE_BATCH_MAX` parents in
-/// one query. Returns `parent_node -> ordered child node ids`, including parents
-/// with an empty child list (so callers can distinguish "no children" from "not
-/// queried"). Parents whose id resolves to a non-Issue / inaccessible node are
-/// absent from the map (GitHub returns `null` for them).
-pub fn fetch_sub_issue_nodes_batch(
-    gql: &dyn GhGraphql,
-    parent_nodes: &[String],
-) -> Result<HashMap<String, Vec<String>>> {
-    debug_assert!(parent_nodes.len() <= SUB_ISSUE_BATCH_MAX);
-    let resp = gql.graphql(
-        SUB_ISSUES_BATCH_QUERY,
-        &[("ids", GqlVar::StrList(parent_nodes.to_vec()))],
-    )?;
-    let mut out = HashMap::new();
-    let Some(nodes) = resp.pointer("/data/nodes").and_then(|v| v.as_array()) else {
-        return Ok(out);
-    };
-    for node in nodes {
-        let Some(parent) = node.get("id").and_then(|i| i.as_str()) else {
-            continue;
-        };
-        let children = node
-            .pointer("/subIssues/nodes")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|n| n.get("id").and_then(|i| i.as_str()).map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        out.insert(parent.to_string(), children);
-    }
-    Ok(out)
-}
-
-/// Resolve the native sub-issue PARENT issue number for up to
-/// [`SUB_ISSUE_BATCH_MAX`] child issues in one query. Returns `child_node ->
-/// parent number`, omitting children with no parent (top-level issues) so a
-/// caller can tell "no parent" from "not queried". Numbers (not node ids) are
-/// returned so read-back resolves parents by number via the issue map, exactly
-/// as the native dependency read-back does.
-pub fn fetch_sub_issue_parent_numbers_batch(
-    gql: &dyn GhGraphql,
-    child_nodes: &[String],
-) -> Result<HashMap<String, u64>> {
-    debug_assert!(child_nodes.len() <= SUB_ISSUE_BATCH_MAX);
-    let resp = gql.graphql(
-        SUB_ISSUE_PARENT_BATCH_QUERY,
-        &[("ids", GqlVar::StrList(child_nodes.to_vec()))],
-    )?;
-    let mut out = HashMap::new();
-    let Some(nodes) = resp.pointer("/data/nodes").and_then(|v| v.as_array()) else {
-        return Ok(out);
-    };
-    for node in nodes {
-        let Some(child) = node.get("id").and_then(|i| i.as_str()) else {
-            continue;
-        };
-        if let Some(number) = node.pointer("/parent/number").and_then(|n| n.as_u64()) {
-            out.insert(child.to_string(), number);
-        }
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -393,28 +309,6 @@ mod tests {
         let first = &repris[0].1;
         assert!(first.contains(&("subIssueId".to_string(), GqlVar::Str("I_a".to_string()))));
         assert!(first.contains(&("afterId".to_string(), GqlVar::Str(String::new()))));
-    }
-
-    // Read-back: children with a parent map to that parent's number; a
-    // parentless (top-level) issue is omitted so callers can tell it apart.
-    #[test]
-    fn parent_numbers_batch_maps_children_and_omits_parentless() {
-        let resp = serde_json::json!({
-            "data": { "nodes": [
-                {"id": "I_child", "parent": {"number": 100}},
-                {"id": "I_top", "parent": null},
-            ]}
-        });
-        let client = MockGhClient::new().with_graphql_responses(vec![resp]);
-
-        let out = fetch_sub_issue_parent_numbers_batch(
-            &client,
-            &["I_child".to_string(), "I_top".to_string()],
-        )
-        .unwrap();
-
-        assert_eq!(out.get("I_child"), Some(&100));
-        assert!(!out.contains_key("I_top"), "parentless issue omitted");
     }
 
     // Already-correct order issues no reprioritize (and no add/remove).

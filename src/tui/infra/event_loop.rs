@@ -2,7 +2,7 @@ use crate::engine::clickup::ClickupClient;
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::document::split_frontmatter;
-use crate::engine::gh::{GhCli, GhGraphql, GhIssueDependencyApi, GhIssueReader, GhMilestoneApi};
+use crate::engine::gh::{GhCli, GhGraphql};
 use crate::engine::git_ref::{GitCli, GitRefOps};
 use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::issue_body::TypeMatchRule;
@@ -12,8 +12,8 @@ use crate::engine::status_colors::StatusColors;
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
 use crate::engine::sync::{
-    sync_all, ClickupMaps, ClickupSync, GhIssueSync, GhMaps, GhMilestoneSync, GitRefSync,
-    SyncContext, Syncers,
+    sync_all, ClickupMaps, ClickupSync, GhMaps, GhMilestoneSync, GhRound, GitRefSync, SyncContext,
+    Syncers,
 };
 use crate::engine::task_map::TaskMap;
 use crate::tui::content;
@@ -296,15 +296,11 @@ fn format_fix_output(output: &crate::engine::ops::fix::FixOutput) -> String {
 //
 // Clients/tokens are injected (DICTUM-003): production passes the real `GhCli` /
 // `GitCli` / `ClickupHttpClient`; tests drive the same seams with fakes.
-#[allow(clippy::too_many_arguments)]
 fn poll_sync(
     root: &Path,
     config: &Config,
     gh_store: Option<&Arc<Mutex<GithubIssuesStore>>>,
-    gh_reader: &dyn GhIssueReader,
     gh_graphql: &dyn GhGraphql,
-    gh_milestone: &dyn GhMilestoneApi,
-    gh_dependency: &dyn GhIssueDependencyApi,
     git_ops: &dyn GitRefOps,
     clickup: &dyn ClickupClient,
     clickup_token: Option<&str>,
@@ -357,27 +353,22 @@ fn poll_sync(
                 }),
                 _ => None,
             },
+            fetch: None,
         };
 
         let mut syncers = Syncers::default();
-        if has_milestones {
-            if let Some(repo) = repo.clone() {
-                syncers.milestone = Some(GhMilestoneSync {
-                    gh: gh_milestone,
-                    repo,
-                });
+        if let Some(repo) = repo.clone() {
+            let round = GhRound {
+                gh: gh_graphql,
+                repo,
+            };
+            if has_gh_issues {
+                syncers.issue = Some(round.issue_sync(type_rules));
             }
+            syncers.round = Some(round);
         }
-        if has_gh_issues {
-            if let Some(repo) = repo.clone() {
-                syncers.issue = Some(GhIssueSync {
-                    reader: gh_reader,
-                    graphql: gh_graphql,
-                    dependency: gh_dependency,
-                    repo,
-                    type_rules,
-                });
-            }
+        if has_milestones {
+            syncers.milestone = Some(GhMilestoneSync);
         }
         if has_git_ref {
             syncers.git_ref = Some(GitRefSync {
@@ -898,9 +889,6 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                             &poll_config,
                             poll_store.as_ref(),
                             &gh,
-                            &gh,
-                            &gh,
-                            &gh,
                             &git_ops,
                             &clickup,
                             clickup_token.as_ref().map(|t| t.expose()),
@@ -1301,7 +1289,9 @@ mod tests {
 
     use crate::engine::clickup::{ClickupError, ClickupStatus, ClickupTask};
     use crate::engine::clickup_cache;
-    use crate::engine::gh::test_support::{MockGhClient, MockGhMilestoneClient};
+    use crate::engine::gh::test_support::{
+        assert_one_composed_round, ten_type_config_src, GhRequestCounter, MockGhClient,
+    };
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use std::cell::Cell;
 
@@ -1316,11 +1306,8 @@ mod tests {
 
     // An inert GitHub client for clickup-only poll tests: no github types are
     // configured and no github store is passed, so no method is ever reached.
-    fn inert_gh() -> (MockGhClient, MockGhMilestoneClient) {
-        (
-            MockGhClient::new(),
-            MockGhMilestoneClient::with_milestones(vec![]),
-        )
+    fn inert_gh() -> MockGhClient {
+        MockGhClient::new()
     }
 
     // AC (STORY-203): a poll over a clickup-tasks type bound to a List with
@@ -1344,20 +1331,9 @@ mod tests {
         }];
         let clickup = FakeClickupClient::with_tasks(vec![task]).with_statuses(statuses);
         let git = MockGitRefClient::new();
-        let (reader, milestone) = inert_gh();
+        let reader = inert_gh();
 
-        let warnings = poll_sync(
-            root,
-            &config,
-            None,
-            &reader,
-            &reader,
-            &milestone,
-            &reader,
-            &git,
-            &clickup,
-            Some("pk_x"),
-        );
+        let warnings = poll_sync(root, &config, None, &reader, &git, &clickup, Some("pk_x"));
 
         assert!(warnings.is_empty(), "got: {warnings:?}");
         assert!(
@@ -1380,20 +1356,9 @@ mod tests {
         // outcome carries an error, folded into warnings, and poll_sync returns.
         let clickup = FakeClickupClient::failing(ClickupError::Timeout);
         let git = MockGitRefClient::new();
-        let (reader, milestone) = inert_gh();
+        let reader = inert_gh();
 
-        let warnings = poll_sync(
-            root,
-            &config,
-            None,
-            &reader,
-            &reader,
-            &milestone,
-            &reader,
-            &git,
-            &clickup,
-            Some("pk_x"),
-        );
+        let warnings = poll_sync(root, &config, None, &reader, &git, &clickup, Some("pk_x"));
 
         assert!(
             warnings.iter().any(|w| w.starts_with("task:")),
@@ -1432,7 +1397,6 @@ mod tests {
             assignees: vec![],
         };
         let gh = MockGhClient::new().with_list_result(vec![gh_issue]);
-        let milestone = MockGhMilestoneClient::with_milestones(vec![]);
         let git = MockGitRefClient::new();
         let clickup = FakeClickupClient::with_tasks(vec![]);
 
@@ -1445,18 +1409,7 @@ mod tests {
             issue_cache: IssueCache::new(root),
         }));
 
-        let _warnings = poll_sync(
-            root,
-            &config,
-            Some(&store),
-            &gh,
-            &gh,
-            &milestone,
-            &gh,
-            &git,
-            &clickup,
-            None,
-        );
+        let _warnings = poll_sync(root, &config, Some(&store), &gh, &git, &clickup, None);
 
         // The fetched issue is mapped in the SHARED store's own field, proving
         // the poll borrowed &mut store.issue_map rather than a throwaway copy.
@@ -1466,6 +1419,38 @@ mod tests {
             Some("I_node42"),
             "poll must write the fetched mapping into the shared store's issue_map"
         );
+    }
+
+    // STORY-249 AC1/AC2 and STORY-250 AC9, on the surface that pays for it every
+    // poll interval: the background poll must cost the same one composed request
+    // the CLI does -- issue lists included -- not one probe per type and board.
+    #[test]
+    fn a_poll_costs_one_composed_request_for_milestones_issue_types_and_board_schemas() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let config = Config::parse(&ten_type_config_src()).unwrap();
+
+        let gh = GhRequestCounter::for_ten_type_config();
+        let store = Arc::new(Mutex::new(GithubIssuesStore {
+            client: Box::new(GhCli::new()),
+            root: root.to_path_buf(),
+            repo: "octo-org/repo".to_string(),
+            config: config.clone(),
+            issue_map: IssueMap::load(root).unwrap(),
+            issue_cache: IssueCache::new(root),
+        }));
+
+        poll_sync(
+            root,
+            &config,
+            Some(&store),
+            &gh,
+            &MockGitRefClient::new(),
+            &FakeClickupClient::with_tasks(vec![]),
+            None,
+        );
+
+        assert_one_composed_round(&gh, root);
     }
 
     // --- ITERATION-311: non-blocking store lock on the UI thread (BUG-001) ---

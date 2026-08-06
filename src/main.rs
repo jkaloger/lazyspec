@@ -882,43 +882,33 @@ fn refresh_github_cache(cwd: &std::path::Path, config: &Config) {
         }
     };
 
-    let mut map_changed = false;
-    for type_def in &gh_types {
-        let all_type_rules: Vec<lazyspec::engine::issue_body::TypeMatchRule> = config
-            .documents
-            .types
-            .iter()
-            .map(lazyspec::engine::issue_body::TypeMatchRule::from)
-            .collect();
-        let result = match cache.refresh_stale(
-            cwd,
-            type_def,
-            &gh,
-            &gh,
-            &repo,
-            &mut issue_map,
-            ttl,
-            &all_type_rules,
-            config,
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!(
-                    "warning: could not refresh cache for type '{}': {}",
-                    type_def.name, e
-                );
-                continue;
-            }
-        };
-        for warning in &result.warnings {
-            eprintln!("warning: {}", warning.message);
+    let all_type_rules: Vec<lazyspec::engine::issue_body::TypeMatchRule> = config
+        .documents
+        .types
+        .iter()
+        .map(lazyspec::engine::issue_body::TypeMatchRule::from)
+        .collect();
+    let result = match cache.refresh_stale(
+        cwd,
+        &gh_types,
+        &gh,
+        &repo,
+        &mut issue_map,
+        ttl,
+        &all_type_rules,
+        config,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("warning: could not refresh github cache: {}", e);
+            return;
         }
-        if result.refreshed > 0 {
-            map_changed = true;
-        }
+    };
+    for warning in &result.warnings {
+        eprintln!("warning: {}", warning.message);
     }
 
-    if map_changed {
+    if result.refreshed > 0 {
         if let Err(e) = issue_map.save(cwd) {
             eprintln!("warning: could not save issue map after refresh: {}", e);
         }
