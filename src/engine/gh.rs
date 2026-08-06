@@ -205,11 +205,6 @@ pub fn parse_milestone_json(stdout: &str) -> Result<GhMilestone> {
         .map_err(|e| anyhow::anyhow!("failed to parse milestone JSON: {}", e))
 }
 
-pub fn parse_milestone_list_json(stdout: &str) -> Result<Vec<GhMilestone>> {
-    serde_json::from_str(stdout)
-        .map_err(|e| anyhow::anyhow!("failed to parse milestone list JSON: {}", e))
-}
-
 /// Pure argv builder for `issue_set_milestone`. `None` clears the milestone and
 /// MUST emit `-F milestone=null` (a JSON null, not the string `"null"`);
 /// `Some(n)` emits `-F milestone=<n>` (a typed int). `-F` (not `-f`) is what
@@ -305,34 +300,6 @@ pub fn build_remove_blocked_by_args(
     ]
 }
 
-/// Pure argv builder for listing an issue's native blocked-by dependencies
-/// (`GET repos/{repo}/issues/{n}/dependencies/blocked_by`). The response is an
-/// array of issue objects; only their `number` is used downstream to resolve
-/// each blocking issue to its doc.
-pub fn build_list_blocked_by_args(repo: &str, blocked_number: u64) -> Vec<String> {
-    vec![
-        "api".to_string(),
-        format!(
-            "repos/{}/issues/{}/dependencies/blocked_by",
-            repo, blocked_number
-        ),
-    ]
-}
-
-#[derive(Deserialize)]
-struct BlockedByIssue {
-    number: u64,
-}
-
-/// Parse a `dependencies/blocked_by` response (an array of issue objects) into
-/// the blocking issues' display numbers. Only `number` is read; every other
-/// field of the issue objects is ignored.
-pub fn parse_blocked_by_numbers(stdout: &str) -> Result<Vec<u64>> {
-    let issues: Vec<BlockedByIssue> = serde_json::from_str(stdout)
-        .map_err(|e| anyhow::anyhow!("failed to parse blocked_by JSON: {}", e))?;
-    Ok(issues.into_iter().map(|i| i.number).collect())
-}
-
 // --- Label helpers ---
 
 pub fn type_label(type_name: &str) -> String {
@@ -409,8 +376,6 @@ pub trait GhIssueWriter {
 /// can be faked independently. Milestones use the REST API (`gh api
 /// repos/{repo}/milestones`), not GraphQL.
 pub trait GhMilestoneApi {
-    fn milestone_list(&self, repo: &str) -> Result<Vec<GhMilestone>>;
-
     fn milestone_view(&self, repo: &str, number: u64) -> Result<GhMilestone>;
 
     fn milestone_create(
@@ -444,22 +409,18 @@ pub trait GhMilestoneApi {
     ) -> Result<()>;
 }
 
-/// REST seam for GitHub issue dependencies (the native blocked-by / blocking
-/// graph), kept separate from [`GhMilestoneApi`] so it can be faked
-/// independently. Dependencies are REST
-/// (`gh api repos/{repo}/issues/{n}/dependencies/blocked_by`), not GraphQL.
+/// REST seam for writing GitHub issue dependencies (the native blocked-by /
+/// blocking graph), kept separate from [`GhMilestoneApi`] so it can be faked
+/// independently. Dependency writes are REST
+/// (`gh api repos/{repo}/issues/{n}/dependencies/blocked_by`), not GraphQL; the
+/// read side rides the composed fetch round's inline `blockedBy` connection
+/// instead ([`crate::engine::gh_fetch`]).
 ///
 /// Endpoints take a blocked issue by its display `number` (the path segment)
 /// and identify the blocking issue by its REST *database id* — the real impl
 /// resolves that id from the number, since the issue map carries only the
 /// display number and GraphQL node id.
 pub trait GhIssueDependencyApi {
-    /// List the display numbers of the issues that block `blocked_number`
-    /// (`GET issues/{blocked_number}/dependencies/blocked_by`, an array of issue
-    /// objects). The read side of the native dependency graph; the caller maps
-    /// each number to its doc via the issue map.
-    fn list_blocked_by(&self, repo: &str, blocked_number: u64) -> Result<Vec<u64>>;
-
     /// Record that issue `blocked_number` is blocked by issue `blocking_number`
     /// (`POST issues/{blocked_number}/dependencies/blocked_by`, body
     /// `issue_id=<blocking issue database id>`). Idempotent on GitHub's side.
@@ -830,10 +791,6 @@ impl<T: GhGraphql + ?Sized> GhGraphql for &T {
 }
 
 impl<T: GhMilestoneApi + ?Sized> GhMilestoneApi for &T {
-    fn milestone_list(&self, repo: &str) -> Result<Vec<GhMilestone>> {
-        (**self).milestone_list(repo)
-    }
-
     fn milestone_view(&self, repo: &str, number: u64) -> Result<GhMilestone> {
         (**self).milestone_view(repo, number)
     }
@@ -876,10 +833,6 @@ impl<T: GhMilestoneApi + ?Sized> GhMilestoneApi for &T {
 }
 
 impl<T: GhIssueDependencyApi + ?Sized> GhIssueDependencyApi for &T {
-    fn list_blocked_by(&self, repo: &str, blocked_number: u64) -> Result<Vec<u64>> {
-        (**self).list_blocked_by(repo, blocked_number)
-    }
-
     fn add_blocked_by(&self, repo: &str, blocked_number: u64, blocking_number: u64) -> Result<()> {
         (**self).add_blocked_by(repo, blocked_number, blocking_number)
     }
@@ -1343,12 +1296,6 @@ impl GhIssueWriter for GhCli {
 }
 
 impl GhMilestoneApi for GhCli {
-    fn milestone_list(&self, repo: &str) -> Result<Vec<GhMilestone>> {
-        let endpoint = format!("repos/{}/milestones?state=all", repo);
-        let stdout = self.run_gh_checked(&["api", &endpoint])?;
-        parse_milestone_list_json(&stdout)
-    }
-
     fn milestone_view(&self, repo: &str, number: u64) -> Result<GhMilestone> {
         let endpoint = format!("repos/{}/milestones/{}", repo, number);
         let stdout = self.run_gh_checked(&["api", &endpoint])?;
@@ -1452,12 +1399,6 @@ impl GhCli {
 }
 
 impl GhIssueDependencyApi for GhCli {
-    fn list_blocked_by(&self, repo: &str, blocked_number: u64) -> Result<Vec<u64>> {
-        let args = build_list_blocked_by_args(repo, blocked_number);
-        let stdout = self.run_gh_checked(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
-        parse_blocked_by_numbers(&stdout)
-    }
-
     fn add_blocked_by(&self, repo: &str, blocked_number: u64, blocking_number: u64) -> Result<()> {
         let blocking_id = self.issue_database_id(repo, blocking_number)?;
         let args = build_add_blocked_by_args(repo, blocked_number, blocking_id);
@@ -1630,7 +1571,7 @@ fn extract_after(text: &str, needle: &str) -> Option<String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::*;
     use std::cell::{Cell, RefCell};
@@ -1896,6 +1837,109 @@ pub mod test_support {
         })
     }
 
+    /// The board [`ten_type_config_src`] hands `t0`'s lifecycle to, and the
+    /// `Status` columns its schema declares.
+    const AUTHORITY_BOARD: u64 = 7;
+    const AUTHORITY_COLUMNS: [&str; 2] = ["Review", "Done"];
+
+    /// The config RFC-065's request budget is measured against: ten
+    /// `github-issues` types spanning all four discovery rules -- plain label,
+    /// tag, native issue type, and both -- so the round composes every alias
+    /// shape rather than ten copies of one, plus a `github-milestones` type and
+    /// a board nominated as `t0`'s status authority.
+    ///
+    /// Prefixes take a letter rather than the type name's digit: a digit stops
+    /// `extract_id_from_name` at the prefix itself, so `T0-1` would resolve as
+    /// `T0` and the cached doc would never match its issue-map entry.
+    ///
+    /// `blocks` is declared so the round's inline `blockedBy` edge is actually
+    /// consumed -- that enrichment costs no request only means something when
+    /// the enrichment happens.
+    pub fn ten_type_config_src() -> String {
+        let mut src = String::from(
+            "[naming]\npattern = \"{type}-{n:03}-{title}.md\"\n\n\
+             [templates]\ndir = \".lazyspec/templates\"\n\n\
+             [github]\nrepo = \"octo-org/repo\"\n\n\
+             [[types]]\nname = \"release\"\nplural = \"releases\"\n\
+             dir = \"docs/releases\"\nprefix = \"RELEASE\"\nstore = \"github-milestones\"\n\n",
+        );
+        for (n, prefix) in ('A'..='J').enumerate() {
+            let authority = if n == 0 {
+                format!("status_authority = \"PROJECT-{AUTHORITY_BOARD}\"\n")
+            } else {
+                String::new()
+            };
+            let rule = match n % 4 {
+                1 => "github_issue_tag = \"triage\"\n",
+                2 => "github_issue_type = \"Bug\"\n",
+                3 => "github_issue_tag = \"triage\"\ngithub_issue_type = \"Bug\"\n",
+                _ => "",
+            };
+            src.push_str(&format!(
+                "[[types]]\nname = \"t{n}\"\nplural = \"t{n}s\"\ndir = \"docs/t{n}\"\n\
+                 prefix = \"T{prefix}\"\nstore = \"github-issues\"\n{authority}{rule}\n"
+            ));
+        }
+        src.push_str("[[relationships]]\nname = \"related-to\"\n\n");
+        src.push_str(
+            "[[relationships]]\nname = \"blocks\"\ninverse = \"blocked-by\"\n\
+             github_native = \"dependency\"\n",
+        );
+        src
+    }
+
+    /// Everything one composed round over [`ten_type_config_src`] must have
+    /// carried, asserted against the cache a fetch left under `root`: the count
+    /// itself, then the sub-issue parentage, the dependency edge, the authority
+    /// board's cell and its field schema -- each of which used to cost a request
+    /// of its own.
+    ///
+    /// Both surfaces that pay for a fetch -- `cli::fetch::run` and the TUI's
+    /// `poll_sync` -- are held to this, each through its own test.
+    pub fn assert_one_composed_round(gh: &GhRequestCounter, root: &std::path::Path) {
+        assert_eq!(
+            gh.round_queries.borrow().len(),
+            1,
+            "one composed round for the whole fetch"
+        );
+        assert!(
+            gh.other_queries.borrow().is_empty(),
+            "no probe survives the round: {:?}",
+            gh.other_queries.borrow()
+        );
+        assert!(
+            root.join(".lazyspec/cache/t0/TA-1/00-TA-2.md").is_file(),
+            "sub-issue parentage must materialize off the round"
+        );
+
+        let parent = std::fs::read_to_string(root.join(".lazyspec/cache/t0/TA-1/index.md"))
+            .expect("the round's parent issue must have been cached");
+        assert!(
+            parent.contains("blocked-by: TA-2"),
+            "dependency edges must come off the round, got:\n{parent}"
+        );
+        assert!(
+            parent.contains(&format!(
+                "status: {}",
+                GhRequestCounter::COUNTED_STATUS.to_lowercase()
+            )),
+            "the authority board's cell must come off the round, got:\n{parent}"
+        );
+
+        let saved = crate::engine::gh_schema::GhSchemaSnapshot::load(root);
+        assert_eq!(
+            saved.field_id(AUTHORITY_BOARD, "Status"),
+            Some(format!("PVTSSF_b{AUTHORITY_BOARD}").as_str())
+        );
+        assert_eq!(
+            saved.status_lifecycle(AUTHORITY_BOARD).unwrap().states,
+            AUTHORITY_COLUMNS
+                .iter()
+                .map(|c| c.to_lowercase())
+                .collect::<Vec<_>>()
+        );
+    }
+
     /// What one fetch costs at the GitHub seams, counted rather than stubbed.
     ///
     /// Every trait a fetch reaches through is implemented here so one double can
@@ -1909,7 +1953,6 @@ pub mod test_support {
         /// Every GraphQL document that was not a composed round. The point of
         /// the round is that this stays empty.
         pub other_queries: RefCell<Vec<String>>,
-        pub milestone_list_calls: Cell<usize>,
         pub board_columns: Vec<(u64, Vec<String>)>,
         /// Whether the round answers with issues carrying sub-issue and
         /// blocked-by edges. See [`GhRequestCounter::with_enriched_issues`].
@@ -1941,6 +1984,13 @@ pub mod test_support {
         /// The `Status` cell the counter's boards answer with, which must be one
         /// of the columns the same board's schema declares.
         pub const COUNTED_STATUS: &'static str = "Review";
+
+        /// A counter wired to answer the board [`ten_type_config_src`] nominates
+        /// as `t0`'s status authority, with the enrichment
+        /// [`assert_one_composed_round`] looks for.
+        pub fn for_ten_type_config() -> Self {
+            Self::with_board(AUTHORITY_BOARD, &AUTHORITY_COLUMNS).with_enriched_issues()
+        }
 
         fn round_project_items(&self) -> Vec<ProjectItem> {
             self.board_columns
@@ -2053,12 +2103,6 @@ pub mod test_support {
     }
 
     impl GhMilestoneApi for GhRequestCounter {
-        fn milestone_list(&self, _repo: &str) -> Result<Vec<GhMilestone>> {
-            self.milestone_list_calls
-                .set(self.milestone_list_calls.get() + 1);
-            Ok(Vec::new())
-        }
-
         fn milestone_view(&self, _repo: &str, _number: u64) -> Result<GhMilestone> {
             bail!("no milestone reads under test")
         }
@@ -2096,9 +2140,6 @@ pub mod test_support {
     }
 
     impl GhIssueDependencyApi for GhRequestCounter {
-        fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
-            Ok(Vec::new())
-        }
         fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
             Ok(())
         }
@@ -2483,9 +2524,6 @@ pub mod test_support {
     /// reader on fetch paths that thread a single client. Dependency-specific
     /// behaviour is faked with [`MockGhDependencyClient`] instead.
     impl GhIssueDependencyApi for MockGhClient {
-        fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
-            Ok(vec![])
-        }
         fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
             Ok(())
         }
@@ -2541,10 +2579,6 @@ pub mod test_support {
     }
 
     impl GhMilestoneApi for MockGhMilestoneClient {
-        fn milestone_list(&self, _repo: &str) -> Result<Vec<GhMilestone>> {
-            Ok(self.milestones.borrow().clone())
-        }
-
         fn milestone_view(&self, _repo: &str, number: u64) -> Result<GhMilestone> {
             self.milestones
                 .borrow()
@@ -2634,9 +2668,6 @@ pub mod test_support {
     /// Delegating impl so a shared `Rc<MockGhMilestoneClient>` can be moved into
     /// an `FnOnce` factory while the original handle remains inspectable after.
     impl GhMilestoneApi for std::rc::Rc<MockGhMilestoneClient> {
-        fn milestone_list(&self, repo: &str) -> Result<Vec<GhMilestone>> {
-            (**self).milestone_list(repo)
-        }
         fn milestone_view(&self, repo: &str, number: u64) -> Result<GhMilestone> {
             (**self).milestone_view(repo, number)
         }
@@ -2676,12 +2707,9 @@ pub mod test_support {
 
     /// In-memory fake for [`GhIssueDependencyApi`]. Records each add/remove as a
     /// `(blocked_number, blocking_number)` pair so a test can assert the native
-    /// edge (and its direction) without touching GitHub. `blocked_by` holds the
-    /// canned read-back set: `blocked_by[n]` is the list of issue numbers that
-    /// block issue `n` (returned by `list_blocked_by`). Zero network.
+    /// edge (and its direction) without touching GitHub. Zero network.
     #[derive(Default)]
     pub struct MockGhDependencyClient {
-        pub blocked_by: RefCell<std::collections::HashMap<u64, Vec<u64>>>,
         pub added: RefCell<Vec<(u64, u64)>>,
         pub removed: RefCell<Vec<(u64, u64)>>,
     }
@@ -2690,27 +2718,9 @@ pub mod test_support {
         pub fn new() -> Self {
             Self::default()
         }
-
-        /// Seed the canned read-back set: issue `blocked_number` is blocked by
-        /// each number in `blocking_numbers`.
-        pub fn with_blocked_by(self, blocked_number: u64, blocking_numbers: Vec<u64>) -> Self {
-            self.blocked_by
-                .borrow_mut()
-                .insert(blocked_number, blocking_numbers);
-            self
-        }
     }
 
     impl GhIssueDependencyApi for MockGhDependencyClient {
-        fn list_blocked_by(&self, _repo: &str, blocked_number: u64) -> Result<Vec<u64>> {
-            Ok(self
-                .blocked_by
-                .borrow()
-                .get(&blocked_number)
-                .cloned()
-                .unwrap_or_default())
-        }
-
         fn add_blocked_by(
             &self,
             _repo: &str,
@@ -2740,10 +2750,6 @@ pub mod test_support {
     /// an `FnOnce` factory while the original handle remains inspectable after
     /// (mirrors the milestone-client Rc impl).
     impl GhIssueDependencyApi for std::rc::Rc<MockGhDependencyClient> {
-        fn list_blocked_by(&self, repo: &str, blocked_number: u64) -> Result<Vec<u64>> {
-            (**self).list_blocked_by(repo, blocked_number)
-        }
-
         fn add_blocked_by(
             &self,
             repo: &str,
@@ -3531,18 +3537,6 @@ mod tests {
         assert_eq!(m.url, "https://github.com/o/r/milestone/3");
     }
 
-    #[test]
-    fn parse_milestone_list_and_null_due_on() {
-        let json = r#"[
-            {"number": 1, "title": "a", "due_on": null, "state": "closed"},
-            {"number": 2, "title": "b", "state": "open"}
-        ]"#;
-        let list = parse_milestone_list_json(json).unwrap();
-        assert_eq!(list.len(), 2);
-        assert!(list[0].due_on.is_none());
-        assert_eq!(list[0].state, "closed");
-    }
-
     // AC4 (real-client edge): clearing the milestone emits `-F milestone=null`
     // (a JSON null), not the string "null"; -F is required so gh sends raw JSON.
     #[test]
@@ -3608,48 +3602,6 @@ mod tests {
         client.remove_blocked_by("o/r", 12, 7).unwrap();
         assert_eq!(*client.added.borrow(), vec![(12, 7)]);
         assert_eq!(*client.removed.borrow(), vec![(12, 7)]);
-    }
-
-    // --- Issue-dependency read-back (STORY-244 AC3/AC6) ---
-
-    // The list GET targets the blocked issue's number under the blocked_by
-    // collection, with no method flag (a plain read).
-    #[test]
-    fn build_list_blocked_by_args_gets_the_blocked_by_collection() {
-        let args = build_list_blocked_by_args("o/r", 12);
-        assert_eq!(
-            args,
-            vec![
-                "api".to_string(),
-                "repos/o/r/issues/12/dependencies/blocked_by".to_string(),
-            ]
-        );
-    }
-
-    // The response is an array of issue objects; only their `number` is read.
-    #[test]
-    fn parse_blocked_by_numbers_extracts_numbers_ignoring_other_fields() {
-        let json = r#"[
-            {"number": 7, "title": "blocker", "state": "open"},
-            {"number": 9, "title": "other blocker", "state": "closed"}
-        ]"#;
-        assert_eq!(parse_blocked_by_numbers(json).unwrap(), vec![7, 9]);
-    }
-
-    #[test]
-    fn parse_blocked_by_numbers_empty_array_is_empty() {
-        assert_eq!(parse_blocked_by_numbers("[]").unwrap(), Vec::<u64>::new());
-    }
-
-    #[test]
-    fn mock_dependency_returns_canned_blocked_by_set() {
-        let client = MockGhDependencyClient::new().with_blocked_by(12, vec![7]);
-        assert_eq!(client.list_blocked_by("o/r", 12).unwrap(), vec![7]);
-        // An issue with no seeded blockers reads back empty, never errors.
-        assert_eq!(
-            client.list_blocked_by("o/r", 99).unwrap(),
-            Vec::<u64>::new()
-        );
     }
 
     #[test]

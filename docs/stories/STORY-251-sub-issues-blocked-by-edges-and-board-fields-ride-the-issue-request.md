@@ -47,9 +47,9 @@ Value: enrichment stops costing requests at all. With the two preceding slices t
   **When** its fields are injected
   **Then** `reconcile_project_fields_for_meta` runs per doc unchanged, reading from the snapshot rather than from a prefetched batch.
 
-- **Given** a dependency mutation
-  **When** it completes
-  **Then** `GhIssueDependencyApi::list_blocked_by` is still used for its read-back; only fetch's read moves to the snapshot.
+- **Given** a dependency mutation followed by a fetch
+  **When** the fetch runs
+  **Then** the resulting `blocked-by` edges come from the round's inline `blockedBy` selection, and the mutation path itself issues no dependency read of its own.
 
 - **Given** the TUI background poll rather than the CLI
   **When** it fires
@@ -63,7 +63,7 @@ Value: enrichment stops costing requests at all. With the two preceding slices t
 
 ### In Scope
 
-- `subIssues(first: 50) { nodes { id number } }`, `blockedBy(first: 50) { nodes { number } }` and `projectItems(first: 10) { nodes { id project { number } fieldValues(first: 25) { ... } } }` inline on each type's alias, with the caps as named constants beside the structs that parse them.
+- `subIssues(first: 50) { nodes { id number } }`, `blockedBy(first: 50) { nodes { number } }` and `projectItems(first: 10) { nodes { id project { number } fieldValues(first: 25) { ... } } }` inline on each type's alias, with the caps on a `Connection` enum whose variants also supply each connection's GraphQL field name for warnings.
 - `FetchSnapshot::sub_issues`, `blocked_by` and `project_items` populated and consumed by `IssueCache::fetch_all` in place of its three enrichment reads.
 - Node-budget arithmetic from the selection constants and type count, splitting types across ⌈T/12⌉ requests when the 500,000-node cap would be exceeded.
 - `pageInfo { hasNextPage }` on every capped connection, and a truncation warning naming the document and connection when it is true.
@@ -74,11 +74,12 @@ Value: enrichment stops costing requests at all. With the two preceding slices t
 ### Out of Scope
 
 - A per-issue follow-up query for overflowing connections. The escape hatch is recorded in RFC-065's risks and deliberately not built; truncation warns instead.
-- `GhIssueDependencyApi::list_blocked_by` on the mutation path and `issue_view` read-back. Both retained.
+- `issue_view` read-back on the mutation path. Retained.
 - Parallelism, comment fetching, cache-format changes, and the `IssueMap`, lock and nested-layout shapes.
 - Raising the caps or making them configurable.
 
 ### Split Point
 
 Cut at project items. Sub-issues and blocked-by inline first — 100 of the 360 nodes per issue, cheap enough to need no split arithmetic — then `projectItems` with `fieldValues`, the budget arithmetic and the truncation warnings as a second story.
+
 

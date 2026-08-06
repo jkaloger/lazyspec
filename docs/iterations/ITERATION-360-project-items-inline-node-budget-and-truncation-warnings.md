@@ -25,7 +25,7 @@ STORY-251 AC1 (completes the deletions), AC2 (completes -- `PROJECT-n.<field>` a
 
 ## Tasks
 
-1. Builder: `projectItems(first: PROJECT_ITEMS_CAP) { pageInfo { hasNextPage } nodes { id project { number } fieldValues(first: FIELD_VALUES_CAP) { pageInfo { hasNextPage } nodes { ... } } } }` on each `t<i>` alias. `PROJECT_ITEMS_CAP = 10`, `FIELD_VALUES_CAP = 25` as named consts beside the parsing structs. The `fieldValues` inline-fragment selection is the shape `parse_project_items_array` (gh.rs:1084) already parses -- reuse it, do not write a second parser.
+1. Builder: `projectItems(first: 10) { pageInfo { hasNextPage } nodes { id project { number } fieldValues(first: 25) { pageInfo { hasNextPage } nodes { ... } } } }` on each `t<i>` alias, the two `first:` arguments rendered from the caps rather than typed twice. The caps live on the `Connection` enum -- `Connection::ProjectItems.cap() = 10`, `Connection::FieldValues.cap() = 25` -- whose variants also supply the GraphQL field name the truncation warning quotes. The `fieldValues` inline-fragment selection is the shape `parse_project_items_array` (gh.rs:1084) already parses -- reuse it, do not write a second parser.
 2. `FetchSnapshot::project_items: HashMap<String, Vec<ProjectItem>>` keyed by issue node id.
 3. Node budget: a pure fn computing possible nodes from the selection constants and the type count. Over 500,000 -> chunk types across `ceil(T/12)` requests, merging each chunk's snapshot into one. Composes with the cursor rounds from STORY-250: chunking is over types, pagination over rounds; both merge into a single `FetchSnapshot`.
 4. `sync::reconcile_project_fields_into_cache` reads `snapshot.project_items`. Delete `PrefetchedProjectItems` -- the wrapper existed only so `reconcile_project_fields_for_meta` could run unmodified against a batch.
@@ -45,7 +45,7 @@ STORY-251 AC1 (completes the deletions), AC2 (completes -- `PROJECT-n.<field>` a
 
 - A per-issue follow-up query for overflowing connections. RFC-065 risks record the escape hatch; deliberately not built.
 - Raising the caps or making them configurable.
-- `GhIssueDependencyApi::list_blocked_by` and `issue_view` on the mutation path. Both retained.
+- `issue_view` on the mutation path. Retained.
 - Parallelism, comment fetching, cache-format changes, `IssueMap`/lock/nested-layout shapes.
 
 ## Principles/conventions
@@ -63,4 +63,5 @@ Budget arithmetic is a named pure fn, not an inline expression with a comment ex
 - Missing `project` scope: `projectItems` null, project-scope warning as today, board-bound docs keep last known status, sub-issues and blocked-by still land from the same response.
 - `PROJECT-n.<field>` attributes and `status_authority`-derived status equivalent to the batch path on identical state.
 - TUI poll: same request count, same warnings, no per-surface wiring.
+
 

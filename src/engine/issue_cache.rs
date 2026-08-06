@@ -28,9 +28,30 @@ pub struct RefreshResult {
     pub warnings: Vec<RefreshWarning>,
 }
 
-#[derive(Debug)]
+/// One thing a refresh could not do. `about_type` names the configured type the
+/// warning belongs to when it belongs to exactly one, so a composed round that
+/// resolved nine types and lost the tenth says so against the tenth alone;
+/// `None` is round-wide and every GitHub-backed type hears it.
+#[derive(Debug, Default)]
 pub struct RefreshWarning {
     pub message: String,
+    pub about_type: Option<String>,
+}
+
+impl RefreshWarning {
+    pub fn new(message: String) -> Self {
+        Self {
+            message,
+            about_type: None,
+        }
+    }
+
+    pub fn for_type(type_name: &str, message: String) -> Self {
+        Self {
+            message,
+            about_type: Some(type_name.to_string()),
+        }
+    }
 }
 
 /// Remote sub-issue parentage, keyed by parent doc id. Each value is the
@@ -138,16 +159,22 @@ impl IssueCache {
         lock.save(&self.root)
     }
 
-    /// Refresh stale cache entries for a given type from its own composed round.
+    /// Refresh every stale cache entry of `type_defs` from one composed round.
     ///
     /// Returns early with zero API calls if all cached documents are fresh.
     /// On API failure, leaves stale cache in place and returns a warning.
     /// A corrupt cache lock is a hard `Err` before any API call.
+    ///
+    /// The round is composed once for all the stale types together, never once
+    /// per type: milestones, the org issue types and every authority board's
+    /// field schema ride every round, so a round per type would re-read all of
+    /// that T times and rewrite the schema snapshot T times -- the request
+    /// amplifier STORY-249 removed from `sync_all`, which this path shares.
     #[allow(clippy::too_many_arguments)]
     pub fn refresh_stale(
         &self,
         root: &Path,
-        type_def: &TypeDef,
+        type_defs: &[&TypeDef],
         gh_graphql: &dyn GhGraphql,
         repo: &str,
         issue_map: &mut IssueMap,
@@ -155,49 +182,109 @@ impl IssueCache {
         known_types: &[TypeMatchRule],
         config: &Config,
     ) -> anyhow::Result<RefreshResult> {
+        let (stale, already_fresh) = self.stale_types(type_defs, ttl)?;
+        if stale.is_empty() {
+            return Ok(RefreshResult {
+                refreshed: 0,
+                unchanged: already_fresh,
+                warnings: vec![],
+            });
+        }
+
+        let round = gh_fetch::fetch_all_pages(
+            gh_graphql,
+            repo,
+            &stale
+                .iter()
+                .map(|td| TypeMatchRule::from(*td))
+                .collect::<Vec<_>>(),
+            &store_dispatch::authority_board_numbers(config),
+        );
+
+        let mut result = RefreshResult {
+            refreshed: 0,
+            unchanged: already_fresh,
+            warnings: Vec::new(),
+        };
+        for type_def in stale {
+            match self.refresh_stale_type(root, type_def, &round, issue_map, known_types, config) {
+                Ok(r) => {
+                    result.refreshed += r.refreshed;
+                    result.unchanged += r.unchanged;
+                    result.warnings.extend(r.warnings);
+                }
+                Err(e) => result.warnings.push(RefreshWarning::for_type(
+                    &type_def.name,
+                    format!(
+                        "could not refresh cache for type '{}': {}",
+                        type_def.name, e
+                    ),
+                )),
+            }
+        }
+
+        // Every value in the snapshot is repo-wide, so it is persisted once for
+        // the round rather than once per type. The round already named what it
+        // could not read, so its warnings are surfaced once too.
+        result
+            .warnings
+            .extend(self.refresh_schema_snapshot(Some(&round), config));
+        result.warnings.extend(round.warnings);
+        Ok(result)
+    }
+
+    /// The types with at least one stale cached document, and how many cached
+    /// documents of the rest are already fresh and so need no round at all. A
+    /// corrupt lock is a hard `Err` here, before any request is composed.
+    fn stale_types<'t>(
+        &self,
+        type_defs: &[&'t TypeDef],
+        ttl: Duration,
+    ) -> anyhow::Result<(Vec<&'t TypeDef>, usize)> {
+        let lock = self.load_lock()?;
+        let mut stale = Vec::new();
+        let mut fresh = 0usize;
+        for type_def in type_defs {
+            let cached_ids = self.list_cached(&type_def.name);
+            if cached_ids
+                .iter()
+                .any(|id| !Self::entry_is_fresh(&lock, id, ttl))
+            {
+                stale.push(*type_def);
+                continue;
+            }
+            fresh += cached_ids.len();
+        }
+        Ok((stale, fresh))
+    }
+
+    /// One stale type's share of the round: re-parse its issues, rewrite the
+    /// cache files whose content changed, and re-stamp the lock. Emits no
+    /// round-level warning and writes no schema snapshot -- both belong to the
+    /// round, which owns them once for every type it served.
+    fn refresh_stale_type(
+        &self,
+        root: &Path,
+        type_def: &TypeDef,
+        round: &FetchSnapshot,
+        issue_map: &mut IssueMap,
+        known_types: &[TypeMatchRule],
+        config: &Config,
+    ) -> anyhow::Result<RefreshResult> {
         let cached_ids = self.list_cached(&type_def.name);
-        if cached_ids.is_empty() {
-            return Ok(RefreshResult {
-                refreshed: 0,
-                unchanged: 0,
-                warnings: vec![],
-            });
-        }
-
-        // Loaded once up front: a corrupt lock is a hard error before any API
-        // call, and never overwritten with a default.
         let mut lock = self.load_lock()?;
-
-        let any_stale = cached_ids
-            .iter()
-            .any(|id| !Self::entry_is_fresh(&lock, id, ttl));
-        if !any_stale {
-            return Ok(RefreshResult {
-                refreshed: 0,
-                unchanged: cached_ids.len(),
-                warnings: vec![],
-            });
-        }
 
         let milestone_rel = config
             .relationship_by_github_native("milestone")
             .map(|r| r.name.as_str());
 
-        // The TTL refresh is not driven by `sync_all`, so it composes its own
-        // round -- this type's issues and the schema snapshot in one document.
-        let round = gh_fetch::fetch_all_pages(
-            gh_graphql,
-            repo,
-            &[TypeMatchRule::from(type_def)],
-            &store_dispatch::authority_board_numbers(config),
-        );
-        // The round already named what it could not read, so the stale cache is
-        // served on its warnings rather than a second one saying the same thing.
+        // A type the round could not read is unknown, never empty: its stale
+        // cache is served as-is, on the round's own warning.
         let Some(issues) = round.issues.get(&type_def.name) else {
             return Ok(RefreshResult {
                 refreshed: 0,
                 unchanged: cached_ids.len(),
-                warnings: round.warnings,
+                warnings: vec![],
             });
         };
 
@@ -241,9 +328,10 @@ impl IssueCache {
             } else {
                 if let Err(e) = store_dispatch::write_cache_file(root, type_def, &meta, &body) {
                     // Non-fatal: skip this doc but keep going
-                    write_warnings.push(RefreshWarning {
-                        message: format!("failed to write cache for {}: {}", id, e),
-                    });
+                    write_warnings.push(RefreshWarning::new(format!(
+                        "failed to write cache for {}: {}",
+                        id, e
+                    )));
                     continue;
                 }
                 refreshed += 1;
@@ -255,14 +343,10 @@ impl IssueCache {
 
         lock.save(&self.root)?;
 
-        let mut warnings = write_warnings;
-        warnings.extend(self.refresh_schema_snapshot(Some(&round), config));
-        warnings.extend(round.warnings);
-
         Ok(RefreshResult {
             refreshed,
             unchanged,
-            warnings,
+            warnings: write_warnings,
         })
     }
 
@@ -309,9 +393,10 @@ impl IssueCache {
         }
 
         if let Err(e) = snapshot.save(&self.root) {
-            warnings.push(RefreshWarning {
-                message: format!("could not persist gh schema snapshot: {}", e),
-            });
+            warnings.push(RefreshWarning::new(format!(
+                "could not persist gh schema snapshot: {}",
+                e
+            )));
         }
         warnings
     }
@@ -677,14 +762,12 @@ fn truncation_warnings(
         .iter()
         .filter_map(|t| {
             let doc = node_to_doc.get(&t.node_id)?;
-            Some(RefreshWarning {
-                message: format!(
-                    "{}: `{}` truncated at {} on this fetch; the rest were not read",
-                    doc,
-                    t.connection,
-                    t.connection.cap()
-                ),
-            })
+            Some(RefreshWarning::new(format!(
+                "{}: `{}` truncated at {} on this fetch; the rest were not read",
+                doc,
+                t.connection,
+                t.connection.cap()
+            )))
         })
         .collect()
 }
@@ -1214,9 +1297,6 @@ mod tests {
     /// test; every other `fetch_all` test uses a `Config::default()` that
     /// declares no `dependency` relation, so this reader is never called.
     impl GhIssueDependencyApi for MockReader {
-        fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
-            Ok(vec![])
-        }
         fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
             unimplemented!()
         }
@@ -1337,7 +1417,7 @@ mod tests {
         let result = cache
             .refresh_stale(
                 tmp.path(),
-                &type_def,
+                &[&type_def],
                 &gh,
                 "owner/repo",
                 &mut issue_map,
@@ -1370,6 +1450,92 @@ mod tests {
         assert_eq!(issue_map.get("STORY-12").unwrap().issue_number, 12);
     }
 
+    // Milestones, the org issue types and every board's field schema ride every
+    // round, so composing one per stale type re-reads all of it T times and
+    // rewrites the schema snapshot T times -- the amplifier STORY-249 removed
+    // from `sync_all`, which lived on here until the round was hoisted above the
+    // per-type loop.
+    #[test]
+    fn refresh_stale_composes_one_round_for_every_stale_type() {
+        let (cache, tmp) = make_cache();
+        let story = story_type_def();
+        let ticket = ticket_type_def();
+        let ttl = Duration::seconds(60);
+
+        cache.write("STORY-10", "story", "old story").unwrap();
+        cache.write("TICKET-10", "ticket", "old ticket").unwrap();
+        backdate_all(&cache, &["STORY-10", "TICKET-10"]);
+
+        let gh = MockReader::new(vec![make_gh_issue(10, "An issue", "Body", &[])]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let result = cache
+            .refresh_stale(
+                tmp.path(),
+                &[&story, &ticket],
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                ttl,
+                &[story_match_rule(), ticket_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            gh.graphql_call_count(),
+            1,
+            "two stale types cost one composed round, not one each"
+        );
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        assert_eq!(result.refreshed, 2);
+        assert!(cache.is_fresh("STORY-10", ttl));
+        assert!(cache.is_fresh("TICKET-10", ttl));
+    }
+
+    // A type whose cache is entirely fresh must not drag the stale types' round
+    // wider: it is not in the query and its cached count is reported unchanged.
+    #[test]
+    fn refresh_stale_leaves_a_fresh_type_out_of_the_round() {
+        let (cache, tmp) = make_cache();
+        let story = story_type_def();
+        let ticket = ticket_type_def();
+        let ttl = Duration::seconds(60);
+
+        cache.write("STORY-10", "story", "old story").unwrap();
+        cache.write("TICKET-11", "ticket", "fresh ticket").unwrap();
+        backdate_all(&cache, &["STORY-10"]);
+
+        let gh = MockReader::new(vec![make_gh_issue(
+            10,
+            "STORY-010 A story",
+            "Body",
+            &["lazyspec:story"],
+        )]);
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let result = cache
+            .refresh_stale(
+                tmp.path(),
+                &[&story, &ticket],
+                &gh,
+                "owner/repo",
+                &mut issue_map,
+                ttl,
+                &[story_match_rule(), ticket_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        assert_eq!(result.refreshed, 1);
+        assert_eq!(result.unchanged, 1, "the fresh ticket is counted, not read");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(".lazyspec/cache/ticket/TICKET-11.md"))
+                .unwrap(),
+            "fresh ticket"
+        );
+    }
+
     // AC4: refresh hook fetches + persists schema ids to gh-schema.json
     #[test]
     fn test_refresh_stale_persists_schema_snapshot_ids() {
@@ -1395,7 +1561,7 @@ mod tests {
         let result = cache
             .refresh_stale(
                 tmp.path(),
-                &type_def,
+                &[&type_def],
                 &gh,
                 "octo-org/repo",
                 &mut issue_map,
@@ -1624,7 +1790,7 @@ mod tests {
         let result = cache
             .refresh_stale(
                 tmp.path(),
-                &type_def,
+                &[&type_def],
                 &gh,
                 "owner/repo",
                 &mut issue_map,
@@ -1661,7 +1827,7 @@ mod tests {
         let result = cache
             .refresh_stale(
                 tmp.path(),
-                &type_def,
+                &[&type_def],
                 &gh,
                 "owner/repo",
                 &mut issue_map,
@@ -1715,7 +1881,7 @@ mod tests {
         let result = cache
             .refresh_stale(
                 tmp.path(),
-                &type_def,
+                &[&type_def],
                 &gh,
                 "owner/repo",
                 &mut issue_map,
@@ -2021,7 +2187,7 @@ mod tests {
         let story_result = cache
             .refresh_stale(
                 tmp.path(),
-                &story_type,
+                &[&story_type],
                 &story_refresh_gh,
                 "owner/repo",
                 &mut issue_map,
@@ -2077,7 +2243,7 @@ mod tests {
         let ticket_result = cache
             .refresh_stale(
                 tmp.path(),
-                &ticket_type,
+                &[&ticket_type],
                 &ticket_refresh_gh,
                 "owner/repo",
                 &mut issue_map,
@@ -2832,7 +2998,7 @@ mod tests {
         cache
             .refresh_stale(
                 tmp.path(),
-                &type_def,
+                &[&type_def],
                 &gh,
                 "owner/repo",
                 &mut issue_map,
@@ -2876,7 +3042,7 @@ mod tests {
         cache
             .refresh_stale(
                 tmp.path(),
-                &type_def,
+                &[&type_def],
                 &gh,
                 "owner/repo",
                 &mut issue_map,
@@ -2929,7 +3095,7 @@ mod tests {
         cache
             .refresh_stale(
                 tmp.path(),
-                &type_def,
+                &[&type_def],
                 &gh,
                 "owner/repo",
                 &mut issue_map,
@@ -3003,11 +3169,11 @@ mod tests {
         )]);
         // A round that resolved everything except board 7's schema.
         let round = FetchSnapshot {
-            warnings: vec![RefreshWarning {
-                message: "could not refresh field schema for board 7 (keeping prior, projects \
-                          need `gh auth refresh -s project`): FORBIDDEN"
+            warnings: vec![RefreshWarning::new(
+                "could not refresh field schema for board 7 (keeping prior, projects \
+                 need `gh auth refresh -s project`): FORBIDDEN"
                     .to_string(),
-            }],
+            )],
             issues: gh.round(&type_def.name).issues,
             ..round_with_bug_issue_type()
         };
@@ -3052,7 +3218,7 @@ mod tests {
         cache
             .refresh_stale(
                 tmp.path(),
-                &type_def,
+                &[&type_def],
                 &gh,
                 "owner/repo",
                 &mut issue_map,
@@ -4307,7 +4473,7 @@ mod tests {
         let err = cache
             .refresh_stale(
                 tmp.path(),
-                &type_def,
+                &[&type_def],
                 &gh,
                 "owner/repo",
                 &mut issue_map,

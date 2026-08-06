@@ -135,10 +135,13 @@ impl TypeSync for GhMilestoneSync {
 
 /// Refreshes a `github-issues` type, then folds in the per-item project-field
 /// reconcile (best-effort) so both surfaces resolve identically.
+///
+/// Built only by [`GhRound::issue_sync`]: the client and repo it writes through
+/// are the round's own, so a run cannot read one repo and write another's cache.
 pub struct GhIssueSync<'c> {
-    pub graphql: &'c dyn GhGraphql,
-    pub repo: String,
-    pub type_rules: Vec<TypeMatchRule>,
+    graphql: &'c dyn GhGraphql,
+    repo: String,
+    type_rules: Vec<TypeMatchRule>,
 }
 
 impl TypeSync for GhIssueSync<'_> {
@@ -268,6 +271,20 @@ pub struct GhRound<'c> {
     pub repo: String,
 }
 
+impl<'c> GhRound<'c> {
+    /// The issue syncer that belongs to this round. The repo string is stated
+    /// once, here, rather than once per syncer: the two used to be independent
+    /// fields that nothing held together, so a mismatch would have fetched one
+    /// repo and reconciled another's boards into its cache.
+    pub fn issue_sync(&self, type_rules: Vec<TypeMatchRule>) -> GhIssueSync<'c> {
+        GhIssueSync {
+            graphql: self.gh,
+            repo: self.repo.clone(),
+            type_rules,
+        }
+    }
+}
+
 /// A caller's per-backend syncers. Typed `Option` fields (not a slice) so
 /// "backend not configured" is a `None` the dispatch reads directly rather than
 /// a runtime scan that could silently lack a needed syncer.
@@ -304,7 +321,7 @@ pub fn sync_all(
         StoreBackend::ClickupTasks,
     ];
 
-    let mut round_warnings: Vec<String> = Vec::new();
+    let mut round_warnings = RoundWarnings::default();
     if let Some(round) = syncers.round.as_ref() {
         let snapshot = gh_fetch::fetch_all_pages(
             round.gh,
@@ -312,11 +329,7 @@ pub fn sync_all(
             &gh_fetch::issue_rules(config),
             &store_dispatch::authority_board_numbers(config),
         );
-        round_warnings = snapshot
-            .warnings
-            .iter()
-            .map(|w| w.message.clone())
-            .collect();
+        round_warnings = RoundWarnings::from(&snapshot);
         ctx.fetch = Some(snapshot);
     }
 
@@ -330,12 +343,45 @@ pub fn sync_all(
                 continue;
             };
             if is_github_backend(&td.store) {
-                outcome.warnings.extend(round_warnings.iter().cloned());
+                outcome.warnings.extend(round_warnings.heard_by(&td.name));
             }
             outcomes.push(outcome);
         }
     }
     outcomes
+}
+
+/// The composed round's warnings, split by who should hear them. One request is
+/// one failure domain, so a round-wide loss lands on every GitHub-backed
+/// outcome -- but a loss the round attributed to one alias belongs to that type
+/// alone, and repeating it once per configured type would say the same sentence
+/// ten times for one failure.
+#[derive(Default)]
+struct RoundWarnings {
+    round_wide: Vec<String>,
+    by_type: HashMap<String, Vec<String>>,
+}
+
+impl RoundWarnings {
+    fn from(snapshot: &gh_fetch::FetchSnapshot) -> Self {
+        let mut split = Self::default();
+        for w in &snapshot.warnings {
+            match &w.about_type {
+                Some(type_name) => split
+                    .by_type
+                    .entry(type_name.clone())
+                    .or_default()
+                    .push(w.message.clone()),
+                None => split.round_wide.push(w.message.clone()),
+            }
+        }
+        split
+    }
+
+    fn heard_by(&self, type_name: &str) -> Vec<String> {
+        let mine = self.by_type.get(type_name).into_iter().flatten();
+        self.round_wide.iter().chain(mine).cloned().collect()
+    }
 }
 
 fn is_github_backend(backend: &StoreBackend) -> bool {
@@ -632,7 +678,7 @@ mod tests {
     use crate::engine::gh::{
         GhAuthor, GhIssue, GhIssueMilestone, GhLabel, GhMilestone, ProjectFieldValue, ProjectItem,
     };
-    use crate::engine::gh::{GhFieldKind, GhFieldValueRepr};
+    use crate::engine::gh::{GhFieldKind, GhFieldValueRepr, GqlVar};
     use tempfile::TempDir;
 
     fn type_def(name: &str, prefix: &str, store: StoreBackend) -> TypeDef {
@@ -1021,6 +1067,27 @@ mod tests {
         assert_eq!(outcomes.len(), 2, "filesystem types produce no outcome");
     }
 
+    // A round-wide loss is every GitHub-backed type's business, but one the
+    // round pinned on a single alias is not: fanning it out prints the same
+    // sentence once per configured type for one failure.
+    #[test]
+    fn a_warning_the_round_pinned_on_one_type_reaches_only_that_type() {
+        let round_wide = "could not refresh milestones (keeping prior): FORBIDDEN";
+        let per_type = "could not refresh issues for type 'story' (keeping prior): FORBIDDEN";
+        let snapshot = FetchSnapshot {
+            warnings: vec![
+                crate::engine::issue_cache::RefreshWarning::new(round_wide.to_string()),
+                crate::engine::issue_cache::RefreshWarning::for_type("story", per_type.to_string()),
+            ],
+            ..Default::default()
+        };
+
+        let split = RoundWarnings::from(&snapshot);
+
+        assert_eq!(split.heard_by("story"), vec![round_wide, per_type]);
+        assert_eq!(split.heard_by("epic"), vec![round_wide]);
+    }
+
     // AC (STORY-202): milestones are fetched before issues, so an issue whose
     // native milestone points at a just-synced milestone resolves its forward
     // `targets` relation. The ordering rule lives in sync_all; if issue fetch
@@ -1236,9 +1303,6 @@ mod tests {
     }
 
     impl crate::engine::gh::GhIssueDependencyApi for FailingInjectClient {
-        fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
-            Ok(vec![])
-        }
         fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
             unimplemented!()
         }
@@ -1596,6 +1660,69 @@ mod tests {
 
         assert!(warnings.is_empty(), "got: {warnings:?}");
         assert_eq!(cached_story_status(&child_file), "review");
+    }
+
+    // The round reads one repo and the issue syncer writes to one repo, and they
+    // are the same string by construction. Nothing used to hold the two
+    // together, so a caller could fetch `a/repo` and resolve the authority board
+    // under `b`'s owner -- silently reconciling one repo's boards into another
+    // repo's cache.
+    #[test]
+    fn the_issue_syncer_resolves_boards_under_the_repo_the_round_read() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let config = authority_config();
+
+        let client = MockGhClient::new().with_list_result(vec![gh_issue_no_milestone(7)]);
+        let mut issue_map = IssueMap::load(root).unwrap();
+        let mut ctx = SyncContext {
+            gh: Some(GhMaps {
+                issue_map: &mut issue_map,
+            }),
+            clickup: None,
+            fetch: None,
+        };
+
+        let round = GhRound {
+            gh: &client,
+            repo: "round-owner/repo".to_string(),
+        };
+        let mut syncers = Syncers {
+            issue: Some(
+                round.issue_sync(
+                    config
+                        .documents
+                        .types
+                        .iter()
+                        .map(TypeMatchRule::from)
+                        .collect(),
+                ),
+            ),
+            round: Some(round),
+            ..Default::default()
+        };
+
+        sync_all(root, &config, &mut ctx, &mut syncers, None);
+
+        let calls = client.graphql_calls.borrow();
+        let board_owners: Vec<&str> = calls
+            .iter()
+            .filter(|(query, _)| !gh_fetch::is_round_query(query))
+            .flat_map(|(_, vars)| vars.iter())
+            .filter(|(name, _)| name == "owner")
+            .filter_map(|(_, value)| match value {
+                GqlVar::Str(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !board_owners.is_empty(),
+            "the authority-board add must have resolved the board under an owner"
+        );
+        assert!(
+            board_owners.iter().all(|o| *o == "round-owner"),
+            "got: {board_owners:?}"
+        );
     }
 
     /// The round's board memberships, keyed by issue node id, as the snapshot

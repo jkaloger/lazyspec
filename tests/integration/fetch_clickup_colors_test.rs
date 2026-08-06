@@ -122,9 +122,6 @@ impl GhIssueWriter for NoopGh {
     }
 }
 impl GhMilestoneApi for NoopGh {
-    fn milestone_list(&self, _repo: &str) -> Result<Vec<GhMilestone>> {
-        unreachable!("not used in this test (clickup types only)")
-    }
     fn milestone_view(&self, _repo: &str, _number: u64) -> Result<GhMilestone> {
         unreachable!("not used in this test (clickup types only)")
     }
@@ -163,9 +160,6 @@ impl GhMilestoneApi for NoopGh {
 }
 
 impl GhIssueDependencyApi for NoopGh {
-    fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
-        Ok(vec![])
-    }
     fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
         unreachable!("not used in this test (clickup types only)")
     }

@@ -8,7 +8,7 @@
 use anyhow::Result;
 use lazyspec::engine::config::{Config, GithubConfig, StoreBackend};
 use lazyspec::engine::gh::{
-    GhAuthor, GhComment, GhFieldValueInput, GhGraphql, GhIssue, GhIssueDependencyApi,
+    test_support, GhAuthor, GhComment, GhFieldValueInput, GhGraphql, GhIssue, GhIssueDependencyApi,
     GhIssueReader, GhIssueWriter, GhLabel, GhMilestone, GhMilestoneApi, GqlVar, ProjectItem,
 };
 use lazyspec::engine::git_ref::GitCli;
@@ -61,20 +61,21 @@ impl GhIssueReader for NestingGh {
 
 impl GhGraphql for NestingGh {
     fn graphql(&self, query: &str, _vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
-        // The composed fetch round: a user-owned repo with no milestones, so
-        // neither the milestone cache nor the schema snapshot has anything to
-        // write and neither warns.
         assert!(
             lazyspec::engine::gh_fetch::is_round_query(query),
             "a fetch issues nothing but the composed round, got: {query}"
         );
-        let mut resp = crate::common::round_response_with_issues(query, &self.issues);
+        let mut resp = test_support::with_issue_pages(
+            query,
+            test_support::round_response(&[], &[], &[]),
+            &self.issues,
+        );
         for (parent, children) in &self.sub_issues_by_node {
             let children: Vec<&str> = children.iter().map(String::as_str).collect();
-            resp = crate::common::with_sub_issues(
+            resp = test_support::with_sub_issues(
                 resp,
                 parent,
-                crate::common::sub_issue_edge(&children),
+                test_support::sub_issue_edge(&children),
             );
         }
         Ok(resp)
@@ -159,9 +160,6 @@ impl GhIssueWriter for NestingGh {
 }
 
 impl GhMilestoneApi for NestingGh {
-    fn milestone_list(&self, _repo: &str) -> Result<Vec<GhMilestone>> {
-        Ok(vec![])
-    }
     fn milestone_view(&self, _repo: &str, _number: u64) -> Result<GhMilestone> {
         unreachable!()
     }
@@ -200,9 +198,6 @@ impl GhMilestoneApi for NestingGh {
 }
 
 impl GhIssueDependencyApi for NestingGh {
-    fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
-        Ok(vec![])
-    }
     fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
         unreachable!()
     }
@@ -355,13 +350,11 @@ fn fetch_cli_nests_via_subissue_and_keeps_implements_relation() {
 
     run_fetch(root, &config, &gh).expect("fetch should succeed");
 
-    // Nests via the native sub-issue.
     let store = Store::load(root, &config).unwrap();
     let parent = story_doc(&store, "STORY-100");
     let children = store.children_of(&parent.path);
     assert_eq!(children.len(), 1, "child nests via native sub-issue");
 
-    // The `implements` relation survives into the child's `related`.
     let child = store_doc_at(&store, &children[0]);
     let implements: Vec<_> = child
         .related

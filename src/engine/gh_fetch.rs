@@ -91,13 +91,6 @@ const PROJECT_FIELDS_SELECTION: &str = "fields(first: 50) { nodes { __typename \
      ... on ProjectV2IterationField { id name dataType \
      configuration { iterations { id title } } } } }";
 
-/// The two flat connections on an issue node. They cap what one issue may carry
-/// like the [`Connection`]s do, and so count against the same node budget, but
-/// a label or assignee past the cap is not remote state the cache is keeping --
-/// so they raise no truncation and stay out of that enum.
-const LABELS_CAP: usize = 20;
-const ASSIGNEES_CAP: usize = 10;
-
 /// One issue's flat fields. `issueType { name }` riding along is what lets a
 /// type classified by native issue type be discovered by filtering this page
 /// instead of by one `issue_view` per number.
@@ -105,18 +98,24 @@ fn issue_node_selection() -> String {
     format!(
         "id number url title body state updatedAt createdAt \
          author {{ login }} issueType {{ name }} milestone {{ number }} \
-         labels(first: {LABELS_CAP}) {{ nodes {{ name }} }} \
-         assignees(first: {ASSIGNEES_CAP}) {{ nodes {{ login }} }}"
+         labels(first: {}) {{ pageInfo {{ hasNextPage }} nodes {{ name }} }} \
+         assignees(first: {}) {{ pageInfo {{ hasNextPage }} nodes {{ login }} }}",
+        Connection::Labels.cap(),
+        Connection::Assignees.cap()
     )
 }
 
-/// A nested connection the round selects inline on every issue. Selecting them
-/// here is what makes sub-issue parentage, dependency edges and board
-/// memberships cost no request of their own; the cap is what keeps a document of
-/// them inside GitHub's node budget, and [`FetchSnapshot::truncations`] is what
-/// keeps the cap honest.
+/// A capped connection the round selects inline on every issue. Selecting them
+/// here is what makes labels, assignees, sub-issue parentage, dependency edges
+/// and board memberships cost no request of their own; the cap is what keeps a
+/// document of them inside GitHub's node budget, and
+/// [`FetchSnapshot::truncations`] is what keeps the cap honest. Every one of
+/// them lands in the cache, so every one of them warns rather than short a list
+/// silently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Connection {
+    Labels,
+    Assignees,
     SubIssues,
     BlockedBy,
     ProjectItems,
@@ -127,9 +126,23 @@ pub enum Connection {
 }
 
 impl Connection {
+    /// The connections whose truncation is read straight off the issue node, in
+    /// selection order. `projectItems` is absent because a null connection there
+    /// means "not read this round" rather than "none", so
+    /// [`IssueEdges::read_project_items`] judges it; `fieldValues` is absent
+    /// because it hangs off a project item rather than the issue.
+    const FLAT_ON_ISSUE: [Connection; 4] = [
+        Connection::Labels,
+        Connection::Assignees,
+        Connection::SubIssues,
+        Connection::BlockedBy,
+    ];
+
     /// How many entries of this connection one issue's page carries.
     pub fn cap(self) -> usize {
         match self {
+            Connection::Labels => 20,
+            Connection::Assignees => 10,
             Connection::SubIssues => 50,
             Connection::BlockedBy => 50,
             Connection::ProjectItems => 10,
@@ -140,6 +153,8 @@ impl Connection {
     /// The GraphQL field, so a warning names the edge a reader can go look at.
     pub fn field(self) -> &'static str {
         match self {
+            Connection::Labels => "labels",
+            Connection::Assignees => "assignees",
             Connection::SubIssues => "subIssues",
             Connection::BlockedBy => "blockedBy",
             Connection::ProjectItems => "projectItems",
@@ -197,8 +212,8 @@ const NODE_BUDGET: usize = 500_000;
 /// the `fieldValues` selected under each of its possible project items -- the
 /// nesting that dominates the total.
 fn nodes_per_issue() -> usize {
-    LABELS_CAP
-        + ASSIGNEES_CAP
+    Connection::Labels.cap()
+        + Connection::Assignees.cap()
         + Connection::SubIssues.cap()
         + Connection::BlockedBy.cap()
         + Connection::ProjectItems.cap() * (1 + Connection::FieldValues.cap())
@@ -470,6 +485,12 @@ fn merge_issue_page(
     mut page: FetchSnapshot,
 ) {
     for rule in requested {
+        if repeats_the_cursor_it_was_sent(&page, sent, &rule.name) {
+            page.issues.remove(&rule.name);
+            page.next_pages.remove(&rule.name);
+            snapshot.warnings.push(stuck_cursor_warning(&rule.name));
+            continue;
+        }
         match page.issues.remove(&rule.name) {
             Some(issues) => snapshot
                 .issues
@@ -487,14 +508,41 @@ fn merge_issue_page(
     snapshot.blocked_by.extend(page.blocked_by);
     absorb_project_items(&mut snapshot.project_items, page.project_items);
     snapshot.truncations.extend(page.truncations);
-    // A cursor handed back unchanged would resume the same page for ever, so
-    // only one that moved counts as another page.
-    snapshot.next_pages.extend(
-        page.next_pages
-            .into_iter()
-            .filter(|(name, cursor)| sent.get(name) != Some(cursor)),
-    );
+    snapshot.next_pages.extend(page.next_pages);
     snapshot.warnings.extend(page.warnings);
+}
+
+/// A cursor handed back unchanged would resume the same page for ever, so the
+/// page that arrived with it is one the snapshot already holds: merging it would
+/// count every issue on it twice and paging on it would never end.
+fn repeats_the_cursor_it_was_sent(
+    page: &FetchSnapshot,
+    sent: &HashMap<String, String>,
+    type_name: &str,
+) -> bool {
+    matches!(page.next_pages.get(type_name), Some(cursor) if sent.get(type_name) == Some(cursor))
+}
+
+fn lost_cursor_warning(type_name: &str) -> RefreshWarning {
+    RefreshWarning::for_type(
+        type_name,
+        format!(
+            "issues for type '{}' have another page but the response named no cursor \
+             to resume from; the rest were not read",
+            type_name
+        ),
+    )
+}
+
+fn stuck_cursor_warning(type_name: &str) -> RefreshWarning {
+    RefreshWarning::for_type(
+        type_name,
+        format!(
+            "stopped paging issues for type '{}' (keeping what was read): \
+             github returned the cursor it was sent, so the page repeated",
+            type_name
+        ),
+    )
 }
 
 /// Issue one round and parse it. `types` are the `github-issues` types whose
@@ -598,8 +646,12 @@ fn parse_round(
             parse_issue_page(repo, index)
         }) {
             Ok(page) => {
-                if let Some(cursor) = page.next_cursor {
-                    next_pages.insert(rule.name.clone(), cursor);
+                match page.next_page {
+                    NextPage::From(cursor) => {
+                        next_pages.insert(rule.name.clone(), cursor);
+                    }
+                    NextPage::Unreachable => warnings.push(lost_cursor_warning(&rule.name)),
+                    NextPage::Done => {}
                 }
                 edges.absorb(page.edges);
                 issues.insert(
@@ -653,16 +705,17 @@ fn parse_round(
     }
 }
 
-/// Whether an error was raised against an issue's `projectItems`. Their paths
-/// run *below* an alias (`repository.t0.nodes.3.projectItems`), so they are
-/// split off before any subtree resolves: left in, a board read the round can
-/// survive without would condemn the whole issue list that came back beside it.
+/// Whether an error was raised against an issue's `projectItems` or anything
+/// under it (`repository.t0.nodes.3.projectItems.nodes.0.fieldValues`). Their
+/// paths run *below* an alias, so they are split off before any subtree
+/// resolves: left in, a board read the round can survive without would condemn
+/// the whole issue list that came back beside it.
 fn names_project_items(path: Option<&str>) -> bool {
     let Some(path) = path else {
         return false;
     };
-    let field = Connection::ProjectItems.field();
-    path == field || path.ends_with(&format!(".{}", field))
+    path.split('.')
+        .any(|segment| segment == Connection::ProjectItems.field())
 }
 
 /// The two repository-wide subtrees, resolved independently of each other and
@@ -694,7 +747,7 @@ fn repo_subtrees(
 struct IssuePage {
     nodes: Vec<GhIssue>,
     edges: IssueEdges,
-    next_cursor: Option<String>,
+    next_page: NextPage,
 }
 
 /// The inline connections, accumulated across every alias of a round. They are
@@ -725,7 +778,7 @@ impl IssueEdges {
         let Some(node_id) = node.get("id").and_then(|v| v.as_str()) else {
             return;
         };
-        for connection in [Connection::SubIssues, Connection::BlockedBy] {
+        for connection in Connection::FLAT_ON_ISSUE {
             if has_next_page(node, connection) {
                 self.truncations.push(Truncation {
                     node_id: node_id.to_string(),
@@ -809,17 +862,33 @@ fn parse_issue_page(repo: &Value, index: usize) -> Option<IssuePage> {
     Some(IssuePage {
         nodes: nodes.iter().filter_map(issue_from_node).collect(),
         edges,
-        next_cursor: next_cursor(page),
+        next_page: next_page(page),
     })
 }
 
-fn next_cursor(page: &Value) -> Option<String> {
-    if !page.pointer("/pageInfo/hasNextPage")?.as_bool()? {
-        return None;
+/// Where one type's list resumes, if it does.
+enum NextPage {
+    /// The connection said this was the last page.
+    Done,
+    From(String),
+    /// The connection reported another page but named no cursor to resume from,
+    /// so the rest of the list cannot be asked for. Silence here would read as a
+    /// complete list, which is the one thing it is not.
+    Unreachable,
+}
+
+fn next_page(page: &Value) -> NextPage {
+    let has_next = page
+        .pointer("/pageInfo/hasNextPage")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !has_next {
+        return NextPage::Done;
     }
-    page.pointer("/pageInfo/endCursor")?
-        .as_str()
-        .map(str::to_string)
+    match page.pointer("/pageInfo/endCursor").and_then(|v| v.as_str()) {
+        Some(cursor) => NextPage::From(cursor.to_string()),
+        None => NextPage::Unreachable,
+    }
 }
 
 /// The one place the GraphQL and REST shapes of an issue differ: `labels` and
@@ -1012,8 +1081,11 @@ fn covers(error_path: Option<&str>, subtree: &str) -> bool {
         || subtree.starts_with(&format!("{}.", error_path))
 }
 
+/// A warning belonging to the whole round, so every GitHub-backed type hears it.
+/// A warning about one type's alias is built with [`RefreshWarning::for_type`]
+/// instead, and reaches that type's outcome alone.
 fn warning(message: String) -> RefreshWarning {
-    RefreshWarning { message }
+    RefreshWarning::new(message)
 }
 
 /// Verbatim the string the per-request schema fetch emitted before the round,
@@ -1026,10 +1098,13 @@ fn issue_types_warning(message: &str) -> RefreshWarning {
 }
 
 fn issues_warning(type_name: &str, message: &str) -> RefreshWarning {
-    warning(format!(
-        "could not refresh issues for type '{}' (keeping prior): {}",
-        type_name, message
-    ))
+    RefreshWarning::for_type(
+        type_name,
+        format!(
+            "could not refresh issues for type '{}' (keeping prior): {}",
+            type_name, message
+        ),
+    )
 }
 
 /// The board memberships the round asked for on every issue and did not get.
@@ -1251,24 +1326,40 @@ mod tests {
         );
         assert!(query.contains("t1: issues"), "{}", query);
         assert!(query.contains("after: $c1)"), "{}", query);
+    }
 
-        for selection in [
-            "pageInfo { hasNextPage endCursor }",
-            "id number url title body state updatedAt createdAt",
-            "author { login }",
-            "issueType { name }",
-            "milestone { number }",
-            "labels(first: 20) { nodes { name } }",
-            "assignees(first: 10) { nodes { login } }",
+    // The one place the built query is tied to [`Connection`]. Every parse test
+    // below feeds a hand-made fixture, so a connection asked for without its
+    // `pageInfo` would truncate in silence and no fixture would notice.
+    #[test]
+    fn every_capped_connection_is_asked_for_at_its_cap_with_its_next_page_flag() {
+        let query = round_query(&[rule("story", None, None)], &[], RoundScope::Everything);
+
+        for connection in [
+            Connection::Labels,
+            Connection::Assignees,
+            Connection::SubIssues,
+            Connection::BlockedBy,
+            Connection::ProjectItems,
+            Connection::FieldValues,
         ] {
-            assert_eq!(
-                query.matches(selection).count(),
-                2,
-                "every alias selects `{}`: {}",
+            let selection = format!(
+                "{}(first: {}) {{ pageInfo {{ hasNextPage }}",
+                connection.field(),
+                connection.cap()
+            );
+            assert!(
+                query.contains(&selection),
+                "missing `{}`: {}",
                 selection,
                 query
             );
         }
+        assert!(
+            query.contains("... on ProjectV2ItemFieldSingleSelectValue"),
+            "the field-value fragments the parser reads must be selected: {}",
+            query
+        );
     }
 
     // GraphQL wraps `labels` and `assignees` in `{nodes: [...]}` where REST hands
@@ -1558,12 +1649,6 @@ mod tests {
             assert!(organization.contains(alias), "Organization: {}", query);
             assert!(user.contains(alias), "User: {}", query);
         }
-        assert_eq!(
-            query.matches(PROJECT_FIELDS_SELECTION).count(),
-            4,
-            "both fragments must splice the one shared fields selection: {}",
-            query
-        );
     }
 
     #[test]
@@ -2138,6 +2223,37 @@ mod tests {
         assert!(snapshot.warnings.is_empty(), "{:?}", snapshot.warnings);
     }
 
+    // `hasNextPage: true` with no `endCursor` leaves the rest of the list
+    // unaskable. Reporting the type as finished would present a short list as a
+    // whole one, and a syncer would prune every document past the first page.
+    #[test]
+    fn a_page_that_promises_more_but_names_no_cursor_warns_instead_of_ending() {
+        let mut page = issue_page(1..3, Some("cursor-page-1"));
+        page["pageInfo"]["endCursor"] = Value::Null;
+        let resp = with_issues(org_owned_response(), &[(0, page)]);
+
+        let snapshot = parse_round(
+            &resp,
+            &[rule("story", None, None)],
+            &[],
+            RoundScope::Everything,
+        );
+
+        assert!(snapshot.next_pages.is_empty());
+        assert_eq!(numbers(&snapshot, "story"), vec![1, 2]);
+        assert_eq!(
+            snapshot
+                .warnings
+                .iter()
+                .map(|w| w.message.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "issues for type 'story' have another page but the response named \
+                 no cursor to resume from; the rest were not read"
+            ]
+        );
+    }
+
     #[test]
     fn rounds_after_the_first_compose_only_the_types_still_paging() {
         let gh = PagingRound::with_pages(3);
@@ -2243,14 +2359,29 @@ mod tests {
     }
 
     #[test]
-    fn a_cursor_that_never_moves_ends_the_loop_instead_of_spinning() {
+    fn a_cursor_that_never_moves_ends_the_loop_and_discards_the_repeated_page() {
         let gh = StuckCursorRound {
             rounds: std::cell::Cell::new(0),
         };
         let snapshot = fetch_all_pages(&gh, "owner/repo", &[rule("bulk", None, None)], &[]);
 
         assert_eq!(gh.rounds.get(), 2);
-        assert_eq!(snapshot.issues["bulk"].len(), 200);
+        assert_eq!(
+            numbers(&snapshot, "bulk"),
+            (1..101).collect::<Vec<u64>>(),
+            "the second round returned the first page again"
+        );
+        assert_eq!(
+            snapshot
+                .warnings
+                .iter()
+                .map(|w| w.message.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "stopped paging issues for type 'bulk' (keeping what was read): \
+                 github returned the cursor it was sent, so the page repeated"
+            ]
+        );
     }
 
     // --- inline sub-issue and dependency edges ---
@@ -2273,22 +2404,6 @@ mod tests {
     fn truncated(mut node: Value, connection: Connection) -> Value {
         node[connection.field()]["pageInfo"]["hasNextPage"] = json!(true);
         node
-    }
-
-    #[test]
-    fn the_round_selects_both_edge_connections_on_every_issue() {
-        let query = round_query(&[rule("story", None, None)], &[], RoundScope::Everything);
-
-        assert!(
-            query.contains("subIssues(first: 50) { pageInfo { hasNextPage } nodes { id } }"),
-            "{}",
-            query
-        );
-        assert!(
-            query.contains("blockedBy(first: 50) { pageInfo { hasNextPage } nodes { number } }"),
-            "{}",
-            query
-        );
     }
 
     #[test]
@@ -2408,12 +2523,45 @@ mod tests {
                 connection: Connection::SubIssues,
             }]
         );
-        // What did arrive is still kept: truncation reports a loss, it is not
-        // grounds for discarding the page that came back.
         assert_eq!(
             snapshot.sub_issues.get("I_kw1"),
             Some(&vec!["I_kw2".to_string()])
         );
+    }
+
+    // Labels become `meta.tags` and assignees become `meta.assignee`, so a cap
+    // reached on either drops remote state the cache is keeping -- the same loss
+    // a capped edge is, and reported the same way. The REST `issue list` this
+    // replaced returned every label, so silence here would be a regression.
+    #[test]
+    fn the_flat_label_and_assignee_connections_truncate_like_the_edges() {
+        let node = truncated(
+            truncated(issue_node(1, &["lazyspec:story"], None), Connection::Labels),
+            Connection::Assignees,
+        );
+        let resp = with_issues(org_owned_response(), &[(0, last_page(vec![node]))]);
+
+        let snapshot = parse_round(
+            &resp,
+            &[rule("story", None, None)],
+            &[],
+            RoundScope::Everything,
+        );
+
+        assert_eq!(
+            snapshot.truncations,
+            vec![
+                Truncation {
+                    node_id: "I_kw1".to_string(),
+                    connection: Connection::Labels,
+                },
+                Truncation {
+                    node_id: "I_kw1".to_string(),
+                    connection: Connection::Assignees,
+                },
+            ]
+        );
+        assert_eq!(snapshot.issues["story"][0].labels.len(), 1);
     }
 
     /// A round whose first page reports another one, so the second round's
@@ -2492,26 +2640,6 @@ mod tests {
     }
 
     #[test]
-    fn the_round_selects_project_items_with_their_field_values_at_the_caps() {
-        let query = round_query(&[rule("story", None, None)], &[], RoundScope::Everything);
-
-        assert!(
-            query.contains(
-                "projectItems(first: 10) { pageInfo { hasNextPage } nodes { \
-                            id project { number } fieldValues(first: 25) \
-                            { pageInfo { hasNextPage } nodes { __typename"
-            ),
-            "{}",
-            query
-        );
-        assert!(
-            query.contains("... on ProjectV2ItemFieldSingleSelectValue"),
-            "the field-value fragments the parser reads must be selected: {}",
-            query
-        );
-    }
-
-    #[test]
     fn board_memberships_and_field_cells_land_keyed_by_the_issues_node_id() {
         let snapshot = boarded_page(&[ProjectItem {
             project_number: 7,
@@ -2575,6 +2703,32 @@ mod tests {
         );
     }
 
+    // An error can be raised deeper than `projectItems` itself -- on the
+    // `fieldValues` of one board item. It is still a board read, so it must be
+    // split off the same way: matched only at the tail, it falls through to the
+    // alias above it and throws away that whole type's issue list.
+    #[test]
+    fn an_error_below_project_items_still_spares_the_alias_it_hangs_under() {
+        let types = [rule("story", None, None)];
+        let node = boarded(issue_node(1, &["lazyspec:story"], None), &[]);
+        let mut resp = with_issues(org_owned_response(), &[(0, last_page(vec![node]))]);
+        resp["errors"] = json!([{
+            "message": "Your token has not been granted the required scopes: project",
+            "path": ["repository", "t0", "nodes", 0, "projectItems", "nodes", 0, "fieldValues"]
+        }]);
+
+        let snapshot = parse_round(&resp, &types, &[], RoundScope::Everything);
+
+        assert_eq!(numbers(&snapshot, "story"), vec![1]);
+        assert_eq!(snapshot.project_items, None);
+        assert_eq!(snapshot.warnings.len(), 1, "{:?}", snapshot.warnings);
+        assert!(
+            snapshot.warnings[0].message.contains("project fields"),
+            "{}",
+            snapshot.warnings[0].message
+        );
+    }
+
     // A null connection with no error entry is one issue's read failing, not the
     // scope: that issue is simply absent, and every other issue's memberships
     // stay authoritative.
@@ -2629,7 +2783,6 @@ mod tests {
                 connection: Connection::ProjectItems,
             }]
         );
-        // The ten that did arrive are kept: the truncation reports the loss.
         assert_eq!(snapshot.project_items.as_ref().unwrap()["I_kw1"].len(), 10);
     }
 
@@ -2666,15 +2819,6 @@ mod tests {
 
     // --- node budget ---
 
-    // RFC-065's measured figures, restated as arithmetic over the constants the
-    // query is built from: 360 nodes of nested connections plus the 30 of labels
-    // and assignees, times a 100-issue page, times the type count.
-    #[test]
-    fn one_types_alias_declares_a_page_of_issues_and_their_own_selections() {
-        assert_eq!(nodes_per_issue(), 20 + 10 + 50 + 50 + 10 + 10 * 25);
-        assert_eq!(possible_nodes(1), 100 * (1 + 390));
-    }
-
     #[test]
     fn ten_types_fit_one_request_and_sixteen_do_not() {
         assert!(
@@ -2687,7 +2831,23 @@ mod tests {
             "16 types must not: {}",
             possible_nodes(16)
         );
-        assert_eq!(types_per_request(), 12);
+    }
+
+    // A repo with no `github-issues` type still has milestones and an owner
+    // subtree to read, so the round still goes out -- with no aliases on it.
+    #[test]
+    fn a_repo_with_no_configured_types_still_issues_one_round() {
+        let gh = MockGhClient::new().with_milestones(vec![GhMilestone {
+            number: 3,
+            ..Default::default()
+        }]);
+
+        let snapshot = fetch_all_pages(&gh, "octo-org/repo", &[], &[]);
+
+        assert_eq!(gh.graphql_calls.borrow().len(), 1);
+        assert_eq!(snapshot.milestones.unwrap().len(), 1);
+        assert!(snapshot.issues.is_empty());
+        assert!(snapshot.warnings.is_empty(), "{:?}", snapshot.warnings);
     }
 
     /// Every request the round would issue for `types`, and what each declares.
@@ -2753,9 +2913,32 @@ mod tests {
         assert_eq!(split.queries.borrow().len(), 2);
         assert_eq!(composed_aliases(&split.queries.borrow()[0]), 12);
         assert_eq!(composed_aliases(&split.queries.borrow()[1]), 4);
-        // Every type is in the snapshot however it was chunked, and the
-        // repository-wide subtrees are read once rather than per chunk.
         assert_eq!(snapshot.issues.len(), 16);
         assert!(!split.queries.borrow()[1].contains("milestones"));
+    }
+
+    fn with_items(items: Option<HashMap<String, Vec<ProjectItem>>>) -> FetchSnapshot {
+        FetchSnapshot {
+            project_items: items,
+            ..Default::default()
+        }
+    }
+
+    fn one_item_map() -> HashMap<String, Vec<ProjectItem>> {
+        HashMap::from([("I_kw1".to_string(), Vec::new())])
+    }
+
+    // Board memberships union only while both chunks knew them. Half a map taken
+    // as authoritative reads as "on no board" for every issue the other chunk
+    // covered, which is what puts a doc back on its authority board.
+    #[test]
+    fn a_chunk_that_could_not_read_board_memberships_makes_the_union_unknown() {
+        let mut known_first = with_items(Some(one_item_map()));
+        absorb_chunk(&mut known_first, with_items(None));
+        assert_eq!(known_first.project_items, None);
+
+        let mut unknown_first = with_items(None);
+        absorb_chunk(&mut unknown_first, with_items(Some(one_item_map())));
+        assert_eq!(unknown_first.project_items, None);
     }
 }

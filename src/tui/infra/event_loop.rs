@@ -12,8 +12,8 @@ use crate::engine::status_colors::StatusColors;
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
 use crate::engine::sync::{
-    sync_all, ClickupMaps, ClickupSync, GhIssueSync, GhMaps, GhMilestoneSync, GhRound, GitRefSync,
-    SyncContext, Syncers,
+    sync_all, ClickupMaps, ClickupSync, GhMaps, GhMilestoneSync, GhRound, GitRefSync, SyncContext,
+    Syncers,
 };
 use crate::engine::task_map::TaskMap;
 use crate::tui::content;
@@ -296,7 +296,6 @@ fn format_fix_output(output: &crate::engine::ops::fix::FixOutput) -> String {
 //
 // Clients/tokens are injected (DICTUM-003): production passes the real `GhCli` /
 // `GitCli` / `ClickupHttpClient`; tests drive the same seams with fakes.
-#[allow(clippy::too_many_arguments)]
 fn poll_sync(
     root: &Path,
     config: &Config,
@@ -359,22 +358,17 @@ fn poll_sync(
 
         let mut syncers = Syncers::default();
         if let Some(repo) = repo.clone() {
-            syncers.round = Some(GhRound {
+            let round = GhRound {
                 gh: gh_graphql,
                 repo,
-            });
+            };
+            if has_gh_issues {
+                syncers.issue = Some(round.issue_sync(type_rules));
+            }
+            syncers.round = Some(round);
         }
         if has_milestones {
             syncers.milestone = Some(GhMilestoneSync);
-        }
-        if has_gh_issues {
-            if let Some(repo) = repo.clone() {
-                syncers.issue = Some(GhIssueSync {
-                    graphql: gh_graphql,
-                    repo,
-                    type_rules,
-                });
-            }
         }
         if has_git_ref {
             syncers.git_ref = Some(GitRefSync {
@@ -1295,8 +1289,9 @@ mod tests {
 
     use crate::engine::clickup::{ClickupError, ClickupStatus, ClickupTask};
     use crate::engine::clickup_cache;
-    use crate::engine::gh::test_support::{GhRequestCounter, MockGhClient};
-    use crate::engine::gh_schema::GhSchemaSnapshot;
+    use crate::engine::gh::test_support::{
+        assert_one_composed_round, ten_type_config_src, GhRequestCounter, MockGhClient,
+    };
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use std::cell::Cell;
 
@@ -1429,32 +1424,13 @@ mod tests {
     // STORY-249 AC1/AC2 and STORY-250 AC9, on the surface that pays for it every
     // poll interval: the background poll must cost the same one composed request
     // the CLI does -- issue lists included -- not one probe per type and board.
-    //
     #[test]
     fn a_poll_costs_one_composed_request_for_milestones_issue_types_and_board_schemas() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
+        let config = Config::parse(&ten_type_config_src()).unwrap();
 
-        let mut config = Config::default();
-        config.documents.types = vec![TypeDef::test_fixture(
-            "release",
-            StoreBackend::GithubMilestones,
-        )];
-        // All four discovery rules, so the poll composes every alias shape. The
-        // prefix takes a letter rather than the type name's digit: a digit stops
-        // `extract_id_from_name` at the prefix, and a cached doc whose id does
-        // not resolve never matches its issue-map entry.
-        for (n, letter) in ('A'..='J').enumerate() {
-            config.documents.types.push(TypeDef {
-                prefix: format!("T{letter}"),
-                status_authority: (n == 0).then(|| "PROJECT-7".to_string()),
-                github_issue_tag: matches!(n % 4, 1 | 3).then(|| "triage".to_string()),
-                github_issue_type: matches!(n % 4, 2 | 3).then(|| "Bug".to_string()),
-                ..TypeDef::test_fixture(&format!("t{n}"), StoreBackend::GithubIssues)
-            });
-        }
-
-        let gh = GhRequestCounter::with_board(7, &["Review", "Done"]).with_enriched_issues();
+        let gh = GhRequestCounter::for_ten_type_config();
         let store = Arc::new(Mutex::new(GithubIssuesStore {
             client: Box::new(GhCli::new()),
             root: root.to_path_buf(),
@@ -1474,37 +1450,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(
-            gh.round_queries.borrow().len(),
-            1,
-            "one composed round per poll"
-        );
-        assert!(
-            gh.other_queries.borrow().is_empty(),
-            "no board-schema probe survives the round: {:?}",
-            gh.other_queries.borrow()
-        );
-        assert_eq!(gh.milestone_list_calls.get(), 0);
-        assert!(
-            root.join(".lazyspec/cache/t0/TA-1/00-TA-2.md").is_file(),
-            "the poll materializes sub-issue parentage off the same one round"
-        );
-
-        let saved = GhSchemaSnapshot::load(root);
-        assert_eq!(saved.field_id(7, "Status"), Some("PVTSSF_b7"));
-        assert_eq!(
-            saved.status_lifecycle(7).unwrap().states,
-            vec!["review", "done"]
-        );
-
-        // STORY-251: board memberships ride that same request, so `t0`'s
-        // authority board sets its status with no read of its own.
-        let parent =
-            std::fs::read_to_string(root.join(".lazyspec/cache/t0/TA-1/index.md")).unwrap();
-        assert!(
-            parent.contains("status: review"),
-            "the authority board's cell must come off the round, got:\n{parent}"
-        );
+        assert_one_composed_round(&gh, root);
     }
 
     // --- ITERATION-311: non-blocking store lock on the UI thread (BUG-001) ---

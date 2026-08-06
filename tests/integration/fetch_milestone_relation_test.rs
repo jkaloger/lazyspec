@@ -10,40 +10,12 @@ use lazyspec::engine::config::{
     Config, GithubConfig, NumberingStrategy, RelationshipDef, StoreBackend, TypeDef,
 };
 use lazyspec::engine::gh::{
-    GhComment, GhFieldValueInput, GhGraphql, GhIssue, GhIssueDependencyApi, GhIssueMilestone,
-    GhIssueReader, GhIssueWriter, GhMilestone, GhMilestoneApi, GqlVar, ProjectItem,
+    test_support, GhComment, GhFieldValueInput, GhGraphql, GhIssue, GhIssueDependencyApi,
+    GhIssueMilestone, GhIssueReader, GhIssueWriter, GhMilestone, GhMilestoneApi, GqlVar,
+    ProjectItem,
 };
 use lazyspec::engine::git_ref::GitCli;
 use tempfile::TempDir;
-
-/// The composed fetch round's response for a user-owned repo carrying
-/// `milestones` and every configured type's `issues`: no `issueTypes` key,
-/// which is what GitHub returns when the owner is a User rather than an
-/// Organization.
-fn round_response(
-    query: &str,
-    milestones: &[GhMilestone],
-    issues: &[GhIssue],
-) -> serde_json::Value {
-    let nodes: Vec<_> = milestones
-        .iter()
-        .map(|m| {
-            serde_json::json!({
-                "number": m.number,
-                "title": m.title,
-                "description": m.description,
-                "dueOn": m.due_on,
-                "state": m.state.to_uppercase(),
-                "url": m.url,
-                "openIssues": {"totalCount": m.open_issues},
-                "closedIssues": {"totalCount": m.closed_issues}
-            })
-        })
-        .collect();
-    let mut resp = crate::common::round_response_with_issues(query, issues);
-    resp["data"]["repository"]["milestones"] = serde_json::json!({"nodes": nodes});
-    resp
-}
 
 /// A gh fake exposing one issue carrying milestone #1 and one milestone #1.
 /// graphql answers the schema-snapshot and parentage queries with empties so the
@@ -74,7 +46,11 @@ impl GhIssueReader for MilestoneGh {
 impl GhGraphql for MilestoneGh {
     fn graphql(&self, query: &str, _vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
         if lazyspec::engine::gh_fetch::is_round_query(query) {
-            return Ok(round_response(query, &self.milestones, &self.issues));
+            return Ok(test_support::with_issue_pages(
+                query,
+                test_support::round_response(&self.milestones, &[], &[]),
+                &self.issues,
+            ));
         }
         Ok(serde_json::json!({
             "data": { "organization": { "issueTypes": { "nodes": [] } } }
@@ -136,9 +112,6 @@ impl GhIssueWriter for MilestoneGh {
 }
 
 impl GhMilestoneApi for MilestoneGh {
-    fn milestone_list(&self, _repo: &str) -> Result<Vec<GhMilestone>> {
-        Ok(self.milestones.clone())
-    }
     fn milestone_view(&self, _repo: &str, number: u64) -> Result<GhMilestone> {
         self.milestones
             .iter()
@@ -176,9 +149,6 @@ impl GhMilestoneApi for MilestoneGh {
 }
 
 impl GhIssueDependencyApi for MilestoneGh {
-    fn list_blocked_by(&self, _: &str, _: u64) -> Result<Vec<u64>> {
-        Ok(vec![])
-    }
     fn add_blocked_by(&self, _: &str, _: u64, _: u64) -> Result<()> {
         unreachable!()
     }

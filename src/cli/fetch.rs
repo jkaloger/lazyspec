@@ -2,7 +2,7 @@ use crate::engine::clickup::ClickupClient;
 use crate::engine::config::{Config, Lifecycle, StoreBackend};
 use crate::engine::config_write::write_config_in_place;
 use crate::engine::credentials::Token;
-use crate::engine::gh::{GhGraphql, GhIssueReader, GhIssueWriter, GhMilestoneApi};
+use crate::engine::gh::GhGraphql;
 use crate::engine::gh_schema::GhSchemaSnapshot;
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::github::resolve_repo;
@@ -11,8 +11,8 @@ use crate::engine::issue_map::IssueMap;
 use crate::engine::status_colors::StatusColors;
 use crate::engine::store_dispatch;
 use crate::engine::sync::{
-    sync_all, ClickupMaps, ClickupSync, GhIssueSync, GhMaps, GhMilestoneSync, GhRound, GitRefSync,
-    SyncContext, Syncers,
+    sync_all, ClickupMaps, ClickupSync, GhMaps, GhMilestoneSync, GhRound, GitRefSync, SyncContext,
+    Syncers,
 };
 use crate::engine::task_map::TaskMap;
 use anyhow::{bail, Context, Result};
@@ -22,7 +22,7 @@ use std::path::Path;
 pub fn run(
     root: &Path,
     config: &Config,
-    gh: &(impl GhIssueReader + GhIssueWriter + GhGraphql + GhMilestoneApi),
+    gh: &dyn GhGraphql,
     git_ref_ops: &dyn GitRefOps,
     clickup: &dyn ClickupClient,
     clickup_token: Option<&Token>,
@@ -165,19 +165,14 @@ pub fn run(
 
         let mut syncers = Syncers::default();
         if let Some(repo) = repo.clone() {
-            syncers.round = Some(GhRound { gh, repo });
+            let round = GhRound { gh, repo };
+            if !fetch_gh.is_empty() {
+                syncers.issue = Some(round.issue_sync(type_rules));
+            }
+            syncers.round = Some(round);
         }
         if !fetch_milestones.is_empty() {
             syncers.milestone = Some(GhMilestoneSync);
-        }
-        if !fetch_gh.is_empty() {
-            syncers.issue = Some(GhIssueSync {
-                graphql: gh,
-                repo: repo
-                    .clone()
-                    .expect("repo resolved when an issue type fetches"),
-                type_rules,
-            });
         }
         if !fetch_gitref.is_empty() {
             syncers.git_ref = Some(GitRefSync {
@@ -366,8 +361,9 @@ mod tests {
     use crate::engine::clickup::{ClickupUser, FakeClickupClient};
     use crate::engine::config::{NumberingStrategy, StoreBackend, TypeDef};
     use crate::engine::gh::{
-        test_support::GhRequestCounter, GhComment, GhFieldValueInput, GhIssue, GhMilestone, GqlVar,
-        ProjectItem,
+        test_support::{assert_one_composed_round, ten_type_config_src, GhRequestCounter},
+        GhComment, GhFieldValueInput, GhIssue, GhIssueReader, GhIssueWriter, GhMilestone,
+        GhMilestoneApi, GqlVar, ProjectItem,
     };
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use tempfile::TempDir;
@@ -489,63 +485,19 @@ name = "related-to"
         snapshot.save(root).unwrap();
     }
 
-    /// The shape RFC-065 is measured against: ten `github-issues` types, one
-    /// `github-milestones` type, and one board nominated as a status authority.
-    fn many_types_config_src() -> String {
-        let mut src = String::from(
-            "[naming]\npattern = \"{type}-{n:03}-{title}.md\"\n\n\
-             [templates]\ndir = \".lazyspec/templates\"\n\n\
-             [github]\nrepo = \"octo-org/repo\"\n\n\
-             [[types]]\nname = \"release\"\nplural = \"releases\"\n\
-             dir = \"docs/releases\"\nprefix = \"RELEASE\"\nstore = \"github-milestones\"\n\n",
-        );
-        // All four discovery rules across the ten types -- plain label, tag,
-        // native issue type, and both -- so the round composes every alias
-        // shape, not ten copies of one.
-        // Letter-suffixed prefixes: a digit in a prefix stops `extract_id_from
-        // _name` at the prefix itself, so `T0-1` would resolve as `T0` and the
-        // cached doc would never match its issue-map entry.
-        for (n, prefix) in ('A'..='J').enumerate() {
-            let authority = if n == 0 {
-                "status_authority = \"PROJECT-7\"\n"
-            } else {
-                ""
-            };
-            let rule = match n % 4 {
-                1 => "github_issue_tag = \"triage\"\n",
-                2 => "github_issue_type = \"Bug\"\n",
-                3 => "github_issue_tag = \"triage\"\ngithub_issue_type = \"Bug\"\n",
-                _ => "",
-            };
-            src.push_str(&format!(
-                "[[types]]\nname = \"t{n}\"\nplural = \"t{n}s\"\ndir = \"docs/t{n}\"\n\
-                 prefix = \"T{prefix}\"\nstore = \"github-issues\"\n{authority}{rule}\n"
-            ));
-        }
-        src.push_str("[[relationships]]\nname = \"related-to\"\n\n");
-        // Declared so the round's inline `blockedBy` edge is actually consumed:
-        // the point of the count is that enrichment costs no request, which only
-        // means something when the enrichment happens.
-        src.push_str(
-            "[[relationships]]\nname = \"blocks\"\ninverse = \"blocked-by\"\n\
-             github_native = \"dependency\"\n",
-        );
-        src
-    }
-
-    // STORY-249 AC1/AC2: milestones, org issue types and every authority board's
-    // field schema arrive together. Twelve types' worth of that work costs one
-    // composed request, and no other GraphQL document is issued at all.
-    //
+    // STORY-249 AC1/AC2 and STORY-251, on the CLI surface: milestones, org issue
+    // types, every authority board's field schema, and the issue enrichment all
+    // arrive together. Twelve types' worth of that work costs one composed
+    // request, and no other GraphQL document is issued at all.
     #[test]
     fn milestone_issue_type_and_board_schema_work_costs_one_composed_request() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        let src = many_types_config_src();
+        let src = ten_type_config_src();
         std::fs::write(root.join(".lazyspec.toml"), &src).unwrap();
         let config = Config::parse(&src).unwrap();
 
-        let gh = GhRequestCounter::with_board(7, &["Review", "Done"]).with_enriched_issues();
+        let gh = GhRequestCounter::for_ten_type_config();
         run(
             root,
             &config,
@@ -558,47 +510,7 @@ name = "related-to"
         )
         .unwrap();
 
-        assert_eq!(
-            gh.round_queries.borrow().len(),
-            1,
-            "one composed round for the whole fetch"
-        );
-        assert!(
-            gh.other_queries.borrow().is_empty(),
-            "no board-schema probe survives the round: {:?}",
-            gh.other_queries.borrow()
-        );
-        assert_eq!(gh.milestone_list_calls.get(), 0);
-
-        // That one request also carried the enrichment: #2 nests under #1 from
-        // the round's `subIssues`, and #1 carries `blocked-by` from its
-        // `blockedBy` -- both without a second query.
-        assert!(
-            root.join(".lazyspec/cache/t0/TA-1/00-TA-2.md").is_file(),
-            "sub-issue parentage must materialize off the round"
-        );
-        let parent =
-            std::fs::read_to_string(root.join(".lazyspec/cache/t0/TA-1/index.md")).unwrap();
-        assert!(
-            parent.contains("blocked-by: TA-2"),
-            "dependency edges must come off the round, got:\n{parent}"
-        );
-
-        // And that one request is what carried the board's schema.
-        let saved = GhSchemaSnapshot::load(root);
-        assert_eq!(saved.field_id(7, "Status"), Some("PVTSSF_b7"));
-        assert_eq!(
-            saved.status_lifecycle(7).unwrap().states,
-            vec!["review", "done"]
-        );
-
-        // STORY-251: and the board *memberships* too. `t0` hands its lifecycle
-        // to board 7, so a status read off that board's `Status` cell is proof
-        // the membership arrived on the same request as everything else.
-        assert!(
-            parent.contains("status: review"),
-            "the authority board's cell must come off the round, got:\n{parent}"
-        );
+        assert_one_composed_round(&gh, root);
     }
 
     #[test]
@@ -1125,9 +1037,6 @@ name = "related-to"
     }
 
     impl GhMilestoneApi for StubGh {
-        fn milestone_list(&self, _: &str) -> Result<Vec<GhMilestone>> {
-            unimplemented!()
-        }
         fn milestone_view(&self, _: &str, _: u64) -> Result<GhMilestone> {
             unimplemented!()
         }
@@ -1161,9 +1070,6 @@ name = "related-to"
     }
 
     impl crate::engine::gh::GhIssueDependencyApi for StubGh {
-        fn list_blocked_by(&self, _: &str, _: u64) -> Result<Vec<u64>> {
-            unimplemented!()
-        }
         fn add_blocked_by(&self, _: &str, _: u64, _: u64) -> Result<()> {
             unimplemented!()
         }

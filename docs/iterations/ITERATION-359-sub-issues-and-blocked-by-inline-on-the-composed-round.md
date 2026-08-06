@@ -26,13 +26,13 @@ STORY-251 AC7, AC8, AC9; AC1 for the dependency and sub-issue reads; AC2 for the
 
 ## Tasks
 
-1. Builder: `subIssues(first: SUB_ISSUES_CAP) { pageInfo { hasNextPage } nodes { id number } }` and `blockedBy(first: BLOCKED_BY_CAP) { pageInfo { hasNextPage } nodes { number } }` inline on each `t<i>` alias. `SUB_ISSUES_CAP = 50`, `BLOCKED_BY_CAP = 50` as named consts beside the structs that parse them.
+1. Builder: `subIssues(first: 50) { pageInfo { hasNextPage } nodes { id number } }` and `blockedBy(first: 50) { pageInfo { hasNextPage } nodes { number } }` inline on each `t<i>` alias, the `first:` arguments rendered from the caps rather than typed twice. The caps live on a `Connection` enum -- `Connection::SubIssues.cap() = 50`, `Connection::BlockedBy.cap() = 50` -- whose variants also supply the GraphQL field name the truncation warning quotes.
 2. Populate `FetchSnapshot::sub_issues` (parent node id -> ordered child node ids, server order) and `blocked_by` (issue number -> blocking numbers).
 3. `fetch_all`: build the `ParentageMap` from `snapshot.sub_issues` in place of `fetch_subissue_parentage`. Resolution semantics unchanged -- child node ids absent from `node_to_doc` are dropped, parents with no resolvable child are omitted. `inject_subissue_relation` and the nesting-vs-relation split (ITERATION-224) untouched.
 4. `fetch_subissue_parent_numbers` (flat-doc relation injection) reads the same map inverted -- child node id -> parent number. One source, not a second read.
 5. Dependency block in `fetch_all`: `snapshot.blocked_by` in place of `gh_dependency.list_blocked_by_batch`. The `number -> doc id` batch map, the cross-type fallback through `IssueMap`, and the "forward `blocks` is derived virtually, never stored" posture all unchanged.
 6. `hasNextPage == true` on either connection -> `RefreshWarning` naming the document id and the connection. Truncation is reported, never silent.
-7. Delete `GhIssueDependencyApi::list_blocked_by_batch` (default + `GhCli` override) and, once unused, `gh_subissue::fetch_sub_issue_nodes_batch`, `fetch_sub_issue_parent_numbers_batch`, `SUB_ISSUE_BATCH_MAX` and their queries/parsers. Keep `GhIssueDependencyApi::list_blocked_by` -- the mutation read-back. Keep `gh_subissue::fetch_remote_sub_issue_nodes` and `reconcile_subissues` -- write path. `gh::GH_NODES_BATCH_MAX` survives this slice; `project_items_batch` is still its user.
+7. Delete `GhIssueDependencyApi::list_blocked_by_batch` (default + `GhCli` override) and, once unused, `gh_subissue::fetch_sub_issue_nodes_batch`, `fetch_sub_issue_parent_numbers_batch`, `SUB_ISSUE_BATCH_MAX` and their queries/parsers. `GhIssueDependencyApi::list_blocked_by` goes with it -- it has had no production caller since ee21fbe. Keep `gh_subissue::fetch_remote_sub_issue_nodes` and `reconcile_subissues` -- write path. `gh::GH_NODES_BATCH_MAX` survives this slice; `project_items_batch` is still its user.
 8. No budget arithmetic. `subIssues(50) + blockedBy(50)` is ~100 nodes per issue; 16 types x 100 issues stays well under 500,000. The arithmetic arrives with `projectItems`, per the story's Split Point.
 9. Tests:
    - Fixtures: nested sub-issue layout, flat-type parent-relation injection, blocked-by edges resolving same-type and cross-type.
@@ -60,6 +60,7 @@ Early returns in the connection parsers. Where a comment about why a child is dr
 - `grep -rn "list_blocked_by_batch\|SUB_ISSUE_BATCH_MAX\|fetch_sub_issue_nodes_batch" src tests` returns nothing.
 - Nested sub-issue layout byte-equivalent to the batch path on identical state; `blocks`/`blocked-by` relations identical.
 - Issue with 51 sub-issues: 50 land, one warning names the doc and `subIssues`.
-- Dependency mutation still reads back through `GhIssueDependencyApi::list_blocked_by`.
+- Every dependency edge in the cache comes from the round's inline `blockedBy` selection: no `nodes(ids:)`, no per-issue dependency read on any path.
 - TUI poll: same request count, same warnings.
+
 

@@ -2,9 +2,9 @@ use anyhow::Result;
 use lazyspec::engine::config::Config;
 use lazyspec::engine::document::Status;
 use lazyspec::engine::gh::{
-    GhAuthor, GhComment, GhFieldKind, GhFieldValueInput, GhFieldValueRepr, GhGraphql, GhIssue,
-    GhIssueDependencyApi, GhIssueReader, GhIssueWriter, GhLabel, GqlVar, ProjectFieldValue,
-    ProjectItem,
+    test_support, GhAuthor, GhComment, GhFieldKind, GhFieldValueInput, GhFieldValueRepr, GhGraphql,
+    GhIssue, GhIssueDependencyApi, GhIssueReader, GhIssueWriter, GhLabel, GqlVar,
+    ProjectFieldValue, ProjectItem,
 };
 use lazyspec::engine::gh_schema::{GhSchemaSnapshot, OptionId, ProjectFieldId};
 use lazyspec::engine::issue_body::TypeMatchRule;
@@ -12,9 +12,7 @@ use lazyspec::engine::issue_cache::IssueCache;
 use lazyspec::engine::issue_map::IssueMap;
 use lazyspec::engine::store::Store;
 use lazyspec::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
-use lazyspec::engine::sync::{
-    sync_all, GhIssueSync, GhMaps, GhRound, SyncContext, SyncOutcome, Syncers,
-};
+use lazyspec::engine::sync::{sync_all, GhMaps, GhRound, SyncContext, SyncOutcome, Syncers};
 use lazyspec::tui::state::App;
 use std::cell::RefCell;
 use std::fs;
@@ -490,15 +488,23 @@ impl GhGraphql for BoardGh {
     fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
         self.remote_calls.borrow_mut().push("graphql".to_string());
         if lazyspec::engine::gh_fetch::is_round_query(query) {
-            let mut resp = crate::common::round_response_with_issues(query, &self.issues);
+            let mut resp = test_support::with_issue_pages(
+                query,
+                test_support::round_response(&[], &[], &[]),
+                &self.issues,
+            );
             if self.items_unreadable {
-                return Ok(crate::common::without_project_items(
+                return Ok(test_support::without_project_items(
                     resp,
                     "your token has not been granted the required scopes: project",
                 ));
             }
             for (node_id, items) in &self.items {
-                resp = crate::common::with_project_items(resp, node_id, items);
+                resp = test_support::with_project_items_edge(
+                    resp,
+                    node_id,
+                    test_support::project_items_edge(items),
+                );
             }
             return Ok(resp);
         }
@@ -585,9 +591,6 @@ impl GhGraphql for BoardGh {
 }
 
 impl GhIssueDependencyApi for BoardGh {
-    fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
-        Ok(vec![])
-    }
     fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
         unreachable!("no dependency writes on the fetch read path")
     }
@@ -607,21 +610,22 @@ fn sync_tickets(tmp: &TempDir, config: &Config, gh: &BoardGh) -> Vec<SyncOutcome
         clickup: None,
         fetch: None,
     };
+    let round = GhRound {
+        gh,
+        repo: "octo-org/repo".to_string(),
+    };
     let mut syncers = Syncers {
-        round: Some(GhRound {
-            gh,
-            repo: "octo-org/repo".to_string(),
-        }),
-        issue: Some(GhIssueSync {
-            graphql: gh,
-            repo: "octo-org/repo".to_string(),
-            type_rules: config
-                .documents
-                .types
-                .iter()
-                .map(TypeMatchRule::from)
-                .collect(),
-        }),
+        issue: Some(
+            round.issue_sync(
+                config
+                    .documents
+                    .types
+                    .iter()
+                    .map(TypeMatchRule::from)
+                    .collect(),
+            ),
+        ),
+        round: Some(round),
         ..Default::default()
     };
     sync_all(tmp.path(), config, &mut ctx, &mut syncers, None)
