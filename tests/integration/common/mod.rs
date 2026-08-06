@@ -214,6 +214,48 @@ impl lazyspec::engine::gh::GhIssueReader for NoopGh {
     }
 }
 
+fn edge(nodes: Vec<serde_json::Value>, has_next_page: bool) -> serde_json::Value {
+    serde_json::json!({"pageInfo": {"hasNextPage": has_next_page}, "nodes": nodes})
+}
+
+/// An issue's sub-issue children as the round selects them inline.
+pub fn sub_issue_edge(children: &[&str]) -> serde_json::Value {
+    edge(
+        children
+            .iter()
+            .map(|id| serde_json::json!({"id": id}))
+            .collect(),
+        false,
+    )
+}
+
+/// Replace the `subIssues` connection of the issue with node id `node_id` on
+/// every alias of a round response, so a double answers the connection the round
+/// selects inline rather than a query of its own.
+pub fn with_sub_issues(
+    mut resp: serde_json::Value,
+    node_id: &str,
+    edge: serde_json::Value,
+) -> serde_json::Value {
+    let Some(repo) = resp
+        .pointer_mut("/data/repository")
+        .and_then(|v| v.as_object_mut())
+    else {
+        return resp;
+    };
+    for (_, alias) in repo.iter_mut() {
+        let Some(nodes) = alias.get_mut("nodes").and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        for node in nodes {
+            if node.get("id").and_then(|v| v.as_str()) == Some(node_id) {
+                node["subIssues"] = edge.clone();
+            }
+        }
+    }
+    resp
+}
+
 /// What a composed fetch round (RFC-065) answers a double holding `issues`:
 /// one finished page on every alias `query` composed, under a repository with
 /// no milestones and a user owner -- so neither the milestone cache nor the
@@ -248,7 +290,9 @@ pub fn round_response_with_issues(
                     .collect::<Vec<_>>()},
                 "assignees": {"nodes": issue.assignees.iter()
                     .map(|a| serde_json::json!({"login": a.login}))
-                    .collect::<Vec<_>>()}
+                    .collect::<Vec<_>>()},
+                "subIssues": edge(vec![], false),
+                "blockedBy": edge(vec![], false)
             })
         })
         .collect();

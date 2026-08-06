@@ -474,27 +474,6 @@ pub trait GhIssueDependencyApi {
         blocked_number: u64,
         blocking_number: u64,
     ) -> Result<()>;
-
-    /// Batched variant of [`list_blocked_by`](GhIssueDependencyApi::list_blocked_by):
-    /// resolve native `blocked-by` edges for many issues at once. `issues`
-    /// pairs each issue's content node id with its number -- the node id is
-    /// what the real GraphQL batch keys on (`nodes(ids:)`), the number is
-    /// what every caller and the REST fallback both already index by. The
-    /// default loops one `list_blocked_by` REST call per issue (correct,
-    /// serial, and what every test double gets for free); `GhCli` overrides it
-    /// with a single `blockedBy` query per [`GH_NODES_BATCH_MAX`]-sized chunk
-    /// of node ids.
-    fn list_blocked_by_batch(
-        &self,
-        repo: &str,
-        issues: &[(String, u64)],
-    ) -> Result<HashMap<u64, Vec<u64>>> {
-        let mut out = HashMap::new();
-        for (_, number) in issues {
-            out.insert(*number, self.list_blocked_by(repo, *number)?);
-        }
-        Ok(out)
-    }
 }
 
 pub trait GhAuth {
@@ -985,25 +964,14 @@ impl<T: GhGraphql + AsAny> GhProjectsClient for T {
 
 const PROJECT_ITEM_FIELDS_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on Issue { projectItems(first: 50) { nodes { id project { number } fieldValues(first: 50) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldIterationValue { title field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } } } } } } } }";
 
-/// GitHub caps a single `nodes(ids:)` selection at 100 ids (mirrors
-/// `gh_subissue::SUB_ISSUE_BATCH_MAX`). Shared by every `nodes(ids:)` batch in
-/// this file -- project items and native blocked-by alike -- since the cap is
-/// GitHub's, not a property of either feature.
+/// GitHub caps a single `nodes(ids:)` selection at 100 ids. The project-item
+/// batch is its last user: sub-issue parentage and native blocked-by both ride
+/// the composed fetch round now (RFC-065) and need no id list at all.
 pub const GH_NODES_BATCH_MAX: usize = 100;
 
 /// Batched variant of [`PROJECT_ITEM_FIELDS_QUERY`]: the same field selection,
 /// resolved for many issues at once via `nodes(ids:)`.
 const PROJECT_ITEM_FIELDS_BATCH_QUERY: &str = "query($ids: [ID!]!) { nodes(ids: $ids) { ... on Issue { id projectItems(first: 50) { nodes { id project { number } fieldValues(first: 50) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldIterationValue { title field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } } } } } } } }";
-
-/// Batched read of native `blockedBy` edges via `nodes(ids:)`. GitHub's
-/// GraphQL schema exposes `blockedBy`/`blocking` directly on `Issue`
-/// (`gh issue` surfaced them as of CLI 2.94.0), so the dependency read-back
-/// batches the same way sub-issue parentage does, even though its write side
-/// ([`GhIssueDependencyApi::list_blocked_by`]) stays REST -- GitHub's REST
-/// dependency endpoints have no bulk form. The outer `number` is selected so
-/// results key by issue number directly, without a separate node-id -> number
-/// map at the call site.
-const BLOCKED_BY_BATCH_QUERY: &str = "query($ids: [ID!]!) { nodes(ids: $ids) { ... on Issue { number blockedBy(first: 100) { nodes { number } } } } }";
 
 const UPDATE_PROJECT_FIELD_MUTATION: &str = "mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) { updateProjectV2ItemFieldValue(input: {projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: __VALUE__}) { projectV2Item { id } } }";
 
@@ -1027,8 +995,7 @@ pub fn parse_project_items(resp: &serde_json::Value) -> Vec<ProjectItem> {
 /// Parse the `projectItems.nodes` of a [`PROJECT_ITEM_FIELDS_BATCH_QUERY`]
 /// response into `content_node_id -> its project items`. A node absent from
 /// GitHub's response (non-Issue, inaccessible, or dropped by a failed chunk
-/// upstream) is simply absent from the map, mirroring
-/// `gh_subissue::fetch_sub_issue_nodes_batch`.
+/// upstream) is simply absent from the map.
 fn parse_project_items_batch(resp: &serde_json::Value) -> HashMap<String, Vec<ProjectItem>> {
     let mut out = HashMap::new();
     let Some(nodes) = resp.pointer("/data/nodes").and_then(|v| v.as_array()) else {
@@ -1044,33 +1011,6 @@ fn parse_project_items_batch(resp: &serde_json::Value) -> HashMap<String, Vec<Pr
             .map(|arr| parse_project_items_array(arr))
             .unwrap_or_default();
         out.insert(id.to_string(), items);
-    }
-    out
-}
-
-/// Parse a [`BLOCKED_BY_BATCH_QUERY`] response into `issue number -> the
-/// numbers of the issues blocking it`. A node with no resolvable `number`
-/// (non-Issue, inaccessible, or dropped by a failed chunk upstream) is simply
-/// absent from the map.
-fn parse_blocked_by_batch(resp: &serde_json::Value) -> HashMap<u64, Vec<u64>> {
-    let mut out = HashMap::new();
-    let Some(nodes) = resp.pointer("/data/nodes").and_then(|v| v.as_array()) else {
-        return out;
-    };
-    for node in nodes {
-        let Some(number) = node.get("number").and_then(|v| v.as_u64()) else {
-            continue;
-        };
-        let blockers = node
-            .pointer("/blockedBy/nodes")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|n| n.get("number").and_then(|v| v.as_u64()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        out.insert(number, blockers);
     }
     out
 }
@@ -1567,23 +1507,6 @@ impl GhIssueDependencyApi for GhCli {
         self.run_gh_checked(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
         Ok(())
     }
-
-    fn list_blocked_by_batch(
-        &self,
-        _repo: &str,
-        issues: &[(String, u64)],
-    ) -> Result<HashMap<u64, Vec<u64>>> {
-        let node_ids: Vec<String> = issues.iter().map(|(id, _)| id.clone()).collect();
-        let mut out = HashMap::new();
-        for chunk in node_ids.chunks(GH_NODES_BATCH_MAX) {
-            let resp = self.graphql(
-                BLOCKED_BY_BATCH_QUERY,
-                &[("ids", GqlVar::StrList(chunk.to_vec()))],
-            )?;
-            out.extend(parse_blocked_by_batch(&resp));
-        }
-        Ok(out)
-    }
 }
 
 impl GhAuth for GhCli {
@@ -1840,8 +1763,81 @@ pub mod test_support {
         resp
     }
 
+    /// An issue's sub-issue children as the round selects them inline. Use
+    /// [`with_sub_issues`] to attach one to a round response.
+    pub fn sub_issue_edge(children: &[&str]) -> serde_json::Value {
+        edge(
+            children
+                .iter()
+                .map(|id| serde_json::json!({"id": id}))
+                .collect(),
+            false,
+        )
+    }
+
+    /// The numbers blocking an issue, as the round selects them inline.
+    pub fn blocked_by_edge(blockers: &[u64]) -> serde_json::Value {
+        edge(
+            blockers
+                .iter()
+                .map(|number| serde_json::json!({"number": number}))
+                .collect(),
+            false,
+        )
+    }
+
+    fn edge(nodes: Vec<serde_json::Value>, has_next_page: bool) -> serde_json::Value {
+        serde_json::json!({"pageInfo": {"hasNextPage": has_next_page}, "nodes": nodes})
+    }
+
+    /// Replace the `subIssues` connection of the issue with node id `node_id` on
+    /// every alias of a round response. Doubles answer the round's inline
+    /// connections this way rather than the retired `nodes(ids:)` batch.
+    pub fn with_sub_issues(
+        resp: serde_json::Value,
+        node_id: &str,
+        edge: serde_json::Value,
+    ) -> serde_json::Value {
+        with_issue_edge(resp, node_id, "subIssues", edge)
+    }
+
+    /// As [`with_sub_issues`], for the `blockedBy` connection.
+    pub fn with_blocked_by(
+        resp: serde_json::Value,
+        node_id: &str,
+        edge: serde_json::Value,
+    ) -> serde_json::Value {
+        with_issue_edge(resp, node_id, "blockedBy", edge)
+    }
+
+    fn with_issue_edge(
+        mut resp: serde_json::Value,
+        node_id: &str,
+        field: &str,
+        edge: serde_json::Value,
+    ) -> serde_json::Value {
+        let Some(repo) = resp
+            .pointer_mut("/data/repository")
+            .and_then(|v| v.as_object_mut())
+        else {
+            return resp;
+        };
+        for (_, alias) in repo.iter_mut() {
+            let Some(nodes) = alias.get_mut("nodes").and_then(|v| v.as_array_mut()) else {
+                continue;
+            };
+            for node in nodes {
+                if node.get("id").and_then(|v| v.as_str()) == Some(node_id) {
+                    node[field] = edge.clone();
+                }
+            }
+        }
+        resp
+    }
+
     /// One issue as `repository.issues.nodes` carries it: REST's fields, with
-    /// `labels` and `assignees` in the `nodes` connection GraphQL wraps them in.
+    /// `labels` and `assignees` in the `nodes` connection GraphQL wraps them in,
+    /// and the inline edge connections empty until a test attaches one.
     pub fn issue_node(issue: &GhIssue) -> serde_json::Value {
         serde_json::json!({
             "id": issue.id,
@@ -1860,7 +1856,9 @@ pub mod test_support {
                 .collect::<Vec<_>>()},
             "assignees": {"nodes": issue.assignees.iter()
                 .map(|a| serde_json::json!({"login": a.login}))
-                .collect::<Vec<_>>()}
+                .collect::<Vec<_>>()},
+            "subIssues": sub_issue_edge(&[]),
+            "blockedBy": blocked_by_edge(&[])
         })
     }
 
@@ -1879,6 +1877,9 @@ pub mod test_support {
         pub other_queries: RefCell<Vec<String>>,
         pub milestone_list_calls: Cell<usize>,
         pub board_columns: Vec<(u64, Vec<String>)>,
+        /// Whether the round answers with issues carrying sub-issue and
+        /// blocked-by edges. See [`GhRequestCounter::with_enriched_issues`].
+        enriched: bool,
     }
 
     impl GhRequestCounter {
@@ -1892,6 +1893,42 @@ pub mod test_support {
                 ..Default::default()
             }
         }
+
+        /// Answer every alias with a parent issue `#1`, its sub-issue child `#2`,
+        /// and a `blockedBy` edge from `#1` to `#2` -- so a fetch that still read
+        /// either edge through a query of its own would land in `other_queries`.
+        pub fn with_enriched_issues(mut self) -> Self {
+            self.enriched = true;
+            self
+        }
+
+        fn round_issues(&self) -> Vec<GhIssue> {
+            if !self.enriched {
+                return Vec::new();
+            }
+            [1u64, 2]
+                .iter()
+                .map(|&number| counted_issue(number))
+                .collect()
+        }
+    }
+
+    fn counted_issue(number: u64) -> GhIssue {
+        GhIssue {
+            number,
+            id: format!("I_{}", number),
+            url: String::new(),
+            title: format!("issue {}", number),
+            body: String::new(),
+            labels: Vec::new(),
+            state: "OPEN".to_string(),
+            updated_at: "2026-08-01T00:00:00Z".to_string(),
+            created_at: "2026-08-01T00:00:00Z".to_string(),
+            author: None,
+            issue_type: None,
+            milestone: None,
+            assignees: Vec::new(),
+        }
     }
 
     impl GhGraphql for GhRequestCounter {
@@ -1901,11 +1938,16 @@ pub mod test_support {
                 bail!("GhRequestCounter answers composed rounds only");
             }
             self.round_queries.borrow_mut().push(query.to_string());
-            Ok(with_issue_pages(
+            let mut resp = with_issue_pages(
                 query,
                 round_response(&[], &[], &self.board_columns),
-                &[],
-            ))
+                &self.round_issues(),
+            );
+            if self.enriched {
+                resp = with_sub_issues(resp, "I_1", sub_issue_edge(&["I_2"]));
+                resp = with_blocked_by(resp, "I_1", blocked_by_edge(&[2]));
+            }
+            Ok(resp)
         }
 
         fn project_items(&self, _repo: &str, _content_node_id: &str) -> Result<Vec<ProjectItem>> {
@@ -2065,6 +2107,9 @@ pub mod test_support {
         /// does not have to account for the round the fetch path now runs.
         pub round_milestones: RefCell<Vec<GhMilestone>>,
         pub round_issue_types: RefCell<Vec<crate::engine::gh_schema::IssueTypeId>>,
+        /// The `blockedBy` edges a composed round answers inline, per issue node
+        /// id. Empty on every issue unless a test sets one.
+        pub round_blocked_by: RefCell<Vec<(String, Vec<u64>)>>,
         pub view_comments: RefCell<Vec<GhComment>>,
         pub comments_call_count: Cell<usize>,
         pub project_items: RefCell<Vec<ProjectItem>>,
@@ -2112,6 +2157,7 @@ pub mod test_support {
                 graphql_calls: RefCell::new(vec![]),
                 round_milestones: RefCell::new(vec![]),
                 round_issue_types: RefCell::new(vec![]),
+                round_blocked_by: RefCell::new(vec![]),
                 view_comments: RefCell::new(vec![]),
                 comments_call_count: Cell::new(0),
                 project_items: RefCell::new(vec![]),
@@ -2179,6 +2225,15 @@ pub mod test_support {
             issue_types: Vec<crate::engine::gh_schema::IssueTypeId>,
         ) -> Self {
             self.round_issue_types = RefCell::new(issue_types);
+            self
+        }
+
+        /// The numbers blocking the issue with node id `node_id`, as the round
+        /// selects them inline on that issue.
+        pub fn with_round_blocked_by(self, node_id: &str, blockers: Vec<u64>) -> Self {
+            self.round_blocked_by
+                .borrow_mut()
+                .push((node_id.to_string(), blockers));
             self
         }
 
@@ -2886,7 +2941,7 @@ pub mod test_support {
                 .push((query.to_string(), recorded));
 
             if crate::engine::gh_fetch::is_round_query(query) {
-                return Ok(with_issue_pages(
+                let mut resp = with_issue_pages(
                     query,
                     round_response(
                         &self.round_milestones.borrow(),
@@ -2894,7 +2949,11 @@ pub mod test_support {
                         &[],
                     ),
                     &self.list_result,
-                ));
+                );
+                for (node_id, blockers) in self.round_blocked_by.borrow().iter() {
+                    resp = with_blocked_by(resp, node_id, blocked_by_edge(blockers));
+                }
+                return Ok(resp);
             }
 
             let mut responses = self.graphql_responses.borrow_mut();

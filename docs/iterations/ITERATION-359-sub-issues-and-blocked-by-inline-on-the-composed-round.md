@@ -1,7 +1,7 @@
 ---
 title: Sub-issues and blocked-by inline on the composed round
 type: iteration
-status: accepted
+status: in-progress
 author: Jack Kaloger
 date: 2026-08-06
 tags: []

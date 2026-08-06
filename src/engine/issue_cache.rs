@@ -5,10 +5,9 @@ use std::path::{Path, PathBuf};
 use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{AttrDef, Config, Lifecycle, TypeDef};
 use crate::engine::document::{AttrValue, DocMeta, Relation, RelationType, Status};
-use crate::engine::gh::{GhGraphql, GhIssue, GhIssueDependencyApi};
+use crate::engine::gh::{GhGraphql, GhIssue};
 use crate::engine::gh_fetch::{self, FetchSnapshot};
 use crate::engine::gh_schema;
-use crate::engine::gh_subissue;
 use crate::engine::issue_body::{self, IssueContext, TypeMatchRule};
 use crate::engine::issue_map::IssueMap;
 use crate::engine::store;
@@ -35,8 +34,9 @@ pub struct RefreshWarning {
 }
 
 /// Remote sub-issue parentage, keyed by parent doc id. Each value is the
-/// parent's children in GitHub sub-issue order (doc ids). TASK-3 consumes this
-/// to write the nested cache layout; built best-effort by `fetch_all`.
+/// parent's children in GitHub sub-issue order (doc ids). `fetch_all` builds it
+/// from the round's inline `subIssues` edges and writes the nested layout from
+/// it.
 pub type ParentageMap = std::collections::HashMap<String, Vec<String>>;
 
 pub struct IssueCache {
@@ -350,20 +350,17 @@ impl IssueCache {
     /// the whole type directory. A round that did not resolve this type is an
     /// `Err`: an absent list is unknown, never empty, and treating it as empty
     /// would delete the cache the round failed to refresh.
-    #[allow(clippy::too_many_arguments)]
     pub fn fetch_all(
         &self,
         root: &Path,
         type_def: &TypeDef,
-        gh_graphql: &dyn GhGraphql,
-        gh_dependency: &dyn GhIssueDependencyApi,
         fetch: Option<&FetchSnapshot>,
-        repo: &str,
         issue_map: &mut IssueMap,
         known_types: &[TypeMatchRule],
         config: &Config,
     ) -> anyhow::Result<FetchResult> {
-        let Some(issues) = fetch.and_then(|f| f.issues.get(&type_def.name)) else {
+        let Some((round, issues)) = fetch.and_then(|f| Some((f, f.issues.get(&type_def.name)?)))
+        else {
             anyhow::bail!(
                 "the github fetch round did not resolve issues for type '{}'; \
                  the cache was left unchanged",
@@ -442,73 +439,51 @@ impl IssueCache {
         let subissue_rel = config.relationship_by_github_native("sub-issue");
         let inject_subissue_relation = subissue_rel.is_some() && !type_def.subdirectory;
 
-        // Best-effort: learn remote native sub-issue parentage so we can write
-        // the nested cache layout. A GraphQL failure warns and falls back to a
-        // flat layout for the affected parent; it never aborts the fetch.
+        // A connection the round capped is a real loss of remote state, so name
+        // the document and the edge rather than write the short list silently.
+        warnings.extend(truncation_warnings(round, &node_to_doc));
+
+        // The nested cache layout comes from the round's own sub-issue edges --
+        // selected inline on each issue, so no request of their own.
         let parentage = if inject_subissue_relation {
             ParentageMap::new()
         } else {
-            let (parentage, subissue_warnings) = fetch_subissue_parentage(gh_graphql, &node_to_doc);
-            warnings.extend(subissue_warnings);
-            parentage
+            parentage_from(round, &node_to_doc)
         };
 
-        // Best-effort: read each issue's native blocked-by dependencies and
-        // inject the declared inverse relation (`blocked-by`) toward each
+        // number -> doc id for the current fetch batch, so a same-type blocker
+        // or parent resolves before the batch is written into the issue map
+        // (cross-type ones resolve via the map once their type fetches, the same
+        // ordering caveat milestones carry).
+        let batch: std::collections::HashMap<u64, String> = issues
+            .iter()
+            .zip(parsed.iter())
+            .map(|(issue, p)| (issue.number, p.id.clone()))
+            .collect();
+
+        // Inject the declared inverse relation (`blocked-by`) toward each
         // blocking issue's doc. Mirrors the milestone read-back -- the forward
         // `blocks` edge on the blocker is derived virtually in `build_links`,
-        // never stored. One batched read for the whole fetch
-        // (`GhIssueDependencyApi::list_blocked_by_batch`, chunked to
-        // `gh::GH_NODES_BATCH_MAX`) rather than one request per issue; a
-        // chunk's failure warns and skips every issue in that chunk, same as a
-        // single-issue read failure did before batching.
+        // never stored.
         if let Some(dep_rel) = config
             .relationship_by_github_native("dependency")
             .and_then(|r| r.inverse.as_deref())
         {
-            // number -> doc id for the current fetch batch, so same-type
-            // blockers resolve before the batch is written into the issue map
-            // (cross-type blockers resolve via the map once their type fetches,
-            // the same ordering caveat milestones carry).
-            let batch: std::collections::HashMap<u64, String> = issues
-                .iter()
-                .zip(parsed.iter())
-                .map(|(issue, p)| (issue.number, p.id.clone()))
-                .collect();
-            // An issue with no node id can't key the GraphQL batch -- the same
-            // constraint the sub-issue parentage read above already accepts.
-            let pairs: Vec<(String, u64)> = issues
-                .iter()
-                .filter(|i| !i.id.is_empty())
-                .map(|i| (i.id.clone(), i.number))
-                .collect();
-            match gh_dependency.list_blocked_by_batch(repo, &pairs) {
-                Ok(blocked_by) => {
-                    for (issue, p) in issues.iter().zip(parsed.iter_mut()) {
-                        let Some(blockers) = blocked_by.get(&issue.number) else {
-                            continue;
-                        };
-                        for &blocker in blockers {
-                            let target = batch.get(&blocker).cloned().or_else(|| {
-                                issue_map.shorthand_for_number(blocker).map(String::from)
-                            });
-                            if let Some(target) = target {
-                                p.meta.related.push(Relation {
-                                    rel_type: RelationType::new(dep_rel),
-                                    target,
-                                });
-                            }
-                        }
+            for (issue, p) in issues.iter().zip(parsed.iter_mut()) {
+                let Some(blockers) = round.blocked_by.get(&issue.number) else {
+                    continue;
+                };
+                for &blocker in blockers {
+                    let target = batch
+                        .get(&blocker)
+                        .cloned()
+                        .or_else(|| issue_map.shorthand_for_number(blocker).map(String::from));
+                    if let Some(target) = target {
+                        p.meta.related.push(Relation {
+                            rel_type: RelationType::new(dep_rel),
+                            target,
+                        });
                     }
-                }
-                Err(e) => {
-                    warnings.push(RefreshWarning {
-                        message: format!(
-                            "could not read native dependencies for {} issues, skipping: {}",
-                            pairs.len(),
-                            e
-                        ),
-                    });
                 }
             }
         }
@@ -519,18 +494,7 @@ impl IssueCache {
         // dropped remote edge simply yields no parent on re-fetch, so the
         // relation vanishes with the authoritative rebuild, no duplicates.
         if let Some(rel) = subissue_rel.filter(|_| inject_subissue_relation) {
-            let (parent_by_child, parent_warnings) =
-                fetch_subissue_parent_numbers(gh_graphql, &node_to_doc);
-            warnings.extend(parent_warnings);
-            // number -> doc id for the in-flight batch, so a same-type parent
-            // resolves before the batch is written into the issue map; cross-type
-            // parents resolve via the map once their type has fetched (the same
-            // ordering caveat milestones and dependencies carry).
-            let batch: std::collections::HashMap<u64, String> = issues
-                .iter()
-                .zip(parsed.iter())
-                .map(|(issue, p)| (issue.number, p.id.clone()))
-                .collect();
+            let parent_by_child = subissue_parent_numbers(round);
             for (issue, p) in issues.iter().zip(parsed.iter_mut()) {
                 let Some(parent_number) = parent_by_child.get(&issue.id) else {
                     continue;
@@ -652,77 +616,77 @@ impl IssueCache {
     }
 }
 
-/// Query each fetched issue's native sub-issues and resolve the ordered child
-/// node ids back to fetched doc ids. Returns only parents that have at least one
-/// resolvable child; child node ids not present in `node_to_doc` are dropped (no
-/// phantom entries).
-///
-/// Batched: one `nodes(ids:)` GraphQL request per chunk of
-/// `SUB_ISSUE_BATCH_MAX` parents, so the call count is `ceil(N / 100)` rather
-/// than N. Best-effort per chunk: a chunk's GraphQL failure is returned as a
-/// warning and skips that chunk's parents rather than aborting. Engine emits no
-/// stderr.
-fn fetch_subissue_parentage(
-    gh_graphql: &dyn GhGraphql,
+/// The round's sub-issue edges as a nested layout: parent doc id -> children doc
+/// ids in GitHub's sub-issue order. A parent the round returned but this type did
+/// not fetch has no doc to nest under, and a child outside the type's fetch has
+/// no doc to nest -- both are dropped, so a parent left with no resolvable child
+/// is omitted rather than written as a childless folder.
+fn parentage_from(
+    round: &FetchSnapshot,
     node_to_doc: &std::collections::HashMap<String, String>,
-) -> (ParentageMap, Vec<RefreshWarning>) {
+) -> ParentageMap {
     let mut map = ParentageMap::new();
-    let mut warnings = Vec::new();
-    let parent_nodes: Vec<String> = node_to_doc.keys().cloned().collect();
-    for chunk in parent_nodes.chunks(gh_subissue::SUB_ISSUE_BATCH_MAX) {
-        let by_node = match gh_subissue::fetch_sub_issue_nodes_batch(gh_graphql, chunk) {
-            Ok(m) => m,
-            Err(e) => {
-                warnings.push(RefreshWarning {
-                    message: format!(
-                        "could not fetch sub-issues for {} parents, skipping nesting: {}",
-                        chunk.len(),
-                        e
-                    ),
-                });
-                continue;
-            }
+    for (parent_node, child_nodes) in &round.sub_issues {
+        let Some(parent_doc) = node_to_doc.get(parent_node) else {
+            continue;
         };
-        for (parent_node, child_nodes) in by_node {
-            let Some(parent_doc) = node_to_doc.get(&parent_node) else {
-                continue;
-            };
-            let children: Vec<String> = child_nodes
-                .iter()
-                .filter_map(|n| node_to_doc.get(n).cloned())
-                .collect();
-            if !children.is_empty() {
-                map.insert(parent_doc.clone(), children);
-            }
+        let children: Vec<String> = child_nodes
+            .iter()
+            .filter_map(|n| node_to_doc.get(n).cloned())
+            .collect();
+        if children.is_empty() {
+            continue;
         }
+        map.insert(parent_doc.clone(), children);
     }
-    (map, warnings)
+    map
 }
 
-/// Best-effort batched read of each fetched issue's native sub-issue parent
-/// number, keyed by the child's node id. Chunked to `SUB_ISSUE_BATCH_MAX`; a
-/// chunk's GraphQL failure warns and skips that chunk rather than aborting the
-/// fetch. Feeds the flat-doc relation read-back, mirroring the dependency path.
-fn fetch_subissue_parent_numbers(
-    gh_graphql: &dyn GhGraphql,
-    node_to_doc: &std::collections::HashMap<String, String>,
-) -> (std::collections::HashMap<String, u64>, Vec<RefreshWarning>) {
+/// The same edges read the other way: child node id -> its parent's issue
+/// number, which is what a flat child's relation targets. The parent's number
+/// comes from the round's own issue lists, so a parent of another type resolves
+/// as readily as a same-type one.
+fn subissue_parent_numbers(round: &FetchSnapshot) -> std::collections::HashMap<String, u64> {
+    let number_by_node: std::collections::HashMap<&str, u64> = round
+        .issues
+        .values()
+        .flatten()
+        .map(|issue| (issue.id.as_str(), issue.number))
+        .collect();
     let mut map = std::collections::HashMap::new();
-    let mut warnings = Vec::new();
-    let child_nodes: Vec<String> = node_to_doc.keys().cloned().collect();
-    for chunk in child_nodes.chunks(gh_subissue::SUB_ISSUE_BATCH_MAX) {
-        match gh_subissue::fetch_sub_issue_parent_numbers_batch(gh_graphql, chunk) {
-            Ok(m) => map.extend(m),
-            Err(e) => warnings.push(RefreshWarning {
-                message: format!(
-                    "could not read sub-issue parents for {} issues, skipping relation injection: {}",
-                    chunk.len(),
-                    e
-                ),
-            }),
+    for (parent_node, child_nodes) in &round.sub_issues {
+        let Some(&parent_number) = number_by_node.get(parent_node.as_str()) else {
+            continue;
+        };
+        for child in child_nodes {
+            map.insert(child.clone(), parent_number);
         }
     }
-    (map, warnings)
+    map
+}
+
+/// One warning per capped connection the round reported more of, naming the
+/// document it belongs to and the edge that was cut short. An issue this type
+/// did not fetch has no doc id here; the type that owns it warns instead.
+fn truncation_warnings(
+    round: &FetchSnapshot,
+    node_to_doc: &std::collections::HashMap<String, String>,
+) -> Vec<RefreshWarning> {
+    round
+        .truncations
+        .iter()
+        .filter_map(|t| {
+            let doc = node_to_doc.get(&t.node_id)?;
+            Some(RefreshWarning {
+                message: format!(
+                    "{}: `{}` truncated at {} on this fetch; the rest were not read",
+                    doc,
+                    t.connection,
+                    t.connection.cap()
+                ),
+            })
+        })
+        .collect()
 }
 
 /// Real doc ids of every `NN-<id>.md` child inside a parent folder.
@@ -1130,9 +1094,16 @@ mod tests {
     trait RoundIssues {
         fn issues(&self) -> &[GhIssue];
 
+        /// The sub-issue edges the round selected inline: parent node id ->
+        /// child node ids, in server order. Empty for a double with none.
+        fn sub_issues(&self) -> HashMap<String, Vec<String>> {
+            HashMap::new()
+        }
+
         fn round(&self, type_name: &str) -> FetchSnapshot {
             FetchSnapshot {
                 issues: HashMap::from([(type_name.to_string(), self.issues().to_vec())]),
+                sub_issues: self.sub_issues(),
                 ..Default::default()
             }
         }
@@ -1789,10 +1760,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &gh,
-                &gh,
                 Some(&gh.round(&type_def.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -1825,10 +1793,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &gh,
-                &gh,
                 Some(&gh.round(&type_def.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -1839,10 +1804,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &gh,
-                &gh,
                 Some(&FetchSnapshot::default()),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -1874,10 +1836,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &gh,
-                &gh,
                 Some(&gh.round(&type_def.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -1964,10 +1923,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &story_type,
-                &gh,
-                &gh,
                 Some(&gh.round(&story_type.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -1978,10 +1934,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &ticket_type,
-                &gh,
-                &gh,
                 Some(&gh.round(&ticket_type.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[ticket_match_rule()],
                 &Config::default(),
@@ -2032,10 +1985,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &story_type,
-                &seed_gh,
-                &seed_gh,
                 Some(&seed_gh.round(&story_type.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -2045,10 +1995,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &ticket_type,
-                &seed_gh,
-                &seed_gh,
                 Some(&seed_gh.round(&ticket_type.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[ticket_match_rule()],
                 &Config::default(),
@@ -2190,10 +2137,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &gh,
-                &gh,
                 Some(&gh.round(&type_def.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -2234,10 +2178,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &gh,
-                &gh,
                 Some(&round),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -2266,10 +2207,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &initial_gh,
-                &initial_gh,
                 Some(&initial_gh.round(&type_def.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -2290,10 +2228,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &updated_gh,
-                &updated_gh,
                 Some(&updated_gh.round(&type_def.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -2339,10 +2274,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &gh,
-                &gh,
                 Some(&gh.round(&type_def.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -2387,10 +2319,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &gh,
-                &gh,
                 Some(&gh.round(&type_def.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -2747,10 +2676,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &gh,
-                &gh,
                 Some(&gh.round(&type_def.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -2814,10 +2740,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &gh,
-                &gh,
                 Some(&gh.round(&type_def.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -2847,10 +2770,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &gh,
-                &gh,
                 Some(&gh.round(&type_def.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -2876,10 +2796,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &gh,
-                &gh,
                 Some(&gh.round(&type_def.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -3050,10 +2967,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &gh,
-                &gh,
                 Some(&gh.round(&type_def.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -3102,10 +3016,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &gh,
-                &gh,
                 Some(&round),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &config_with_status_authority(Some("PROJECT-7")),
@@ -3348,10 +3259,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &gh,
-                &gh,
                 Some(&gh.round(&type_def.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &config,
@@ -3559,106 +3467,7 @@ mod tests {
         assert!(!root.join(".lazyspec/cache/story/STORY-100").exists());
     }
 
-    // --- fetch_subissue_parentage tests ---
-
-    /// GhGraphql mock for the batched `nodes(ids:)` parentage query. Maps each
-    /// parent node id to `Some(child node ids)`, or `None` to emit a `null`
-    /// node (inaccessible / non-Issue). `fail` makes every query error,
-    /// simulating a chunk-level GraphQL failure. `calls` counts graphql
-    /// invocations so tests can assert batching.
-    struct ParentGraphql {
-        by_node: std::collections::HashMap<String, Option<Vec<String>>>,
-        fail: bool,
-        calls: std::cell::Cell<usize>,
-    }
-
-    impl ParentGraphql {
-        fn new(entries: &[(&str, Option<&[&str]>)]) -> Self {
-            Self {
-                by_node: entries
-                    .iter()
-                    .map(|(n, kids)| {
-                        let kids = kids.map(|k| k.iter().map(|s| s.to_string()).collect());
-                        (n.to_string(), kids)
-                    })
-                    .collect(),
-                fail: false,
-                calls: std::cell::Cell::new(0),
-            }
-        }
-
-        fn failing() -> Self {
-            Self {
-                by_node: std::collections::HashMap::new(),
-                fail: true,
-                calls: std::cell::Cell::new(0),
-            }
-        }
-    }
-
-    impl GhGraphql for ParentGraphql {
-        fn graphql(&self, _query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
-            let ids = vars
-                .iter()
-                .find(|(k, _)| *k == "ids")
-                .and_then(|(_, v)| match v {
-                    GqlVar::StrList(l) => Some(l.clone()),
-                    _ => None,
-                });
-            // Schema-snapshot refresh has no `ids` var.
-            let Some(ids) = ids else {
-                return Ok(empty_issue_types_response());
-            };
-            self.calls.set(self.calls.get() + 1);
-            if self.fail {
-                anyhow::bail!("graphql failed");
-            }
-            let nodes: Vec<serde_json::Value> = ids
-                .iter()
-                .map(|id| match self.by_node.get(id) {
-                    Some(Some(kids)) => serde_json::json!({
-                        "id": id,
-                        "subIssues": {
-                            "nodes": kids
-                                .iter()
-                                .map(|k| serde_json::json!({"id": k}))
-                                .collect::<Vec<_>>()
-                        }
-                    }),
-                    Some(None) => serde_json::Value::Null,
-                    None => serde_json::json!({"id": id, "subIssues": {"nodes": []}}),
-                })
-                .collect();
-            Ok(serde_json::json!({"data": {"nodes": nodes}}))
-        }
-
-        fn project_items(
-            &self,
-            _repo: &str,
-            _content_node_id: &str,
-        ) -> Result<Vec<crate::engine::gh::ProjectItem>> {
-            Ok(vec![])
-        }
-
-        fn update_project_v2_item_field_value(
-            &self,
-            _project_id: &str,
-            _item_id: &str,
-            _field_id: &str,
-            _value: &crate::engine::gh::GhFieldValueInput,
-        ) -> Result<()> {
-            Ok(())
-        }
-
-        fn clear_project_field(
-            &self,
-            _project_id: &str,
-            _item_id: &str,
-            _field_id: &str,
-        ) -> Result<()> {
-            Ok(())
-        }
-    }
+    // --- sub-issue edges off the composed round ---
 
     fn node_to_doc(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
         pairs
@@ -3667,16 +3476,32 @@ mod tests {
             .collect()
     }
 
+    /// A round that learned `sub_issues` and nothing else.
+    fn round_with_sub_issues(edges: &[(&str, &[&str])]) -> FetchSnapshot {
+        FetchSnapshot {
+            sub_issues: edges
+                .iter()
+                .map(|(parent, kids)| {
+                    (
+                        parent.to_string(),
+                        kids.iter().map(|k| k.to_string()).collect(),
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn parentage_resolves_children_in_subissue_order() {
-        let gql = ParentGraphql::new(&[("I_parent", Some(&["I_b", "I_a"]))]);
+        let round = round_with_sub_issues(&[("I_parent", &["I_b", "I_a"])]);
         let map = node_to_doc(&[
             ("I_parent", "STORY-1"),
             ("I_a", "STORY-2"),
             ("I_b", "STORY-3"),
         ]);
 
-        let (parentage, _) = fetch_subissue_parentage(&gql, &map);
+        let parentage = parentage_from(&round, &map);
 
         // Children preserve GitHub sub-issue order (I_b before I_a).
         assert_eq!(
@@ -3688,82 +3513,225 @@ mod tests {
     #[test]
     fn parentage_drops_unresolvable_child_nodes() {
         // I_unknown is not among the fetched issues.
-        let gql = ParentGraphql::new(&[("I_parent", Some(&["I_a", "I_unknown"]))]);
+        let round = round_with_sub_issues(&[("I_parent", &["I_a", "I_unknown"])]);
         let map = node_to_doc(&[("I_parent", "STORY-1"), ("I_a", "STORY-2")]);
 
-        let (parentage, _) = fetch_subissue_parentage(&gql, &map);
+        let parentage = parentage_from(&round, &map);
 
         assert_eq!(parentage.get("STORY-1"), Some(&vec!["STORY-2".to_string()]));
     }
 
     #[test]
-    fn parentage_skips_inaccessible_parent_node() {
-        // I_p1 comes back as a `null` node (inaccessible / non-Issue); I_p2 resolves.
-        let gql = ParentGraphql::new(&[("I_p1", None), ("I_p2", Some(&["I_c"]))]);
-        let map = node_to_doc(&[("I_p1", "STORY-1"), ("I_p2", "STORY-2"), ("I_c", "STORY-3")]);
+    fn parentage_skips_a_parent_this_type_did_not_fetch() {
+        // I_other is a parent of another type; its children are not this type's
+        // to nest, so it contributes nothing rather than a phantom entry.
+        let round = round_with_sub_issues(&[("I_other", &["I_c"]), ("I_p2", &["I_c"])]);
+        let map = node_to_doc(&[("I_p2", "STORY-2"), ("I_c", "STORY-3")]);
 
-        let (parentage, _) = fetch_subissue_parentage(&gql, &map);
+        let parentage = parentage_from(&round, &map);
 
-        assert!(!parentage.contains_key("STORY-1"));
+        assert_eq!(parentage.len(), 1);
         assert_eq!(parentage.get("STORY-2"), Some(&vec!["STORY-3".to_string()]));
     }
 
     #[test]
-    fn parentage_warns_and_skips_chunk_on_graphql_failure() {
-        let gql = ParentGraphql::failing();
-        let map = node_to_doc(&[("I_p1", "STORY-1"), ("I_p2", "STORY-2")]);
-
-        let (parentage, warnings) = fetch_subissue_parentage(&gql, &map);
-
-        assert!(parentage.is_empty());
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].message.contains("skipping nesting"));
-    }
-
-    #[test]
-    fn parentage_omits_childless_parents() {
-        let gql = ParentGraphql::new(&[("I_parent", Some(&[]))]);
+    fn parentage_omits_parents_with_no_resolvable_child() {
+        let round = round_with_sub_issues(&[("I_parent", &["I_elsewhere"])]);
         let map = node_to_doc(&[("I_parent", "STORY-1")]);
 
-        let (parentage, _) = fetch_subissue_parentage(&gql, &map);
-
-        assert!(parentage.is_empty());
+        assert!(parentage_from(&round, &map).is_empty());
     }
 
     #[test]
-    fn parentage_batches_parents_into_one_query() {
-        let gql = ParentGraphql::new(&[
-            ("I_a", Some(&["I_c"])),
-            ("I_b", Some(&[])),
-            ("I_c", Some(&[])),
-        ]);
-        let map = node_to_doc(&[("I_a", "STORY-1"), ("I_b", "STORY-2"), ("I_c", "STORY-3")]);
+    fn subissue_parent_numbers_invert_the_rounds_edges() {
+        let mut parent = make_gh_issue(100, "STORY-100", "b", &[]);
+        parent.id = "I_parent".to_string();
+        let mut round = round_with_sub_issues(&[("I_parent", &["I_a", "I_b"])]);
+        round
+            .issues
+            .insert("story".to_string(), vec![parent.clone()]);
 
-        let (parentage, _) = fetch_subissue_parentage(&gql, &map);
+        let by_child = subissue_parent_numbers(&round);
 
-        // Three parents, one GraphQL call (no N+1).
-        assert_eq!(gql.calls.get(), 1);
-        assert_eq!(parentage.get("STORY-1"), Some(&vec!["STORY-3".to_string()]));
+        assert_eq!(by_child.get("I_a"), Some(&100));
+        assert_eq!(by_child.get("I_b"), Some(&100));
     }
 
     #[test]
-    fn parentage_chunks_above_batch_max() {
-        let n = gh_subissue::SUB_ISSUE_BATCH_MAX + 1;
-        let entries: Vec<(String, String)> = (0..n)
-            .map(|i| (format!("I_{i}"), format!("STORY-{i}")))
-            .collect();
-        let gql = ParentGraphql::new(
-            &entries
-                .iter()
-                .map(|(node, _)| (node.as_str(), Some(&[][..])))
-                .collect::<Vec<_>>(),
+    fn subissue_parent_numbers_resolve_a_parent_of_another_type() {
+        // The parent came back on a different alias; its number is still the
+        // round's to give, so the child's relation resolves.
+        let mut parent = make_gh_issue(7, "EPIC-7", "b", &[]);
+        parent.id = "I_epic".to_string();
+        let mut round = round_with_sub_issues(&[("I_epic", &["I_child"])]);
+        round.issues.insert("epic".to_string(), vec![parent]);
+
+        assert_eq!(subissue_parent_numbers(&round).get("I_child"), Some(&7));
+    }
+
+    #[test]
+    fn subissue_parent_numbers_skip_a_parent_the_round_never_returned() {
+        let round = round_with_sub_issues(&[("I_unseen", &["I_child"])]);
+
+        assert!(subissue_parent_numbers(&round).is_empty());
+    }
+
+    #[test]
+    fn a_truncated_connection_warns_naming_the_document_and_the_edge() {
+        let round = FetchSnapshot {
+            truncations: vec![gh_fetch::Truncation {
+                node_id: "I_parent".to_string(),
+                connection: gh_fetch::Connection::SubIssues,
+            }],
+            ..Default::default()
+        };
+        let map = node_to_doc(&[("I_parent", "STORY-1")]);
+
+        let warnings = truncation_warnings(&round, &map);
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("STORY-1"), "{:?}", warnings[0]);
+        assert!(
+            warnings[0].message.contains("subIssues"),
+            "{:?}",
+            warnings[0]
         );
-        let map: std::collections::HashMap<String, String> = entries.into_iter().collect();
+        assert!(warnings[0].message.contains("50"), "{:?}", warnings[0]);
+    }
 
-        let (_parentage, _) = fetch_subissue_parentage(&gql, &map);
+    /// A `story` type whose config declares the native dependency relationship,
+    /// so `fetch_all` injects `blocked-by` from the round's edges.
+    fn dependency_config() -> Config {
+        let mut config = Config::default();
+        config.documents.types = vec![story_type_def()];
+        config.relationships = vec![crate::engine::config::RelationshipDef {
+            name: "blocks".to_string(),
+            inverse: Some("blocked-by".to_string()),
+            github_native: Some("dependency".to_string()),
+            traversal: None,
+        }];
+        config
+    }
 
-        // N+1 parents span two chunks -> two GraphQL calls (ceil(N/100)).
-        assert_eq!(gql.calls.get(), 2);
+    fn round_of(issues: Vec<GhIssue>) -> FetchSnapshot {
+        FetchSnapshot {
+            issues: HashMap::from([("story".to_string(), issues)]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_blocker_fetched_in_the_same_round_resolves_to_its_doc() {
+        let (cache, tmp) = make_cache();
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let mut round = round_of(vec![issue_with_node(42, "I_a"), issue_with_node(7, "I_b")]);
+        round.blocked_by = HashMap::from([(42, vec![7])]);
+
+        cache
+            .fetch_all(
+                tmp.path(),
+                &story_type_def(),
+                Some(&round),
+                &mut issue_map,
+                &[story_match_rule()],
+                &dependency_config(),
+            )
+            .unwrap();
+
+        let blocked =
+            std::fs::read_to_string(tmp.path().join(".lazyspec/cache/story/STORY-42.md")).unwrap();
+        assert!(blocked.contains("blocked-by: STORY-7"), "got:\n{blocked}");
+        // `blocks` is derived in the graph, never stored on the blocker.
+        let blocker =
+            std::fs::read_to_string(tmp.path().join(".lazyspec/cache/story/STORY-7.md")).unwrap();
+        assert!(!blocker.contains("blocks:"), "got:\n{blocker}");
+    }
+
+    #[test]
+    fn a_blocker_of_another_type_resolves_through_the_issue_map() {
+        let (cache, tmp) = make_cache();
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        // #7 belongs to a type fetched on an earlier pass, so only the map knows
+        // its doc id.
+        issue_map.insert("TICKET-7", 7, "2026-07-01T00:00:00Z", "I_b");
+        let mut round = round_of(vec![issue_with_node(42, "I_a")]);
+        round.blocked_by = HashMap::from([(42, vec![7])]);
+
+        cache
+            .fetch_all(
+                tmp.path(),
+                &story_type_def(),
+                Some(&round),
+                &mut issue_map,
+                &[story_match_rule()],
+                &dependency_config(),
+            )
+            .unwrap();
+
+        let blocked =
+            std::fs::read_to_string(tmp.path().join(".lazyspec/cache/story/STORY-42.md")).unwrap();
+        assert!(blocked.contains("blocked-by: TICKET-7"), "got:\n{blocked}");
+    }
+
+    #[test]
+    fn an_issue_with_more_children_than_the_cap_nests_what_arrived_and_warns() {
+        let (cache, tmp) = make_cache();
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        let cap = gh_fetch::Connection::SubIssues.cap();
+
+        // GitHub has 51 children; the round read the first 50 and said so.
+        let mut issues = vec![issue_with_node(100, "I_parent")];
+        issues.extend((0..cap).map(|i| issue_with_node(200 + i as u64, &format!("I_c{i}"))));
+        let mut round = round_of(issues);
+        round.sub_issues = HashMap::from([(
+            "I_parent".to_string(),
+            (0..cap).map(|i| format!("I_c{i}")).collect(),
+        )]);
+        round.truncations = vec![gh_fetch::Truncation {
+            node_id: "I_parent".to_string(),
+            connection: gh_fetch::Connection::SubIssues,
+        }];
+
+        let result = cache
+            .fetch_all(
+                tmp.path(),
+                &story_type_def(),
+                Some(&round),
+                &mut issue_map,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        let folder = tmp.path().join(".lazyspec/cache/story/STORY-100");
+        let nested = std::fs::read_dir(&folder)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name() != "index.md")
+            .count();
+        assert_eq!(nested, cap, "every child the round did read is nested");
+
+        let truncation: Vec<&str> = result
+            .warnings
+            .iter()
+            .map(|w| w.message.as_str())
+            .filter(|m| m.contains("subIssues"))
+            .collect();
+        assert_eq!(truncation.len(), 1, "{:?}", result.warnings);
+        assert!(truncation[0].contains("STORY-100"), "{}", truncation[0]);
+    }
+
+    #[test]
+    fn a_truncation_on_another_types_issue_is_left_to_that_type() {
+        let round = FetchSnapshot {
+            truncations: vec![gh_fetch::Truncation {
+                node_id: "I_elsewhere".to_string(),
+                connection: gh_fetch::Connection::BlockedBy,
+            }],
+            ..Default::default()
+        };
+
+        assert!(truncation_warnings(&round, &node_to_doc(&[])).is_empty());
     }
 
     #[test]
@@ -3782,10 +3750,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &gh,
-                &gh,
                 Some(&gh.round(&type_def.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -3810,22 +3775,26 @@ mod tests {
 
     // --- TASK-3: nested materialization on fetch ---
 
-    /// Combined GhIssueReader + GhGraphql mock for nested-fetch tests. Answers
-    /// the batched `nodes(ids:)` parentage query, returning a node per requested
-    /// id with its configured sub-issue children; any query without an `ids` var
-    /// is the schema-snapshot refresh and returns an empty issue-types response.
+    /// The remote sub-issue shape a round answers with: the type's issues plus
+    /// the parentage selected inline on them. No GraphQL seam -- a fetch reads
+    /// both off the snapshot.
     struct NestingReader {
         issues: Vec<GhIssue>,
-        sub_issues_by_node: std::collections::HashMap<String, Vec<&'static str>>,
+        sub_issues_by_node: std::collections::HashMap<String, Vec<String>>,
     }
 
     impl NestingReader {
-        fn new(issues: Vec<GhIssue>, sub_issues_by_node: &[(&str, &[&'static str])]) -> Self {
+        fn new(issues: Vec<GhIssue>, sub_issues_by_node: &[(&str, &[&str])]) -> Self {
             Self {
                 issues,
                 sub_issues_by_node: sub_issues_by_node
                     .iter()
-                    .map(|(node, kids)| (node.to_string(), kids.to_vec()))
+                    .map(|(node, kids)| {
+                        (
+                            node.to_string(),
+                            kids.iter().map(|k| k.to_string()).collect(),
+                        )
+                    })
                     .collect(),
             }
         }
@@ -3835,77 +3804,9 @@ mod tests {
         fn issues(&self) -> &[GhIssue] {
             &self.issues
         }
-    }
 
-    impl GhGraphql for NestingReader {
-        fn graphql(&self, _query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
-            let ids = vars
-                .iter()
-                .find(|(k, _)| *k == "ids")
-                .and_then(|(_, v)| match v {
-                    GqlVar::StrList(l) => Some(l.clone()),
-                    _ => None,
-                });
-            // Schema-snapshot refresh: no `ids` var.
-            let Some(ids) = ids else {
-                return Ok(empty_issue_types_response());
-            };
-            let nodes: Vec<serde_json::Value> = ids
-                .iter()
-                .map(|node| {
-                    let kids = self
-                        .sub_issues_by_node
-                        .get(node)
-                        .cloned()
-                        .unwrap_or_default();
-                    serde_json::json!({
-                        "id": node,
-                        "subIssues": {
-                            "nodes": kids
-                                .iter()
-                                .map(|k| serde_json::json!({"id": k}))
-                                .collect::<Vec<_>>()
-                        }
-                    })
-                })
-                .collect();
-            Ok(serde_json::json!({"data": {"nodes": nodes}}))
-        }
-        fn project_items(
-            &self,
-            _repo: &str,
-            _content_node_id: &str,
-        ) -> Result<Vec<crate::engine::gh::ProjectItem>> {
-            Ok(vec![])
-        }
-        fn update_project_v2_item_field_value(
-            &self,
-            _project_id: &str,
-            _item_id: &str,
-            _field_id: &str,
-            _value: &crate::engine::gh::GhFieldValueInput,
-        ) -> Result<()> {
-            Ok(())
-        }
-        fn clear_project_field(
-            &self,
-            _project_id: &str,
-            _item_id: &str,
-            _field_id: &str,
-        ) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    impl GhIssueDependencyApi for NestingReader {
-        fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
-            Ok(vec![])
-        }
-        fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
-            unimplemented!()
-        }
-        fn remove_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
-            unimplemented!()
+        fn sub_issues(&self) -> HashMap<String, Vec<String>> {
+            self.sub_issues_by_node.clone()
         }
     }
 
@@ -3925,10 +3826,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &story_type_def(),
-                gh,
-                gh,
                 Some(&gh.round("story")),
-                "owner/repo",
                 issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -4151,93 +4049,6 @@ mod tests {
 
     // --- STORY-245: relationship read-back for flat (non-subdir) docs ---
 
-    /// GhIssueReader + GhGraphql fake for the flat-doc relation read-back path.
-    /// Answers the batched `parent { number }` query, mapping each requested
-    /// child node to its remote parent's issue number; a query without an `ids`
-    /// var is the schema-snapshot refresh and returns an empty issue-types
-    /// response. Mirrors `NestingReader` but walks the parent edge.
-    struct ParentReader {
-        issues: Vec<GhIssue>,
-        parent_number_by_node: std::collections::HashMap<String, u64>,
-    }
-
-    impl ParentReader {
-        fn new(issues: Vec<GhIssue>, parents: &[(&str, u64)]) -> Self {
-            Self {
-                issues,
-                parent_number_by_node: parents
-                    .iter()
-                    .map(|(node, num)| (node.to_string(), *num))
-                    .collect(),
-            }
-        }
-    }
-
-    impl RoundIssues for ParentReader {
-        fn issues(&self) -> &[GhIssue] {
-            &self.issues
-        }
-    }
-
-    impl GhGraphql for ParentReader {
-        fn graphql(&self, _query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
-            let ids = vars
-                .iter()
-                .find(|(k, _)| *k == "ids")
-                .and_then(|(_, v)| match v {
-                    GqlVar::StrList(l) => Some(l.clone()),
-                    _ => None,
-                });
-            let Some(ids) = ids else {
-                return Ok(empty_issue_types_response());
-            };
-            let nodes: Vec<serde_json::Value> = ids
-                .iter()
-                .map(|node| match self.parent_number_by_node.get(node) {
-                    Some(num) => serde_json::json!({"id": node, "parent": {"number": num}}),
-                    None => serde_json::json!({"id": node, "parent": null}),
-                })
-                .collect();
-            Ok(serde_json::json!({"data": {"nodes": nodes}}))
-        }
-        fn project_items(
-            &self,
-            _repo: &str,
-            _content_node_id: &str,
-        ) -> Result<Vec<crate::engine::gh::ProjectItem>> {
-            Ok(vec![])
-        }
-        fn update_project_v2_item_field_value(
-            &self,
-            _project_id: &str,
-            _item_id: &str,
-            _field_id: &str,
-            _value: &crate::engine::gh::GhFieldValueInput,
-        ) -> Result<()> {
-            Ok(())
-        }
-        fn clear_project_field(
-            &self,
-            _project_id: &str,
-            _item_id: &str,
-            _field_id: &str,
-        ) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    impl GhIssueDependencyApi for ParentReader {
-        fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
-            Ok(vec![])
-        }
-        fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
-            unimplemented!()
-        }
-        fn remove_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
-            unimplemented!()
-        }
-    }
-
     fn subissue_relationship() -> crate::engine::config::RelationshipDef {
         crate::engine::config::RelationshipDef {
             name: "implements".to_string(),
@@ -4270,16 +4081,13 @@ mod tests {
         config: &Config,
     ) -> FetchResult
     where
-        R: RoundIssues + GhGraphql + GhIssueDependencyApi,
+        R: RoundIssues,
     {
         cache
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                gh,
-                gh,
                 Some(&gh.round(&type_def.name)),
-                "owner/repo",
                 issue_map,
                 &[story_match_rule()],
                 config,
@@ -4295,9 +4103,9 @@ mod tests {
         let (cache, tmp) = make_cache();
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
         // STORY-11 (I_a) is a native sub-issue of STORY-100 (#100).
-        let gh = ParentReader::new(
+        let gh = NestingReader::new(
             vec![issue_with_node(100, "I_parent"), issue_with_node(11, "I_a")],
-            &[("I_a", 100)],
+            &[("I_parent", &["I_a"])],
         );
         let config = config_with_subissue_rel(story_type_def());
         fetch_typed(&cache, &tmp, &gh, &mut issue_map, story_type_def(), &config);
@@ -4374,9 +4182,9 @@ mod tests {
         let story_dir = tmp.path().join(".lazyspec/cache/story");
 
         // First fetch: STORY-11 is a native sub-issue of STORY-100.
-        let first = ParentReader::new(
+        let first = NestingReader::new(
             vec![issue_with_node(100, "I_parent"), issue_with_node(11, "I_a")],
-            &[("I_a", 100)],
+            &[("I_parent", &["I_a"])],
         );
         fetch_typed(
             &cache,
@@ -4391,7 +4199,7 @@ mod tests {
             .contains("implements: STORY-100"));
 
         // Second fetch: the edge is gone on the remote.
-        let second = ParentReader::new(
+        let second = NestingReader::new(
             vec![issue_with_node(100, "I_parent"), issue_with_node(11, "I_a")],
             &[],
         );
@@ -4509,10 +4317,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &gh,
-                &gh,
                 Some(&gh.round(&type_def.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -4551,10 +4356,7 @@ mod tests {
             .fetch_all(
                 tmp.path(),
                 &type_def,
-                &gh,
-                &gh,
                 Some(&gh.round(&type_def.name)),
-                "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
                 &Config::default(),
@@ -4578,10 +4380,7 @@ mod tests {
         let result = cache.fetch_all(
             tmp.path(),
             &type_def,
-            &gh,
-            &gh,
             Some(&gh.round(&type_def.name)),
-            "owner/repo",
             &mut issue_map,
             &[story_match_rule()],
             &Config::default(),

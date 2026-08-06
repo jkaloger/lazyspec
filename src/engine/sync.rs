@@ -14,7 +14,7 @@ use crate::engine::cache_lock::CacheLock;
 use crate::engine::clickup::ClickupClient;
 use crate::engine::clickup_cache;
 use crate::engine::config::{Config, Lifecycle, StoreBackend, TypeDef};
-use crate::engine::gh::{GhGraphql, GhIssueDependencyApi};
+use crate::engine::gh::GhGraphql;
 use crate::engine::gh_fetch::{self, FetchSnapshot};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::issue_body::TypeMatchRule;
@@ -137,7 +137,6 @@ impl TypeSync for GhMilestoneSync {
 /// reconcile (best-effort) so both surfaces resolve identically.
 pub struct GhIssueSync<'c> {
     pub graphql: &'c dyn GhGraphql,
-    pub dependency: &'c dyn GhIssueDependencyApi,
     pub repo: String,
     pub type_rules: Vec<TypeMatchRule>,
 }
@@ -155,17 +154,7 @@ impl TypeSync for GhIssueSync<'_> {
             return SyncOutcome::failed(&td.name, "github maps not provided in SyncContext");
         };
         let cache = IssueCache::new(root);
-        let result = match cache.fetch_all(
-            root,
-            td,
-            self.graphql,
-            self.dependency,
-            fetch,
-            &self.repo,
-            maps.issue_map,
-            &self.type_rules,
-            cfg,
-        ) {
+        let result = match cache.fetch_all(root, td, fetch, maps.issue_map, &self.type_rules, cfg) {
             Ok(r) => r,
             Err(e) => return SyncOutcome::failed(&td.name, e.to_string()),
         };
@@ -692,7 +681,7 @@ mod tests {
     use crate::engine::config::{
         Config, NumberingStrategy, RelationshipDef, StoreBackend, TypeDef,
     };
-    use crate::engine::gh::test_support::{MockGhClient, MockGhDependencyClient};
+    use crate::engine::gh::test_support::MockGhClient;
     use crate::engine::gh::{
         GhAuthor, GhIssue, GhIssueMilestone, GhLabel, GhMilestone, ProjectFieldValue, ProjectItem,
     };
@@ -981,7 +970,6 @@ mod tests {
             milestone: Some(GhMilestoneSync),
             issue: Some(GhIssueSync {
                 graphql: &client,
-                dependency: &client,
                 repo: "owner/repo".to_string(),
                 type_rules: config
                     .documents
@@ -1063,7 +1051,6 @@ mod tests {
             milestone: Some(GhMilestoneSync),
             issue: Some(GhIssueSync {
                 graphql: &client,
-                dependency: &client,
                 repo: "owner/repo".to_string(),
                 type_rules,
             }),
@@ -1134,7 +1121,6 @@ mod tests {
             milestone: Some(GhMilestoneSync),
             issue: Some(GhIssueSync {
                 graphql: &issue_client,
-                dependency: &issue_client,
                 repo: "owner/repo".to_string(),
                 type_rules: config
                     .documents
@@ -1164,8 +1150,8 @@ mod tests {
 
     // STORY-244 AC3/AC6: a native "A blocked_by B" set on GitHub surfaces on
     // fetch as `A blocked-by B` on A's doc (the declared inverse), and the
-    // resolved graph carries `B blocks A` as the derived inverse -- exercised
-    // entirely through the dependency fake, with no output-shape change.
+    // resolved graph carries `B blocks A` as the derived inverse -- read off the
+    // composed round, with no output-shape change.
     #[test]
     fn fetch_reads_native_blocked_by_into_graph_with_inverse_direction() {
         let tmp = TempDir::new().unwrap();
@@ -1176,10 +1162,11 @@ mod tests {
         config.relationships = vec![dependency_relationship()];
 
         // Issue #42 (STORY-42) is blocked by issue #7 (STORY-7); both are
-        // fetched in the same run, so #7 resolves via the in-flight batch.
+        // fetched in the same run, so #7 resolves via the in-flight batch. The
+        // edge rides the round's `blockedBy` connection, not a read of its own.
         let issue_client = MockGhClient::new()
-            .with_list_result(vec![gh_issue_no_milestone(42), gh_issue_no_milestone(7)]);
-        let dependency_client = MockGhDependencyClient::new().with_blocked_by(42, vec![7]);
+            .with_list_result(vec![gh_issue_no_milestone(42), gh_issue_no_milestone(7)])
+            .with_round_blocked_by("I_node42", vec![7]);
 
         let mut issue_map = IssueMap::load(root).unwrap();
         let mut ctx = SyncContext {
@@ -1196,7 +1183,6 @@ mod tests {
             }),
             issue: Some(GhIssueSync {
                 graphql: &issue_client,
-                dependency: &dependency_client,
                 repo: "owner/repo".to_string(),
                 type_rules: config
                     .documents
@@ -1353,7 +1339,6 @@ mod tests {
             }),
             issue: Some(GhIssueSync {
                 graphql: &issue_client,
-                dependency: &issue_client,
                 repo: "owner/repo".to_string(),
                 type_rules: config
                     .documents
@@ -1514,7 +1499,6 @@ mod tests {
             milestone: Some(GhMilestoneSync),
             issue: Some(GhIssueSync {
                 graphql: &issue_client,
-                dependency: &issue_client,
                 repo: "owner/repo".to_string(),
                 type_rules: vec![],
             }),
@@ -1571,7 +1555,6 @@ mod tests {
             }),
             issue: Some(GhIssueSync {
                 graphql: &issue_client,
-                dependency: &issue_client,
                 repo: "owner/repo".to_string(),
                 type_rules: config
                     .documents

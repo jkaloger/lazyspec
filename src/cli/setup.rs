@@ -1,7 +1,7 @@
 use crate::engine::clickup::ClickupClient;
 use crate::engine::config::Config;
 use crate::engine::credentials::{CredentialLocation, CredentialStore, Token};
-use crate::engine::gh::{AuthStatus, GhAuth, GhGraphql, GhIssueDependencyApi, GhIssueReader};
+use crate::engine::gh::{AuthStatus, GhAuth, GhGraphql, GhIssueReader};
 use crate::engine::github::resolve_repo;
 use crate::engine::issue_body::TypeMatchRule;
 use crate::engine::issue_cache::IssueCache;
@@ -106,7 +106,7 @@ fn prompt_token() -> Result<String> {
 pub fn run(
     root: &Path,
     config: &Config,
-    gh: &(impl GhIssueReader + GhAuth + GhGraphql + GhIssueDependencyApi),
+    gh: &(impl GhIssueReader + GhAuth + GhGraphql),
 ) -> Result<()> {
     let gh_types = config.documents.github_issues_types();
     if gh_types.is_empty() {
@@ -160,10 +160,7 @@ pub fn run(
         let result = cache.fetch_all(
             root,
             type_def,
-            gh,
-            gh,
             Some(&round),
-            &repo,
             &mut issue_map,
             &all_type_rules,
             config,

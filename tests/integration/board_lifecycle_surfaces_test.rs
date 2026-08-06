@@ -605,7 +605,6 @@ fn sync_tickets(tmp: &TempDir, config: &Config, gh: &BoardGh) -> Vec<SyncOutcome
         }),
         issue: Some(GhIssueSync {
             graphql: gh,
-            dependency: gh,
             repo: "octo-org/repo".to_string(),
             type_rules: config
                 .documents

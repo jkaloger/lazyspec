@@ -2,9 +2,7 @@ use crate::engine::clickup::ClickupClient;
 use crate::engine::config::{Config, Lifecycle, StoreBackend};
 use crate::engine::config_write::write_config_in_place;
 use crate::engine::credentials::Token;
-use crate::engine::gh::{
-    GhGraphql, GhIssueDependencyApi, GhIssueReader, GhIssueWriter, GhMilestoneApi,
-};
+use crate::engine::gh::{GhGraphql, GhIssueReader, GhIssueWriter, GhMilestoneApi};
 use crate::engine::gh_schema::GhSchemaSnapshot;
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::github::resolve_repo;
@@ -24,7 +22,7 @@ use std::path::Path;
 pub fn run(
     root: &Path,
     config: &Config,
-    gh: &(impl GhIssueReader + GhIssueWriter + GhGraphql + GhMilestoneApi + GhIssueDependencyApi),
+    gh: &(impl GhIssueReader + GhIssueWriter + GhGraphql + GhMilestoneApi),
     git_ref_ops: &dyn GitRefOps,
     clickup: &dyn ClickupClient,
     clickup_token: Option<&Token>,
@@ -175,7 +173,6 @@ pub fn run(
         if !fetch_gh.is_empty() {
             syncers.issue = Some(GhIssueSync {
                 graphql: gh,
-                dependency: gh,
                 repo: repo
                     .clone()
                     .expect("repo resolved when an issue type fetches"),
@@ -522,7 +519,14 @@ name = "related-to"
                  prefix = \"T{n}\"\nstore = \"github-issues\"\n{authority}{rule}\n"
             ));
         }
-        src.push_str("[[relationships]]\nname = \"related-to\"\n");
+        src.push_str("[[relationships]]\nname = \"related-to\"\n\n");
+        // Declared so the round's inline `blockedBy` edge is actually consumed:
+        // the point of the count is that enrichment costs no request, which only
+        // means something when the enrichment happens.
+        src.push_str(
+            "[[relationships]]\nname = \"blocks\"\ninverse = \"blocked-by\"\n\
+             github_native = \"dependency\"\n",
+        );
         src
     }
 
@@ -538,7 +542,7 @@ name = "related-to"
         std::fs::write(root.join(".lazyspec.toml"), &src).unwrap();
         let config = Config::parse(&src).unwrap();
 
-        let gh = GhRequestCounter::with_board(7, &["Review", "Done"]);
+        let gh = GhRequestCounter::with_board(7, &["Review", "Done"]).with_enriched_issues();
         run(
             root,
             &config,
@@ -562,6 +566,20 @@ name = "related-to"
             gh.other_queries.borrow()
         );
         assert_eq!(gh.milestone_list_calls.get(), 0);
+
+        // That one request also carried the enrichment: #2 nests under #1 from
+        // the round's `subIssues`, and #1 carries `blocked-by` from its
+        // `blockedBy` -- both without a second query.
+        assert!(
+            root.join(".lazyspec/cache/t0/T0-1/00-T0-2.md").is_file(),
+            "sub-issue parentage must materialize off the round"
+        );
+        let parent =
+            std::fs::read_to_string(root.join(".lazyspec/cache/t0/T0-1/index.md")).unwrap();
+        assert!(
+            parent.contains("blocked-by: T0-2"),
+            "dependency edges must come off the round, got:\n{parent}"
+        );
 
         // And that one request is what carried the board's schema.
         let saved = GhSchemaSnapshot::load(root);

@@ -16,10 +16,9 @@ use lazyspec::engine::store::{Filter, Store};
 use std::collections::HashMap;
 use tempfile::TempDir;
 
-/// A gh mock that exposes flat issues via `issue_list` and native sub-issue
-/// parentage via `graphql` (the `subIssues` query, keyed on the node `id` var).
-/// A graphql call with no `id` var is the schema-snapshot refresh and returns an
-/// empty issue-types response. All write/milestone calls are unused here.
+/// A gh mock whose composed round answers the issues it holds plus the
+/// `subIssues` connection selected inline on each of them -- the whole read a
+/// fetch makes. All write/milestone calls are unused here.
 struct NestingGh {
     issues: Vec<GhIssue>,
     sub_issues_by_node: HashMap<String, Vec<String>>,
@@ -61,62 +60,24 @@ impl GhIssueReader for NestingGh {
 }
 
 impl GhGraphql for NestingGh {
-    fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+    fn graphql(&self, query: &str, _vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
         // The composed fetch round: a user-owned repo with no milestones, so
         // neither the milestone cache nor the schema snapshot has anything to
         // write and neither warns.
-        if lazyspec::engine::gh_fetch::is_round_query(query) {
-            return Ok(crate::common::round_response_with_issues(
-                query,
-                &self.issues,
-            ));
+        assert!(
+            lazyspec::engine::gh_fetch::is_round_query(query),
+            "a fetch issues nothing but the composed round, got: {query}"
+        );
+        let mut resp = crate::common::round_response_with_issues(query, &self.issues);
+        for (parent, children) in &self.sub_issues_by_node {
+            let children: Vec<&str> = children.iter().map(String::as_str).collect();
+            resp = crate::common::with_sub_issues(
+                resp,
+                parent,
+                crate::common::sub_issue_edge(&children),
+            );
         }
-
-        // Batched parentage query: `ids: [parent_node, ...]` -> `data.nodes`,
-        // each `{ id, subIssues: { nodes: [{ id }] } }`.
-        if let Some((_, GqlVar::StrList(ids))) = vars.iter().find(|(k, _)| *k == "ids") {
-            let nodes: Vec<_> = ids
-                .iter()
-                .map(|parent| {
-                    let kids = self
-                        .sub_issues_by_node
-                        .get(parent)
-                        .cloned()
-                        .unwrap_or_default();
-                    let child_nodes: Vec<_> = kids
-                        .iter()
-                        .map(|n| serde_json::json!({ "id": n }))
-                        .collect();
-                    serde_json::json!({ "id": parent, "subIssues": { "nodes": child_nodes } })
-                })
-                .collect();
-            return Ok(serde_json::json!({ "data": { "nodes": nodes } }));
-        }
-
-        let id = vars
-            .iter()
-            .find(|(k, _)| *k == "id")
-            .and_then(|(_, v)| match v {
-                GqlVar::Str(s) => Some(s.clone()),
-                _ => None,
-            });
-        match id {
-            Some(node) => {
-                let kids = self
-                    .sub_issues_by_node
-                    .get(&node)
-                    .cloned()
-                    .unwrap_or_default();
-                let nodes: Vec<_> = kids
-                    .iter()
-                    .map(|n| serde_json::json!({ "id": n }))
-                    .collect();
-                Ok(serde_json::json!({ "data": { "node": { "subIssues": { "nodes": nodes } } } }))
-            }
-            None => Ok(serde_json::json!({
-                "data": { "organization": { "issueTypes": { "nodes": [] } } }
-            })),
-        }
+        Ok(resp)
     }
     fn project_items(&self, _repo: &str, _content_node_id: &str) -> Result<Vec<ProjectItem>> {
         Ok(vec![])

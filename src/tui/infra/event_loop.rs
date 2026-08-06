@@ -2,7 +2,7 @@ use crate::engine::clickup::ClickupClient;
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::document::split_frontmatter;
-use crate::engine::gh::{GhCli, GhGraphql, GhIssueDependencyApi};
+use crate::engine::gh::{GhCli, GhGraphql};
 use crate::engine::git_ref::{GitCli, GitRefOps};
 use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::issue_body::TypeMatchRule;
@@ -302,7 +302,6 @@ fn poll_sync(
     config: &Config,
     gh_store: Option<&Arc<Mutex<GithubIssuesStore>>>,
     gh_graphql: &dyn GhGraphql,
-    gh_dependency: &dyn GhIssueDependencyApi,
     git_ops: &dyn GitRefOps,
     clickup: &dyn ClickupClient,
     clickup_token: Option<&str>,
@@ -372,7 +371,6 @@ fn poll_sync(
             if let Some(repo) = repo.clone() {
                 syncers.issue = Some(GhIssueSync {
                     graphql: gh_graphql,
-                    dependency: gh_dependency,
                     repo,
                     type_rules,
                 });
@@ -897,7 +895,6 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                             &poll_config,
                             poll_store.as_ref(),
                             &gh,
-                            &gh,
                             &git_ops,
                             &clickup,
                             clickup_token.as_ref().map(|t| t.expose()),
@@ -1341,16 +1338,7 @@ mod tests {
         let git = MockGitRefClient::new();
         let reader = inert_gh();
 
-        let warnings = poll_sync(
-            root,
-            &config,
-            None,
-            &reader,
-            &reader,
-            &git,
-            &clickup,
-            Some("pk_x"),
-        );
+        let warnings = poll_sync(root, &config, None, &reader, &git, &clickup, Some("pk_x"));
 
         assert!(warnings.is_empty(), "got: {warnings:?}");
         assert!(
@@ -1375,16 +1363,7 @@ mod tests {
         let git = MockGitRefClient::new();
         let reader = inert_gh();
 
-        let warnings = poll_sync(
-            root,
-            &config,
-            None,
-            &reader,
-            &reader,
-            &git,
-            &clickup,
-            Some("pk_x"),
-        );
+        let warnings = poll_sync(root, &config, None, &reader, &git, &clickup, Some("pk_x"));
 
         assert!(
             warnings.iter().any(|w| w.starts_with("task:")),
@@ -1435,7 +1414,7 @@ mod tests {
             issue_cache: IssueCache::new(root),
         }));
 
-        let _warnings = poll_sync(root, &config, Some(&store), &gh, &gh, &git, &clickup, None);
+        let _warnings = poll_sync(root, &config, Some(&store), &gh, &git, &clickup, None);
 
         // The fetched issue is mapped in the SHARED store's own field, proving
         // the poll borrowed &mut store.issue_map rather than a throwaway copy.
@@ -1471,7 +1450,7 @@ mod tests {
             });
         }
 
-        let gh = GhRequestCounter::with_board(7, &["Review", "Done"]);
+        let gh = GhRequestCounter::with_board(7, &["Review", "Done"]).with_enriched_issues();
         let store = Arc::new(Mutex::new(GithubIssuesStore {
             client: Box::new(GhCli::new()),
             root: root.to_path_buf(),
@@ -1485,7 +1464,6 @@ mod tests {
             root,
             &config,
             Some(&store),
-            &gh,
             &gh,
             &MockGitRefClient::new(),
             &FakeClickupClient::with_tasks(vec![]),
@@ -1503,6 +1481,10 @@ mod tests {
             gh.other_queries.borrow()
         );
         assert_eq!(gh.milestone_list_calls.get(), 0);
+        assert!(
+            root.join(".lazyspec/cache/t0/T0-1/00-T0-2.md").is_file(),
+            "the poll materializes sub-issue parentage off the same one round"
+        );
 
         let saved = GhSchemaSnapshot::load(root);
         assert_eq!(saved.field_id(7, "Status"), Some("PVTSSF_b7"));

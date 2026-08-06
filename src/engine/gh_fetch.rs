@@ -43,10 +43,15 @@ pub type BoardFieldSchema = (Vec<ProjectFieldId>, Vec<OptionId>, Vec<IterationId
 pub struct FetchSnapshot {
     /// Per type name: the issues matching that type's discovery rule.
     pub issues: HashMap<String, Vec<GhIssue>>,
-    /// Per issue node id, in server order.
+    /// Per issue node id, its children's node ids in server order. An issue with
+    /// no sub-issues is simply absent.
     pub sub_issues: HashMap<String, Vec<String>>,
-    /// Per issue number, the numbers blocking it.
+    /// Per issue number, the numbers blocking it. An issue nothing blocks is
+    /// simply absent.
     pub blocked_by: HashMap<u64, Vec<u64>>,
+    /// Every capped connection that reported another page, so a consumer can
+    /// name what it did not get instead of writing a partial edge set silently.
+    pub truncations: Vec<Truncation>,
     /// Per issue node id, its board memberships and field cells.
     pub project_items: HashMap<String, Vec<ProjectItem>>,
     pub milestones: Option<Vec<GhMilestone>>,
@@ -81,13 +86,67 @@ const PROJECT_FIELDS_SELECTION: &str = "fields(first: 50) { nodes { __typename \
      ... on ProjectV2IterationField { id name dataType \
      configuration { iterations { id title } } } } }";
 
-/// One issue's fields, flat: no nested connection here costs more than the 20
-/// labels and 10 assignees a document can carry. `issueType { name }` riding
-/// along is what lets a type classified by native issue type be discovered by
-/// filtering this page instead of by one `issue_view` per number.
+/// One issue's flat fields. `issueType { name }` riding along is what lets a
+/// type classified by native issue type be discovered by filtering this page
+/// instead of by one `issue_view` per number.
 const ISSUE_NODE_SELECTION: &str = "id number url title body state updatedAt createdAt \
      author { login } issueType { name } milestone { number } \
      labels(first: 20) { nodes { name } } assignees(first: 10) { nodes { login } }";
+
+/// A nested connection the round selects inline on every issue. Selecting them
+/// here is what makes sub-issue parentage and dependency edges cost no request
+/// of their own; the cap is what keeps a document of them inside GitHub's node
+/// budget, and [`FetchSnapshot::truncations`] is what keeps the cap honest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Connection {
+    SubIssues,
+    BlockedBy,
+}
+
+impl Connection {
+    /// How many entries of this connection one issue's page carries.
+    pub fn cap(self) -> usize {
+        match self {
+            Connection::SubIssues => 50,
+            Connection::BlockedBy => 50,
+        }
+    }
+
+    /// The GraphQL field, so a warning names the edge a reader can go look at.
+    pub fn field(self) -> &'static str {
+        match self {
+            Connection::SubIssues => "subIssues",
+            Connection::BlockedBy => "blockedBy",
+        }
+    }
+}
+
+impl std::fmt::Display for Connection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.field())
+    }
+}
+
+/// One issue's connection that had more entries than its cap, so the snapshot
+/// holds only the first page of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Truncation {
+    /// The issue's node id: what a consumer maps back to the document it wrote.
+    pub node_id: String,
+    pub connection: Connection,
+}
+
+/// The sub-issue and dependency edges, selected on the same node as the issue's
+/// own fields. `pageInfo { hasNextPage }` on each is what turns a cap into a
+/// reported truncation rather than a silently short edge list.
+fn issue_edges_selection() -> String {
+    format!(
+        "subIssues(first: {}) {{ pageInfo {{ hasNextPage }} nodes {{ id }} }} \
+         blockedBy(first: {}) {{ pageInfo {{ hasNextPage }} nodes {{ number }} }}",
+        Connection::SubIssues.cap(),
+        Connection::BlockedBy.cap()
+    )
+}
 
 /// GraphQL's ceiling on a connection page, and so the round's page size.
 const ISSUE_PAGE_SIZE: usize = 100;
@@ -180,6 +239,7 @@ fn matches_rule(rule: &TypeMatchRule, issue: &GhIssue) -> bool {
 }
 
 fn issues_selection(types: &[TypeMatchRule]) -> String {
+    let node = format!("{ISSUE_NODE_SELECTION} {}", issue_edges_selection());
     types
         .iter()
         .enumerate()
@@ -190,7 +250,7 @@ fn issues_selection(types: &[TypeMatchRule]) -> String {
             };
             format!(
                 "{}: issues(first: {ISSUE_PAGE_SIZE}, states: [OPEN, CLOSED], {labels}after: ${}) \
-                 {{ pageInfo {{ hasNextPage endCursor }} nodes {{ {ISSUE_NODE_SELECTION} }} }} ",
+                 {{ pageInfo {{ hasNextPage endCursor }} nodes {{ {node} }} }} ",
                 issue_alias(index),
                 cursor_var(index)
             )
@@ -292,6 +352,11 @@ fn merge_issue_page(
             }
         }
     }
+    // Edges are keyed by issue, not by type, so a later page only ever adds
+    // issues the earlier rounds had not reached.
+    snapshot.sub_issues.extend(page.sub_issues);
+    snapshot.blocked_by.extend(page.blocked_by);
+    snapshot.truncations.extend(page.truncations);
     // A cursor handed back unchanged would resume the same page for ever, so
     // only one that moved counts as another page.
     snapshot.next_pages.extend(
@@ -419,6 +484,7 @@ fn parse_round(
     let mut warnings = Vec::new();
     let mut issues = HashMap::new();
     let mut next_pages = HashMap::new();
+    let mut edges = IssueEdges::default();
     for (index, rule) in types.iter().enumerate() {
         match resolve_subtree(&errors, &issues_path(index), || {
             parse_issue_page(repo, index)
@@ -427,6 +493,7 @@ fn parse_round(
                 if let Some(cursor) = page.next_cursor {
                     next_pages.insert(rule.name.clone(), cursor);
                 }
+                edges.absorb(page.edges);
                 issues.insert(
                     rule.name.clone(),
                     page.nodes
@@ -458,6 +525,9 @@ fn parse_round(
 
     FetchSnapshot {
         issues,
+        sub_issues: edges.sub_issues,
+        blocked_by: edges.blocked_by,
+        truncations: edges.truncations,
         next_pages,
         milestones,
         issue_types,
@@ -491,11 +561,72 @@ fn repo_subtrees(
     (milestones, issue_types)
 }
 
-/// One type's alias as it came back: the page's issues, and the cursor to resume
-/// from when the connection says there is more.
+/// One type's alias as it came back: the page's issues, the edges selected on
+/// them, and the cursor to resume from when the connection says there is more.
 struct IssuePage {
     nodes: Vec<GhIssue>,
+    edges: IssueEdges,
     next_cursor: Option<String>,
+}
+
+/// The inline connections, accumulated across every alias of a round. They are
+/// repo-wide rather than per type on purpose: an issue's blocker or its
+/// sub-issue parent is often a document of another type, and the alias that
+/// returned it is an accident of which type's list it matched.
+#[derive(Default)]
+struct IssueEdges {
+    sub_issues: HashMap<String, Vec<String>>,
+    blocked_by: HashMap<u64, Vec<u64>>,
+    truncations: Vec<Truncation>,
+}
+
+impl IssueEdges {
+    fn absorb(&mut self, other: IssueEdges) {
+        self.sub_issues.extend(other.sub_issues);
+        self.blocked_by.extend(other.blocked_by);
+        self.truncations.extend(other.truncations);
+    }
+
+    /// An issue that carries no edge at all is left out of both maps: absence is
+    /// "nothing blocks it, nothing hangs off it", which is what the round said.
+    fn read(&mut self, node: &Value) {
+        let Some(node_id) = node.get("id").and_then(|v| v.as_str()) else {
+            return;
+        };
+        for connection in [Connection::SubIssues, Connection::BlockedBy] {
+            if has_next_page(node, connection) {
+                self.truncations.push(Truncation {
+                    node_id: node_id.to_string(),
+                    connection,
+                });
+            }
+        }
+        let children: Vec<String> = connection_nodes(node, Connection::SubIssues.field())
+            .iter()
+            .filter_map(|child| child.get("id").and_then(|v| v.as_str()))
+            .map(str::to_string)
+            .collect();
+        if !children.is_empty() {
+            self.sub_issues.insert(node_id.to_string(), children);
+        }
+        let blockers: Vec<u64> = connection_nodes(node, Connection::BlockedBy.field())
+            .iter()
+            .filter_map(|blocker| blocker.get("number").and_then(|v| v.as_u64()))
+            .collect();
+        if blockers.is_empty() {
+            return;
+        }
+        let Some(number) = node.get("number").and_then(|v| v.as_u64()) else {
+            return;
+        };
+        self.blocked_by.insert(number, blockers);
+    }
+}
+
+fn has_next_page(node: &Value, connection: Connection) -> bool {
+    node.pointer(&format!("/{}/pageInfo/hasNextPage", connection.field()))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 /// `Repository.issues` is `IssueConnection!`, so a missing or null alias is error
@@ -504,8 +635,13 @@ struct IssuePage {
 fn parse_issue_page(repo: &Value, index: usize) -> Option<IssuePage> {
     let page = repo.get(issue_alias(index)).filter(|v| !v.is_null())?;
     let nodes = page.get("nodes")?.as_array()?;
+    let mut edges = IssueEdges::default();
+    for node in nodes {
+        edges.read(node);
+    }
     Some(IssuePage {
         nodes: nodes.iter().filter_map(issue_from_node).collect(),
+        edges,
         next_cursor: next_cursor(page),
     })
 }
@@ -1907,5 +2043,211 @@ mod tests {
 
         assert_eq!(gh.rounds.get(), 2);
         assert_eq!(snapshot.issues["bulk"].len(), 200);
+    }
+
+    // --- inline sub-issue and dependency edges ---
+
+    /// The connections a round selects on an issue, attached to its node.
+    fn edged(mut node: Value, sub_issues: &[&str], blocked_by: &[u64]) -> Value {
+        node["subIssues"] = json!({
+            "pageInfo": {"hasNextPage": false},
+            "nodes": sub_issues.iter().map(|id| json!({"id": id})).collect::<Vec<_>>()
+        });
+        node["blockedBy"] = json!({
+            "pageInfo": {"hasNextPage": false},
+            "nodes": blocked_by.iter().map(|n| json!({"number": n})).collect::<Vec<_>>()
+        });
+        node
+    }
+
+    /// The same node with `connection` reporting another page -- what GitHub
+    /// sends when an issue has more entries than the round's cap.
+    fn truncated(mut node: Value, connection: Connection) -> Value {
+        node[connection.field()]["pageInfo"]["hasNextPage"] = json!(true);
+        node
+    }
+
+    #[test]
+    fn the_round_selects_both_edge_connections_on_every_issue() {
+        let query = round_query(&[rule("story", None, None)], &[], RoundScope::Everything);
+
+        assert!(
+            query.contains("subIssues(first: 50) { pageInfo { hasNextPage } nodes { id } }"),
+            "{}",
+            query
+        );
+        assert!(
+            query.contains("blockedBy(first: 50) { pageInfo { hasNextPage } nodes { number } }"),
+            "{}",
+            query
+        );
+    }
+
+    #[test]
+    fn sub_issue_children_land_keyed_by_their_parents_node_id_in_server_order() {
+        let types = [rule("story", None, None)];
+        let resp = with_issues(
+            org_owned_response(),
+            &[(
+                0,
+                last_page(vec![edged(
+                    issue_node(1, &["lazyspec:story"], None),
+                    &["I_kw3", "I_kw2"],
+                    &[],
+                )]),
+            )],
+        );
+
+        let snapshot = parse_round(&resp, &types, &[], RoundScope::Everything);
+
+        assert_eq!(
+            snapshot.sub_issues.get("I_kw1"),
+            Some(&vec!["I_kw3".to_string(), "I_kw2".to_string()])
+        );
+    }
+
+    #[test]
+    fn blocked_by_edges_land_keyed_by_the_blocked_issues_number() {
+        let types = [rule("story", None, None)];
+        let resp = with_issues(
+            org_owned_response(),
+            &[(
+                0,
+                last_page(vec![edged(
+                    issue_node(42, &["lazyspec:story"], None),
+                    &[],
+                    &[7, 9],
+                )]),
+            )],
+        );
+
+        let snapshot = parse_round(&resp, &types, &[], RoundScope::Everything);
+
+        assert_eq!(snapshot.blocked_by.get(&42), Some(&vec![7, 9]));
+    }
+
+    #[test]
+    fn an_issue_with_no_edges_is_absent_from_both_maps() {
+        let types = [rule("story", None, None)];
+        let resp = with_issues(
+            org_owned_response(),
+            &[(
+                0,
+                last_page(vec![edged(
+                    issue_node(1, &["lazyspec:story"], None),
+                    &[],
+                    &[],
+                )]),
+            )],
+        );
+
+        let snapshot = parse_round(&resp, &types, &[], RoundScope::Everything);
+
+        assert!(snapshot.sub_issues.is_empty());
+        assert!(snapshot.blocked_by.is_empty());
+        assert!(snapshot.truncations.is_empty());
+    }
+
+    #[test]
+    fn edges_from_every_alias_fold_into_one_repo_wide_snapshot() {
+        let types = [rule("story", None, None), rule("epic", None, Some("Epic"))];
+        let resp = with_issues(
+            org_owned_response(),
+            &[
+                (
+                    0,
+                    last_page(vec![edged(
+                        issue_node(1, &["lazyspec:story"], None),
+                        &[],
+                        &[2],
+                    )]),
+                ),
+                (
+                    1,
+                    last_page(vec![edged(
+                        issue_node(2, &[], Some("Epic")),
+                        &["I_kw1"],
+                        &[],
+                    )]),
+                ),
+            ],
+        );
+
+        let snapshot = parse_round(&resp, &types, &[], RoundScope::Everything);
+
+        assert_eq!(snapshot.blocked_by.get(&1), Some(&vec![2]));
+        assert_eq!(
+            snapshot.sub_issues.get("I_kw2"),
+            Some(&vec!["I_kw1".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_connection_with_another_page_is_recorded_as_a_truncation() {
+        let types = [rule("story", None, None)];
+        let node = truncated(
+            edged(issue_node(1, &["lazyspec:story"], None), &["I_kw2"], &[]),
+            Connection::SubIssues,
+        );
+        let resp = with_issues(org_owned_response(), &[(0, last_page(vec![node]))]);
+
+        let snapshot = parse_round(&resp, &types, &[], RoundScope::Everything);
+
+        assert_eq!(
+            snapshot.truncations,
+            vec![Truncation {
+                node_id: "I_kw1".to_string(),
+                connection: Connection::SubIssues,
+            }]
+        );
+        // What did arrive is still kept: truncation reports a loss, it is not
+        // grounds for discarding the page that came back.
+        assert_eq!(
+            snapshot.sub_issues.get("I_kw1"),
+            Some(&vec!["I_kw2".to_string()])
+        );
+    }
+
+    /// A round whose first page reports another one, so the second round's
+    /// edges have to be merged rather than replace the first's.
+    struct TwoPageEdges;
+
+    impl GhGraphql for TwoPageEdges {
+        fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<Value> {
+            let resumed = vars.iter().any(|(k, _)| *k == "c0");
+            let (number, has_next) = if resumed { (2, false) } else { (1, true) };
+            let page = json!({
+                "pageInfo": {"hasNextPage": has_next, "endCursor": format!("cursor{}", number)},
+                "nodes": [edged(
+                    issue_node(number, &["lazyspec:story"], None),
+                    &[],
+                    &[number + 100],
+                )]
+            });
+            let mut resp = if query.contains("milestones") {
+                org_owned_response()
+            } else {
+                json!({"data": {"repository": {}}})
+            };
+            resp["data"]["repository"]["t0"] = page;
+            Ok(resp)
+        }
+
+        fn project_items(&self, _repo: &str, _content_node_id: &str) -> Result<Vec<ProjectItem>> {
+            unreachable!("the round only speaks graphql")
+        }
+    }
+
+    #[test]
+    fn a_later_page_adds_its_edges_rather_than_replacing_the_first_pages() {
+        let snapshot = fetch_all_pages(
+            &TwoPageEdges,
+            "owner/repo",
+            &[rule("story", None, None)],
+            &[],
+        );
+
+        assert_eq!(snapshot.blocked_by.get(&1), Some(&vec![101]));
+        assert_eq!(snapshot.blocked_by.get(&2), Some(&vec![102]));
     }
 }
