@@ -12,7 +12,7 @@ use crate::engine::document::{compose_frontmatter, AttrValue, DocMeta, DocType, 
 use crate::engine::gh::{
     self, missing_project_scope, GhClient, GhGraphql, GhMilestoneClient, GhProjectsClient, GqlVar,
 };
-use crate::engine::gh_schema::{try_org_then_user, GhSchemaSnapshot};
+use crate::engine::gh_schema::GhSchemaSnapshot;
 use crate::engine::issue_body;
 use crate::engine::issue_cache::{self, IssueCache};
 use crate::engine::issue_map::IssueMap;
@@ -1637,12 +1637,40 @@ pub(crate) fn resolve_board_node_id(
     resolve_project_id_live(client, owner_of(repo)?, project_number)
 }
 
+/// Fire the org query and, if its pointer resolves, return the org node
+/// subtree; otherwise fire the user query and return the user node subtree. The
+/// owner's account kind doubles as the discriminator -- GitHub returns a
+/// top-level `errors` payload with a null node for the wrong root, so the
+/// pointer's presence (not the `errors` payload) is what we switch on.
+///
+/// A node-id lookup for a bare owner login, which the composed fetch round
+/// cannot answer: the round is rooted at a repository, and these two callers
+/// have only an owner.
+fn org_then_user_node(
+    client: &dyn GhGraphql,
+    org_query: &str,
+    user_query: &str,
+    vars: &[(&str, GqlVar)],
+    org_ptr: &str,
+    user_ptr: &str,
+) -> Result<serde_json::Value> {
+    let org_resp = client.graphql(org_query, vars)?;
+    if let Some(node) = org_resp.pointer(org_ptr) {
+        return Ok(node.clone());
+    }
+    let user_resp = client.graphql(user_query, vars)?;
+    if let Some(node) = user_resp.pointer(user_ptr) {
+        return Ok(node.clone());
+    }
+    anyhow::bail!("owner did not resolve as an organization or a user")
+}
+
 /// Live org-then-user resolve of a Projects v2 board number to its node id.
 /// Used by [`resolve_board_node_id`] when the issue map has no cached board
 /// binding, and by [`GithubProjectsStore::resolve_board`], which has no issue map.
 /// NEVER issues a create mutation.
 fn resolve_project_id_live(client: &dyn GhGraphql, owner: &str, number: u64) -> Result<String> {
-    let (_kind, id_node) = try_org_then_user(
+    let id_node = org_then_user_node(
         client,
         PROJECT_NODE_ID_ORG_QUERY,
         PROJECT_NODE_ID_USER_QUERY,
@@ -2374,7 +2402,7 @@ const CREATE_PROJECT_V2_MUTATION: &str = "mutation($ownerId: ID!, $title: String
 /// first then the user root (mirrors [`resolve_project_id_live`]). The
 /// `createProjectV2` mutation needs the owner's *node id*, not the login.
 fn resolve_owner_node_id(client: &dyn GhGraphql, owner: &str) -> Result<String> {
-    let (_kind, id_node) = try_org_then_user(
+    let id_node = org_then_user_node(
         client,
         OWNER_NODE_ID_ORG_QUERY,
         OWNER_NODE_ID_USER_QUERY,

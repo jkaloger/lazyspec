@@ -4,7 +4,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::engine::config::Lifecycle;
-use crate::engine::gh::{GhGraphql, GqlVar};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueTypeId {
@@ -194,72 +193,16 @@ impl GhSchemaSnapshot {
     }
 }
 
-const PROJECT_FIELDS_ORG_QUERY: &str = "query($owner: String!, $number: Int!) { organization(login: $owner) { projectV2(number: $number) { fields(first: 50) { nodes { __typename ... on ProjectV2FieldCommon { id name dataType } ... on ProjectV2SingleSelectField { id name dataType options { id name } } ... on ProjectV2IterationField { id name dataType configuration { iterations { id title } } } } } } } }";
-
-const PROJECT_FIELDS_USER_QUERY: &str = "query($owner: String!, $number: Int!) { user(login: $owner) { projectV2(number: $number) { fields(first: 50) { nodes { __typename ... on ProjectV2FieldCommon { id name dataType } ... on ProjectV2SingleSelectField { id name dataType options { id name } } ... on ProjectV2IterationField { id name dataType configuration { iterations { id title } } } } } } } }";
-
-/// Which account root resolved an owner login: an organization or a user.
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub enum OwnerKind {
-    Org,
-    User,
-}
-
-/// Fire the org query and, if its pointer resolves, return the org node subtree;
-/// otherwise fire the user query and return the user node subtree. The owner's
-/// account kind doubles as the discriminator — GitHub returns a top-level
-/// `errors` payload with a null node for the wrong root, so the pointer's
-/// presence (not the `errors` payload) is what we switch on.
-///
-/// Returns an owned node `Value` (cloned from the resolved pointer) so callers
-/// are not tied to a response borrowed inside this function.
-pub fn try_org_then_user(
-    gh: &dyn GhGraphql,
-    org_query: &str,
-    user_query: &str,
-    vars: &[(&str, GqlVar)],
-    org_ptr: &str,
-    user_ptr: &str,
-) -> Result<(OwnerKind, serde_json::Value)> {
-    let org_resp = gh.graphql(org_query, vars)?;
-    if let Some(node) = org_resp.pointer(org_ptr) {
-        return Ok((OwnerKind::Org, node.clone()));
-    }
-    let user_resp = gh.graphql(user_query, vars)?;
-    if let Some(node) = user_resp.pointer(user_ptr) {
-        return Ok((OwnerKind::User, node.clone()));
-    }
-    anyhow::bail!("owner did not resolve as an organization or a user")
-}
-
-/// Fetch project field/option/iteration ids for a specific project number.
-pub fn fetch_project_fields(
-    gh: &dyn GhGraphql,
-    repo: &str,
-    project_number: u64,
-) -> Result<(Vec<ProjectFieldId>, Vec<OptionId>, Vec<IterationId>)> {
-    let (owner, _name) = split_repo(repo)?;
-    let (_kind, nodes) = try_org_then_user(
-        gh,
-        PROJECT_FIELDS_ORG_QUERY,
-        PROJECT_FIELDS_USER_QUERY,
-        &[
-            ("owner", GqlVar::Str(owner.to_string())),
-            ("number", GqlVar::Int(project_number as i64)),
-        ],
-        "/data/organization/projectV2/fields/nodes",
-        "/data/user/projectV2/fields/nodes",
-    )?;
-    Ok(parse_project_fields(&nodes, project_number))
-}
-
 pub(crate) fn split_repo(repo: &str) -> Result<(&str, &str)> {
     repo.split_once('/')
         .filter(|(o, n)| !o.is_empty() && !n.is_empty())
         .with_context(|| format!("repo '{}' must be in owner/name form", repo))
 }
 
-fn parse_project_fields(
+/// Read one board's `ProjectV2.fields` connection nodes into the three id sets
+/// the snapshot stores. Shared by every caller that resolves a board schema, so
+/// the composed round and any future reader agree on the shape.
+pub(crate) fn parse_project_fields(
     nodes: &serde_json::Value,
     project_number: u64,
 ) -> (Vec<ProjectFieldId>, Vec<OptionId>, Vec<IterationId>) {
@@ -331,12 +274,12 @@ fn parse_project_fields(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::gh::test_support::MockGhClient;
     use tempfile::TempDir;
 
-    /// A one-board field set whose `Status` single-select carries `options` in
-    /// the given order. `field_id` distinguishes boards within one snapshot.
-    fn status_field_response(field_id: &str, options: &[&str]) -> serde_json::Value {
+    /// A one-board `fields` connection whose `Status` single-select carries
+    /// `options` in the given order. `field_id` distinguishes boards within one
+    /// snapshot.
+    fn status_field_nodes(field_id: &str, options: &[&str]) -> serde_json::Value {
         let opts: Vec<serde_json::Value> = options
             .iter()
             .map(|name| {
@@ -346,41 +289,31 @@ mod tests {
                 })
             })
             .collect();
-        serde_json::json!({
-            "data": {"organization": {"projectV2": {"fields": {"nodes": [
-                {
-                    "__typename": "ProjectV2SingleSelectField",
-                    "id": field_id,
-                    "name": "Status",
-                    "dataType": "SINGLE_SELECT",
-                    "options": opts
-                }
-            ]}}}}
-        })
+        serde_json::json!([{
+            "__typename": "ProjectV2SingleSelectField",
+            "id": field_id,
+            "name": "Status",
+            "dataType": "SINGLE_SELECT",
+            "options": opts
+        }])
     }
 
-    fn sprint_only_response() -> serde_json::Value {
-        serde_json::json!({
-            "data": {"organization": {"projectV2": {"fields": {"nodes": [
-                {
-                    "__typename": "ProjectV2IterationField",
-                    "id": "PVTIF_sprint",
-                    "name": "Sprint",
-                    "dataType": "ITERATION",
-                    "configuration": {"iterations": [{"id": "iter_1", "title": "Sprint 1"}]}
-                }
-            ]}}}}
-        })
+    fn sprint_only_nodes() -> serde_json::Value {
+        serde_json::json!([{
+            "__typename": "ProjectV2IterationField",
+            "id": "PVTIF_sprint",
+            "name": "Sprint",
+            "dataType": "ITERATION",
+            "configuration": {"iterations": [{"id": "iter_1", "title": "Sprint 1"}]}
+        }])
     }
 
-    /// Build a snapshot by parsing each board's canned field response, so the
+    /// Build a snapshot by parsing each board's canned field nodes, so the
     /// vector order under test is the order GraphQL actually produced.
     fn snapshot_with_boards(boards: &[(u64, serde_json::Value)]) -> GhSchemaSnapshot {
         let mut snapshot = GhSchemaSnapshot::default();
-        for (number, resp) in boards {
-            let gh = MockGhClient::new().with_graphql_responses(vec![resp.clone()]);
-            let (fields, options, iterations) =
-                fetch_project_fields(&gh, "octo-org/repo", *number).unwrap();
+        for (number, nodes) in boards {
+            let (fields, options, iterations) = parse_project_fields(nodes, *number);
             snapshot.project_fields.extend(fields);
             snapshot.single_select_options.extend(options);
             snapshot.iterations.extend(iterations);
@@ -392,7 +325,7 @@ mod tests {
     fn status_lifecycle_lowercases_option_names_in_board_order() {
         let snapshot = snapshot_with_boards(&[(
             7,
-            status_field_response(
+            status_field_nodes(
                 "PVTSSF_b7",
                 &["Ready To Start", "In Progress", "Review", "Done"],
             ),
@@ -413,7 +346,7 @@ mod tests {
     fn status_option_matches_a_lowercased_status_against_a_display_cased_column() {
         let snapshot = snapshot_with_boards(&[(
             7,
-            status_field_response("PVTSSF_b7", &["Ready To Start", "In Progress"]),
+            status_field_nodes("PVTSSF_b7", &["Ready To Start", "In Progress"]),
         )]);
 
         let option = snapshot
@@ -430,7 +363,7 @@ mod tests {
     fn status_option_misses_an_unknown_column_and_an_unknown_board() {
         let snapshot = snapshot_with_boards(&[(
             7,
-            status_field_response("PVTSSF_b7", &["Ready To Start", "In Progress"]),
+            status_field_nodes("PVTSSF_b7", &["Ready To Start", "In Progress"]),
         )]);
 
         assert_eq!(snapshot.status_option(7, "blocked"), None);
@@ -444,9 +377,9 @@ mod tests {
         let snapshot = snapshot_with_boards(&[
             (
                 7,
-                status_field_response("PVTSSF_b7", &["Ready To Start", "In Progress", "Done"]),
+                status_field_nodes("PVTSSF_b7", &["Ready To Start", "In Progress", "Done"]),
             ),
-            (9, status_field_response("PVTSSF_b9", &["Triage"])),
+            (9, status_field_nodes("PVTSSF_b9", &["Triage"])),
         ]);
 
         assert_eq!(
@@ -459,24 +392,21 @@ mod tests {
 
     #[test]
     fn status_lifecycle_returns_none_when_board_has_no_status_field() {
-        let snapshot = snapshot_with_boards(&[(7, sprint_only_response())]);
+        let snapshot = snapshot_with_boards(&[(7, sprint_only_nodes())]);
         assert_eq!(snapshot.status_lifecycle(7), None);
     }
 
     #[test]
     fn status_lifecycle_returns_none_when_status_field_has_no_options() {
-        let snapshot = snapshot_with_boards(&[(7, status_field_response("PVTSSF_b7", &[]))]);
+        let snapshot = snapshot_with_boards(&[(7, status_field_nodes("PVTSSF_b7", &[]))]);
         assert_eq!(snapshot.status_lifecycle(7), None);
     }
 
     #[test]
     fn status_lifecycle_reads_only_the_named_boards_status() {
         let snapshot = snapshot_with_boards(&[
-            (7, status_field_response("PVTSSF_b7", &["Review", "Done"])),
-            (
-                9,
-                status_field_response("PVTSSF_b9", &["Triage", "Shipped"]),
-            ),
+            (7, status_field_nodes("PVTSSF_b7", &["Review", "Done"])),
+            (9, status_field_nodes("PVTSSF_b9", &["Triage", "Shipped"])),
         ]);
 
         assert_eq!(
@@ -489,40 +419,26 @@ mod tests {
         );
     }
 
-    fn project_fields_response() -> serde_json::Value {
-        serde_json::json!({
-            "data": {
-                "organization": {
-                    "projectV2": {
-                        "fields": {
-                            "nodes": [
-                                {
-                                    "__typename": "ProjectV2SingleSelectField",
-                                    "id": "PVTSSF_field1",
-                                    "name": "Status",
-                                    "dataType": "SINGLE_SELECT",
-                                    "options": [
-                                        {"id": "opt_todo", "name": "Todo"},
-                                        {"id": "opt_done", "name": "Done"}
-                                    ]
-                                },
-                                {
-                                    "__typename": "ProjectV2IterationField",
-                                    "id": "PVTIF_field2",
-                                    "name": "Sprint",
-                                    "dataType": "ITERATION",
-                                    "configuration": {
-                                        "iterations": [
-                                            {"id": "iter_1", "title": "Sprint 1"}
-                                        ]
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                }
+    fn project_field_nodes() -> serde_json::Value {
+        serde_json::json!([
+            {
+                "__typename": "ProjectV2SingleSelectField",
+                "id": "PVTSSF_field1",
+                "name": "Status",
+                "dataType": "SINGLE_SELECT",
+                "options": [
+                    {"id": "opt_todo", "name": "Todo"},
+                    {"id": "opt_done", "name": "Done"}
+                ]
+            },
+            {
+                "__typename": "ProjectV2IterationField",
+                "id": "PVTIF_field2",
+                "name": "Sprint",
+                "dataType": "ITERATION",
+                "configuration": {"iterations": [{"id": "iter_1", "title": "Sprint 1"}]}
             }
-        })
+        ])
     }
 
     #[test]
@@ -624,9 +540,8 @@ mod tests {
     }
 
     #[test]
-    fn fetch_project_fields_captures_field_option_iteration_ids() {
-        let gh = MockGhClient::new().with_graphql_responses(vec![project_fields_response()]);
-        let (fields, options, iterations) = fetch_project_fields(&gh, "octo-org/repo", 7).unwrap();
+    fn parse_project_fields_captures_field_option_iteration_ids() {
+        let (fields, options, iterations) = parse_project_fields(&project_field_nodes(), 7);
 
         assert_eq!(fields.len(), 2);
         assert!(fields
@@ -638,53 +553,13 @@ mod tests {
         assert!(iterations
             .iter()
             .any(|i| i.id == "iter_1" && i.title == "Sprint 1" && i.field_id == "PVTIF_field2"));
-
-        // number passed as typed Int var
-        let calls = gh.graphql_calls.borrow();
-        assert!(calls[0].1.contains(&("number".to_string(), GqlVar::Int(7))));
     }
 
-    fn org_null_response() -> serde_json::Value {
-        serde_json::json!({
-            "data": {"organization": serde_json::Value::Null},
-            "errors": [{"message": "Could not resolve to an Organization with the login of 'jkaloger'."}]
-        })
-    }
-
-    fn reroot_org_to_user(mut v: serde_json::Value) -> serde_json::Value {
-        let org = v["data"]["organization"].take();
-        serde_json::json!({ "data": { "user": org } })
-    }
-
-    // AC1: user-account project fields resolve via the org->user fallback.
+    // Anything that is not a `nodes` array yields nothing rather than a partial
+    // read: the caller decides whether that is a known-empty board or a failure.
     #[test]
-    fn fetch_project_fields_falls_back_to_user_root() {
-        let user_resp = reroot_org_to_user(project_fields_response());
-        let gh = MockGhClient::new().with_graphql_responses(vec![org_null_response(), user_resp]);
-        let (fields, options, iterations) =
-            fetch_project_fields(&gh, "jkaloger/lazyspec", 7).unwrap();
-
-        assert_eq!(fields.len(), 2);
-        assert!(fields
-            .iter()
-            .any(|f| f.id == "PVTSSF_field1" && f.field_name == "Status" && f.project_number == 7));
-        assert!(options
-            .iter()
-            .any(|o| o.id == "opt_todo" && o.name == "Todo" && o.field_id == "PVTSSF_field1"));
-        assert!(iterations
-            .iter()
-            .any(|i| i.id == "iter_1" && i.title == "Sprint 1" && i.field_id == "PVTIF_field2"));
-
-        // Two round-trips: org (null) then user.
-        assert_eq!(gh.graphql_calls.borrow().len(), 2);
-    }
-
-    // AC2: org account resolves in a single round-trip (regression).
-    #[test]
-    fn fetch_project_fields_org_single_round_trip() {
-        let gh = MockGhClient::new().with_graphql_responses(vec![project_fields_response()]);
-        let (fields, _, _) = fetch_project_fields(&gh, "octo-org/repo", 7).unwrap();
-        assert_eq!(fields.len(), 2);
-        assert_eq!(gh.graphql_calls.borrow().len(), 1);
+    fn parse_project_fields_of_a_non_array_is_empty() {
+        let (fields, options, iterations) = parse_project_fields(&serde_json::Value::Null, 7);
+        assert!(fields.is_empty() && options.is_empty() && iterations.is_empty());
     }
 }

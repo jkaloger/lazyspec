@@ -25,8 +25,8 @@ use crate::engine::gh::{GhGraphql, GhIssue, GhMilestone, GqlVar, ProjectItem};
 use crate::engine::gh_schema::{self, IssueTypeId, IterationId, OptionId, ProjectFieldId};
 use crate::engine::issue_cache::RefreshWarning;
 
-/// One board's field schema, as `gh_schema::fetch_project_fields` returns it:
-/// its fields, their single-select options, and its iterations.
+/// One board's field schema: its fields, their single-select options, and its
+/// iterations, in the shape [`gh_schema::parse_project_fields`] produces.
 pub type BoardFieldSchema = (Vec<ProjectFieldId>, Vec<OptionId>, Vec<IterationId>);
 
 /// Everything one fetch round learned from GitHub, resolved in one request.
@@ -48,7 +48,9 @@ pub struct FetchSnapshot {
     /// Empty on a user-owned repo: issue types are an Organization-only field,
     /// so its absence from the response is an answer, not a failure.
     pub issue_types: Option<Vec<IssueTypeId>>,
-    /// Per authority board number.
+    /// Per authority board number. Absent means the round did not resolve that
+    /// board, so its prior schema stands; present with empty vectors means the
+    /// board answered and genuinely has no fields.
     pub board_fields: HashMap<u64, BoardFieldSchema>,
     /// Types whose issue list has more pages, with the cursor to resume from.
     pub next_pages: HashMap<String, String>,
@@ -65,12 +67,14 @@ const MILESTONES_SELECTION: &str = "milestones(first: 100, states: [OPEN, CLOSED
      openIssues: issues(states: OPEN) { totalCount } \
      closedIssues: issues(states: CLOSED) { totalCount } } }";
 
-/// `issueTypes` hangs off the Organization fragment because that is where
-/// GitHub defines it; a user-owned repo returns no such key and no error. The
-/// account kind is the selected `__typename`, never a failed probe.
-const OWNER_SELECTION: &str = "owner { __typename \
-     ... on Organization { issueTypes(first: 50) { nodes { id name } } } \
-     ... on User { login } }";
+/// The `ProjectV2.fields` selection, named once and spliced into both owner
+/// fragments. GraphQL merges two selections that share an alias only while they
+/// are identical, so the two copies must stay one constant.
+const PROJECT_FIELDS_SELECTION: &str = "fields(first: 50) { nodes { __typename \
+     ... on ProjectV2FieldCommon { id name dataType } \
+     ... on ProjectV2SingleSelectField { id name dataType options { id name } } \
+     ... on ProjectV2IterationField { id name dataType \
+     configuration { iterations { id title } } } } }";
 
 /// Names the composed document so a test double can tell a round apart from the
 /// other queries the same [`GhGraphql`] seam carries.
@@ -82,35 +86,74 @@ pub fn is_round_query(query: &str) -> bool {
 
 const MILESTONES_PATH: &str = "repository.milestones";
 const OWNER_PATH: &str = "repository.owner";
+const ISSUE_TYPES_PATH: &str = "repository.owner.issueTypes";
 
-fn round_query() -> String {
+/// The response key one board's schema arrives under. Aliasing by number keeps
+/// every board in one flat owner selection instead of one request each.
+fn board_alias(number: u64) -> String {
+    format!("b{}", number)
+}
+
+fn board_path(number: u64) -> String {
+    format!("{}.{}", OWNER_PATH, board_alias(number))
+}
+
+/// `issueTypes` hangs off the Organization fragment because that is where GitHub
+/// defines it; a user-owned repo returns no such key and no error. The account
+/// kind is the selected `__typename`, never a failed probe.
+///
+/// Each board is aliased into **both** fragments. `projectV2` resolves the same
+/// `ProjectV2` type either way, so the two selections merge legally and one
+/// response carries the board whichever kind of account owns the repo. `login`
+/// keeps the User fragment non-empty when no board is requested.
+fn owner_selection(boards: &[u64]) -> String {
+    let aliased: String = boards
+        .iter()
+        .map(|&n| {
+            format!(
+                "{}: projectV2(number: {}) {{ {PROJECT_FIELDS_SELECTION} }} ",
+                board_alias(n),
+                n
+            )
+        })
+        .collect();
     format!(
-        "query {ROUND_OPERATION}($owner: String!, $name: String!) {{ \
-         repository(owner: $owner, name: $name) {{ {MILESTONES_SELECTION} {OWNER_SELECTION} }} }}"
+        "owner {{ __typename \
+         ... on Organization {{ issueTypes(first: 50) {{ nodes {{ id name }} }} {aliased}}} \
+         ... on User {{ login {aliased}}} }}"
     )
 }
 
-/// Issue the round and parse it. `Err` only for a transport failure or a repo
-/// string that is not `owner/name`; a partly-failed response is an `Ok`
-/// snapshot carrying warnings.
-pub fn fetch_round(gh: &dyn GhGraphql, repo: &str) -> Result<FetchSnapshot> {
+fn round_query(boards: &[u64]) -> String {
+    let owner = owner_selection(boards);
+    format!(
+        "query {ROUND_OPERATION}($owner: String!, $name: String!) {{ \
+         repository(owner: $owner, name: $name) {{ {MILESTONES_SELECTION} {owner} }} }}"
+    )
+}
+
+/// Issue the round and parse it. `boards` are the Projects v2 board numbers
+/// whose field schema this round should resolve. `Err` only for a transport
+/// failure or a repo string that is not `owner/name`; a partly-failed response
+/// is an `Ok` snapshot carrying warnings.
+pub fn fetch_round(gh: &dyn GhGraphql, repo: &str, boards: &[u64]) -> Result<FetchSnapshot> {
     let (owner, name) = gh_schema::split_repo(repo)?;
     let resp = gh.graphql(
-        &round_query(),
+        &round_query(boards),
         &[
             ("owner", GqlVar::Str(owner.to_string())),
             ("name", GqlVar::Str(name.to_string())),
         ],
     )?;
-    Ok(parse_round(&resp))
+    Ok(parse_round(&resp, boards))
 }
 
 /// [`fetch_round`] with a transport failure folded into the same shape a wholly
 /// failed response produces: every subtree unknown, one warning. Callers that
 /// must not abort a sync on an unreachable API use this and let each consumer
 /// keep its prior cache.
-pub fn fetch_round_best_effort(gh: &dyn GhGraphql, repo: &str) -> FetchSnapshot {
-    match fetch_round(gh, repo) {
+pub fn fetch_round_best_effort(gh: &dyn GhGraphql, repo: &str, boards: &[u64]) -> FetchSnapshot {
+    match fetch_round(gh, repo, boards) {
         Ok(snapshot) => snapshot,
         Err(e) => FetchSnapshot {
             warnings: vec![warning(format!(
@@ -122,7 +165,7 @@ pub fn fetch_round_best_effort(gh: &dyn GhGraphql, repo: &str) -> FetchSnapshot 
     }
 }
 
-fn parse_round(resp: &Value) -> FetchSnapshot {
+fn parse_round(resp: &Value, boards: &[u64]) -> FetchSnapshot {
     let errors = subtree_errors(resp);
 
     let Some(repo) = resp.pointer("/data/repository").filter(|v| !v.is_null()) else {
@@ -130,8 +173,10 @@ fn parse_round(resp: &Value) -> FetchSnapshot {
             .first()
             .map(|e| e.message.as_str())
             .unwrap_or("the response carried no repository data");
+        let mut warnings = vec![milestones_warning(message), issue_types_warning(message)];
+        warnings.extend(boards.iter().map(|&n| board_fields_warning(n, message)));
         return FetchSnapshot {
-            warnings: vec![milestones_warning(message), issue_types_warning(message)],
+            warnings,
             ..Default::default()
         };
     };
@@ -144,7 +189,7 @@ fn parse_round(resp: &Value) -> FetchSnapshot {
             None
         }
     };
-    let issue_types = match resolve_subtree(&errors, OWNER_PATH, || parse_issue_types(repo)) {
+    let issue_types = match resolve_subtree(&errors, ISSUE_TYPES_PATH, || parse_issue_types(repo)) {
         Ok(issue_types) => Some(issue_types),
         Err(message) => {
             warnings.push(issue_types_warning(&message));
@@ -152,12 +197,35 @@ fn parse_round(resp: &Value) -> FetchSnapshot {
         }
     };
 
+    let mut board_fields = HashMap::new();
+    for &number in boards {
+        match resolve_subtree(&errors, &board_path(number), || {
+            parse_board_fields(repo, number)
+        }) {
+            Ok(schema) => {
+                board_fields.insert(number, schema);
+            }
+            Err(message) => warnings.push(board_fields_warning(number, &message)),
+        }
+    }
+
     FetchSnapshot {
         milestones,
         issue_types,
+        board_fields,
         warnings,
         ..Default::default()
     }
+}
+
+/// `projectV2(number:)` is nullable, so a null board is indistinguishable from
+/// one whose read failed -- both leave the alias with nothing to parse and both
+/// must keep the prior schema. Only a real `fields` connection is an answer.
+fn parse_board_fields(repo: &Value, number: u64) -> Option<BoardFieldSchema> {
+    let nodes = repo
+        .pointer(&format!("/owner/{}/fields/nodes", board_alias(number)))
+        .filter(|nodes| nodes.is_array())?;
+    Some(gh_schema::parse_project_fields(nodes, number))
 }
 
 /// `Repository.milestones` is `MilestoneConnection!`, so a missing or null value
@@ -309,6 +377,15 @@ fn milestones_warning(message: &str) -> RefreshWarning {
     ))
 }
 
+/// Verbatim the string the per-board schema fetch emitted before the round, so
+/// a user who has seen it once reads the same sentence after the cut-over.
+fn board_fields_warning(number: u64, message: &str) -> RefreshWarning {
+    warning(format!(
+        "could not refresh field schema for board {} (keeping prior, projects need `gh auth refresh -s project`): {}",
+        number, message
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,9 +431,255 @@ mod tests {
         })
     }
 
+    /// One board's `fields` connection: a `Status` single-select whose option
+    /// ids are derived from `field_id`, so two boards in one response never
+    /// share an id.
+    fn board_node(field_id: &str, options: &[&str]) -> Value {
+        let opts: Vec<Value> = options
+            .iter()
+            .map(|name| {
+                serde_json::json!({
+                    "id": format!("{}_{}", field_id, name.to_lowercase()),
+                    "name": name
+                })
+            })
+            .collect();
+        serde_json::json!({"fields": {"nodes": [{
+            "__typename": "ProjectV2SingleSelectField",
+            "id": field_id,
+            "name": "Status",
+            "dataType": "SINGLE_SELECT",
+            "options": opts
+        }]}})
+    }
+
+    fn with_boards(mut resp: Value) -> Value {
+        resp["data"]["repository"]["owner"]["b7"] = board_node("PVTSSF_b7", &["Review", "Done"]);
+        resp["data"]["repository"]["owner"]["b9"] = board_node("PVTSSF_b9", &["Triage"]);
+        resp
+    }
+
+    fn status_options(snapshot: &FetchSnapshot, board: u64) -> Vec<&str> {
+        let (_, options, _) = &snapshot.board_fields[&board];
+        options.iter().map(|o| o.name.as_str()).collect()
+    }
+
+    // The alias trick RFC-065 turns on: one selection per board, spliced into
+    // both owner fragments, so the request count does not grow with the number
+    // of boards and does not depend on the account kind.
+    #[test]
+    fn every_board_is_aliased_into_both_owner_fragments_from_one_selection() {
+        let query = round_query(&[7, 9]);
+        let (organization, user) = query
+            .split_once("... on User")
+            .expect("the query carries a User fragment");
+
+        for alias in ["b7: projectV2(number: 7)", "b9: projectV2(number: 9)"] {
+            assert!(organization.contains(alias), "Organization: {}", query);
+            assert!(user.contains(alias), "User: {}", query);
+        }
+        assert_eq!(
+            query.matches(PROJECT_FIELDS_SELECTION).count(),
+            4,
+            "both fragments must splice the one shared fields selection: {}",
+            query
+        );
+    }
+
+    #[test]
+    fn an_org_owned_round_yields_every_boards_field_schema() {
+        let snapshot = parse_round(&with_boards(org_owned_response()), &[7, 9]);
+
+        assert_eq!(
+            snapshot
+                .issue_types
+                .as_ref()
+                .expect("issue types resolved")
+                .len(),
+            2
+        );
+        assert_eq!(status_options(&snapshot, 7), vec!["Review", "Done"]);
+        assert_eq!(status_options(&snapshot, 9), vec!["Triage"]);
+        let (fields, _, _) = &snapshot.board_fields[&7];
+        assert_eq!(fields[0].project_number, 7);
+        assert_eq!(fields[0].id, "PVTSSF_b7");
+        assert!(snapshot.warnings.is_empty(), "{:?}", snapshot.warnings);
+    }
+
+    // The point of aliasing into both fragments: a user-owned repo answers every
+    // board through the `User` fragment in the same one response. `issueTypes`
+    // is simply absent (an Organization-only field), which is an answer, not a
+    // failure, so nothing warns.
+    #[test]
+    fn a_user_owned_round_resolves_every_board_through_the_user_fragment() {
+        let resp = with_boards(user_owned_response());
+        assert_eq!(resp["data"]["repository"]["owner"]["__typename"], "User");
+        assert!(resp["data"]["repository"]["owner"]
+            .get("issueTypes")
+            .is_none());
+
+        let snapshot = parse_round(&resp, &[7, 9]);
+
+        assert_eq!(status_options(&snapshot, 7), vec!["Review", "Done"]);
+        assert_eq!(status_options(&snapshot, 9), vec!["Triage"]);
+        assert_eq!(snapshot.issue_types, Some(Vec::new()));
+        assert!(snapshot.warnings.is_empty(), "{:?}", snapshot.warnings);
+    }
+
+    // A token without the `project` scope fails one board and nothing else.
+    // Every other subtree -- milestones, issue types, the other board -- still
+    // lands, and the one warning names the board so its prior ids are kept.
+    #[test]
+    fn a_partial_response_fails_only_the_board_its_error_path_names() {
+        let mut resp = with_boards(org_owned_response());
+        resp["data"]["repository"]["owner"]["b7"] = Value::Null;
+        resp["errors"] = serde_json::json!([{
+            "type": "FORBIDDEN",
+            "message": "Your token has not been granted the required scopes",
+            "path": ["repository", "owner", "b7"]
+        }]);
+
+        let snapshot = parse_round(&resp, &[7, 9]);
+
+        assert_eq!(
+            snapshot
+                .milestones
+                .as_ref()
+                .expect("milestones resolved")
+                .len(),
+            2
+        );
+        assert_eq!(
+            snapshot
+                .issue_types
+                .as_ref()
+                .expect("issue types resolved")
+                .len(),
+            2
+        );
+        assert_eq!(status_options(&snapshot, 9), vec!["Triage"]);
+        assert!(
+            !snapshot.board_fields.contains_key(&7),
+            "an unresolved board must be absent, never an empty schema"
+        );
+        assert_eq!(snapshot.warnings.len(), 1, "{:?}", snapshot.warnings);
+        assert_eq!(
+            snapshot.warnings[0].message,
+            "could not refresh field schema for board 7 (keeping prior, projects need \
+             `gh auth refresh -s project`): Your token has not been granted the required scopes"
+        );
+    }
+
+    // `projectV2(number:)` is nullable, so GitHub can null a board without an
+    // `errors[]` entry -- a board number that resolves to nothing. Unknown, not
+    // an empty schema, or the next save would wipe that board's ids.
+    #[test]
+    fn a_null_board_with_no_error_entry_is_unknown_not_empty() {
+        let mut resp = with_boards(org_owned_response());
+        resp["data"]["repository"]["owner"]["b7"] = Value::Null;
+
+        let snapshot = parse_round(&resp, &[7, 9]);
+
+        assert!(!snapshot.board_fields.contains_key(&7));
+        assert_eq!(status_options(&snapshot, 9), vec!["Triage"]);
+        assert_eq!(snapshot.warnings.len(), 1, "{:?}", snapshot.warnings);
+        assert!(
+            snapshot.warnings[0]
+                .message
+                .starts_with("could not refresh field schema for board 7 (keeping prior,"),
+            "{}",
+            snapshot.warnings[0].message
+        );
+    }
+
+    // A board with no fields at all answered, so it is a known empty set: the
+    // consumer must drop that board's stale ids rather than keep them.
+    #[test]
+    fn a_board_with_an_empty_field_connection_is_a_known_empty_schema() {
+        let mut resp = with_boards(org_owned_response());
+        resp["data"]["repository"]["owner"]["b7"] = serde_json::json!({"fields": {"nodes": []}});
+
+        let snapshot = parse_round(&resp, &[7, 9]);
+
+        assert_eq!(snapshot.board_fields[&7], Default::default());
+        assert!(snapshot.warnings.is_empty(), "{:?}", snapshot.warnings);
+    }
+
+    // The whole owner failing takes issue types and every board with it, but
+    // leaves milestones alone -- they hang off the repository, not the owner.
+    #[test]
+    fn a_failed_owner_subtree_fails_issue_types_and_every_board() {
+        let mut resp = with_boards(org_owned_response());
+        resp["data"]["repository"]["owner"] = Value::Null;
+        resp["errors"] = serde_json::json!([{
+            "message": "Resource not accessible by integration",
+            "path": ["repository", "owner"]
+        }]);
+
+        let snapshot = parse_round(&resp, &[7, 9]);
+
+        assert_eq!(snapshot.milestones.expect("milestones resolved").len(), 2);
+        assert_eq!(snapshot.issue_types, None);
+        assert!(snapshot.board_fields.is_empty());
+        assert_eq!(snapshot.warnings.len(), 3, "{:?}", snapshot.warnings);
+    }
+
+    // The converse of the rule above, and the reason issue types are keyed on
+    // `repository.owner.issueTypes` rather than on the owner: a board failing
+    // must not condemn its sibling selection.
+    #[test]
+    fn a_failed_board_leaves_issue_types_intact_on_a_null_free_owner() {
+        let mut resp = with_boards(org_owned_response());
+        resp["errors"] = serde_json::json!([{
+            "message": "Something went wrong",
+            "path": ["repository", "owner", "b9"]
+        }]);
+
+        let snapshot = parse_round(&resp, &[7, 9]);
+
+        assert_eq!(
+            snapshot
+                .issue_types
+                .as_ref()
+                .expect("issue types resolved")
+                .len(),
+            2
+        );
+        assert_eq!(status_options(&snapshot, 7), vec!["Review", "Done"]);
+        assert!(!snapshot.board_fields.contains_key(&9));
+    }
+
+    // A response that carries no repository at all condemns the boards too, so
+    // each keeps its prior schema and says why.
+    #[test]
+    fn a_null_repository_warns_for_every_requested_board() {
+        let resp = serde_json::json!({
+            "data": {"repository": Value::Null},
+            "errors": [{"message": "Could not resolve to a Repository", "path": ["repository"]}]
+        });
+
+        let snapshot = parse_round(&resp, &[7, 9]);
+
+        assert!(snapshot.board_fields.is_empty());
+        assert_eq!(snapshot.warnings.len(), 4, "{:?}", snapshot.warnings);
+        for number in [7, 9] {
+            assert!(
+                snapshot
+                    .warnings
+                    .iter()
+                    .any(|w| w.message.starts_with(&format!(
+                        "could not refresh field schema for board {}",
+                        number
+                    ))),
+                "{:?}",
+                snapshot.warnings
+            );
+        }
+    }
+
     #[test]
     fn org_owned_round_yields_milestones_and_issue_types() {
-        let snapshot = parse_round(&org_owned_response());
+        let snapshot = parse_round(&org_owned_response(), &[]);
 
         let milestones = snapshot.milestones.expect("milestones resolved");
         assert_eq!(milestones.len(), 2);
@@ -395,7 +718,7 @@ mod tests {
     // doc changes on the first fetch after the cut-over.
     #[test]
     fn milestone_state_arrives_in_the_rest_spelling() {
-        let snapshot = parse_round(&org_owned_response());
+        let snapshot = parse_round(&org_owned_response(), &[]);
         let milestones = snapshot.milestones.unwrap();
         assert_eq!(milestones[0].state, "open");
         assert_eq!(milestones[1].state, "closed");
@@ -406,7 +729,7 @@ mod tests {
     // set with no warning, never to `None` (which would keep stale ids alive).
     #[test]
     fn user_owned_round_yields_no_issue_types_and_no_warning() {
-        let snapshot = parse_round(&user_owned_response());
+        let snapshot = parse_round(&user_owned_response(), &[]);
 
         assert_eq!(snapshot.issue_types, Some(Vec::new()));
         assert_eq!(snapshot.milestones.expect("milestones resolved").len(), 1);
@@ -426,7 +749,7 @@ mod tests {
             "path": ["repository", "owner", "issueTypes"]
         }]);
 
-        let snapshot = parse_round(&resp);
+        let snapshot = parse_round(&resp, &[]);
 
         assert_eq!(snapshot.milestones.expect("milestones resolved").len(), 2);
         assert_eq!(snapshot.issue_types, None);
@@ -447,7 +770,7 @@ mod tests {
             "path": ["repository", "milestones"]
         }]);
 
-        let snapshot = parse_round(&resp);
+        let snapshot = parse_round(&resp, &[]);
 
         assert_eq!(snapshot.milestones, None);
         assert_eq!(snapshot.issue_types.expect("issue types resolved").len(), 2);
@@ -470,7 +793,7 @@ mod tests {
                         This may be the result of a timeout, or it could be a GitHub bug."
         }]);
 
-        let snapshot = parse_round(&resp);
+        let snapshot = parse_round(&resp, &[]);
 
         assert_eq!(snapshot.milestones, None);
         assert_eq!(snapshot.issue_types, None);
@@ -488,7 +811,7 @@ mod tests {
         let mut resp = org_owned_response();
         resp["data"]["repository"]["milestones"] = Value::Null;
 
-        let snapshot = parse_round(&resp);
+        let snapshot = parse_round(&resp, &[]);
 
         assert_eq!(snapshot.milestones, None);
         assert_eq!(snapshot.issue_types.expect("issue types resolved").len(), 2);
@@ -510,7 +833,7 @@ mod tests {
         let mut resp = org_owned_response();
         resp["data"]["repository"]["milestones"] = serde_json::json!({"nodes": []});
 
-        let snapshot = parse_round(&resp);
+        let snapshot = parse_round(&resp, &[]);
 
         assert_eq!(snapshot.milestones, Some(Vec::new()));
         assert!(snapshot.warnings.is_empty());
@@ -529,7 +852,7 @@ mod tests {
             }]
         });
 
-        let snapshot = parse_round(&resp);
+        let snapshot = parse_round(&resp, &[]);
 
         assert_eq!(snapshot.milestones, None);
         assert_eq!(snapshot.issue_types, None);
@@ -565,7 +888,7 @@ mod tests {
                 id: "IT_kwABC".into(),
             }]);
 
-        let snapshot = fetch_round(&gh, "octo-org/repo").unwrap();
+        let snapshot = fetch_round(&gh, "octo-org/repo", &[]).unwrap();
 
         assert_eq!(snapshot.milestones.unwrap().len(), 1);
         assert_eq!(snapshot.issue_types.unwrap().len(), 1);
@@ -583,7 +906,7 @@ mod tests {
 
     #[test]
     fn a_transport_failure_is_a_round_with_nothing_known() {
-        let snapshot = fetch_round_best_effort(&UnreachableGh, "octo-org/repo");
+        let snapshot = fetch_round_best_effort(&UnreachableGh, "octo-org/repo", &[]);
 
         assert_eq!(snapshot.milestones, None);
         assert_eq!(snapshot.issue_types, None);
@@ -596,7 +919,7 @@ mod tests {
     #[test]
     fn a_repo_that_is_not_owner_slash_name_never_reaches_the_transport() {
         let gh = MockGhClient::new();
-        assert!(fetch_round(&gh, "no-slash").is_err());
+        assert!(fetch_round(&gh, "no-slash", &[]).is_err());
         assert!(gh.graphql_calls.borrow().is_empty());
     }
 }

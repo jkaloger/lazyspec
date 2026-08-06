@@ -6,6 +6,7 @@ use crate::engine::github::resolve_repo;
 use crate::engine::issue_body::TypeMatchRule;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
+use crate::engine::store_dispatch;
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use serde::Serialize;
@@ -135,7 +136,11 @@ pub fn run(
     let mut issue_map = IssueMap::load(root)?;
     let cache = IssueCache::new(root);
     // One composed read for the whole setup fetch, not one per type.
-    let round = crate::engine::gh_fetch::fetch_round_best_effort(gh, &repo);
+    let round = crate::engine::gh_fetch::fetch_round_best_effort(
+        gh,
+        &repo,
+        &store_dispatch::authority_board_numbers(config),
+    );
     for w in &round.warnings {
         eprintln!("warning: {}", w.message);
     }

@@ -280,8 +280,12 @@ impl IssueCache {
         }
         // The TTL refresh is not driven by `sync_all`, so it runs its own round
         // for the schema snapshot rather than inheriting one.
-        let round = gh_fetch::fetch_round_best_effort(gh_graphql, repo);
-        warnings.extend(self.refresh_schema_snapshot(gh_graphql, Some(&round), repo, config));
+        let round = gh_fetch::fetch_round_best_effort(
+            gh_graphql,
+            repo,
+            &store_dispatch::authority_board_numbers(config),
+        );
+        warnings.extend(self.refresh_schema_snapshot(Some(&round), config));
         warnings.extend(round.warnings);
 
         Ok(RefreshResult {
@@ -297,16 +301,17 @@ impl IssueCache {
     /// keep the ids they already had, so offline resolution never regresses
     /// because of a board this call did not touch.
     ///
-    /// Issue types come from `fetch`, read once for the whole round rather than
-    /// once per type. `None` -- no round ran, or its owner subtree failed --
-    /// keeps the prior issue types; the round already warned about why, so this
-    /// pass stays silent about it. Per-board failures are individually
-    /// non-fatal, hence one warning each.
+    /// Every value comes from `fetch`, read once for the whole round rather than
+    /// once per type and once per board; this pass issues no request of its own.
+    /// A board the round did not resolve -- absent from `board_fields` -- is
+    /// skipped, and so is everything when there was no round at all. The round
+    /// already warned about each failure, so this pass stays silent.
+    ///
+    /// Boards are visited in `authority_board_numbers` order, not the map's, so
+    /// the persisted file is byte-identical across runs on identical state.
     fn refresh_schema_snapshot(
         &self,
-        gh_graphql: &dyn GhGraphql,
         fetch: Option<&FetchSnapshot>,
-        repo: &str,
         config: &Config,
     ) -> Vec<RefreshWarning> {
         let prior = gh_schema::GhSchemaSnapshot::load(&self.root);
@@ -324,17 +329,12 @@ impl IssueCache {
         snapshot.iterations = prior.iterations;
 
         for number in store_dispatch::authority_board_numbers(config) {
-            match gh_schema::fetch_project_fields(gh_graphql, repo, number) {
-                Ok((fields, options, iterations)) => {
-                    snapshot.replace_board_fields(number, fields, options, iterations)
-                }
-                Err(e) => warnings.push(RefreshWarning {
-                    message: format!(
-                        "could not refresh field schema for board {} (keeping prior, projects need `gh auth refresh -s project`): {}",
-                        number, e
-                    ),
-                }),
-            }
+            let Some((fields, options, iterations)) =
+                fetch.and_then(|f| f.board_fields.get(&number)).cloned()
+            else {
+                continue;
+            };
+            snapshot.replace_board_fields(number, fields, options, iterations);
         }
 
         if let Err(e) = snapshot.save(&self.root) {
@@ -676,7 +676,7 @@ impl IssueCache {
 
         lock.save(&self.root)?;
 
-        warnings.extend(self.refresh_schema_snapshot(gh_graphql, fetch, repo, config));
+        warnings.extend(self.refresh_schema_snapshot(fetch, config));
 
         Ok(FetchResult {
             fetched: issues.len(),
@@ -1117,11 +1117,11 @@ mod tests {
     use crate::engine::config::{NumberingStrategy, StoreBackend};
     use crate::engine::document::DocType;
     use crate::engine::gh::{
-        test_support::MockGhClient, GhAuthor, GhGraphql, GhIssueDependencyApi, GhIssueReader,
-        GhLabel, GqlVar,
+        GhAuthor, GhGraphql, GhIssueDependencyApi, GhIssueReader, GhLabel, GqlVar,
     };
     use anyhow::Result;
     use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
@@ -1308,6 +1308,7 @@ mod tests {
                 return Ok(crate::engine::gh::test_support::round_response(
                     &[],
                     &self.round_issue_types.borrow(),
+                    &[],
                 ));
             }
             let mut responses = self.graphql_responses.borrow_mut();
@@ -1598,7 +1599,10 @@ mod tests {
         }
     }
 
-    fn board_fields_response(field_id: &str, options: &[&str]) -> serde_json::Value {
+    /// A round that resolved one org issue type plus one board's `Status`
+    /// column set, parsed from the connection nodes GitHub would have sent, so
+    /// the fixture exercises the same reader the live round does.
+    fn round_with_board(number: u64, field_id: &str, options: &[&str]) -> FetchSnapshot {
         let opts: Vec<serde_json::Value> = options
             .iter()
             .map(|name| {
@@ -1608,17 +1612,20 @@ mod tests {
                 })
             })
             .collect();
-        serde_json::json!({
-            "data": {"organization": {"projectV2": {"fields": {"nodes": [
-                {
-                    "__typename": "ProjectV2SingleSelectField",
-                    "id": field_id,
-                    "name": "Status",
-                    "dataType": "SINGLE_SELECT",
-                    "options": opts
-                }
-            ]}}}}
-        })
+        let nodes = serde_json::json!([{
+            "__typename": "ProjectV2SingleSelectField",
+            "id": field_id,
+            "name": "Status",
+            "dataType": "SINGLE_SELECT",
+            "options": opts
+        }]);
+        FetchSnapshot {
+            board_fields: HashMap::from([(
+                number,
+                gh_schema::parse_project_fields(&nodes, number),
+            )]),
+            ..round_with_bug_issue_type()
+        }
     }
 
     fn config_with_status_authority(authority: Option<&str>) -> Config {
@@ -1652,15 +1659,13 @@ mod tests {
     #[test]
     fn refresh_schema_snapshot_merges_authority_board_fields() {
         let (cache, tmp) = make_cache();
-        let gh = MockGhClient::new().with_graphql_responses(vec![board_fields_response(
-            "PVTSSF_b7",
-            &["Ready To Start", "In Progress", "Review", "Done"],
-        )]);
 
         let warnings = cache.refresh_schema_snapshot(
-            &gh,
-            Some(&round_with_bug_issue_type()),
-            "octo-org/repo",
+            Some(&round_with_board(
+                7,
+                "PVTSSF_b7",
+                &["Ready To Start", "In Progress", "Review", "Done"],
+            )),
             &config_with_status_authority(Some("PROJECT-7")),
         );
 
@@ -1678,50 +1683,76 @@ mod tests {
         );
     }
 
+    // The board a type nominates is the only one persisted: a round that
+    // resolved a board no type nominates must not leak into the snapshot.
     #[test]
-    fn refresh_schema_snapshot_makes_no_project_calls_without_status_authority() {
+    fn refresh_schema_snapshot_ignores_a_board_no_type_nominates() {
         let (cache, tmp) = make_cache();
-        let gh = MockGhClient::new();
 
         let warnings = cache.refresh_schema_snapshot(
-            &gh,
-            Some(&round_with_bug_issue_type()),
-            "octo-org/repo",
-            &config_with_status_authority(None),
+            Some(&round_with_board(9, "PVTSSF_b9", &["Triage"])),
+            &config_with_status_authority(Some("PROJECT-7")),
         );
 
         assert!(warnings.is_empty(), "warnings: {:?}", warnings);
-        // Issue types ride the round, so persisting them costs no request here.
-        assert!(gh.graphql_calls.borrow().is_empty());
         let saved = gh_schema::GhSchemaSnapshot::load(tmp.path());
         assert!(saved.project_fields.is_empty());
     }
 
     #[test]
-    fn refresh_schema_snapshot_keeps_prior_board_fields_when_project_fetch_fails() {
+    fn refresh_schema_snapshot_persists_issue_types_without_a_status_authority() {
+        let (cache, tmp) = make_cache();
+
+        let warnings = cache.refresh_schema_snapshot(
+            Some(&round_with_bug_issue_type()),
+            &config_with_status_authority(None),
+        );
+
+        assert!(warnings.is_empty(), "warnings: {:?}", warnings);
+        let saved = gh_schema::GhSchemaSnapshot::load(tmp.path());
+        assert_eq!(saved.issue_type_id("Bug"), Some("IT_kwBug"));
+        assert!(saved.project_fields.is_empty());
+    }
+
+    // A board the round could not resolve is absent from `board_fields`, which
+    // is not the same as a board that answered with nothing: the prior ids must
+    // survive. The round already warned about why, so this pass adds none.
+    #[test]
+    fn refresh_schema_snapshot_keeps_prior_board_fields_when_the_round_missed_the_board() {
         let (cache, tmp) = make_cache();
         write_board_7_snapshot(tmp.path(), "Review");
 
-        // No canned response, so the project-fields query errors.
-        let gh = MockGhClient::new();
-
         let warnings = cache.refresh_schema_snapshot(
-            &gh,
             Some(&round_with_bug_issue_type()),
-            "octo-org/repo",
             &config_with_status_authority(Some("PROJECT-7")),
         );
 
-        assert_eq!(warnings.len(), 1, "warnings: {:?}", warnings);
-        assert!(
-            warnings[0].message.contains('7'),
-            "warning should name the board: {}",
-            warnings[0].message
-        );
+        assert!(warnings.is_empty(), "warnings: {:?}", warnings);
         let saved = gh_schema::GhSchemaSnapshot::load(tmp.path());
         assert_eq!(saved.issue_type_id("Bug"), Some("IT_kwBug"));
         assert_eq!(saved.field_id(7, "Status"), Some("PVTSSF_prior"));
         assert_eq!(saved.status_lifecycle(7).unwrap().states, vec!["review"]);
+    }
+
+    // The other side of that rule: a board that answered with an empty field set
+    // is authoritative, so its prior ids are dropped rather than kept alive.
+    #[test]
+    fn refresh_schema_snapshot_clears_a_board_the_round_resolved_as_empty() {
+        let (cache, tmp) = make_cache();
+        write_board_7_snapshot(tmp.path(), "Review");
+
+        let warnings = cache.refresh_schema_snapshot(
+            Some(&FetchSnapshot {
+                board_fields: HashMap::from([(7, Default::default())]),
+                ..round_with_bug_issue_type()
+            }),
+            &config_with_status_authority(Some("PROJECT-7")),
+        );
+
+        assert!(warnings.is_empty(), "warnings: {:?}", warnings);
+        let saved = gh_schema::GhSchemaSnapshot::load(tmp.path());
+        assert!(saved.project_fields.is_empty());
+        assert!(saved.single_select_options.is_empty());
     }
 
     #[test]
@@ -1729,15 +1760,8 @@ mod tests {
         let (cache, tmp) = make_cache();
         write_board_7_snapshot(tmp.path(), "Retired Column");
 
-        let gh = MockGhClient::new().with_graphql_responses(vec![board_fields_response(
-            "PVTSSF_b7",
-            &["Review", "Done"],
-        )]);
-
         let warnings = cache.refresh_schema_snapshot(
-            &gh,
-            Some(&round_with_bug_issue_type()),
-            "octo-org/repo",
+            Some(&round_with_board(7, "PVTSSF_b7", &["Review", "Done"])),
             &config_with_status_authority(Some("PROJECT-7")),
         );
 
@@ -3440,6 +3464,65 @@ mod tests {
             .unwrap();
 
         assert_eq!(cached_status(&tmp, "STORY-10"), "in progress");
+    }
+
+    // The composed round can fail one board and nothing else. When it does, the
+    // board-bound doc keeps its last known column AND the snapshot keeps that
+    // board's prior ids -- the two halves of "a missing `project` scope costs a
+    // warning, never data".
+    #[test]
+    fn a_failed_board_schema_costs_neither_the_docs_status_nor_the_boards_prior_ids() {
+        let (cache, tmp) = make_cache();
+        let type_def = authority_story_type_def();
+        write_board_7_snapshot(tmp.path(), "In Progress");
+
+        cache
+            .write(
+                "STORY-10",
+                "story",
+                "---\ntitle: \"Work\"\ntype: story\nstatus: in progress\nauthor: \"@octocat\"\ndate: 2026-01-01\ntags: []\n---\nplain body\n",
+            )
+            .unwrap();
+
+        // A round that resolved everything except board 7's schema.
+        let round = FetchSnapshot {
+            warnings: vec![RefreshWarning {
+                message: "could not refresh field schema for board 7 (keeping prior, projects \
+                          need `gh auth refresh -s project`): FORBIDDEN"
+                    .to_string(),
+            }],
+            ..round_with_bug_issue_type()
+        };
+
+        let gh = MockReader::new(vec![make_gh_issue(
+            10,
+            "Work",
+            "plain body",
+            &["lazyspec:story"],
+        )]);
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        cache
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                &gh,
+                Some(&round),
+                "owner/repo",
+                &mut issue_map,
+                &[story_match_rule()],
+                &config_with_status_authority(Some("PROJECT-7")),
+            )
+            .unwrap();
+
+        assert_eq!(cached_status(&tmp, "STORY-10"), "in progress");
+        let saved = gh_schema::GhSchemaSnapshot::load(tmp.path());
+        assert_eq!(saved.field_id(7, "Status"), Some("PVTSSF_prior"));
+        assert_eq!(
+            saved.option_id("PVTSSF_prior", "In Progress"),
+            Some("opt_prior")
+        );
     }
 
     // Nothing to carry over: a doc the cache has never seen at a board column

@@ -370,7 +370,8 @@ mod tests {
     use crate::engine::clickup::{ClickupUser, FakeClickupClient};
     use crate::engine::config::{NumberingStrategy, StoreBackend, TypeDef};
     use crate::engine::gh::{
-        GhComment, GhFieldValueInput, GhIssue, GhMilestone, GqlVar, ProjectItem,
+        test_support::GhRequestCounter, GhComment, GhFieldValueInput, GhIssue, GhMilestone, GqlVar,
+        ProjectItem,
     };
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use tempfile::TempDir;
@@ -490,6 +491,84 @@ name = "related-to"
             ..Default::default()
         };
         snapshot.save(root).unwrap();
+    }
+
+    /// The shape RFC-065 is measured against: ten `github-issues` types, one
+    /// `github-milestones` type, and one board nominated as a status authority.
+    fn many_types_config_src() -> String {
+        let mut src = String::from(
+            "[naming]\npattern = \"{type}-{n:03}-{title}.md\"\n\n\
+             [templates]\ndir = \".lazyspec/templates\"\n\n\
+             [github]\nrepo = \"octo-org/repo\"\n\n\
+             [[types]]\nname = \"release\"\nplural = \"releases\"\n\
+             dir = \"docs/releases\"\nprefix = \"RELEASE\"\nstore = \"github-milestones\"\n\n",
+        );
+        for n in 0..10 {
+            let authority = if n == 0 {
+                "status_authority = \"PROJECT-7\"\n"
+            } else {
+                ""
+            };
+            src.push_str(&format!(
+                "[[types]]\nname = \"t{n}\"\nplural = \"t{n}s\"\ndir = \"docs/t{n}\"\n\
+                 prefix = \"T{n}\"\nstore = \"github-issues\"\n{authority}\n"
+            ));
+        }
+        src.push_str("[[relationships]]\nname = \"related-to\"\n");
+        src
+    }
+
+    // STORY-249 AC1/AC2: milestones, org issue types and every authority board's
+    // field schema arrive together. Twelve types' worth of that work costs one
+    // composed request, and no other GraphQL document is issued at all.
+    //
+    // Scoped to the composed round on purpose: per-type issue discovery still
+    // reads through `issue_list`, which ITERATION-358 moves onto the same round.
+    #[test]
+    fn milestone_issue_type_and_board_schema_work_costs_one_composed_request() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let src = many_types_config_src();
+        std::fs::write(root.join(".lazyspec.toml"), &src).unwrap();
+        let config = Config::parse(&src).unwrap();
+
+        let gh = GhRequestCounter::with_board(7, &["Review", "Done"]);
+        run(
+            root,
+            &config,
+            &gh,
+            &MockGitRefClient::new(),
+            &fake_clickup(),
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            gh.round_queries.borrow().len(),
+            1,
+            "one composed round for the whole fetch"
+        );
+        assert!(
+            gh.other_queries.borrow().is_empty(),
+            "no board-schema probe survives the round: {:?}",
+            gh.other_queries.borrow()
+        );
+        assert_eq!(gh.milestone_list_calls.get(), 0);
+        assert_eq!(
+            gh.issue_list_calls.get(),
+            10,
+            "per-type discovery is still one read each -- ITERATION-358's to fold in"
+        );
+
+        // And that one request is what carried the board's schema.
+        let saved = GhSchemaSnapshot::load(root);
+        assert_eq!(saved.field_id(7, "Status"), Some("PVTSSF_b7"));
+        assert_eq!(
+            saved.status_lifecycle(7).unwrap().states,
+            vec!["review", "done"]
+        );
     }
 
     #[test]

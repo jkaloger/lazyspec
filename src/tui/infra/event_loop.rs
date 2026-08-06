@@ -1301,7 +1301,8 @@ mod tests {
 
     use crate::engine::clickup::{ClickupError, ClickupStatus, ClickupTask};
     use crate::engine::clickup_cache;
-    use crate::engine::gh::test_support::MockGhClient;
+    use crate::engine::gh::test_support::{GhRequestCounter, MockGhClient};
+    use crate::engine::gh_schema::GhSchemaSnapshot;
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use std::cell::Cell;
 
@@ -1458,6 +1459,76 @@ mod tests {
             guard.issue_map.get("STORY-42").map(|e| e.node_id.as_str()),
             Some("I_node42"),
             "poll must write the fetched mapping into the shared store's issue_map"
+        );
+    }
+
+    // STORY-249 AC1/AC2, on the surface that pays for it every poll interval:
+    // the background poll must cost the same one composed request the CLI does,
+    // not one probe per type and per board.
+    //
+    // Scoped to the composed round on purpose: per-type issue discovery still
+    // reads through `issue_list`, which ITERATION-358 moves onto the same round.
+    #[test]
+    fn a_poll_costs_one_composed_request_for_milestones_issue_types_and_board_schemas() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        let mut config = Config::default();
+        config.documents.types = vec![TypeDef::test_fixture(
+            "release",
+            StoreBackend::GithubMilestones,
+        )];
+        for n in 0..10 {
+            config.documents.types.push(TypeDef {
+                status_authority: (n == 0).then(|| "PROJECT-7".to_string()),
+                ..TypeDef::test_fixture(&format!("t{n}"), StoreBackend::GithubIssues)
+            });
+        }
+
+        let gh = GhRequestCounter::with_board(7, &["Review", "Done"]);
+        let store = Arc::new(Mutex::new(GithubIssuesStore {
+            client: Box::new(GhCli::new()),
+            root: root.to_path_buf(),
+            repo: "octo-org/repo".to_string(),
+            config: config.clone(),
+            issue_map: IssueMap::load(root).unwrap(),
+            issue_cache: IssueCache::new(root),
+        }));
+
+        poll_sync(
+            root,
+            &config,
+            Some(&store),
+            &gh,
+            &gh,
+            &gh,
+            &MockGitRefClient::new(),
+            &FakeClickupClient::with_tasks(vec![]),
+            None,
+        );
+
+        assert_eq!(
+            gh.round_queries.borrow().len(),
+            1,
+            "one composed round per poll"
+        );
+        assert!(
+            gh.other_queries.borrow().is_empty(),
+            "no board-schema probe survives the round: {:?}",
+            gh.other_queries.borrow()
+        );
+        assert_eq!(gh.milestone_list_calls.get(), 0);
+        assert_eq!(
+            gh.issue_list_calls.get(),
+            10,
+            "per-type discovery is still one read each -- ITERATION-358's to fold in"
+        );
+
+        let saved = GhSchemaSnapshot::load(root);
+        assert_eq!(saved.field_id(7, "Status"), Some("PVTSSF_b7"));
+        assert_eq!(
+            saved.status_lifecycle(7).unwrap().states,
+            vec!["review", "done"]
         );
     }
 

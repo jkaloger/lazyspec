@@ -317,7 +317,11 @@ pub fn sync_all(
 
     let mut round_warnings: Vec<String> = Vec::new();
     if let Some(round) = syncers.round.as_ref() {
-        let snapshot = gh_fetch::fetch_round_best_effort(round.gh, &round.repo);
+        let snapshot = gh_fetch::fetch_round_best_effort(
+            round.gh,
+            &round.repo,
+            &store_dispatch::authority_board_numbers(config),
+        );
         round_warnings = snapshot
             .warnings
             .iter()

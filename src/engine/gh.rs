@@ -1671,10 +1671,10 @@ impl GhGraphql for GhCli {
 
         // `gh api graphql` exits non-zero whenever the response carries a
         // GraphQL `errors` array -- e.g. an org-rooted query against a user
-        // account -- even though the body's `data` still tells callers like
-        // `try_org_then_user` which root resolved. Parse stdout first so that
-        // signal survives; only fall back to the exit-code failure path when
-        // stdout is not a GraphQL response at all.
+        // account, or one failed subtree of a composed round -- even though the
+        // body's `data` still carries everything that did resolve. Parse stdout
+        // first so that signal survives; only fall back to the exit-code failure
+        // path when stdout is not a GraphQL response at all.
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
             if json.get("data").is_some() {
                 return Ok(json);
@@ -1809,6 +1809,7 @@ pub mod test_support {
     pub fn round_response(
         milestones: &[GhMilestone],
         issue_types: &[crate::engine::gh_schema::IssueTypeId],
+        boards: &[(u64, Vec<String>)],
     ) -> serde_json::Value {
         let milestone_nodes: Vec<_> = milestones
             .iter()
@@ -1829,13 +1830,203 @@ pub mod test_support {
             .iter()
             .map(|t| serde_json::json!({"id": t.id, "name": t.name}))
             .collect();
+        let mut owner = serde_json::json!({
+            "__typename": "Organization",
+            "issueTypes": {"nodes": issue_type_nodes}
+        });
+        for (number, columns) in boards {
+            let field_id = format!("PVTSSF_b{}", number);
+            let options: Vec<_> = columns
+                .iter()
+                .map(|name| {
+                    serde_json::json!({
+                        "id": format!("{}_{}", field_id, name.to_lowercase()),
+                        "name": name
+                    })
+                })
+                .collect();
+            owner[format!("b{}", number)] = serde_json::json!({"fields": {"nodes": [{
+                "__typename": "ProjectV2SingleSelectField",
+                "id": field_id,
+                "name": "Status",
+                "dataType": "SINGLE_SELECT",
+                "options": options
+            }]}});
+        }
         serde_json::json!({"data": {"repository": {
             "milestones": {"nodes": milestone_nodes},
-            "owner": {
-                "__typename": "Organization",
-                "issueTypes": {"nodes": issue_type_nodes}
-            }
+            "owner": owner
         }}})
+    }
+
+    /// What one fetch costs at the GitHub seams, counted rather than stubbed.
+    ///
+    /// Every trait a fetch reaches through is implemented here so one double can
+    /// drive both surfaces -- `cli::fetch::run` and the TUI's `poll_sync` -- and
+    /// they can be held to the same count. Reads answer with the configured
+    /// round and nothing else: what is under test is how many requests a fetch
+    /// makes, not what comes back.
+    #[derive(Default)]
+    pub struct GhRequestCounter {
+        pub round_queries: RefCell<Vec<String>>,
+        /// Every GraphQL document that was not a composed round. The point of
+        /// the round is that this stays empty.
+        pub other_queries: RefCell<Vec<String>>,
+        pub issue_list_calls: Cell<usize>,
+        pub milestone_list_calls: Cell<usize>,
+        pub board_columns: Vec<(u64, Vec<String>)>,
+    }
+
+    impl GhRequestCounter {
+        /// A counter whose round answers `board` with the given `Status` columns.
+        pub fn with_board(number: u64, columns: &[&str]) -> Self {
+            Self {
+                board_columns: vec![(
+                    number,
+                    columns.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                )],
+                ..Default::default()
+            }
+        }
+    }
+
+    impl GhGraphql for GhRequestCounter {
+        fn graphql(&self, query: &str, _vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+            if !crate::engine::gh_fetch::is_round_query(query) {
+                self.other_queries.borrow_mut().push(query.to_string());
+                bail!("GhRequestCounter answers composed rounds only");
+            }
+            self.round_queries.borrow_mut().push(query.to_string());
+            Ok(round_response(&[], &[], &self.board_columns))
+        }
+
+        fn project_items(&self, _repo: &str, _content_node_id: &str) -> Result<Vec<ProjectItem>> {
+            Ok(Vec::new())
+        }
+
+        fn update_project_v2_item_field_value(
+            &self,
+            _project_id: &str,
+            _item_id: &str,
+            _field_id: &str,
+            _value: &GhFieldValueInput,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear_project_field(&self, _: &str, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl GhIssueReader for GhRequestCounter {
+        fn issue_list(
+            &self,
+            _repo: &str,
+            _labels: &[String],
+            _json_fields: &[String],
+            _limit: Option<u64>,
+        ) -> Result<Vec<GhIssue>> {
+            self.issue_list_calls.set(self.issue_list_calls.get() + 1);
+            Ok(Vec::new())
+        }
+
+        fn issue_view(&self, _repo: &str, _number: u64) -> Result<GhIssue> {
+            bail!("no issue reads under test")
+        }
+
+        fn issue_comments(&self, _repo: &str, _number: u64) -> Result<Vec<GhComment>> {
+            Ok(Vec::new())
+        }
+    }
+
+    impl GhMilestoneApi for GhRequestCounter {
+        fn milestone_list(&self, _repo: &str) -> Result<Vec<GhMilestone>> {
+            self.milestone_list_calls
+                .set(self.milestone_list_calls.get() + 1);
+            Ok(Vec::new())
+        }
+
+        fn milestone_view(&self, _repo: &str, _number: u64) -> Result<GhMilestone> {
+            bail!("no milestone reads under test")
+        }
+
+        fn milestone_create(
+            &self,
+            _repo: &str,
+            _title: &str,
+            _description: &str,
+            _due_on: Option<&str>,
+            _state: &str,
+        ) -> Result<GhMilestone> {
+            bail!("no milestone writes under test")
+        }
+
+        fn milestone_edit(
+            &self,
+            _repo: &str,
+            _number: u64,
+            _title: Option<&str>,
+            _description: Option<&str>,
+            _due_on: Option<&str>,
+            _state: Option<&str>,
+        ) -> Result<GhMilestone> {
+            bail!("no milestone writes under test")
+        }
+
+        fn milestone_delete(&self, _repo: &str, _number: u64) -> Result<()> {
+            bail!("no milestone writes under test")
+        }
+
+        fn issue_set_milestone(&self, _: &str, _: u64, _: Option<u64>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl GhIssueDependencyApi for GhRequestCounter {
+        fn list_blocked_by(&self, _repo: &str, _blocked_number: u64) -> Result<Vec<u64>> {
+            Ok(Vec::new())
+        }
+        fn add_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
+            Ok(())
+        }
+        fn remove_blocked_by(&self, _repo: &str, _blocked: u64, _blocking: u64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Only here to satisfy the bound `cli::fetch::run` declares. A fetch writes
+    /// nothing, so every method failing loudly is the assertion.
+    impl GhIssueWriter for GhRequestCounter {
+        fn issue_create(&self, _: &str, _: &str, _: &str, _: &[String]) -> Result<GhIssue> {
+            bail!("a fetch must not write issues")
+        }
+        fn issue_edit(
+            &self,
+            _: &str,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &[String],
+            _: &[String],
+        ) -> Result<()> {
+            bail!("a fetch must not write issues")
+        }
+        fn issue_close(&self, _: &str, _: u64) -> Result<()> {
+            bail!("a fetch must not write issues")
+        }
+        fn issue_reopen(&self, _: &str, _: u64) -> Result<()> {
+            bail!("a fetch must not write issues")
+        }
+        fn issue_set_assignee(&self, _: &str, _: u64, _: &[String], _: &[String]) -> Result<()> {
+            bail!("a fetch must not write issues")
+        }
+        fn label_create(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
+            bail!("a fetch must not write labels")
+        }
+        fn label_ensure(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
+            bail!("a fetch must not write labels")
+        }
     }
 
     pub struct MockGhClient {
@@ -2688,6 +2879,7 @@ pub mod test_support {
                 return Ok(round_response(
                     &self.round_milestones.borrow(),
                     &self.round_issue_types.borrow(),
+                    &[],
                 ));
             }
 

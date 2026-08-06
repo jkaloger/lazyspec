@@ -1,7 +1,7 @@
 ---
 title: Board field schemas on the composed owner subtree
 type: iteration
-status: accepted
+status: complete
 author: Jack Kaloger
 date: 2026-08-06
 tags: []
