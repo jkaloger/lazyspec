@@ -134,6 +134,11 @@ pub fn run(
     )?;
     let mut issue_map = IssueMap::load(root)?;
     let cache = IssueCache::new(root);
+    // One composed read for the whole setup fetch, not one per type.
+    let round = crate::engine::gh_fetch::fetch_round_best_effort(gh, &repo);
+    for w in &round.warnings {
+        eprintln!("warning: {}", w.message);
+    }
 
     for type_name in &gh_types {
         let type_def = config
@@ -152,6 +157,7 @@ pub fn run(
             gh,
             gh,
             gh,
+            Some(&round),
             &repo,
             &mut issue_map,
             &all_type_rules,

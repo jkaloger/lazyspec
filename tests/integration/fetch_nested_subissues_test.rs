@@ -61,7 +61,17 @@ impl GhIssueReader for NestingGh {
 }
 
 impl GhGraphql for NestingGh {
-    fn graphql(&self, _query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+    fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+        // The composed fetch round: a user-owned repo with no milestones, so
+        // neither the milestone cache nor the schema snapshot has anything to
+        // write and neither warns.
+        if lazyspec::engine::gh_fetch::is_round_query(query) {
+            return Ok(serde_json::json!({"data": {"repository": {
+                "milestones": {"nodes": []},
+                "owner": {"__typename": "User", "login": "owner"}
+            }}}));
+        }
+
         // Batched parentage query: `ids: [parent_node, ...]` -> `data.nodes`,
         // each `{ id, subIssues: { nodes: [{ id }] } }`.
         if let Some((_, GqlVar::StrList(ids))) = vars.iter().find(|(k, _)| *k == "ids") {

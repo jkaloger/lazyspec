@@ -1,7 +1,7 @@
 ---
 title: One request refreshes milestones, org issue types and every board's field schema
 type: story
-status: accepted
+status: in-progress
 author: Jack Kaloger
 date: 2026-08-06
 tags: []

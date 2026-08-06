@@ -585,6 +585,7 @@ fn sync_tickets(tmp: &TempDir, config: &Config, gh: &BoardGh) -> Vec<SyncOutcome
             issue_map: &mut issue_map,
         }),
         clickup: None,
+        fetch: None,
     };
     let mut syncers = Syncers {
         issue: Some(GhIssueSync {

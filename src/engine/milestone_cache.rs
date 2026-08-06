@@ -4,30 +4,32 @@ use anyhow::Result;
 
 use crate::engine::config::TypeDef;
 use crate::engine::document::{AttrValue, DocMeta, DocType};
-use crate::engine::gh::GhMilestoneApi;
+use crate::engine::gh::GhMilestone;
 use crate::engine::issue_cache::{FetchResult, IssueCache, RefreshWarning};
 use crate::engine::issue_map::{EntryKind, IssueMap};
 use crate::engine::store_dispatch::{milestone_state_to_status, write_cache_file};
 
-/// Fetch all milestones for a `github-milestones` type and materialize them as
-/// cache documents, mapping REST `state` to a lifecycle status. The milestone
-/// number is the document id (`make_id(number)`), mirroring github-issues.
+/// Materialize `milestones` -- read once for the whole fetch round
+/// ([`crate::engine::gh_fetch::fetch_round`]) rather than per type -- as cache
+/// documents, mapping `state` to a lifecycle status. The milestone number is
+/// the document id (`make_id(number)`), mirroring github-issues.
+///
+/// Authoritative for the type: a milestone absent from `milestones` is removed
+/// from the cache, so a caller must pass what the round actually resolved and
+/// never an empty slice standing in for a failed read.
 pub fn fetch_milestones(
     root: &Path,
     type_def: &TypeDef,
-    gh: &impl GhMilestoneApi,
-    repo: &str,
+    milestones: &[GhMilestone],
     issue_map: &mut IssueMap,
 ) -> Result<FetchResult> {
-    let milestones = gh.milestone_list(repo)?;
-
     let cache = IssueCache::new(root);
     let previously: std::collections::HashSet<String> =
         cache.list_cached(&type_def.name).into_iter().collect();
     let mut fetched_ids = std::collections::HashSet::new();
     let mut new_count = 0usize;
 
-    for m in &milestones {
+    for m in milestones {
         let id = type_def.make_id(m.number);
         let mut attributes: std::collections::BTreeMap<String, AttrValue> = Default::default();
         if let Some(due) = &m.due_on {
@@ -85,8 +87,6 @@ pub fn fetch_milestones(
 mod tests {
     use super::*;
     use crate::engine::config::{NumberingStrategy, StoreBackend, TypeDef};
-    use crate::engine::gh::test_support::MockGhMilestoneClient;
-    use crate::engine::gh::GhMilestone;
     use tempfile::TempDir;
 
     fn milestone_type_def() -> TypeDef {
@@ -124,7 +124,7 @@ mod tests {
         let root = tmp.path();
         let td = milestone_type_def();
 
-        let gh = MockGhMilestoneClient::with_milestones(vec![
+        let milestones = vec![
             GhMilestone {
                 number: 3,
                 title: "v1.0".to_string(),
@@ -145,10 +145,10 @@ mod tests {
                 closed_issues: 5,
                 url: String::new(),
             },
-        ]);
+        ];
 
         let mut issue_map = IssueMap::load(root).unwrap();
-        let result = fetch_milestones(root, &td, &gh, "owner/repo", &mut issue_map).unwrap();
+        let result = fetch_milestones(root, &td, &milestones, &mut issue_map).unwrap();
 
         assert_eq!(result.fetched, 2);
         assert_eq!(result.new, 2);

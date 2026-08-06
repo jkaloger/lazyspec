@@ -16,6 +16,31 @@ use lazyspec::engine::gh::{
 use lazyspec::engine::git_ref::GitCli;
 use tempfile::TempDir;
 
+/// The composed fetch round's response for a user-owned repo carrying
+/// `milestones`: no `issueTypes` key, which is what GitHub returns when the
+/// owner is a User rather than an Organization.
+fn round_response(milestones: &[GhMilestone]) -> serde_json::Value {
+    let nodes: Vec<_> = milestones
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "number": m.number,
+                "title": m.title,
+                "description": m.description,
+                "dueOn": m.due_on,
+                "state": m.state.to_uppercase(),
+                "url": m.url,
+                "openIssues": {"totalCount": m.open_issues},
+                "closedIssues": {"totalCount": m.closed_issues}
+            })
+        })
+        .collect();
+    serde_json::json!({"data": {"repository": {
+        "milestones": {"nodes": nodes},
+        "owner": {"__typename": "User", "login": "owner"}
+    }}})
+}
+
 /// A gh fake exposing one issue carrying milestone #1 and one milestone #1.
 /// graphql answers the schema-snapshot and parentage queries with empties so the
 /// fetch path settles a flat cache layout; writes are unused.
@@ -43,7 +68,10 @@ impl GhIssueReader for MilestoneGh {
 }
 
 impl GhGraphql for MilestoneGh {
-    fn graphql(&self, _query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+    fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+        if lazyspec::engine::gh_fetch::is_round_query(query) {
+            return Ok(round_response(&self.milestones));
+        }
         if let Some((_, GqlVar::StrList(ids))) = vars.iter().find(|(k, _)| *k == "ids") {
             let nodes: Vec<_> = ids
                 .iter()

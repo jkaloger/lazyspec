@@ -1,7 +1,7 @@
 ---
 title: 'Composed gh_fetch round: milestones and org issue types'
 type: iteration
-status: accepted
+status: complete
 author: Jack Kaloger
 date: 2026-08-06
 tags: []

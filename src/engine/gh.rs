@@ -1801,6 +1801,43 @@ pub mod test_support {
 
     type GraphqlCall = (String, Vec<(String, GqlVar)>);
 
+    /// A composed fetch-round response ([`crate::engine::gh_fetch`]) in the shape
+    /// GitHub returns it, so a double answering a round drives the real parser
+    /// rather than a hand-built [`crate::engine::gh_fetch::FetchSnapshot`].
+    /// Org-owned: `issueTypes` only ever resolves under the Organization
+    /// fragment.
+    pub fn round_response(
+        milestones: &[GhMilestone],
+        issue_types: &[crate::engine::gh_schema::IssueTypeId],
+    ) -> serde_json::Value {
+        let milestone_nodes: Vec<_> = milestones
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "number": m.number,
+                    "title": m.title,
+                    "description": m.description,
+                    "dueOn": m.due_on,
+                    "state": m.state.to_uppercase(),
+                    "url": m.url,
+                    "openIssues": {"totalCount": m.open_issues},
+                    "closedIssues": {"totalCount": m.closed_issues}
+                })
+            })
+            .collect();
+        let issue_type_nodes: Vec<_> = issue_types
+            .iter()
+            .map(|t| serde_json::json!({"id": t.id, "name": t.name}))
+            .collect();
+        serde_json::json!({"data": {"repository": {
+            "milestones": {"nodes": milestone_nodes},
+            "owner": {
+                "__typename": "Organization",
+                "issueTypes": {"nodes": issue_type_nodes}
+            }
+        }}})
+    }
+
     pub struct MockGhClient {
         pub auth: AuthStatus,
         pub list_result: Vec<GhIssue>,
@@ -1822,6 +1859,11 @@ pub mod test_support {
         pub next_issue_number: Cell<u64>,
         pub graphql_responses: RefCell<Vec<serde_json::Value>>,
         pub graphql_calls: RefCell<Vec<GraphqlCall>>,
+        /// What a composed fetch round resolves. Answered off to the side of
+        /// `graphql_responses` so a test seeding a specific query's response
+        /// does not have to account for the round the fetch path now runs.
+        pub round_milestones: RefCell<Vec<GhMilestone>>,
+        pub round_issue_types: RefCell<Vec<crate::engine::gh_schema::IssueTypeId>>,
         pub view_comments: RefCell<Vec<GhComment>>,
         pub comments_call_count: Cell<usize>,
         pub project_items: RefCell<Vec<ProjectItem>>,
@@ -1867,6 +1909,8 @@ pub mod test_support {
                 next_issue_number: Cell::new(1),
                 graphql_responses: RefCell::new(vec![]),
                 graphql_calls: RefCell::new(vec![]),
+                round_milestones: RefCell::new(vec![]),
+                round_issue_types: RefCell::new(vec![]),
                 view_comments: RefCell::new(vec![]),
                 comments_call_count: Cell::new(0),
                 project_items: RefCell::new(vec![]),
@@ -1919,6 +1963,21 @@ pub mod test_support {
 
         pub fn with_graphql_responses(mut self, responses: Vec<serde_json::Value>) -> Self {
             self.graphql_responses = RefCell::new(responses);
+            self
+        }
+
+        /// The milestones a composed fetch round resolves for this client.
+        pub fn with_milestones(mut self, milestones: Vec<GhMilestone>) -> Self {
+            self.round_milestones = RefCell::new(milestones);
+            self
+        }
+
+        /// The org issue types a composed fetch round resolves for this client.
+        pub fn with_issue_types(
+            mut self,
+            issue_types: Vec<crate::engine::gh_schema::IssueTypeId>,
+        ) -> Self {
+            self.round_issue_types = RefCell::new(issue_types);
             self
         }
 
@@ -2624,6 +2683,13 @@ pub mod test_support {
             self.graphql_calls
                 .borrow_mut()
                 .push((query.to_string(), recorded));
+
+            if crate::engine::gh_fetch::is_round_query(query) {
+                return Ok(round_response(
+                    &self.round_milestones.borrow(),
+                    &self.round_issue_types.borrow(),
+                ));
+            }
 
             let mut responses = self.graphql_responses.borrow_mut();
             if responses.is_empty() {

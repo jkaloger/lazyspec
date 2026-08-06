@@ -9,6 +9,7 @@ use crate::engine::gh::{
     search_issue_numbers_by_type, GhGraphql, GhIssue, GhIssueDependencyApi, GhIssueReader,
     ISSUE_TYPE_SEARCH_PAGE_SIZE,
 };
+use crate::engine::gh_fetch::{self, FetchSnapshot};
 use crate::engine::gh_schema;
 use crate::engine::gh_subissue;
 use crate::engine::issue_body::{self, IssueContext, TypeMatchRule};
@@ -277,7 +278,11 @@ impl IssueCache {
         if search_truncated {
             warnings.push(search_truncation_warning(&type_def.name));
         }
-        warnings.extend(self.refresh_schema_snapshot(gh_graphql, repo, config));
+        // The TTL refresh is not driven by `sync_all`, so it runs its own round
+        // for the schema snapshot rather than inheriting one.
+        let round = gh_fetch::fetch_round_best_effort(gh_graphql, repo);
+        warnings.extend(self.refresh_schema_snapshot(gh_graphql, Some(&round), repo, config));
+        warnings.extend(round.warnings);
 
         Ok(RefreshResult {
             refreshed,
@@ -286,42 +291,33 @@ impl IssueCache {
         })
     }
 
-    /// Best-effort fetch + persist of the native field schema snapshot: org
-    /// issue types, plus the project fields of every board a type nominates as
-    /// its status authority. A merge, not an overwrite -- boards that are not
-    /// re-fetched keep the ids they already had, so offline resolution never
-    /// regresses because of a board this call did not touch.
+    /// Persist the native field schema snapshot: the round's org issue types,
+    /// plus the project fields of every board a type nominates as its status
+    /// authority. A merge, not an overwrite -- boards that are not re-fetched
+    /// keep the ids they already had, so offline resolution never regresses
+    /// because of a board this call did not touch.
     ///
-    /// On GraphQL failure, the prior snapshot on disk is left untouched and a
-    /// warning is returned; offline validation still works against it. Per-board
-    /// failures are individually non-fatal, hence one warning each.
-    ///
-    /// Issue types are an org-only GitHub feature (a user-owned repo has none),
-    /// so that query failing is expected there and must not block the board
-    /// loop below it -- the two are unrelated schema pieces fetched in one
-    /// pass, not a single all-or-nothing call.
+    /// Issue types come from `fetch`, read once for the whole round rather than
+    /// once per type. `None` -- no round ran, or its owner subtree failed --
+    /// keeps the prior issue types; the round already warned about why, so this
+    /// pass stays silent about it. Per-board failures are individually
+    /// non-fatal, hence one warning each.
     fn refresh_schema_snapshot(
         &self,
         gh_graphql: &dyn GhGraphql,
+        fetch: Option<&FetchSnapshot>,
         repo: &str,
         config: &Config,
     ) -> Vec<RefreshWarning> {
         let prior = gh_schema::GhSchemaSnapshot::load(&self.root);
         let mut warnings = Vec::new();
-        let mut snapshot = match gh_schema::fetch_snapshot(gh_graphql, repo) {
-            Ok(snapshot) => snapshot,
-            Err(e) => {
-                warnings.push(RefreshWarning {
-                    message: format!(
-                        "could not refresh gh schema snapshot (keeping prior issue types, projects need `gh auth refresh -s project`): {}",
-                        e
-                    ),
-                });
-                gh_schema::GhSchemaSnapshot {
-                    issue_types: prior.issue_types.clone(),
-                    ..Default::default()
-                }
-            }
+        let issue_types = fetch
+            .and_then(|f| f.issue_types.clone())
+            .unwrap_or_else(|| prior.issue_types.clone());
+        let mut snapshot = gh_schema::GhSchemaSnapshot {
+            issue_types,
+            fetched_at: Utc::now().to_rfc3339(),
+            ..Default::default()
         };
         snapshot.project_fields = prior.project_fields;
         snapshot.single_select_options = prior.single_select_options;
@@ -385,6 +381,7 @@ impl IssueCache {
         gh: &dyn GhIssueReader,
         gh_graphql: &dyn GhGraphql,
         gh_dependency: &dyn GhIssueDependencyApi,
+        fetch: Option<&FetchSnapshot>,
         repo: &str,
         issue_map: &mut IssueMap,
         known_types: &[TypeMatchRule],
@@ -679,7 +676,7 @@ impl IssueCache {
 
         lock.save(&self.root)?;
 
-        warnings.extend(self.refresh_schema_snapshot(gh_graphql, repo, config));
+        warnings.extend(self.refresh_schema_snapshot(gh_graphql, fetch, repo, config));
 
         Ok(FetchResult {
             fetched: issues.len(),
@@ -1246,6 +1243,7 @@ mod tests {
         list_labels: RefCell<Vec<Vec<String>>>,
         graphql_responses: RefCell<Vec<serde_json::Value>>,
         graphql_call_count: AtomicUsize,
+        round_issue_types: RefCell<Vec<gh_schema::IssueTypeId>>,
         view_issues: Vec<GhIssue>,
         view_call_count: AtomicUsize,
     }
@@ -1259,6 +1257,7 @@ mod tests {
                 list_labels: RefCell::new(vec![]),
                 graphql_responses: RefCell::new(vec![]),
                 graphql_call_count: AtomicUsize::new(0),
+                round_issue_types: RefCell::new(vec![]),
                 view_issues: vec![],
                 view_call_count: AtomicUsize::new(0),
             }
@@ -1271,6 +1270,12 @@ mod tests {
 
         fn with_graphql_responses(self, responses: Vec<serde_json::Value>) -> Self {
             *self.graphql_responses.borrow_mut() = responses;
+            self
+        }
+
+        /// The org issue types a composed fetch round resolves for this double.
+        fn with_issue_types(self, issue_types: Vec<gh_schema::IssueTypeId>) -> Self {
+            *self.round_issue_types.borrow_mut() = issue_types;
             self
         }
 
@@ -1297,8 +1302,14 @@ mod tests {
     }
 
     impl GhGraphql for MockReader {
-        fn graphql(&self, _query: &str, _vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+        fn graphql(&self, query: &str, _vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
             self.graphql_call_count.fetch_add(1, Ordering::SeqCst);
+            if gh_fetch::is_round_query(query) {
+                return Ok(crate::engine::gh::test_support::round_response(
+                    &[],
+                    &self.round_issue_types.borrow(),
+                ));
+            }
             let mut responses = self.graphql_responses.borrow_mut();
             if responses.is_empty() {
                 anyhow::bail!("graphql unreachable");
@@ -1538,18 +1549,16 @@ mod tests {
         cache.write("STORY-10", "story", "old content 1").unwrap();
         backdate_all(&cache, &["STORY-10"]);
 
-        let issue_types_resp = serde_json::json!({
-            "data": { "organization": { "issueTypes": {
-                "nodes": [{"id": "IT_kwBug", "name": "Bug"}]
-            } } }
-        });
         let gh = MockReader::new(vec![make_gh_issue(
             10,
             "STORY-001 First",
             "Body 1",
             &["lazyspec:story"],
         )])
-        .with_graphql_responses(vec![issue_types_resp]);
+        .with_issue_types(vec![gh_schema::IssueTypeId {
+            name: "Bug".to_string(),
+            id: "IT_kwBug".to_string(),
+        }]);
 
         let mut issue_map = IssueMap::load(tmp.path()).unwrap();
         let result = cache
@@ -1578,12 +1587,15 @@ mod tests {
         assert_eq!(snapshot.issue_type_id("Bug"), Some("IT_kwBug"));
     }
 
-    fn bug_issue_types_response() -> serde_json::Value {
-        serde_json::json!({
-            "data": { "organization": { "issueTypes": {
-                "nodes": [{"id": "IT_kwBug", "name": "Bug"}]
-            } } }
-        })
+    /// A round that resolved one org issue type and nothing else.
+    fn round_with_bug_issue_type() -> FetchSnapshot {
+        FetchSnapshot {
+            issue_types: Some(vec![gh_schema::IssueTypeId {
+                name: "Bug".to_string(),
+                id: "IT_kwBug".to_string(),
+            }]),
+            ..Default::default()
+        }
     }
 
     fn board_fields_response(field_id: &str, options: &[&str]) -> serde_json::Value {
@@ -1640,16 +1652,14 @@ mod tests {
     #[test]
     fn refresh_schema_snapshot_merges_authority_board_fields() {
         let (cache, tmp) = make_cache();
-        let gh = MockGhClient::new().with_graphql_responses(vec![
-            bug_issue_types_response(),
-            board_fields_response(
-                "PVTSSF_b7",
-                &["Ready To Start", "In Progress", "Review", "Done"],
-            ),
-        ]);
+        let gh = MockGhClient::new().with_graphql_responses(vec![board_fields_response(
+            "PVTSSF_b7",
+            &["Ready To Start", "In Progress", "Review", "Done"],
+        )]);
 
         let warnings = cache.refresh_schema_snapshot(
             &gh,
+            Some(&round_with_bug_issue_type()),
             "octo-org/repo",
             &config_with_status_authority(Some("PROJECT-7")),
         );
@@ -1671,16 +1681,18 @@ mod tests {
     #[test]
     fn refresh_schema_snapshot_makes_no_project_calls_without_status_authority() {
         let (cache, tmp) = make_cache();
-        let gh = MockGhClient::new().with_graphql_responses(vec![bug_issue_types_response()]);
+        let gh = MockGhClient::new();
 
         let warnings = cache.refresh_schema_snapshot(
             &gh,
+            Some(&round_with_bug_issue_type()),
             "octo-org/repo",
             &config_with_status_authority(None),
         );
 
         assert!(warnings.is_empty(), "warnings: {:?}", warnings);
-        assert_eq!(gh.graphql_calls.borrow().len(), 1);
+        // Issue types ride the round, so persisting them costs no request here.
+        assert!(gh.graphql_calls.borrow().is_empty());
         let saved = gh_schema::GhSchemaSnapshot::load(tmp.path());
         assert!(saved.project_fields.is_empty());
     }
@@ -1690,12 +1702,12 @@ mod tests {
         let (cache, tmp) = make_cache();
         write_board_7_snapshot(tmp.path(), "Review");
 
-        // Only the issue-types response is canned; the project-fields query then
-        // runs out of responses and errors.
-        let gh = MockGhClient::new().with_graphql_responses(vec![bug_issue_types_response()]);
+        // No canned response, so the project-fields query errors.
+        let gh = MockGhClient::new();
 
         let warnings = cache.refresh_schema_snapshot(
             &gh,
+            Some(&round_with_bug_issue_type()),
             "octo-org/repo",
             &config_with_status_authority(Some("PROJECT-7")),
         );
@@ -1717,13 +1729,14 @@ mod tests {
         let (cache, tmp) = make_cache();
         write_board_7_snapshot(tmp.path(), "Retired Column");
 
-        let gh = MockGhClient::new().with_graphql_responses(vec![
-            bug_issue_types_response(),
-            board_fields_response("PVTSSF_b7", &["Review", "Done"]),
-        ]);
+        let gh = MockGhClient::new().with_graphql_responses(vec![board_fields_response(
+            "PVTSSF_b7",
+            &["Review", "Done"],
+        )]);
 
         let warnings = cache.refresh_schema_snapshot(
             &gh,
+            Some(&round_with_bug_issue_type()),
             "octo-org/repo",
             &config_with_status_authority(Some("PROJECT-7")),
         );
@@ -2042,6 +2055,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -2133,6 +2147,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -2147,6 +2162,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[ticket_match_rule()],
@@ -2201,6 +2217,7 @@ mod tests {
                 &seed_gh,
                 &seed_gh,
                 &seed_gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -2214,6 +2231,7 @@ mod tests {
                 &seed_gh,
                 &seed_gh,
                 &seed_gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[ticket_match_rule()],
@@ -2329,12 +2347,23 @@ mod tests {
     }
 
     #[test]
-    fn test_fetch_all_collects_schema_snapshot_warning() {
+    // A round that resolved nothing (transport failure, or none run at all)
+    // must leave the ids already on disk alone: the fetch still writes its
+    // issues, and offline resolution keeps working against the prior schema.
+    // The failure itself is the round's to report, so this pass adds no warning.
+    fn test_fetch_all_without_a_round_keeps_prior_issue_types() {
         let (cache, tmp) = make_cache();
         let type_def = story_type_def();
+        gh_schema::GhSchemaSnapshot {
+            issue_types: vec![gh_schema::IssueTypeId {
+                name: "Bug".to_string(),
+                id: "IT_kwPrior".to_string(),
+            }],
+            ..Default::default()
+        }
+        .save(tmp.path())
+        .unwrap();
 
-        // No graphql_responses -> snapshot refresh fails -> warning is data,
-        // not stderr.
         let gh = MockReader::new(vec![make_gh_issue(
             10,
             "STORY-001 First",
@@ -2350,6 +2379,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -2358,13 +2388,53 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.fetched, 1);
-        assert!(
-            result
-                .warnings
-                .iter()
-                .any(|w| w.message.contains("could not refresh gh schema snapshot")),
-            "schema-snapshot failure should surface as a returned warning: {:?}",
-            result.warnings
+        assert!(result.warnings.is_empty(), "got: {:?}", result.warnings);
+        let saved = gh_schema::GhSchemaSnapshot::load(tmp.path());
+        assert_eq!(saved.issue_type_id("Bug"), Some("IT_kwPrior"));
+    }
+
+    // A round that resolved a user-owned repo's (empty) issue types is an
+    // answer, so it replaces what was on disk rather than being mistaken for a
+    // failed read.
+    #[test]
+    fn test_fetch_all_with_an_empty_round_clears_stale_issue_types() {
+        let (cache, tmp) = make_cache();
+        let type_def = story_type_def();
+        gh_schema::GhSchemaSnapshot {
+            issue_types: vec![gh_schema::IssueTypeId {
+                name: "Bug".to_string(),
+                id: "IT_kwPrior".to_string(),
+            }],
+            ..Default::default()
+        }
+        .save(tmp.path())
+        .unwrap();
+
+        let gh = MockReader::new(vec![]);
+        let round = FetchSnapshot {
+            issue_types: Some(Vec::new()),
+            ..Default::default()
+        };
+
+        let mut issue_map = IssueMap::load(tmp.path()).unwrap();
+        cache
+            .fetch_all(
+                tmp.path(),
+                &type_def,
+                &gh,
+                &gh,
+                &gh,
+                Some(&round),
+                "owner/repo",
+                &mut issue_map,
+                &[story_match_rule()],
+                &Config::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            gh_schema::GhSchemaSnapshot::load(tmp.path()).issue_type_id("Bug"),
+            None
         );
     }
 
@@ -2387,6 +2457,7 @@ mod tests {
                 &initial_gh,
                 &initial_gh,
                 &initial_gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -2411,6 +2482,7 @@ mod tests {
                 &updated_gh,
                 &updated_gh,
                 &updated_gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -2460,6 +2532,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -2508,6 +2581,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -2576,6 +2650,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -2623,6 +2698,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -2670,6 +2746,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -2703,6 +2780,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -3043,6 +3121,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -3110,6 +3189,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -3143,6 +3223,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -3172,6 +3253,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -3349,6 +3431,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -3590,6 +3673,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -4024,6 +4108,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -4183,6 +4268,7 @@ mod tests {
                 gh,
                 gh,
                 gh,
+                None,
                 "owner/repo",
                 issue_map,
                 &[story_match_rule()],
@@ -4550,6 +4636,7 @@ mod tests {
                 gh,
                 gh,
                 gh,
+                None,
                 "owner/repo",
                 issue_map,
                 &[story_match_rule()],
@@ -4780,6 +4867,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -4822,6 +4910,7 @@ mod tests {
                 &gh,
                 &gh,
                 &gh,
+                None,
                 "owner/repo",
                 &mut issue_map,
                 &[story_match_rule()],
@@ -4849,6 +4938,7 @@ mod tests {
             &gh,
             &gh,
             &gh,
+            None,
             "owner/repo",
             &mut issue_map,
             &[story_match_rule()],

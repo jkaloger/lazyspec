@@ -13,7 +13,7 @@ use crate::engine::issue_map::IssueMap;
 use crate::engine::status_colors::StatusColors;
 use crate::engine::store_dispatch;
 use crate::engine::sync::{
-    sync_all, ClickupMaps, ClickupSync, GhIssueSync, GhMaps, GhMilestoneSync, GitRefSync,
+    sync_all, ClickupMaps, ClickupSync, GhIssueSync, GhMaps, GhMilestoneSync, GhRound, GitRefSync,
     SyncContext, Syncers,
 };
 use crate::engine::task_map::TaskMap;
@@ -162,16 +162,15 @@ pub fn run(
                 }),
                 _ => None,
             },
+            fetch: None,
         };
 
         let mut syncers = Syncers::default();
+        if let Some(repo) = repo.clone() {
+            syncers.round = Some(GhRound { gh, repo });
+        }
         if !fetch_milestones.is_empty() {
-            syncers.milestone = Some(GhMilestoneSync {
-                gh,
-                repo: repo
-                    .clone()
-                    .expect("repo resolved when a milestone type fetches"),
-            });
+            syncers.milestone = Some(GhMilestoneSync);
         }
         if !fetch_gh.is_empty() {
             syncers.issue = Some(GhIssueSync {

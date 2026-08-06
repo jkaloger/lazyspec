@@ -2,7 +2,7 @@ use crate::engine::clickup::ClickupClient;
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::document::split_frontmatter;
-use crate::engine::gh::{GhCli, GhGraphql, GhIssueDependencyApi, GhIssueReader, GhMilestoneApi};
+use crate::engine::gh::{GhCli, GhGraphql, GhIssueDependencyApi, GhIssueReader};
 use crate::engine::git_ref::{GitCli, GitRefOps};
 use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::issue_body::TypeMatchRule;
@@ -12,7 +12,7 @@ use crate::engine::status_colors::StatusColors;
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
 use crate::engine::sync::{
-    sync_all, ClickupMaps, ClickupSync, GhIssueSync, GhMaps, GhMilestoneSync, GitRefSync,
+    sync_all, ClickupMaps, ClickupSync, GhIssueSync, GhMaps, GhMilestoneSync, GhRound, GitRefSync,
     SyncContext, Syncers,
 };
 use crate::engine::task_map::TaskMap;
@@ -303,7 +303,6 @@ fn poll_sync(
     gh_store: Option<&Arc<Mutex<GithubIssuesStore>>>,
     gh_reader: &dyn GhIssueReader,
     gh_graphql: &dyn GhGraphql,
-    gh_milestone: &dyn GhMilestoneApi,
     gh_dependency: &dyn GhIssueDependencyApi,
     git_ops: &dyn GitRefOps,
     clickup: &dyn ClickupClient,
@@ -357,16 +356,18 @@ fn poll_sync(
                 }),
                 _ => None,
             },
+            fetch: None,
         };
 
         let mut syncers = Syncers::default();
+        if let Some(repo) = repo.clone() {
+            syncers.round = Some(GhRound {
+                gh: gh_graphql,
+                repo,
+            });
+        }
         if has_milestones {
-            if let Some(repo) = repo.clone() {
-                syncers.milestone = Some(GhMilestoneSync {
-                    gh: gh_milestone,
-                    repo,
-                });
-            }
+            syncers.milestone = Some(GhMilestoneSync);
         }
         if has_gh_issues {
             if let Some(repo) = repo.clone() {
@@ -900,7 +901,6 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                             &gh,
                             &gh,
                             &gh,
-                            &gh,
                             &git_ops,
                             &clickup,
                             clickup_token.as_ref().map(|t| t.expose()),
@@ -1301,7 +1301,7 @@ mod tests {
 
     use crate::engine::clickup::{ClickupError, ClickupStatus, ClickupTask};
     use crate::engine::clickup_cache;
-    use crate::engine::gh::test_support::{MockGhClient, MockGhMilestoneClient};
+    use crate::engine::gh::test_support::MockGhClient;
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use std::cell::Cell;
 
@@ -1316,11 +1316,8 @@ mod tests {
 
     // An inert GitHub client for clickup-only poll tests: no github types are
     // configured and no github store is passed, so no method is ever reached.
-    fn inert_gh() -> (MockGhClient, MockGhMilestoneClient) {
-        (
-            MockGhClient::new(),
-            MockGhMilestoneClient::with_milestones(vec![]),
-        )
+    fn inert_gh() -> MockGhClient {
+        MockGhClient::new()
     }
 
     // AC (STORY-203): a poll over a clickup-tasks type bound to a List with
@@ -1344,7 +1341,7 @@ mod tests {
         }];
         let clickup = FakeClickupClient::with_tasks(vec![task]).with_statuses(statuses);
         let git = MockGitRefClient::new();
-        let (reader, milestone) = inert_gh();
+        let reader = inert_gh();
 
         let warnings = poll_sync(
             root,
@@ -1352,7 +1349,6 @@ mod tests {
             None,
             &reader,
             &reader,
-            &milestone,
             &reader,
             &git,
             &clickup,
@@ -1380,7 +1376,7 @@ mod tests {
         // outcome carries an error, folded into warnings, and poll_sync returns.
         let clickup = FakeClickupClient::failing(ClickupError::Timeout);
         let git = MockGitRefClient::new();
-        let (reader, milestone) = inert_gh();
+        let reader = inert_gh();
 
         let warnings = poll_sync(
             root,
@@ -1388,7 +1384,6 @@ mod tests {
             None,
             &reader,
             &reader,
-            &milestone,
             &reader,
             &git,
             &clickup,
@@ -1432,7 +1427,6 @@ mod tests {
             assignees: vec![],
         };
         let gh = MockGhClient::new().with_list_result(vec![gh_issue]);
-        let milestone = MockGhMilestoneClient::with_milestones(vec![]);
         let git = MockGitRefClient::new();
         let clickup = FakeClickupClient::with_tasks(vec![]);
 
@@ -1451,7 +1445,6 @@ mod tests {
             Some(&store),
             &gh,
             &gh,
-            &milestone,
             &gh,
             &git,
             &clickup,

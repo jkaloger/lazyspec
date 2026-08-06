@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -195,8 +194,6 @@ impl GhSchemaSnapshot {
     }
 }
 
-const ISSUE_TYPES_ORG_QUERY: &str = "query($owner: String!) { organization(login: $owner) { issueTypes(first: 50) { nodes { id name } } } }";
-
 const PROJECT_FIELDS_ORG_QUERY: &str = "query($owner: String!, $number: Int!) { organization(login: $owner) { projectV2(number: $number) { fields(first: 50) { nodes { __typename ... on ProjectV2FieldCommon { id name dataType } ... on ProjectV2SingleSelectField { id name dataType options { id name } } ... on ProjectV2IterationField { id name dataType configuration { iterations { id title } } } } } } } }";
 
 const PROJECT_FIELDS_USER_QUERY: &str = "query($owner: String!, $number: Int!) { user(login: $owner) { projectV2(number: $number) { fields(first: 50) { nodes { __typename ... on ProjectV2FieldCommon { id name dataType } ... on ProjectV2SingleSelectField { id name dataType options { id name } } ... on ProjectV2IterationField { id name dataType configuration { iterations { id title } } } } } } } }";
@@ -235,26 +232,6 @@ pub fn try_org_then_user(
     anyhow::bail!("owner did not resolve as an organization or a user")
 }
 
-/// Best-effort fetch of native field ids for `owner/name`. Currently fetches
-/// org-level issue types; project field queries are keyed off a project number
-/// once a project is configured.
-pub fn fetch_snapshot(gh: &dyn GhGraphql, repo: &str) -> Result<GhSchemaSnapshot> {
-    let (owner, _name) = split_repo(repo)?;
-
-    let mut snapshot = GhSchemaSnapshot {
-        fetched_at: Utc::now().to_rfc3339(),
-        ..Default::default()
-    };
-
-    let issue_types_resp = gh.graphql(
-        ISSUE_TYPES_ORG_QUERY,
-        &[("owner", GqlVar::Str(owner.to_string()))],
-    )?;
-    snapshot.issue_types = parse_issue_types(&issue_types_resp);
-
-    Ok(snapshot)
-}
-
 /// Fetch project field/option/iteration ids for a specific project number.
 pub fn fetch_project_fields(
     gh: &dyn GhGraphql,
@@ -276,27 +253,10 @@ pub fn fetch_project_fields(
     Ok(parse_project_fields(&nodes, project_number))
 }
 
-fn split_repo(repo: &str) -> Result<(&str, &str)> {
+pub(crate) fn split_repo(repo: &str) -> Result<(&str, &str)> {
     repo.split_once('/')
         .filter(|(o, n)| !o.is_empty() && !n.is_empty())
         .with_context(|| format!("repo '{}' must be in owner/name form", repo))
-}
-
-fn parse_issue_types(resp: &serde_json::Value) -> Vec<IssueTypeId> {
-    resp.pointer("/data/organization/issueTypes/nodes")
-        .and_then(|n| n.as_array())
-        .map(|nodes| {
-            nodes
-                .iter()
-                .filter_map(|node| {
-                    Some(IssueTypeId {
-                        name: node.get("name")?.as_str()?.to_string(),
-                        id: node.get("id")?.as_str()?.to_string(),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn parse_project_fields(
@@ -373,21 +333,6 @@ mod tests {
     use super::*;
     use crate::engine::gh::test_support::MockGhClient;
     use tempfile::TempDir;
-
-    fn issue_types_response() -> serde_json::Value {
-        serde_json::json!({
-            "data": {
-                "organization": {
-                    "issueTypes": {
-                        "nodes": [
-                            {"id": "IT_kwABC", "name": "Bug"},
-                            {"id": "IT_kwDEF", "name": "Feature"}
-                        ]
-                    }
-                }
-            }
-        })
-    }
 
     /// A one-board field set whose `Status` single-select carries `options` in
     /// the given order. `field_id` distinguishes boards within one snapshot.
@@ -678,25 +623,6 @@ mod tests {
         assert_eq!(loaded.iteration_id("F_2", "Sprint 1"), Some("I_1"));
     }
 
-    // AC4: fetch_snapshot persists ids (not just names)
-    #[test]
-    fn fetch_snapshot_captures_issue_type_ids() {
-        let gh = MockGhClient::new().with_graphql_responses(vec![issue_types_response()]);
-        let snapshot = fetch_snapshot(&gh, "octo-org/repo").unwrap();
-
-        assert_eq!(snapshot.issue_types.len(), 2);
-        assert_eq!(snapshot.issue_type_id("Bug"), Some("IT_kwABC"));
-        assert_eq!(snapshot.issue_type_id("Feature"), Some("IT_kwDEF"));
-        assert!(!snapshot.fetched_at.is_empty());
-
-        let calls = gh.graphql_calls.borrow();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(
-            calls[0].1,
-            vec![("owner".to_string(), GqlVar::Str("octo-org".to_string()))]
-        );
-    }
-
     #[test]
     fn fetch_project_fields_captures_field_option_iteration_ids() {
         let gh = MockGhClient::new().with_graphql_responses(vec![project_fields_response()]);
@@ -760,20 +686,5 @@ mod tests {
         let (fields, _, _) = fetch_project_fields(&gh, "octo-org/repo", 7).unwrap();
         assert_eq!(fields.len(), 2);
         assert_eq!(gh.graphql_calls.borrow().len(), 1);
-    }
-
-    // AC3: user account with no org issue types -> empty set, no error, no warning.
-    #[test]
-    fn fetch_snapshot_user_account_empty_issue_types() {
-        let gh = MockGhClient::new().with_graphql_responses(vec![org_null_response()]);
-        let snapshot = fetch_snapshot(&gh, "jkaloger/lazyspec").unwrap();
-        assert!(snapshot.issue_types.is_empty());
-        assert_eq!(snapshot.issue_type_id("Bug"), None);
-    }
-
-    #[test]
-    fn fetch_snapshot_rejects_bad_repo() {
-        let gh = MockGhClient::new().with_graphql_responses(vec![issue_types_response()]);
-        assert!(fetch_snapshot(&gh, "no-slash").is_err());
     }
 }
