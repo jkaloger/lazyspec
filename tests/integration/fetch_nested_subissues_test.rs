@@ -50,7 +50,7 @@ impl GhIssueReader for NestingGh {
         _json_fields: &[String],
         _limit: Option<u64>,
     ) -> Result<Vec<GhIssue>> {
-        Ok(self.issues.clone())
+        unreachable!("a fetch reads issues off the composed round, never REST")
     }
     fn issue_view(&self, _repo: &str, _number: u64) -> Result<GhIssue> {
         unreachable!("issue_view not used in this test")
@@ -66,10 +66,10 @@ impl GhGraphql for NestingGh {
         // neither the milestone cache nor the schema snapshot has anything to
         // write and neither warns.
         if lazyspec::engine::gh_fetch::is_round_query(query) {
-            return Ok(serde_json::json!({"data": {"repository": {
-                "milestones": {"nodes": []},
-                "owner": {"__typename": "User", "login": "owner"}
-            }}}));
+            return Ok(crate::common::round_response_with_issues(
+                query,
+                &self.issues,
+            ));
         }
 
         // Batched parentage query: `ids: [parent_node, ...]` -> `data.nodes`,

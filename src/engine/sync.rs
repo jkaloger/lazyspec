@@ -14,7 +14,7 @@ use crate::engine::cache_lock::CacheLock;
 use crate::engine::clickup::ClickupClient;
 use crate::engine::clickup_cache;
 use crate::engine::config::{Config, Lifecycle, StoreBackend, TypeDef};
-use crate::engine::gh::{GhGraphql, GhIssueDependencyApi, GhIssueReader};
+use crate::engine::gh::{GhGraphql, GhIssueDependencyApi};
 use crate::engine::gh_fetch::{self, FetchSnapshot};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::issue_body::TypeMatchRule;
@@ -136,7 +136,6 @@ impl TypeSync for GhMilestoneSync {
 /// Refreshes a `github-issues` type, then folds in the per-item project-field
 /// reconcile (best-effort) so both surfaces resolve identically.
 pub struct GhIssueSync<'c> {
-    pub reader: &'c dyn GhIssueReader,
     pub graphql: &'c dyn GhGraphql,
     pub dependency: &'c dyn GhIssueDependencyApi,
     pub repo: String,
@@ -159,7 +158,6 @@ impl TypeSync for GhIssueSync<'_> {
         let result = match cache.fetch_all(
             root,
             td,
-            self.reader,
             self.graphql,
             self.dependency,
             fetch,
@@ -317,9 +315,10 @@ pub fn sync_all(
 
     let mut round_warnings: Vec<String> = Vec::new();
     if let Some(round) = syncers.round.as_ref() {
-        let snapshot = gh_fetch::fetch_round_best_effort(
+        let snapshot = gh_fetch::fetch_all_pages(
             round.gh,
             &round.repo,
+            &gh_fetch::issue_rules(config),
             &store_dispatch::authority_board_numbers(config),
         );
         round_warnings = snapshot
@@ -981,7 +980,6 @@ mod tests {
             }),
             milestone: Some(GhMilestoneSync),
             issue: Some(GhIssueSync {
-                reader: &client,
                 graphql: &client,
                 dependency: &client,
                 repo: "owner/repo".to_string(),
@@ -1064,7 +1062,6 @@ mod tests {
             }),
             milestone: Some(GhMilestoneSync),
             issue: Some(GhIssueSync {
-                reader: &client,
                 graphql: &client,
                 dependency: &client,
                 repo: "owner/repo".to_string(),
@@ -1136,7 +1133,6 @@ mod tests {
             }),
             milestone: Some(GhMilestoneSync),
             issue: Some(GhIssueSync {
-                reader: &issue_client,
                 graphql: &issue_client,
                 dependency: &issue_client,
                 repo: "owner/repo".to_string(),
@@ -1194,8 +1190,11 @@ mod tests {
             fetch: None,
         };
         let mut syncers = Syncers {
+            round: Some(GhRound {
+                gh: &issue_client,
+                repo: "owner/repo".to_string(),
+            }),
             issue: Some(GhIssueSync {
-                reader: &issue_client,
                 graphql: &issue_client,
                 dependency: &dependency_client,
                 repo: "owner/repo".to_string(),
@@ -1262,34 +1261,19 @@ mod tests {
         issues: Vec<GhIssue>,
     }
 
-    impl GhIssueReader for FailingInjectClient {
-        fn issue_list(
-            &self,
-            _repo: &str,
-            _labels: &[String],
-            _fields: &[String],
-            _limit: Option<u64>,
-        ) -> Result<Vec<GhIssue>> {
-            Ok(self.issues.clone())
-        }
-        fn issue_view(&self, _repo: &str, number: u64) -> Result<GhIssue> {
-            Ok(gh_issue_no_milestone(number))
-        }
-        fn issue_comments(
-            &self,
-            _repo: &str,
-            _number: u64,
-        ) -> Result<Vec<crate::engine::gh::GhComment>> {
-            Ok(vec![])
-        }
-    }
-
     impl GhGraphql for FailingInjectClient {
         fn graphql(
             &self,
-            _query: &str,
+            query: &str,
             _vars: &[(&str, crate::engine::gh::GqlVar)],
         ) -> Result<serde_json::Value> {
+            if gh_fetch::is_round_query(query) {
+                return Ok(crate::engine::gh::test_support::with_issue_pages(
+                    query,
+                    crate::engine::gh::test_support::round_response(&[], &[], &[]),
+                    &self.issues,
+                ));
+            }
             anyhow::bail!("graphql unreachable")
         }
         fn project_items(&self, _repo: &str, _content_node_id: &str) -> Result<Vec<ProjectItem>> {
@@ -1363,8 +1347,11 @@ mod tests {
             fetch: None,
         };
         let mut syncers = Syncers {
+            round: Some(GhRound {
+                gh: &issue_client,
+                repo: "owner/repo".to_string(),
+            }),
             issue: Some(GhIssueSync {
-                reader: &issue_client,
                 graphql: &issue_client,
                 dependency: &issue_client,
                 repo: "owner/repo".to_string(),
@@ -1526,7 +1513,6 @@ mod tests {
             }),
             milestone: Some(GhMilestoneSync),
             issue: Some(GhIssueSync {
-                reader: &issue_client,
                 graphql: &issue_client,
                 dependency: &issue_client,
                 repo: "owner/repo".to_string(),
@@ -1579,8 +1565,11 @@ mod tests {
             fetch: None,
         };
         let mut syncers = Syncers {
+            round: Some(GhRound {
+                gh: &issue_client,
+                repo: "owner/repo".to_string(),
+            }),
             issue: Some(GhIssueSync {
-                reader: &issue_client,
                 graphql: &issue_client,
                 dependency: &issue_client,
                 repo: "owner/repo".to_string(),

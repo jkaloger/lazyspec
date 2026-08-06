@@ -10,7 +10,7 @@ use crate::engine::issue_map::{EntryKind, IssueMap};
 use crate::engine::store_dispatch::{milestone_state_to_status, write_cache_file};
 
 /// Materialize `milestones` -- read once for the whole fetch round
-/// ([`crate::engine::gh_fetch::fetch_round`]) rather than per type -- as cache
+/// ([`crate::engine::gh_fetch::fetch_all_pages`]) rather than per type -- as cache
 /// documents, mapping `state` to a lifecycle status. The milestone number is
 /// the document id (`make_id(number)`), mirroring github-issues.
 ///

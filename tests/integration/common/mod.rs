@@ -213,3 +213,57 @@ impl lazyspec::engine::gh::GhIssueReader for NoopGh {
         Ok(vec![])
     }
 }
+
+/// What a composed fetch round (RFC-065) answers a double holding `issues`:
+/// one finished page on every alias `query` composed, under a repository with
+/// no milestones and a user owner -- so neither the milestone cache nor the
+/// schema snapshot has anything to write.
+///
+/// A double that leaves an alias out is telling the parser that type's list
+/// failed, so every alias the query asked for must be answered.
+pub fn round_response_with_issues(
+    query: &str,
+    issues: &[lazyspec::engine::gh::GhIssue],
+) -> serde_json::Value {
+    let nodes: Vec<serde_json::Value> = issues
+        .iter()
+        .map(|issue| {
+            serde_json::json!({
+                "id": issue.id,
+                "number": issue.number,
+                "url": issue.url,
+                "title": issue.title,
+                "body": issue.body,
+                "state": issue.state,
+                "updatedAt": issue.updated_at,
+                "createdAt": issue.created_at,
+                "author": issue.author.as_ref().map(|a| serde_json::json!({"login": a.login})),
+                "issueType": issue.issue_type.as_ref().map(|t| serde_json::json!({"name": t})),
+                "milestone": issue
+                    .milestone
+                    .as_ref()
+                    .map(|m| serde_json::json!({"number": m.number})),
+                "labels": {"nodes": issue.labels.iter()
+                    .map(|l| serde_json::json!({"name": l.name}))
+                    .collect::<Vec<_>>()},
+                "assignees": {"nodes": issue.assignees.iter()
+                    .map(|a| serde_json::json!({"login": a.login}))
+                    .collect::<Vec<_>>()}
+            })
+        })
+        .collect();
+
+    let mut repository = serde_json::json!({
+        "milestones": {"nodes": []},
+        "owner": {"__typename": "User", "login": "owner"}
+    });
+    let mut index = 0;
+    while query.contains(&format!("t{}: issues(", index)) {
+        repository[format!("t{}", index)] = serde_json::json!({
+            "pageInfo": {"hasNextPage": false, "endCursor": serde_json::Value::Null},
+            "nodes": nodes
+        });
+        index += 1;
+    }
+    serde_json::json!({"data": {"repository": repository}})
+}

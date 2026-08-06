@@ -1,7 +1,7 @@
 ---
 title: Composed per-type issue aliases with cursor pagination
 type: iteration
-status: accepted
+status: in-progress
 author: Jack Kaloger
 date: 2026-08-06
 tags: []

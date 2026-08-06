@@ -174,7 +174,6 @@ pub fn run(
         }
         if !fetch_gh.is_empty() {
             syncers.issue = Some(GhIssueSync {
-                reader: gh,
                 graphql: gh,
                 dependency: gh,
                 repo: repo
@@ -503,15 +502,24 @@ name = "related-to"
              [[types]]\nname = \"release\"\nplural = \"releases\"\n\
              dir = \"docs/releases\"\nprefix = \"RELEASE\"\nstore = \"github-milestones\"\n\n",
         );
+        // All four discovery rules across the ten types -- plain label, tag,
+        // native issue type, and both -- so the round composes every alias
+        // shape, not ten copies of one.
         for n in 0..10 {
             let authority = if n == 0 {
                 "status_authority = \"PROJECT-7\"\n"
             } else {
                 ""
             };
+            let rule = match n % 4 {
+                1 => "github_issue_tag = \"triage\"\n",
+                2 => "github_issue_type = \"Bug\"\n",
+                3 => "github_issue_tag = \"triage\"\ngithub_issue_type = \"Bug\"\n",
+                _ => "",
+            };
             src.push_str(&format!(
                 "[[types]]\nname = \"t{n}\"\nplural = \"t{n}s\"\ndir = \"docs/t{n}\"\n\
-                 prefix = \"T{n}\"\nstore = \"github-issues\"\n{authority}\n"
+                 prefix = \"T{n}\"\nstore = \"github-issues\"\n{authority}{rule}\n"
             ));
         }
         src.push_str("[[relationships]]\nname = \"related-to\"\n");
@@ -522,8 +530,6 @@ name = "related-to"
     // field schema arrive together. Twelve types' worth of that work costs one
     // composed request, and no other GraphQL document is issued at all.
     //
-    // Scoped to the composed round on purpose: per-type issue discovery still
-    // reads through `issue_list`, which ITERATION-358 moves onto the same round.
     #[test]
     fn milestone_issue_type_and_board_schema_work_costs_one_composed_request() {
         let tmp = TempDir::new().unwrap();
@@ -556,11 +562,6 @@ name = "related-to"
             gh.other_queries.borrow()
         );
         assert_eq!(gh.milestone_list_calls.get(), 0);
-        assert_eq!(
-            gh.issue_list_calls.get(),
-            10,
-            "per-type discovery is still one read each -- ITERATION-358's to fold in"
-        );
 
         // And that one request is what carried the board's schema.
         let saved = GhSchemaSnapshot::load(root);

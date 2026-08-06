@@ -17,9 +17,14 @@ use lazyspec::engine::git_ref::GitCli;
 use tempfile::TempDir;
 
 /// The composed fetch round's response for a user-owned repo carrying
-/// `milestones`: no `issueTypes` key, which is what GitHub returns when the
-/// owner is a User rather than an Organization.
-fn round_response(milestones: &[GhMilestone]) -> serde_json::Value {
+/// `milestones` and every configured type's `issues`: no `issueTypes` key,
+/// which is what GitHub returns when the owner is a User rather than an
+/// Organization.
+fn round_response(
+    query: &str,
+    milestones: &[GhMilestone],
+    issues: &[GhIssue],
+) -> serde_json::Value {
     let nodes: Vec<_> = milestones
         .iter()
         .map(|m| {
@@ -35,10 +40,9 @@ fn round_response(milestones: &[GhMilestone]) -> serde_json::Value {
             })
         })
         .collect();
-    serde_json::json!({"data": {"repository": {
-        "milestones": {"nodes": nodes},
-        "owner": {"__typename": "User", "login": "owner"}
-    }}})
+    let mut resp = crate::common::round_response_with_issues(query, issues);
+    resp["data"]["repository"]["milestones"] = serde_json::json!({"nodes": nodes});
+    resp
 }
 
 /// A gh fake exposing one issue carrying milestone #1 and one milestone #1.
@@ -57,7 +61,7 @@ impl GhIssueReader for MilestoneGh {
         _json_fields: &[String],
         _limit: Option<u64>,
     ) -> Result<Vec<GhIssue>> {
-        Ok(self.issues.clone())
+        unreachable!("a fetch reads issues off the composed round, never REST")
     }
     fn issue_view(&self, _repo: &str, _number: u64) -> Result<GhIssue> {
         unreachable!("issue_view not used")
@@ -70,7 +74,7 @@ impl GhIssueReader for MilestoneGh {
 impl GhGraphql for MilestoneGh {
     fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
         if lazyspec::engine::gh_fetch::is_round_query(query) {
-            return Ok(round_response(&self.milestones));
+            return Ok(round_response(query, &self.milestones, &self.issues));
         }
         if let Some((_, GqlVar::StrList(ids))) = vars.iter().find(|(k, _)| *k == "ids") {
             let nodes: Vec<_> = ids

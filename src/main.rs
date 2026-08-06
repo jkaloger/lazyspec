@@ -894,7 +894,6 @@ fn refresh_github_cache(cwd: &std::path::Path, config: &Config) {
             cwd,
             type_def,
             &gh,
-            &gh,
             &repo,
             &mut issue_map,
             ttl,

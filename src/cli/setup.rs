@@ -136,9 +136,10 @@ pub fn run(
     let mut issue_map = IssueMap::load(root)?;
     let cache = IssueCache::new(root);
     // One composed read for the whole setup fetch, not one per type.
-    let round = crate::engine::gh_fetch::fetch_round_best_effort(
+    let round = crate::engine::gh_fetch::fetch_all_pages(
         gh,
         &repo,
+        &crate::engine::gh_fetch::issue_rules(config),
         &store_dispatch::authority_board_numbers(config),
     );
     for w in &round.warnings {
@@ -159,7 +160,6 @@ pub fn run(
         let result = cache.fetch_all(
             root,
             type_def,
-            gh,
             gh,
             gh,
             Some(&round),

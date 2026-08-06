@@ -1320,46 +1320,6 @@ fn parse_issue_type_name(resp: &serde_json::Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// Page size of [`ISSUE_TYPE_SEARCH_QUERY`] (`search(... first:)`). Kept in sync
-/// with the literal in that query by hand; used to detect a truncated result.
-pub const ISSUE_TYPE_SEARCH_PAGE_SIZE: usize = 100;
-
-const ISSUE_TYPE_SEARCH_QUERY: &str =
-    "query($searchQuery: String!) { search(query: $searchQuery, type: ISSUE, first: 100) { nodes { ... on Issue { number } } } }";
-
-/// Extract issue numbers from an [`ISSUE_TYPE_SEARCH_QUERY`] response. Defensive
-/// like [`parse_project_items`]: a missing or malformed `nodes` array
-/// yields an empty vec rather than erroring.
-fn parse_search_issue_numbers(resp: &serde_json::Value) -> Vec<u64> {
-    resp.pointer("/data/search/nodes")
-        .and_then(|v| v.as_array())
-        .map(|nodes| {
-            nodes
-                .iter()
-                .filter_map(|n| n.pointer("/number").and_then(|v| v.as_u64()))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Discover the issue numbers in `repo` classified under the native GitHub issue
-/// type `issue_type`, via the GraphQL `search` API (there is no REST list filter
-/// for issue type). Capped at [`ISSUE_TYPE_SEARCH_PAGE_SIZE`]; callers detect a
-/// full page as a truncated result. A free function over the generic
-/// [`GhGraphql::graphql`] seam, mirroring `issue_view`'s ad hoc GraphQL use.
-pub fn search_issue_numbers_by_type(
-    gh_graphql: &dyn GhGraphql,
-    repo: &str,
-    issue_type: &str,
-) -> Result<Vec<u64>> {
-    let search_query = format!("repo:{} is:issue type:\"{}\"", repo, issue_type);
-    let resp = gh_graphql.graphql(
-        ISSUE_TYPE_SEARCH_QUERY,
-        &[("searchQuery", GqlVar::Str(search_query))],
-    )?;
-    Ok(parse_search_issue_numbers(&resp))
-}
-
 impl GhIssueWriter for GhCli {
     fn issue_create(
         &self,
@@ -1859,6 +1819,51 @@ pub mod test_support {
         }}})
     }
 
+    /// Answer every issue alias `query` composed with one finished page holding
+    /// `issues`. `Repository.issues` is non-null, so a double that leaves an
+    /// alias out is telling the parser that type's list failed; an empty page
+    /// says "this type has none", which is what an empty `issues` gives.
+    pub fn with_issue_pages(
+        query: &str,
+        mut resp: serde_json::Value,
+        issues: &[GhIssue],
+    ) -> serde_json::Value {
+        let nodes: Vec<serde_json::Value> = issues.iter().map(issue_node).collect();
+        let mut index = 0;
+        while query.contains(&format!("t{}: issues(", index)) {
+            resp["data"]["repository"][format!("t{}", index)] = serde_json::json!({
+                "pageInfo": {"hasNextPage": false, "endCursor": serde_json::Value::Null},
+                "nodes": nodes
+            });
+            index += 1;
+        }
+        resp
+    }
+
+    /// One issue as `repository.issues.nodes` carries it: REST's fields, with
+    /// `labels` and `assignees` in the `nodes` connection GraphQL wraps them in.
+    pub fn issue_node(issue: &GhIssue) -> serde_json::Value {
+        serde_json::json!({
+            "id": issue.id,
+            "number": issue.number,
+            "url": issue.url,
+            "title": issue.title,
+            "body": issue.body,
+            "state": issue.state,
+            "updatedAt": issue.updated_at,
+            "createdAt": issue.created_at,
+            "author": issue.author.as_ref().map(|a| serde_json::json!({"login": a.login})),
+            "issueType": issue.issue_type.as_ref().map(|t| serde_json::json!({"name": t})),
+            "milestone": issue.milestone.as_ref().map(|m| serde_json::json!({"number": m.number})),
+            "labels": {"nodes": issue.labels.iter()
+                .map(|l| serde_json::json!({"name": l.name}))
+                .collect::<Vec<_>>()},
+            "assignees": {"nodes": issue.assignees.iter()
+                .map(|a| serde_json::json!({"login": a.login}))
+                .collect::<Vec<_>>()}
+        })
+    }
+
     /// What one fetch costs at the GitHub seams, counted rather than stubbed.
     ///
     /// Every trait a fetch reaches through is implemented here so one double can
@@ -1872,7 +1877,6 @@ pub mod test_support {
         /// Every GraphQL document that was not a composed round. The point of
         /// the round is that this stays empty.
         pub other_queries: RefCell<Vec<String>>,
-        pub issue_list_calls: Cell<usize>,
         pub milestone_list_calls: Cell<usize>,
         pub board_columns: Vec<(u64, Vec<String>)>,
     }
@@ -1897,7 +1901,11 @@ pub mod test_support {
                 bail!("GhRequestCounter answers composed rounds only");
             }
             self.round_queries.borrow_mut().push(query.to_string());
-            Ok(round_response(&[], &[], &self.board_columns))
+            Ok(with_issue_pages(
+                query,
+                round_response(&[], &[], &self.board_columns),
+                &[],
+            ))
         }
 
         fn project_items(&self, _repo: &str, _content_node_id: &str) -> Result<Vec<ProjectItem>> {
@@ -1919,6 +1927,9 @@ pub mod test_support {
         }
     }
 
+    /// Both REST issue reads panic rather than count: a fetch resolves every
+    /// type's list from the composed round, so reaching this seam at all is the
+    /// regression, and the trait says so louder than an assertion downstream.
     impl GhIssueReader for GhRequestCounter {
         fn issue_list(
             &self,
@@ -1927,12 +1938,11 @@ pub mod test_support {
             _json_fields: &[String],
             _limit: Option<u64>,
         ) -> Result<Vec<GhIssue>> {
-            self.issue_list_calls.set(self.issue_list_calls.get() + 1);
-            Ok(Vec::new())
+            unreachable!("a fetch reads issues off the composed round, never REST")
         }
 
         fn issue_view(&self, _repo: &str, _number: u64) -> Result<GhIssue> {
-            bail!("no issue reads under test")
+            unreachable!("a fetch reads issues off the composed round, never REST")
         }
 
         fn issue_comments(&self, _repo: &str, _number: u64) -> Result<Vec<GhComment>> {
@@ -2876,10 +2886,14 @@ pub mod test_support {
                 .push((query.to_string(), recorded));
 
             if crate::engine::gh_fetch::is_round_query(query) {
-                return Ok(round_response(
-                    &self.round_milestones.borrow(),
-                    &self.round_issue_types.borrow(),
-                    &[],
+                return Ok(with_issue_pages(
+                    query,
+                    round_response(
+                        &self.round_milestones.borrow(),
+                        &self.round_issue_types.borrow(),
+                        &[],
+                    ),
+                    &self.list_result,
                 ));
             }
 
@@ -3689,39 +3703,6 @@ mod tests {
         assert!(items[0].fields.is_empty());
         assert_eq!(items[1].project_number, 8);
         assert_eq!(items[1].item_id, "", "missing id leaves item_id empty");
-    }
-
-    #[test]
-    fn parse_search_issue_numbers_extracts_numbers_in_order() {
-        let resp = serde_json::json!({
-            "data": {"search": {"nodes": [{"number": 42}, {"number": 7}]}}
-        });
-        assert_eq!(parse_search_issue_numbers(&resp), vec![42, 7]);
-    }
-
-    #[test]
-    fn parse_search_issue_numbers_missing_or_malformed_nodes_is_empty() {
-        let missing = serde_json::json!({"data": {"search": {}}});
-        assert!(parse_search_issue_numbers(&missing).is_empty());
-        let malformed = serde_json::json!({"data": {"search": {"nodes": "nope"}}});
-        assert!(parse_search_issue_numbers(&malformed).is_empty());
-    }
-
-    #[test]
-    fn search_issue_numbers_by_type_sends_repo_and_type_qualified_query() {
-        let client = MockGhClient::new().with_graphql_responses(vec![serde_json::json!({
-            "data": {"search": {"nodes": [{"number": 1}, {"number": 2}]}}
-        })]);
-        let numbers = search_issue_numbers_by_type(&client, "owner/repo", "Bug").unwrap();
-        assert_eq!(numbers, vec![1, 2]);
-        let calls = client.graphql_calls.borrow();
-        assert_eq!(
-            calls[0].1,
-            vec![(
-                "searchQuery".to_string(),
-                GqlVar::Str("repo:owner/repo is:issue type:\"Bug\"".to_string())
-            )]
-        );
     }
 
     #[test]

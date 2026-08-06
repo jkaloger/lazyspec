@@ -2,7 +2,7 @@ use crate::engine::clickup::ClickupClient;
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::document::split_frontmatter;
-use crate::engine::gh::{GhCli, GhGraphql, GhIssueDependencyApi, GhIssueReader};
+use crate::engine::gh::{GhCli, GhGraphql, GhIssueDependencyApi};
 use crate::engine::git_ref::{GitCli, GitRefOps};
 use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::issue_body::TypeMatchRule;
@@ -301,7 +301,6 @@ fn poll_sync(
     root: &Path,
     config: &Config,
     gh_store: Option<&Arc<Mutex<GithubIssuesStore>>>,
-    gh_reader: &dyn GhIssueReader,
     gh_graphql: &dyn GhGraphql,
     gh_dependency: &dyn GhIssueDependencyApi,
     git_ops: &dyn GitRefOps,
@@ -372,7 +371,6 @@ fn poll_sync(
         if has_gh_issues {
             if let Some(repo) = repo.clone() {
                 syncers.issue = Some(GhIssueSync {
-                    reader: gh_reader,
                     graphql: gh_graphql,
                     dependency: gh_dependency,
                     repo,
@@ -900,7 +898,6 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                             poll_store.as_ref(),
                             &gh,
                             &gh,
-                            &gh,
                             &git_ops,
                             &clickup,
                             clickup_token.as_ref().map(|t| t.expose()),
@@ -1350,7 +1347,6 @@ mod tests {
             None,
             &reader,
             &reader,
-            &reader,
             &git,
             &clickup,
             Some("pk_x"),
@@ -1383,7 +1379,6 @@ mod tests {
             root,
             &config,
             None,
-            &reader,
             &reader,
             &reader,
             &git,
@@ -1440,17 +1435,7 @@ mod tests {
             issue_cache: IssueCache::new(root),
         }));
 
-        let _warnings = poll_sync(
-            root,
-            &config,
-            Some(&store),
-            &gh,
-            &gh,
-            &gh,
-            &git,
-            &clickup,
-            None,
-        );
+        let _warnings = poll_sync(root, &config, Some(&store), &gh, &gh, &git, &clickup, None);
 
         // The fetched issue is mapped in the SHARED store's own field, proving
         // the poll borrowed &mut store.issue_map rather than a throwaway copy.
@@ -1462,12 +1447,10 @@ mod tests {
         );
     }
 
-    // STORY-249 AC1/AC2, on the surface that pays for it every poll interval:
-    // the background poll must cost the same one composed request the CLI does,
-    // not one probe per type and per board.
+    // STORY-249 AC1/AC2 and STORY-250 AC9, on the surface that pays for it every
+    // poll interval: the background poll must cost the same one composed request
+    // the CLI does -- issue lists included -- not one probe per type and board.
     //
-    // Scoped to the composed round on purpose: per-type issue discovery still
-    // reads through `issue_list`, which ITERATION-358 moves onto the same round.
     #[test]
     fn a_poll_costs_one_composed_request_for_milestones_issue_types_and_board_schemas() {
         let tmp = TempDir::new().unwrap();
@@ -1478,9 +1461,12 @@ mod tests {
             "release",
             StoreBackend::GithubMilestones,
         )];
+        // All four discovery rules, so the poll composes every alias shape.
         for n in 0..10 {
             config.documents.types.push(TypeDef {
                 status_authority: (n == 0).then(|| "PROJECT-7".to_string()),
+                github_issue_tag: matches!(n % 4, 1 | 3).then(|| "triage".to_string()),
+                github_issue_type: matches!(n % 4, 2 | 3).then(|| "Bug".to_string()),
                 ..TypeDef::test_fixture(&format!("t{n}"), StoreBackend::GithubIssues)
             });
         }
@@ -1501,7 +1487,6 @@ mod tests {
             Some(&store),
             &gh,
             &gh,
-            &gh,
             &MockGitRefClient::new(),
             &FakeClickupClient::with_tasks(vec![]),
             None,
@@ -1518,11 +1503,6 @@ mod tests {
             gh.other_queries.borrow()
         );
         assert_eq!(gh.milestone_list_calls.get(), 0);
-        assert_eq!(
-            gh.issue_list_calls.get(),
-            10,
-            "per-type discovery is still one read each -- ITERATION-358's to fold in"
-        );
 
         let saved = GhSchemaSnapshot::load(root);
         assert_eq!(saved.field_id(7, "Status"), Some("PVTSSF_b7"));

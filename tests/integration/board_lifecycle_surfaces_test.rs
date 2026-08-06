@@ -12,7 +12,9 @@ use lazyspec::engine::issue_cache::IssueCache;
 use lazyspec::engine::issue_map::IssueMap;
 use lazyspec::engine::store::Store;
 use lazyspec::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
-use lazyspec::engine::sync::{sync_all, GhIssueSync, GhMaps, SyncContext, SyncOutcome, Syncers};
+use lazyspec::engine::sync::{
+    sync_all, GhIssueSync, GhMaps, GhRound, SyncContext, SyncOutcome, Syncers,
+};
 use lazyspec::tui::state::App;
 use std::cell::RefCell;
 use std::fs;
@@ -409,6 +411,9 @@ fn status_item(board: u64, status: &str) -> ProjectItem {
     }
 }
 
+/// `issue_list` panics: a fetch reads every type's issues off the composed
+/// round now (RFC-065), so any REST list call is the regression this asserts
+/// against. `issue_view` stays -- a mutation's read-back is correctly one read.
 impl GhIssueReader for BoardGh {
     fn issue_list(
         &self,
@@ -417,7 +422,7 @@ impl GhIssueReader for BoardGh {
         _json_fields: &[String],
         _limit: Option<u64>,
     ) -> Result<Vec<GhIssue>> {
-        Ok(self.issues.clone())
+        unreachable!("a fetch reads issues off the composed round, never REST")
     }
     fn issue_view(&self, _repo: &str, number: u64) -> Result<GhIssue> {
         self.remote_calls
@@ -484,6 +489,12 @@ impl GhIssueWriter for BoardGh {
 impl GhGraphql for BoardGh {
     fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
         self.remote_calls.borrow_mut().push("graphql".to_string());
+        if lazyspec::engine::gh_fetch::is_round_query(query) {
+            return Ok(crate::common::round_response_with_issues(
+                query,
+                &self.issues,
+            ));
+        }
         if query.contains("mutation") {
             self.mutations.borrow_mut().push(query.to_string());
         }
@@ -588,8 +599,11 @@ fn sync_tickets(tmp: &TempDir, config: &Config, gh: &BoardGh) -> Vec<SyncOutcome
         fetch: None,
     };
     let mut syncers = Syncers {
+        round: Some(GhRound {
+            gh,
+            repo: "octo-org/repo".to_string(),
+        }),
         issue: Some(GhIssueSync {
-            reader: gh,
             graphql: gh,
             dependency: gh,
             repo: "octo-org/repo".to_string(),
