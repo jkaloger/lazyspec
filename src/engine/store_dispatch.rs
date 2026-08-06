@@ -624,31 +624,8 @@ fn authority_status_cell(items: &[gh::ProjectItem], board: u64) -> AuthorityCell
         .map_or(AuthorityCell::Empty, AuthorityCell::Set)
 }
 
-/// Whether `meta` needs its project-item board memberships read at all, and
-/// under what content node id -- the same predicate
-/// [`reconcile_project_fields_for_meta`] applies before its own read, factored
-/// out so a caller can resolve every target in a doc set up front and fetch
-/// them in one batched [`GhGraphql::project_items_batch`] call instead of one
-/// [`GhGraphql::project_items`] call per doc (see
-/// `sync::reconcile_project_fields_into_cache`).
-pub fn reconcile_target_node_id(
-    config: &Config,
-    issue_map: &IssueMap,
-    meta: &DocMeta,
-) -> Option<String> {
-    let boards = membership_board_numbers(config, meta);
-    let authority = authority_board_for(config, meta);
-    if boards.is_empty() && authority.is_none() {
-        return None;
-    }
-    issue_map
-        .get(&meta.id)
-        .map(|e| e.node_id.clone())
-        .filter(|n| !n.is_empty())
-}
-
-/// Read the per-item project field values for `meta` across every board it is a
-/// member of and inject them into `meta.attributes` keyed
+/// Inject `items` -- the board memberships and field cells the fetch round read
+/// for `meta`'s issue -- into `meta.attributes` keyed
 /// `PROJECT-{number}.{field_name}`; then, when `meta`'s type nominates a
 /// `status_authority` board, set `meta.status` from that board's `Status` cell.
 /// Standalone (no store) so read-path callers that only hold a borrowed graphql
@@ -675,11 +652,10 @@ pub fn reconcile_target_node_id(
 /// A missing node id, or a doc with neither memberships nor an authority board,
 /// is a no-op.
 ///
-/// The read is a single [`GhGraphql::project_items`] call, so a caller
-/// reconciling many docs at once should not call this in a loop over an
-/// unbounded doc set -- see [`reconcile_target_node_id`], which factors out the
-/// same "does this doc need a read, and under what node id" predicate so that
-/// read can go out batched (`GhGraphql::project_items_batch`) instead.
+/// `client` is here for the one write, not for a read: the memberships arrive
+/// from the round (`sync::reconcile_project_fields_into_cache`), so this
+/// injects and never fetches.
+#[allow(clippy::too_many_arguments)]
 pub fn reconcile_project_fields_for_meta(
     client: &dyn GhGraphql,
     repo: &str,
@@ -687,15 +663,22 @@ pub fn reconcile_project_fields_for_meta(
     config: &Config,
     board_ids: &mut BoardNodeIds,
     meta: &mut DocMeta,
-) -> Result<Vec<String>> {
+    items: &[gh::ProjectItem],
+) -> Vec<String> {
     let boards = membership_board_numbers(config, meta);
     let authority = authority_board_for(config, meta);
-    let Some(node_id) = reconcile_target_node_id(config, issue_map, meta) else {
-        return Ok(Vec::new());
+    if boards.is_empty() && authority.is_none() {
+        return Vec::new();
+    }
+    let Some(node_id) = issue_map
+        .get(&meta.id)
+        .map(|e| e.node_id.clone())
+        .filter(|n| !n.is_empty())
+    else {
+        return Vec::new();
     };
 
-    let items = client.project_items(repo, &node_id)?;
-    for item in &items {
+    for item in items {
         for v in &item.fields {
             if !boards.contains(&v.project_number) {
                 continue;
@@ -707,7 +690,7 @@ pub fn reconcile_project_fields_for_meta(
 
     let mut warnings = Vec::new();
     if let Some(board) = authority {
-        match authority_status_cell(&items, board) {
+        match authority_status_cell(items, board) {
             AuthorityCell::Set(name) => meta.status = Status::new(name),
             AuthorityCell::Empty => {
                 meta.status = Status::new("");
@@ -738,7 +721,7 @@ pub fn reconcile_project_fields_for_meta(
             }
         }
     }
-    Ok(warnings)
+    warnings
 }
 
 /// Put the issue `content_node_id` on authority board `board`, so the type has
@@ -8220,9 +8203,15 @@ mod tests {
     }
 
     /// One doc's worth of a fetch's reconcile pass: the free function with its own
-    /// board memo, the way a single-doc pass behaves.
-    fn reconcile_one(store: &GithubIssuesStore, meta: &mut DocMeta) -> Result<Vec<String>> {
-        reconcile_with(store, &mut BoardNodeIds::default(), meta)
+    /// board memo, the way a single-doc pass behaves. `items` are what the fetch
+    /// round read for this doc's issue -- handed over directly, because the read
+    /// is no longer this function's concern and so needs no double.
+    fn reconcile_one(
+        store: &GithubIssuesStore,
+        meta: &mut DocMeta,
+        items: &[ProjectItem],
+    ) -> Vec<String> {
+        reconcile_with(store, &mut BoardNodeIds::default(), meta, items)
     }
 
     /// One doc of a multi-doc pass, sharing the pass's board memo.
@@ -8230,7 +8219,8 @@ mod tests {
         store: &GithubIssuesStore,
         board_ids: &mut BoardNodeIds,
         meta: &mut DocMeta,
-    ) -> Result<Vec<String>> {
+        items: &[ProjectItem],
+    ) -> Vec<String> {
         reconcile_project_fields_for_meta(
             store.client.as_graphql(),
             &store.repo,
@@ -8238,7 +8228,28 @@ mod tests {
             &store.config,
             board_ids,
             meta,
+            items,
         )
+    }
+
+    /// Loose field values grouped into one item per board, in first-seen board
+    /// order, for tests that care about the values and not about membership.
+    fn items_from(values: Vec<ProjectFieldValue>) -> Vec<ProjectItem> {
+        let mut items: Vec<ProjectItem> = Vec::new();
+        for value in values {
+            match items
+                .iter_mut()
+                .find(|i| i.project_number == value.project_number)
+            {
+                Some(item) => item.fields.push(value),
+                None => items.push(ProjectItem {
+                    project_number: value.project_number,
+                    item_id: format!("PVTI_{}", value.project_number),
+                    fields: vec![value],
+                }),
+            }
+        }
+        items
     }
 
     // AC1: each field kind surfaces as the right coerced AttrValue under the
@@ -8280,12 +8291,11 @@ mod tests {
                 value: GhFieldValueRepr::IterationTitle("Sprint 4".into()),
             },
         ];
-        let client = MockGhClient::new().with_project_field_values(values);
-        let mut store = issues_store_with(&root, client);
+        let mut store = issues_store_with(&root, MockGhClient::new());
         store.issue_map.insert("STORY-7", 7, "", "I_issue7");
 
         let mut meta = member_meta("STORY-7", &[1]);
-        reconcile_one(&store, &mut meta).unwrap();
+        reconcile_one(&store, &mut meta, &items_from(values));
 
         assert_eq!(
             meta.attributes["PROJECT-1.Status"],
@@ -8325,12 +8335,11 @@ mod tests {
                 value: GhFieldValueRepr::OptionName("Done".into()),
             },
         ];
-        let client = MockGhClient::new().with_project_field_values(values);
-        let mut store = issues_store_with(&root, client);
+        let mut store = issues_store_with(&root, MockGhClient::new());
         store.issue_map.insert("STORY-7", 7, "", "I_issue7");
 
         let mut meta = member_meta("STORY-7", &[1, 2]);
-        reconcile_one(&store, &mut meta).unwrap();
+        reconcile_one(&store, &mut meta, &items_from(values));
 
         assert_eq!(
             meta.attributes["PROJECT-1.Status"],
@@ -8388,13 +8397,11 @@ mod tests {
     #[test]
     fn reconcile_project_fields_reads_status_from_the_authority_board_cell() {
         let root = tmp_root("iter353_authority_cell");
-        let client =
-            MockGhClient::new().with_project_items(vec![status_item(7, Some("In Progress"))]);
-        let mut store = authority_store(&root, client);
+        let mut store = authority_store(&root, MockGhClient::new());
         store.issue_map.insert("STORY-7", 7, "", "I_issue7");
 
         let mut meta = member_meta("STORY-7", &[]);
-        let warnings = reconcile_one(&store, &mut meta).unwrap();
+        let warnings = reconcile_one(&store, &mut meta, &[status_item(7, Some("In Progress"))]);
 
         assert_eq!(meta.status, Status::new("in progress"));
         assert!(warnings.is_empty(), "got: {warnings:?}");
@@ -8410,12 +8417,11 @@ mod tests {
     #[test]
     fn reconcile_project_fields_warns_and_unsets_status_for_an_empty_authority_cell() {
         let root = tmp_root("iter353_empty_cell");
-        let client = MockGhClient::new().with_project_items(vec![status_item(7, None)]);
-        let mut store = authority_store(&root, client);
+        let mut store = authority_store(&root, MockGhClient::new());
         store.issue_map.insert("STORY-7", 7, "", "I_issue7");
 
         let mut meta = member_meta("STORY-7", &[]);
-        let warnings = reconcile_one(&store, &mut meta).unwrap();
+        let warnings = reconcile_one(&store, &mut meta, &[status_item(7, None)]);
 
         assert_eq!(meta.status, Status::new(""));
         assert_eq!(warnings.len(), 1, "got: {warnings:?}");
@@ -8461,15 +8467,13 @@ mod tests {
     #[test]
     fn reconcile_project_fields_adds_a_non_member_to_the_authority_board() {
         let root = tmp_root("iter354_adds_non_member");
-        let client = MockGhClient::new()
-            .with_project_items(vec![status_item(9, Some("Triage"))])
-            .with_graphql_responses(vec![add_item_response()]);
+        let client = MockGhClient::new().with_graphql_responses(vec![add_item_response()]);
         let mut store = authority_store(&root, client);
         store.issue_map.insert("STORY-7", 7, "", "I_issue7");
         bind_board(&mut store, 7, "PVT_board7");
 
         let mut meta = member_meta("STORY-7", &[9]);
-        let warnings = reconcile_one(&store, &mut meta).unwrap();
+        let warnings = reconcile_one(&store, &mut meta, &[status_item(9, Some("Triage"))]);
 
         let calls = store.mock().graphql_calls.borrow();
         assert_eq!(calls.len(), 1, "got: {calls:?}");
@@ -8495,13 +8499,12 @@ mod tests {
     fn reconcile_project_fields_falls_back_to_a_live_board_lookup_for_the_add() {
         let root = tmp_root("iter354_live_board_lookup");
         let client = MockGhClient::new()
-            .with_project_items(vec![])
             .with_graphql_responses(vec![org_board_response("PVT_live7"), add_item_response()]);
         let mut store = authority_store(&root, client);
         store.issue_map.insert("STORY-7", 7, "", "I_issue7");
 
         let mut meta = member_meta("STORY-7", &[]);
-        let warnings = reconcile_one(&store, &mut meta).unwrap();
+        let warnings = reconcile_one(&store, &mut meta, &[]);
 
         let calls = store.mock().graphql_calls.borrow();
         assert_eq!(calls.len(), 2, "got: {calls:?}");
@@ -8521,12 +8524,11 @@ mod tests {
     fn reconcile_project_fields_warns_and_carries_on_when_the_board_add_fails() {
         let root = tmp_root("iter354_add_fails");
         // No canned graphql response: both the board lookup and the add fail.
-        let client = MockGhClient::new().with_project_items(vec![status_item(9, Some("Triage"))]);
-        let mut store = authority_store(&root, client);
+        let mut store = authority_store(&root, MockGhClient::new());
         store.issue_map.insert("STORY-7", 7, "", "I_issue7");
 
         let mut meta = member_meta("STORY-7", &[9]);
-        let warnings = reconcile_one(&store, &mut meta).unwrap();
+        let warnings = reconcile_one(&store, &mut meta, &[status_item(9, Some("Triage"))]);
 
         assert_eq!(meta.status, Status::new("draft"));
         assert_eq!(warnings.len(), 1, "got: {warnings:?}");
@@ -8552,15 +8554,13 @@ mod tests {
             "data": {"addProjectV2ItemById": serde_json::Value::Null},
             "errors": [{"type": "INSUFFICIENT_SCOPES", "message": "requires the `project` scope"}]
         });
-        let client = MockGhClient::new()
-            .with_project_items(vec![])
-            .with_graphql_responses(vec![scope_error]);
+        let client = MockGhClient::new().with_graphql_responses(vec![scope_error]);
         let mut store = authority_store(&root, client);
         store.issue_map.insert("STORY-7", 7, "", "I_issue7");
         bind_board(&mut store, 7, "PVT_board7");
 
         let mut meta = member_meta("STORY-7", &[]);
-        let warnings = reconcile_one(&store, &mut meta).unwrap();
+        let warnings = reconcile_one(&store, &mut meta, &[]);
 
         assert_eq!(meta.status, Status::new("draft"));
         assert_eq!(warnings.len(), 1, "got: {warnings:?}");
@@ -8581,13 +8581,11 @@ mod tests {
     #[test]
     fn reconcile_project_fields_resolves_the_authority_board_once_per_pass() {
         let root = tmp_root("iter354_board_resolved_once");
-        let client = MockGhClient::new()
-            .with_project_items(vec![])
-            .with_graphql_responses(vec![
-                org_board_response("PVT_live7"),
-                add_item_response(),
-                add_item_response(),
-            ]);
+        let client = MockGhClient::new().with_graphql_responses(vec![
+            org_board_response("PVT_live7"),
+            add_item_response(),
+            add_item_response(),
+        ]);
         let mut store = authority_store(&root, client);
         store.issue_map.insert("STORY-7", 7, "", "I_issue7");
         store.issue_map.insert("STORY-8", 8, "", "I_issue8");
@@ -8595,7 +8593,7 @@ mod tests {
         let mut board_ids = BoardNodeIds::default();
         for id in ["STORY-7", "STORY-8"] {
             let mut meta = member_meta(id, &[]);
-            reconcile_with(&store, &mut board_ids, &mut meta).unwrap();
+            reconcile_with(&store, &mut board_ids, &mut meta, &[]);
         }
 
         let calls = store.mock().graphql_calls.borrow();
@@ -8618,15 +8616,18 @@ mod tests {
     #[test]
     fn reconcile_project_fields_lets_only_the_authority_board_drive_status() {
         let root = tmp_root("iter353_two_boards");
-        let client = MockGhClient::new().with_project_items(vec![
-            status_item(7, Some("Review")),
-            status_item(9, Some("Triage")),
-        ]);
-        let mut store = authority_store(&root, client);
+        let mut store = authority_store(&root, MockGhClient::new());
         store.issue_map.insert("STORY-7", 7, "", "I_issue7");
 
         let mut meta = member_meta("STORY-7", &[7, 9]);
-        let warnings = reconcile_one(&store, &mut meta).unwrap();
+        let warnings = reconcile_one(
+            &store,
+            &mut meta,
+            &[
+                status_item(7, Some("Review")),
+                status_item(9, Some("Triage")),
+            ],
+        );
 
         assert_eq!(meta.status, Status::new("review"));
         assert_eq!(
@@ -8645,12 +8646,11 @@ mod tests {
     #[test]
     fn reconcile_project_fields_leaves_status_untouched_without_an_authority_board() {
         let root = tmp_root("iter353_no_authority");
-        let client = MockGhClient::new().with_project_items(vec![status_item(7, Some("Review"))]);
-        let mut store = issues_store_with(&root, client);
+        let mut store = issues_store_with(&root, MockGhClient::new());
         store.issue_map.insert("STORY-7", 7, "", "I_issue7");
 
         let mut meta = member_meta("STORY-7", &[7]);
-        let warnings = reconcile_one(&store, &mut meta).unwrap();
+        let warnings = reconcile_one(&store, &mut meta, &[status_item(7, Some("Review"))]);
 
         assert_eq!(meta.status, Status::new("draft"));
         assert!(warnings.is_empty(), "got: {warnings:?}");

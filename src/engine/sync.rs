@@ -5,7 +5,7 @@
 //! in through a borrowed [`SyncContext`]. Adding a backend or a fetch step then
 //! happens in one place, so the CLI and TUI stay in lockstep by construction.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
@@ -14,7 +14,7 @@ use crate::engine::cache_lock::CacheLock;
 use crate::engine::clickup::ClickupClient;
 use crate::engine::clickup_cache;
 use crate::engine::config::{Config, Lifecycle, StoreBackend, TypeDef};
-use crate::engine::gh::GhGraphql;
+use crate::engine::gh::{GhGraphql, ProjectItem};
 use crate::engine::gh_fetch::{self, FetchSnapshot};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::issue_body::TypeMatchRule;
@@ -150,6 +150,7 @@ impl TypeSync for GhIssueSync<'_> {
         cfg: &Config,
     ) -> SyncOutcome {
         let fetch = ctx.fetch.as_ref();
+        let project_items = fetch.and_then(|f| f.project_items.as_ref());
         let Some(maps) = ctx.gh.as_mut() else {
             return SyncOutcome::failed(&td.name, "github maps not provided in SyncContext");
         };
@@ -167,6 +168,7 @@ impl TypeSync for GhIssueSync<'_> {
             maps.issue_map,
             cfg,
             td,
+            project_items,
         ));
 
         SyncOutcome {
@@ -507,14 +509,16 @@ pub(crate) fn fetch_git_ref(
 /// engine emits no stderr, so warnings flow back to the caller via the outcome).
 /// Relocated from `cli::fetch::inject_project_fields_into_cache` (RFC-057).
 ///
-/// The board-membership read is one batched [`GhGraphql::project_items_batch`]
-/// call across every doc that needs it, not one [`GhGraphql::project_items`]
-/// call per doc: every doc is parsed first so the full target set (and its
-/// content node ids) is known before any network call, then
-/// [`store_dispatch::reconcile_project_fields_for_meta`] runs per doc unchanged,
-/// served out of that batch via [`PrefetchedProjectItems`]. A doc whose target
-/// falls in a chunk that failed to fetch is left unwritten this pass, exactly
-/// as a per-doc read failure was before batching.
+/// The board memberships cost no read here: they rode the composed fetch round
+/// (RFC-065) and arrive as `project_items`, keyed by issue node id.
+/// [`store_dispatch::reconcile_project_fields_for_meta`] then runs per doc,
+/// fed the entry for its own issue. `client` is still needed for the one write
+/// that pass can trigger -- adding a doc to its authority board.
+///
+/// A round that could not read memberships at all hands `None`, and nothing is
+/// written: every doc keeps the attributes and the board-derived status it
+/// already had, which is what a token without the `project` scope should cost.
+/// A doc the round did not return is skipped the same way, one doc at a time.
 fn reconcile_project_fields_into_cache(
     root: &Path,
     client: &dyn GhGraphql,
@@ -522,7 +526,11 @@ fn reconcile_project_fields_into_cache(
     issue_map: &IssueMap,
     config: &Config,
     type_def: &TypeDef,
+    project_items: Option<&HashMap<String, Vec<ProjectItem>>>,
 ) -> Vec<String> {
+    let Some(items_by_node) = project_items else {
+        return Vec::new();
+    };
     let mut warnings = Vec::new();
     let cache_dir = root.join(".lazyspec/cache").join(&type_def.name);
 
@@ -552,66 +560,23 @@ fn reconcile_project_fields_into_cache(
         loaded.push(Loaded { meta, body });
     }
 
-    let targets: Vec<(usize, String)> = loaded
-        .iter()
-        .enumerate()
-        .filter_map(|(i, l)| {
-            store_dispatch::reconcile_target_node_id(config, issue_map, &l.meta).map(|n| (i, n))
-        })
-        .collect();
-
-    let mut skip: HashSet<usize> = HashSet::new();
-    let items_by_node = if targets.is_empty() {
-        std::collections::HashMap::new()
-    } else {
-        let node_ids: Vec<String> = targets.iter().map(|(_, n)| n.clone()).collect();
-        match client.project_items_batch(repo, &node_ids) {
-            Ok(m) => m,
-            Err(e) => {
-                warnings.push(format!(
-                    "could not read project fields for {} issues, skipping: {}",
-                    targets.len(),
-                    e
-                ));
-                skip.extend(targets.iter().map(|(i, _)| *i));
-                std::collections::HashMap::new()
-            }
-        }
-    };
-    let served = PrefetchedProjectItems {
-        inner: client,
-        items: items_by_node,
-    };
-
     let mut board_ids = store_dispatch::BoardNodeIds::default();
-    for (i, _) in &targets {
-        if skip.contains(i) {
+    for l in &mut loaded {
+        let Some(items) = round_items(items_by_node, issue_map, &l.meta.id) else {
             continue;
-        }
-        let l = &mut loaded[*i];
-        match store_dispatch::reconcile_project_fields_for_meta(
-            &served,
+        };
+        warnings.extend(store_dispatch::reconcile_project_fields_for_meta(
+            client,
             repo,
             issue_map,
             config,
             &mut board_ids,
             &mut l.meta,
-        ) {
-            Ok(w) => warnings.extend(w),
-            Err(e) => {
-                warnings.push(format!(
-                    "could not read project fields for {}: {}",
-                    l.meta.id, e
-                ));
-                skip.insert(*i);
-            }
-        }
+            items,
+        ));
     }
 
-    for (i, l) in loaded.iter().enumerate() {
-        if skip.contains(&i) {
-            continue;
-        }
+    for l in &loaded {
         if let Err(e) = store_dispatch::write_cache_file(root, type_def, &l.meta, &l.body) {
             warnings.push(format!("could not rewrite cache for {}: {}", l.meta.id, e));
         }
@@ -619,35 +584,17 @@ fn reconcile_project_fields_into_cache(
     warnings
 }
 
-/// Wraps a real [`GhGraphql`] client so [`GhGraphql::project_items`] serves a
-/// pre-fetched batch (keyed by content node id) instead of issuing its own
-/// per-doc call -- the seam that lets
-/// [`store_dispatch::reconcile_project_fields_for_meta`] run unmodified, one doc
-/// at a time, against a read that already happened once for the whole batch.
-/// Every other method, notably the authority-board-add mutation
-/// `reconcile_project_fields_for_meta` can trigger, passes straight through to
-/// `inner`.
-struct PrefetchedProjectItems<'a> {
-    inner: &'a dyn GhGraphql,
-    items: std::collections::HashMap<String, Vec<crate::engine::gh::ProjectItem>>,
-}
-
-impl GhGraphql for PrefetchedProjectItems<'_> {
-    fn graphql(
-        &self,
-        query: &str,
-        vars: &[(&str, crate::engine::gh::GqlVar)],
-    ) -> Result<serde_json::Value> {
-        self.inner.graphql(query, vars)
-    }
-
-    fn project_items(
-        &self,
-        _repo: &str,
-        content_node_id: &str,
-    ) -> Result<Vec<crate::engine::gh::ProjectItem>> {
-        Ok(self.items.get(content_node_id).cloned().unwrap_or_default())
-    }
+/// What the round read for the doc's own issue, or `None` when it did not read
+/// it -- an unmapped doc, or one whose type's list failed this round. `None` is
+/// what keeps a doc off the "not on the board" path, which would otherwise add
+/// it to its authority board on the strength of an answer nobody gave.
+fn round_items<'a>(
+    items_by_node: &'a HashMap<String, Vec<ProjectItem>>,
+    issue_map: &IssueMap,
+    doc_id: &str,
+) -> Option<&'a [ProjectItem]> {
+    let node_id = &issue_map.get(doc_id)?.node_id;
+    items_by_node.get(node_id).map(Vec::as_slice)
 }
 
 /// Every cached doc of one type: the flat `<id>.md` files plus the one nesting
@@ -1254,16 +1201,20 @@ mod tests {
             _vars: &[(&str, crate::engine::gh::GqlVar)],
         ) -> Result<serde_json::Value> {
             if gh_fetch::is_round_query(query) {
-                return Ok(crate::engine::gh::test_support::with_issue_pages(
+                let resp = crate::engine::gh::test_support::with_issue_pages(
                     query,
                     crate::engine::gh::test_support::round_response(&[], &[], &[]),
                     &self.issues,
+                );
+                return Ok(crate::engine::gh::test_support::without_project_items(
+                    resp,
+                    "your token has not been granted the required scopes: project",
                 ));
             }
             anyhow::bail!("graphql unreachable")
         }
         fn project_items(&self, _repo: &str, _content_node_id: &str) -> Result<Vec<ProjectItem>> {
-            anyhow::bail!("project fields unreachable")
+            unreachable!("a fetch reads board memberships off the composed round")
         }
         fn update_project_v2_item_field_value(
             &self,
@@ -1313,8 +1264,8 @@ mod tests {
             traversal: None,
         }];
 
-        // An issue whose body declares a board membership, so injection attempts
-        // the project-field GraphQL -- which this client fails -> a warning.
+        // An issue whose body declares a board membership, whose `projectItems`
+        // the round could not read -> a warning, and the doc still caches.
         let issue = GhIssue {
             body: issue_body_with_membership(),
             ..gh_issue_no_milestone(42)
@@ -1628,7 +1579,7 @@ mod tests {
 
         let mut issue_map = IssueMap::load(root).unwrap();
         issue_map.insert("STORY-12", 12, "", "I_node12");
-        let client = MockGhClient::new().with_project_items(vec![board_status_item(7, "Review")]);
+        let client = MockGhClient::new();
 
         let warnings = reconcile_project_fields_into_cache(
             root,
@@ -1637,9 +1588,103 @@ mod tests {
             &issue_map,
             &config,
             td,
+            Some(&round_items_for(&[(
+                "I_node12",
+                vec![board_status_item(7, "Review")],
+            )])),
         );
 
         assert!(warnings.is_empty(), "got: {warnings:?}");
         assert_eq!(cached_story_status(&child_file), "review");
+    }
+
+    /// The round's board memberships, keyed by issue node id, as the snapshot
+    /// hands them over.
+    fn round_items_for(entries: &[(&str, Vec<ProjectItem>)]) -> HashMap<String, Vec<ProjectItem>> {
+        entries
+            .iter()
+            .map(|(node_id, items)| (node_id.to_string(), items.clone()))
+            .collect()
+    }
+
+    // A round that could not read board memberships at all -- a token without
+    // the `project` scope -- must leave every doc exactly as it was rather than
+    // read "on no board" into a cache and, for an authority-bound type, put the
+    // doc back on its board off the strength of it.
+    #[test]
+    fn an_unread_project_scope_leaves_every_board_bound_doc_untouched() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let config = authority_config();
+        let td = &config.documents.types[0];
+
+        let cache = root.join(".lazyspec/cache/story");
+        std::fs::create_dir_all(&cache).unwrap();
+        let doc = cache.join("STORY-12.md");
+        std::fs::write(
+            &doc,
+            "---\ntitle: \"Story\"\ntype: story\nstatus: \"review\"\nauthor: \"@octocat\"\ndate: 2026-01-01\ntags: []\n---\nbody\n",
+        )
+        .unwrap();
+
+        let mut issue_map = IssueMap::load(root).unwrap();
+        issue_map.insert("STORY-12", 12, "", "I_node12");
+        let client = MockGhClient::new();
+
+        let warnings = reconcile_project_fields_into_cache(
+            root,
+            &client,
+            "owner/repo",
+            &issue_map,
+            &config,
+            td,
+            None,
+        );
+
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+        assert_eq!(cached_story_status(&doc), "review");
+        assert!(
+            client.graphql_calls.borrow().is_empty(),
+            "an unknown membership must not trigger a board add, got: {:?}",
+            client.graphql_calls.borrow()
+        );
+    }
+
+    // A doc the round never returned is not "on no board": it was not read.
+    // Acting on its absence would add it to its authority board and blank the
+    // status it still legitimately holds.
+    #[test]
+    fn a_doc_the_round_did_not_return_keeps_its_board_status() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let config = authority_config();
+        let td = &config.documents.types[0];
+
+        let cache = root.join(".lazyspec/cache/story");
+        std::fs::create_dir_all(&cache).unwrap();
+        let doc = cache.join("STORY-12.md");
+        std::fs::write(
+            &doc,
+            "---\ntitle: \"Story\"\ntype: story\nstatus: \"review\"\nauthor: \"@octocat\"\ndate: 2026-01-01\ntags: []\n---\nbody\n",
+        )
+        .unwrap();
+
+        let mut issue_map = IssueMap::load(root).unwrap();
+        issue_map.insert("STORY-12", 12, "", "I_node12");
+        let client = MockGhClient::new();
+
+        let warnings = reconcile_project_fields_into_cache(
+            root,
+            &client,
+            "owner/repo",
+            &issue_map,
+            &config,
+            td,
+            Some(&round_items_for(&[("I_other", vec![])])),
+        );
+
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+        assert_eq!(cached_story_status(&doc), "review");
+        assert!(client.graphql_calls.borrow().is_empty());
     }
 }

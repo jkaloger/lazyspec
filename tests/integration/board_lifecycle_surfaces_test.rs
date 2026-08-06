@@ -490,10 +490,17 @@ impl GhGraphql for BoardGh {
     fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
         self.remote_calls.borrow_mut().push("graphql".to_string());
         if lazyspec::engine::gh_fetch::is_round_query(query) {
-            return Ok(crate::common::round_response_with_issues(
-                query,
-                &self.issues,
-            ));
+            let mut resp = crate::common::round_response_with_issues(query, &self.issues);
+            if self.items_unreadable {
+                return Ok(crate::common::without_project_items(
+                    resp,
+                    "your token has not been granted the required scopes: project",
+                ));
+            }
+            for (node_id, items) in &self.items {
+                resp = crate::common::with_project_items(resp, node_id, items);
+            }
+            return Ok(resp);
         }
         if query.contains("mutation") {
             self.mutations.borrow_mut().push(query.to_string());
@@ -537,6 +544,8 @@ impl GhGraphql for BoardGh {
         }
         Ok(serde_json::json!({ "data": { "nodes": [] } }))
     }
+    /// The write path's read-back only: a fetch takes board memberships off the
+    /// composed round, so a call here during a fetch is the regression.
     fn project_items(&self, _repo: &str, content_node_id: &str) -> Result<Vec<ProjectItem>> {
         self.remote_calls
             .borrow_mut()
@@ -772,13 +781,14 @@ fn an_unreadable_board_keeps_the_last_known_status_and_warns() {
         cached_ticket(&tmp, &config).status,
         Status::new("in progress")
     );
-    // The board read is one batched call for the whole fetch, so the warning
-    // reports the affected issue count rather than naming each doc.
+    // The memberships ride the round, so the warning is the round's -- one for
+    // the whole read, naming the scope that withheld it.
     assert!(
         outcomes[0]
             .warnings
             .iter()
-            .any(|w| w.contains("project fields") && w.contains("1 issues")),
+            .any(|w| w.contains("could not read project fields")
+                && w.contains("gh auth refresh -s project")),
         "got: {:?}",
         outcomes[0].warnings
     );

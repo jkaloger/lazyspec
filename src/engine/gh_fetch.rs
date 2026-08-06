@@ -1,6 +1,6 @@
 //! One composed GraphQL document per fetch round (RFC-065).
 //!
-//! [`fetch_round`] builds a single query from the repo, issues it through the
+//! [`fetch_all_pages`] builds a single query from the repo, issues it through the
 //! existing [`GhGraphql`] seam, and returns everything the round learned as a
 //! [`FetchSnapshot`]. It touches no cache and holds no state: the builder and
 //! the parser are the whole module.
@@ -23,7 +23,7 @@ use serde_json::Value;
 
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::gh::{
-    GhAssignee, GhAuthor, GhGraphql, GhIssue, GhIssueMilestone, GhLabel, GhMilestone, GqlVar,
+    self, GhAssignee, GhAuthor, GhGraphql, GhIssue, GhIssueMilestone, GhLabel, GhMilestone, GqlVar,
     ProjectItem,
 };
 use crate::engine::gh_schema::{self, IssueTypeId, IterationId, OptionId, ProjectFieldId};
@@ -52,8 +52,13 @@ pub struct FetchSnapshot {
     /// Every capped connection that reported another page, so a consumer can
     /// name what it did not get instead of writing a partial edge set silently.
     pub truncations: Vec<Truncation>,
-    /// Per issue node id, its board memberships and field cells.
-    pub project_items: HashMap<String, Vec<ProjectItem>>,
+    /// Per issue node id, its board memberships and field cells. An issue the
+    /// round read but that is on no board is present with an empty vector, so a
+    /// consumer can tell "on no board" from "this round never saw it" -- absent
+    /// means the latter, and a doc that is absent keeps whatever it had. `None`
+    /// for the whole map means the round could not read board memberships at
+    /// all, which is what a token without the `project` scope produces.
+    pub project_items: Option<HashMap<String, Vec<ProjectItem>>>,
     pub milestones: Option<Vec<GhMilestone>>,
     /// Empty on a user-owned repo: issue types are an Organization-only field,
     /// so its absence from the response is an answer, not a failure.
@@ -86,21 +91,39 @@ const PROJECT_FIELDS_SELECTION: &str = "fields(first: 50) { nodes { __typename \
      ... on ProjectV2IterationField { id name dataType \
      configuration { iterations { id title } } } } }";
 
+/// The two flat connections on an issue node. They cap what one issue may carry
+/// like the [`Connection`]s do, and so count against the same node budget, but
+/// a label or assignee past the cap is not remote state the cache is keeping --
+/// so they raise no truncation and stay out of that enum.
+const LABELS_CAP: usize = 20;
+const ASSIGNEES_CAP: usize = 10;
+
 /// One issue's flat fields. `issueType { name }` riding along is what lets a
 /// type classified by native issue type be discovered by filtering this page
 /// instead of by one `issue_view` per number.
-const ISSUE_NODE_SELECTION: &str = "id number url title body state updatedAt createdAt \
-     author { login } issueType { name } milestone { number } \
-     labels(first: 20) { nodes { name } } assignees(first: 10) { nodes { login } }";
+fn issue_node_selection() -> String {
+    format!(
+        "id number url title body state updatedAt createdAt \
+         author {{ login }} issueType {{ name }} milestone {{ number }} \
+         labels(first: {LABELS_CAP}) {{ nodes {{ name }} }} \
+         assignees(first: {ASSIGNEES_CAP}) {{ nodes {{ login }} }}"
+    )
+}
 
 /// A nested connection the round selects inline on every issue. Selecting them
-/// here is what makes sub-issue parentage and dependency edges cost no request
-/// of their own; the cap is what keeps a document of them inside GitHub's node
-/// budget, and [`FetchSnapshot::truncations`] is what keeps the cap honest.
+/// here is what makes sub-issue parentage, dependency edges and board
+/// memberships cost no request of their own; the cap is what keeps a document of
+/// them inside GitHub's node budget, and [`FetchSnapshot::truncations`] is what
+/// keeps the cap honest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Connection {
     SubIssues,
     BlockedBy,
+    ProjectItems,
+    /// Nested one level deeper than the rest: selected on every project item, so
+    /// it multiplies against [`Connection::ProjectItems`] rather than adding to
+    /// it, which is what makes it the expensive one against the node budget.
+    FieldValues,
 }
 
 impl Connection {
@@ -109,6 +132,8 @@ impl Connection {
         match self {
             Connection::SubIssues => 50,
             Connection::BlockedBy => 50,
+            Connection::ProjectItems => 10,
+            Connection::FieldValues => 25,
         }
     }
 
@@ -117,6 +142,8 @@ impl Connection {
         match self {
             Connection::SubIssues => "subIssues",
             Connection::BlockedBy => "blockedBy",
+            Connection::ProjectItems => "projectItems",
+            Connection::FieldValues => "fieldValues",
         }
     }
 }
@@ -136,20 +163,71 @@ pub struct Truncation {
     pub connection: Connection,
 }
 
-/// The sub-issue and dependency edges, selected on the same node as the issue's
-/// own fields. `pageInfo { hasNextPage }` on each is what turns a cap into a
-/// reported truncation rather than a silently short edge list.
+/// The sub-issue edges, dependency edges and board memberships, selected on the
+/// same node as the issue's own fields. `pageInfo { hasNextPage }` on each is
+/// what turns a cap into a reported truncation rather than a silently short
+/// list. The `fieldValues` selection comes from `gh` because that is the module
+/// whose parser reads it back.
 fn issue_edges_selection() -> String {
+    let field_values = crate::engine::gh::PROJECT_FIELD_VALUE_SELECTION;
     format!(
         "subIssues(first: {}) {{ pageInfo {{ hasNextPage }} nodes {{ id }} }} \
-         blockedBy(first: {}) {{ pageInfo {{ hasNextPage }} nodes {{ number }} }}",
+         blockedBy(first: {}) {{ pageInfo {{ hasNextPage }} nodes {{ number }} }} \
+         projectItems(first: {}) {{ pageInfo {{ hasNextPage }} nodes {{ \
+         id project {{ number }} \
+         fieldValues(first: {}) {{ pageInfo {{ hasNextPage }} nodes {{ {field_values} }} }} }} }}",
         Connection::SubIssues.cap(),
-        Connection::BlockedBy.cap()
+        Connection::BlockedBy.cap(),
+        Connection::ProjectItems.cap(),
+        Connection::FieldValues.cap()
     )
 }
 
 /// GraphQL's ceiling on a connection page, and so the round's page size.
 const ISSUE_PAGE_SIZE: usize = 100;
+
+/// GitHub rejects a query whose **possible** node count exceeds this, computed
+/// from the `first:` arguments the document declares rather than from what comes
+/// back. So the ceiling is arithmetic over the selection, knowable before the
+/// request is sent -- which is why the round splits its types rather than
+/// discovering the limit as an error.
+const NODE_BUDGET: usize = 500_000;
+
+/// Possible nodes one issue node declares: every connection selected on it, plus
+/// the `fieldValues` selected under each of its possible project items -- the
+/// nesting that dominates the total.
+fn nodes_per_issue() -> usize {
+    LABELS_CAP
+        + ASSIGNEES_CAP
+        + Connection::SubIssues.cap()
+        + Connection::BlockedBy.cap()
+        + Connection::ProjectItems.cap() * (1 + Connection::FieldValues.cap())
+}
+
+/// Possible nodes a round composing `types` aliases declares: one page of issue
+/// nodes per alias, each issue carrying its own selections. This is the figure
+/// GitHub compares against its own limit, so it is knowable here.
+fn possible_nodes(types: usize) -> usize {
+    types * ISSUE_PAGE_SIZE * (1 + nodes_per_issue())
+}
+
+/// How many type aliases one request can carry. The repository-wide subtrees
+/// (milestones, issue types, board schemas) are a small constant beside a type's
+/// cost and fit in the remainder this division leaves; at least one type goes
+/// per request whatever the arithmetic says, since a type cannot be split.
+fn types_per_request() -> usize {
+    (NODE_BUDGET / possible_nodes(1)).max(1)
+}
+
+/// The types of one round each, split so no request exceeds [`NODE_BUDGET`].
+/// Always at least one chunk: a repo with no `github-issues` type still has
+/// milestones and an owner subtree to read, and they ride the first chunk.
+fn type_chunks(types: &[TypeMatchRule]) -> Vec<&[TypeMatchRule]> {
+    if types.is_empty() {
+        return vec![&[]];
+    }
+    types.chunks(types_per_request()).collect()
+}
 
 /// Names the composed document so a test double can tell a round apart from the
 /// other queries the same [`GhGraphql`] seam carries.
@@ -239,7 +317,7 @@ fn matches_rule(rule: &TypeMatchRule, issue: &GhIssue) -> bool {
 }
 
 fn issues_selection(types: &[TypeMatchRule]) -> String {
-    let node = format!("{ISSUE_NODE_SELECTION} {}", issue_edges_selection());
+    let node = format!("{} {}", issue_node_selection(), issue_edges_selection());
     types
         .iter()
         .enumerate()
@@ -301,6 +379,12 @@ pub fn issue_rules(config: &Config) -> Vec<TypeMatchRule> {
 /// count is the largest type's page count rather than the sum across types --
 /// one 300-issue type beside nine short ones costs three rounds, not twelve.
 ///
+/// Types past what one document may declare ([`types_per_request`]) go in
+/// further chunks, each paging on its own. Only the first chunk carries the
+/// repository-wide subtrees: milestones and the owner have already answered by
+/// the time a second chunk goes out, and re-reading them would spend nodes on
+/// values the snapshot already holds.
+///
 /// Never `Err`: a round that could not be issued leaves its subtrees unknown and
 /// warns, so every consumer keeps the cache it already had.
 pub fn fetch_all_pages(
@@ -309,7 +393,25 @@ pub fn fetch_all_pages(
     types: &[TypeMatchRule],
     boards: &[u64],
 ) -> FetchSnapshot {
-    let mut snapshot = fetch_round_best_effort(gh, repo, types, boards, &HashMap::new());
+    let mut chunks = type_chunks(types).into_iter();
+    let first = chunks.next().unwrap_or_default();
+    let mut snapshot = fetch_chunk(gh, repo, first, boards, RoundScope::Everything);
+    for chunk in chunks {
+        let more = fetch_chunk(gh, repo, chunk, &[], RoundScope::IssuePages);
+        absorb_chunk(&mut snapshot, more);
+    }
+    snapshot
+}
+
+/// One chunk of types, read to the end of every alias's pages.
+fn fetch_chunk(
+    gh: &dyn GhGraphql,
+    repo: &str,
+    types: &[TypeMatchRule],
+    boards: &[u64],
+    scope: RoundScope,
+) -> FetchSnapshot {
+    let mut snapshot = best_effort(run_round(gh, repo, types, boards, &HashMap::new(), scope));
     let mut pending = still_paging(types, &snapshot.next_pages);
     while !pending.is_empty() {
         let cursors = std::mem::take(&mut snapshot.next_pages);
@@ -318,6 +420,33 @@ pub fn fetch_all_pages(
         pending = still_paging(&pending, &snapshot.next_pages);
     }
     snapshot
+}
+
+/// Fold a later chunk into the first. The two chunks share no type, so their
+/// issue lists union rather than merge; everything else is keyed by issue and
+/// unions the same way.
+fn absorb_chunk(snapshot: &mut FetchSnapshot, chunk: FetchSnapshot) {
+    snapshot.issues.extend(chunk.issues);
+    snapshot.sub_issues.extend(chunk.sub_issues);
+    snapshot.blocked_by.extend(chunk.blocked_by);
+    absorb_project_items(&mut snapshot.project_items, chunk.project_items);
+    snapshot.truncations.extend(chunk.truncations);
+    snapshot.warnings.extend(chunk.warnings);
+}
+
+/// Board memberships from two rounds, unioned only while both rounds knew them.
+/// One round that could not read them makes the union unknown: a consumer that
+/// took a half-map as authoritative would read "not on the board" off issues
+/// nobody asked about.
+fn absorb_project_items(
+    into: &mut Option<HashMap<String, Vec<ProjectItem>>>,
+    from: Option<HashMap<String, Vec<ProjectItem>>>,
+) {
+    let (Some(known), Some(more)) = (into.as_mut(), from) else {
+        *into = None;
+        return;
+    };
+    known.extend(more);
 }
 
 fn still_paging(
@@ -356,6 +485,7 @@ fn merge_issue_page(
     // issues the earlier rounds had not reached.
     snapshot.sub_issues.extend(page.sub_issues);
     snapshot.blocked_by.extend(page.blocked_by);
+    absorb_project_items(&mut snapshot.project_items, page.project_items);
     snapshot.truncations.extend(page.truncations);
     // A cursor handed back unchanged would resume the same page for ever, so
     // only one that moved counts as another page.
@@ -367,23 +497,13 @@ fn merge_issue_page(
     snapshot.warnings.extend(page.warnings);
 }
 
-/// Issue the round and parse it. `types` are the `github-issues` types whose
+/// Issue one round and parse it. `types` are the `github-issues` types whose
 /// lists this round should resolve, one alias each; `boards` are the Projects v2
 /// board numbers whose field schema it should resolve; `cursors` resumes a
 /// type's list from where a prior round left off, keyed by type name, and a type
 /// absent from it starts at the first page. `Err` only for a transport failure
 /// or a repo string that is not `owner/name`; a partly-failed response is an
 /// `Ok` snapshot carrying warnings.
-fn fetch_round(
-    gh: &dyn GhGraphql,
-    repo: &str,
-    types: &[TypeMatchRule],
-    boards: &[u64],
-    cursors: &HashMap<String, String>,
-) -> Result<FetchSnapshot> {
-    run_round(gh, repo, types, boards, cursors, RoundScope::Everything)
-}
-
 fn run_round(
     gh: &dyn GhGraphql,
     repo: &str,
@@ -405,20 +525,6 @@ fn run_round(
     }
     let resp = gh.graphql(&round_query(types, boards, scope), &vars)?;
     Ok(parse_round(&resp, types, boards, scope))
-}
-
-/// [`fetch_round`] with a transport failure folded into the same shape a wholly
-/// failed response produces: every subtree unknown, one warning. Callers that
-/// must not abort a sync on an unreachable API use this and let each consumer
-/// keep its prior cache.
-fn fetch_round_best_effort(
-    gh: &dyn GhGraphql,
-    repo: &str,
-    types: &[TypeMatchRule],
-    boards: &[u64],
-    cursors: &HashMap<String, String>,
-) -> FetchSnapshot {
-    best_effort(fetch_round(gh, repo, types, boards, cursors))
 }
 
 /// The continuation of a round already begun: one alias per type still reporting
@@ -460,7 +566,9 @@ fn parse_round(
     boards: &[u64],
     scope: RoundScope,
 ) -> FetchSnapshot {
-    let errors = subtree_errors(resp);
+    let (item_errors, errors): (Vec<SubtreeError>, Vec<SubtreeError>) = subtree_errors(resp)
+        .into_iter()
+        .partition(|e| names_project_items(e.path.as_deref()));
 
     let Some(repo) = resp.pointer("/data/repository").filter(|v| !v.is_null()) else {
         let message = errors
@@ -523,18 +631,38 @@ fn parse_round(
         }
     }
 
+    let project_items = match item_errors.first() {
+        Some(failure) => {
+            warnings.push(project_items_warning(&failure.message));
+            None
+        }
+        None => Some(edges.project_items),
+    };
+
     FetchSnapshot {
         issues,
         sub_issues: edges.sub_issues,
         blocked_by: edges.blocked_by,
+        project_items,
         truncations: edges.truncations,
         next_pages,
         milestones,
         issue_types,
         board_fields,
         warnings,
-        ..Default::default()
     }
+}
+
+/// Whether an error was raised against an issue's `projectItems`. Their paths
+/// run *below* an alias (`repository.t0.nodes.3.projectItems`), so they are
+/// split off before any subtree resolves: left in, a board read the round can
+/// survive without would condemn the whole issue list that came back beside it.
+fn names_project_items(path: Option<&str>) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    let field = Connection::ProjectItems.field();
+    path == field || path.ends_with(&format!(".{}", field))
 }
 
 /// The two repository-wide subtrees, resolved independently of each other and
@@ -577,6 +705,7 @@ struct IssuePage {
 struct IssueEdges {
     sub_issues: HashMap<String, Vec<String>>,
     blocked_by: HashMap<u64, Vec<u64>>,
+    project_items: HashMap<String, Vec<ProjectItem>>,
     truncations: Vec<Truncation>,
 }
 
@@ -584,11 +713,14 @@ impl IssueEdges {
     fn absorb(&mut self, other: IssueEdges) {
         self.sub_issues.extend(other.sub_issues);
         self.blocked_by.extend(other.blocked_by);
+        self.project_items.extend(other.project_items);
         self.truncations.extend(other.truncations);
     }
 
-    /// An issue that carries no edge at all is left out of both maps: absence is
-    /// "nothing blocks it, nothing hangs off it", which is what the round said.
+    /// An issue that carries no edge at all is left out of both edge maps:
+    /// absence is "nothing blocks it, nothing hangs off it", which is what the
+    /// round said. Board memberships are the exception -- see
+    /// [`IssueEdges::read_project_items`].
     fn read(&mut self, node: &Value) {
         let Some(node_id) = node.get("id").and_then(|v| v.as_str()) else {
             return;
@@ -601,6 +733,7 @@ impl IssueEdges {
                 });
             }
         }
+        self.read_project_items(node_id, node);
         let children: Vec<String> = connection_nodes(node, Connection::SubIssues.field())
             .iter()
             .filter_map(|child| child.get("id").and_then(|v| v.as_str()))
@@ -621,6 +754,40 @@ impl IssueEdges {
         };
         self.blocked_by.insert(number, blockers);
     }
+
+    /// Board memberships, recorded even when empty: "on no board" is a state a
+    /// consumer acts on (it is what puts a doc of an authority-bound type onto
+    /// its board), so it must be distinguishable from an issue this round never
+    /// resolved. A null connection is the latter and is left out entirely --
+    /// GitHub nulls it for a token without the `project` scope.
+    fn read_project_items(&mut self, node_id: &str, node: &Value) {
+        let field = Connection::ProjectItems.field();
+        if node.get(field).filter(|v| !v.is_null()).is_none() {
+            return;
+        }
+        if has_next_page(node, Connection::ProjectItems) {
+            self.truncations.push(Truncation {
+                node_id: node_id.to_string(),
+                connection: Connection::ProjectItems,
+            });
+        }
+        let items = connection_nodes(node, field);
+        if items.iter().any(field_values_truncated) {
+            self.truncations.push(Truncation {
+                node_id: node_id.to_string(),
+                connection: Connection::FieldValues,
+            });
+        }
+        self.project_items
+            .insert(node_id.to_string(), gh::parse_project_items_array(items));
+    }
+}
+
+/// Whether one board item reported more field cells than its cap carried. The
+/// truncation is reported against the issue rather than the item: the item id is
+/// a Projects v2 internal, and it is the document a reader goes and looks at.
+fn field_values_truncated(item: &Value) -> bool {
+    has_next_page(item, Connection::FieldValues)
 }
 
 fn has_next_page(node: &Value, connection: Connection) -> bool {
@@ -865,6 +1032,16 @@ fn issues_warning(type_name: &str, message: &str) -> RefreshWarning {
     ))
 }
 
+/// The board memberships the round asked for on every issue and did not get.
+/// Names the `project` scope because that is what withholds them in practice,
+/// the same sentence the per-doc read emitted before the round.
+fn project_items_warning(message: &str) -> RefreshWarning {
+    warning(format!(
+        "could not read project fields (keeping prior, projects need `gh auth refresh -s project`): {}",
+        message
+    ))
+}
+
 fn milestones_warning(message: &str) -> RefreshWarning {
     warning(format!(
         "could not refresh milestones (keeping prior): {}",
@@ -886,7 +1063,8 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::engine::gh::test_support::{round_response, MockGhClient};
+    use crate::engine::gh::test_support::{project_items_edge, round_response, MockGhClient};
+    use crate::engine::gh::{GhFieldKind, GhFieldValueRepr, ProjectFieldValue};
 
     fn rule(name: &str, tag: Option<&str>, issue_type: Option<&str>) -> TypeMatchRule {
         TypeMatchRule {
@@ -1237,7 +1415,15 @@ mod tests {
         let types = [rule("story", None, None), rule("epic", None, Some("Epic"))];
         let cursors = HashMap::from([("epic".to_string(), "Y3Vyc29yOjEwMA==".to_string())]);
 
-        fetch_round(&gh, "octo-org/repo", &types, &[], &cursors).unwrap();
+        run_round(
+            &gh,
+            "octo-org/repo",
+            &types,
+            &[],
+            &cursors,
+            RoundScope::Everything,
+        )
+        .unwrap();
 
         let calls = gh.graphql_calls.borrow();
         assert_eq!(
@@ -1787,7 +1973,15 @@ mod tests {
                 id: "IT_kwABC".into(),
             }]);
 
-        let snapshot = fetch_round(&gh, "octo-org/repo", &[], &[], &no_cursors()).unwrap();
+        let snapshot = run_round(
+            &gh,
+            "octo-org/repo",
+            &[],
+            &[],
+            &no_cursors(),
+            RoundScope::Everything,
+        )
+        .unwrap();
 
         assert_eq!(snapshot.milestones.unwrap().len(), 1);
         assert_eq!(snapshot.issue_types.unwrap().len(), 1);
@@ -1805,8 +1999,14 @@ mod tests {
 
     #[test]
     fn a_transport_failure_is_a_round_with_nothing_known() {
-        let snapshot =
-            fetch_round_best_effort(&UnreachableGh, "octo-org/repo", &[], &[], &no_cursors());
+        let snapshot = best_effort(run_round(
+            &UnreachableGh,
+            "octo-org/repo",
+            &[],
+            &[],
+            &no_cursors(),
+            RoundScope::Everything,
+        ));
 
         assert_eq!(snapshot.milestones, None);
         assert_eq!(snapshot.issue_types, None);
@@ -1819,7 +2019,15 @@ mod tests {
     #[test]
     fn a_repo_that_is_not_owner_slash_name_never_reaches_the_transport() {
         let gh = MockGhClient::new();
-        assert!(fetch_round(&gh, "no-slash", &[], &[], &no_cursors()).is_err());
+        assert!(run_round(
+            &gh,
+            "no-slash",
+            &[],
+            &[],
+            &no_cursors(),
+            RoundScope::Everything
+        )
+        .is_err());
         assert!(gh.graphql_calls.borrow().is_empty());
     }
 
@@ -2249,5 +2457,305 @@ mod tests {
 
         assert_eq!(snapshot.blocked_by.get(&1), Some(&vec![101]));
         assert_eq!(snapshot.blocked_by.get(&2), Some(&vec![102]));
+    }
+
+    // --- inline board memberships and field cells ---
+
+    fn status_cell(board: u64, status: &str) -> ProjectFieldValue {
+        ProjectFieldValue {
+            project_number: board,
+            field_name: "Status".to_string(),
+            kind: GhFieldKind::SingleSelect,
+            value: GhFieldValueRepr::OptionName(status.to_string()),
+        }
+    }
+
+    /// The board memberships a round selects inline on an issue.
+    fn boarded(mut node: Value, items: &[ProjectItem]) -> Value {
+        node["projectItems"] = project_items_edge(items);
+        node
+    }
+
+    fn boarded_page(items: &[ProjectItem]) -> FetchSnapshot {
+        let types = [rule("story", None, None)];
+        let resp = with_issues(
+            org_owned_response(),
+            &[(
+                0,
+                last_page(vec![boarded(
+                    issue_node(1, &["lazyspec:story"], None),
+                    items,
+                )]),
+            )],
+        );
+        parse_round(&resp, &types, &[], RoundScope::Everything)
+    }
+
+    #[test]
+    fn the_round_selects_project_items_with_their_field_values_at_the_caps() {
+        let query = round_query(&[rule("story", None, None)], &[], RoundScope::Everything);
+
+        assert!(
+            query.contains(
+                "projectItems(first: 10) { pageInfo { hasNextPage } nodes { \
+                            id project { number } fieldValues(first: 25) \
+                            { pageInfo { hasNextPage } nodes { __typename"
+            ),
+            "{}",
+            query
+        );
+        assert!(
+            query.contains("... on ProjectV2ItemFieldSingleSelectValue"),
+            "the field-value fragments the parser reads must be selected: {}",
+            query
+        );
+    }
+
+    #[test]
+    fn board_memberships_and_field_cells_land_keyed_by_the_issues_node_id() {
+        let snapshot = boarded_page(&[ProjectItem {
+            project_number: 7,
+            item_id: "PVTI_7".to_string(),
+            fields: vec![status_cell(7, "In Progress")],
+        }]);
+
+        assert_eq!(
+            snapshot.project_items.as_ref().unwrap()["I_kw1"],
+            vec![ProjectItem {
+                project_number: 7,
+                item_id: "PVTI_7".to_string(),
+                fields: vec![status_cell(7, "In Progress")],
+            }]
+        );
+    }
+
+    // "On no board" is a state a consumer acts on -- it is what puts a doc of an
+    // authority-bound type onto its board -- so it must be an answer, not a gap.
+    #[test]
+    fn an_issue_on_no_board_is_recorded_as_empty_rather_than_left_out() {
+        let snapshot = boarded_page(&[]);
+
+        assert_eq!(
+            snapshot.project_items.as_ref().unwrap().get("I_kw1"),
+            Some(&Vec::new())
+        );
+    }
+
+    // AC5: a token without the `project` scope nulls `projectItems` and names it
+    // in `errors[].path`. The alias it hangs under must survive that: the issue
+    // list, the sub-issues and the blocked-by edges all came back beside it.
+    #[test]
+    fn a_failed_project_items_read_leaves_the_issues_and_their_other_edges_intact() {
+        let types = [rule("story", None, None)];
+        let mut node = edged(issue_node(1, &["lazyspec:story"], None), &["I_kw2"], &[9]);
+        node["projectItems"] = Value::Null;
+        let mut resp = with_issues(org_owned_response(), &[(0, last_page(vec![node]))]);
+        resp["errors"] = json!([{
+            "type": "INSUFFICIENT_SCOPES",
+            "message": "Your token has not been granted the required scopes: project",
+            "path": ["repository", "t0", "nodes", 0, "projectItems"]
+        }]);
+
+        let snapshot = parse_round(&resp, &types, &[], RoundScope::Everything);
+
+        assert_eq!(snapshot.project_items, None);
+        assert_eq!(numbers(&snapshot, "story"), vec![1]);
+        assert_eq!(
+            snapshot.sub_issues.get("I_kw1"),
+            Some(&vec!["I_kw2".to_string()])
+        );
+        assert_eq!(snapshot.blocked_by.get(&1), Some(&vec![9]));
+        assert_eq!(snapshot.warnings.len(), 1, "{:?}", snapshot.warnings);
+        assert!(
+            snapshot.warnings[0]
+                .message
+                .contains("gh auth refresh -s project"),
+            "{}",
+            snapshot.warnings[0].message
+        );
+    }
+
+    // A null connection with no error entry is one issue's read failing, not the
+    // scope: that issue is simply absent, and every other issue's memberships
+    // stay authoritative.
+    #[test]
+    fn a_null_project_items_with_no_error_entry_leaves_only_that_issue_unread() {
+        let types = [rule("story", None, None)];
+        let mut unread = issue_node(1, &["lazyspec:story"], None);
+        unread["projectItems"] = Value::Null;
+        let resp = with_issues(
+            org_owned_response(),
+            &[(
+                0,
+                last_page(vec![
+                    unread,
+                    boarded(issue_node(2, &["lazyspec:story"], None), &[]),
+                ]),
+            )],
+        );
+
+        let snapshot = parse_round(&resp, &types, &[], RoundScope::Everything);
+
+        let items = snapshot.project_items.as_ref().unwrap();
+        assert_eq!(items.get("I_kw1"), None);
+        assert_eq!(items.get("I_kw2"), Some(&Vec::new()));
+        assert!(snapshot.warnings.is_empty(), "{:?}", snapshot.warnings);
+    }
+
+    #[test]
+    fn an_issue_on_more_boards_than_the_cap_is_recorded_as_a_truncation() {
+        let items: Vec<ProjectItem> = (1..=Connection::ProjectItems.cap() as u64)
+            .map(|board| ProjectItem {
+                project_number: board,
+                item_id: format!("PVTI_{}", board),
+                fields: Vec::new(),
+            })
+            .collect();
+        let mut node = boarded(issue_node(1, &["lazyspec:story"], None), &items);
+        node["projectItems"]["pageInfo"]["hasNextPage"] = json!(true);
+        let resp = with_issues(org_owned_response(), &[(0, last_page(vec![node]))]);
+
+        let snapshot = parse_round(
+            &resp,
+            &[rule("story", None, None)],
+            &[],
+            RoundScope::Everything,
+        );
+
+        assert_eq!(
+            snapshot.truncations,
+            vec![Truncation {
+                node_id: "I_kw1".to_string(),
+                connection: Connection::ProjectItems,
+            }]
+        );
+        // The ten that did arrive are kept: the truncation reports the loss.
+        assert_eq!(snapshot.project_items.as_ref().unwrap()["I_kw1"].len(), 10);
+    }
+
+    // The truncation is reported against the issue, not the board item: the item
+    // id is a Projects v2 internal, and the document is what a reader looks at.
+    #[test]
+    fn a_board_item_with_more_field_cells_than_the_cap_truncates_against_the_issue() {
+        let mut node = boarded(
+            issue_node(1, &["lazyspec:story"], None),
+            &[ProjectItem {
+                project_number: 7,
+                item_id: "PVTI_7".to_string(),
+                fields: vec![status_cell(7, "Review")],
+            }],
+        );
+        node["projectItems"]["nodes"][0]["fieldValues"]["pageInfo"]["hasNextPage"] = json!(true);
+        let resp = with_issues(org_owned_response(), &[(0, last_page(vec![node]))]);
+
+        let snapshot = parse_round(
+            &resp,
+            &[rule("story", None, None)],
+            &[],
+            RoundScope::Everything,
+        );
+
+        assert_eq!(
+            snapshot.truncations,
+            vec![Truncation {
+                node_id: "I_kw1".to_string(),
+                connection: Connection::FieldValues,
+            }]
+        );
+    }
+
+    // --- node budget ---
+
+    // RFC-065's measured figures, restated as arithmetic over the constants the
+    // query is built from: 360 nodes of nested connections plus the 30 of labels
+    // and assignees, times a 100-issue page, times the type count.
+    #[test]
+    fn one_types_alias_declares_a_page_of_issues_and_their_own_selections() {
+        assert_eq!(nodes_per_issue(), 20 + 10 + 50 + 50 + 10 + 10 * 25);
+        assert_eq!(possible_nodes(1), 100 * (1 + 390));
+    }
+
+    #[test]
+    fn ten_types_fit_one_request_and_sixteen_do_not() {
+        assert!(
+            possible_nodes(10) <= NODE_BUDGET,
+            "10 types must fit: {}",
+            possible_nodes(10)
+        );
+        assert!(
+            possible_nodes(16) > NODE_BUDGET,
+            "16 types must not: {}",
+            possible_nodes(16)
+        );
+        assert_eq!(types_per_request(), 12);
+    }
+
+    /// Every request the round would issue for `types`, and what each declares.
+    fn chunk_sizes(types: usize) -> Vec<usize> {
+        let rules: Vec<TypeMatchRule> = (0..types)
+            .map(|index| rule(&format!("t{}", index), None, None))
+            .collect();
+        type_chunks(&rules).iter().map(|c| c.len()).collect()
+    }
+
+    // AC3: the overrun is detected from the constants and the type count before
+    // anything is sent, and no request the split produces exceeds the budget.
+    #[test]
+    fn sixteen_types_split_into_two_requests_neither_over_the_budget() {
+        assert_eq!(chunk_sizes(10), vec![10]);
+        assert_eq!(chunk_sizes(16), vec![12, 4]);
+        assert_eq!(chunk_sizes(16).len(), 16_usize.div_ceil(12));
+
+        for types in 1..=40 {
+            for chunk in chunk_sizes(types) {
+                assert!(
+                    possible_nodes(chunk) <= NODE_BUDGET,
+                    "a chunk of {} types declares {} nodes",
+                    chunk,
+                    possible_nodes(chunk)
+                );
+            }
+        }
+    }
+
+    // The same claim at the query-builder level: what is actually composed into
+    // one document never declares more than GitHub allows.
+    #[test]
+    fn no_built_query_declares_more_nodes_than_github_allows() {
+        for types in [1, 10, 12, 16, 40] {
+            let rules: Vec<TypeMatchRule> = (0..types)
+                .map(|index| rule(&format!("t{}", index), None, None))
+                .collect();
+            for chunk in type_chunks(&rules) {
+                let query = round_query(chunk, &[7], RoundScope::Everything);
+                assert_eq!(composed_aliases(&query), chunk.len());
+                assert!(
+                    possible_nodes(composed_aliases(&query)) <= NODE_BUDGET,
+                    "{} aliases in one document",
+                    composed_aliases(&query)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ten_types_cost_one_request_and_sixteen_cost_two() {
+        let ten = PagingRound::with_pages(1);
+        fetch_all_pages(&ten, "owner/repo", &ten_types(), &[]);
+        assert_eq!(ten.queries.borrow().len(), 1);
+
+        let sixteen: Vec<TypeMatchRule> = (0..16)
+            .map(|index| rule(&format!("type{}", index), None, None))
+            .collect();
+        let split = PagingRound::with_pages(1);
+        let snapshot = fetch_all_pages(&split, "owner/repo", &sixteen, &[]);
+
+        assert_eq!(split.queries.borrow().len(), 2);
+        assert_eq!(composed_aliases(&split.queries.borrow()[0]), 12);
+        assert_eq!(composed_aliases(&split.queries.borrow()[1]), 4);
+        // Every type is in the snapshot however it was chunked, and the
+        // repository-wide subtrees are read once rather than per chunk.
+        assert_eq!(snapshot.issues.len(), 16);
+        assert!(!split.queries.borrow()[1].contains("milestones"));
     }
 }

@@ -502,7 +502,10 @@ name = "related-to"
         // All four discovery rules across the ten types -- plain label, tag,
         // native issue type, and both -- so the round composes every alias
         // shape, not ten copies of one.
-        for n in 0..10 {
+        // Letter-suffixed prefixes: a digit in a prefix stops `extract_id_from
+        // _name` at the prefix itself, so `T0-1` would resolve as `T0` and the
+        // cached doc would never match its issue-map entry.
+        for (n, prefix) in ('A'..='J').enumerate() {
             let authority = if n == 0 {
                 "status_authority = \"PROJECT-7\"\n"
             } else {
@@ -516,7 +519,7 @@ name = "related-to"
             };
             src.push_str(&format!(
                 "[[types]]\nname = \"t{n}\"\nplural = \"t{n}s\"\ndir = \"docs/t{n}\"\n\
-                 prefix = \"T{n}\"\nstore = \"github-issues\"\n{authority}{rule}\n"
+                 prefix = \"T{prefix}\"\nstore = \"github-issues\"\n{authority}{rule}\n"
             ));
         }
         src.push_str("[[relationships]]\nname = \"related-to\"\n\n");
@@ -571,13 +574,13 @@ name = "related-to"
         // the round's `subIssues`, and #1 carries `blocked-by` from its
         // `blockedBy` -- both without a second query.
         assert!(
-            root.join(".lazyspec/cache/t0/T0-1/00-T0-2.md").is_file(),
+            root.join(".lazyspec/cache/t0/TA-1/00-TA-2.md").is_file(),
             "sub-issue parentage must materialize off the round"
         );
         let parent =
-            std::fs::read_to_string(root.join(".lazyspec/cache/t0/T0-1/index.md")).unwrap();
+            std::fs::read_to_string(root.join(".lazyspec/cache/t0/TA-1/index.md")).unwrap();
         assert!(
-            parent.contains("blocked-by: T0-2"),
+            parent.contains("blocked-by: TA-2"),
             "dependency edges must come off the round, got:\n{parent}"
         );
 
@@ -587,6 +590,14 @@ name = "related-to"
         assert_eq!(
             saved.status_lifecycle(7).unwrap().states,
             vec!["review", "done"]
+        );
+
+        // STORY-251: and the board *memberships* too. `t0` hands its lifecycle
+        // to board 7, so a status read off that board's `Status` cell is proof
+        // the membership arrived on the same request as everything else.
+        assert!(
+            parent.contains("status: review"),
+            "the authority board's cell must come off the round, got:\n{parent}"
         );
     }
 

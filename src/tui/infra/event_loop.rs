@@ -1440,9 +1440,13 @@ mod tests {
             "release",
             StoreBackend::GithubMilestones,
         )];
-        // All four discovery rules, so the poll composes every alias shape.
-        for n in 0..10 {
+        // All four discovery rules, so the poll composes every alias shape. The
+        // prefix takes a letter rather than the type name's digit: a digit stops
+        // `extract_id_from_name` at the prefix, and a cached doc whose id does
+        // not resolve never matches its issue-map entry.
+        for (n, letter) in ('A'..='J').enumerate() {
             config.documents.types.push(TypeDef {
+                prefix: format!("T{letter}"),
                 status_authority: (n == 0).then(|| "PROJECT-7".to_string()),
                 github_issue_tag: matches!(n % 4, 1 | 3).then(|| "triage".to_string()),
                 github_issue_type: matches!(n % 4, 2 | 3).then(|| "Bug".to_string()),
@@ -1482,7 +1486,7 @@ mod tests {
         );
         assert_eq!(gh.milestone_list_calls.get(), 0);
         assert!(
-            root.join(".lazyspec/cache/t0/T0-1/00-T0-2.md").is_file(),
+            root.join(".lazyspec/cache/t0/TA-1/00-TA-2.md").is_file(),
             "the poll materializes sub-issue parentage off the same one round"
         );
 
@@ -1491,6 +1495,15 @@ mod tests {
         assert_eq!(
             saved.status_lifecycle(7).unwrap().states,
             vec!["review", "done"]
+        );
+
+        // STORY-251: board memberships ride that same request, so `t0`'s
+        // authority board sets its status with no read of its own.
+        let parent =
+            std::fs::read_to_string(root.join(".lazyspec/cache/t0/TA-1/index.md")).unwrap();
+        assert!(
+            parent.contains("status: review"),
+            "the authority board's cell must come off the round, got:\n{parent}"
         );
     }
 

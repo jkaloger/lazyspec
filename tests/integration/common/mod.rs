@@ -229,12 +229,110 @@ pub fn sub_issue_edge(children: &[&str]) -> serde_json::Value {
     )
 }
 
+/// An issue's board memberships and field cells, rendered back into the shape
+/// the round selects them in, so a double drives the real parser.
+pub fn project_items_edge(items: &[lazyspec::engine::gh::ProjectItem]) -> serde_json::Value {
+    use lazyspec::engine::gh::GhFieldValueRepr;
+    let nodes = items
+        .iter()
+        .map(|item| {
+            let values = item
+                .fields
+                .iter()
+                .map(|value| {
+                    let field = serde_json::json!({"name": value.field_name});
+                    match &value.value {
+                        GhFieldValueRepr::OptionName(name) => serde_json::json!({
+                            "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                            "name": name, "field": field
+                        }),
+                        GhFieldValueRepr::IterationTitle(title) => serde_json::json!({
+                            "__typename": "ProjectV2ItemFieldIterationValue",
+                            "title": title, "field": field
+                        }),
+                        GhFieldValueRepr::Number(number) => serde_json::json!({
+                            "__typename": "ProjectV2ItemFieldNumberValue",
+                            "number": number, "field": field
+                        }),
+                        GhFieldValueRepr::Date(date) => serde_json::json!({
+                            "__typename": "ProjectV2ItemFieldDateValue",
+                            "date": date.format("%Y-%m-%d").to_string(), "field": field
+                        }),
+                        GhFieldValueRepr::Text(text) => serde_json::json!({
+                            "__typename": "ProjectV2ItemFieldTextValue",
+                            "text": text, "field": field
+                        }),
+                    }
+                })
+                .collect();
+            serde_json::json!({
+                "id": item.item_id,
+                "project": {"number": item.project_number},
+                "fieldValues": edge(values, false)
+            })
+        })
+        .collect();
+    edge(nodes, false)
+}
+
+/// As [`with_sub_issues`], for the `projectItems` connection.
+pub fn with_project_items(
+    resp: serde_json::Value,
+    node_id: &str,
+    items: &[lazyspec::engine::gh::ProjectItem],
+) -> serde_json::Value {
+    with_issue_connection(resp, node_id, "projectItems", project_items_edge(items))
+}
+
+/// The round as a token without the `project` scope gets it: every issue's
+/// `projectItems` null, with one `errors[]` entry naming the path. The issue
+/// lists come back intact beside it.
+pub fn without_project_items(mut resp: serde_json::Value, message: &str) -> serde_json::Value {
+    let mut paths = Vec::new();
+    if let Some(repo) = resp
+        .pointer_mut("/data/repository")
+        .and_then(|v| v.as_object_mut())
+    {
+        for (alias, value) in repo.iter_mut() {
+            let Some(nodes) = value.get_mut("nodes").and_then(|v| v.as_array_mut()) else {
+                continue;
+            };
+            for (index, node) in nodes.iter_mut().enumerate() {
+                node["projectItems"] = serde_json::Value::Null;
+                paths.push(serde_json::json!([
+                    "repository",
+                    alias,
+                    "nodes",
+                    index,
+                    "projectItems"
+                ]));
+            }
+        }
+    }
+    resp["errors"] = paths
+        .into_iter()
+        .map(|path| {
+            serde_json::json!({"type": "INSUFFICIENT_SCOPES", "message": message, "path": path})
+        })
+        .collect();
+    resp
+}
+
 /// Replace the `subIssues` connection of the issue with node id `node_id` on
 /// every alias of a round response, so a double answers the connection the round
 /// selects inline rather than a query of its own.
 pub fn with_sub_issues(
+    resp: serde_json::Value,
+    node_id: &str,
+    edge: serde_json::Value,
+) -> serde_json::Value {
+    with_issue_connection(resp, node_id, "subIssues", edge)
+}
+
+fn with_issue_connection(
     mut resp: serde_json::Value,
     node_id: &str,
+    field: &str,
     edge: serde_json::Value,
 ) -> serde_json::Value {
     let Some(repo) = resp
@@ -249,7 +347,7 @@ pub fn with_sub_issues(
         };
         for node in nodes {
             if node.get("id").and_then(|v| v.as_str()) == Some(node_id) {
-                node["subIssues"] = edge.clone();
+                node[field] = edge.clone();
             }
         }
     }
@@ -292,7 +390,8 @@ pub fn round_response_with_issues(
                     .map(|a| serde_json::json!({"login": a.login}))
                     .collect::<Vec<_>>()},
                 "subIssues": edge(vec![], false),
-                "blockedBy": edge(vec![], false)
+                "blockedBy": edge(vec![], false),
+                "projectItems": edge(vec![], false)
             })
         })
         .collect();

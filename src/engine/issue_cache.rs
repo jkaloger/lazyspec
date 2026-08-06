@@ -3599,6 +3599,37 @@ mod tests {
         assert!(warnings[0].message.contains("50"), "{:?}", warnings[0]);
     }
 
+    // STORY-251 AC4: the board connections warn the same way, one per truncated
+    // connection, each naming the document and the cap it was cut at.
+    #[test]
+    fn a_truncated_board_connection_warns_naming_the_document_and_the_cap() {
+        let round = FetchSnapshot {
+            truncations: vec![
+                gh_fetch::Truncation {
+                    node_id: "I_parent".to_string(),
+                    connection: gh_fetch::Connection::ProjectItems,
+                },
+                gh_fetch::Truncation {
+                    node_id: "I_parent".to_string(),
+                    connection: gh_fetch::Connection::FieldValues,
+                },
+            ],
+            ..Default::default()
+        };
+        let map = node_to_doc(&[("I_parent", "STORY-1")]);
+
+        let warnings = truncation_warnings(&round, &map);
+
+        let messages: Vec<&str> = warnings.iter().map(|w| w.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            vec![
+                "STORY-1: `projectItems` truncated at 10 on this fetch; the rest were not read",
+                "STORY-1: `fieldValues` truncated at 25 on this fetch; the rest were not read",
+            ]
+        );
+    }
+
     /// A `story` type whose config declares the native dependency relationship,
     /// so `fetch_all` injects `blocked-by` from the round's edges.
     fn dependency_config() -> Config {

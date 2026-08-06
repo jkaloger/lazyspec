@@ -3,7 +3,6 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::process::Command;
 use std::time::Duration;
@@ -668,25 +667,6 @@ pub trait GhGraphql {
         )?;
         require_project_item(&resp, "clearProjectV2ItemFieldValue")
     }
-
-    /// Batched variant of [`project_items`](GhGraphql::project_items): resolve
-    /// board memberships for many issues in as few round trips as the backend
-    /// can manage. The default loops one `project_items` call per id -- correct
-    /// but serial, and what every test double gets for free. `GhCli` overrides
-    /// this with a single `nodes(ids:)` query per `GH_NODES_BATCH_MAX`-sized
-    /// chunk, so a multi-doc pass (`sync::reconcile_project_fields_into_cache`)
-    /// stops paying one `gh` subprocess per doc.
-    fn project_items_batch(
-        &self,
-        repo: &str,
-        content_node_ids: &[String],
-    ) -> Result<HashMap<String, Vec<ProjectItem>>> {
-        let mut out = HashMap::new();
-        for id in content_node_ids {
-            out.insert(id.clone(), self.project_items(repo, id)?);
-        }
-        Ok(out)
-    }
 }
 
 /// A project-field mutation moved the cell only if GitHub echoed the item back.
@@ -962,22 +942,34 @@ impl<T: GhGraphql + AsAny> GhProjectsClient for T {
     }
 }
 
-const PROJECT_ITEM_FIELDS_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on Issue { projectItems(first: 50) { nodes { id project { number } fieldValues(first: 50) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldIterationValue { title field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } } } } } } } }";
+/// One inline fragment per project-field value type, naming the field it belongs
+/// to. This is the exact shape [`parse_project_items_array`] reads, so every
+/// query that wants project field values -- the single-issue read below and the
+/// composed fetch round's inline `fieldValues` (`gh_fetch`) -- selects it from
+/// here rather than spelling it out a second time.
+pub(crate) const PROJECT_FIELD_VALUE_SELECTION: &str = "__typename \
+     ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } \
+     ... on ProjectV2ItemFieldIterationValue { title field { ... on ProjectV2FieldCommon { name } } } \
+     ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } } \
+     ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2FieldCommon { name } } } \
+     ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } }";
 
-/// GitHub caps a single `nodes(ids:)` selection at 100 ids. The project-item
-/// batch is its last user: sub-issue parentage and native blocked-by both ride
-/// the composed fetch round now (RFC-065) and need no id list at all.
-pub const GH_NODES_BATCH_MAX: usize = 100;
-
-/// Batched variant of [`PROJECT_ITEM_FIELDS_QUERY`]: the same field selection,
-/// resolved for many issues at once via `nodes(ids:)`.
-const PROJECT_ITEM_FIELDS_BATCH_QUERY: &str = "query($ids: [ID!]!) { nodes(ids: $ids) { ... on Issue { id projectItems(first: 50) { nodes { id project { number } fieldValues(first: 50) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldIterationValue { title field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } } } } } } } }";
+/// One issue's board memberships and field cells. The read-back after a
+/// project-field write, where one issue is genuinely one request; a fetch reads
+/// the same shape inline on the composed round instead.
+fn project_item_fields_query() -> String {
+    format!(
+        "query($id: ID!) {{ node(id: $id) {{ ... on Issue {{ \
+         projectItems(first: 50) {{ nodes {{ id project {{ number }} \
+         fieldValues(first: 50) {{ nodes {{ {PROJECT_FIELD_VALUE_SELECTION} }} }} }} }} }} }} }}"
+    )
+}
 
 const UPDATE_PROJECT_FIELD_MUTATION: &str = "mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) { updateProjectV2ItemFieldValue(input: {projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: __VALUE__}) { projectV2Item { id } } }";
 
 const CLEAR_PROJECT_FIELD_MUTATION: &str = "mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) { clearProjectV2ItemFieldValue(input: {projectId: $projectId, itemId: $itemId, fieldId: $fieldId}) { projectV2Item { id } } }";
 
-/// Parse the `projectItems.nodes` of a [`PROJECT_ITEM_FIELDS_QUERY`] response
+/// Parse the `projectItems.nodes` of a [`project_item_fields_query`] response
 /// into one [`ProjectItem`] per board membership, each carrying one
 /// [`ProjectFieldValue`] per set field value. Unset fields and field values with
 /// no resolvable name/typename are skipped; an item whose board number is
@@ -992,36 +984,13 @@ pub fn parse_project_items(resp: &serde_json::Value) -> Vec<ProjectItem> {
     parse_project_items_array(items)
 }
 
-/// Parse the `projectItems.nodes` of a [`PROJECT_ITEM_FIELDS_BATCH_QUERY`]
-/// response into `content_node_id -> its project items`. A node absent from
-/// GitHub's response (non-Issue, inaccessible, or dropped by a failed chunk
-/// upstream) is simply absent from the map.
-fn parse_project_items_batch(resp: &serde_json::Value) -> HashMap<String, Vec<ProjectItem>> {
-    let mut out = HashMap::new();
-    let Some(nodes) = resp.pointer("/data/nodes").and_then(|v| v.as_array()) else {
-        return out;
-    };
-    for node in nodes {
-        let Some(id) = node.get("id").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let items = node
-            .pointer("/projectItems/nodes")
-            .and_then(|v| v.as_array())
-            .map(|arr| parse_project_items_array(arr))
-            .unwrap_or_default();
-        out.insert(id.to_string(), items);
-    }
-    out
-}
-
-/// Shared per-item parse behind both [`parse_project_items`] and
-/// [`parse_project_items_batch`]: one [`ProjectItem`] per board membership,
-/// each carrying one [`ProjectFieldValue`] per set field value. Unset fields
-/// and field values with no resolvable name/typename are skipped; an item
-/// whose board number is missing is skipped entirely, but an item with no
-/// field values is kept.
-fn parse_project_items_array(items: &[serde_json::Value]) -> Vec<ProjectItem> {
+/// The per-item parse, over the `projectItems.nodes` array wherever it was
+/// selected -- the single-issue read back or the composed round's inline
+/// connection. One [`ProjectItem`] per board membership, each carrying one
+/// [`ProjectFieldValue`] per set field value. Unset fields and field values with
+/// no resolvable name/typename are skipped; an item whose board number is
+/// missing is skipped entirely, but an item with no field values is kept.
+pub(crate) fn parse_project_items_array(items: &[serde_json::Value]) -> Vec<ProjectItem> {
     let mut out: Vec<ProjectItem> = Vec::new();
     for item in items {
         let Some(number) = item.pointer("/project/number").and_then(|v| v.as_u64()) else {
@@ -1575,26 +1544,10 @@ impl GhGraphql for GhCli {
 
     fn project_items(&self, _repo: &str, content_node_id: &str) -> Result<Vec<ProjectItem>> {
         let resp = self.graphql(
-            PROJECT_ITEM_FIELDS_QUERY,
+            &project_item_fields_query(),
             &[("id", GqlVar::Str(content_node_id.to_string()))],
         )?;
         Ok(parse_project_items(&resp))
-    }
-
-    fn project_items_batch(
-        &self,
-        _repo: &str,
-        content_node_ids: &[String],
-    ) -> Result<HashMap<String, Vec<ProjectItem>>> {
-        let mut out = HashMap::new();
-        for chunk in content_node_ids.chunks(GH_NODES_BATCH_MAX) {
-            let resp = self.graphql(
-                PROJECT_ITEM_FIELDS_BATCH_QUERY,
-                &[("ids", GqlVar::StrList(chunk.to_vec()))],
-            )?;
-            out.extend(parse_project_items_batch(&resp));
-        }
-        Ok(out)
     }
 }
 
@@ -1786,6 +1739,44 @@ pub mod test_support {
         )
     }
 
+    /// An issue's board memberships and field cells, rendered back into the
+    /// GraphQL shape the round selects, so a double drives the real parser
+    /// rather than handing [`ProjectItem`]s straight to the snapshot.
+    pub fn project_items_edge(items: &[ProjectItem]) -> serde_json::Value {
+        edge(items.iter().map(project_item_node).collect(), false)
+    }
+
+    fn project_item_node(item: &ProjectItem) -> serde_json::Value {
+        serde_json::json!({
+            "id": item.item_id,
+            "project": {"number": item.project_number},
+            "fieldValues": edge(item.fields.iter().map(field_value_node).collect(), false)
+        })
+    }
+
+    fn field_value_node(value: &ProjectFieldValue) -> serde_json::Value {
+        let field = serde_json::json!({"name": value.field_name});
+        match &value.value {
+            GhFieldValueRepr::OptionName(name) => serde_json::json!({
+                "__typename": "ProjectV2ItemFieldSingleSelectValue", "name": name, "field": field
+            }),
+            GhFieldValueRepr::IterationTitle(title) => serde_json::json!({
+                "__typename": "ProjectV2ItemFieldIterationValue", "title": title, "field": field
+            }),
+            GhFieldValueRepr::Number(number) => serde_json::json!({
+                "__typename": "ProjectV2ItemFieldNumberValue", "number": number, "field": field
+            }),
+            GhFieldValueRepr::Date(date) => serde_json::json!({
+                "__typename": "ProjectV2ItemFieldDateValue",
+                "date": date.format("%Y-%m-%d").to_string(),
+                "field": field
+            }),
+            GhFieldValueRepr::Text(text) => serde_json::json!({
+                "__typename": "ProjectV2ItemFieldTextValue", "text": text, "field": field
+            }),
+        }
+    }
+
     fn edge(nodes: Vec<serde_json::Value>, has_next_page: bool) -> serde_json::Value {
         serde_json::json!({"pageInfo": {"hasNextPage": has_next_page}, "nodes": nodes})
     }
@@ -1808,6 +1799,48 @@ pub mod test_support {
         edge: serde_json::Value,
     ) -> serde_json::Value {
         with_issue_edge(resp, node_id, "blockedBy", edge)
+    }
+
+    /// The round as a token without the `project` scope gets it: every issue's
+    /// `projectItems` null, with one `errors[]` entry naming the path. The issue
+    /// lists and the other inline connections come back intact beside it, which
+    /// is the partial-failure shape the round is built to survive.
+    pub fn without_project_items(mut resp: serde_json::Value, message: &str) -> serde_json::Value {
+        let mut paths = Vec::new();
+        if let Some(repo) = resp
+            .pointer_mut("/data/repository")
+            .and_then(|v| v.as_object_mut())
+        {
+            for (alias, value) in repo.iter_mut() {
+                let Some(nodes) = value.get_mut("nodes").and_then(|v| v.as_array_mut()) else {
+                    continue;
+                };
+                for (index, node) in nodes.iter_mut().enumerate() {
+                    node["projectItems"] = serde_json::Value::Null;
+                    paths.push(serde_json::json!([
+                        "repository",
+                        alias,
+                        "nodes",
+                        index,
+                        "projectItems"
+                    ]));
+                }
+            }
+        }
+        resp["errors"] = paths
+            .into_iter()
+            .map(|path| serde_json::json!({"type": "INSUFFICIENT_SCOPES", "message": message, "path": path}))
+            .collect();
+        resp
+    }
+
+    /// As [`with_sub_issues`], for the `projectItems` connection.
+    pub fn with_project_items_edge(
+        resp: serde_json::Value,
+        node_id: &str,
+        edge: serde_json::Value,
+    ) -> serde_json::Value {
+        with_issue_edge(resp, node_id, "projectItems", edge)
     }
 
     fn with_issue_edge(
@@ -1858,7 +1891,8 @@ pub mod test_support {
                 .map(|a| serde_json::json!({"login": a.login}))
                 .collect::<Vec<_>>()},
             "subIssues": sub_issue_edge(&[]),
-            "blockedBy": blocked_by_edge(&[])
+            "blockedBy": blocked_by_edge(&[]),
+            "projectItems": project_items_edge(&[])
         })
     }
 
@@ -1895,11 +1929,33 @@ pub mod test_support {
         }
 
         /// Answer every alias with a parent issue `#1`, its sub-issue child `#2`,
-        /// and a `blockedBy` edge from `#1` to `#2` -- so a fetch that still read
-        /// either edge through a query of its own would land in `other_queries`.
+        /// a `blockedBy` edge from `#1` to `#2`, and membership of every
+        /// configured board with its `Status` cell set -- so a fetch that still
+        /// read any of that through a query of its own, or wrote a membership it
+        /// wrongly read as missing, would land in `other_queries`.
         pub fn with_enriched_issues(mut self) -> Self {
             self.enriched = true;
             self
+        }
+
+        /// The `Status` cell the counter's boards answer with, which must be one
+        /// of the columns the same board's schema declares.
+        pub const COUNTED_STATUS: &'static str = "Review";
+
+        fn round_project_items(&self) -> Vec<ProjectItem> {
+            self.board_columns
+                .iter()
+                .map(|(number, _)| ProjectItem {
+                    project_number: *number,
+                    item_id: format!("PVTI_b{}", number),
+                    fields: vec![ProjectFieldValue {
+                        project_number: *number,
+                        field_name: "Status".to_string(),
+                        kind: GhFieldKind::SingleSelect,
+                        value: GhFieldValueRepr::OptionName(Self::COUNTED_STATUS.to_string()),
+                    }],
+                })
+                .collect()
         }
 
         fn round_issues(&self) -> Vec<GhIssue> {
@@ -1946,6 +2002,10 @@ pub mod test_support {
             if self.enriched {
                 resp = with_sub_issues(resp, "I_1", sub_issue_edge(&["I_2"]));
                 resp = with_blocked_by(resp, "I_1", blocked_by_edge(&[2]));
+                let items = project_items_edge(&self.round_project_items());
+                for issue in self.round_issues() {
+                    resp = with_project_items_edge(resp, &issue.id, items.clone());
+                }
             }
             Ok(resp)
         }
@@ -2952,6 +3012,16 @@ pub mod test_support {
                 );
                 for (node_id, blockers) in self.round_blocked_by.borrow().iter() {
                     resp = with_blocked_by(resp, node_id, blocked_by_edge(blockers));
+                }
+                // Board memberships ride the round now, so the items this mock
+                // was given answer there rather than through `project_items`.
+                // Every issue carries the same set: a test that wants them apart
+                // reaches for `with_project_items_edge`.
+                let items = self.project_items.borrow();
+                if !items.is_empty() {
+                    for issue in &self.list_result {
+                        resp = with_project_items_edge(resp, &issue.id, project_items_edge(&items));
+                    }
                 }
                 return Ok(resp);
             }

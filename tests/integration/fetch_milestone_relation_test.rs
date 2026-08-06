@@ -72,16 +72,9 @@ impl GhIssueReader for MilestoneGh {
 }
 
 impl GhGraphql for MilestoneGh {
-    fn graphql(&self, query: &str, vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
+    fn graphql(&self, query: &str, _vars: &[(&str, GqlVar)]) -> Result<serde_json::Value> {
         if lazyspec::engine::gh_fetch::is_round_query(query) {
             return Ok(round_response(query, &self.milestones, &self.issues));
-        }
-        if let Some((_, GqlVar::StrList(ids))) = vars.iter().find(|(k, _)| *k == "ids") {
-            let nodes: Vec<_> = ids
-                .iter()
-                .map(|p| serde_json::json!({ "id": p, "subIssues": { "nodes": [] } }))
-                .collect();
-            return Ok(serde_json::json!({ "data": { "nodes": nodes } }));
         }
         Ok(serde_json::json!({
             "data": { "organization": { "issueTypes": { "nodes": [] } } }

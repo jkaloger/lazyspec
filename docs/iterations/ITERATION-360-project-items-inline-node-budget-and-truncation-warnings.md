@@ -1,7 +1,7 @@
 ---
 title: Project items inline, node budget and truncation warnings
 type: iteration
-status: accepted
+status: in-progress
 author: Jack Kaloger
 date: 2026-08-06
 tags: []
