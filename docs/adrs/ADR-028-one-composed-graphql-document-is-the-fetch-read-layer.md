@@ -1,7 +1,7 @@
 ---
 title: One composed GraphQL document is the fetch read layer
 type: adr
-status: draft
+status: review
 author: Jack Kaloger
 date: 2026-08-06
 tags: []

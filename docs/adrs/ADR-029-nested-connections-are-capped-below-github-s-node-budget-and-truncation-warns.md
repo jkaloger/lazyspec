@@ -1,7 +1,7 @@
 ---
 title: Nested connections are capped below GitHub's node budget, and truncation warns
 type: adr
-status: draft
+status: review
 author: Jack Kaloger
 date: 2026-08-06
 tags: []

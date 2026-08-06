@@ -1,7 +1,7 @@
 ---
 title: Pagination composes across types per round
 type: adr
-status: draft
+status: review
 author: Jack Kaloger
 date: 2026-08-06
 tags: []
