@@ -98,7 +98,7 @@ Until a pillar is `accepted`, nothing can be built. That is deliberate -- commit
 | ----------------------------- | -------------------------------------------------------------------- |
 | Start any work                | `/lazy` (dispatches the right verb from your position)               |
 | New doc                       | `lazyspec create <type>` / `/scaffold` / `/co-write` / `/generate`   |
-| Move a doc forward            | `lazyspec advance <id>` / `/advance`                                 |
+| Move a doc forward            | `lazyspec update <id> --status <next>` / `/advance`                  |
 | Run one iteration's build     | `/execute` (the build agent)                                         |
 | Batch-run many ready iters    | `/orchestrate`                                                       |
 | Critique before advancing     | `/review`                                                            |

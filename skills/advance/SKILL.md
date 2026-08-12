@@ -9,6 +9,16 @@ TRAVERSE ONE OUT-EDGE OF THE LIFECYCLE GRAPH
 
 A type's lifecycle is a directed graph: the nodes are its statuses, the edges are the transitions config permits. A document sits on one status. Advance reads the out-edges from that status, picks the successor, confirms the gate on that edge holds, and writes the move. One document, one edge.
 
+## The command
+
+Advance is a skill, not a subcommand. The move is written by `update`:
+
+```
+lazyspec update <id> --status <next>
+```
+
+`lazyspec advance` does not exist. `lazyspec help` lists every subcommand there is.
+
 <HARD-GATE>
 Propose only a successor: a status the current one has an out-edge to in `lifecycle.edges`. Read the edge set from config. The binary rejects any pair that is not an edge.
 Advance writes status only. It never creates a child document, even when the move satisfies a gate that makes a child creatable.
