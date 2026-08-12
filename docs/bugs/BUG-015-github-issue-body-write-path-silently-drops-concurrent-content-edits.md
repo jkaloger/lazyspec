@@ -44,8 +44,8 @@ see ITERATION-361: re-fetch remote body immediately before the final `issue_edit
 
 ## Acceptance Criteria
 
-- [ ] `merge_relation_to_remote` re-verifies remote body immediately before its `issue_edit` call; a body that changed since the read the merge was built from aborts/retries rather than overwriting silently.
-- [ ] `resync_after_native_edge` gets the same treatment.
-- [ ] test drives the race deterministically (inject a body change between the merge's read and its write via the mock client) and asserts the concurrent edit survives.
-- [ ] `update()`'s existing `check_lock` behavior unchanged.
-- [ ] full check green: `cargo fmt --check`, `cargo clippy`, `cargo test`.
+- [x] `merge_relation_to_remote` re-verifies remote body immediately before its `issue_edit` call; a body that changed since the read the merge was built from aborts/retries rather than overwriting silently.
+- [x] `resync_after_native_edge` gets the same treatment.
+- [x] test drives the race deterministically (inject a body change between the merge's read and its write via the mock client) and asserts the concurrent edit survives.
+- [x] `update()`'s existing `check_lock` behavior unchanged.
+- [x] full check green: `cargo fmt --check`, `cargo clippy`, `cargo test`.

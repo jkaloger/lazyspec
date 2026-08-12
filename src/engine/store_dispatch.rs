@@ -829,6 +829,12 @@ impl GithubIssuesStore {
     /// body moved since the read this mirror was built from, the mirror is rebuilt
     /// on the prose that arrived instead of reverting it, and a remote that moves
     /// again aborts the mirror rather than discarding that prose.
+    ///
+    /// The rebuilt mirror is cache-authoritative for `meta` and only
+    /// remote-authoritative for prose, so a relation another session merged into
+    /// the remote inside that window is dropped rather than preserved. That is the
+    /// point: unioning the remote's `related` back in would resurrect an edge an
+    /// `unlink` had just removed from the cache.
     pub fn resync_after_native_edge(&mut self, type_def: &TypeDef, doc_id: &str) -> Result<()> {
         let cache_dir = self.root.join(".lazyspec/cache").join(&type_def.name);
         let cache_path = find_cache_file(&cache_dir, doc_id)
@@ -844,11 +850,16 @@ impl GithubIssuesStore {
             .ok_or_else(|| anyhow::anyhow!("{} not found in issue map", doc_id))?;
 
         // Read the remote to capture its current timestamp. Last-write-wins: the
-        // remote is authoritative for `updated_at`; we never reject on it.
+        // remote is authoritative for `updated_at`; we never reject on an
+        // `updated_at` bump alone.
         let base = self.client.issue_view(&self.repo, issue_number)?;
+        // Mirrors the CACHE's copy of the prose, where the retry below mirrors the
+        // REMOTE's. The two paths disagree about which prose wins; leaving that as
+        // it stands, since which copy is authoritative is a decision about user
+        // content rather than about this race.
         let new_body = issue_body::serialize(&meta, &body);
 
-        let (base, new_body) = match self.body_changed_since(issue_number, &base.updated_at)? {
+        let (base, new_body) = match self.fresh_body_if_changed(issue_number, &base.body)? {
             None => (base, new_body),
             Some(fresh) => {
                 // The native edge PATCH already landed and is authoritative, so
@@ -856,14 +867,14 @@ impl GithubIssuesStore {
                 // arrived, not the cache's copy of the prose it replaced.
                 let mirrored = issue_body::serialize(&meta, &self.remote_prose(type_def, &fresh));
                 if self
-                    .body_changed_since(issue_number, &fresh.updated_at)?
+                    .fresh_body_if_changed(issue_number, &fresh.body)?
                     .is_some()
                 {
                     bail!(
                         "{} kept changing on GitHub while its native-relation edge \
                          was being mirrored.\n  \
                          The edge itself is applied; the issue body was left alone \
-                         rather than overwrite the newer content.\n\
+                         rather than overwriting the newer content.\n\
                          Re-run once the remote settles to finish the mirror.",
                         doc_id,
                     );
@@ -887,16 +898,17 @@ impl GithubIssuesStore {
     /// whole-body write was built from. `Some(fresh)` means it did, and carries the
     /// state that write must be rebuilt on; `None` means the write is still current.
     ///
-    /// This is not [`Self::check_lock`]: it compares against what THIS operation
-    /// read moments ago, not against the issue map's fetch baseline, so an
-    /// unrelated remote bump predating the operation cannot reject it.
-    fn body_changed_since(
+    /// This is not [`Self::check_lock`]: it compares the body THIS operation read
+    /// moments ago, not the issue map's fetch baseline, so neither an unrelated
+    /// remote bump predating the operation nor one that leaves the body alone (a
+    /// comment, a label, a bot assignment) can reject it.
+    fn fresh_body_if_changed(
         &self,
         issue_number: u64,
-        seen_updated_at: &str,
+        base_body: &str,
     ) -> Result<Option<gh::GhIssue>> {
         let fresh = self.client.issue_view(&self.repo, issue_number)?;
-        if fresh.updated_at == seen_updated_at {
+        if fresh.body == base_body {
             return Ok(None);
         }
         Ok(Some(fresh))
@@ -955,7 +967,7 @@ impl GithubIssuesStore {
     /// preserves the remote prose, and pushes the merged body. `set == true`
     /// with the relation already present is a no-op (dedup): no `issue_edit`.
     /// Like [`Self::resync_after_native_edge`] it records the remote's current
-    /// `updated_at` and never rejects on it.
+    /// `updated_at` and never rejects on an `updated_at` bump alone.
     ///
     /// The merged body still replaces the whole remote body, which GitHub offers
     /// no conditional write for (BUG-015), so the remote is re-checked immediately
@@ -982,7 +994,7 @@ impl GithubIssuesStore {
             return Ok(());
         };
 
-        let (base, new_body) = match self.body_changed_since(issue_number, &base.updated_at)? {
+        let (base, new_body) = match self.fresh_body_if_changed(issue_number, &base.body)? {
             None => (base, new_body),
             Some(fresh) => {
                 let Some(retried) =
@@ -991,7 +1003,7 @@ impl GithubIssuesStore {
                     return Ok(());
                 };
                 if self
-                    .body_changed_since(issue_number, &fresh.updated_at)?
+                    .fresh_body_if_changed(issue_number, &fresh.body)?
                     .is_some()
                 {
                     bail!(
@@ -1919,26 +1931,7 @@ impl DocumentStore for GithubIssuesStore {
 
         let (issue_number, remote_issue) = self.check_lock(doc_id)?;
 
-        let ctx = issue_body::IssueContext {
-            title: remote_issue.title.clone(),
-            labels: remote_issue.labels.iter().map(|l| l.name.clone()).collect(),
-            is_open: remote_issue.state == "OPEN",
-            known_types: self
-                .config
-                .documents
-                .types
-                .iter()
-                .map(issue_body::TypeMatchRule::from)
-                .collect(),
-            issue_type: remote_issue.issue_type.clone(),
-            default_type: type_def.name.clone(),
-            attr_defs: type_def.attributes.clone(),
-            open_status: type_def
-                .effective_lifecycle()
-                .first_active_status()
-                .to_string(),
-            closed_status: type_def.effective_lifecycle().terminal_status().to_string(),
-        };
+        let ctx = self.issue_ctx(type_def, &remote_issue);
         let (mut meta, mut body) = issue_body::deserialize(&remote_issue.body, &ctx)?;
 
         let mut new_status: Option<Status> = None;
@@ -2118,26 +2111,7 @@ impl DocumentStore for GithubIssuesStore {
     ) -> Result<PushOutcome> {
         let (issue_number, remote_issue) = self.check_lock(doc_id)?;
 
-        let ctx = issue_body::IssueContext {
-            title: remote_issue.title.clone(),
-            labels: remote_issue.labels.iter().map(|l| l.name.clone()).collect(),
-            is_open: remote_issue.state == "OPEN",
-            known_types: self
-                .config
-                .documents
-                .types
-                .iter()
-                .map(issue_body::TypeMatchRule::from)
-                .collect(),
-            issue_type: remote_issue.issue_type.clone(),
-            default_type: type_def.name.clone(),
-            attr_defs: type_def.attributes.clone(),
-            open_status: type_def
-                .effective_lifecycle()
-                .first_active_status()
-                .to_string(),
-            closed_status: type_def.effective_lifecycle().terminal_status().to_string(),
-        };
+        let ctx = self.issue_ctx(type_def, &remote_issue);
         let (mut meta, body) = issue_body::deserialize(&remote_issue.body, &ctx)?;
         meta.provenance = provenance.to_vec();
 
@@ -6066,14 +6040,20 @@ mod tests {
             .merge_relation_to_remote(&td, "RFC-001", "implements", "STORY-001", true)
             .unwrap();
 
-        assert!(
-            gh_store.mock().last_edit_body.borrow().is_none(),
+        assert_eq!(
+            gh_store.mock().edit_calls.get(),
+            0,
             "already-present relation must not trigger an issue_edit"
+        );
+        assert_eq!(
+            gh_store.mock().view_calls.get(),
+            1,
+            "dedup short-circuits before the pre-write re-check"
         );
     }
 
     // Issue 42 as the remote holds it at one point in time.
-    fn remote_issue_at(body: &str, updated_at: &str) -> GhIssue {
+    fn issue_42_at(body: &str, updated_at: &str) -> GhIssue {
         GhIssue {
             number: 42,
             id: "I_node42".to_string(),
@@ -6092,6 +6072,35 @@ mod tests {
             milestone: None,
             assignees: vec![],
         }
+    }
+
+    // A lazyspec-comment body whose `related` block carries `relations`, for a
+    // remote that grew edges of its own.
+    fn issue_body_with_related(prose: &str, relations: &[(&str, &str)]) -> String {
+        use crate::engine::document::{Relation, RelationType};
+        let meta = DocMeta {
+            path: PathBuf::new(),
+            title: "My RFC".to_string(),
+            doc_type: DocType::new("rfc"),
+            status: Status::new("draft"),
+            author: "agent-7".to_string(),
+            date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related: relations
+                .iter()
+                .map(|(rel, target)| Relation {
+                    rel_type: RelationType::new(rel),
+                    target: target.to_string(),
+                })
+                .collect(),
+            validate_ignore: false,
+            virtual_doc: false,
+            assignee: None,
+            attributes: Default::default(),
+            id: "RFC-001".to_string(),
+        };
+        issue_body::serialize(&meta, prose)
     }
 
     fn gh_store_for_issue_42(root: &Path, client: MockGhClient) -> GithubIssuesStore {
@@ -6114,11 +6123,11 @@ mod tests {
     fn merge_relation_to_remote_retries_onto_concurrent_edit() {
         let root = tmp_root("merge_rel_toctou_retry");
         let client = MockGhClient::new().with_view_sequence(vec![
-            remote_issue_at(
+            issue_42_at(
                 &make_issue_body("agent-7", "2026-03-27", None, "ORIGINAL PROSE"),
                 "2026-03-27T11:00:00Z",
             ),
-            remote_issue_at(
+            issue_42_at(
                 &make_issue_body(
                     "agent-7",
                     "2026-03-27",
@@ -6141,8 +6150,176 @@ mod tests {
         assert!(pushed.contains("- implements: STORY-001"), "got:\n{pushed}");
         assert_eq!(gh_store.mock().edit_calls.get(), 1);
         assert_eq!(
-            gh_store.issue_map.get("RFC-001").unwrap().updated_at,
+            gh_store.mock().view_calls.get(),
+            3,
+            "base read, the re-check that caught the change, the re-check after the retry"
+        );
+        assert_eq!(
+            IssueMap::load(&root)
+                .unwrap()
+                .get("RFC-001")
+                .unwrap()
+                .updated_at,
             "2026-03-27T11:05:00Z"
+        );
+    }
+
+    // BUG-015: the guard is on the BODY, not on `updated_at`. A remote bump that
+    // leaves the body alone -- a comment, a label, a bot assignment -- must push
+    // straight through, not spend a retry and not risk the bail.
+    #[test]
+    fn merge_relation_to_remote_ignores_non_body_remote_bump() {
+        let root = tmp_root("merge_rel_non_body_bump");
+        let unchanged_body = make_issue_body("agent-7", "2026-03-27", None, "ORIGINAL PROSE");
+        let client = MockGhClient::new().with_view_sequence(vec![
+            issue_42_at(&unchanged_body, "2026-03-27T11:00:00Z"),
+            issue_42_at(&unchanged_body, "2026-03-27T11:05:00Z"),
+        ]);
+        let mut gh_store = gh_store_for_issue_42(&root, client);
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        gh_store
+            .merge_relation_to_remote(&td, "RFC-001", "implements", "STORY-001", true)
+            .expect("a bump that left the body alone is not a conflict");
+
+        let pushed = gh_store.mock().last_edit_body.borrow();
+        let pushed = pushed.as_ref().expect("issue_edit should run");
+        assert!(pushed.contains("ORIGINAL PROSE"), "got:\n{pushed}");
+        assert!(pushed.contains("- implements: STORY-001"), "got:\n{pushed}");
+        assert_eq!(
+            gh_store.mock().edit_calls.get(),
+            1,
+            "one write, no retry round"
+        );
+        assert_eq!(
+            gh_store.mock().view_calls.get(),
+            2,
+            "base read plus the single pre-write re-check"
+        );
+        // The baseline recorded is the read the pushed body was built from, so a
+        // non-body bump does not advance it.
+        assert_eq!(
+            IssueMap::load(&root)
+                .unwrap()
+                .get("RFC-001")
+                .unwrap()
+                .updated_at,
+            "2026-03-27T11:00:00Z"
+        );
+    }
+
+    // BUG-015: a relation another session added to the remote inside the window is
+    // preserved -- the retry re-applies this op's delta to the FRESH `related`
+    // rather than to the stale copy it first read.
+    #[test]
+    fn merge_relation_to_remote_retry_keeps_concurrent_remote_relation() {
+        let root = tmp_root("merge_rel_toctou_remote_rel");
+        let client = MockGhClient::new().with_view_sequence(vec![
+            issue_42_at(
+                &issue_body_with_related("ORIGINAL PROSE", &[]),
+                "2026-03-27T11:00:00Z",
+            ),
+            issue_42_at(
+                &issue_body_with_related("ORIGINAL PROSE", &[("blocks", "STORY-9")]),
+                "2026-03-27T11:05:00Z",
+            ),
+        ]);
+        let mut gh_store = gh_store_for_issue_42(&root, client);
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        gh_store
+            .merge_relation_to_remote(&td, "RFC-001", "implements", "STORY-001", true)
+            .expect("a settled remote change must be merged, not rejected");
+
+        let pushed = gh_store.mock().last_edit_body.borrow();
+        let pushed = pushed.as_ref().expect("issue_edit should run");
+        assert!(pushed.contains("- blocks: STORY-9"), "got:\n{pushed}");
+        assert!(pushed.contains("- implements: STORY-001"), "got:\n{pushed}");
+        assert_eq!(gh_store.mock().edit_calls.get(), 1);
+    }
+
+    // BUG-015: `set == false` takes the same retry -- an unlink must drop only its
+    // own edge from the fresh body, never revert the prose that arrived with it.
+    #[test]
+    fn merge_relation_to_remote_unlink_retries_onto_concurrent_edit() {
+        let root = tmp_root("merge_rel_toctou_unlink");
+        let client = MockGhClient::new().with_view_sequence(vec![
+            issue_42_at(
+                &issue_body_with_related("ORIGINAL PROSE", &[("implements", "STORY-001")]),
+                "2026-03-27T11:00:00Z",
+            ),
+            issue_42_at(
+                &issue_body_with_related(
+                    "ORIGINAL PROSE\n\nCONCURRENT EDIT",
+                    &[("implements", "STORY-001"), ("blocks", "STORY-9")],
+                ),
+                "2026-03-27T11:05:00Z",
+            ),
+        ]);
+        let mut gh_store = gh_store_for_issue_42(&root, client);
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        gh_store
+            .merge_relation_to_remote(&td, "RFC-001", "implements", "STORY-001", false)
+            .expect("a settled remote change must be merged, not rejected");
+
+        let pushed = gh_store.mock().last_edit_body.borrow();
+        let pushed = pushed.as_ref().expect("issue_edit should run");
+        assert!(pushed.contains("CONCURRENT EDIT"), "got:\n{pushed}");
+        assert!(pushed.contains("- blocks: STORY-9"), "got:\n{pushed}");
+        assert!(
+            !pushed.contains("- implements: STORY-001"),
+            "the unlinked edge must be gone, got:\n{pushed}"
+        );
+        assert_eq!(gh_store.mock().edit_calls.get(), 1);
+    }
+
+    // BUG-015, tradeoff pinned: when the concurrent edit added the SAME relation,
+    // the retry dedups and returns Ok with no write -- discarding what it just
+    // learned about the remote. The issue-map baseline keeps the read the merge
+    // started from, so the next ordinary body write hard-fails `check_lock`.
+    #[test]
+    fn merge_relation_to_remote_retry_dedup_leaves_stale_baseline() {
+        let root = tmp_root("merge_rel_toctou_retry_dedup");
+        let client = MockGhClient::new().with_view_sequence(vec![
+            issue_42_at(
+                &issue_body_with_related("ORIGINAL PROSE", &[]),
+                "2026-03-27T11:00:00Z",
+            ),
+            issue_42_at(
+                &issue_body_with_related("ORIGINAL PROSE", &[("implements", "STORY-001")]),
+                "2026-03-27T11:05:00Z",
+            ),
+        ]);
+        let mut gh_store = gh_store_for_issue_42(&root, client);
+        // Accurate as of the base read, so the staleness below is this op's doing.
+        gh_store
+            .issue_map
+            .insert("RFC-001", 42, "2026-03-27T11:00:00Z", "I_node42");
+
+        let td = test_type_def(StoreBackend::GithubIssues);
+        gh_store
+            .merge_relation_to_remote(&td, "RFC-001", "implements", "STORY-001", true)
+            .expect("the relation is already there, so there is nothing to write");
+
+        assert_eq!(gh_store.mock().edit_calls.get(), 0);
+        assert_eq!(
+            gh_store.mock().view_calls.get(),
+            2,
+            "base read plus the re-check; the retry dedups before any second re-check"
+        );
+        assert_eq!(
+            gh_store.issue_map.get("RFC-001").unwrap().updated_at,
+            "2026-03-27T11:00:00Z",
+            "the known-moved remote timestamp is not recorded"
+        );
+
+        let err = gh_store
+            .update(&td, "RFC-001", &[("body", "later edit")])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("has been modified on GitHub"),
+            "got: {err}"
         );
     }
 
@@ -6152,15 +6329,15 @@ mod tests {
     fn merge_relation_to_remote_bails_when_remote_never_settles() {
         let root = tmp_root("merge_rel_toctou_bail");
         let client = MockGhClient::new().with_view_sequence(vec![
-            remote_issue_at(
+            issue_42_at(
                 &make_issue_body("agent-7", "2026-03-27", None, "PROSE ONE"),
                 "2026-03-27T11:00:00Z",
             ),
-            remote_issue_at(
+            issue_42_at(
                 &make_issue_body("agent-7", "2026-03-27", None, "PROSE TWO"),
                 "2026-03-27T11:05:00Z",
             ),
-            remote_issue_at(
+            issue_42_at(
                 &make_issue_body("agent-7", "2026-03-27", None, "PROSE THREE"),
                 "2026-03-27T11:10:00Z",
             ),
@@ -6177,6 +6354,11 @@ mod tests {
             gh_store.mock().edit_calls.get(),
             0,
             "an unsettled remote must not be written at all"
+        );
+        assert_eq!(
+            gh_store.mock().view_calls.get(),
+            3,
+            "base read plus both re-checks, then the bail -- it never reads again"
         );
     }
 
@@ -6207,11 +6389,11 @@ mod tests {
         .unwrap();
 
         let client = MockGhClient::new().with_view_sequence(vec![
-            remote_issue_at(
+            issue_42_at(
                 &make_issue_body("agent-7", "2026-03-27", None, "MIRRORED PROSE"),
                 "2026-03-27T11:00:00Z",
             ),
-            remote_issue_at(
+            issue_42_at(
                 &make_issue_body(
                     "agent-7",
                     "2026-03-27",
@@ -6232,6 +6414,12 @@ mod tests {
         let pushed = pushed.as_ref().expect("issue_edit should run");
         assert!(pushed.contains("CONCURRENT EDIT"), "got:\n{pushed}");
         assert!(pushed.contains("- targets: MILESTONE-3"), "got:\n{pushed}");
+        assert_eq!(gh_store.mock().edit_calls.get(), 1);
+        assert_eq!(
+            gh_store.mock().view_calls.get(),
+            3,
+            "base read, the re-check that caught the change, the re-check after the retry"
+        );
         assert_eq!(
             IssueMap::load(&root)
                 .unwrap()
@@ -6268,15 +6456,15 @@ mod tests {
         .unwrap();
 
         let client = MockGhClient::new().with_view_sequence(vec![
-            remote_issue_at(
+            issue_42_at(
                 &make_issue_body("agent-7", "2026-03-27", None, "PROSE ONE"),
                 "2026-03-27T11:00:00Z",
             ),
-            remote_issue_at(
+            issue_42_at(
                 &make_issue_body("agent-7", "2026-03-27", None, "PROSE TWO"),
                 "2026-03-27T11:05:00Z",
             ),
-            remote_issue_at(
+            issue_42_at(
                 &make_issue_body("agent-7", "2026-03-27", None, "PROSE THREE"),
                 "2026-03-27T11:10:00Z",
             ),
@@ -6293,6 +6481,11 @@ mod tests {
             gh_store.mock().edit_calls.get(),
             0,
             "an unsettled remote must not be written at all"
+        );
+        assert_eq!(
+            gh_store.mock().view_calls.get(),
+            3,
+            "base read plus both re-checks, then the bail -- it never reads again"
         );
     }
 

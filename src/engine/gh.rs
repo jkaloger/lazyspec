@@ -2201,6 +2201,7 @@ pub mod test_support {
         pub last_edit_labels_add: RefCell<Vec<String>>,
         pub last_edit_labels_remove: RefCell<Vec<String>>,
         pub edit_calls: Cell<usize>,
+        pub view_calls: Cell<usize>,
         pub last_ensure_label_names: RefCell<Vec<String>>,
         pub last_create_body: RefCell<Option<String>>,
         pub last_create_labels: RefCell<Vec<String>>,
@@ -2256,6 +2257,7 @@ pub mod test_support {
                 last_edit_labels_add: RefCell::new(vec![]),
                 last_edit_labels_remove: RefCell::new(vec![]),
                 edit_calls: Cell::new(0),
+                view_calls: Cell::new(0),
                 last_ensure_label_names: RefCell::new(vec![]),
                 last_create_body: RefCell::new(None),
                 last_create_labels: RefCell::new(vec![]),
@@ -2360,8 +2362,6 @@ pub mod test_support {
             self
         }
 
-        /// Answer successive `issue_view` calls with `issues` in order; the last
-        /// entry answers every call after it.
         pub fn with_view_sequence(mut self, issues: Vec<GhIssue>) -> Self {
             self.view_sequence = RefCell::new(issues);
             self
@@ -2404,6 +2404,7 @@ pub mod test_support {
         }
 
         fn issue_view(&self, _repo: &str, number: u64) -> Result<GhIssue> {
+            self.view_calls.set(self.view_calls.get() + 1);
             if let Some(issue) = self.next_view_in_sequence() {
                 return Ok(issue);
             }

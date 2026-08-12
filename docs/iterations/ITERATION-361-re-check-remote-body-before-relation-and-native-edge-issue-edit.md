@@ -1,7 +1,7 @@
 ---
 title: re-check remote body before relation and native-edge issue_edit
 type: iteration
-status: in-progress
+status: complete
 author: jkaloger
 date: 2026-08-12
 tags: []
