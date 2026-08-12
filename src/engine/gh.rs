@@ -2186,6 +2186,10 @@ pub mod test_support {
         pub auth: AuthStatus,
         pub list_result: Vec<GhIssue>,
         pub view_issue: RefCell<Option<GhIssue>>,
+        /// Successive remote states `issue_view` answers, one per call, so a test
+        /// can drive a remote that moves between a read and the write built from
+        /// it. The final entry sticks: every call past it answers that state.
+        pub view_sequence: RefCell<Vec<GhIssue>>,
         pub create_result: Option<GhIssue>,
         pub label_create_fail: bool,
         pub edit_fail: bool,
@@ -2196,6 +2200,7 @@ pub mod test_support {
         pub last_edit_body: RefCell<Option<String>>,
         pub last_edit_labels_add: RefCell<Vec<String>>,
         pub last_edit_labels_remove: RefCell<Vec<String>>,
+        pub edit_calls: Cell<usize>,
         pub last_ensure_label_names: RefCell<Vec<String>>,
         pub last_create_body: RefCell<Option<String>>,
         pub last_create_labels: RefCell<Vec<String>>,
@@ -2239,6 +2244,7 @@ pub mod test_support {
                 },
                 list_result: vec![],
                 view_issue: RefCell::new(None),
+                view_sequence: RefCell::new(vec![]),
                 create_result: None,
                 label_create_fail: false,
                 edit_fail: false,
@@ -2249,6 +2255,7 @@ pub mod test_support {
                 last_edit_body: RefCell::new(None),
                 last_edit_labels_add: RefCell::new(vec![]),
                 last_edit_labels_remove: RefCell::new(vec![]),
+                edit_calls: Cell::new(0),
                 last_ensure_label_names: RefCell::new(vec![]),
                 last_create_body: RefCell::new(None),
                 last_create_labels: RefCell::new(vec![]),
@@ -2353,6 +2360,22 @@ pub mod test_support {
             self
         }
 
+        /// Answer successive `issue_view` calls with `issues` in order; the last
+        /// entry answers every call after it.
+        pub fn with_view_sequence(mut self, issues: Vec<GhIssue>) -> Self {
+            self.view_sequence = RefCell::new(issues);
+            self
+        }
+
+        fn next_view_in_sequence(&self) -> Option<GhIssue> {
+            let mut sequence = self.view_sequence.borrow_mut();
+            let issue = sequence.first()?.clone();
+            if sequence.len() > 1 {
+                sequence.remove(0);
+            }
+            Some(issue)
+        }
+
         pub fn with_create_result(mut self, issue: GhIssue) -> Self {
             self.create_result = Some(issue);
             self
@@ -2381,6 +2404,9 @@ pub mod test_support {
         }
 
         fn issue_view(&self, _repo: &str, number: u64) -> Result<GhIssue> {
+            if let Some(issue) = self.next_view_in_sequence() {
+                return Ok(issue);
+            }
             if let Some(issue) = self.view_issue.borrow().as_ref() {
                 return Ok(issue.clone());
             }
@@ -2456,6 +2482,7 @@ pub mod test_support {
             labels_add: &[String],
             labels_remove: &[String],
         ) -> Result<()> {
+            self.edit_calls.set(self.edit_calls.get() + 1);
             if self.edit_fail {
                 bail!("simulated issue_edit failure");
             }
