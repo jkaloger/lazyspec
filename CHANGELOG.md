@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1](https://github.com/jkaloger/lazyspec/compare/v0.11.0...v0.11.1) - 2026-08-13
+
+### Added
+
+- *(skills)* prevent `advance` command hallucination
+- board-driven lifecycle via status_authority ([#95](https://github.com/jkaloger/lazyspec/pull/95))
+- *(graph)* bidirectional graph view
+
+### Fixed
+
+- re-check remote body before unlocked issue_edit
+- slow graph
+- *(clickup)* cache regression
+- *(clickup)* attr doesn't update custom fields
+
+### Other
+
+- compare body not updated_at in the pre-write re-check
+- Batch Github Reads ([#96](https://github.com/jkaloger/lazyspec/pull/96))
+- disable flakey test
+- lean execute ([#92](https://github.com/jkaloger/lazyspec/pull/92))
+
 ## [0.11.0](https://github.com/jkaloger/lazyspec/compare/v0.10.0...v0.11.0) - 2026-07-27
 
 ### Added
