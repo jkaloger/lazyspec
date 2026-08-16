@@ -1,0 +1,540 @@
+{
+  "created_at": "2026-08-16T14:27:56Z",
+  "heads": {
+    "body-rendering": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "DECIDED BY AGENT under explicit user delegation (\"I think you can make good decisions about the rest of this\"), not chosen by the user. The body has two audiences: a human scanning what was decided, and an agent reading the doc as context for the RFC it feeds. Rationale and rejected[] are the parts that stop a future session re-proposing a dead branch, so they belong in the body, not dropped.",
+        "rejected": [
+          {
+            "option": "ASCII tree only",
+            "why_not": "loses the decisions, which are the entire content"
+          },
+          {
+            "option": "raw JSON in a fenced block",
+            "why_not": "unreadable in the TUI and web view"
+          }
+        ],
+        "text": "Rendered markdown, assembled from the JSON at load, never written to disk:\n`# <slug>` / intent as prose / the ASCII tree in a fenced block / `## Decisions` — one subsection per answered head carrying question, answer, rationale and a rejected[] list / `## Open questions` — the remaining heads, marked blocked or ready.\nCauterised heads appear under Decisions with their cauterised_by noted."
+      },
+      "blocked_by": [
+        "granularity"
+      ],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJC7GVP5T5KPMKV43QNHK",
+      "parent": null,
+      "prior": null,
+      "question": "What markdown body does a hydra document render to — intent + ASCII tree + answered Q/A, and where do rationale and rejected[] go?",
+      "rev": 1,
+      "seq": 2,
+      "slug": "body-rendering",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:38:35Z"
+    },
+    "cli-surface": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "DECIDED BY AGENT under explicit user delegation (\"I think you can make good decisions about the rest of this\"), not chosen by the user. Every command is already store-agnostic and already supports --json (dictum 2); adding subcommands would put hydra-specific knowledge in the CLI layer for behaviour the generic commands already give.",
+        "rejected": [
+          {
+            "option": "dedicated `lazyspec hydra ...` subcommands",
+            "why_not": "duplicates the hydra CLI and leaks store specifics into the command layer"
+          }
+        ],
+        "text": "Nothing new. Hydra docs appear in list, show, status, search, context, validate and their --json forms like any other type.\nREADME gains a hydra store section; no new command surface."
+      },
+      "blocked_by": [
+        "granularity"
+      ],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJC8HGSM8JWT73D2XG48M",
+      "parent": null,
+      "prior": null,
+      "question": "What does the CLI expose: nothing new (hydra docs just appear in list/show/status/search), or dedicated subcommands?",
+      "rev": 1,
+      "seq": 5,
+      "slug": "cli-surface",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:38:35Z"
+    },
+    "config-declaration": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "DECIDED BY AGENT under explicit user delegation (\"I think you can make good decisions about the rest of this\"), not chosen by the user. Opting in matters because .hydra is not universal and a shipped-on type would put an empty phantom type in every repo. The defaults are chosen so a bare [[types]] entry with name and store is enough.",
+        "rejected": [],
+        "text": "A [[types]] entry, opt-in, not shipped enabled in the default config:\nname = \"hydra\", store = \"hydra\", dir = \".hydra\" (default), prefix = \"HYDRA\" (default), singleton = false, lifecycle states draft/in-progress/complete with the store as status authority, authorship irrelevant since the type is read-only."
+      },
+      "blocked_by": [],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJCABZWSGQ37JJ4KX2HH7",
+      "parent": "store-shape",
+      "prior": null,
+      "question": "How does a user turn this on in lazyspec.toml — a [[types]] entry with store = \"hydra\", and what are the sensible defaults?",
+      "rev": 1,
+      "seq": 5,
+      "slug": "config-declaration",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:38:35Z"
+    },
+    "cross-store-links": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "DECIDED BY AGENT under explicit user delegation (\"I think you can make good decisions about the rest of this\"), not chosen by the user. Inbound links come free: reverse_links is built from all loaded docs (store.rs:112), so an RFC linking to HYDRA-* shows on the hydra doc with no extra work. Outbound is different — the hydra JSON has no field naming a lazyspec document, so there is nothing to source outbound links from.",
+        "rejected": [
+          {
+            "option": "let hydra docs declare outbound relations",
+            "why_not": "nothing in the hydra JSON expresses one, so it could only come from a lazyspec-side sidecar"
+          }
+        ],
+        "text": "Inbound yes, outbound no. An RFC or story links to HYDRA-<SLUG> with a normal relation and it appears as a reverse link on the hydra doc.\nThe hydra doc itself declares no outbound relations."
+      },
+      "blocked_by": [
+        "doc-identity"
+      ],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJC9CJN7GHRZH2H17VT80",
+      "parent": null,
+      "prior": null,
+      "question": "Can other lazyspec documents (an RFC, a story) link to a hydra interview, and does the hydra doc show those inbound links?",
+      "rev": 1,
+      "seq": 8,
+      "slug": "cross-store-links",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:38:35Z"
+    },
+    "discovery": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "DECIDED BY AGENT under explicit user delegation (\"I think you can make good decisions about the rest of this\"), not chosen by the user. The AGENTS.md     DESIGN.md  examples    icons\t       static\t\ttests\nCHANGELOG.md  LICENSE\t flake.lock  release-plz.toml  target\nCLAUDE.md     README.md  flake.nix   result\t       tauri.conf.json\nCargo.lock    build.rs\t gen\t     skills\t       templates\nCargo.toml    docs\t hooks\t     src\t       test field already means 'where this type's docs live, relative to repo root', and lazyspec already anchors at the repo root, so hydra needs no new locating concept. hydra's own upward walk exists because hydra has no project root; lazyspec does.",
+        "rejected": [
+          {
+            "option": "upward walk from cwd like hydra itself",
+            "why_not": "lazyspec already resolved the repo root, a second walk could disagree with it"
+          },
+          {
+            "option": "hardcoded .hydra",
+            "why_not": "gratuitously less flexible than the dir field that already exists"
+          }
+        ],
+        "text": "The type def's existing `dir` field, defaulting to `.hydra`.\nNo new config concept and no upward walk. Missing dir is not an error (see hydra-absent)."
+      },
+      "blocked_by": [],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJC71Z4N2JRGTPDYV9C4S",
+      "parent": "store-shape",
+      "prior": null,
+      "question": "How does lazyspec find the .hydra directory — fixed repo-root convention, upward walk like hydra itself does, or a configurable path on the type definition?",
+      "rev": 1,
+      "seq": 3,
+      "slug": "discovery",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:38:35Z"
+    },
+    "doc-identity": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "DECIDED BY AGENT under explicit user delegation (\"I think you can make good decisions about the rest of this\"), not chosen by the user. Exact-match lookup (store.rs:225/259 use d.id == target) makes any unique string valid, but extract_id_from_name (store.rs:656) truncates at the first non-uppercase segment, so a lowercase slug in an id breaks the path-derived id sites at graph.rs:446 and web/render.rs:316. Uppercasing sidesteps that.",
+        "rejected": [
+          {
+            "option": "incremental HYDRA-001",
+            "why_not": "needs a persisted slug->number map (issue_map.rs / task_map.rs precedent) for no benefit, since hydra slugs are already unique and stable"
+          },
+          {
+            "option": "raw lowercase slug (HYDRA-hydra-store)",
+            "why_not": "truncated to HYDRA-hydra by extract_id_from_name"
+          }
+        ],
+        "text": "ID = \"HYDRA-\" + the hydra slug uppercased. `hydra-store` -> `HYDRA-HYDRA-STORE`.\nPrefix comes from the type def as usual. DocMeta.path stays the real `.hydra/<slug>.json`. KNOWN SHARP EDGE: graph.rs:446 and web/render.rs:316 re-derive an id from the path stem rather than reading DocMeta.id, and would get `hydra` for a lowercase filename — those two sites must resolve via store lookup instead. That is a task in the iteration."
+      },
+      "blocked_by": [],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJC5PD7D1WAQMD8AT7ZN9",
+      "parent": "granularity",
+      "prior": null,
+      "question": "How are lazyspec IDs assigned to hydra docs — incremental HYDRA-001 numbering, or the hydra slug used verbatim as the identifier?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "doc-identity",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:38:35Z"
+    },
+    "granularity": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "a hydra interview is one artifact — a decision record — and the hydra binary already owns per-head navigation; lazyspec needs it visible next to the RFC it feeds, not exploded into rows",
+        "rejected": [
+          {
+            "option": "one doc per head",
+            "why_not": "a repo with 5 trees becomes 100+ docs in list view, needs an ID scheme and relation mapping for no gain lazyspec cannot already get from `hydra tree`"
+          },
+          {
+            "option": "tree doc as parent + head docs as children (convention/dictum pattern)",
+            "why_not": "same cost as per-head plus a second type"
+          }
+        ],
+        "text": "One lazyspec document per hydra tree (one per .hydra/<slug>.json).\nWhole-interview granularity. Body carries intent, the ASCII tree and the answered Q/A; the doc has a single status for the interview as a whole."
+      },
+      "blocked_by": [],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJC5DGEVQ0SY98Z4HXQDP",
+      "parent": "store-shape",
+      "prior": null,
+      "question": "What is one lazyspec document: a whole hydra tree (one doc per .hydra/<slug>.json), or a single head (one doc per question)?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "granularity",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:36:09Z"
+    },
+    "hydra-absent": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "DECIDED BY AGENT under explicit user delegation (\"I think you can make good decisions about the rest of this\"), not chosen by the user. Store::load already treats a missing type dir as zero docs and continues (store.rs:82-90), and already collects per-file failures into parse_errors rather than aborting. Matching that costs nothing and means a broken tree never takes the whole repo down.",
+        "rejected": [
+          {
+            "option": "error when .hydra is missing",
+            "why_not": "the type may be configured before the first interview exists"
+          },
+          {
+            "option": "abort load on unparseable JSON",
+            "why_not": "one bad tree would break every lazyspec command in the repo"
+          }
+        ],
+        "text": "Missing .hydra -> zero documents, no error, exactly like any other missing type dir.\nUnparseable or newer-schema JSON -> a ParseError in store.parse_errors, surfaced the way markdown parse errors already are. Load continues.\nThe hydra binary being absent is irrelevant — it is never invoked."
+      },
+      "blocked_by": [],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJC9V178YN1JPPAT3Z16E",
+      "parent": null,
+      "prior": null,
+      "question": "What happens when there is no .hydra directory, the hydra binary is missing, or a tree JSON is written by a newer hydra than lazyspec understands?",
+      "rev": 1,
+      "seq": 10,
+      "slug": "hydra-absent",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:38:35Z"
+    },
+    "hydra-invocation": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "DECIDED BY AGENT under explicit user delegation (\"I think you can make good decisions about the rest of this\"), not chosen by the user. Read-only removes the reason to shell out for writes, and the ASCII render is a small tree walk. Owning it avoids making the hydra binary a runtime dependency of lazyspec and keeps the engine free of subprocess I/O for this path (dictum 3).",
+        "rejected": [
+          {
+            "option": "shell out to `hydra tree` for the ASCII render",
+            "why_not": "couples lazyspec to an installed hydra binary and its version, and puts a subprocess in the load path"
+          }
+        ],
+        "text": "lazyspec reads and parses the JSON itself. The hydra binary is never invoked.\nThe ASCII tree in the body is rendered by lazyspec from the parsed heads."
+      },
+      "blocked_by": [],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJC8AE3SDSZNX6FG671F9",
+      "parent": "write-direction",
+      "prior": null,
+      "question": "Does lazyspec shell out to the `hydra` binary, or read/write the JSON files itself?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "hydra-invocation",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:38:35Z"
+    },
+    "materialisation": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "the .hydra JSON is already local, already version-controlled, and already the source of truth; a markdown mirror in .lazyspec/cache would be a second copy that can only be stale or redundant",
+        "rejected": [
+          {
+            "option": "materialise .lazyspec/cache/hydra/*.md like git-ref/github/clickup",
+            "why_not": "pointless copy of a local file, plus cache invalidation work"
+          }
+        ],
+        "text": "Parse .hydra/*.json directly at Store::load. No .lazyspec/cache mirror.\nThis is the first backend whose docs are not markdown-on-disk, so the loader needs a JSON path that builds DocMeta in memory rather than going through frontmatter parsing."
+      },
+      "blocked_by": [],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJC6HJ8EAV7ZASWXV01H9",
+      "parent": "store-shape",
+      "prior": null,
+      "question": "Does the hydra store materialise markdown into .lazyspec/cache/<type>/ like the other remote stores, or parse .hydra JSON directly at Store::load with no cache on disk?",
+      "rev": 1,
+      "seq": 2,
+      "slug": "materialisation",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:34:50Z"
+    },
+    "refresh-trigger": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "DECIDED BY AGENT under explicit user delegation (\"I think you can make good decisions about the rest of this\"), not chosen by the user. No cache means no staleness window and nothing to invalidate; the read is a few local JSON files. The TUI already watches the tree (watch.rs) and reloads.",
+        "rejected": [
+          {
+            "option": "lazyspec sync",
+            "why_not": "sync exists to reconcile remote state; there is no remote here"
+          },
+          {
+            "option": "mtime comparison",
+            "why_not": "an optimisation for a cache that no longer exists"
+          }
+        ],
+        "text": "Read on every Store::load. No sync step, no invalidation.\nThe existing file-watch is extended to cover the hydra dir so a live TUI picks up a cut mid-interview."
+      },
+      "blocked_by": [],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJC6SJPH7PFV0EP9DYT8P",
+      "parent": "materialisation",
+      "prior": null,
+      "question": "What refreshes the hydra view when the interview moves: every lazyspec invocation, `lazyspec sync`, mtime comparison, or the existing file-watch?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "refresh-trigger",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:38:35Z"
+    },
+    "relations-mapping": {
+      "answer": {
+        "cauterised_by": "granularity",
+        "rationale": "parent and blocked_by edges are internal to a single hydra tree, and a tree is now exactly one lazyspec document — so there are no inter-document edges to map. The edges live in the rendered body via the ASCII tree.",
+        "rejected": [],
+        "text": "cauterised"
+      },
+      "blocked_by": [],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJC5W1CXBN9MQ7X479207",
+      "parent": "granularity",
+      "prior": null,
+      "question": "Do hydra parent and blocked_by edges become lazyspec relations (chain / blocks), or are they left inside the rendered body only?",
+      "rev": 1,
+      "seq": 2,
+      "slug": "relations-mapping",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:36:09Z"
+    },
+    "status-mapping": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "DECIDED BY AGENT under explicit user delegation (\"I think you can make good decisions about the rest of this\"), not chosen by the user. Status is a newtype over String (document.rs:95), not an enum, so arbitrary state names are already legal. Per-head states cannot survive whole-tree granularity, so the mapping is a fold over the tree, matching what {\n  \"tree\": \"hydra-store\",\n  \"answered\": 9,\n  \"open\": 11,\n  \"ready\": 10,\n  \"blocked\": 1,\n  \"cauterised\": 1,\n  \"done\": false\n} exit 0/4 already means.",
+        "rejected": [
+          {
+            "option": "expose per-head states (ready/blocked/reopened) as document statuses",
+            "why_not": "meaningless at tree granularity — a tree is many heads at once"
+          },
+          {
+            "option": "reuse the default draft/review/accepted lifecycle",
+            "why_not": "an interview is never reviewed or accepted, the states would be dead"
+          }
+        ],
+        "text": "Derived from the tree, not authored: no heads -> `draft`; any open head -> `in-progress`; all heads answered -> `complete`.\nThat is `hydra status` exit 4 vs exit 0. The type declares those three states; the store owns the value, so lazyspec cannot move it."
+      },
+      "blocked_by": [
+        "granularity"
+      ],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJC7S5ETH384Q7ET0B6ME",
+      "parent": null,
+      "prior": null,
+      "question": "How do hydra head states (open, ready, blocked, answered, cauterised, reopened) map onto a lazyspec lifecycle?",
+      "rev": 1,
+      "seq": 3,
+      "slug": "status-mapping",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:38:35Z"
+    },
+    "store-shape": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "reading .hydra JSON in-process is only possible inside the store abstraction; the git-ref precedent already shows a local read-only backend, minus its cache step",
+        "rejected": [
+          {
+            "option": "lazyspec hydra import (one-shot converter into docs/)",
+            "why_not": "duplicates live interview state into git, goes stale"
+          },
+          {
+            "option": "external script + filesystem type",
+            "why_not": "not first-class support, which was the ask"
+          }
+        ],
+        "text": "New StoreBackend::Hydra variant, reading .hydra/*.json directly.\nSame enum + match-site pattern as git-ref/clickup, but WITHOUT the .lazyspec/cache materialisation step every other non-filesystem backend uses. The JSON is parsed into DocMeta in memory at Store::load."
+      },
+      "blocked_by": [],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJC52NP2WRW8VF1V3WSQH",
+      "parent": null,
+      "prior": null,
+      "question": "How does hydra data enter lazyspec: a new StoreBackend variant (store = \"hydra\") alongside filesystem/git-ref/clickup, or something outside the store abstraction (a converter command, a plugin, an import)?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "store-shape",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:34:50Z"
+    },
+    "testing-seam": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "DECIDED BY AGENT under explicit user delegation (\"I think you can make good decisions about the rest of this\"), not chosen by the user. The FileSystem trait (fs.rs:24) already exposes read_to_string, read_dir and exists, which is the whole I/O surface a read-only JSON loader needs, and Store::load_with_fs already threads it. GitRefOps exists because git is a subprocess, not a filesystem — hydra is a filesystem. Dictum 6: one implementation does not need a trait.",
+        "rejected": [
+          {
+            "option": "new HydraOps trait mirroring GitRefOps",
+            "why_not": "GitRefOps abstracts a subprocess; there is no subprocess here (see hydra-invocation)"
+          },
+          {
+            "option": "fixture JSON on real disk via tempdir",
+            "why_not": "works, but bypasses the seam the codebase already standardised on"
+          }
+        ],
+        "text": "The existing FileSystem trait. No new trait.\nTests supply fixture tree JSON through the existing fake FS via Store::load_with_fs."
+      },
+      "blocked_by": [
+        "materialisation"
+      ],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJCA3HXMD70111ZEYVYD0",
+      "parent": null,
+      "prior": null,
+      "question": "What is the test seam for hydra reading — the existing FileSystem trait, a new HydraOps trait like GitRefOps, or fixture JSON on disk?",
+      "rev": 1,
+      "seq": 11,
+      "slug": "testing-seam",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:38:35Z"
+    },
+    "tree-selection": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "DECIDED BY AGENT under explicit user delegation (\"I think you can make good decisions about the rest of this\"), not chosen by the user. Filtering to HEAD would make trees silently invisible in list/search, which is the opposite of what a doc store is for; and HEAD is hydra's editing cursor, not a statement about relevance. Not reading HEAD at all keeps the loader to one glob.",
+        "rejected": [
+          {
+            "option": "HEAD tree only",
+            "why_not": "hides real interviews from list, search and validate for no reason"
+          },
+          {
+            "option": "read .hydra/HEAD and tag the active tree",
+            "why_not": "small and mildly useful, but it is state that changes under you and `hydra trees` already answers the question"
+          }
+        ],
+        "text": "Every tree in the dir becomes a document. `.hydra/HEAD` is not read."
+      },
+      "blocked_by": [],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJC799VXKAGX0Z11C9356",
+      "parent": "store-shape",
+      "prior": null,
+      "question": "When .hydra holds several trees, which does lazyspec surface: only the tree HEAD names, all of them, or a configured subset?",
+      "rev": 1,
+      "seq": 4,
+      "slug": "tree-selection",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:38:35Z"
+    },
+    "tui-surface": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "DECIDED BY AGENT under explicit user delegation (\"I think you can make good decisions about the rest of this\"), not chosen by the user. The body-rendering answer already puts the ASCII tree in the body, so the detail pane shows the tree with no TUI-specific code. A dedicated mode would be a second renderer for the same content.",
+        "rejected": [
+          {
+            "option": "dedicated tree-navigation pane with per-head selection",
+            "why_not": "real work, and it only pays off at per-head granularity, which was rejected"
+          }
+        ],
+        "text": "Another type in the existing document list and detail pane. No dedicated mode.\nThe ASCII tree renders because it is part of the body."
+      },
+      "blocked_by": [
+        "body-rendering"
+      ],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJC8T4Y9CXVS4QJGBBSTH",
+      "parent": null,
+      "prior": null,
+      "question": "How does the TUI present hydra: as another type in the existing document list and detail pane, or with a dedicated tree render?",
+      "rev": 1,
+      "seq": 6,
+      "slug": "tui-surface",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:38:35Z"
+    },
+    "validation-rules": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "DECIDED BY AGENT under explicit user delegation (\"I think you can make good decisions about the rest of this\"), not chosen by the user. A validation finding is only useful if someone can act on it, and lazyspec cannot author or repair a hydra doc (write-direction: read-only). Dangling-link checks are different: those fire on the doc that holds the bad reference, which is an ordinary lazyspec doc the user can fix.",
+        "rejected": [
+          {
+            "option": "apply all rules uniformly",
+            "why_not": "emits findings on read-only docs that nothing can fix, training users to ignore validate output"
+          }
+        ],
+        "text": "Hydra docs are exempt from authoring rules (parent-child, relation-existence). Dangling-link validation still applies to OTHER documents that reference a HYDRA-* id, and to hydra docs as link targets."
+      },
+      "blocked_by": [
+        "relations-mapping"
+      ],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJC9KR6XHVHN4NFH0WA8W",
+      "parent": null,
+      "prior": null,
+      "question": "Do lazyspec validation rules (parent-child, relation-existence, dangling links) apply to hydra documents, or are they exempt?",
+      "rev": 1,
+      "seq": 9,
+      "slug": "validation-rules",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:38:35Z"
+    },
+    "web-surface": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "DECIDED BY AGENT under explicit user delegation (\"I think you can make good decisions about the rest of this\"), not chosen by the user. The change is entirely in the engine loader, and both TUI and web consume Store, so parity is free rather than extra work — which is what CLAUDE.md requires. The one caveat is web/render.rs:316 re-deriving ids from paths, already captured under doc-identity.",
+        "rejected": [
+          {
+            "option": "defer web to a later iteration",
+            "why_not": "would leave the three surfaces out of step, against the repo rule that TUI/web/CLI move together"
+          }
+        ],
+        "text": "Same iteration. Web needs no hydra-specific code — it renders Store documents already."
+      },
+      "blocked_by": [
+        "tui-surface"
+      ],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJC9378K57CBNRDPCWG8G",
+      "parent": null,
+      "prior": null,
+      "question": "Does the web view get the same hydra surface in this iteration, or is it deferred?",
+      "rev": 1,
+      "seq": 7,
+      "slug": "web-surface",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:38:35Z"
+    },
+    "write-direction": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "DECIDED BY AGENT under explicit user delegation (\"I think you can make good decisions about the rest of this\"), not chosen by the user. This is the single largest scope lever in the interview and the user asked for a very simple feature twice. hydra owns invariants lazyspec does not model — cascade on re-answer, blocked_by cycle refusal, cauterise vs reopen — so a lazyspec write path would either duplicate them or corrupt the tree.",
+        "rejected": [
+          {
+            "option": "bidirectional",
+            "why_not": "lazyspec cut/sprout via update: would have to reimplement hydra cascade and cycle invariants, which is the whole of hydra"
+          },
+          {
+            "option": "write-through by shelling out to the hydra binary on update",
+            "why_not": "makes the hydra binary a hard dependency and puts an interview protocol behind a document editor"
+          }
+        ],
+        "text": "Read-only. lazyspec never writes .hydra.\ncreate/update/advance/link targeting a hydra document fail with an error naming the `hydra` command to use instead."
+      },
+      "blocked_by": [
+        "store-shape"
+      ],
+      "created_at": "2026-08-16T14:28:18Z",
+      "id": "01M05FJC82KQBYZ5AV4FAYN1MP",
+      "parent": null,
+      "prior": null,
+      "question": "Is the hydra store read-only in lazyspec, or can lazyspec write back (cut/sprout/reword via `lazyspec update`)?",
+      "rev": 1,
+      "seq": 4,
+      "slug": "write-direction",
+      "status": "answered",
+      "updated_at": "2026-08-16T14:38:35Z"
+    }
+  },
+  "intent": "Design first-class support in lazyspec for hydra interviews: the lazyspec CLI and TUI should read `.hydra/<slug>.json` decision trees as a document store, the way they already read filesystem markdown, github-issues, git-ref and clickup-tasks. The user asked explicitly for a VERY SIMPLE feature — the interview should resist scope creep toward bidirectional sync, hydra-driving-from-lazyspec, or a bespoke TUI mode unless the user chooses it. Output feeds a lazyspec RFC/story/iteration chain in this repo.",
+  "slug": "hydra-store",
+  "version": 1
+}
