@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.3](https://github.com/jkaloger/lazyspec/compare/v0.11.2...v0.11.3) - 2026-08-24
+
+### Fixed
+
+- *(ci)* move lld rustflags from .cargo/config.toml to nix devShell
+
 ## [0.11.2](https://github.com/jkaloger/lazyspec/compare/v0.11.1...v0.11.2) - 2026-08-24
 
 ### Other
