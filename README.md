@@ -25,12 +25,26 @@ Lazyspec manages project documentation as version-controlled markdown files with
 
 ## Install
 
+macOS (Apple Silicon & Intel) and Linux (x86_64 & aarch64, static musl):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jkaloger/lazyspec/main/install.sh | sh
+```
+
+The installer verifies the SHA-256 checksum and installs to `~/.local/bin` (override with `LAZYSPEC_INSTALL_DIR`; pin a version with `LAZYSPEC_VERSION=v0.12.0`).
+
+<details>
+<summary>Other install methods & shell completions</summary>
+
+### Cargo
+
 ```sh
 cargo install lazyspec
 ```
 
-<details>
-<summary>Other install methods & shell completions</summary>
+### Prebuilt binaries
+
+Release tarballs with SHA-256 checksums are on the [releases page](https://github.com/jkaloger/lazyspec/releases) if you'd rather not pipe to sh.
 
 ### Nix
 

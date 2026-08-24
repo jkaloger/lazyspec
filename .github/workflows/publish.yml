@@ -15,6 +15,11 @@ jobs:
       contents: write
       pull-requests: read
       id-token: write # OIDC for crates.io Trusted Publishing
+    outputs:
+      releases_created: ${{ steps.release-plz.outputs.releases_created }}
+      # Guarded so fromJson never runs on an empty `releases` output.
+      tag: ${{ steps.release-plz.outputs.releases_created == 'true' && fromJson(steps.release-plz.outputs.releases)[0].tag || '' }}
+      version: ${{ steps.release-plz.outputs.releases_created == 'true' && fromJson(steps.release-plz.outputs.releases)[0].version || '' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -61,6 +66,97 @@ jobs:
           command: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-binaries:
+    name: Build ${{ matrix.target }}
+    needs: publish-release
+    if: needs.publish-release.outputs.releases_created == 'true'
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          # Both mac targets build on the arm runner; the apple SDK
+          # cross-compiles x86_64 out of the box.
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.publish-release.outputs.tag }}
+          persist-credentials: false
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Install Rust target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+      - name: Build
+        # CC pins: cc-rs doesn't reliably find musl-gcc for the aarch64 musl
+        # triple, and the runner arch always matches the musl target arch here.
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        env:
+          TAG: ${{ needs.publish-release.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          archive="lazyspec-${TAG}-${TARGET}.tar.gz"
+          mkdir -p dist/pkg
+          cp "target/${TARGET}/release/lazyspec" LICENSE README.md dist/pkg/
+          tar -czf "dist/${archive}" -C dist/pkg lazyspec LICENSE README.md
+          (cd dist && shasum -a 256 "${archive}" > "${archive}.sha256")
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binaries-${{ matrix.target }}
+          path: dist/lazyspec-*
+          if-no-files-found: error
+
+  create-release:
+    name: Create GitHub release
+    needs: [publish-release, build-binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.publish-release.outputs.tag }}
+          persist-credentials: false
+      - name: Download binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: binaries-*
+          merge-multiple: true
+          path: dist
+      - name: Extract changelog notes
+        env:
+          TAG: ${{ needs.publish-release.outputs.tag }}
+          VERSION: ${{ needs.publish-release.outputs.version }}
+        run: |
+          awk -v ver="[$VERSION]" 'index($0, "## " ver) == 1 {f=1; next} /^## /{f=0} f' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "$TAG" > notes.md
+      - name: Create release
+        # gh uploads assets to a draft and publishes afterwards, so the
+        # release is immutable-safe: assets are in place before publish.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.publish-release.outputs.tag }}
+        run: gh release create "$TAG" dist/* --verify-tag --title "$TAG" --notes-file notes.md
 
   publish-pr:
     name: Publish PR

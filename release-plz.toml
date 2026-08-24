@@ -1,3 +1,7 @@
+# GitHub releases are created by the binary-release jobs in publish.yml, not
+# release-plz: immutable releases forbid attaching assets after publish, so the
+# release must be created in one shot once binaries are built. release-plz
+# still bumps versions, tags, and publishes to crates.io.
 [workspace]
-git_release_enable = true
+git_release_enable = false
 git_tag_name = "v{{ version }}"
