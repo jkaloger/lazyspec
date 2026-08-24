@@ -87,6 +87,9 @@
 
         devShells.default = craneLib.devShell {
           checks = self.checks.${system};
+          # lld lives here (not .cargo/config.toml) so CI builds with plain
+          # Apple clang, which has no lld, still link.
+          CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS = "-C link-arg=-fuse-ld=lld";
           shellHook = pre-commit-check.shellHook;
           packages = pre-commit-check.enabledPackages ++ [
             pkgs.clippy
