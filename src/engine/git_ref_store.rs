@@ -5,7 +5,9 @@ use chrono::Local;
 
 use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{Config, TypeDef};
-use crate::engine::document::{compose_frontmatter, split_frontmatter, DocMeta, DocType, Status};
+use crate::engine::document::{
+    body_section, compose_frontmatter, split_frontmatter, DocMeta, DocType, Status,
+};
 use crate::engine::git_ref::GitRefClient;
 use crate::engine::store_dispatch::{
     find_cache_file, write_cache_file, CreatedDoc, DocumentStore, PushOutcome,
@@ -113,14 +115,9 @@ impl GitRefStore {
         status: &str,
         body: &str,
     ) -> String {
-        let body_section = if body.is_empty() {
-            String::new()
-        } else {
-            format!("\n{}\n", body)
-        };
         format!(
-            "---\ntitle: \"{}\"\ntype: {}\nstatus: {}\nauthor: \"{}\"\ndate: {}\ntags: []\nrelated: []\n---\n{}",
-            title, type_def.name, status, author, date, body_section
+            "---\ntitle: \"{}\"\ntype: {}\nstatus: {}\nauthor: \"{}\"\ndate: {}\ntags: []\nrelated: []\n---{}",
+            title, type_def.name, status, author, date, body_section(body)
         )
     }
 
@@ -394,13 +391,7 @@ impl DocumentStore for GitRefStore {
 
         let updated_yaml = serde_yaml::to_string(&frontmatter)?;
         let body = new_body.as_deref().unwrap_or(&existing_body);
-        let body_trimmed = body.trim_start_matches('\n');
-        let body_section = if body_trimmed.is_empty() {
-            String::new()
-        } else {
-            format!("\n{}\n", body_trimmed)
-        };
-        let updated_content = compose_frontmatter(&updated_yaml, &body_section);
+        let updated_content = compose_frontmatter(&updated_yaml, &body_section(body));
 
         let refname = Self::refname(&type_def.name, doc_id);
         let new_sha = self.git.create_commit(
@@ -466,13 +457,7 @@ impl DocumentStore for GitRefStore {
         );
         let new_yaml = serde_yaml::to_string(&value)?;
 
-        let body_trimmed = existing_body.trim_start_matches('\n');
-        let body_section = if body_trimmed.is_empty() {
-            String::new()
-        } else {
-            format!("\n{}\n", body_trimmed)
-        };
-        let updated_content = compose_frontmatter(&new_yaml, &body_section);
+        let updated_content = compose_frontmatter(&new_yaml, &body_section(&existing_body));
 
         let refname = Self::refname(&type_def.name, doc_id);
         let new_sha = self.git.create_commit(
@@ -764,6 +749,62 @@ mod tests {
         );
         assert!(!updated.contains("status: backlog"));
         assert!(!updated.contains("status: shipped"));
+    }
+
+    #[test]
+    fn update_body_keeps_a_blank_line_after_the_frontmatter() {
+        let tmp = TempDir::new().unwrap();
+
+        let td = test_type_def();
+        seed_doc(&tmp, SEED_CACHE, "oldsha");
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha456".to_string()))
+            .with_update_ref_result(Ok(()));
+
+        let mut store = make_store(&tmp, mock);
+        store
+            .update(&td, "ITERATION-042", &[("body", "## Problem\n\nBroke.")])
+            .unwrap();
+
+        let updated = std::fs::read_to_string(
+            tmp.path()
+                .join(".lazyspec/cache/iteration/ITERATION-042.md"),
+        )
+        .unwrap();
+        assert!(
+            updated.ends_with("---\n\n## Problem\n\nBroke.\n"),
+            "body glued to the delimiter: {:?}",
+            updated
+        );
+    }
+
+    #[test]
+    fn update_without_a_body_keeps_the_blank_line_after_the_frontmatter() {
+        let tmp = TempDir::new().unwrap();
+
+        let td = test_type_def();
+        seed_doc(&tmp, SEED_CACHE, "oldsha");
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha456".to_string()))
+            .with_update_ref_result(Ok(()));
+
+        let mut store = make_store(&tmp, mock);
+        store
+            .update(&td, "ITERATION-042", &[("status", "accepted")])
+            .unwrap();
+
+        let updated = std::fs::read_to_string(
+            tmp.path()
+                .join(".lazyspec/cache/iteration/ITERATION-042.md"),
+        )
+        .unwrap();
+        assert!(
+            updated.ends_with("---\n\nbody\n"),
+            "separator blank line lost: {:?}",
+            updated
+        );
     }
 
     #[test]

@@ -381,6 +381,21 @@ pub fn compose_frontmatter(yaml: &str, body: &str) -> String {
     }
 }
 
+/// Render an externally supplied body (a `--body`/`--body-file` argument, a
+/// template's body) as the section that follows the closing `---` delimiter.
+///
+/// [`compose_frontmatter`] preserves whatever body it is given byte-for-byte, so
+/// the leading newline that separates the delimiter from the body belongs to the
+/// body. A body that came from [`split_frontmatter`] already carries one; a body
+/// that came from the outside does not, and gets one here (BUG-016).
+pub fn body_section(body: &str) -> String {
+    let trimmed = body.trim_start_matches('\n').trim_end();
+    if trimmed.is_empty() {
+        return "\n".to_string();
+    }
+    format!("\n\n{}\n", trimmed)
+}
+
 pub fn split_frontmatter(content: &str) -> Result<(String, String)> {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {

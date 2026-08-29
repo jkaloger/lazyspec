@@ -5,7 +5,9 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Local;
 
 use crate::engine::config::{Config, NumberingStrategy, ReservedFormat, TypeDef};
-use crate::engine::document::{apply_attrs, compose_frontmatter, split_frontmatter, DocMeta};
+use crate::engine::document::{
+    apply_attrs, body_section, compose_frontmatter, split_frontmatter, DocMeta,
+};
 use crate::engine::reservation;
 use crate::engine::store::Store;
 use crate::engine::template;
@@ -247,7 +249,7 @@ pub fn create_child_in_dir(
     if let Some(body_text) = body {
         let written = fs::read_to_string(&target_path)?;
         let (yaml, _) = split_frontmatter(&written)?;
-        let new_content = format!("---\n{}\n---\n\n{}\n", yaml.trim(), body_text);
+        let new_content = compose_frontmatter(yaml.trim(), &body_section(body_text));
         fs::write(&target_path, new_content)?;
     }
 
@@ -338,7 +340,7 @@ pub fn update_document_with_type(
     let mut lines: Vec<String> = yaml.lines().map(|l| l.to_string()).collect();
     for (key, value) in updates {
         if *key == "body" {
-            new_body = value.to_string();
+            new_body = body_section(value);
             continue;
         }
         // `assignee` is absent-when-unset, so unlike the other reserved keys it
@@ -505,6 +507,101 @@ mod tests {
         .unwrap();
 
         assert_eq!(status_line(&path), "status: reported");
+    }
+
+    fn rfc_with_body(root: &Path, body: &str) -> PathBuf {
+        let path = root.join("docs/rfcs/RFC-001-test.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            format!(
+                "---\ntitle: \"Test\"\ntype: rfc\nstatus: draft\nauthor: \"alice\"\ndate: 2026-01-01\ntags: []\n---\n\n{}\n",
+                body
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    fn update_body(root: &Path, body: &str) -> String {
+        let config = Config::default();
+        let path = rfc_with_body(root, "old body");
+        let store = Store::load(root, &config).unwrap();
+        update_document(root, &store, "docs/rfcs/RFC-001-test.md", &[("body", body)]).unwrap();
+        fs::read_to_string(&path).unwrap()
+    }
+
+    #[test]
+    fn update_body_keeps_a_blank_line_after_the_frontmatter() {
+        let tmp = TempDir::new().unwrap();
+
+        let content = update_body(tmp.path(), "## Problem\n\nSomething broke.");
+
+        assert!(
+            content.ends_with("---\n\n## Problem\n\nSomething broke.\n"),
+            "body glued to the delimiter: {:?}",
+            content
+        );
+    }
+
+    #[test]
+    fn update_body_matches_create_body_byte_for_byte() {
+        let tmp = TempDir::new().unwrap();
+        let body = "## Problem\n\nSomething broke.";
+
+        let updated = update_body(tmp.path(), body);
+
+        let config = config_with_bug_type(false);
+        let child_type = config.type_by_name("bug").unwrap().clone();
+        let created_path = create_child_in_dir(
+            tmp.path(),
+            &config,
+            &child_type,
+            &tmp.path().join("docs/bugs"),
+            "Created",
+            "alice",
+            Some(body),
+        )
+        .unwrap();
+        let created = fs::read_to_string(&created_path).unwrap();
+
+        let (_, updated_body) = split_frontmatter(&updated).unwrap();
+        let (_, created_body) = split_frontmatter(&created).unwrap();
+        assert_eq!(updated_body, created_body);
+    }
+
+    #[test]
+    fn update_body_does_not_accumulate_leading_or_trailing_blank_lines() {
+        let tmp = TempDir::new().unwrap();
+
+        let content = update_body(tmp.path(), "\n\n## Problem\n\n\n");
+
+        assert!(
+            content.ends_with("---\n\n## Problem\n"),
+            "blank lines accumulated: {:?}",
+            content
+        );
+    }
+
+    #[test]
+    fn update_without_a_body_leaves_the_existing_body_byte_for_byte() {
+        let tmp = TempDir::new().unwrap();
+        let config = Config::default();
+        let path = rfc_with_body(tmp.path(), "## Kept\n\n   indented tail   ");
+        let before = fs::read_to_string(&path).unwrap();
+        let store = Store::load(tmp.path(), &config).unwrap();
+
+        update_document(
+            tmp.path(),
+            &store,
+            "docs/rfcs/RFC-001-test.md",
+            &[("status", "review")],
+        )
+        .unwrap();
+
+        let (_, before_body) = split_frontmatter(&before).unwrap();
+        let (_, after_body) = split_frontmatter(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(before_body, after_body);
     }
 
     #[test]

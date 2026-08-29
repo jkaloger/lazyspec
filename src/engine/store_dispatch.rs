@@ -8,7 +8,9 @@ use serde::Serialize;
 use crate::engine::clickup::TaskUpdate;
 use crate::engine::clickup_cache;
 use crate::engine::config::{Config, Lifecycle, StoreBackend, TypeDef};
-use crate::engine::document::{compose_frontmatter, AttrValue, DocMeta, DocType, Status};
+use crate::engine::document::{
+    body_section, compose_frontmatter, AttrValue, DocMeta, DocType, Status,
+};
 use crate::engine::gh::{
     self, missing_project_scope, GhClient, GhGraphql, GhMilestoneClient, GhProjectsClient, GqlVar,
 };
@@ -2881,12 +2883,7 @@ fn render_cache_content(meta: &DocMeta, body: &str) -> Result<String> {
         attributes: meta.attributes.clone(),
     };
     let yaml = serde_yaml::to_string(&frontmatter)?;
-    let body_section = if body.is_empty() {
-        String::new()
-    } else {
-        format!("\n{}\n", body)
-    };
-    Ok(compose_frontmatter(&yaml, &body_section))
+    Ok(compose_frontmatter(&yaml, &body_section(body)))
 }
 
 #[allow(clippy::too_many_arguments)]
