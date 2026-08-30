@@ -752,62 +752,6 @@ mod tests {
     }
 
     #[test]
-    fn update_body_keeps_a_blank_line_after_the_frontmatter() {
-        let tmp = TempDir::new().unwrap();
-
-        let td = test_type_def();
-        seed_doc(&tmp, SEED_CACHE, "oldsha");
-
-        let mock = MockGitRefClient::new()
-            .with_create_commit_result(Ok("newsha456".to_string()))
-            .with_update_ref_result(Ok(()));
-
-        let mut store = make_store(&tmp, mock);
-        store
-            .update(&td, "ITERATION-042", &[("body", "## Problem\n\nBroke.")])
-            .unwrap();
-
-        let updated = std::fs::read_to_string(
-            tmp.path()
-                .join(".lazyspec/cache/iteration/ITERATION-042.md"),
-        )
-        .unwrap();
-        assert!(
-            updated.ends_with("---\n\n## Problem\n\nBroke.\n"),
-            "body glued to the delimiter: {:?}",
-            updated
-        );
-    }
-
-    #[test]
-    fn update_without_a_body_keeps_the_blank_line_after_the_frontmatter() {
-        let tmp = TempDir::new().unwrap();
-
-        let td = test_type_def();
-        seed_doc(&tmp, SEED_CACHE, "oldsha");
-
-        let mock = MockGitRefClient::new()
-            .with_create_commit_result(Ok("newsha456".to_string()))
-            .with_update_ref_result(Ok(()));
-
-        let mut store = make_store(&tmp, mock);
-        store
-            .update(&td, "ITERATION-042", &[("status", "accepted")])
-            .unwrap();
-
-        let updated = std::fs::read_to_string(
-            tmp.path()
-                .join(".lazyspec/cache/iteration/ITERATION-042.md"),
-        )
-        .unwrap();
-        assert!(
-            updated.ends_with("---\n\nbody\n"),
-            "separator blank line lost: {:?}",
-            updated
-        );
-    }
-
-    #[test]
     fn test_git_ref_store_update() {
         let tmp = TempDir::new().unwrap();
 
@@ -1550,6 +1494,56 @@ mod tests {
                 == "push_ref_with_lease:origin:refs/lazyspec/iteration/ITERATION-042:new_sha=newsha:expected_old=Some(\"oldsha\")"),
             "update should push with lease, got: {:?}",
             *calls
+        );
+    }
+
+    #[test]
+    fn git_ref_update_body_keeps_a_blank_line_after_the_frontmatter() {
+        let tmp = TempDir::new().unwrap();
+        seed_doc(&tmp, SEED_CACHE, "oldsha");
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha456".to_string()))
+            .with_update_ref_result(Ok(()));
+
+        let mut store = make_store(&tmp, mock);
+        store
+            .update(
+                &test_type_def(),
+                "ITERATION-042",
+                &[("body", "## Problem\n\nBroke.")],
+            )
+            .unwrap();
+
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        let updated = std::fs::read_to_string(cache_dir.join("ITERATION-042.md")).unwrap();
+        assert!(
+            updated.ends_with("---\n\n## Problem\n\nBroke.\n"),
+            "body glued to the delimiter: {:?}",
+            updated
+        );
+    }
+
+    #[test]
+    fn update_without_a_body_keeps_the_blank_line_after_the_frontmatter() {
+        let tmp = TempDir::new().unwrap();
+        seed_doc(&tmp, SEED_CACHE, "oldsha");
+
+        let mock = MockGitRefClient::new()
+            .with_create_commit_result(Ok("newsha456".to_string()))
+            .with_update_ref_result(Ok(()));
+
+        let mut store = make_store(&tmp, mock);
+        store
+            .update(&test_type_def(), "ITERATION-042", &[("status", "accepted")])
+            .unwrap();
+
+        let cache_dir = tmp.path().join(".lazyspec/cache/iteration");
+        let updated = std::fs::read_to_string(cache_dir.join("ITERATION-042.md")).unwrap();
+        assert!(
+            updated.ends_with("---\n\nbody\n"),
+            "separator blank line lost: {:?}",
+            updated
         );
     }
 

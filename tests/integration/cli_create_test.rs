@@ -384,8 +384,8 @@ fn create_with_body_sets_content() {
         content
     );
     assert!(
-        content.contains(body_content),
-        "should have body content, got: {}",
+        content.ends_with(&format!("---\n\n{}\n", body_content)),
+        "should have body content after a separator blank line, got: {}",
         content
     );
 }
@@ -422,8 +422,8 @@ fn create_with_body_file_sets_content() {
         content
     );
     assert!(
-        content.contains("Body from file."),
-        "should have body from file, got: {}",
+        content.ends_with("---\n\nBody from file.\n"),
+        "should have body from file after a separator blank line, got: {}",
         content
     );
 }

@@ -1,8 +1,8 @@
 use crate::engine::clickup::ClickupHttpClient;
 use crate::engine::config::{validate_status, Config, StoreBackend, ValidationRule};
 use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
+use crate::engine::document::DocType;
 use crate::engine::document::Status;
-use crate::engine::document::{body_section, compose_frontmatter, split_frontmatter, DocType};
 use crate::engine::fs_ops;
 use crate::engine::gh::GhCli;
 use crate::engine::git_ref::GitCli;
@@ -239,10 +239,7 @@ pub fn run_with_body(
     )?;
 
     if let Some(body_text) = body {
-        let content = fs::read_to_string(&path)?;
-        let (yaml, _) = split_frontmatter(&content)?;
-        let new_content = compose_frontmatter(yaml.trim(), &body_section(body_text));
-        fs::write(&path, new_content)?;
+        fs_ops::replace_body(&path, body_text)?;
     }
 
     Ok((path, PushOutcome::Synced))

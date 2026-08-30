@@ -73,6 +73,82 @@ fn update_status_in_frontmatter() {
     assert_eq!(format!("{}", meta.status), "review");
 }
 
+// BUG-016: `update --body-file` used to glue the body onto the closing `---`.
+#[test]
+fn update_with_body_file_keeps_the_frontmatter_separator() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-test.md", "Test", "draft");
+    let store = fixture.store();
+
+    let body_file = fixture.root().join("body.md");
+    fs::write(&body_file, "## Problem\n\nSomething broke.\n").unwrap();
+    let body = lazyspec::cli::resolve_body(&None, &Some(body_file.display().to_string()))
+        .unwrap()
+        .unwrap();
+
+    lazyspec::cli::update::run(
+        fixture.root(),
+        &store,
+        "RFC-001",
+        &[("body", body.as_str())],
+    )
+    .unwrap();
+
+    let content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-test.md")).unwrap();
+    assert!(
+        content.ends_with("---\n\n## Problem\n\nSomething broke.\n"),
+        "body glued to the delimiter: {:?}",
+        content
+    );
+}
+
+// The same body file must produce the same body through `create` and `update`.
+#[test]
+fn update_body_file_matches_create_body_file() {
+    let fixture = TestFixture::new();
+    let config = fixture.config();
+
+    let body_file = fixture.root().join("body.md");
+    fs::write(&body_file, "## Problem\n\nSomething broke.\n").unwrap();
+    let body = lazyspec::cli::resolve_body(&None, &Some(body_file.display().to_string()))
+        .unwrap()
+        .unwrap();
+
+    let created_path = lazyspec::cli::create::run_with_body(
+        fixture.root(),
+        &config,
+        &fixture.store(),
+        "rfc",
+        "Created",
+        "agent",
+        None,
+        Some(body.as_str()),
+        |_| {},
+    )
+    .unwrap()
+    .0;
+
+    let updated_path = fixture.write_rfc("RFC-900-test.md", "Updated", "draft");
+    lazyspec::cli::update::run(
+        fixture.root(),
+        &fixture.store(),
+        "RFC-900",
+        &[("body", body.as_str())],
+    )
+    .unwrap();
+
+    let created = fs::read_to_string(&created_path).unwrap();
+    let updated = fs::read_to_string(&updated_path).unwrap();
+    assert_eq!(
+        lazyspec::engine::document::split_frontmatter(&created)
+            .unwrap()
+            .1,
+        lazyspec::engine::document::split_frontmatter(&updated)
+            .unwrap()
+            .1,
+    );
+}
+
 #[test]
 fn delete_removes_file() {
     let fixture = TestFixture::new();

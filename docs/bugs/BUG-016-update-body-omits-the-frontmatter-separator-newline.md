@@ -1,7 +1,7 @@
 ---
 title: "update --body omits the frontmatter separator newline"
 type: bug
-status: in-progress
+status: fixed
 author: "Jack Kaloger"
 date: 2026-08-29
 tags: []

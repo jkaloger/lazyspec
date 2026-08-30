@@ -381,21 +381,6 @@ pub fn compose_frontmatter(yaml: &str, body: &str) -> String {
     }
 }
 
-/// Render an externally supplied body (a `--body`/`--body-file` argument, a
-/// template's body) as the section that follows the closing `---` delimiter.
-///
-/// [`compose_frontmatter`] preserves whatever body it is given byte-for-byte, so
-/// the leading newline that separates the delimiter from the body belongs to the
-/// body. A body that came from [`split_frontmatter`] already carries one; a body
-/// that came from the outside does not, and gets one here (BUG-016).
-pub fn body_section(body: &str) -> String {
-    let trimmed = body.trim_start_matches('\n').trim_end();
-    if trimmed.is_empty() {
-        return "\n".to_string();
-    }
-    format!("\n\n{}\n", trimmed)
-}
-
 pub fn split_frontmatter(content: &str) -> Result<(String, String)> {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
@@ -411,6 +396,21 @@ pub fn split_frontmatter(content: &str) -> Result<(String, String)> {
     let body = after_first[end + 4..].to_string();
 
     Ok((frontmatter, body))
+}
+
+/// Normalise a body into the canonical section that follows the closing `---`
+/// delimiter: one blank line, the body, one trailing newline.
+///
+/// The newline after the delimiter belongs to the body, and [`compose_frontmatter`]
+/// keeps whatever body it is handed byte-for-byte. A body from [`split_frontmatter`]
+/// already carries that newline; one supplied by `--body`/`--body-file` does not
+/// (BUG-016). Either yields the same shape here, so this is idempotent.
+pub fn body_section(body: &str) -> String {
+    let trimmed = body.trim_matches('\n');
+    if trimmed.is_empty() {
+        return "\n".to_string();
+    }
+    format!("\n\n{}\n", trimmed)
 }
 
 pub(crate) fn parse_relation(value: &serde_yaml::Value) -> Result<Relation> {
@@ -644,6 +644,40 @@ Body.
             let recomposed = compose_frontmatter(&yaml_with_newline, &body);
             assert_eq!(recomposed, original, "roundtrip failed for: {:?}", original);
         }
+    }
+
+    #[test]
+    fn body_section_normalises_to_the_canonical_shape() {
+        let cases = [
+            ("## Problem\n\nBroke.", "\n\n## Problem\n\nBroke.\n"),
+            ("\n\n## Problem\n\nBroke.\n", "\n\n## Problem\n\nBroke.\n"),
+            ("body\n\n\n", "\n\nbody\n"),
+            ("", "\n"),
+            ("\n\n\n", "\n"),
+            ("trailing hard break  ", "\n\ntrailing hard break  \n"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                body_section(input),
+                expected,
+                "body_section failed for: {:?}",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn body_section_is_idempotent() {
+        for input in ["## Problem", "\n\nbody\n", "", "\n\n\n", "a\n\n\nb\n\n"] {
+            let once = body_section(input);
+            assert_eq!(body_section(&once), once, "not idempotent for: {:?}", input);
+        }
+    }
+
+    #[test]
+    fn body_section_composes_into_a_separated_document() {
+        let composed = compose_frontmatter("title: foo", &body_section("## Problem"));
+        assert_eq!(composed, "---\ntitle: foo\n---\n\n## Problem\n");
     }
 
     #[test]

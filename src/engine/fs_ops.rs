@@ -80,6 +80,17 @@ fn seed_lifecycle_status(content: &str, status: &str) -> Result<String> {
     Ok(compose_frontmatter(&lines.join("\n"), &body))
 }
 
+/// Swap the body of an existing document for `body`, keeping its frontmatter.
+///
+/// Creation writes the rendered template first, then substitutes the supplied
+/// body over it; the frontmatter has to survive that second pass unchanged.
+pub fn replace_body(path: &Path, body: &str) -> Result<()> {
+    let content = fs::read_to_string(path)?;
+    let (yaml, _) = split_frontmatter(&content)?;
+    fs::write(path, compose_frontmatter(&yaml, &body_section(body)))?;
+    Ok(())
+}
+
 /// Create a document on the filesystem. Handles numbering, template resolution, and file writing.
 /// Returns the absolute path to the created file.
 #[allow(clippy::too_many_arguments)]
@@ -247,10 +258,7 @@ pub fn create_child_in_dir(
     fs::write(&target_path, &content)?;
 
     if let Some(body_text) = body {
-        let written = fs::read_to_string(&target_path)?;
-        let (yaml, _) = split_frontmatter(&written)?;
-        let new_content = compose_frontmatter(yaml.trim(), &body_section(body_text));
-        fs::write(&target_path, new_content)?;
+        replace_body(&target_path, body_text)?;
     }
 
     Ok(target_path)
@@ -422,6 +430,28 @@ mod tests {
         config
     }
 
+    fn rfc_with_body(root: &Path, body: &str) -> PathBuf {
+        let path = root.join("docs/rfcs/RFC-001-test.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            format!(
+                "---\ntitle: \"Test\"\ntype: rfc\nstatus: draft\nauthor: \"alice\"\ndate: 2026-01-01\ntags: []\n---\n\n{}\n",
+                body
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    fn update_body(root: &Path, body: &str) -> String {
+        let config = Config::default();
+        let path = rfc_with_body(root, "old body");
+        let store = Store::load(root, &config).unwrap();
+        update_document(root, &store, "docs/rfcs/RFC-001-test.md", &[("body", body)]).unwrap();
+        fs::read_to_string(&path).unwrap()
+    }
+
     #[test]
     fn create_seeds_first_lifecycle_state_for_non_draft_type() {
         let tmp = TempDir::new().unwrap();
@@ -509,26 +539,27 @@ mod tests {
         assert_eq!(status_line(&path), "status: reported");
     }
 
-    fn rfc_with_body(root: &Path, body: &str) -> PathBuf {
-        let path = root.join("docs/rfcs/RFC-001-test.md");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
-            &path,
-            format!(
-                "---\ntitle: \"Test\"\ntype: rfc\nstatus: draft\nauthor: \"alice\"\ndate: 2026-01-01\ntags: []\n---\n\n{}\n",
-                body
-            ),
+    #[test]
+    fn create_child_seed_survives_body_recompose() {
+        let tmp = TempDir::new().unwrap();
+        let config = config_with_bug_type(false);
+        let child_type = config.type_by_name("bug").unwrap().clone();
+        let target_dir = tmp.path().join("docs/stories/STORY-001/bugs");
+
+        let path = create_child_in_dir(
+            tmp.path(),
+            &config,
+            &child_type,
+            &target_dir,
+            "Child Bug",
+            "alice",
+            Some("some custom body"),
         )
         .unwrap();
-        path
-    }
 
-    fn update_body(root: &Path, body: &str) -> String {
-        let config = Config::default();
-        let path = rfc_with_body(root, "old body");
-        let store = Store::load(root, &config).unwrap();
-        update_document(root, &store, "docs/rfcs/RFC-001-test.md", &[("body", body)]).unwrap();
-        fs::read_to_string(&path).unwrap()
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(status_line(&path), "status: reported");
+        assert!(content.contains("some custom body"));
     }
 
     #[test]
@@ -542,32 +573,6 @@ mod tests {
             "body glued to the delimiter: {:?}",
             content
         );
-    }
-
-    #[test]
-    fn update_body_matches_create_body_byte_for_byte() {
-        let tmp = TempDir::new().unwrap();
-        let body = "## Problem\n\nSomething broke.";
-
-        let updated = update_body(tmp.path(), body);
-
-        let config = config_with_bug_type(false);
-        let child_type = config.type_by_name("bug").unwrap().clone();
-        let created_path = create_child_in_dir(
-            tmp.path(),
-            &config,
-            &child_type,
-            &tmp.path().join("docs/bugs"),
-            "Created",
-            "alice",
-            Some(body),
-        )
-        .unwrap();
-        let created = fs::read_to_string(&created_path).unwrap();
-
-        let (_, updated_body) = split_frontmatter(&updated).unwrap();
-        let (_, created_body) = split_frontmatter(&created).unwrap();
-        assert_eq!(updated_body, created_body);
     }
 
     #[test]
@@ -602,28 +607,5 @@ mod tests {
         let (_, before_body) = split_frontmatter(&before).unwrap();
         let (_, after_body) = split_frontmatter(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(before_body, after_body);
-    }
-
-    #[test]
-    fn create_child_seed_survives_body_recompose() {
-        let tmp = TempDir::new().unwrap();
-        let config = config_with_bug_type(false);
-        let child_type = config.type_by_name("bug").unwrap().clone();
-        let target_dir = tmp.path().join("docs/stories/STORY-001/bugs");
-
-        let path = create_child_in_dir(
-            tmp.path(),
-            &config,
-            &child_type,
-            &target_dir,
-            "Child Bug",
-            "alice",
-            Some("some custom body"),
-        )
-        .unwrap();
-
-        let content = fs::read_to_string(&path).unwrap();
-        assert_eq!(status_line(&path), "status: reported");
-        assert!(content.contains("some custom body"));
     }
 }

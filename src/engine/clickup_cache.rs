@@ -451,7 +451,11 @@ pub(crate) fn build_task_update(updates: &[(&str, &str)]) -> TaskUpdate {
     for &(key, value) in updates {
         match key {
             "title" => payload.name = Some(value.to_string()),
-            "body" => payload.markdown_content = Some(value.to_string()),
+            // Trimmed here rather than at the call sites: a body read back out of
+            // a document carries the blank line that separates it from the closing
+            // `---`, which is frontmatter punctuation and not part of the
+            // description ClickUp stores.
+            "body" => payload.markdown_content = Some(value.trim().to_string()),
             "status" => payload.status = Some(value.to_string()),
             "priority" => payload.priority = priority_name_to_int(value),
             "due" => payload.due_date = value.trim().parse::<i64>().ok(),
@@ -962,6 +966,15 @@ mod tests {
         assert_eq!(payload.due_date, Some(1_748_541_600_000));
         assert_eq!(payload.time_estimate, Some(3_600_000));
         assert_eq!(payload.start_date, None);
+    }
+
+    #[test]
+    fn build_task_update_strips_the_frontmatter_separator_from_the_body() {
+        let payload = build_task_update(&[("body", "\n\nedited in the tui\n")]);
+        assert_eq!(
+            payload.markdown_content,
+            Some("edited in the tui".to_string())
+        );
     }
 
     #[test]
