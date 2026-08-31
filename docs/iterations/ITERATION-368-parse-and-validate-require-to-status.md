@@ -1,7 +1,7 @@
 ---
 title: Parse and validate require_to_status
 type: iteration
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-08-31
 tags: []
