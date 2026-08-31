@@ -702,7 +702,11 @@ required = "error"
 
 A finding names what a wildcard position matches rather than the spelling `"*"`: `iteration needs any relationship to a document of any type`.
 
-Each edge is matched independently. A wildcard edge and a concrete edge that both cover one link are both enforced, and each unsatisfied edge reports its own finding.
+Two rows overlap when one concrete edge is covered by both. Overlapping rows are ordered by specificity: the count of `from`, `to` and `via` positions that name something rather than wildcarding, from zero to three. A named position counts once whether it names one type or six, so `from = "iteration", to = "*"` and `from = "*", to = ["story"]` are equally specific.
+
+Two overlapping rows of equal specificity may not disagree on requiredness. Such a pair fails config load, naming both rows and the requiredness each declares. An omitted `required` is one of those declarations: it states that the edge is legal and its absence is not a finding, so it disagrees with `required = "error"` and with `required = "warning"`. Rows that agree on requiredness, rows of unequal specificity, and rows that cannot both cover any one edge all load.
+
+`required` on a row whose `from` is `"*"` fails config load, naming the edge, because such a row demands the edge of every declared type. A wildcard `from` on a row that omits `required` loads.
 
 The wildcard is always explicit. Leaving `via` out does not mean "any relationship" — it fails config load, naming the edge, because a table whose shape carried a second meaning would be a rule nobody wrote down.
 

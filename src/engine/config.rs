@@ -70,6 +70,73 @@ impl EdgeDef {
     pub fn matches(&self, from: &str, via: &str, to: &str) -> bool {
         self.from.matches(from) && self.via.matches(via) && self.to.matches(to)
     }
+
+    /// How specific this row is: how many of `from`, `to`, `via` name something
+    /// rather than wildcarding, 0 through 3. ADR-031 orders requiredness by
+    /// this score; the only score comparison made so far is between two
+    /// overlapping rows at load, where equal scores make a disagreement
+    /// unresolvable and so an error.
+    ///
+    /// ADR-031 §Consequences accepts that this is coarse. A named position
+    /// scores one whether it lists one type or six, and every position weighs
+    /// the same, so `from = "iteration", to = "*"` and `from = "*", to =
+    /// ["story"]` both score one: they tie, and a tie that disagrees is
+    /// rejected at load rather than resolved by an unpredictable rule.
+    pub(crate) fn specificity(&self) -> usize {
+        [
+            self.from.is_concrete(),
+            self.to.is_concrete(),
+            self.via.is_concrete(),
+        ]
+        .into_iter()
+        .filter(|concrete| *concrete)
+        .count()
+    }
+
+    /// True iff some one concrete edge is covered by both rows, which is the
+    /// case exactly when all three positions intersect.
+    pub(crate) fn overlaps(&self, other: &Self) -> bool {
+        self.from.intersects(&other.from)
+            && self.via.intersects(&other.via)
+            && self.to.intersects(&other.to)
+    }
+}
+
+/// ADR-031: requiredness comes from the most specific matching row, so two rows
+/// that can match one concrete edge at equal specificity and disagree on
+/// requiredness have no resolution. The error names both rows, which is why
+/// `name` is mandatory on an edge.
+fn reject_requiredness_ties(edges: &[EdgeDef]) -> Result<()> {
+    for (index, edge) in edges.iter().enumerate() {
+        for other in &edges[index + 1..] {
+            if edge.required == other.required
+                || edge.specificity() != other.specificity()
+                || !edge.overlaps(other)
+            {
+                continue;
+            }
+            bail!(
+                "edges \"{}\" ({}) and \"{}\" ({}) can both match the same edge and are equally \
+                 specific, so neither wins: make one of them more specific, or have them agree",
+                edge.name,
+                requiredness_spelling(&edge.required),
+                other.name,
+                requiredness_spelling(&other.required),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// How a row's requiredness reads back to whoever wrote the TOML. An absent
+/// `required` is a positive claim — the edge is legal but its absence is not a
+/// finding (RFC-067 §Design) — so it gets a spelling of its own.
+fn requiredness_spelling(required: &Option<Severity>) -> &'static str {
+    match required {
+        Some(Severity::Error) => "required = \"error\"",
+        Some(Severity::Warning) => "required = \"warning\"",
+        None => "no `required`",
+    }
 }
 
 /// An `[[edges]]` row as written, before `via` has been checked. Serde's own
@@ -118,6 +185,24 @@ impl TypeSelector {
             TypeSelector::Types(names) => names.iter().any(|name| name == type_name),
         }
     }
+
+    /// True iff this position names types rather than matching by wildcard.
+    fn is_concrete(&self) -> bool {
+        match self {
+            TypeSelector::Any => false,
+            TypeSelector::Types(_) => true,
+        }
+    }
+
+    /// True iff some one concrete type is covered by both positions.
+    fn intersects(&self, other: &Self) -> bool {
+        match (self, other) {
+            (TypeSelector::Any, _) | (_, TypeSelector::Any) => true,
+            (TypeSelector::Types(ours), TypeSelector::Types(theirs)) => {
+                ours.iter().any(|name| theirs.contains(name))
+            }
+        }
+    }
 }
 
 /// The `via` position on an `[[edges]]` row. A relationship is one name or any;
@@ -142,6 +227,23 @@ impl RelSelector {
         match self {
             RelSelector::Any => true,
             RelSelector::Named(name) => name == rel_name,
+        }
+    }
+
+    /// True iff this position names a relationship rather than matching by
+    /// wildcard.
+    fn is_concrete(&self) -> bool {
+        match self {
+            RelSelector::Any => false,
+            RelSelector::Named(_) => true,
+        }
+    }
+
+    /// True iff some one concrete relationship is covered by both positions.
+    fn intersects(&self, other: &Self) -> bool {
+        match (self, other) {
+            (RelSelector::Any, _) | (_, RelSelector::Any) => true,
+            (RelSelector::Named(ours), RelSelector::Named(theirs)) => ours == theirs,
         }
     }
 }
@@ -1343,7 +1445,17 @@ impl Config {
                     );
                 }
             }
+            // ADR-031: requiring an edge from `*` would demand it of every
+            // declared type, including those where it is nonsense.
+            if edge.required.is_some() && edge.from == TypeSelector::Any {
+                bail!(
+                    "edge \"{}\" sets `required` on a wildcard `from`, which would demand the edge from \
+                     every declared type; name the source types that must carry it, or drop `required`",
+                    edge.name
+                );
+            }
         }
+        reject_requiredness_ties(&edges)?;
 
         let any_sqids = types
             .iter()
@@ -2048,6 +2160,245 @@ via = "supersedes"
             err.contains("stories-supersede-rfcs"),
             "names the offending edge: {err}"
         );
+    }
+
+    // STORY-256 AC4 / ADR-031: requiring an edge from `*` would demand it of
+    // every declared type, including the ones where it is nonsense.
+    #[test]
+    fn edge_requiring_a_wildcard_source_fails_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "everything-relates"
+from = "*"
+to = "*"
+via = "related-to"
+required = "error"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+
+        assert!(
+            err.contains("everything-relates"),
+            "names the offending edge: {err}"
+        );
+        assert!(
+            err.contains("wildcard `from`"),
+            "names the wildcard source as the reason: {err}"
+        );
+    }
+
+    #[test]
+    fn edge_with_a_wildcard_source_and_no_requiredness_loads() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "everything-relates"
+from = "*"
+to = "*"
+via = "related-to"
+"#
+        );
+
+        let config = Config::parse(&toml_str).unwrap();
+
+        assert_eq!(config.edges[0].from, TypeSelector::Any);
+        assert_eq!(config.edges[0].required, None);
+    }
+
+    // STORY-256 AC3 / ADR-031: both rows below score two concrete positions and
+    // both cover `story -implements-> rfc`, so nothing picks between their
+    // severities.
+    #[test]
+    fn equally_specific_overlapping_edges_disagreeing_on_severity_fail_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-strictly"
+from = "story"
+to = "*"
+via = "implements"
+required = "error"
+
+[[edges]]
+name = "stories-implement-loosely"
+from = "story"
+to = ["rfc"]
+via = "*"
+required = "warning"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+
+        assert!(
+            err.contains("stories-implement-strictly") && err.contains("stories-implement-loosely"),
+            "names both conflicting edges: {err}"
+        );
+        assert!(
+            err.contains("required"),
+            "names requiredness as the disagreement: {err}"
+        );
+    }
+
+    // RFC-067 §Design: an edge with no `required` is legal but its absence is
+    // not a finding, which is a different claim from `required = "error"`.
+    #[test]
+    fn equally_specific_overlapping_edges_disagreeing_on_absence_fail_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-must-implement-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"
+required = "error"
+
+[[edges]]
+name = "stories-may-implement-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+
+        assert!(
+            err.contains("stories-must-implement-rfcs")
+                && err.contains("stories-may-implement-rfcs"),
+            "names both conflicting edges: {err}"
+        );
+        assert!(
+            err.contains("required"),
+            "names requiredness as the disagreement: {err}"
+        );
+    }
+
+    // ADR-031 §Consequences' worked tie, in the form that reaches the tie check:
+    // the literal both-required version is unreachable because `required` on a
+    // wildcard `from` is rejected first. One concrete position each, and every
+    // position intersects, so `iteration -related-to-> story` is covered by both.
+    #[test]
+    fn a_concrete_source_and_a_concrete_target_tie_at_one_concrete_position() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[types]]
+name = "iteration"
+plural = "iterations"
+dir = "docs/iterations"
+prefix = "ITERATION"
+
+[[edges]]
+name = "iterations-need-something"
+from = "iteration"
+to = "*"
+via = "*"
+required = "error"
+
+[[edges]]
+name = "anything-may-point-at-stories"
+from = "*"
+to = ["story"]
+via = "*"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+
+        assert!(
+            err.contains("iterations-need-something")
+                && err.contains("anything-may-point-at-stories"),
+            "names both conflicting edges: {err}"
+        );
+        assert!(
+            err.contains("equally specific"),
+            "gives the tie, not the wildcard `from` rejection, as the reason: {err}"
+        );
+    }
+
+    // ADR-031: the more specific row wins, so an overlap across specificity
+    // levels is a resolution rather than an ambiguity.
+    #[test]
+    fn overlapping_edges_of_unequal_specificity_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "general-relatedness"
+from = "*"
+to = "*"
+via = "related-to"
+
+[[edges]]
+name = "stories-relate-to-rfcs"
+from = "story"
+to = "rfc"
+via = "related-to"
+required = "error"
+"#
+        );
+
+        let config = Config::parse(&toml_str).unwrap();
+
+        assert_eq!(config.edges.len(), 2);
+    }
+
+    #[test]
+    fn equally_specific_edges_that_cannot_both_match_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"
+required = "error"
+
+[[edges]]
+name = "rfcs-relate-to-stories"
+from = "rfc"
+to = "story"
+via = "related-to"
+"#
+        );
+
+        let config = Config::parse(&toml_str).unwrap();
+
+        assert_eq!(config.edges.len(), 2);
+    }
+
+    #[test]
+    fn equally_specific_overlapping_edges_agreeing_on_requiredness_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-strictly"
+from = "story"
+to = "*"
+via = "implements"
+required = "error"
+
+[[edges]]
+name = "stories-implement-rfcs-strictly"
+from = "story"
+to = ["rfc"]
+via = "*"
+required = "error"
+"#
+        );
+
+        let config = Config::parse(&toml_str).unwrap();
+
+        assert_eq!(config.edges.len(), 2);
     }
 
     #[test]
