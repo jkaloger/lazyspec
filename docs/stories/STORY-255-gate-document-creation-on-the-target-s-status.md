@@ -1,7 +1,7 @@
 ---
 title: Gate document creation on the target's status
 type: story
-status: accepted
+status: in-progress
 author: Jack Kaloger
 date: 2026-08-29
 tags: []

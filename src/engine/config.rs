@@ -1,5 +1,5 @@
 use crate::engine::document::Status;
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -50,7 +50,9 @@ pub enum ValidationRule {
 /// (RFC-067). `from` names the source type, `to` the permitted target types,
 /// `via` the relationship that realizes the edge. `required` is the severity of
 /// a finding when the edge is absent; `None` means the edge is legal but not
-/// demanded.
+/// demanded. `require_to_status` withholds the edge until the target reaches a
+/// status, keyed by target type because a `to` set can span lifecycles
+/// (STORY-255); an absent key leaves that target ungated.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct EdgeDef {
     pub name: String,
@@ -61,6 +63,10 @@ pub struct EdgeDef {
     pub via: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required: Option<Severity>,
+    // Skipped when empty for the same reason `Config::edges` is: an empty map
+    // serializes to a bare key that TOML would hoist above the tables.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub require_to_status: BTreeMap<String, String>,
 }
 
 /// The two TOML spellings of [`EdgeDef::to`]: a bare type name or a list of
@@ -1185,6 +1191,23 @@ impl Config {
                     edge.via
                 );
             }
+            for (target, gate) in &edge.require_to_status {
+                // A gate keyed outside `to` can never be read, so it is a typo.
+                let Some(target_def) = types
+                    .iter()
+                    .find(|t| &t.name == target && edge.to.contains(&t.name))
+                else {
+                    bail!(
+                        "edge \"{}\" gates status on type \"{}\", which is not one of its targets ({})",
+                        edge.name,
+                        target,
+                        edge.to.join(", ")
+                    );
+                };
+                validate_status(target_def, &Status::new(gate)).map_err(|e| {
+                    anyhow!("edge \"{}\" gates on an invalid status: {e}", edge.name)
+                })?;
+            }
         }
 
         let any_sqids = types
@@ -1556,7 +1579,7 @@ name = "related-to"
         );
 
         let edge_props = &json["$defs"]["EdgeDef"]["properties"];
-        for field in ["name", "from", "to", "via", "required"] {
+        for field in ["name", "from", "to", "via", "required", "require_to_status"] {
             assert!(
                 edge_props[field].is_object(),
                 "EdgeDef must expose `{field}`, got {edge_props}"
@@ -1568,20 +1591,30 @@ name = "related-to"
         );
     }
 
-    /// Two types and the relationship that joins them, for the `[[edges]]`
+    /// Three types and the relationship that joins them, for the `[[edges]]`
     /// tests. Strict load rejects an edge naming anything absent from these.
+    /// `bug` runs a lifecycle disjoint from the default one `rfc` and `story`
+    /// inherit, so a per-target-type status gate has something to distinguish.
     const EDGE_PREAMBLE: &str = r#"
 [[types]]
 name = "rfc"
 plural = "rfcs"
 dir = "docs/rfcs"
 prefix = "RFC"
+lifecycle = { states = ["draft", "review", "accepted"] }
 
 [[types]]
 name = "story"
 plural = "stories"
 dir = "docs/stories"
 prefix = "STORY"
+
+[[types]]
+name = "bug"
+plural = "bugs"
+dir = "docs/bugs"
+prefix = "BUG"
+lifecycle = { states = ["reported", "triaged", "fixed"] }
 
 [[relationships]]
 name = "implements"
@@ -1678,6 +1711,95 @@ via = "supersedes"
         );
         assert!(
             err.contains("stories-supersede-rfcs"),
+            "names the offending edge: {err}"
+        );
+    }
+
+    /// STORY-255: the gate is a status per target type, because a target set can
+    /// span lifecycles -- `bug` never reaches the `accepted` that gates `rfc`.
+    #[test]
+    fn edge_require_to_status_reads_a_status_for_each_target_type() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-rfcs"
+from = "story"
+to = ["rfc", "bug"]
+via = "implements"
+require_to_status = { rfc = "accepted", bug = "triaged" }
+"#
+        );
+
+        let edge = &Config::parse(&toml_str).unwrap().edges[0];
+
+        assert_eq!(edge.require_to_status["rfc"], "accepted");
+        assert_eq!(edge.require_to_status["bug"], "triaged");
+    }
+
+    #[test]
+    fn edge_omitting_require_to_status_gates_no_target() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-rfcs"
+from = "story"
+to = ["rfc"]
+via = "implements"
+"#
+        );
+
+        let edge = &Config::parse(&toml_str).unwrap().edges[0];
+
+        assert!(edge.require_to_status.is_empty());
+    }
+
+    /// STORY-255 AC5: a typo in a gated status is caught at load, not silently
+    /// gating nothing at create time.
+    #[test]
+    fn edge_requiring_a_status_outside_the_target_lifecycle_fails_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-rfcs"
+from = "story"
+to = ["rfc", "bug"]
+via = "implements"
+require_to_status = { bug = "accepted" }
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+        assert!(err.contains("bug"), "names the target type: {err}");
+        assert!(err.contains("accepted"), "names the status: {err}");
+        assert!(
+            err.contains("stories-implement-rfcs"),
+            "names the offending edge: {err}"
+        );
+    }
+
+    /// A gate keyed on a type the edge never targets can never be read, so it is
+    /// a typo by construction.
+    #[test]
+    fn edge_requiring_a_status_for_a_non_target_type_fails_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-rfcs"
+from = "story"
+to = ["rfc"]
+via = "implements"
+require_to_status = { bug = "triaged" }
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+        assert!(err.contains("bug"), "names the untargeted type: {err}");
+        assert!(
+            err.contains("stories-implement-rfcs"),
             "names the offending edge: {err}"
         );
     }

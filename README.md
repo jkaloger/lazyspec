@@ -658,6 +658,7 @@ An `[[edges]]` block declares one directed edge kind in the document DAG: a sour
 | `to`       | The permitted target types, written as one type name or a list of them. `to = "story"` and `to = ["story"]` are identical   |
 | `via`      | The relationship that realizes the edge                                                                                    |
 | `required` | `"error"` or `"warning"`: the severity of a finding when the edge is absent. Omit it and the edge is legal but not demanded |
+| `require_to_status` | A table mapping a target type to the status it must reach before the edge may be drawn. Omit a target and it is ungated |
 
 `validate` reports one finding per document of the `from` type that carries no `via` relation to a document of any type listed in `to`. A list of target types is a disjunction, so the edge below is satisfied by an iteration that implements a spike, or a story, or a bug — not one link per member. The finding names the edge and every permitted target type.
 
@@ -677,9 +678,20 @@ via = "implements"
 required = "warning"
 ```
 
-An edge naming a type absent from `[[types]]`, or a relationship absent from `[[relationships]]`, fails config load. Declared edges appear in `lazyspec config --json` under `edges`.
+`require_to_status` is keyed by target type rather than being a single status, because a `to` set can span lifecycles — a `bug` that runs `reported → triaged → fixed` never reaches the `accepted` that gates an `rfc`. The key is parsed and checked at config load; `create` does not consult it yet.
 
-`[[edges]]` and `[[rules]]` are enforced independently; a project may declare either or both. An edge carries exactly the five keys above: wildcard endpoints (`"*"`), per-edge `traversal`, and `require_to_status` are not supported yet, and traversal remains a property of `[[relationships]]`.
+```toml
+[[edges]]
+name = "iterations-implement-work"
+from = "iteration"
+to = ["story", "bug"]
+via = "implements"
+require_to_status = { story = "accepted", bug = "triaged" }
+```
+
+An edge naming a type absent from `[[types]]`, or a relationship absent from `[[relationships]]`, fails config load. So does a `require_to_status` key naming a status outside that type's lifecycle, or a type the edge does not target — either is a typo that would otherwise gate nothing. Declared edges appear in `lazyspec config --json` under `edges`.
+
+`[[edges]]` and `[[rules]]` are enforced independently; a project may declare either or both. An edge carries exactly the six keys above: wildcard endpoints (`"*"`) and per-edge `traversal` are not supported yet, and traversal remains a property of `[[relationships]]`.
 
 ### Numbering
 

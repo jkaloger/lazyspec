@@ -2089,7 +2089,7 @@ mod edge_tests {
     use crate::engine::config::{EdgeDef, RelationshipDef, Traversal};
     use crate::engine::document::{Relation, RelationType};
     use chrono::NaiveDate;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     fn doc(path: &str, doc_type: &str, id: &str, related: Vec<Relation>) -> DocMeta {
         DocMeta {
@@ -2145,6 +2145,7 @@ mod edge_tests {
             to: vec!["spike".to_string(), "story".to_string(), "bug".to_string()],
             via: "implements".to_string(),
             required,
+            require_to_status: BTreeMap::new(),
         }
     }
 
