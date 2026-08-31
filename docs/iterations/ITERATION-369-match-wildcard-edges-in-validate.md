@@ -1,7 +1,7 @@
 ---
 title: Match wildcard edges in validate
 type: iteration
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-08-31
 tags: []
