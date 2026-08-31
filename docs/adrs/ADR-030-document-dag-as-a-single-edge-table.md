@@ -20,9 +20,9 @@ Groups and a widened `parent` both answer the disjunction ask cheaply and change
 
 ## Decision
 
-A single `[[edges]]` table owns the DAG. `EdgeDef` carries `name`, `from`, `to`, `via`, `traversal`, `required`, and `require_to_status`. Both `ValidationRule` variants are removed; `traversal` moves off `RelationshipDef`. `[[relationships]]` retains `name`, `inverse`, and `github_native`.
+A single `[[edges]]` table owns the DAG. `EdgeDef` carries `name`, `from`, `to`, `via`, `traversal`, and `required`. Both `ValidationRule` variants are removed; `traversal` moves off `RelationshipDef`. `[[relationships]]` retains `name`, `inverse`, and `github_native`.
 
-`to` is a type selector, so "an iteration implements a spike, a story, or a bug" is one row. `via` names the relationship, closing the unnamed-relationship hole structurally rather than by adding a field. `require_to_status` is a map keyed by target type, because a set can span lifecycles — `bug` has no `accepted` state.
+`to` is a type selector, so "an iteration implements a spike, a story, or a bug" is one row. `via` names the relationship, closing the unnamed-relationship hole structurally rather than by adding a field.
 
 `TypeDef.parent_type` is untouched. It means containment (shared store backend, directory nesting) and is documented as such. Folding containment into the edge table would re-conflate the two meanings the RFC set out to separate.
 
@@ -33,4 +33,6 @@ A single `[[edges]]` table owns the DAG. `EdgeDef` carries `name`, `from`, `to`,
 - Every existing config needs migration; see the migration ADR.
 - Supersedes RFC-042 §Design.2's placement of constraints in `[[rules]]`, while honouring its unbuilt intent that constraints reference relationships by name. Its other half stands: relations remain arbitrary doc→doc at the model level, so the edge table informs `validate`, never `link`.
 - Amends ADR-022 in carrier only. Status-conditioned gating over a phase axis remains the right call; `require_parent_status` becomes `require_to_status`, a map keyed by target type, because a type set can span lifecycles.
+
+**Amended 2026-08-31 (ADR-033):** the gating consequence above no longer holds. `require_to_status` is dropped from `EdgeDef` and status-conditioned `create` gating is abandoned outright; ADR-033 supersedes ADR-022 rather than amending its carrier. The rest of this decision -- the single edge table, `via` naming the relationship, `to` as a type selector -- stands.
 - Per-edge traversal is precise only where a row is spent. Wildcard rows restore blanket behaviour by design; the RFC states this rather than claiming traversal is fully fixed.

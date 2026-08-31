@@ -112,6 +112,8 @@ require_parent_status: Option<String>,   // e.g. story creatable only when rfc i
 
 `create <child>` refuses when the gate is unmet. Combined with the rule that the skill never auto-crosses a type boundary (spawning a child is always a human-initiated step; only within-doc progression flows automatically), this gives the planning→delivery handoff the user wants: the agent settles the planning docs and stops, rather than racing into iterations. Banding is implicit in the gates plus the existing DAG topology; no `[[phases]]` (ADR-022).
 
+**Amended 2026-08-31 (ADR-033):** the refusal is withdrawn. Status-conditioned `create` gating is abandoned, so the planning→delivery handoff now rests solely on the second fact above — the skill never auto-crosses a type boundary. `require_parent_status` dies with `[[rules]]` (RFC-067 STORY-259) and has no successor.
+
 ### CLI surface
 
 New and extended commands, all `--json` (principle 2):

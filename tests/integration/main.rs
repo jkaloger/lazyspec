@@ -8,7 +8,6 @@ mod cli_config_schema_test;
 mod cli_context_test;
 mod cli_convention_test;
 mod cli_create_test;
-mod cli_edge_gate_test;
 mod cli_expanded_validate_test;
 mod cli_fix_cascade_test;
 mod cli_fix_config_test;

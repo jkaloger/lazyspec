@@ -223,8 +223,7 @@ fn init_config_accepts_an_appended_edges_block() {
         &config_path,
         format!(
             "{content}\n[[edges]]\nname = \"iterations-implement-stories\"\n\
-             from = \"iteration\"\nto = [\"story\", \"rfc\"]\nvia = \"implements\"\n\
-             require_to_status = {{ story = \"accepted\" }}\n"
+             from = \"iteration\"\nto = [\"story\", \"rfc\"]\nvia = \"implements\"\n"
         ),
     )
     .unwrap();
@@ -238,7 +237,6 @@ fn init_config_accepts_an_appended_edges_block() {
     assert_eq!(edge.from, "iteration");
     assert_eq!(edge.to, vec!["story".to_string(), "rfc".to_string()]);
     assert_eq!(edge.via, "implements");
-    assert_eq!(edge.require_to_status["story"], "accepted");
 
     // Non-empty edges still round-trip out as an `[[edges]]` block, so a config
     // rewrite (TUI settings editor, web view) cannot silently drop them.

@@ -14,7 +14,6 @@ use lazyspec::engine::git_ref::GitCli;
 use lazyspec::engine::github::resolve_repo;
 use lazyspec::engine::issue_cache::IssueCache;
 use lazyspec::engine::issue_map::IssueMap;
-use lazyspec::engine::ops::create::EdgeStatusRefusal;
 use lazyspec::engine::store::Store;
 
 fn main() -> anyhow::Result<()> {
@@ -206,19 +205,7 @@ fn main() -> anyhow::Result<()> {
                     }
                     Err(e) => {
                         lazyspec::cli::spinner::finish_err(pb, "create failed");
-                        // A refused create is a failure in both modes, so the
-                        // machine-readable refusal still exits non-zero, as
-                        // `validate --json` and `fix --json` do.
-                        let Some(refusal) = e.downcast_ref::<EdgeStatusRefusal>() else {
-                            return Err(e);
-                        };
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(
-                                &lazyspec::cli::create::edge_status_gate_json(refusal)
-                            )?
-                        );
-                        std::process::exit(1);
+                        return Err(e);
                     }
                 }
             } else {

@@ -23,7 +23,7 @@ An alternative was to allow no wildcards and accept the row count, relying on ge
 Resolution when several rows match one concrete edge:
 
 - **Traversal composes.** An edge walks if any matching row gives it a traversal role. Two rows assigning *different* roles to the same triple is a load error, not a precedence puzzle.
-- **Requiredness and gating take the most specific row.** Specificity is ordered by how many of the three positions are concrete: three beats two beats one beats zero. A tie between rows of equal specificity that disagree is a load error.
+- **Requiredness takes the most specific row.** Specificity is ordered by how many of the three positions are concrete: three beats two beats one beats zero. A tie between rows of equal specificity that disagree is a load error.
 - **`required` on a wildcard `from` is rejected at load.** It would demand the edge from every declared type, including types where it is nonsense. RFC-067 lists this as an open question; this ADR closes it as a load error.
 
 ## Consequences

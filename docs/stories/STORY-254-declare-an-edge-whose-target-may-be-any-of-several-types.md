@@ -7,7 +7,6 @@ date: 2026-08-29
 tags: []
 related:
 - implements: RFC-067
-- blocks: STORY-255
 - blocks: STORY-256
 - blocks: STORY-257
 - blocks: STORY-258
@@ -22,7 +21,7 @@ This is the walking skeleton for RFC-067: the thinnest path that parses an `[[ed
 
 In: `EdgeDef` with `from`, `to`, `via`, `required`; strict-load validation of type and relationship names; the validation checker; `config --json` exposure.
 
-Out: `traversal` (STORY-257), wildcards (STORY-256), `require_to_status` (STORY-255), migration (STORY-258), editors (STORY-260, STORY-261).
+Out: `traversal` (STORY-257), wildcards (STORY-256), migration (STORY-258), editors (STORY-260, STORY-261).
 
 ## Acceptance criteria
 

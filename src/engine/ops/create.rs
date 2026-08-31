@@ -1,5 +1,5 @@
 use crate::engine::clickup::ClickupHttpClient;
-use crate::engine::config::{validate_status, Config, EdgeDef, StoreBackend, ValidationRule};
+use crate::engine::config::{validate_status, Config, StoreBackend, ValidationRule};
 use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::document::DocType;
 use crate::engine::document::Status;
@@ -15,59 +15,8 @@ use crate::engine::store_dispatch::{
     DocumentStore, GithubIssuesStore, GithubMilestonesStore, PushOutcome,
 };
 use anyhow::{anyhow, bail, Result};
-use std::collections::BTreeSet;
-use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-/// One target type of an edge whose `require_to_status` gate nothing satisfies.
-///
-/// `current_statuses` holds the distinct statuses documents of that type sit at
-/// today, and is empty when the project holds none: the gate asks whether *any*
-/// document of the type has reached the status, so there is no single current
-/// status to name and nothing to invent when there are no documents at all.
-#[derive(Debug, Clone, PartialEq)]
-pub struct UnsatisfiedTargetGate {
-    pub target_type: String,
-    pub required_status: String,
-    pub current_statuses: Vec<String>,
-}
-
-/// A `create` refused because no target of `edge` has reached the status its
-/// `require_to_status` map demands (RFC-067, STORY-255).
-///
-/// Carried as a typed error so the CLI can render the fields as JSON without
-/// re-parsing the message.
-#[derive(Debug, Clone, PartialEq)]
-pub struct EdgeStatusRefusal {
-    pub doc_type: String,
-    pub edge: String,
-    pub unsatisfied: Vec<UnsatisfiedTargetGate>,
-}
-
-impl fmt::Display for EdgeStatusRefusal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "cannot create {}: edge \"{}\" requires ",
-            self.doc_type, self.edge
-        )?;
-        for (i, gate) in self.unsatisfied.iter().enumerate() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "{} at \"{}\" ", gate.target_type, gate.required_status)?;
-            if gate.current_statuses.is_empty() {
-                write!(f, "(none exists)")?;
-            } else {
-                write!(f, "(found {})", gate.current_statuses.join(", "))?;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for EdgeStatusRefusal {}
 
 pub fn run(
     root: &Path,
@@ -164,17 +113,6 @@ pub fn run_with_body(
                 parent,
                 required
             );
-        }
-    }
-
-    // The edge table's gate runs alongside the scalar one above; STORY-259
-    // retires `[[rules]]` and with it the scalar.
-    for edge in &config.edges {
-        if edge.from != doc_type || edge.require_to_status.is_empty() {
-            continue;
-        }
-        if let Some(refusal) = edge_status_refusal(store, doc_type, edge) {
-            return Err(anyhow!(refusal));
         }
     }
 
@@ -305,49 +243,6 @@ pub fn run_with_body(
     }
 
     Ok((path, PushOutcome::Synced))
-}
-
-/// Whether `edge` withholds creation, and if so which of its target types are
-/// unsatisfied.
-///
-/// An edge over a target set is satisfied by any one member, mirroring
-/// `required` (RFC-067 §Design). A gated member is satisfied when some document
-/// of that type has reached its required status; an ungated member — one absent
-/// from `require_to_status` — by the existence of any document of that type.
-fn edge_status_refusal(store: &Store, doc_type: &str, edge: &EdgeDef) -> Option<EdgeStatusRefusal> {
-    let mut unsatisfied = Vec::new();
-
-    for target in &edge.to {
-        let target_type = DocType::new(target);
-        let current: BTreeSet<&str> = store
-            .docs
-            .values()
-            .filter(|d| d.doc_type == target_type)
-            .map(|d| d.status.as_str())
-            .collect();
-
-        let Some(required) = edge.require_to_status.get(target) else {
-            if current.is_empty() {
-                continue;
-            }
-            return None;
-        };
-
-        if current.contains(Status::new(required).as_str()) {
-            return None;
-        }
-        unsatisfied.push(UnsatisfiedTargetGate {
-            target_type: target.clone(),
-            required_status: required.clone(),
-            current_statuses: current.into_iter().map(str::to_string).collect(),
-        });
-    }
-
-    Some(EdgeStatusRefusal {
-        doc_type: doc_type.to_string(),
-        edge: edge.name.clone(),
-        unsatisfied,
-    })
 }
 
 /// Author a child of `parent_id`, branching on the child type's store.
