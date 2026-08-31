@@ -38,6 +38,7 @@ pub fn starter_config() -> Config {
         relationships: starter_relationships(),
         ui: UiConfig::default(),
         rules: default_rules(),
+        edges: Vec::new(),
         ref_count_ceiling: 15,
         certification: CertificationConfig::default(),
         agents: Default::default(),

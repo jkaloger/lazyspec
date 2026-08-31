@@ -96,8 +96,17 @@ pub enum ConfigCommand {
     },
 }
 
+/// `Config::edges` is skipped when empty so the TOML writer never emits a bare
+/// `edges = []` above the tables, but the JSON contract is an always-present
+/// array: an agent reading `edges` should never have to branch on null.
 pub fn run_show_json(config: &Config) -> Result<String> {
-    Ok(serde_json::to_string_pretty(config)?)
+    let mut value = serde_json::to_value(config)?;
+    if let Some(object) = value.as_object_mut() {
+        object
+            .entry("edges")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    }
+    Ok(serde_json::to_string_pretty(&value)?)
 }
 
 pub fn run_schema_json() -> Result<String> {
@@ -993,6 +1002,35 @@ severity = "error"
             parsed.is_object(),
             "schema should be a JSON object: {parsed}"
         );
+    }
+
+    #[test]
+    fn show_json_emits_declared_edges_with_every_field() {
+        let src = format!(
+            "{SRC}{}",
+            r#"
+[[edges]]
+name = "stories-implement-rfcs"
+from = "story"
+to = ["rfc"]
+via = "implements"
+required = "error"
+"#
+        );
+
+        let edge = &show(&src)["edges"][0];
+
+        assert_eq!(edge["name"], "stories-implement-rfcs");
+        assert_eq!(edge["from"], "story");
+        assert_eq!(edge["to"], serde_json::json!(["rfc"]));
+        assert_eq!(edge["via"], "implements");
+        assert_eq!(edge["required"], "error");
+    }
+
+    // Dictum 2: an agent reading `edges` should never have to branch on null.
+    #[test]
+    fn show_json_emits_an_empty_edge_array_when_none_are_declared() {
+        assert_eq!(show(SRC)["edges"], serde_json::json!([]));
     }
 
     // AC1: every type serializes with all three STORY-145 axes, and the lifecycle

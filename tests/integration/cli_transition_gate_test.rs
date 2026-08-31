@@ -149,6 +149,7 @@ fn config_with_parent_status_gate() -> Config {
             severity: Severity::Error,
             require_parent_status: Some("accepted".to_string()),
         }],
+        edges: vec![],
         ref_count_ceiling: 15,
         certification: Default::default(),
         agents: Default::default(),

@@ -46,6 +46,43 @@ pub enum ValidationRule {
     },
 }
 
+/// One entry in the `[[edges]]` block: a directed edge kind in the document DAG
+/// (RFC-067). `from` names the source type, `to` the permitted target types,
+/// `via` the relationship that realizes the edge. `required` is the severity of
+/// a finding when the edge is absent; `None` means the edge is legal but not
+/// demanded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct EdgeDef {
+    pub name: String,
+    pub from: String,
+    #[serde(deserialize_with = "deserialize_edge_targets")]
+    #[schemars(with = "EdgeTargets")]
+    pub to: Vec<String>,
+    pub via: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required: Option<Severity>,
+}
+
+/// The two TOML spellings of [`EdgeDef::to`]: a bare type name or a list of
+/// them. Exists so the scalar form loads as the one-element list and the schema
+/// documents both.
+#[derive(Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum EdgeTargets {
+    One(String),
+    Many(Vec<String>),
+}
+
+fn deserialize_edge_targets<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match EdgeTargets::deserialize(deserializer)? {
+        EdgeTargets::One(name) => vec![name],
+        EdgeTargets::Many(names) => names,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum NumberingStrategy {
@@ -650,6 +687,12 @@ pub struct Config {
     // deserialized via `RawConfig` in `Config::parse`, not the derive.
     #[serde(skip_deserializing)]
     pub rules: Vec<ValidationRule>,
+    // Serialized so `to_toml` writes `[[edges]]` into the config it emits, but
+    // deserialized via `RawConfig` in `Config::parse`, not the derive. An empty
+    // set is skipped: a bare `edges = []` key would be hoisted above the tables
+    // and collide with any `[[edges]]` header the user later appends.
+    #[serde(skip_deserializing, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<EdgeDef>,
     #[serde(skip)]
     pub ref_count_ceiling: usize,
     #[serde(default)]
@@ -809,6 +852,10 @@ struct RawConfig {
     /// Structural validation rules between types, one per `[[rules]]` block
     /// (`parent-child` or `relation-existence` shapes), checked by `validate`.
     rules: Option<Vec<ValidationRule>>,
+    /// The document DAG's edge kinds, one per `[[edges]]` block: source type,
+    /// permitted target types, the relationship realizing the edge, and the
+    /// severity of its absence.
+    edges: Option<Vec<EdgeDef>>,
     /// The `[templates]` block: where Markdown document templates live.
     templates: Option<Templates>,
     /// The `[naming]` block: the filename pattern new documents are created
@@ -995,6 +1042,7 @@ impl Default for Config {
             relationships: starter_relationships(),
             ui: UiConfig::default(),
             rules: default_rules(),
+            edges: Vec::new(),
             ref_count_ceiling: 15,
             certification: CertificationConfig::default(),
             agents: AgentsConfig::default(),
@@ -1119,6 +1167,26 @@ impl Config {
 
         let rules = raw.rules.unwrap_or_default();
 
+        let edges = raw.edges.unwrap_or_default();
+        for edge in &edges {
+            for type_name in std::iter::once(&edge.from).chain(&edge.to) {
+                if !types.iter().any(|t| &t.name == type_name) {
+                    bail!(
+                        "edge \"{}\" names unknown type \"{}\" (not declared in [[types]])",
+                        edge.name,
+                        type_name
+                    );
+                }
+            }
+            if !relationships.iter().any(|r| r.name == edge.via) {
+                bail!(
+                    "edge \"{}\" names unknown relationship \"{}\" (not declared in [[relationships]])",
+                    edge.name,
+                    edge.via
+                );
+            }
+        }
+
         let any_sqids = types
             .iter()
             .any(|t| t.numbering == NumberingStrategy::Sqids);
@@ -1211,6 +1279,7 @@ impl Config {
             relationships,
             ui: raw.tui.unwrap_or_default(),
             rules,
+            edges,
             ref_count_ceiling,
             certification: raw.certification.unwrap_or_default(),
             agents: raw.agents.unwrap_or_default(),
@@ -1484,6 +1553,132 @@ name = "related-to"
         assert!(
             shape_consts.contains(&"relation-existence"),
             "expected a relation-existence shape const, got {shape_consts:?}"
+        );
+
+        let edge_props = &json["$defs"]["EdgeDef"]["properties"];
+        for field in ["name", "from", "to", "via", "required"] {
+            assert!(
+                edge_props[field].is_object(),
+                "EdgeDef must expose `{field}`, got {edge_props}"
+            );
+        }
+        assert!(
+            json["$defs"]["EdgeTargets"]["anyOf"].is_array(),
+            "edge `to` must document both the scalar and the list form"
+        );
+    }
+
+    /// Two types and the relationship that joins them, for the `[[edges]]`
+    /// tests. Strict load rejects an edge naming anything absent from these.
+    const EDGE_PREAMBLE: &str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+"#;
+
+    #[test]
+    fn edge_to_reads_a_scalar_as_a_single_element_list() {
+        let with_targets = |to: &str| {
+            format!(
+                "{EDGE_PREAMBLE}
+[[edges]]
+name = \"stories-implement-rfcs\"
+from = \"story\"
+to = {to}
+via = \"implements\"
+required = \"error\"
+"
+            )
+        };
+
+        let scalar = Config::parse(&with_targets("\"rfc\"")).unwrap();
+        let list = Config::parse(&with_targets("[\"rfc\"]")).unwrap();
+
+        assert_eq!(scalar.edges, list.edges);
+        assert_eq!(scalar.edges[0].to, vec!["rfc".to_string()]);
+    }
+
+    #[test]
+    fn config_without_an_edge_table_loads_with_no_edges() {
+        let config = Config::parse(TYPES).unwrap();
+        assert!(config.edges.is_empty());
+    }
+
+    #[test]
+    fn edge_targeting_an_undeclared_type_fails_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-spikes"
+from = "story"
+to = ["spike"]
+via = "implements"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+        assert!(err.contains("spike"), "names the unknown type: {err}");
+        assert!(
+            err.contains("stories-implement-spikes"),
+            "names the offending edge: {err}"
+        );
+    }
+
+    #[test]
+    fn edge_sourced_from_an_undeclared_type_fails_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "spikes-implement-rfcs"
+from = "spike"
+to = ["rfc"]
+via = "implements"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+        assert!(err.contains("spike"), "names the unknown type: {err}");
+        assert!(
+            err.contains("spikes-implement-rfcs"),
+            "names the offending edge: {err}"
+        );
+    }
+
+    #[test]
+    fn edge_via_an_undeclared_relationship_fails_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-supersede-rfcs"
+from = "story"
+to = ["rfc"]
+via = "supersedes"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+        assert!(
+            err.contains("supersedes"),
+            "names the unknown relationship: {err}"
+        );
+        assert!(
+            err.contains("stories-supersede-rfcs"),
+            "names the offending edge: {err}"
         );
     }
 

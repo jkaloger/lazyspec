@@ -202,6 +202,52 @@ fn init_project_loads_strict_and_validates_clean() {
     );
 }
 
+// A fresh config must leave room for the `[[edges]]` array of tables: TOML
+// rejects a bare `edges = []` key alongside an `[[edges]]` header in the same
+// document, so an empty edge set must serialize to nothing at all.
+#[test]
+fn init_config_accepts_an_appended_edges_block() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    lazyspec::cli::init::run(root).unwrap();
+
+    let config_path = root.join(".lazyspec.toml");
+    let content = fs::read_to_string(&config_path).unwrap();
+    assert!(
+        !content.contains("edges = []"),
+        "empty edges must not be serialized, got:\n{content}"
+    );
+
+    fs::write(
+        &config_path,
+        format!(
+            "{content}\n[[edges]]\nname = \"iterations-implement-stories\"\n\
+             from = \"iteration\"\nto = [\"story\", \"rfc\"]\nvia = \"implements\"\n"
+        ),
+    )
+    .unwrap();
+
+    let config = parse_written_config(root);
+    let edge = config
+        .edges
+        .iter()
+        .find(|e| e.name == "iterations-implement-stories")
+        .expect("appended edge should parse");
+    assert_eq!(edge.from, "iteration");
+    assert_eq!(edge.to, vec!["story".to_string(), "rfc".to_string()]);
+    assert_eq!(edge.via, "implements");
+
+    // Non-empty edges still round-trip out as an `[[edges]]` block, so a config
+    // rewrite (TUI settings editor, web view) cannot silently drop them.
+    let emitted = config.to_toml().unwrap();
+    assert!(
+        emitted.contains("[[edges]]"),
+        "declared edges must survive to_toml, got:\n{emitted}"
+    );
+    assert_eq!(Config::parse(&emitted).unwrap().edges, config.edges);
+}
+
 #[test]
 fn init_creates_convention_skeleton_files() {
     let dir = TempDir::new().unwrap();
