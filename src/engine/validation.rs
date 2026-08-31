@@ -23,6 +23,13 @@ pub enum ValidationIssue {
         rule_name: String,
         doc_type: String,
     },
+    UnsatisfiedEdge {
+        path: PathBuf,
+        edge_name: String,
+        from_type: String,
+        to_types: Vec<String>,
+        via: String,
+    },
     SupersededParent {
         path: PathBuf,
         parent: PathBuf,
@@ -165,6 +172,23 @@ impl std::fmt::Display for ValidationIssue {
                     rule_name,
                     path.display(),
                     doc_type
+                )
+            }
+            ValidationIssue::UnsatisfiedEdge {
+                path,
+                edge_name,
+                from_type,
+                to_types,
+                via,
+            } => {
+                write!(
+                    f,
+                    "unsatisfied edge [{}]: {} ({} needs \"{}\" to one of: {})",
+                    edge_name,
+                    path.display(),
+                    from_type,
+                    via,
+                    to_types.join(", ")
                 )
             }
             ValidationIssue::SupersededParent { path, parent } => {
@@ -578,6 +602,71 @@ impl Checker for ParentLinkRule {
                             ));
                         }
                     }
+                }
+            }
+        }
+
+        issues
+    }
+}
+
+pub struct RequiredEdgeRule;
+
+impl Checker for RequiredEdgeRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        let mut issues = Vec::new();
+
+        let id_to_path: HashMap<String, PathBuf> = store
+            .docs
+            .values()
+            .map(|doc| (doc.id.clone(), doc.path.clone()))
+            .collect();
+
+        for (path, meta) in &store.docs {
+            if meta.validate_ignore {
+                continue;
+            }
+
+            for edge in &config.edges {
+                let Some(severity) = &edge.required else {
+                    continue;
+                };
+                if meta.doc_type != DocType::new(&edge.from) {
+                    continue;
+                }
+
+                // Matching `via` by name is the whole point: `[[rules]]` accepts
+                // any chain relationship, so `targets` satisfies a rule that
+                // meant `implements` (RFC-067 §Problem.1).
+                let satisfied = meta.related.iter().any(|r| {
+                    if r.rel_type.as_str() != edge.via {
+                        return false;
+                    }
+                    let resolved = id_to_path
+                        .get(&r.target)
+                        .cloned()
+                        .unwrap_or_else(|| PathBuf::from(&r.target));
+                    store
+                        .docs
+                        .get(&resolved)
+                        .is_some_and(|d| edge.to.iter().any(|t| d.doc_type == DocType::new(t)))
+                });
+
+                if !satisfied {
+                    issues.push((
+                        severity.clone(),
+                        ValidationIssue::UnsatisfiedEdge {
+                            path: path.clone(),
+                            edge_name: edge.name.clone(),
+                            from_type: edge.from.clone(),
+                            to_types: edge.to.clone(),
+                            via: edge.via.clone(),
+                        },
+                    ));
                 }
             }
         }
@@ -1300,6 +1389,7 @@ fn default_checkers() -> Vec<Box<dyn Checker>> {
     vec![
         Box::new(BrokenLinkRule),
         Box::new(ParentLinkRule),
+        Box::new(RequiredEdgeRule),
         Box::new(StatusConsistencyRule),
         Box::new(DuplicateIdRule),
         Box::new(AcSlugFormatRule),
@@ -1990,5 +2080,339 @@ lifecycle = { states = ["triage", "shipped"], edges = [] }"#,
         let found = issues(&config, tmp.path());
 
         assert!(found.is_empty(), "got: {:?}", found);
+    }
+}
+
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+    use crate::engine::config::{EdgeDef, RelationshipDef, Traversal};
+    use crate::engine::document::{Relation, RelationType};
+    use chrono::NaiveDate;
+    use std::collections::HashMap;
+
+    fn doc(path: &str, doc_type: &str, id: &str, related: Vec<Relation>) -> DocMeta {
+        DocMeta {
+            path: PathBuf::from(path),
+            title: "T".to_string(),
+            doc_type: DocType::new(doc_type),
+            status: Status::new("draft"),
+            author: "a".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            related,
+            validate_ignore: false,
+            virtual_doc: false,
+            assignee: None,
+            id: id.to_string(),
+            attributes: Default::default(),
+        }
+    }
+
+    fn rel(rel_type: &str, target: &str) -> Relation {
+        Relation {
+            rel_type: RelationType::new(rel_type),
+            target: target.to_string(),
+        }
+    }
+
+    /// Both `implements` and `targets` walk the chain, as they do in this
+    /// project's own config -- the arrangement RFC-067 §Problem.1 names.
+    fn store_from(docs: Vec<DocMeta>) -> super::super::store::Store {
+        let mut map = HashMap::new();
+        for d in docs {
+            map.insert(d.path.clone(), d);
+        }
+        super::super::store::Store {
+            root: PathBuf::from("."),
+            docs: map,
+            forward_links: HashMap::new(),
+            reverse_links: HashMap::new(),
+            children: HashMap::new(),
+            parent_of: HashMap::new(),
+            parse_errors: Vec::new(),
+            chain_relationships: vec!["implements".to_string(), "targets".to_string()],
+            related_relationships: vec!["related-to".to_string()],
+            body_cache: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn iterations_implement_work(required: Option<Severity>) -> EdgeDef {
+        EdgeDef {
+            name: "iterations-implement-work".to_string(),
+            from: "iteration".to_string(),
+            to: vec!["spike".to_string(), "story".to_string(), "bug".to_string()],
+            via: "implements".to_string(),
+            required,
+        }
+    }
+
+    fn targets_relationship() -> RelationshipDef {
+        RelationshipDef {
+            name: "targets".to_string(),
+            inverse: Some("targeted-by".to_string()),
+            github_native: None,
+            traversal: Some(Traversal::Chain),
+        }
+    }
+
+    /// The edge under test with `[[rules]]` cleared, so any finding can only
+    /// have come from the edge checker.
+    fn config_with_edge(edge: EdgeDef) -> Config {
+        let mut relationships = crate::engine::config::starter_relationships();
+        relationships.push(targets_relationship());
+        Config {
+            relationships,
+            rules: Vec::new(),
+            edges: vec![edge],
+            ..Config::default()
+        }
+    }
+
+    fn unsatisfied_edges(result: &ValidationResult) -> Vec<&ValidationIssue> {
+        result
+            .errors
+            .iter()
+            .chain(result.warnings.iter())
+            .filter(|i| matches!(i, ValidationIssue::UnsatisfiedEdge { .. }))
+            .collect()
+    }
+
+    // AC1: one edge to any single member of `to` satisfies the edge -- the set is
+    // a disjunction, not a demand for one link per member.
+    #[test]
+    fn any_one_permitted_target_type_satisfies_the_edge() {
+        for (target_type, target_id, target_path) in [
+            ("spike", "SPIKE-001", "docs/spikes/SPIKE-001.md"),
+            ("story", "STORY-001", "docs/stories/STORY-001.md"),
+            ("bug", "BUG-001", "docs/bugs/BUG-001.md"),
+        ] {
+            let store = store_from(vec![
+                doc(target_path, target_type, target_id, vec![]),
+                doc(
+                    "docs/iterations/ITERATION-001.md",
+                    "iteration",
+                    "ITERATION-001",
+                    vec![rel("implements", target_id)],
+                ),
+            ]);
+
+            let result = validate_full(
+                &store,
+                &config_with_edge(iterations_implement_work(Some(Severity::Error))),
+            );
+
+            assert!(
+                unsatisfied_edges(&result).is_empty(),
+                "an iteration implementing a {target_type} must satisfy the edge, got: {:?}",
+                unsatisfied_edges(&result)
+            );
+        }
+    }
+
+    // AC2: the finding names the edge and every permitted target type. "an
+    // iteration needs a story" is the wrong message when spikes and bugs are
+    // equally valid.
+    #[test]
+    fn absent_edge_reports_one_error_naming_the_whole_target_set() {
+        let store = store_from(vec![doc(
+            "docs/iterations/ITERATION-001.md",
+            "iteration",
+            "ITERATION-001",
+            vec![],
+        )]);
+
+        let result = validate_full(
+            &store,
+            &config_with_edge(iterations_implement_work(Some(Severity::Error))),
+        );
+
+        let found = unsatisfied_edges(&result);
+        assert_eq!(found.len(), 1, "got: {found:?}");
+        assert!(result.warnings.is_empty(), "got: {:?}", result.warnings);
+        let rendered = found[0].to_string();
+        for expected in [
+            "iterations-implement-work",
+            "docs/iterations/ITERATION-001.md",
+            "implements",
+            "spike",
+            "story",
+            "bug",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "finding must name {expected}, got: {rendered}"
+            );
+        }
+    }
+
+    // AC3 / RFC-067 §Problem.1: `targets` also walks the chain, so under the
+    // `[[rules]]` semantics it wrongly satisfies any parent-child rule. The edge
+    // checker matches on `via` by name, so it does not inherit that hole.
+    #[test]
+    fn a_relationship_other_than_via_does_not_satisfy_the_edge() {
+        let store = store_from(vec![
+            doc("docs/stories/STORY-001.md", "story", "STORY-001", vec![]),
+            doc(
+                "docs/iterations/ITERATION-001.md",
+                "iteration",
+                "ITERATION-001",
+                vec![rel("targets", "STORY-001")],
+            ),
+        ]);
+
+        let result = validate_full(
+            &store,
+            &config_with_edge(iterations_implement_work(Some(Severity::Error))),
+        );
+
+        assert_eq!(
+            unsatisfied_edges(&result).len(),
+            1,
+            "a `targets` link must not satisfy an `implements` edge, got errors {:?} warnings {:?}",
+            result.errors,
+            result.warnings
+        );
+    }
+
+    // An `implements` link to a type outside `to` is no better than no link.
+    #[test]
+    fn a_target_outside_the_permitted_set_does_not_satisfy_the_edge() {
+        let store = store_from(vec![
+            doc("docs/rfcs/RFC-001.md", "rfc", "RFC-001", vec![]),
+            doc(
+                "docs/iterations/ITERATION-001.md",
+                "iteration",
+                "ITERATION-001",
+                vec![rel("implements", "RFC-001")],
+            ),
+        ]);
+
+        let result = validate_full(
+            &store,
+            &config_with_edge(iterations_implement_work(Some(Severity::Error))),
+        );
+
+        assert_eq!(
+            unsatisfied_edges(&result).len(),
+            1,
+            "got: {:?}",
+            result.errors
+        );
+    }
+
+    // `required = "warning"` reports at that severity, not as an error.
+    #[test]
+    fn required_severity_decides_which_bucket_the_finding_lands_in() {
+        let store = store_from(vec![doc(
+            "docs/iterations/ITERATION-001.md",
+            "iteration",
+            "ITERATION-001",
+            vec![],
+        )]);
+
+        let result = validate_full(
+            &store,
+            &config_with_edge(iterations_implement_work(Some(Severity::Warning))),
+        );
+
+        assert_eq!(unsatisfied_edges(&result).len(), 1);
+        assert!(
+            result
+                .errors
+                .iter()
+                .all(|e| !matches!(e, ValidationIssue::UnsatisfiedEdge { .. })),
+            "got: {:?}",
+            result.errors
+        );
+    }
+
+    // An edge with no `required` is legal but not demanded: its absence is not a
+    // finding.
+    #[test]
+    fn an_edge_without_required_is_not_checked() {
+        let store = store_from(vec![doc(
+            "docs/iterations/ITERATION-001.md",
+            "iteration",
+            "ITERATION-001",
+            vec![],
+        )]);
+
+        let result = validate_full(&store, &config_with_edge(iterations_implement_work(None)));
+
+        assert!(
+            unsatisfied_edges(&result).is_empty(),
+            "got: {:?}",
+            unsatisfied_edges(&result)
+        );
+    }
+
+    // A `validate_ignore` document is exempt from edges as it is from rules.
+    #[test]
+    fn a_validate_ignored_document_is_exempt_from_the_edge() {
+        let mut iteration = doc(
+            "docs/iterations/ITERATION-001.md",
+            "iteration",
+            "ITERATION-001",
+            vec![],
+        );
+        iteration.validate_ignore = true;
+        let store = store_from(vec![iteration]);
+
+        let result = validate_full(
+            &store,
+            &config_with_edge(iterations_implement_work(Some(Severity::Error))),
+        );
+
+        assert!(
+            unsatisfied_edges(&result).is_empty(),
+            "got: {:?}",
+            unsatisfied_edges(&result)
+        );
+    }
+
+    // AC7: during the dual-declaration window both tables are enforced, and
+    // neither suppresses the other.
+    #[test]
+    fn rules_and_edges_both_report_from_the_same_config() {
+        let mut config = config_with_edge(iterations_implement_work(Some(Severity::Error)));
+        config.rules = crate::engine::config::default_rules();
+        let store = store_from(vec![
+            doc(
+                "docs/iterations/ITERATION-001.md",
+                "iteration",
+                "ITERATION-001",
+                vec![],
+            ),
+            doc("docs/adrs/ADR-001.md", "adr", "ADR-001", vec![]),
+        ]);
+
+        let result = validate_full(&store, &config);
+
+        assert!(
+            result.errors.iter().any(|e| matches!(
+                e,
+                ValidationIssue::MissingParentLink { rule_name, .. }
+                    if rule_name == "iterations-need-stories"
+            )),
+            "the [[rules]] parent-child finding must survive, got: {:?}",
+            result.errors
+        );
+        assert!(
+            result.errors.iter().any(|e| matches!(
+                e,
+                ValidationIssue::MissingRelation { rule_name, .. }
+                    if rule_name == "adrs-need-relations"
+            )),
+            "the [[rules]] relation-existence finding must survive, got: {:?}",
+            result.errors
+        );
+        assert_eq!(
+            unsatisfied_edges(&result).len(),
+            1,
+            "the [[edges]] finding must survive, got: {:?}",
+            result.errors
+        );
     }
 }
