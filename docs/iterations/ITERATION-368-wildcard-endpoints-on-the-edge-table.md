@@ -1,7 +1,7 @@
 ---
 title: Wildcard endpoints on the edge table
 type: iteration
-status: draft
+status: complete
 author: Jack Kaloger
 date: 2026-08-31
 tags: []

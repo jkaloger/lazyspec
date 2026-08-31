@@ -654,9 +654,9 @@ An `[[edges]]` block declares one directed edge kind in the document DAG: a sour
 | Key        | Meaning                                                                                                                    |
 | ---------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `name`     | Identifies the edge in validation findings                                                                                 |
-| `from`     | The source document type                                                                                                   |
-| `to`       | The permitted target types, written as one type name or a list of them. `to = "story"` and `to = ["story"]` are identical   |
-| `via`      | The relationship that realizes the edge                                                                                    |
+| `from`     | The source document type, or `"*"` for any type                                                                            |
+| `to`       | The permitted target types, written as one type name, a list of them, or `"*"` for any type. `to = "story"` and `to = ["story"]` are identical |
+| `via`      | The relationship that realizes the edge, or `"*"` for any relationship. Required — omitting it is an error, not a shorthand for `"*"` |
 | `required` | `"error"` or `"warning"`: the severity of a finding when the edge is absent. Omit it and the edge is legal but not demanded |
 
 `validate` reports one finding per document of the `from` type that carries no `via` relation to a document of any type listed in `to`. A list of target types is a disjunction, so the edge below is satisfied by an iteration that implements a spike, or a story, or a bug — not one link per member. The finding names the edge and every permitted target type.
@@ -677,9 +677,21 @@ via = "implements"
 required = "warning"
 ```
 
-An edge naming a type absent from `[[types]]`, or a relationship absent from `[[relationships]]`, fails config load. Declared edges appear in `lazyspec config --json` under `edges`.
+Any of `from`, `to` and `via` may be written as `"*"`, which matches every declared type or relationship:
 
-`[[edges]]` and `[[rules]]` are enforced independently; a project may declare either or both. An edge carries exactly the five keys above: wildcard endpoints (`"*"`) and per-edge `traversal` are not supported yet, and traversal remains a property of `[[relationships]]`. Edges describe the DAG and drive findings; they never refuse a command.
+```toml
+[[edges]]
+name = "general-relatedness"
+from = "*"
+to = "*"
+via = "related-to"
+```
+
+The wildcard is always explicit. Leaving `via` out does not mean "any relationship" — it fails config load, naming the edge, because a table whose shape carried a second meaning would be a rule nobody wrote down.
+
+An edge naming a type absent from `[[types]]`, or a relationship absent from `[[relationships]]`, fails config load; `"*"` names neither and is never reported as an unknown identifier. Declared edges appear in `lazyspec config --json` under `edges`, and re-emit in the spelling they were written in.
+
+`[[edges]]` and `[[rules]]` are enforced independently; a project may declare either or both. Per-edge `traversal` is not supported yet, and traversal remains a property of `[[relationships]]`. Edges describe the DAG and drive findings; they never refuse a command.
 
 ### Numbering
 

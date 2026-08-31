@@ -1,5 +1,6 @@
 use lazyspec::engine::config::{
-    default_rules, starter_relationships, starter_types, Config, RelationshipDef, Traversal,
+    default_rules, starter_relationships, starter_types, Config, RelSelector, RelationshipDef,
+    Traversal, TypeSelector,
 };
 use lazyspec::engine::store::Store;
 use std::fs;
@@ -234,9 +235,15 @@ fn init_config_accepts_an_appended_edges_block() {
         .iter()
         .find(|e| e.name == "iterations-implement-stories")
         .expect("appended edge should parse");
-    assert_eq!(edge.from, "iteration");
-    assert_eq!(edge.to, vec!["story".to_string(), "rfc".to_string()]);
-    assert_eq!(edge.via, "implements");
+    assert_eq!(
+        edge.from,
+        TypeSelector::Types(vec!["iteration".to_string()])
+    );
+    assert_eq!(
+        edge.to,
+        TypeSelector::Types(vec!["story".to_string(), "rfc".to_string()])
+    );
+    assert_eq!(edge.via, RelSelector::Named("implements".to_string()));
 
     // Non-empty edges still round-trip out as an `[[edges]]` block, so a config
     // rewrite (TUI settings editor, web view) cannot silently drop them.

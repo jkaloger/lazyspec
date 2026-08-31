@@ -1,5 +1,6 @@
 use crate::engine::config::{
-    AttrKind, Config, Severity, StoreBackend, TypeDef, ValidationRule as ConfigRule,
+    AttrKind, Config, RelSelector, Severity, StoreBackend, TypeDef, TypeSelector,
+    ValidationRule as ConfigRule,
 };
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
 use std::collections::{HashMap, HashSet};
@@ -635,7 +636,18 @@ impl Checker for RequiredEdgeRule {
                 let Some(severity) = &edge.required else {
                     continue;
                 };
-                if meta.doc_type != DocType::new(&edge.from) {
+                // A wildcard position names nothing to compare a document
+                // against; matching wildcard rows is the next slice of
+                // STORY-256, so such a row is inert here.
+                let (
+                    TypeSelector::Types(from_types),
+                    TypeSelector::Types(to_types),
+                    RelSelector::Named(via),
+                ) = (&edge.from, &edge.to, &edge.via)
+                else {
+                    continue;
+                };
+                if !from_types.iter().any(|t| meta.doc_type == DocType::new(t)) {
                     continue;
                 }
 
@@ -643,7 +655,7 @@ impl Checker for RequiredEdgeRule {
                 // any chain relationship, so `targets` satisfies a rule that
                 // meant `implements` (RFC-067 §Problem.1).
                 let satisfied = meta.related.iter().any(|r| {
-                    if r.rel_type.as_str() != edge.via {
+                    if r.rel_type.as_str() != via.as_str() {
                         return false;
                     }
                     let resolved = id_to_path
@@ -653,7 +665,7 @@ impl Checker for RequiredEdgeRule {
                     store
                         .docs
                         .get(&resolved)
-                        .is_some_and(|d| edge.to.iter().any(|t| d.doc_type == DocType::new(t)))
+                        .is_some_and(|d| to_types.iter().any(|t| d.doc_type == DocType::new(t)))
                 });
 
                 if !satisfied {
@@ -662,9 +674,9 @@ impl Checker for RequiredEdgeRule {
                         ValidationIssue::UnsatisfiedEdge {
                             path: path.clone(),
                             edge_name: edge.name.clone(),
-                            from_type: edge.from.clone(),
-                            to_types: edge.to.clone(),
-                            via: edge.via.clone(),
+                            from_type: from_types.join(", "),
+                            to_types: to_types.clone(),
+                            via: via.clone(),
                         },
                     ));
                 }
@@ -2141,9 +2153,13 @@ mod edge_tests {
     fn iterations_implement_work(required: Option<Severity>) -> EdgeDef {
         EdgeDef {
             name: "iterations-implement-work".to_string(),
-            from: "iteration".to_string(),
-            to: vec!["spike".to_string(), "story".to_string(), "bug".to_string()],
-            via: "implements".to_string(),
+            from: TypeSelector::Types(vec!["iteration".to_string()]),
+            to: TypeSelector::Types(vec![
+                "spike".to_string(),
+                "story".to_string(),
+                "bug".to_string(),
+            ]),
+            via: RelSelector::Named("implements".to_string()),
             required,
         }
     }

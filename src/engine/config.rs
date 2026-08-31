@@ -1,5 +1,5 @@
 use crate::engine::document::Status;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -54,33 +54,143 @@ pub enum ValidationRule {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct EdgeDef {
     pub name: String,
-    pub from: String,
-    #[serde(deserialize_with = "deserialize_edge_targets")]
-    #[schemars(with = "EdgeTargets")]
-    pub to: Vec<String>,
-    pub via: String,
+    #[schemars(with = "TypeSelectorRepr")]
+    pub from: TypeSelector,
+    #[schemars(with = "TypeSelectorRepr")]
+    pub to: TypeSelector,
+    #[schemars(with = "RelSelectorRepr")]
+    pub via: RelSelector,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required: Option<Severity>,
 }
 
-/// The two TOML spellings of [`EdgeDef::to`]: a bare type name or a list of
-/// them. Exists so the scalar form loads as the one-element list and the schema
-/// documents both.
-#[derive(Deserialize, JsonSchema)]
+/// An `[[edges]]` row as written, before `via` has been checked. Serde's own
+/// "missing field `via`" names neither the offending edge nor `"*"` as the way
+/// to spell "any relationship", so the field is optional here and
+/// [`Config::parse`] reports its absence instead.
+#[derive(Deserialize)]
+struct RawEdgeDef {
+    name: String,
+    from: TypeSelector,
+    to: TypeSelector,
+    via: Option<RelSelector>,
+    #[serde(default)]
+    required: Option<Severity>,
+}
+
+/// The wildcard spelling of any edge position (ADR-031).
+const WILDCARD: &str = "*";
+
+/// A type position on an `[[edges]]` row (`from`, `to`). `"*"` is [`Any`]; a
+/// bare type name and a one-element list are the same selector, so the pair
+/// re-emits as the bare name.
+///
+/// [`Any`]: TypeSelector::Any
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeSelector {
+    Any,
+    Types(Vec<String>),
+}
+
+impl TypeSelector {
+    /// The declared type names this selector spells out. [`TypeSelector::Any`]
+    /// spells out none: it matches by wildcard rather than by naming a type, so
+    /// the declared-type check has nothing to look up.
+    pub fn names(&self) -> &[String] {
+        match self {
+            TypeSelector::Any => &[],
+            TypeSelector::Types(names) => names,
+        }
+    }
+}
+
+/// The `via` position on an `[[edges]]` row. A relationship is one name or any;
+/// unlike a type position it is never a set.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RelSelector {
+    Any,
+    Named(String),
+}
+
+impl RelSelector {
+    /// The declared relationship name, or `None` for [`RelSelector::Any`].
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            RelSelector::Any => None,
+            RelSelector::Named(name) => Some(name),
+        }
+    }
+}
+
+/// The TOML spellings of a type position: `"*"`, a bare type name, or a list of
+/// type names.
+// Doubles as the serde and schema shape for `TypeSelector`; the doc comment
+// above is the `description` the emitted JSON schema carries.
+#[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
-enum EdgeTargets {
+enum TypeSelectorRepr {
     One(String),
     Many(Vec<String>),
 }
 
-fn deserialize_edge_targets<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(match EdgeTargets::deserialize(deserializer)? {
-        EdgeTargets::One(name) => vec![name],
-        EdgeTargets::Many(names) => names,
-    })
+/// The TOML spelling of the `via` position: a declared relationship name, or
+/// `"*"` for any relationship.
+// Carries the schema shape for `RelSelector`.
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct RelSelectorRepr(String);
+
+impl Serialize for TypeSelector {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            TypeSelector::Any => WILDCARD.serialize(serializer),
+            TypeSelector::Types(names) => match names.as_slice() {
+                [only] => only.serialize(serializer),
+                many => many.serialize(serializer),
+            },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TypeSelector {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match TypeSelectorRepr::deserialize(deserializer)? {
+            TypeSelectorRepr::One(name) if name == WILDCARD => TypeSelector::Any,
+            TypeSelectorRepr::One(name) => TypeSelector::Types(vec![name]),
+            TypeSelectorRepr::Many(names) => TypeSelector::Types(names),
+        })
+    }
+}
+
+impl Serialize for RelSelector {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            RelSelector::Any => WILDCARD.serialize(serializer),
+            RelSelector::Named(name) => name.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RelSelector {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let name = String::deserialize(deserializer)?;
+        Ok(if name == WILDCARD {
+            RelSelector::Any
+        } else {
+            RelSelector::Named(name)
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, JsonSchema)]
@@ -855,7 +965,10 @@ struct RawConfig {
     /// The document DAG's edge kinds, one per `[[edges]]` block: source type,
     /// permitted target types, the relationship realizing the edge, and the
     /// severity of its absence.
-    edges: Option<Vec<EdgeDef>>,
+    // `via` is optional on the raw shape only so its absence can be reported
+    // against the edge by name; the schema documents the field as required.
+    #[schemars(with = "Option<Vec<EdgeDef>>")]
+    edges: Option<Vec<RawEdgeDef>>,
     /// The `[templates]` block: where Markdown document templates live.
     templates: Option<Templates>,
     /// The `[naming]` block: the filename pattern new documents are created
@@ -1167,9 +1280,28 @@ impl Config {
 
         let rules = raw.rules.unwrap_or_default();
 
-        let edges = raw.edges.unwrap_or_default();
+        let edges = raw
+            .edges
+            .unwrap_or_default()
+            .into_iter()
+            .map(|edge| {
+                let via = edge.via.with_context(|| {
+                    format!(
+                        "edge \"{}\" declares no `via`; name the relationship that realizes it, or `via = \"*\"` for any relationship",
+                        edge.name
+                    )
+                })?;
+                Ok(EdgeDef {
+                    name: edge.name,
+                    from: edge.from,
+                    to: edge.to,
+                    via,
+                    required: edge.required,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         for edge in &edges {
-            for type_name in std::iter::once(&edge.from).chain(&edge.to) {
+            for type_name in edge.from.names().iter().chain(edge.to.names()) {
                 if !types.iter().any(|t| &t.name == type_name) {
                     bail!(
                         "edge \"{}\" names unknown type \"{}\" (not declared in [[types]])",
@@ -1178,12 +1310,14 @@ impl Config {
                     );
                 }
             }
-            if !relationships.iter().any(|r| r.name == edge.via) {
-                bail!(
-                    "edge \"{}\" names unknown relationship \"{}\" (not declared in [[relationships]])",
-                    edge.name,
-                    edge.via
-                );
+            if let Some(via) = edge.via.name() {
+                if !relationships.iter().any(|r| r.name == via) {
+                    bail!(
+                        "edge \"{}\" names unknown relationship \"{}\" (not declared in [[relationships]])",
+                        edge.name,
+                        via
+                    );
+                }
             }
         }
 
@@ -1562,9 +1696,20 @@ name = "related-to"
                 "EdgeDef must expose `{field}`, got {edge_props}"
             );
         }
+        let type_selector = json["$defs"]["TypeSelectorRepr"].to_string();
         assert!(
-            json["$defs"]["EdgeTargets"]["anyOf"].is_array(),
-            "edge `to` must document both the scalar and the list form"
+            json["$defs"]["TypeSelectorRepr"]["anyOf"].is_array(),
+            "a type position must document both the scalar and the list form"
+        );
+        assert!(
+            type_selector.contains('*'),
+            "a type position must document the wildcard spelling, got {type_selector}"
+        );
+
+        let rel_selector = json["$defs"]["RelSelectorRepr"].to_string();
+        assert!(
+            rel_selector.contains('*'),
+            "`via` must document the wildcard spelling, got {rel_selector}"
         );
     }
 
@@ -1607,7 +1752,120 @@ required = \"error\"
         let list = Config::parse(&with_targets("[\"rfc\"]")).unwrap();
 
         assert_eq!(scalar.edges, list.edges);
-        assert_eq!(scalar.edges[0].to, vec!["rfc".to_string()]);
+        assert_eq!(
+            scalar.edges[0].to,
+            TypeSelector::Types(vec!["rfc".to_string()])
+        );
+    }
+
+    #[test]
+    fn edge_to_reads_a_list_as_the_declared_type_set() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-work"
+from = "story"
+to = ["story", "rfc"]
+via = "implements"
+"#
+        );
+
+        let config = Config::parse(&toml_str).unwrap();
+
+        assert_eq!(
+            config.edges[0].to,
+            TypeSelector::Types(vec!["story".to_string(), "rfc".to_string()])
+        );
+    }
+
+    // An absent `via` must not be read as "any relationship" (ADR-031): the
+    // wildcard is explicit, so the omission is an error that has to point at it.
+    #[test]
+    fn edge_without_via_fails_load_naming_the_edge_and_the_wildcard() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-work"
+from = "story"
+to = "rfc"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+
+        assert!(
+            err.contains("stories-implement-work") && err.contains(r#"via = "*""#),
+            "a missing `via` must name the edge and the wildcard spelling, got {err}"
+        );
+    }
+
+    #[test]
+    fn edge_wildcard_positions_parse_to_the_any_selectors() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "general-relatedness"
+from = "*"
+to = "*"
+via = "*"
+"#
+        );
+
+        let edge = &Config::parse(&toml_str).unwrap().edges[0];
+
+        assert_eq!(edge.from, TypeSelector::Any);
+        assert_eq!(edge.to, TypeSelector::Any);
+        assert_eq!(edge.via, RelSelector::Any);
+    }
+
+    /// Two edges spanning every spelling a human writes, for the `to_toml`
+    /// round-trip tests.
+    fn wildcard_and_concrete_edges() -> String {
+        format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "general-relatedness"
+from = "*"
+to = "*"
+via = "*"
+
+[[edges]]
+name = "stories-implement-work"
+from = "story"
+to = ["story", "rfc"]
+via = "implements"
+"#
+        )
+    }
+
+    // `Config::to_toml` backs the config writers in `src/cli/config.rs`, so a
+    // `"*"` that came back as `["*"]` would be propagated into a user's file.
+    #[test]
+    fn edge_selectors_re_emit_the_toml_spelling_they_were_written_in() {
+        let config = Config::parse(&wildcard_and_concrete_edges()).unwrap();
+
+        let emitted: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
+        let edges = emitted["edges"].as_array().unwrap();
+
+        assert_eq!(edges[0]["from"], toml::Value::from("*"));
+        assert_eq!(edges[0]["to"], toml::Value::from("*"));
+        assert_eq!(edges[0]["via"], toml::Value::from("*"));
+        assert_eq!(edges[1]["from"], toml::Value::from("story"));
+        assert_eq!(edges[1]["to"], toml::Value::from(vec!["story", "rfc"]));
+        assert_eq!(edges[1]["via"], toml::Value::from("implements"));
+    }
+
+    #[test]
+    fn edge_selectors_survive_a_to_toml_round_trip() {
+        let config = Config::parse(&wildcard_and_concrete_edges()).unwrap();
+
+        let reparsed = Config::parse(&config.to_toml().unwrap()).unwrap();
+
+        assert_eq!(reparsed.edges, config.edges);
     }
 
     #[test]

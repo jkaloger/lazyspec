@@ -1012,7 +1012,7 @@ severity = "error"
 [[edges]]
 name = "stories-implement-rfcs"
 from = "story"
-to = ["rfc"]
+to = ["rfc", "story"]
 via = "implements"
 required = "error"
 "#
@@ -1022,7 +1022,7 @@ required = "error"
 
         assert_eq!(edge["name"], "stories-implement-rfcs");
         assert_eq!(edge["from"], "story");
-        assert_eq!(edge["to"], serde_json::json!(["rfc"]));
+        assert_eq!(edge["to"], serde_json::json!(["rfc", "story"]));
         assert_eq!(edge["via"], "implements");
         assert_eq!(edge["required"], "error");
     }
