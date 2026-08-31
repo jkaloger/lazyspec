@@ -677,7 +677,7 @@ via = "implements"
 required = "warning"
 ```
 
-Any of `from`, `to` and `via` may be written as `"*"`, which matches every declared type or relationship:
+Any of `from`, `to` and `via` may be written as `"*"`, which matches every declared type or relationship. Each position takes `"*"` independently of the others:
 
 ```toml
 [[edges]]
@@ -686,6 +686,23 @@ from = "*"
 to = "*"
 via = "related-to"
 ```
+
+A wildcard `to` is satisfied by a relation that resolves to a document present in the store. A relation naming a document that is not in the store carries its own broken-link finding and does not satisfy the edge.
+
+Wildcarding `to` and `via` together demands a relationship without naming one, the shape a `relation-existence` rule translates to. The edge below reports every iteration that carries no relation at all:
+
+```toml
+[[edges]]
+name = "iterations-need-relations"
+from = "iteration"
+to = "*"
+via = "*"
+required = "error"
+```
+
+A finding names what a wildcard position matches rather than the spelling `"*"`: `iteration needs any relationship to a document of any type`.
+
+Each edge is matched independently. A wildcard edge and a concrete edge that both cover one link are both enforced, and each unsatisfied edge reports its own finding.
 
 The wildcard is always explicit. Leaving `via` out does not mean "any relationship" — it fails config load, naming the edge, because a table whose shape carried a second meaning would be a rule nobody wrote down.
 

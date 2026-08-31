@@ -1,6 +1,6 @@
 use crate::engine::config::{
-    AttrKind, Config, RelSelector, Severity, StoreBackend, TypeDef, TypeSelector,
-    ValidationRule as ConfigRule,
+    AttrKind, Config, Severity, StoreBackend, TypeDef, TypeSelector, ValidationRule as ConfigRule,
+    WILDCARD,
 };
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
 use std::collections::{HashMap, HashSet};
@@ -141,6 +141,24 @@ impl ValidationResult {
     }
 }
 
+/// How an unsatisfied edge's `via` reads in the finding. A wildcard is a config
+/// spelling, not a relationship name, so quoting it back says nothing about what
+/// the document is missing.
+fn via_phrase(via: &str) -> String {
+    if via == WILDCARD {
+        return "any relationship".to_string();
+    }
+    format!("\"{via}\"")
+}
+
+/// How an unsatisfied edge's target set reads in the finding.
+fn to_phrase(to_types: &[String]) -> String {
+    if to_types == [WILDCARD] {
+        return "to a document of any type".to_string();
+    }
+    format!("to one of: {}", to_types.join(", "))
+}
+
 impl std::fmt::Display for ValidationIssue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -184,12 +202,12 @@ impl std::fmt::Display for ValidationIssue {
             } => {
                 write!(
                     f,
-                    "unsatisfied edge [{}]: {} ({} needs \"{}\" to one of: {})",
+                    "unsatisfied edge [{}]: {} ({} needs {} {})",
                     edge_name,
                     path.display(),
                     from_type,
-                    via,
-                    to_types.join(", ")
+                    via_phrase(via),
+                    to_phrase(to_types)
                 )
             }
             ValidationIssue::SupersededParent { path, parent } => {
@@ -611,6 +629,15 @@ impl Checker for ParentLinkRule {
     }
 }
 
+/// The type names an edge position spells out for a finding's message. A
+/// wildcard names none, so it renders as itself.
+fn selector_names(selector: &TypeSelector) -> Vec<String> {
+    match selector {
+        TypeSelector::Any => vec![WILDCARD.to_string()],
+        TypeSelector::Types(names) => names.clone(),
+    }
+}
+
 pub struct RequiredEdgeRule;
 
 impl Checker for RequiredEdgeRule {
@@ -636,36 +663,28 @@ impl Checker for RequiredEdgeRule {
                 let Some(severity) = &edge.required else {
                     continue;
                 };
-                // A wildcard position names nothing to compare a document
-                // against; matching wildcard rows is the next slice of
-                // STORY-256, so such a row is inert here.
-                let (
-                    TypeSelector::Types(from_types),
-                    TypeSelector::Types(to_types),
-                    RelSelector::Named(via),
-                ) = (&edge.from, &edge.to, &edge.via)
-                else {
-                    continue;
-                };
-                if !from_types.iter().any(|t| meta.doc_type == DocType::new(t)) {
+                let doc_type = meta.doc_type.as_str();
+                // `from` gates the document as a whole: a row that does not
+                // apply must not read as unsatisfied against an empty
+                // `related` list.
+                if !edge.from.matches(doc_type) {
                     continue;
                 }
 
-                // Matching `via` by name is the whole point: `[[rules]]` accepts
-                // any chain relationship, so `targets` satisfies a rule that
+                // The row's own `via` decides, never "any chain relationship":
+                // that is how `[[rules]]` lets `targets` satisfy a rule that
                 // meant `implements` (RFC-067 §Problem.1).
                 let satisfied = meta.related.iter().any(|r| {
-                    if r.rel_type.as_str() != via.as_str() {
-                        return false;
-                    }
                     let resolved = id_to_path
                         .get(&r.target)
                         .cloned()
                         .unwrap_or_else(|| PathBuf::from(&r.target));
-                    store
-                        .docs
-                        .get(&resolved)
-                        .is_some_and(|d| to_types.iter().any(|t| d.doc_type == DocType::new(t)))
+                    // `to = "*"` means any document, not any string in
+                    // `related`: a target that resolves to nothing already has
+                    // its own broken-link finding.
+                    store.docs.get(&resolved).is_some_and(|d| {
+                        edge.matches(doc_type, r.rel_type.as_str(), d.doc_type.as_str())
+                    })
                 });
 
                 if !satisfied {
@@ -674,9 +693,9 @@ impl Checker for RequiredEdgeRule {
                         ValidationIssue::UnsatisfiedEdge {
                             path: path.clone(),
                             edge_name: edge.name.clone(),
-                            from_type: from_types.join(", "),
-                            to_types: to_types.clone(),
-                            via: via.clone(),
+                            from_type: selector_names(&edge.from).join(", "),
+                            to_types: selector_names(&edge.to),
+                            via: edge.via.name().unwrap_or(WILDCARD).to_string(),
                         },
                     ));
                 }
@@ -2098,7 +2117,7 @@ lifecycle = { states = ["triage", "shipped"], edges = [] }"#,
 #[cfg(test)]
 mod edge_tests {
     use super::*;
-    use crate::engine::config::{EdgeDef, RelationshipDef, Traversal};
+    use crate::engine::config::{EdgeDef, RelSelector, RelationshipDef, Traversal};
     use crate::engine::document::{Relation, RelationType};
     use chrono::NaiveDate;
     use std::collections::HashMap;
@@ -2429,6 +2448,162 @@ mod edge_tests {
             1,
             "the [[edges]] finding must survive, got: {:?}",
             result.errors
+        );
+    }
+
+    /// The shape `relation-existence` translates to (RFC-067 §Design): any
+    /// relationship, to a document of any type.
+    fn iterations_need_some_relation() -> EdgeDef {
+        EdgeDef {
+            name: "iterations-need-relations".to_string(),
+            from: TypeSelector::Types(vec!["iteration".to_string()]),
+            to: TypeSelector::Any,
+            via: RelSelector::Any,
+            required: Some(Severity::Error),
+        }
+    }
+
+    // STORY-256 AC6: with both endpoints wildcarded, an iteration carrying no
+    // relation at all is the finding -- the edge stands in for the legacy
+    // `relation-existence` rule.
+    #[test]
+    fn a_document_with_no_relations_fails_a_wildcard_via_and_to_edge() {
+        let store = store_from(vec![doc(
+            "docs/iterations/ITERATION-001.md",
+            "iteration",
+            "ITERATION-001",
+            vec![],
+        )]);
+
+        let result = validate_full(&store, &config_with_edge(iterations_need_some_relation()));
+
+        assert_eq!(
+            unsatisfied_edges(&result).len(),
+            1,
+            "got errors {:?} warnings {:?}",
+            result.errors,
+            result.warnings
+        );
+    }
+
+    // AC6, the other half: any one relationship to any resolvable document
+    // satisfies the row, whatever the relationship or the target's type.
+    #[test]
+    fn any_single_relation_to_a_resolvable_document_satisfies_a_wildcard_edge() {
+        for (rel_type, target_type, target_id, target_path) in [
+            (
+                "implements",
+                "story",
+                "STORY-001",
+                "docs/stories/STORY-001.md",
+            ),
+            ("related-to", "adr", "ADR-001", "docs/adrs/ADR-001.md"),
+            ("targets", "rfc", "RFC-001", "docs/rfcs/RFC-001.md"),
+        ] {
+            let store = store_from(vec![
+                doc(target_path, target_type, target_id, vec![]),
+                doc(
+                    "docs/iterations/ITERATION-001.md",
+                    "iteration",
+                    "ITERATION-001",
+                    vec![rel(rel_type, target_id)],
+                ),
+            ]);
+
+            let result = validate_full(&store, &config_with_edge(iterations_need_some_relation()));
+
+            assert!(
+                unsatisfied_edges(&result).is_empty(),
+                "a {rel_type} link to a {target_type} must satisfy the wildcard edge, got: {:?}",
+                unsatisfied_edges(&result)
+            );
+        }
+    }
+
+    // `to = "*"` means any *document*, not any string in `related`: a target
+    // that resolves to nothing already has its own broken-link finding, so it
+    // must not quietly satisfy the edge.
+    #[test]
+    fn a_dangling_target_does_not_satisfy_a_wildcard_to_edge() {
+        let store = store_from(vec![doc(
+            "docs/iterations/ITERATION-001.md",
+            "iteration",
+            "ITERATION-001",
+            vec![rel("related-to", "STORY-404")],
+        )]);
+
+        let result = validate_full(&store, &config_with_edge(iterations_need_some_relation()));
+
+        assert_eq!(
+            unsatisfied_edges(&result).len(),
+            1,
+            "got errors {:?} warnings {:?}",
+            result.errors,
+            result.warnings
+        );
+    }
+
+    /// The one finding an edge produces against a lone iteration carrying no
+    /// relation, rendered.
+    fn rendered_finding_for(edge: EdgeDef) -> String {
+        let store = store_from(vec![doc(
+            "docs/iterations/ITERATION-001.md",
+            "iteration",
+            "ITERATION-001",
+            vec![],
+        )]);
+
+        let result = validate_full(&store, &config_with_edge(edge));
+
+        let found = unsatisfied_edges(&result);
+        assert_eq!(found.len(), 1, "got: {found:?}");
+        found[0].to_string()
+    }
+
+    fn iteration_path() -> String {
+        PathBuf::from("docs/iterations/ITERATION-001.md")
+            .display()
+            .to_string()
+    }
+
+    // STORY-256: a firing wildcard row must produce a sentence. `needs "*" to
+    // one of: *` names the config spelling, not what the document is missing.
+    #[test]
+    fn a_wildcard_via_and_to_render_as_prose() {
+        assert_eq!(
+            rendered_finding_for(iterations_need_some_relation()),
+            format!(
+                "unsatisfied edge [iterations-need-relations]: {} \
+                 (iteration needs any relationship to a document of any type)",
+                iteration_path()
+            )
+        );
+    }
+
+    // The two positions are independent: each wildcard reads as prose while its
+    // concrete counterpart keeps the wording the concrete-row tests assert.
+    #[test]
+    fn each_wildcard_position_composes_with_a_concrete_counterpart() {
+        let mut any_via = iterations_implement_work(Some(Severity::Error));
+        any_via.via = RelSelector::Any;
+        assert_eq!(
+            rendered_finding_for(any_via),
+            format!(
+                "unsatisfied edge [iterations-implement-work]: {} \
+                 (iteration needs any relationship to one of: spike, story, bug)",
+                iteration_path()
+            )
+        );
+
+        let mut any_to = iterations_implement_work(Some(Severity::Error));
+        any_to.to = TypeSelector::Any;
+        assert_eq!(
+            rendered_finding_for(any_to),
+            format!(
+                "unsatisfied edge [iterations-implement-work]: {} \
+                 (iteration needs \"implements\" to a document of any type)",
+                iteration_path()
+            )
         );
     }
 }

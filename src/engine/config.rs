@@ -64,6 +64,14 @@ pub struct EdgeDef {
     pub required: Option<Severity>,
 }
 
+impl EdgeDef {
+    /// True iff this row covers the concrete edge `from -via-> to`. A wildcard
+    /// position matches any name; a type set matches its members (ADR-031).
+    pub fn matches(&self, from: &str, via: &str, to: &str) -> bool {
+        self.from.matches(from) && self.via.matches(via) && self.to.matches(to)
+    }
+}
+
 /// An `[[edges]]` row as written, before `via` has been checked. Serde's own
 /// "missing field `via`" names neither the offending edge nor `"*"` as the way
 /// to spell "any relationship", so the field is optional here and
@@ -79,7 +87,7 @@ struct RawEdgeDef {
 }
 
 /// The wildcard spelling of any edge position (ADR-031).
-const WILDCARD: &str = "*";
+pub(crate) const WILDCARD: &str = "*";
 
 /// A type position on an `[[edges]]` row (`from`, `to`). `"*"` is [`Any`]; a
 /// bare type name and a one-element list are the same selector, so the pair
@@ -102,6 +110,14 @@ impl TypeSelector {
             TypeSelector::Types(names) => names,
         }
     }
+
+    /// True iff this position covers the concrete type `type_name`.
+    pub(crate) fn matches(&self, type_name: &str) -> bool {
+        match self {
+            TypeSelector::Any => true,
+            TypeSelector::Types(names) => names.iter().any(|name| name == type_name),
+        }
+    }
 }
 
 /// The `via` position on an `[[edges]]` row. A relationship is one name or any;
@@ -118,6 +134,14 @@ impl RelSelector {
         match self {
             RelSelector::Any => None,
             RelSelector::Named(name) => Some(name),
+        }
+    }
+
+    /// True iff this position covers the concrete relationship `rel_name`.
+    fn matches(&self, rel_name: &str) -> bool {
+        match self {
+            RelSelector::Any => true,
+            RelSelector::Named(name) => name == rel_name,
         }
     }
 }
@@ -1731,6 +1755,10 @@ prefix = "STORY"
 [[relationships]]
 name = "implements"
 inverse = "implemented-by"
+
+[[relationships]]
+name = "related-to"
+inverse = "related-to"
 "#;
 
     #[test]
@@ -1819,6 +1847,88 @@ via = "*"
         assert_eq!(edge.from, TypeSelector::Any);
         assert_eq!(edge.to, TypeSelector::Any);
         assert_eq!(edge.via, RelSelector::Any);
+    }
+
+    // STORY-256 AC1: one wildcard row stands in for every type pair, so the
+    // relationship it names is the only thing left doing the matching.
+    #[test]
+    fn edge_with_wildcard_endpoints_matches_any_type_pair_on_the_named_relationship() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "general-relatedness"
+from = "*"
+to = "*"
+via = "related-to"
+"#
+        );
+
+        let edge = &Config::parse(&toml_str).unwrap().edges[0];
+
+        for (from, to) in [("story", "rfc"), ("rfc", "story"), ("story", "story")] {
+            assert!(
+                edge.matches(from, "related-to", to),
+                "wildcard endpoints must match {from} -related-to-> {to}"
+            );
+        }
+        assert!(
+            !edge.matches("story", "implements", "rfc"),
+            "a concrete `via` must not match another relationship"
+        );
+    }
+
+    #[test]
+    fn edge_with_concrete_positions_matches_only_the_declared_triple() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-rfcs"
+from = "story"
+to = ["rfc"]
+via = "implements"
+"#
+        );
+
+        let edge = &Config::parse(&toml_str).unwrap().edges[0];
+
+        assert!(edge.matches("story", "implements", "rfc"));
+        assert!(
+            !edge.matches("rfc", "implements", "rfc"),
+            "a source type outside `from` must not match"
+        );
+        assert!(
+            !edge.matches("story", "implements", "story"),
+            "a target type outside `to` must not match"
+        );
+        assert!(
+            !edge.matches("story", "related-to", "rfc"),
+            "another relationship must not match"
+        );
+    }
+
+    #[test]
+    fn edge_with_wildcard_via_matches_any_relationship() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-relate-somehow"
+from = "story"
+to = "*"
+via = "*"
+"#
+        );
+
+        let edge = &Config::parse(&toml_str).unwrap().edges[0];
+
+        assert!(edge.matches("story", "implements", "rfc"));
+        assert!(edge.matches("story", "related-to", "story"));
+        assert!(
+            !edge.matches("rfc", "implements", "story"),
+            "the concrete `from` still constrains the source type"
+        );
     }
 
     /// Two edges spanning every spelling a human writes, for the `to_toml`
