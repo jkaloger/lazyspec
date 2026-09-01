@@ -15,8 +15,20 @@ From there `/lazy` dispatches:
   - `/co-write` -- AI proposes a draft body, the human edits, iterate. Refuses when the type's ceiling is `human`.
   - `/generate` -- AI writes the full body from context, then asks for review. Permitted only when the type's ceiling is `generated`.
 - **`/advance`** -- move a document to its next status along the type's `lifecycle` edges, checking gates. Status only; never spawns children.
-- **`/execute`** -- carry out the work a delivery document describes, against its task breakdown and ACs. (No authorship ceiling -- this is work, not authoring.)
-- **`/review`** -- two-stage critique (conformance to intent + ACs first, quality second) before advancing.
+- **`/review`** -- two-stage critique of a **document** (conformance to intent + ACs first, quality second) before advancing.
+
+When the next step is the work itself, `/lazy` presents the work plan -- which delivery documents are ready, the order their dependency edges imply, the route -- and stops for explicit approval. On approval it dispatches by count:
+
+- **`/execute`** -- one ready unit. One agent does every task in the breakdown itself, TDD, runs the repo's gate command once, and reports. It opens the document's work-active status and stops there: it does not dispatch, review, commit, or close. (No authorship ceiling -- this is work, not authoring.)
+- **`/orchestrate`** -- several ready units. Orders them by their dependency edges and drives the whole chunk: one build agent per unit, one review per unit, one commit per unit, the status transitions, then one comprehensive pass over the combined diff with a single cleanup commit.
+- **`/review-work`** -- critique landed code against the document that specified it. Three stages: acceptance conformance, then **convention conformance** against `lazyspec convention --json` (each finding naming the principle or dictum it violates), then quality. Runs blocking-only per unit and comprehensive per chunk.
+
+### Boundaries
+
+Two lines keep the work verbs from overlapping:
+
+- **Document vs code.** `/review` reads document bodies; `/review-work` reads diffs. Convention conformance lives only in `/review-work`.
+- **Unit vs chunk.** `/execute` sees exactly one delivery document and never spawns an agent. `/orchestrate` sees a set, spans as many parent documents as the set does, and is the only agent that spawns agents. A unit that will not fit one `/execute` pass is a sizing defect: `/execute` stops at a task boundary and reports it rather than fanning out.
 
 `resolve-context` folds into `context --json`: `/lazy` reads the chain from the CLI rather than calling a separate skill.
 
@@ -33,8 +45,10 @@ From there `/lazy` dispatches:
 | `co-write`    | Propose a draft body, the human edits, iterate; refuses for `human`-ceiling types                 |
 | `generate`    | Write the full body from context, then request review; permitted only for `generated`-ceiling types |
 | `advance`     | Move a document to its next lifecycle status, checking gates; status only, no child spawning      |
-| `execute`     | Carry out the work a delivery document describes against its task breakdown                        |
-| `review`      | Two-stage critique: conformance to intent + ACs first, quality second                             |
+| `execute`     | Build one delivery document's breakdown in a single agent pass; terminal, reports and stops       |
+| `orchestrate` | Drive a batch of delivery documents to done: order, dispatch, review, commit, close, chunk pass   |
+| `review`      | Two-stage critique of a document: conformance to intent + ACs first, quality second               |
+| `review-work` | Three-stage critique of landed code: acceptance conformance, convention conformance, quality      |
 | `create-audit`| Run a criteria-based review and document findings for user triage                                 |
 | `configure-type`| Interview the user to co-author one custom document type; write its template and `[[types]]` config via the config-write CLI (runs independently of the pipeline) |
 

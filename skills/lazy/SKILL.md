@@ -41,8 +41,14 @@ advance: /advance {tooltip: "status move, no authoring"}
 author: authoring verb at ceiling {
   tooltip: "human -> /scaffold, assisted -> /co-write, generated -> /generate"
 }
-execute: /execute {tooltip: "work the document describes -- HUMAN-INITIATED, never auto-dispatched"}
-review: /review {tooltip: "critique before next status"}
+confirm: Confirm the work plan {
+  shape: hexagon
+  tooltip: "present units, order, route -- STOP for explicit approval"
+}
+execute: /execute {tooltip: "one ready unit -- build pass, terminal"}
+orchestrate: /orchestrate {tooltip: "several ready units -- ordered batch, commits, closes"}
+review: /review {tooltip: "critique a document before its next status"}
+reviewwork: /review-work {tooltip: "critique landed code against the doc's ACs"}
 
 validate: validate touched doc {
   shape: rectangle
@@ -64,21 +70,27 @@ locate -> dispatch
 dispatch -> advance: "eligible status edge"
 dispatch -> author: "authoring step due"
 dispatch -> review: "critique due"
-dispatch -> boundary: "next step crosses a type boundary (parent_type or parent-child rule), or only work remains"
+dispatch -> reviewwork: "work landed, awaiting critique"
+dispatch -> confirm: "work is the next step"
+dispatch -> boundary: "next step crosses a type boundary (parent_type or parent-child rule)"
+
+confirm -> execute: "approved, one ready unit"
+confirm -> orchestrate: "approved, several ready units"
+execute -> reviewwork: "build reported"
+orchestrate -> locate: "chunk done -- it reviewed, committed and closed its own units"
 
 advance -> validate: "graph mutated"
 author -> validate: "graph mutated"
 validate -> locate: "loop within document"
 review -> locate
-
-boundary -> execute: "human runs /execute" {style.stroke-dash: 3}
+reviewwork -> locate: "GREEN -> advance to completion"
 ```
 
 <HARD-GATE>
-CONFIRM THE PLAN BEFORE MUTATING. Before the FIRST graph-mutating dispatch of a turn (`create`, `link`, `/advance`, or any authoring verb) AND before `/execute`, present the planned commands and the direction (which doc, which type, which parent link, what the fix/feature is), then STOP for explicit user approval. A prior "do it", "go ahead", "use /lazy", or the user naming the fix is approval of the WORK -- never of THIS specific plan (the parent link, the scope, the type choice are decisions to surface). General go-ahead is not step approval. This binds the actor: it holds whether `/lazy` is the entry router OR you are acting inline as the orchestrator -- running a verb directly does not exempt you. Violating the letter of this gate is violating its spirit.
+CONFIRM THE PLAN BEFORE MUTATING. Before the FIRST graph-mutating dispatch of a turn (`create`, `link`, `/advance`, or any authoring verb) AND before `/execute` or `/orchestrate`, present the planned commands and the direction (which doc, which type, which parent link, what the fix/feature is), then STOP for explicit user approval. A prior "do it", "go ahead", "use /lazy", or the user naming the fix is approval of the WORK -- never of THIS specific plan (the parent link, the scope, the type choice are decisions to surface). General go-ahead is not step approval. This binds the actor: it holds whether `/lazy` is the entry router OR you are acting inline as the orchestrator -- running a verb directly does not exempt you. Violating the letter of this gate is violating its spirit.
 A **type-boundary edge** is any edge to a different type, declared EITHER via `parent_type` OR via a parent-child `rule` (`shape: parent-child`, carrying `child`/`parent`/`link`). Both express the DAG; a config may use one, the other, or both. Derive boundaries from the UNION. Never assume `parent_type` is populated -- many configs encode the entire DAG in `rules` with every `parent_type` null. Null `parent_type` everywhere does NOT mean "no boundaries"; read the boundaries from the rules.
 Do NOT auto-run `create <child-type>` across a type-boundary edge. Crossing into a different type is always human-initiated -- even when a `require_parent_status` gate is already satisfied. Within-document progression is automatic; crossing a type boundary is not.
-**No work without a plan -- the PLAN->EXECUTE wall.** Authoring and advancing a delivery document's plan (task breakdown, AC) is automatic within that document; *executing* that plan is a separate, human-initiated step. `/lazy` NEVER auto-runs `/execute`. It authors and reviews the delivery doc, then STOPS and reports that the plan is ready to execute. It does not start implementing.
+**No work without a reviewed plan -- the PLAN->EXECUTE gate.** Authoring and advancing a delivery document's plan (task breakdown, AC) is automatic within that document. *Starting the work* is not: it requires an explicit, separate approval of THIS work plan -- which units, in which order, by which route. Present it and STOP. Never begin work off a general go-ahead, and never off a plan that has not been through /review.
 Compute the dispatch table from `lazyspec config --json` at runtime. There is no fixed chain in this prose.
 A reported bug, defect, or unexpected behaviour is investigated to root cause FIRST -- via systematic-debugging -- before any fix document is authored. No fix doc before root cause.
 After every graph-mutating dispatch (/advance and the authoring verbs), run `lazyspec validate --json` scoped to the touched document before looping.
@@ -144,9 +156,18 @@ Build the dispatch table at runtime from config. No `parent_type` chain is hardc
 
 **Authoring submits into review.** A body-producing authoring verb (/co-write, /generate) writes the body but not the status -- it leaves the document at its initial status (`draft` in the default lifecycle). It does NOT leave the document review-ready by itself. After such a verb completes and the body exists, advance the document across the edge into its review status (`draft -> review`) BEFORE dispatching /review, so /review critiques a document that is actually in its review status and its pass-route (the onward edge, `review -> accepted`) is available. Skipping this into-review advance is the common failure: /review fires while the doc is still at `draft`, and the `review -> ...` edge it expects to traverse on pass does not exist from `draft`. /scaffold is exempt -- it hands the body back to the human, so the document stays at its initial status until the human writes the body and re-enters /lazy, which then advances it into review.
 
-**The work-open edge belongs to /execute, not /lazy.** The edge from the work-ready status into the work-active status (`accepted -> in-progress` in the default DAG) is ungated, but /lazy does NOT auto-traverse it. That edge means "the build loop has started", and only /execute starts the build loop. /lazy stops at the work-ready status (the PLAN->EXECUTE wall below); /execute opens `in-progress` when the human runs it.
+**The work-open edge belongs to the build pass, not /lazy.** The edge from the work-ready status into the work-active status (`accepted -> in-progress` in the default DAG) is ungated, but /lazy does NOT traverse it. That edge means "the build has started", and /execute writes it as its first act. /lazy stops at the work-ready status and asks.
 
-**`/execute` is never automatic.** Work described by a delivery document is implementation -- the EXECUTE band. `/lazy` does NOT dispatch `/execute` on its own. It brings the delivery doc to a reviewed, ready-to-execute plan and STOPS (treat this like a type boundary: human-initiated). Report that the plan is ready and the human runs `/execute` to begin work. No work without a reviewed plan.
+**Work is confirm-then-run.** When the next step is the work itself, /lazy does not stop dead and it does not just go. It presents the work plan -- which delivery documents are ready, the order their dependency edges imply, and which route -- then STOPS for explicit approval of that plan. On approval it dispatches:
+
+| Ready units | Route | What it does |
+|---|---|---|
+| One | /execute | Builds that unit and reports. Terminal -- it does not review, commit, or close. /lazy then routes to /review-work, and on GREEN to /advance. |
+| Several | /orchestrate | Orders them by their dependency edges and drives the whole chunk: build, review, commit, close, plus the end-of-chunk pass. Returns when the chunk is done. |
+
+Approval of the work is not approval of this plan. "Go ahead", "use /lazy", or the user naming the feature authorises the work; the units, the order, and the route are still decisions to surface. Present them, get the nod, then dispatch.
+
+**Reviewing work is /review-work, not /review.** After /execute reports, the delivery document sits at its work-active status with a diff and no verdict. Dispatch /review-work (depth blocking-only) against that diff, not /review -- /review critiques documents. On GREEN, /advance the document to its completion status. On RED, route the findings to a fix pass. On STOP, halt and report: the plan, not the code, is wrong.
 
 **Authorship-aware dispatch.** When routing to an authoring action, pick the verb at or below the type's `authorship` ceiling. Default to the ceiling verb (`human` -> /scaffold, `assisted` -> /co-write, `generated` -> /generate) and allow the human to drop lower. Never dispatch an above-ceiling verb.
 
@@ -167,5 +188,5 @@ with every value read from config + status for that run.
 `/lazy` is the chokepoint for graph integrity. After every dispatched verb that **mutates the graph** -- `/advance` (status move plus relations) and the authoring verbs `/scaffold`, `/co-write`, `/generate` (create plus link) -- run `lazyspec validate --json` before looping back to locate.
 
 - **Scope to the doc just touched.** `validate` is a whole-repo check and will report pre-existing findings across unrelated documents. Filter its output to findings naming the document this mutation created, linked, or advanced. Fix only the broken or dangling relation **this mutation introduced** before continuing. Do not block on pre-existing repo-wide findings.
-- `/execute` and `/review` are not graph mutators in this loop, so they need no validate step here (`/execute` runs its own `validate` at Final Review).
+- `/review` and `/review-work` are not graph mutators, so they need no validate step here. `/execute` runs its own `validate` at close-out, and `/orchestrate` runs one at its done check.
 - **Known limitation:** invoking a mutating verb standalone -- outside `/lazy` -- skips this check. `/lazy` is the canonical entry router; that is where graph integrity is enforced.
