@@ -3957,7 +3957,7 @@ mod tests {
     use super::*;
     use crate::engine::config::TypeDef;
     use crate::engine::store::Store;
-    use crate::engine::traversal::ChainWalk;
+    use crate::engine::traversal::TraversalWalk;
     use crossterm::event::{KeyCode, KeyModifiers};
 
     fn make_dummy_node(index: usize) -> DocListNode {
@@ -3984,8 +3984,7 @@ mod tests {
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
-            chain_walk: ChainWalk::default(),
-            related_relationships: vec!["related-to".to_string()],
+            traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
         };
 
@@ -4325,8 +4324,7 @@ mod tests {
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
-            chain_walk: ChainWalk::default(),
-            related_relationships: vec!["related-to".to_string()],
+            traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
         };
 

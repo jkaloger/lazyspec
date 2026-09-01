@@ -351,7 +351,7 @@ Each document entry in `show --json` and `status --json` (under `documents[]`) i
 
 | Flag            | Description                                                                                                                                                                                                                                                             |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--depth N`     | Max hops to follow `related-to` links when collecting related records (default: 1)                                                                                                                                                                                      |
+| `--depth N`     | Max hops to follow related links when collecting related records (default: 1)                                                                                                                                                                                           |
 | `--anchor TYPE` | Forest mode only (omit `<id>`): re-root the forest on documents of `TYPE`, emitting each anchor with its chain descendants nested below it and its chain ancestors below it too as an inverted subtree, marked `↑` in the human tree and `reverse_in_context` in `--json` |
 
 With an `<id>`, `context` shows that document's chain. Omit the id to emit the whole-store context forest (every document, parents-first); add `--anchor TYPE` (for example `--anchor story`) to re-root the forest on a document type.
@@ -606,7 +606,7 @@ The relationship vocabulary is config-driven, just like document types. Each `[[
 
 A relationship may also declare `traversal`, which governs how it participates in context traversal: `chain` relationships form the parent-child hierarchy that `parent-child` validation rules and the context chain walk follow, while `related` relationships form the symmetric related-context neighbourhood. A relationship with no `traversal` participates in neither walk, but the target document's own declared relations still surface in the related section of `context` (and the TUI Relations tab) at one hop.
 
-`traversal` here is blanket: it applies to every pair of document types the relationship links, and it is the fallback for relationships that no `[[edges]]` row assigns a role to. A relationship named by the `via` of a row that states a `traversal` takes its chain membership from the rows instead, source type and target type included. See [Edges](#edges). `parent-child` rules read the blanket marker either way.
+`traversal` here is blanket: it applies to every pair of document types the relationship links, and it is the fallback for relationships that no `[[edges]]` row assigns a role to. A relationship named by the `via` of a row that states a `traversal` takes its membership in both walks from the rows instead, source type and target type included. See [Edges](#edges). `parent-child` rules read the blanket marker either way.
 
 ```toml
 [[relationships]]
@@ -732,7 +732,9 @@ Traversal composes: an edge joins a walk when any matching row gives it a role. 
 
 The chain walk reads these rows, so `context`, the TUI graph view and the web view all follow them. A row carrying `traversal = "chain"` makes the edge walk for the triple it names: a source type from `from`, the relationship in `via`, a target type from `to`. No other triple walks on account of that row.
 
-A row that states any `traversal` also settles walk membership for the relationship its `via` names. That relationship's `traversal` on `[[relationships]]` is suppressed, and the rows become the only declaration the chain walk reads for it. The row below suppresses the blanket marker above it. An iteration that targets a milestone walks the chain. An iteration that targets a story does not, and no longer appears in that story's chain.
+A row carrying `traversal = "related"` scopes the related neighbourhood to the triple it names in the same way. `context` follows those rows when it walks out from the chain, and the Graph view's `related` column reads the same declaration, so both follow whatever relationships the config gives the related role rather than a fixed `related-to`. The triple is asked in the direction the relation was declared. A link read backwards still asks the declaring document's type as `from`, so both ends of one declared link join the neighbourhood or neither does. A single row with `from = "*"`, `to = "*"`, `via = "related-to"` and `traversal = "related"` gives that relationship the role between every pair of declared types, which is what a blanket `traversal = "related"` on `[[relationships]]` means.
+
+A row that states any `traversal` also settles walk membership for the relationship its `via` names. That relationship's `traversal` on `[[relationships]]` is suppressed, and the rows become the only declaration the walks read for it. The row below suppresses the blanket marker above it. An iteration that targets a milestone walks the chain. An iteration that targets a story does not, and no longer appears in that story's chain.
 
 ```toml
 [[relationships]]
@@ -748,9 +750,7 @@ via = "targets"
 traversal = "chain"
 ```
 
-Suppression is keyed by relationship name rather than by triple, which makes it broader than the row's own selectors suggest. A row with `via = "*"` and any `traversal` suppresses the global marker of every declared relationship. A row with `traversal = "related"` suppresses the same relationship's global `traversal = "chain"`: the row has assigned that relationship a role, and the two declarations do not combine.
-
-The related neighbourhood still follows `traversal = "related"` on `[[relationships]]`. A row naming `related` does not add its triple to that walk.
+Suppression is keyed by relationship name rather than by triple, which makes it broader than the row's own selectors suggest. A row with `via = "*"` and any `traversal` suppresses the global marker of every declared relationship. Suppression is also blind to which role the row names: a row with `traversal = "related"` suppresses the same relationship's global `traversal = "chain"`, and a row with `traversal = "chain"` suppresses its global `traversal = "related"`. The row has assigned that relationship a role, and the two declarations do not combine.
 
 A wildcard filters but does not enumerate. `to = "*"` admits every target type, so a row with `from = "iteration"` and `to = "*"` reports `iteration` as a child type of every type. `from = "*"` names no source type, so such a row walks the chain and contributes no child types at all. The child types of a type, rendered as `child_types` when a prompt template is filled, are the `from` types of the rows that name them, plus the `child` of each `parent-child` rule whose `parent` matches. Only a row that names its source types contributes a concrete child type.
 

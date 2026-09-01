@@ -1474,7 +1474,7 @@ mod attr_schema_tests {
     use super::*;
     use crate::engine::config::{AttrDef, AttrKind};
     use crate::engine::document::AttrValue;
-    use crate::engine::traversal::ChainWalk;
+    use crate::engine::traversal::TraversalWalk;
     use chrono::NaiveDate;
     use std::collections::{BTreeMap, HashMap};
 
@@ -1521,8 +1521,7 @@ mod attr_schema_tests {
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
-            chain_walk: ChainWalk::default(),
-            related_relationships: vec!["related-to".to_string()],
+            traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -1618,8 +1617,7 @@ mod attr_schema_tests {
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
-            chain_walk: ChainWalk::default(),
-            related_relationships: vec!["related-to".to_string()],
+            traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -1730,7 +1728,7 @@ mod unknown_relationship_tests {
     use super::*;
     use crate::engine::config::RelationshipDef;
     use crate::engine::document::{Relation, RelationType};
-    use crate::engine::traversal::ChainWalk;
+    use crate::engine::traversal::TraversalWalk;
     use chrono::NaiveDate;
     use std::collections::HashMap;
 
@@ -1768,8 +1766,7 @@ mod unknown_relationship_tests {
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
-            chain_walk: ChainWalk::default(),
-            related_relationships: vec!["related-to".to_string()],
+            traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -1822,7 +1819,7 @@ mod unknown_relationship_tests {
 mod parent_link_chain_tests {
     use super::*;
     use crate::engine::document::{Relation, RelationType};
-    use crate::engine::traversal::ChainWalk;
+    use crate::engine::traversal::TraversalWalk;
     use chrono::NaiveDate;
     use std::collections::HashMap;
 
@@ -1859,8 +1856,7 @@ mod parent_link_chain_tests {
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string()],
-            chain_walk: ChainWalk::default(),
-            related_relationships: vec!["related-to".to_string()],
+            traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -2145,7 +2141,7 @@ mod edge_tests {
     use super::*;
     use crate::engine::config::{EdgeDef, RelSelector, RelationshipDef, Traversal};
     use crate::engine::document::{Relation, RelationType};
-    use crate::engine::traversal::ChainWalk;
+    use crate::engine::traversal::TraversalWalk;
     use chrono::NaiveDate;
     use std::collections::HashMap;
 
@@ -2191,8 +2187,7 @@ mod edge_tests {
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
             chain_relationships: vec!["implements".to_string(), "targets".to_string()],
-            chain_walk: ChainWalk::default(),
-            related_relationships: vec!["related-to".to_string()],
+            traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }

@@ -1,7 +1,7 @@
 ---
 title: Walk the related neighbourhood from the edge table
 type: iteration
-status: draft
+status: in-progress
 author: jack
 date: 2026-08-31
 tags: []

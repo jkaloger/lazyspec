@@ -173,7 +173,7 @@ fn doc_to_view(store: &Store, doc: &DocMeta, fs: &dyn FileSystem) -> Result<Docu
 /// Child type names for `doc`'s type, from both places a project may declare
 /// hierarchy: each `child` of a `ParentChild` rule whose `parent` matches, plus
 /// the `from` side of every chain edge pointing at this type
-/// ([`crate::engine::traversal::ChainWalk::child_types_for`]). Neither
+/// ([`crate::engine::traversal::TraversalWalk::child_types_for`]). Neither
 /// declaration yielding anything gives an empty list (loops render empty, not
 /// undefined).
 ///
@@ -197,7 +197,7 @@ fn child_types_for(store: &Store, config: &Config, doc: &DocMeta) -> Vec<String>
         .collect();
 
     let from_edges: Vec<String> = store
-        .chain_walk
+        .traversal_walk
         .child_types_for(doc_type)
         .into_iter()
         .filter(|child| !child_types.contains(child))

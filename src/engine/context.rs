@@ -63,7 +63,7 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
             let Some(parent) = store.resolve_relation_target(&rel.target) else {
                 continue;
             };
-            if !store.chain_walk.walks(
+            if !store.traversal_walk.walks_chain(
                 current.doc_type.as_str(),
                 rel.rel_type.as_str(),
                 parent.doc_type.as_str(),
@@ -95,7 +95,7 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
                 .iter()
                 .filter_map(|(rel_type, source_path)| store.get(source_path).map(|d| (rel_type, d)))
                 .filter(|(rel_type, source)| {
-                    store.chain_walk.walks(
+                    store.traversal_walk.walks_chain(
                         source.doc_type.as_str(),
                         rel_type.as_str(),
                         doc.doc_type.as_str(),
@@ -129,25 +129,38 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
         let mut next_frontier: Vec<PathBuf> = Vec::new();
 
         for from in &frontier {
+            let Some(frontier_doc) = store.get(from) else {
+                continue;
+            };
             let mut neighbours: Vec<(RelationType, PathBuf)> = Vec::new();
             if let Some(fwd) = store.forward_links.get(from) {
                 for (rel_type, target) in fwd {
-                    if store
-                        .related_relationships
-                        .iter()
-                        .any(|r| r == rel_type.as_str())
-                    {
+                    let Some(target_doc) = store.get(target) else {
+                        continue;
+                    };
+                    if store.traversal_walk.walks_related(
+                        frontier_doc.doc_type.as_str(),
+                        rel_type.as_str(),
+                        target_doc.doc_type.as_str(),
+                    ) {
                         neighbours.push((rel_type.clone(), target.clone()));
                     }
                 }
             }
             if let Some(rev) = store.reverse_links.get(from) {
                 for (rel_type, source) in rev {
-                    if store
-                        .related_relationships
-                        .iter()
-                        .any(|r| r == rel_type.as_str())
-                    {
+                    let Some(source_doc) = store.get(source) else {
+                        continue;
+                    };
+                    // A reverse link is the same declared edge read backwards,
+                    // so the triple is asked source -> frontier: the row's
+                    // `from` is about who declared the relation, not who is
+                    // being walked from.
+                    if store.traversal_walk.walks_related(
+                        source_doc.doc_type.as_str(),
+                        rel_type.as_str(),
+                        frontier_doc.doc_type.as_str(),
+                    ) {
                         neighbours.push((rel_type.clone(), source.clone()));
                     }
                 }
@@ -204,7 +217,7 @@ pub fn merge_declared_related<'a>(store: &'a Store, resolved: &mut ResolvedConte
         .iter()
         .filter_map(|rel| store.resolve_relation_target(&rel.target).map(|d| (rel, d)))
         .filter(|(rel, d)| {
-            !store.chain_walk.walks(
+            !store.traversal_walk.walks_chain(
                 target.doc_type.as_str(),
                 rel.rel_type.as_str(),
                 d.doc_type.as_str(),
@@ -291,7 +304,7 @@ fn chain_parents(store: &Store) -> HashMap<PathBuf, Vec<PathBuf>> {
                 let Some(parent) = store.resolve_relation_target(&rel.target) else {
                     continue;
                 };
-                if !store.chain_walk.walks(
+                if !store.traversal_walk.walks_chain(
                     doc.doc_type.as_str(),
                     rel.rel_type.as_str(),
                     parent.doc_type.as_str(),
@@ -619,11 +632,12 @@ mod tests {
     }
 
     fn ids_in_order(paths: &[PathBuf]) -> Vec<String> {
-        paths
-            .iter()
-            .map(|p| p.file_stem().unwrap().to_string_lossy().to_string())
-            .map(|stem| crate::engine::store::extract_id_from_name(&stem))
-            .collect()
+        paths.iter().map(|p| id_of_path(p)).collect()
+    }
+
+    fn id_of_path(path: &std::path::Path) -> String {
+        let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+        crate::engine::store::extract_id_from_name(&stem)
     }
 
     // --- resolve_chain -----------------------------------------------------
@@ -986,6 +1000,85 @@ mod tests {
         );
     }
 
+    /// `related-to` links spanning three types, outbound and inbound, with a
+    /// two-hop reach: enough that a wildcard row's `from` and `to` positions
+    /// and the BFS's `distance` and `via` are all really being claimed.
+    fn related_neighbourhood_files() -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "docs/rfcs/RFC-001-anchor.md",
+                doc_md("Anchor", "rfc", "- related-to: STORY-001"),
+            ),
+            (
+                "docs/stories/STORY-001-near.md",
+                doc_md("Near", "story", "- related-to: ITERATION-001"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-far.md",
+                doc_md("Far", "iteration", "[]"),
+            ),
+            (
+                "docs/adrs/ADR-001-inbound.md",
+                doc_md("Inbound", "adr", "- related-to: RFC-001"),
+            ),
+        ]
+    }
+
+    /// Every related entry as (id, distance, relation, id of the doc it was
+    /// reached through) in emitted order -- the whole resolved claim, so an
+    /// equivalence assertion cannot pass by comparing less than the output.
+    fn related_neighbourhood(store: &Store) -> Vec<(String, usize, String, String)> {
+        resolve_chain(store, "RFC-001", 2)
+            .unwrap()
+            .related
+            .iter()
+            .map(|r| {
+                (
+                    r.doc.id.clone(),
+                    r.distance,
+                    r.relation.to_string(),
+                    id_of_path(&r.via),
+                )
+            })
+            .collect()
+    }
+
+    // STORY-257 AC4.
+    #[test]
+    fn a_wildcard_related_row_reproduces_the_global_markers_neighbourhood() {
+        let owned = related_neighbourhood_files();
+        let files: Vec<(&str, &str)> = owned.iter().map(|(p, c)| (*p, c.as_str())).collect();
+        let tmp = write_docs(&files);
+
+        let by_marker = Store::load(tmp.path(), &Config::default()).unwrap();
+
+        // The row is the whole story: `related-to`'s global marker is gone, so
+        // a neighbourhood can only come from the table.
+        let mut row_config = Config::default();
+        for rel in &mut row_config.relationships {
+            if rel.name == "related-to" {
+                rel.traversal = None;
+            }
+        }
+        row_config.edges.push(EdgeDef {
+            name: "anything-relates-to-anything".to_string(),
+            from: TypeSelector::Any,
+            to: TypeSelector::Any,
+            via: RelSelector::Named("related-to".to_string()),
+            required: None,
+            traversal: Some(Traversal::Related),
+        });
+        let by_row = Store::load(tmp.path(), &row_config).unwrap();
+
+        let expected = related_neighbourhood(&by_marker);
+        assert_eq!(
+            expected.len(),
+            3,
+            "the fixture must have a neighbourhood to compare"
+        );
+        assert_eq!(related_neighbourhood(&by_row), expected);
+    }
+
     // --- merge_declared_related ---------------------------------------------
 
     #[test]
@@ -1039,6 +1132,49 @@ mod tests {
                 ("blocks".to_string(), "RFC-002".to_string()),
             ]
         );
+    }
+
+    // BUG-013 under an edge-table config: the roles come from `[[edges]]`, and
+    // `blocks` appears in no row, so no triple gives it a role at all. It must
+    // still surface at one hop.
+    #[test]
+    fn merge_declared_related_surfaces_a_relation_no_row_gives_a_role() {
+        let mut config = Config::default();
+        for rel in &mut config.relationships {
+            rel.traversal = None;
+        }
+        config.edges.push(EdgeDef {
+            name: "anything-relates-to-anything".to_string(),
+            from: TypeSelector::Any,
+            to: TypeSelector::Any,
+            via: RelSelector::Named("related-to".to_string()),
+            required: None,
+            traversal: Some(Traversal::Related),
+        });
+
+        let (_tmp, store) = store_from_with_config(
+            &[
+                (
+                    "docs/rfcs/RFC-001-anchor.md",
+                    &doc_md("Anchor", "rfc", "- blocks: RFC-002"),
+                ),
+                ("docs/rfcs/RFC-002-near.md", &doc_md("Near", "rfc", "[]")),
+            ],
+            &config,
+        );
+
+        let mut resolved = resolve_chain(&store, "RFC-001", 1).unwrap();
+        assert!(
+            resolved.related.is_empty(),
+            "no row gives `blocks` a role, so the BFS drops it"
+        );
+
+        merge_declared_related(&store, &mut resolved);
+
+        assert_eq!(resolved.related.len(), 1);
+        assert_eq!(resolved.related[0].doc.id, "RFC-002");
+        assert_eq!(resolved.related[0].relation.as_str(), "blocks");
+        assert_eq!(resolved.related[0].distance, 1);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use crate::engine::document::{DocMeta, DocType, RelationType, Status};
 use crate::engine::fs::{FileSystem, RealFileSystem};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::refs::RefExpander;
-use crate::engine::traversal::ChainWalk;
+use crate::engine::traversal::TraversalWalk;
 use anyhow::Result;
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config as NucleoConfig, Matcher, Utf32Str};
@@ -41,17 +41,14 @@ pub struct Store {
     /// [`validation`](crate::engine::validation) ask "is this ANY chain
     /// relationship", which is exactly the defect RFC-067 §Problem.1 describes
     /// and STORY-259 deletes along with the rules. The walk asks the triple
-    /// instead, via `chain_walk` below.
+    /// instead, via `traversal_walk` below.
     pub(crate) chain_relationships: Vec<String>,
     /// Which (source type, relationship, target type) triples form the
     /// parent-child DAG walked by
     /// [`resolve_chain`](crate::engine::context::resolve_chain) and
-    /// [`resolve_forest`](crate::engine::context::resolve_forest).
-    pub(crate) chain_walk: ChainWalk,
-    /// The relationship names whose `traversal == Some(Traversal::Related)`,
-    /// walked by [`resolve_chain`](crate::engine::context::resolve_chain)'s
-    /// related neighbourhood.
-    pub(crate) related_relationships: Vec<String>,
+    /// [`resolve_forest`](crate::engine::context::resolve_forest), and which
+    /// join the related neighbourhood `resolve_chain` surfaces beside it.
+    pub(crate) traversal_walk: TraversalWalk,
     /// Raw document bodies memoized on first read during [`search`](Store::search),
     /// so repeated fuzzy queries (a live TUI filter re-runs on every keystroke)
     /// score body text from memory instead of re-reading each file from disk.
@@ -126,12 +123,6 @@ impl Store {
             .filter(|r| r.traversal == Some(Traversal::Chain))
             .map(|r| r.name.clone())
             .collect();
-        let related_relationships: Vec<String> = config
-            .relationships
-            .iter()
-            .filter(|r| r.traversal == Some(Traversal::Related))
-            .map(|r| r.name.clone())
-            .collect();
 
         let mut store = Store {
             root: root.to_path_buf(),
@@ -142,8 +133,7 @@ impl Store {
             parent_of,
             parse_errors,
             chain_relationships,
-            chain_walk: ChainWalk::from_config(config),
-            related_relationships,
+            traversal_walk: TraversalWalk::from_config(config),
             body_cache: std::sync::Mutex::new(HashMap::new()),
         };
         store.propagate_parent_links();

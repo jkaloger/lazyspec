@@ -1,7 +1,7 @@
 ---
 title: Walk the chain from the edge table
 type: iteration
-status: in-progress
+status: complete
 author: jack
 date: 2026-08-31
 tags: []
