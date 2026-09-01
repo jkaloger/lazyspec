@@ -42,5 +42,6 @@ pub mod symbols;
 pub mod sync;
 pub mod task_map;
 pub mod template;
+pub mod traversal;
 pub mod validation;
 pub mod watch;

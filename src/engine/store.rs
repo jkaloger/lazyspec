@@ -7,6 +7,7 @@ use crate::engine::document::{DocMeta, DocType, RelationType, Status};
 use crate::engine::fs::{FileSystem, RealFileSystem};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::refs::RefExpander;
+use crate::engine::traversal::ChainWalk;
 use anyhow::Result;
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config as NucleoConfig, Matcher, Utf32Str};
@@ -35,10 +36,18 @@ pub struct Store {
     pub(crate) parent_of: HashMap<PathBuf, PathBuf>,
     pub(crate) parse_errors: Vec<ParseError>,
     /// The relationship names whose `traversal == Some(Traversal::Chain)`,
-    /// sourced from `config.relationships`. These form the parent-child DAG
-    /// walked by [`resolve_chain`](crate::engine::context::resolve_chain) and
-    /// [`resolve_forest`](crate::engine::context::resolve_forest).
+    /// sourced from `config.relationships`. Serves `[[rules]]` only: the
+    /// `parent-child` and `relation-existence` checkers in
+    /// [`validation`](crate::engine::validation) ask "is this ANY chain
+    /// relationship", which is exactly the defect RFC-067 §Problem.1 describes
+    /// and STORY-259 deletes along with the rules. The walk asks the triple
+    /// instead, via `chain_walk` below.
     pub(crate) chain_relationships: Vec<String>,
+    /// Which (source type, relationship, target type) triples form the
+    /// parent-child DAG walked by
+    /// [`resolve_chain`](crate::engine::context::resolve_chain) and
+    /// [`resolve_forest`](crate::engine::context::resolve_forest).
+    pub(crate) chain_walk: ChainWalk,
     /// The relationship names whose `traversal == Some(Traversal::Related)`,
     /// walked by [`resolve_chain`](crate::engine::context::resolve_chain)'s
     /// related neighbourhood.
@@ -133,6 +142,7 @@ impl Store {
             parent_of,
             parse_errors,
             chain_relationships,
+            chain_walk: ChainWalk::from_config(config),
             related_relationships,
             body_cache: std::sync::Mutex::new(HashMap::new()),
         };

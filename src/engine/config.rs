@@ -12,11 +12,14 @@ pub enum Severity {
     Warning,
 }
 
-/// How a relationship participates in context traversal. `Chain` relationships
-/// form the parent-child DAG walked by `resolve_chain`/`resolve_forest`;
-/// `Related` relationships form the symmetric depth-bounded neighbourhood.
-/// Absence (`None` on `RelationshipDef`) means the relationship participates in
-/// neither walk.
+/// A role in context traversal. `Chain` is the parent-child DAG walked by
+/// `resolve_chain`/`resolve_forest`; `Related` is the symmetric depth-bounded
+/// neighbourhood.
+///
+/// Two declarations assign the role, and they do not union. On [`EdgeDef`] it
+/// names the role for the triple that row selects -- source type, relationship,
+/// target type -- and for no other; on [`RelationshipDef`] it is the blanket
+/// fallback, read only for relationships no `[[edges]]` row assigns a role to.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Traversal {
@@ -50,8 +53,8 @@ pub enum ValidationRule {
 /// (RFC-067). `from` names the source type, `to` the permitted target types,
 /// `via` the relationship that realizes the edge. `required` is the severity of
 /// a finding when the edge is absent; `None` means the edge is legal but not
-/// demanded. `traversal` is the walk this edge joins (ADR-030); `None` means it
-/// joins neither.
+/// demanded. `traversal` is the walk this edge joins (ADR-030); `None` means
+/// this row names no role, leaving the triple to any other matching row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct EdgeDef {
     pub name: String,
@@ -276,7 +279,7 @@ impl RelSelector {
     }
 
     /// True iff this position covers the concrete relationship `rel_name`.
-    fn matches(&self, rel_name: &str) -> bool {
+    pub(crate) fn matches(&self, rel_name: &str) -> bool {
         match self {
             RelSelector::Any => true,
             RelSelector::Named(name) => name == rel_name,
@@ -737,9 +740,10 @@ pub struct RelationshipDef {
     /// Absent for ordinary relationships.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_native: Option<String>,
-    /// How this relationship participates in context traversal. `None` (the
-    /// default, absent from TOML) means it drives neither the chain walk nor the
-    /// related neighbourhood.
+    /// This relationship's blanket traversal role, holding for every pair of
+    /// types it links. The walks read it only where no `[[edges]]` row assigns
+    /// this relationship a role; `[[rules]]`, which has no notion of a triple,
+    /// reads it unconditionally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traversal: Option<Traversal>,
 }

@@ -170,13 +170,22 @@ fn doc_to_view(store: &Store, doc: &DocMeta, fs: &dyn FileSystem) -> Result<Docu
     })
 }
 
-/// Child type names for `doc`'s type: each `child` from a `ParentChild` rule
-/// whose `parent` matches `doc.doc_type`. No matching rule yields an empty list
-/// (loops render empty, not undefined). Mirrors the TUI `spawn_create_children`
-/// derivation.
-fn child_types_for(config: &Config, doc: &DocMeta) -> Vec<String> {
+/// Child type names for `doc`'s type, from both places a project may declare
+/// hierarchy: each `child` of a `ParentChild` rule whose `parent` matches, plus
+/// the `from` side of every chain edge pointing at this type
+/// ([`crate::engine::traversal::ChainWalk::child_types_for`]). Neither
+/// declaration yielding anything gives an empty list (loops render empty, not
+/// undefined).
+///
+/// The two union, which the chain walk itself deliberately does not do -- there
+/// an edge row suppresses the relationship's global marker. `[[rules]]` and
+/// `[[edges]]` are enforced independently, and a list of child types can carry
+/// both answers where a single walk decision cannot. Rules come first so a
+/// project that declares only rules renders exactly what it did before the edge
+/// table existed. STORY-259 deletes the rules half.
+fn child_types_for(store: &Store, config: &Config, doc: &DocMeta) -> Vec<String> {
     let doc_type = doc.doc_type.as_str();
-    config
+    let mut child_types: Vec<String> = config
         .rules
         .iter()
         .filter_map(|rule| match rule {
@@ -185,12 +194,22 @@ fn child_types_for(config: &Config, doc: &DocMeta) -> Vec<String> {
             }
             _ => None,
         })
-        .collect()
+        .collect();
+
+    let from_edges: Vec<String> = store
+        .chain_walk
+        .child_types_for(doc_type)
+        .into_iter()
+        .filter(|child| !child_types.contains(child))
+        .collect();
+    child_types.extend(from_edges);
+
+    child_types
 }
 
 /// Assemble the minijinja render context for `doc`:
 /// - `document`: the selected doc's fields (id/title/type/body/status/path).
-/// - `child_types`: child type names from `ParentChild` rules.
+/// - `child_types`: child type names from `ParentChild` rules and chain edges.
 /// - `context.ancestors`: the `implements` chain, nearest-parent-first, target
 ///   excluded (full ancestry, from [`resolve_chain`]'s `nodes`).
 /// - `context.related`: directly-adjacent `related-to` docs (depth `1`).
@@ -222,7 +241,7 @@ pub fn build_render_context(
 
     let ctx = RenderContext {
         document: doc_to_view(store, doc, fs)?,
-        child_types: child_types_for(config, doc),
+        child_types: child_types_for(store, config, doc),
         context: ContextView { ancestors, related },
     };
 
@@ -470,13 +489,17 @@ mod tests {
     }
 
     fn store_from(files: &[(&str, &str)]) -> (TempDir, Store) {
+        store_from_with(files, &Config::default())
+    }
+
+    fn store_from_with(files: &[(&str, &str)], config: &Config) -> (TempDir, Store) {
         let tmp = TempDir::new().unwrap();
         for (rel_path, contents) in files {
             let full = tmp.path().join(rel_path);
             std::fs::create_dir_all(full.parent().unwrap()).unwrap();
             std::fs::write(&full, contents).unwrap();
         }
-        let store = Store::load(tmp.path(), &Config::default()).unwrap();
+        let store = Store::load(tmp.path(), config).unwrap();
         (tmp, store)
     }
 
@@ -558,6 +581,106 @@ mod tests {
         let prompt = body_prompt("[{% for c in child_types %}{{ c }}{% endfor %}]");
         let out = render(&prompt, &ctx).unwrap();
         assert_eq!(out.trim(), "[]");
+    }
+
+    // STORY-257 §Notes: child types must come off the edge table as well as
+    // `[[rules]]`, so the two halves are exercised against the same expected
+    // answer -- one project states iteration-under-story as a rule, the other
+    // states it as a chain edge, and both must name `iteration`.
+
+    fn parent_child_rule(parent: &str, child: &str) -> ValidationRule {
+        ValidationRule::ParentChild {
+            name: format!("{child}s-need-{parent}s"),
+            child: child.to_string(),
+            parent: parent.to_string(),
+            severity: crate::engine::config::Severity::Warning,
+            require_parent_status: None,
+        }
+    }
+
+    fn chain_edge(name: &str, from: &str, to: &str, via: &str) -> crate::engine::config::EdgeDef {
+        use crate::engine::config::{RelSelector, Traversal, TypeSelector};
+        crate::engine::config::EdgeDef {
+            name: name.to_string(),
+            from: TypeSelector::Types(vec![from.to_string()]),
+            to: TypeSelector::Types(vec![to.to_string()]),
+            via: RelSelector::Named(via.to_string()),
+            required: None,
+            traversal: Some(Traversal::Chain),
+        }
+    }
+
+    fn rendered_child_types(config: &Config, files: &[(&str, &str)], shorthand: &str) -> String {
+        let (_tmp, store) = store_from_with(files, config);
+        let doc = store.resolve_shorthand(shorthand).unwrap();
+        let ctx = build_render_context(&store, config, doc, &RealFileSystem).unwrap();
+        let prompt = body_prompt("[{% for c in child_types %}{{ c }},{% endfor %}]");
+        render(&prompt, &ctx).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn child_types_resolve_from_rules_when_the_project_declares_no_edges() {
+        let config = Config {
+            rules: vec![parent_child_rule("story", "iteration")],
+            edges: Vec::new(),
+            ..Config::default()
+        };
+
+        let out = rendered_child_types(
+            &config,
+            &[("docs/stories/STORY-001-s.md", &doc_md("S", "story", "[]"))],
+            "STORY-001",
+        );
+
+        assert_eq!(out, "[iteration,]");
+    }
+
+    #[test]
+    fn child_types_resolve_from_chain_edges_when_the_project_declares_no_rules() {
+        let config = Config {
+            rules: Vec::new(),
+            edges: vec![chain_edge(
+                "iterations-implement-stories",
+                "iteration",
+                "story",
+                "implements",
+            )],
+            ..Config::default()
+        };
+
+        let out = rendered_child_types(
+            &config,
+            &[("docs/stories/STORY-001-s.md", &doc_md("S", "story", "[]"))],
+            "STORY-001",
+        );
+
+        assert_eq!(out, "[iteration,]");
+    }
+
+    // The two declarations union here, unlike the chain walk, where an edge row
+    // suppresses the relationship's global marker: `[[rules]]` and `[[edges]]`
+    // are enforced independently, and a list of child types can hold both
+    // answers where a single walk decision cannot.
+    #[test]
+    fn child_types_union_rules_and_chain_edges_when_both_are_declared() {
+        let config = Config {
+            rules: vec![parent_child_rule("story", "iteration")],
+            edges: vec![chain_edge(
+                "spikes-probe-stories",
+                "spike",
+                "story",
+                "probes",
+            )],
+            ..Config::default()
+        };
+
+        let out = rendered_child_types(
+            &config,
+            &[("docs/stories/STORY-001-s.md", &doc_md("S", "story", "[]"))],
+            "STORY-001",
+        );
+
+        assert_eq!(out, "[iteration,spike,]");
     }
 
     // AC7: an unknown variable errors (strict mode), never renders empty, and

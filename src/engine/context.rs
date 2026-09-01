@@ -60,16 +60,16 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
     while let Some(current) = queue.pop_front() {
         let mut parents: Vec<PathBuf> = Vec::new();
         for rel in &current.related {
-            if !store
-                .chain_relationships
-                .iter()
-                .any(|r| r.as_str() == rel.rel_type.as_str())
-            {
-                continue;
-            }
             let Some(parent) = store.resolve_relation_target(&rel.target) else {
                 continue;
             };
+            if !store.chain_walk.walks(
+                current.doc_type.as_str(),
+                rel.rel_type.as_str(),
+                parent.doc_type.as_str(),
+            ) {
+                continue;
+            }
             if !parents.contains(&parent.path) {
                 parents.push(parent.path.clone());
             }
@@ -93,13 +93,14 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
         .map(|links| {
             links
                 .iter()
-                .filter(|(rel_type, _)| {
-                    store
-                        .chain_relationships
-                        .iter()
-                        .any(|r| r.as_str() == rel_type.as_str())
-                })
                 .filter_map(|(rel_type, source_path)| store.get(source_path).map(|d| (rel_type, d)))
+                .filter(|(rel_type, source)| {
+                    store.chain_walk.walks(
+                        source.doc_type.as_str(),
+                        rel_type.as_str(),
+                        doc.doc_type.as_str(),
+                    )
+                })
                 .map(|(rel_type, d)| RelatedRef {
                     doc: d,
                     relation: rel_type.clone(),
@@ -201,13 +202,14 @@ pub fn merge_declared_related<'a>(store: &'a Store, resolved: &mut ResolvedConte
     let declared: Vec<RelatedRef<'a>> = target
         .related
         .iter()
-        .filter(|rel| {
-            !store
-                .chain_relationships
-                .iter()
-                .any(|c| c.as_str() == rel.rel_type.as_str())
-        })
         .filter_map(|rel| store.resolve_relation_target(&rel.target).map(|d| (rel, d)))
+        .filter(|(rel, d)| {
+            !store.chain_walk.walks(
+                target.doc_type.as_str(),
+                rel.rel_type.as_str(),
+                d.doc_type.as_str(),
+            )
+        })
         .filter(|(_, d)| !chain_paths.contains(&d.path))
         .filter(|(rel, d)| seen.insert((rel.rel_type.to_string(), d.path.clone())))
         .map(|(rel, d)| RelatedRef {
@@ -286,16 +288,16 @@ fn chain_parents(store: &Store) -> HashMap<PathBuf, Vec<PathBuf>> {
         .map(|doc| {
             let mut parents: Vec<PathBuf> = Vec::new();
             for rel in &doc.related {
-                if !store
-                    .chain_relationships
-                    .iter()
-                    .any(|r| r.as_str() == rel.rel_type.as_str())
-                {
-                    continue;
-                }
                 let Some(parent) = store.resolve_relation_target(&rel.target) else {
                     continue;
                 };
+                if !store.chain_walk.walks(
+                    doc.doc_type.as_str(),
+                    rel.rel_type.as_str(),
+                    parent.doc_type.as_str(),
+                ) {
+                    continue;
+                }
                 if !parents.contains(&parent.path) {
                     parents.push(parent.path.clone());
                 }
@@ -532,7 +534,9 @@ fn topo_order<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::{Config, Traversal};
+    use crate::engine::config::{
+        Config, EdgeDef, RelSelector, RelationshipDef, Traversal, TypeSelector,
+    };
     use std::collections::BTreeSet;
     use tempfile::TempDir;
 
@@ -550,29 +554,29 @@ mod tests {
         )
     }
 
-    /// Load a real `Store` from in-memory files written under a fresh TempDir.
-    /// Goes through `Store::load` so link-building (including
-    /// `propagate_parent_links`) runs exactly as in production.
-    fn store_from(files: &[(&str, &str)]) -> (TempDir, Store) {
+    /// Write the given files under a fresh TempDir, so a test that loads the
+    /// same fixture twice compares stores built from one set of paths.
+    fn write_docs(files: &[(&str, &str)]) -> TempDir {
         let tmp = TempDir::new().unwrap();
         for (rel_path, contents) in files {
             let full = tmp.path().join(rel_path);
             std::fs::create_dir_all(full.parent().unwrap()).unwrap();
             std::fs::write(&full, contents).unwrap();
         }
-        let store = Store::load(tmp.path(), &Config::default()).unwrap();
-        (tmp, store)
+        tmp
+    }
+
+    /// Load a real `Store` from in-memory files written under a fresh TempDir.
+    /// Goes through `Store::load` so link-building (including
+    /// `propagate_parent_links`) runs exactly as in production.
+    fn store_from(files: &[(&str, &str)]) -> (TempDir, Store) {
+        store_from_with_config(files, &Config::default())
     }
 
     /// Like [`store_from`] but loads under a caller-supplied `config`, so a test
     /// can pin the traversal markers (or their absence) that drive the walk.
     fn store_from_with_config(files: &[(&str, &str)], config: &Config) -> (TempDir, Store) {
-        let tmp = TempDir::new().unwrap();
-        for (rel_path, contents) in files {
-            let full = tmp.path().join(rel_path);
-            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
-            std::fs::write(&full, contents).unwrap();
-        }
+        let tmp = write_docs(files);
         let store = Store::load(tmp.path(), config).unwrap();
         (tmp, store)
     }
@@ -883,6 +887,105 @@ mod tests {
         );
     }
 
+    /// A config in the arrangement RFC-067 §Problem.3 names: `targets` carries a
+    /// global `traversal = "chain"` marker AND one `[[edges]]` row declares it
+    /// chain for iteration -> milestone only. The global marker being present is
+    /// the point -- an edge row stating a traversal suppresses it, so the row is
+    /// the whole story for `targets`.
+    fn targets_walks_only_to_milestones() -> Config {
+        let mut config = Config::default();
+
+        let mut milestone = config
+            .documents
+            .types
+            .iter()
+            .find(|t| t.name == "rfc")
+            .expect("starter types declare rfc")
+            .clone();
+        milestone.name = "milestone".to_string();
+        milestone.plural = "milestones".to_string();
+        milestone.dir = "docs/milestones".to_string();
+        milestone.prefix = "MILESTONE".to_string();
+        config.documents.types.push(milestone);
+
+        config.relationships.push(RelationshipDef {
+            name: "targets".to_string(),
+            inverse: Some("targeted-by".to_string()),
+            github_native: None,
+            traversal: Some(Traversal::Chain),
+        });
+        config.edges.push(EdgeDef {
+            name: "iterations-target-milestones".to_string(),
+            from: TypeSelector::Types(vec!["iteration".to_string()]),
+            to: TypeSelector::Types(vec!["milestone".to_string()]),
+            via: RelSelector::Named("targets".to_string()),
+            required: None,
+            traversal: Some(Traversal::Chain),
+        });
+        config
+    }
+
+    /// One iteration targets a story and a milestone. STORY-257 AC1: the story's
+    /// context does not reach the iteration, because no row declares
+    /// iteration --targets--> story. AC2: the milestone's row does walk.
+    fn iteration_targeting_story_and_milestone() -> (TempDir, Store) {
+        store_from_with_config(
+            &[
+                (
+                    "docs/milestones/MILESTONE-001-launch.md",
+                    &doc_md("Launch", "milestone", "[]"),
+                ),
+                (
+                    "docs/stories/STORY-001-mid.md",
+                    &doc_md("Mid", "story", "[]"),
+                ),
+                (
+                    "docs/iterations/ITERATION-001-leaf.md",
+                    &doc_md(
+                        "Leaf",
+                        "iteration",
+                        "  - targets: STORY-001\n  - targets: MILESTONE-001",
+                    ),
+                ),
+            ],
+            &targets_walks_only_to_milestones(),
+        )
+    }
+
+    // STORY-257 AC1.
+    #[test]
+    fn chain_excludes_a_targets_link_no_edge_row_declares() {
+        let (_tmp, store) = iteration_targeting_story_and_milestone();
+
+        let resolved = resolve_chain(&store, "STORY-001", 1).unwrap();
+        let reached: BTreeSet<String> = resolved
+            .nodes
+            .iter()
+            .map(|n| n.doc.id.clone())
+            .chain(resolved.forward.iter().map(|r| r.doc.id.clone()))
+            .collect();
+
+        assert_eq!(
+            reached,
+            BTreeSet::from(["STORY-001".to_string()]),
+            "no row declares iteration --targets--> story, so the story stands alone"
+        );
+    }
+
+    // STORY-257 AC2.
+    #[test]
+    fn chain_includes_the_targets_link_an_edge_row_declares() {
+        let (_tmp, store) = iteration_targeting_story_and_milestone();
+
+        let resolved = resolve_chain(&store, "ITERATION-001", 1).unwrap();
+
+        assert_eq!(
+            node_ids(&resolved.nodes),
+            BTreeSet::from(["ITERATION-001".to_string(), "MILESTONE-001".to_string()]),
+            "the declared iteration --targets--> milestone row walks the chain"
+        );
+    }
+
     // --- merge_declared_related ---------------------------------------------
 
     #[test]
@@ -1125,6 +1228,112 @@ mod tests {
             "resolve_forest over {} docs took {elapsed:?}; topo_order has regressed \
              to a quadratic scan-per-emitted-node",
             ROOTS * 2
+        );
+    }
+
+    /// A forest reduced to comparable values: the emitted order, each node's
+    /// parents in emitted order, and whether anchoring inverted them.
+    /// `ContextNode` borrows a `DocMeta` and carries no equality, so two forests
+    /// are compared through this projection. Both loads below read one fixture
+    /// directory, so the paths themselves compare.
+    fn forest_shape(forest: &[ContextNode]) -> Vec<(PathBuf, Vec<PathBuf>, bool)> {
+        forest
+            .iter()
+            .map(|node| {
+                (
+                    node.doc.path.clone(),
+                    node.parents.clone(),
+                    node.parents_inverted,
+                )
+            })
+            .collect()
+    }
+
+    /// RFC-067 §"The traversal cost, stated plainly" made executable: a wildcard
+    /// row buys no precision and exists to keep the config short, so it must
+    /// reproduce what the global marker did rather than approximate it. Two
+    /// loads of one fixture, differing only in where `implements` is declared to
+    /// walk, must yield the same whole-store forest -- same nodes, same order,
+    /// same parent edges.
+    #[test]
+    fn a_blanket_edge_row_rebuilds_the_forest_the_global_marker_built() {
+        let tmp = write_docs(&[
+            ("docs/rfcs/RFC-001-left.md", &doc_md("Left", "rfc", "[]")),
+            ("docs/rfcs/RFC-002-right.md", &doc_md("Right", "rfc", "[]")),
+            (
+                "docs/stories/STORY-001-first.md",
+                &doc_md("First", "story", "- implements: RFC-001"),
+            ),
+            (
+                "docs/stories/STORY-002-second.md",
+                &doc_md("Second", "story", "- implements: RFC-001"),
+            ),
+            (
+                "docs/stories/STORY-003-third.md",
+                &doc_md("Third", "story", "- implements: RFC-002"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-shared.md",
+                &doc_md(
+                    "Shared",
+                    "iteration",
+                    "- implements: STORY-001\n- implements: STORY-002",
+                ),
+            ),
+            (
+                "docs/iterations/ITERATION-002-loose.md",
+                &doc_md("Loose", "iteration", "[]"),
+            ),
+        ]);
+
+        let by_global_marker = Config::default();
+        assert_eq!(
+            by_global_marker
+                .relationship_by_name("implements")
+                .unwrap()
+                .traversal,
+            Some(Traversal::Chain),
+            "the starter config marks implements chain; that marker is what the row must replace"
+        );
+
+        let mut by_blanket_row = by_global_marker.clone();
+        for rel in &mut by_blanket_row.relationships {
+            if rel.name == "implements" {
+                rel.traversal = None;
+            }
+        }
+        by_blanket_row.edges.push(EdgeDef {
+            name: "anything-implements-anything".to_string(),
+            from: TypeSelector::Any,
+            to: TypeSelector::Any,
+            via: RelSelector::Named("implements".to_string()),
+            required: None,
+            traversal: Some(Traversal::Chain),
+        });
+
+        let marker_store = Store::load(tmp.path(), &by_global_marker).unwrap();
+        let row_store = Store::load(tmp.path(), &by_blanket_row).unwrap();
+        let by_marker = resolve_forest(&marker_store, None);
+        let by_row = resolve_forest(&row_store, None);
+
+        // The forest under comparison has real shape -- three roots, three
+        // levels, a diamond -- so equality below cannot pass by both sides being
+        // flat or empty.
+        assert_eq!(by_marker.len(), 7);
+        assert_eq!(
+            parents_of(&by_marker, "ITERATION-001"),
+            BTreeSet::from(["STORY-001".to_string(), "STORY-002".to_string()])
+        );
+        assert_eq!(
+            parents_of(&by_marker, "STORY-003"),
+            BTreeSet::from(["RFC-002".to_string()])
+        );
+        assert!(parents_of(&by_marker, "ITERATION-002").is_empty());
+
+        assert_eq!(
+            forest_shape(&by_row),
+            forest_shape(&by_marker),
+            "the blanket row must reproduce the global marker's forest exactly"
         );
     }
 

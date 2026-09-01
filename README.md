@@ -606,6 +606,8 @@ The relationship vocabulary is config-driven, just like document types. Each `[[
 
 A relationship may also declare `traversal`, which governs how it participates in context traversal: `chain` relationships form the parent-child hierarchy that `parent-child` validation rules and the context chain walk follow, while `related` relationships form the symmetric related-context neighbourhood. A relationship with no `traversal` participates in neither walk, but the target document's own declared relations still surface in the related section of `context` (and the TUI Relations tab) at one hop.
 
+`traversal` here is blanket: it applies to every pair of document types the relationship links, and it is the fallback for relationships that no `[[edges]]` row assigns a role to. A relationship named by the `via` of a row that states a `traversal` takes its chain membership from the rows instead, source type and target type included. See [Edges](#edges). `parent-child` rules read the blanket marker either way.
+
 ```toml
 [[relationships]]
 name = "implements"
@@ -728,7 +730,29 @@ There is no spelling for "legal here, and stop demanding the broader edge". Narr
 
 Traversal composes: an edge joins a walk when any matching row gives it a role. Two rows that can both cover one concrete edge and name different roles fail config load, naming both rows and the `traversal` each writes. Specificity does not resolve such a disagreement, so a concrete row contradicting a wildcard row fails the same way an equally specific pair does. A row that omits `traversal` names no role: it joins no walk and contradicts nothing, however specific it is.
 
-The chain and related walks follow `traversal` on `[[relationships]]`. A role written on an `[[edges]]` row is checked at load and re-emitted by `lazyspec config --json`; no walk reads it yet.
+The chain walk reads these rows, so `context`, the TUI graph view and the web view all follow them. A row carrying `traversal = "chain"` makes the edge walk for the triple it names: a source type from `from`, the relationship in `via`, a target type from `to`. No other triple walks on account of that row.
+
+A row that states any `traversal` also settles walk membership for the relationship its `via` names. That relationship's `traversal` on `[[relationships]]` is suppressed, and the rows become the only declaration the chain walk reads for it. The row below suppresses the blanket marker above it. An iteration that targets a milestone walks the chain. An iteration that targets a story does not, and no longer appears in that story's chain.
+
+```toml
+[[relationships]]
+name = "targets"
+inverse = "targeted-by"
+traversal = "chain"
+
+[[edges]]
+name = "iterations-target-milestones"
+from = "iteration"
+to = "milestone"
+via = "targets"
+traversal = "chain"
+```
+
+Suppression is keyed by relationship name rather than by triple, which makes it broader than the row's own selectors suggest. A row with `via = "*"` and any `traversal` suppresses the global marker of every declared relationship. A row with `traversal = "related"` suppresses the same relationship's global `traversal = "chain"`: the row has assigned that relationship a role, and the two declarations do not combine.
+
+The related neighbourhood still follows `traversal = "related"` on `[[relationships]]`. A row naming `related` does not add its triple to that walk.
+
+A wildcard filters but does not enumerate. `to = "*"` admits every target type, so a row with `from = "iteration"` and `to = "*"` reports `iteration` as a child type of every type. `from = "*"` names no source type, so such a row walks the chain and contributes no child types at all. The child types of a type, rendered as `child_types` when a prompt template is filled, are the `from` types of the rows that name them, plus the `child` of each `parent-child` rule whose `parent` matches. Only a row that names its source types contributes a concrete child type.
 
 The wildcard is always explicit. Leaving `via` out does not mean "any relationship" — it fails config load, naming the edge, because a table whose shape carried a second meaning would be a rule nobody wrote down.
 
@@ -737,6 +761,8 @@ The wildcard also has one spelling: the bare string. A list is read as type name
 An edge naming a type absent from `[[types]]`, or a relationship absent from `[[relationships]]`, fails config load; `"*"` names neither and is never reported as an unknown identifier. Declared edges appear in `lazyspec config --json` under `edges`, and re-emit in the spelling they were written in.
 
 `[[edges]]` and `[[rules]]` are enforced independently; a project may declare either or both. Edges describe the DAG and drive findings; they never refuse a command.
+
+That independence is a statement about findings, and findings stack: one document may be reported by a rule and by an edge, and neither declaration suppresses the other. A walk cannot stack, because a link either is hierarchy or is not, so traversal takes the narrower rule described above: an `[[edges]]` row that states a `traversal` suppresses the relationship's blanket marker instead of adding to it. The suppression reaches the walks only. `parent-child` rules keep reading `traversal = "chain"` on `[[relationships]]`, so a row that suppresses a blanket marker changes what `context` walks and leaves what `validate` reports alone.
 
 ### Numbering
 
