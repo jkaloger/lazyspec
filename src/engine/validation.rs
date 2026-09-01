@@ -2199,6 +2199,7 @@ mod edge_tests {
             ]),
             via: RelSelector::Named("implements".to_string()),
             required,
+            traversal: None,
         }
     }
 
@@ -2483,6 +2484,7 @@ mod edge_tests {
             to: TypeSelector::Any,
             via: RelSelector::Any,
             required: Some(Severity::Error),
+            traversal: None,
         }
     }
 
@@ -2661,6 +2663,7 @@ mod edge_tests {
             to,
             via,
             required,
+            traversal: None,
         }
     }
 

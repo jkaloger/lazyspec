@@ -50,7 +50,8 @@ pub enum ValidationRule {
 /// (RFC-067). `from` names the source type, `to` the permitted target types,
 /// `via` the relationship that realizes the edge. `required` is the severity of
 /// a finding when the edge is absent; `None` means the edge is legal but not
-/// demanded.
+/// demanded. `traversal` is the walk this edge joins (ADR-030); `None` means it
+/// joins neither.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct EdgeDef {
     pub name: String,
@@ -62,6 +63,8 @@ pub struct EdgeDef {
     pub via: RelSelector,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required: Option<Severity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traversal: Option<Traversal>,
 }
 
 impl EdgeDef {
@@ -147,6 +150,46 @@ fn requiredness_spelling(required: &Severity) -> &'static str {
     }
 }
 
+/// ADR-031: traversal composes — an edge walks if any matching row gives it a
+/// role — so two rows that can match one concrete edge and name *different*
+/// roles cannot both be honoured. Unlike requiredness there is no
+/// most-specific-wins fallback to appeal to, so specificity is not consulted:
+/// a concrete row disagreeing with a wildcard row is as unresolvable as a tie.
+/// A row that omits `traversal` names no role and so disagrees with nothing.
+fn reject_traversal_disagreements(edges: &[EdgeDef]) -> Result<()> {
+    for (index, edge) in edges.iter().enumerate() {
+        let Some(traversal) = edge.traversal else {
+            continue;
+        };
+        for other in &edges[index + 1..] {
+            let Some(other_traversal) = other.traversal else {
+                continue;
+            };
+            if traversal == other_traversal || !edge.overlaps(other) {
+                continue;
+            }
+            bail!(
+                "edges \"{}\" ({}) and \"{}\" ({}) can both match the same edge and give it \
+                 different traversal roles: traversal composes rather than resolving by \
+                 specificity, so make them agree, or narrow one so they cannot both match",
+                edge.name,
+                traversal_spelling(traversal),
+                other.name,
+                traversal_spelling(other_traversal),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// How a row's traversal role reads back to whoever wrote the TOML.
+fn traversal_spelling(traversal: Traversal) -> &'static str {
+    match traversal {
+        Traversal::Chain => "traversal = \"chain\"",
+        Traversal::Related => "traversal = \"related\"",
+    }
+}
+
 /// An `[[edges]]` row as written, before `via` has been checked. Serde's own
 /// "missing field `via`" names neither the offending edge nor `"*"` as the way
 /// to spell "any relationship", so the field is optional here and
@@ -159,6 +202,8 @@ struct RawEdgeDef {
     via: Option<RelSelector>,
     #[serde(default)]
     required: Option<Severity>,
+    #[serde(default)]
+    traversal: Option<Traversal>,
 }
 
 /// The wildcard spelling of any edge position (ADR-031).
@@ -1431,6 +1476,7 @@ impl Config {
                     to: edge.to,
                     via,
                     required: edge.required,
+                    traversal: edge.traversal,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1479,6 +1525,7 @@ impl Config {
             }
         }
         reject_requiredness_ties(&edges)?;
+        reject_traversal_disagreements(&edges)?;
 
         let any_sqids = types
             .iter()
@@ -1849,7 +1896,7 @@ name = "related-to"
         );
 
         let edge_props = &json["$defs"]["EdgeDef"]["properties"];
-        for field in ["name", "from", "to", "via", "required"] {
+        for field in ["name", "from", "to", "via", "required", "traversal"] {
             assert!(
                 edge_props[field].is_object(),
                 "EdgeDef must expose `{field}`, got {edge_props}"
@@ -2118,6 +2165,57 @@ via = "implements"
         let reparsed = Config::parse(&config.to_toml().unwrap()).unwrap();
 
         assert_eq!(reparsed.edges, config.edges);
+    }
+
+    // ADR-030 moves the traversal role off the relationship name and onto the
+    // individual row. A row silent on it joins no walk, which is a different
+    // thing from joining one, so the absence has to survive a round trip as an
+    // absence rather than as a default.
+    #[test]
+    fn edge_traversal_round_trips_with_an_absent_role_omitted() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"
+traversal = "chain"
+
+[[edges]]
+name = "general-relatedness"
+from = "*"
+to = "*"
+via = "related-to"
+traversal = "related"
+
+[[edges]]
+name = "stories-implement-stories"
+from = "story"
+to = "story"
+via = "implements"
+"#
+        );
+
+        let config = Config::parse(&toml_str).unwrap();
+
+        assert_eq!(config.edges[0].traversal, Some(Traversal::Chain));
+        assert_eq!(config.edges[1].traversal, Some(Traversal::Related));
+        assert_eq!(config.edges[2].traversal, None);
+
+        let emitted = config.to_toml().unwrap();
+        let edges = toml::from_str::<toml::Value>(&emitted).unwrap()["edges"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(edges[0]["traversal"], toml::Value::from("chain"));
+        assert_eq!(edges[1]["traversal"], toml::Value::from("related"));
+        assert!(
+            edges[2].get("traversal").is_none(),
+            "skip_serializing_if must omit an absent traversal: {emitted}"
+        );
+        assert_eq!(Config::parse(&emitted).unwrap().edges, config.edges);
     }
 
     #[test]
@@ -2494,6 +2592,138 @@ required = "error"
         let config = Config::parse(&toml_str).unwrap();
 
         assert_eq!(config.edges.len(), 2);
+    }
+
+    // STORY-257 AC3 / ADR-031: traversal composes, so two rows that can match
+    // `story -implements-> rfc` and name different roles have no resolution.
+    // Both rows below score two concrete positions.
+    #[test]
+    fn equally_specific_overlapping_edges_disagreeing_on_traversal_fail_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-chain-through-implements"
+from = "story"
+to = "*"
+via = "implements"
+traversal = "chain"
+
+[[edges]]
+name = "stories-relate-to-rfcs"
+from = "story"
+to = ["rfc"]
+via = "*"
+traversal = "related"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+
+        assert!(
+            err.contains("stories-chain-through-implements")
+                && err.contains("stories-relate-to-rfcs"),
+            "names both conflicting edges: {err}"
+        );
+        assert!(
+            err.contains("traversal"),
+            "names traversal as the disagreement: {err}"
+        );
+    }
+
+    // ADR-031: unlike requiredness, traversal does not resolve by specificity.
+    // The concrete row below scores three and the wildcard row one, and that
+    // gap still leaves no answer for the edge they both cover.
+    #[test]
+    fn overlapping_edges_of_unequal_specificity_disagreeing_on_traversal_fail_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "general-relatedness"
+from = "*"
+to = "*"
+via = "related-to"
+traversal = "related"
+
+[[edges]]
+name = "stories-chain-to-rfcs"
+from = "story"
+to = "rfc"
+via = "related-to"
+traversal = "chain"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+
+        assert!(
+            err.contains("general-relatedness") && err.contains("stories-chain-to-rfcs"),
+            "names both conflicting edges: {err}"
+        );
+        assert!(
+            err.contains("traversal"),
+            "names traversal as the disagreement: {err}"
+        );
+    }
+
+    // ADR-031: a row silent on `traversal` states no role, so it disagrees with
+    // nothing -- the same conclusion the ADR reaches for an absent `required`.
+    // Silence is not "chain by default" and does not become the other row's
+    // role either, so each row keeps what it wrote.
+    #[test]
+    fn overlapping_edges_where_only_one_states_traversal_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-chain-to-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"
+traversal = "chain"
+
+[[edges]]
+name = "stories-may-implement-anything"
+from = "story"
+to = "*"
+via = "implements"
+"#
+        );
+
+        let config = Config::parse(&toml_str).unwrap();
+
+        assert_eq!(config.edges[0].traversal, Some(Traversal::Chain));
+        assert_eq!(config.edges[1].traversal, None);
+    }
+
+    // ADR-031: an edge walks if any matching row gives it a role, so two rows
+    // naming the *same* role compose rather than colliding.
+    #[test]
+    fn overlapping_edges_agreeing_on_traversal_each_keep_the_shared_role() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-chain-through-implements"
+from = "story"
+to = "*"
+via = "implements"
+traversal = "chain"
+
+[[edges]]
+name = "stories-chain-to-rfcs"
+from = "story"
+to = ["rfc"]
+via = "*"
+traversal = "chain"
+"#
+        );
+
+        let config = Config::parse(&toml_str).unwrap();
+
+        assert_eq!(config.edges[0].traversal, Some(Traversal::Chain));
+        assert_eq!(config.edges[1].traversal, Some(Traversal::Chain));
     }
 
     #[test]

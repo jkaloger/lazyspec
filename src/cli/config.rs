@@ -1015,6 +1015,7 @@ from = "story"
 to = ["rfc", "story"]
 via = "implements"
 required = "error"
+traversal = "chain"
 "#
         );
 
@@ -1025,6 +1026,7 @@ required = "error"
         assert_eq!(edge["to"], serde_json::json!(["rfc", "story"]));
         assert_eq!(edge["via"], "implements");
         assert_eq!(edge["required"], "error");
+        assert_eq!(edge["traversal"], "chain");
     }
 
     // Dictum 2: an agent reading `edges` should never have to branch on null.

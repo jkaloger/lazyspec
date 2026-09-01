@@ -658,6 +658,7 @@ An `[[edges]]` block declares one directed edge kind in the document DAG: a sour
 | `to`       | The permitted target types, written the same way. `to = "story"` and `to = ["story"]` are identical, as are the `from` equivalents |
 | `via`      | The relationship that realizes the edge, or `"*"` for any relationship. Required — omitting it is an error, not a shorthand for `"*"` |
 | `required` | `"error"` or `"warning"`: the severity of a finding when the edge is absent. Omit it and the edge is legal but not demanded |
+| `traversal` | `"chain"` or `"related"`: the walk this edge joins. Omit it and this row names no role. Another matching row may still give the edge one. |
 
 `validate` reports one finding per document whose type is listed in `from` and which carries no `via` relation to a document of any type listed in `to`. Both lists are disjunctions. The edge below is satisfied by an iteration that implements a spike, or a story, or a bug — not one link per member. The finding names the edge, the type of the document it is about, and every permitted target type.
 
@@ -725,13 +726,17 @@ There is no spelling for "legal here, and stop demanding the broader edge". Narr
 
 `required` on a row whose `from` is `"*"` fails config load, naming the edge, because such a row demands the edge of every declared type. A wildcard `from` on a row that omits `required` loads.
 
+Traversal composes: an edge joins a walk when any matching row gives it a role. Two rows that can both cover one concrete edge and name different roles fail config load, naming both rows and the `traversal` each writes. Specificity does not resolve such a disagreement, so a concrete row contradicting a wildcard row fails the same way an equally specific pair does. A row that omits `traversal` names no role: it joins no walk and contradicts nothing, however specific it is.
+
+The chain and related walks follow `traversal` on `[[relationships]]`. A role written on an `[[edges]]` row is checked at load and re-emitted by `lazyspec config --json`; no walk reads it yet.
+
 The wildcard is always explicit. Leaving `via` out does not mean "any relationship" — it fails config load, naming the edge, because a table whose shape carried a second meaning would be a rule nobody wrote down.
 
 The wildcard also has one spelling: the bare string. A list is read as type names, so `to = ["*"]` fails config load telling you to write `to = "*"`. `["*", "story"]` fails the same way rather than meaning "any type, and also story".
 
 An edge naming a type absent from `[[types]]`, or a relationship absent from `[[relationships]]`, fails config load; `"*"` names neither and is never reported as an unknown identifier. Declared edges appear in `lazyspec config --json` under `edges`, and re-emit in the spelling they were written in.
 
-`[[edges]]` and `[[rules]]` are enforced independently; a project may declare either or both. Per-edge `traversal` is not supported yet, and traversal remains a property of `[[relationships]]`. Edges describe the DAG and drive findings; they never refuse a command.
+`[[edges]]` and `[[rules]]` are enforced independently; a project may declare either or both. Edges describe the DAG and drive findings; they never refuse a command.
 
 ### Numbering
 
