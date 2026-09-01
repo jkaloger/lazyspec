@@ -3,8 +3,9 @@ use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Val
 
 use crate::engine::config::{
     default_git_ref_remote, default_normalize, default_skills_entry, default_table_columns,
-    AttrDef, AttrKind, Authorship, Config, Edge, Lifecycle, NumberingStrategy, RelationshipDef,
-    ReservedFormat, Severity, TypeDef, ValidationRule,
+    AttrDef, AttrKind, Authorship, Config, Edge, EdgeDef, Lifecycle, NumberingStrategy,
+    RelSelector, RelationshipDef, ReservedFormat, Severity, Traversal, TypeDef, TypeSelector,
+    ValidationRule, WILDCARD,
 };
 
 pub fn write_config_in_place(existing_src: &str, buffer: &Config) -> Result<String> {
@@ -23,6 +24,7 @@ pub fn write_config_in_place(existing_src: &str, buffer: &Config) -> Result<Stri
     write_skills(&mut doc, buffer);
     write_git_ref(&mut doc, buffer);
     write_rules(&mut doc, buffer);
+    write_edges(&mut doc, buffer);
 
     Ok(doc.to_string())
 }
@@ -283,6 +285,7 @@ fn update_relationship_table(entry: &mut Table, def: &RelationshipDef) {
     set_str(entry, "name", &def.name);
     set_opt_str(entry, "inverse", def.inverse.as_deref());
     set_opt_str(entry, "github_native", def.github_native.as_deref());
+    set_opt_str(entry, "traversal", def.traversal.map(traversal_str));
 }
 
 fn write_tui(doc: &mut DocumentMut, buffer: &Config) {
@@ -621,6 +624,72 @@ fn update_rule_table(entry: &mut Table, rule: &ValidationRule) {
     }
 }
 
+fn write_edges(doc: &mut DocumentMut, buffer: &Config) {
+    if !doc.contains_key("edges") {
+        if buffer.edges.is_empty() {
+            return;
+        }
+        doc.insert("edges", Item::ArrayOfTables(ArrayOfTables::new()));
+    }
+    let Some(edges) = doc.get_mut("edges").and_then(Item::as_array_of_tables_mut) else {
+        return;
+    };
+    reconcile_array_of_tables(
+        edges,
+        &buffer.edges,
+        |def| def.name.as_str(),
+        update_edge_table,
+    );
+}
+
+fn update_edge_table(entry: &mut Table, def: &EdgeDef) {
+    set_str(entry, "name", &def.name);
+    set_type_selector(entry, "from", &def.from);
+    set_type_selector(entry, "to", &def.to);
+    set_str(entry, "via", rel_selector_str(&def.via));
+    set_opt_str(entry, "required", def.required.as_ref().map(severity_str));
+    set_opt_str(entry, "traversal", def.traversal.map(traversal_str));
+}
+
+// A type position spelled the way a human writes it: the wildcard is a bare
+// string (`["*"]` is a wildcard inside a list, which the loader rejects), a lone
+// type name is bare, and only a genuine set becomes an array. A source that
+// already spells the selector as a list keeps that spelling, so rendering an
+// unedited config changes nothing.
+fn set_type_selector(entry: &mut Table, key: &str, selector: &TypeSelector) {
+    let names = match selector {
+        TypeSelector::Any => {
+            set_str(entry, key, WILDCARD);
+            return;
+        }
+        TypeSelector::Types(names) => names,
+    };
+    if array_matches(entry.get(key).and_then(Item::as_array), names) {
+        return;
+    }
+    match names.as_slice() {
+        [only] => set_str(entry, key, only),
+        many => {
+            let array: Array = many.iter().map(|name| name.as_str()).collect();
+            set_value(entry, key, Value::Array(array));
+        }
+    }
+}
+
+fn rel_selector_str(via: &RelSelector) -> &str {
+    match via {
+        RelSelector::Any => WILDCARD,
+        RelSelector::Named(name) => name,
+    }
+}
+
+fn traversal_str(traversal: Traversal) -> &'static str {
+    match traversal {
+        Traversal::Chain => "chain",
+        Traversal::Related => "related",
+    }
+}
+
 // Reconcile an `[[...]]` array-of-tables to `buffer` entries by IDENTITY (the
 // entry's `name`, unique per collection). Each surviving source table is updated
 // in place via `update` (preserving its decor/comments); deleted source tables
@@ -818,7 +887,8 @@ fn set_value(table: &mut dyn toml_edit::TableLike, key: &str, new: Value) {
 mod tests {
     use super::*;
     use crate::engine::config::{
-        CertificationOverride, Config, RelationshipDef, StoreBackend, TypeDef,
+        CertificationOverride, Config, EdgeDef, RelSelector, RelationshipDef, StoreBackend,
+        Traversal, TypeDef, TypeSelector,
     };
 
     const SRC: &str = r#"# lazyspec configuration
@@ -1707,6 +1777,212 @@ inverse = "implemented-by"
         let buffer = Config::parse(STATUSBAR_SRC).unwrap();
         let out = write_config_in_place(STATUSBAR_SRC, &buffer).unwrap();
         assert!(!out.contains("[git-ref]"), "got: {out}");
+    }
+
+    const TRAVERSAL_SRC: &str = r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+traversal = "chain"
+
+[[relationships]]
+name = "related-to"
+traversal = "related"
+
+# every adr answers to something
+[[rules]]
+name = "adrs-need-relations"
+shape = "relation-existence"
+type = "adr"
+require = "any-relation"
+severity = "error"
+
+[github]
+repo = "owner/repo"
+"#;
+
+    // The edge migration deletes every rule, and an array-of-tables reconciled
+    // against an empty buffer leaves its key behind, so the key comes off the
+    // document outright. Asserted on the text: a reparse cannot tell an absent
+    // key from an empty one.
+    #[test]
+    fn clearing_every_rule_takes_the_rules_key_off_the_document() {
+        let buffer = {
+            let mut c = Config::parse(TRAVERSAL_SRC).unwrap();
+            c.rules.clear();
+            c
+        };
+
+        let out = write_config_in_place(TRAVERSAL_SRC, &buffer).unwrap();
+
+        assert!(!out.contains("rules"), "got: {out}");
+        assert!(
+            out.contains("[github]"),
+            "the section after it survives: {out}"
+        );
+        assert!(Config::parse(&out).unwrap().rules.is_empty());
+    }
+
+    #[test]
+    fn clearing_a_relationship_traversal_removes_the_key() {
+        let buffer = {
+            let mut c = Config::parse(TRAVERSAL_SRC).unwrap();
+            for relationship in &mut c.relationships {
+                relationship.traversal = None;
+            }
+            c
+        };
+
+        let out = write_config_in_place(TRAVERSAL_SRC, &buffer).unwrap();
+
+        assert!(!out.contains("traversal"), "got: {out}");
+        let reparsed = Config::parse(&out).unwrap();
+        assert!(reparsed.relationships.iter().all(|r| r.traversal.is_none()));
+    }
+
+    #[test]
+    fn setting_a_relationship_traversal_writes_the_key() {
+        let buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.relationships[0].traversal = Some(Traversal::Chain);
+            c
+        };
+
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+
+        assert!(out.contains(r#"traversal = "chain""#), "got: {out}");
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(
+            reparsed
+                .relationship_by_name("implements")
+                .unwrap()
+                .traversal,
+            Some(Traversal::Chain)
+        );
+    }
+
+    fn wildcard_and_concrete_edges() -> Vec<EdgeDef> {
+        vec![
+            EdgeDef {
+                name: "stories-need-rfcs".to_string(),
+                from: TypeSelector::Types(vec!["story".to_string()]),
+                to: TypeSelector::Types(vec!["rfc".to_string()]),
+                via: RelSelector::Any,
+                required: Some(Severity::Warning),
+                traversal: None,
+            },
+            EdgeDef {
+                name: "related-to-traversal".to_string(),
+                from: TypeSelector::Any,
+                to: TypeSelector::Any,
+                via: RelSelector::Named("related-to".to_string()),
+                required: None,
+                traversal: Some(Traversal::Related),
+            },
+        ]
+    }
+
+    #[test]
+    fn edges_are_written_with_every_key_and_round_trip() {
+        let buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.edges = wildcard_and_concrete_edges();
+            c
+        };
+
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+
+        assert!(out.contains("[[edges]]"), "got: {out}");
+        assert!(out.contains(r#"required = "warning""#), "got: {out}");
+        assert!(out.contains(r#"traversal = "related""#), "got: {out}");
+        assert!(out.contains(r#"via = "related-to""#), "got: {out}");
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(reparsed.edges, wildcard_and_concrete_edges());
+    }
+
+    // ITERATION-368 Task 3 guards the same spelling in `to_toml`; the in-place
+    // writer is a second code path and needs its own assertion. `["*"]` is not
+    // just ugly -- a wildcard inside a list is rejected at load.
+    #[test]
+    fn a_wildcard_edge_position_is_written_as_a_bare_string() {
+        let buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.edges = wildcard_and_concrete_edges();
+            c
+        };
+
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+
+        assert!(out.contains(r#"from = "*""#), "got: {out}");
+        assert!(out.contains(r#"to = "*""#), "got: {out}");
+        assert!(out.contains(r#"via = "*""#), "got: {out}");
+        assert!(!out.contains(r#"["*"]"#), "got: {out}");
+    }
+
+    #[test]
+    fn an_edge_naming_several_target_types_is_written_as_a_list() {
+        let buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.edges = vec![EdgeDef {
+                name: "story-parent".to_string(),
+                from: TypeSelector::Types(vec!["story".to_string()]),
+                to: TypeSelector::Types(vec!["story".to_string(), "rfc".to_string()]),
+                via: RelSelector::Named("implements".to_string()),
+                required: None,
+                traversal: Some(Traversal::Chain),
+            }];
+            c
+        };
+
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+
+        assert!(out.contains(r#"from = "story""#), "got: {out}");
+        assert!(out.contains(r#"to = ["story", "rfc"]"#), "got: {out}");
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(
+            reparsed.edges[0].to,
+            TypeSelector::Types(vec!["story".to_string(), "rfc".to_string()])
+        );
+    }
+
+    // AC6 at the writer's level: a config already carrying `[[edges]]` is what a
+    // second migration run reads, and rendering it must change nothing.
+    #[test]
+    fn an_unchanged_edge_block_survives_byte_for_byte() {
+        const EDGES_SRC: &str = r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+# the chain a story has to hang off
+[[edges]]
+name = "stories-need-rfcs"
+from = "story"
+to = ["rfc"]
+via = "*"
+required = "warning"
+"#;
+        let buffer = Config::parse(EDGES_SRC).unwrap();
+
+        let out = write_config_in_place(EDGES_SRC, &buffer).unwrap();
+
+        assert_eq!(out, EDGES_SRC);
     }
 
     #[test]
