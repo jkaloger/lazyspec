@@ -1,9 +1,11 @@
 mod links;
 mod loader;
 
+pub use links::Link;
+
 use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{Config, StoreBackend, Traversal};
-use crate::engine::document::{DocMeta, DocType, RelationType, Status};
+use crate::engine::document::{DocMeta, DocType, Status};
 use crate::engine::fs::{FileSystem, RealFileSystem};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::refs::RefExpander;
@@ -30,8 +32,8 @@ pub struct Filter {
 pub struct Store {
     pub(crate) root: PathBuf,
     pub(crate) docs: HashMap<PathBuf, DocMeta>,
-    pub(crate) forward_links: HashMap<PathBuf, Vec<(RelationType, PathBuf)>>,
-    pub(crate) reverse_links: HashMap<PathBuf, Vec<(RelationType, PathBuf)>>,
+    pub(crate) forward_links: HashMap<PathBuf, Vec<Link>>,
+    pub(crate) reverse_links: HashMap<PathBuf, Vec<Link>>,
     pub(crate) children: HashMap<PathBuf, Vec<PathBuf>>,
     pub(crate) parent_of: HashMap<PathBuf, PathBuf>,
     pub(crate) parse_errors: Vec<ParseError>,
@@ -343,14 +345,14 @@ impl Store {
         self.parent_of.get(path)
     }
 
-    pub fn forward_links_for(&self, path: &Path) -> &[(RelationType, PathBuf)] {
+    pub fn forward_links_for(&self, path: &Path) -> &[Link] {
         self.forward_links
             .get(path)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
     }
 
-    pub fn reverse_links_for(&self, path: &Path) -> &[(RelationType, PathBuf)] {
+    pub fn reverse_links_for(&self, path: &Path) -> &[Link] {
         self.reverse_links
             .get(path)
             .map(|v| v.as_slice())
@@ -784,6 +786,69 @@ pub struct SearchResult<'a> {
     pub match_field: &'static str,
     pub snippet: String,
     pub score: u32,
+}
+
+/// Fixtures shared by the engine's walk tests (`context`, `graph`, `traversal`),
+/// which all want the same thing: real documents on disk, loaded through
+/// [`Store::load`] so link building runs exactly as it does in production.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::Store;
+    use crate::engine::config::{Config, EdgeDef, RelSelector, Traversal, TypeSelector};
+    use tempfile::TempDir;
+
+    /// A markdown doc of the given type. `related` is the YAML list body (e.g.
+    /// `"- implements: RFC-001"`), or `"[]"` for a doc that declares no links.
+    pub(crate) fn doc_md(title: &str, doc_type: &str, related: &str) -> String {
+        let related_block = if related == "[]" {
+            "related: []".to_string()
+        } else {
+            format!("related:\n{related}")
+        };
+        format!(
+            "---\ntitle: \"{title}\"\ntype: {doc_type}\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\n{related_block}\n---\n\n{title} body\n"
+        )
+    }
+
+    /// The given files written under a fresh TempDir, so a test that loads the
+    /// same fixture twice compares stores built from one set of paths.
+    pub(crate) fn write_docs(files: &[(&str, &str)]) -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        for (rel_path, contents) in files {
+            let full = tmp.path().join(rel_path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, contents).unwrap();
+        }
+        tmp
+    }
+
+    /// A real `Store` over `files`, loaded under `config` so a test can pin the
+    /// traversal markers (or their absence) that drive the walk.
+    pub(crate) fn store_from_with_config(
+        files: &[(&str, &str)],
+        config: &Config,
+    ) -> (TempDir, Store) {
+        let tmp = write_docs(files);
+        let store = Store::load(tmp.path(), config).unwrap();
+        (tmp, store)
+    }
+
+    /// One `[[edges]]` row with both endpoints concrete -- the only shape that
+    /// can tell the readings of a link apart, since a wildcard admits them all.
+    pub(crate) fn stories_mention_rfcs() -> Config {
+        Config {
+            relationships: Vec::new(),
+            edges: vec![EdgeDef {
+                name: "stories-mention-rfcs".to_string(),
+                from: TypeSelector::Types(vec!["story".to_string()]),
+                to: TypeSelector::Types(vec!["rfc".to_string()]),
+                via: RelSelector::Named("mentions".to_string()),
+                required: None,
+                traversal: Some(Traversal::Related),
+            }],
+            ..Config::default()
+        }
+    }
 }
 
 #[cfg(test)]

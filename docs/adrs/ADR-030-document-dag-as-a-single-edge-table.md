@@ -36,3 +36,5 @@ A single `[[edges]]` table owns the DAG. `EdgeDef` carries `name`, `from`, `to`,
 
 **Amended 2026-08-31 (ADR-033):** the gating consequence above no longer holds. `require_to_status` is dropped from `EdgeDef` and status-conditioned `create` gating is abandoned outright; ADR-033 supersedes ADR-022 rather than amending its carrier. The rest of this decision -- the single edge table, `via` naming the relationship, `to` as a type selector -- stands.
 - Per-edge traversal is precise only where a row is spent. Wildcard rows restore blanket behaviour by design; the RFC states this rather than claiming traversal is fully fixed.
+
+**Amended 2026-09-01 (ADR-034):** `from` and `to` are read off the declaration, not off the walk. Whatever traversal role a row assigns, `from` is the type of the document whose frontmatter declared the relation -- so a link read backwards, and a link a nested child inherited from its parent, are both asked as the declaring document's triple. Wildcard rows are unaffected; this only ever mattered where a row names a concrete `from`.

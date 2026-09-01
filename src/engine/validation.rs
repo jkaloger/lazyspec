@@ -747,20 +747,20 @@ impl Checker for StatusConsistencyRule {
                     .get(parent_path)
                     .into_iter()
                     .flatten()
-                    .filter(|(rel_type, child_path)| {
+                    .filter(|link| {
                         store
                             .chain_relationships
                             .iter()
-                            .any(|c| c == rel_type.as_str())
+                            .any(|c| c == link.rel_type.as_str())
                             && store
                                 .docs
-                                .get(child_path)
+                                .get(&link.endpoint)
                                 .map(|d| {
                                     d.doc_type == DocType::new(child_type) && !d.validate_ignore
                                 })
                                 .unwrap_or(false)
                     })
-                    .map(|(_, child_path)| child_path.clone())
+                    .map(|link| link.endpoint.clone())
                     .collect();
 
                 if children.is_empty() {

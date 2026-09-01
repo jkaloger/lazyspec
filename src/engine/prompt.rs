@@ -474,33 +474,14 @@ mod tests {
 
     use crate::engine::config::Config;
     use crate::engine::fs::RealFileSystem;
+    use crate::engine::store::test_support::{doc_md, store_from_with_config};
     use crate::engine::store::Store;
     use tempfile::TempDir;
 
-    fn doc_md(title: &str, doc_type: &str, related: &str) -> String {
-        let related_block = if related == "[]" {
-            "related: []".to_string()
-        } else {
-            format!("related:\n{related}")
-        };
-        format!(
-            "---\ntitle: \"{title}\"\ntype: {doc_type}\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\n{related_block}\n---\n\n{title} body\n"
-        )
-    }
-
+    /// [`store_from_with_config`] under the starter config, for the tests that
+    /// declare no traversal of their own.
     fn store_from(files: &[(&str, &str)]) -> (TempDir, Store) {
-        store_from_with(files, &Config::default())
-    }
-
-    fn store_from_with(files: &[(&str, &str)], config: &Config) -> (TempDir, Store) {
-        let tmp = TempDir::new().unwrap();
-        for (rel_path, contents) in files {
-            let full = tmp.path().join(rel_path);
-            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
-            std::fs::write(&full, contents).unwrap();
-        }
-        let store = Store::load(tmp.path(), config).unwrap();
-        (tmp, store)
+        store_from_with_config(files, &Config::default())
     }
 
     /// Build a one-line prompt with the given body template.
@@ -611,7 +592,7 @@ mod tests {
     }
 
     fn rendered_child_types(config: &Config, files: &[(&str, &str)], shorthand: &str) -> String {
-        let (_tmp, store) = store_from_with(files, config);
+        let (_tmp, store) = store_from_with_config(files, config);
         let doc = store.resolve_shorthand(shorthand).unwrap();
         let ctx = build_render_context(&store, config, doc, &RealFileSystem).unwrap();
         let prompt = body_prompt("[{% for c in child_types %}{{ c }},{% endfor %}]");

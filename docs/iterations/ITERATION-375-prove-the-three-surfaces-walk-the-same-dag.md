@@ -1,7 +1,7 @@
 ---
 title: Prove the three surfaces walk the same DAG
 type: iteration
-status: draft
+status: in-progress
 author: jack
 date: 2026-08-31
 tags: []

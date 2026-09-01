@@ -10,7 +10,8 @@
 
 use crate::engine::context::ContextNode;
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
-use crate::engine::store::{extract_id_from_name, Store};
+use crate::engine::store::Store;
+use crate::engine::traversal::related_neighbours;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -428,69 +429,19 @@ fn implements_lineage_of(
 
 /// The node's OWN depth-1 cross-cutting related neighbours as doc ids, sorted,
 /// excluding any neighbour on the node's `implements` lineage (a transitive
-/// ancestor or descendant, already drawn as a tree edge through the node). Reads
-/// the same propagated `forward_links`/`reverse_links` the `context` command's
-/// related set reads, but is NOT equal to `context <id> --json`'s `related` in
-/// general: that set also surfaces the related links of the node's ancestors,
-/// whereas this is the node's own depth-1 set only (see `flatten_forest`
-/// doc-comment).
+/// ancestor or descendant, already drawn as a tree edge through the node). Takes
+/// its neighbours from [`related_neighbours`], the same engine walk
+/// `resolve_chain`'s related BFS steps, but is NOT equal to `context <id>
+/// --json`'s `related` in general: that set also surfaces the related links of
+/// the node's ancestors, whereas this is the node's own depth-1 set only (see
+/// `flatten_forest` doc-comment).
 fn related_annotations(path: &Path, lineage: &HashSet<PathBuf>, store: &Store) -> Vec<String> {
-    let mut ids: BTreeSet<String> = BTreeSet::new();
-    for neighbour in related_neighbours(path, store) {
-        if lineage.contains(neighbour) {
-            continue;
-        }
-        let id = match store.get(neighbour) {
-            Some(doc) => doc.id.clone(),
-            None => neighbour
-                .file_stem()
-                .map(|s| extract_id_from_name(&s.to_string_lossy()))
-                .unwrap_or_default(),
-        };
-        ids.insert(id);
-    }
+    let ids: BTreeSet<String> = related_neighbours(store, path)
+        .into_iter()
+        .filter(|neighbour| !lineage.contains(&neighbour.doc.path))
+        .map(|neighbour| neighbour.doc.id.clone())
+        .collect();
     ids.into_iter().collect()
-}
-
-/// The paths joined to `path` by a link whose (from, via, to) triple the config
-/// gives the related role — the SAME predicate `resolve_chain`'s related BFS
-/// asks, so the graph's annotations and `context`'s neighbourhood can never
-/// disagree about which relationships are cross-cutting (RFC-067).
-///
-/// Each link is asked in the direction it was DECLARED: a forward link asks the
-/// node as `from`, a reverse link asks the neighbour as `from`, because a row's
-/// `from` is about which document declared the relation, not which end is being
-/// looked at. Both ends of one declared link therefore annotate or neither does.
-///
-/// A neighbour with no document in the store (a dangling target) has no type to
-/// ask about and is asked as the empty type name: a wildcard row covers it, and
-/// so does a global `[[relationships]]` marker (which names no types at all),
-/// but a row naming concrete types does not.
-fn related_neighbours<'a>(path: &Path, store: &'a Store) -> Vec<&'a PathBuf> {
-    let type_of = |p: &Path| store.get(p).map(|doc| doc.doc_type.as_str()).unwrap_or("");
-    let own_type = type_of(path);
-
-    let forward = store
-        .forward_links_for(path)
-        .iter()
-        .filter(|(rel, target)| {
-            store
-                .traversal_walk
-                .walks_related(own_type, rel.as_str(), type_of(target))
-        });
-    let reverse = store
-        .reverse_links_for(path)
-        .iter()
-        .filter(|(rel, source)| {
-            store
-                .traversal_walk
-                .walks_related(type_of(source), rel.as_str(), own_type)
-        });
-
-    forward
-        .chain(reverse)
-        .map(|(_, neighbour)| neighbour)
-        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -577,40 +528,20 @@ mod tests {
         Config, EdgeDef, RelSelector, RelationshipDef, Traversal, TypeSelector,
     };
     use crate::engine::context::resolve_forest;
+    use crate::engine::store::test_support::{
+        doc_md, store_from_with_config, stories_mention_rfcs,
+    };
     use crate::engine::store::{extract_id_from_name, Store};
     use tempfile::TempDir;
 
-    /// Build a markdown doc with the given type and `related` block. `related`
-    /// is the YAML list body (e.g. `"- implements: RFC-001"`) or `"[]"` for
-    /// none.
-    fn doc_md(title: &str, doc_type: &str, related: &str) -> String {
-        let related_block = if related == "[]" {
-            "related: []".to_string()
-        } else {
-            format!("related:\n{related}")
-        };
-        format!(
-            "---\ntitle: \"{title}\"\ntype: {doc_type}\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\n{related_block}\n---\n\n{title} body\n"
-        )
-    }
-
-    /// Load a real `Store` from in-memory files written under a fresh TempDir,
-    /// going through `Store::load` so link-building runs as in production.
+    /// [`store_from_with`] under the starter config, for the tests that do not
+    /// declare traversal roles of their own.
     fn store_from(files: &[(&str, &str)]) -> (TempDir, Store) {
         store_from_with(files, Config::default())
     }
 
-    /// [`store_from`] under a caller-supplied config, for the tests that declare
-    /// their own traversal roles.
     fn store_from_with(files: &[(&str, &str)], config: Config) -> (TempDir, Store) {
-        let tmp = TempDir::new().unwrap();
-        for (rel_path, contents) in files {
-            let full = tmp.path().join(rel_path);
-            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
-            std::fs::write(&full, contents).unwrap();
-        }
-        let store = Store::load(tmp.path(), &config).unwrap();
-        (tmp, store)
+        store_from_with_config(files, &config)
     }
 
     /// The doc id of a `GraphNode` (derived from its path file stem).
@@ -1191,23 +1122,6 @@ mod tests {
         assert!(related_of(&nodes, "RFC-002").is_empty());
     }
 
-    /// One `[[edges]]` row, `from` and `to` both concrete: the shape that can
-    /// tell the two directions of a link apart.
-    fn stories_mention_rfcs() -> Config {
-        Config {
-            relationships: Vec::new(),
-            edges: vec![EdgeDef {
-                name: "stories-mention-rfcs".to_string(),
-                from: TypeSelector::Types(vec!["story".to_string()]),
-                to: TypeSelector::Types(vec!["rfc".to_string()]),
-                via: RelSelector::Named("mentions".to_string()),
-                required: None,
-                traversal: Some(Traversal::Related),
-            }],
-            ..Config::default()
-        }
-    }
-
     #[test]
     fn annotation_asks_the_triple_in_the_direction_the_link_was_declared() {
         // STORY-001 -mentions-> RFC-001 is the declared triple; RFC-002
@@ -1278,6 +1192,21 @@ mod tests {
 
         assert_eq!(related_of(&nodes, "RFC-001"), vec!["STORY-001".to_string()]);
         assert_eq!(related_of(&nodes, "STORY-001"), vec!["RFC-001".to_string()]);
+    }
+
+    #[test]
+    fn annotation_drops_a_neighbour_with_no_document_in_the_store() {
+        let (_tmp, store) = store_from(&[(
+            "docs/rfcs/RFC-001-a.md",
+            &doc_md("A", "rfc", "- related-to: NOPE-001"),
+        )]);
+
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
+
+        assert!(
+            related_of(&nodes, "RFC-001").is_empty(),
+            "a dangling target has no type to ask the triple about, so it is not a neighbour"
+        );
     }
 
     // --- anchored reverse chain (STORY-247) -------------------------------

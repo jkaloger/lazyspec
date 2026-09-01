@@ -1,5 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
+pub mod walk_fixture;
+
 use lazyspec::engine::config::Config;
 use lazyspec::engine::store::Store;
 use std::path::{Path, PathBuf};
