@@ -16,7 +16,7 @@ ADR-012 set the precedent: a lenient read that bypasses strict load, with the st
 ## Acceptance criteria
 
 - Given a config with `[[rules]]` and relationship `traversal` keys, when `fix --config` runs, then `[[edges]]` is written and the source `[[rules]]` blocks and `traversal` keys are removed.
-- Given a `parent-child` rule, when translated, then the edge carries `from = child`, `to = [parent]`, `traversal = "chain"`, `required = severity`, and `via = "*"`. `via = "*"` is deliberate: it preserves today's accept-any-chain-relationship behaviour rather than silently tightening to `implements` and turning valid existing documents into findings.
+- Given a `parent-child` rule, when translated, then one edge is emitted per chain-marked relationship, each carrying `from = child`, `to = [parent]`, `via = ` that relationship's name, `traversal = "chain"`, and `required = severity`. Naming the relationship rather than writing `via = "*"` is the preservation: `validation.rs:583` satisfies the rule only through a chain-marked relationship, so the wildcard would widen it — and a `via = "*"` row carrying `traversal = "chain"` overlaps the row translated from a `related` relationship and fails to load (ADR-032).
 - Given a `relation-existence` rule, when translated, then the edge carries `from = type`, `to = "*"`, `via = "*"`, `required = severity`.
 - Given a relationship carrying `traversal`, when translated, then a wildcard row is emitted with `from = "*"`, `to = "*"`, `via = name`, and that traversal role.
 - Given any repository, when `validate` runs before and after migration, then the finding set is identical.
@@ -26,6 +26,6 @@ ADR-012 set the precedent: a lenient read that bypasses strict load, with the st
 
 ## Notes
 
-The wildcard rows this emits are exactly the imprecision the edge table lets authors escape. Migration lands a working config, not a good one; narrowing is a later human edit.
+The wildcard rows this emits — the `relation-existence` translations and the relationship traversal markers — are exactly the imprecision the edge table lets authors escape. Migration lands a working config, not a good one; narrowing is a later human edit.
 
 `ops/fix/config.rs`'s append-only doc comment is no longer accurate for the module and must be amended in the same change — a stale rule is either changed or the code is (convention §Governance).

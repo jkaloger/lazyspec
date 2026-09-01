@@ -19,18 +19,24 @@ That precedent does not transfer cleanly. `collect_config_fixes` (`ops/fix/confi
 
 `fix --config` gains a translating migration that rewrites rather than appends. The translation is mechanical and total:
 
-- each `parent-child` rule becomes an edge with `from = child`, `to = [parent]`, `traversal = "chain"`, `required = severity`, and `via = "*"`
+- each `parent-child` rule becomes an edge per chain-marked relationship, with `from = child`, `to = [parent]`, `via = ` that relationship's name, `traversal = "chain"`, and `required = severity`
 - each `relation-existence` rule becomes `from = type`, `to = "*"`, `via = "*"`, `required = severity`
 - each relationship carrying `traversal` contributes a wildcard row: `from = "*"`, `to = "*"`, `via = name`, and that traversal role
 - the source `[[rules]]` blocks and `traversal` keys are deleted
 
-`via = "*"` on translated parent-child rules is deliberate. It preserves today's actual behaviour, which accepts any chain relationship, instead of silently tightening to `implements` and turning existing valid documents into findings. Tightening is a subsequent human edit, not something migration does.
+A translated parent-child row names the chain relationship in `via` rather than carrying `via = "*"`. This decision was amended after the original was found to be wrong on its own terms and unloadable besides.
+
+The original reasoning was that `via = "*"` preserves today's behaviour, "which accepts any chain relationship". It does not: `via = "*"` accepts *any* relationship, while `validation.rs:583` satisfies a parent-child rule only through a relationship the config marks `traversal = "chain"`. A story linked to an RFC by `blocks` fails the rule today and would pass under `via = "*"`. The wildcard is the widening, and naming the chain relationship is the preservation.
+
+It is also the only shape that loads. A `via = "*"` row carrying `traversal = "chain"` overlaps the wildcard row translated from a `related` relationship on all three positions, and `reject_traversal_disagreements` (`config.rs:162`) refuses the pair — for the default config, this repo's own included. Naming the relationship in `via` removes the overlap: the row agrees with its own relationship's marker row and cannot match any other.
+
+`via` is one name or `"*"`, never a set, so a config marking two relationships as chain yields one translated row per relationship rather than one row naming both.
 
 Sections the migration does not understand are preserved. The migration is idempotent: a config already carrying `[[edges]]` and no `[[rules]]` is left untouched.
 
 ## Consequences
 
-- Migration is behaviour-preserving, so upgrading cannot break a repository's validation state. The `targets`-satisfies-`implements` hole survives migration by design and closes only when a human writes a concrete `via`.
+- Migration is behaviour-preserving, so upgrading cannot break a repository's validation state. Naming the chain relationship in `via` is what makes that true; the wildcard would have widened it.
 - Byte-for-byte preservation is lost for the blocks being replaced. Comments attached to a `[[rules]]` block do not survive translation; the migration plan must say so before applying.
 - `ops/fix/config.rs`'s append-only contract is no longer accurate for the whole module and its doc comment needs amending, per the convention's governance rule that a stale rule is either changed or the code is.
 - The wildcard rows emitted for relationship traversal are exactly the imprecision the edge table was meant to allow escaping. Migration lands a working config, not a good one; narrowing is left to the author.
