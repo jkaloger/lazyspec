@@ -1,7 +1,7 @@
 ---
 title: Scaffold a starter edge table that reproduces today's traversal
 type: iteration
-status: draft
+status: accepted
 author: Jack Kaloger
 date: 2026-09-01
 tags: []

@@ -1,7 +1,7 @@
 ---
 title: Translate rules and relationship traversal into edge rows
 type: iteration
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-01
 tags: []

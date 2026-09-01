@@ -1,7 +1,7 @@
 ---
 title: Rewrite the config in place, deleting the source declarations
 type: iteration
-status: draft
+status: in-progress
 author: Jack Kaloger
 date: 2026-09-01
 tags: []

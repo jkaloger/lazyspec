@@ -1,7 +1,7 @@
 ---
 title: Prove the migration preserves the finding set
 type: iteration
-status: draft
+status: accepted
 author: Jack Kaloger
 date: 2026-09-01
 tags: []

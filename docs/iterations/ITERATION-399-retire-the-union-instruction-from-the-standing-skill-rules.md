@@ -1,7 +1,7 @@
 ---
 title: Retire the union instruction from the standing skill rules
 type: iteration
-status: draft
+status: accepted
 author: Jack Kaloger
 date: 2026-09-01
 tags: []

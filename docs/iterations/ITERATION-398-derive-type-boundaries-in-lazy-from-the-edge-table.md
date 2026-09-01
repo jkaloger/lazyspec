@@ -1,7 +1,7 @@
 ---
 title: Derive type boundaries in /lazy from the edge table
 type: iteration
-status: draft
+status: accepted
 author: Jack Kaloger
 date: 2026-09-01
 tags: []

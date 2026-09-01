@@ -1,7 +1,7 @@
 ---
 title: Edit an edge's fields from the settings panel
 type: iteration
-status: draft
+status: accepted
 author: Jack Kaloger
 date: 2026-09-01
 tags: []

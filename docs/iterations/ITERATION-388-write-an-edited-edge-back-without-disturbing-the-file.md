@@ -1,7 +1,7 @@
 ---
 title: Write an edited edge back without disturbing the file
 type: iteration
-status: draft
+status: accepted
 author: Jack Kaloger
 date: 2026-09-01
 tags: []
