@@ -1,6 +1,6 @@
 use crate::engine::config::{
-    AttrKind, Config, EdgeDef, Severity, StoreBackend, TypeDef, TypeSelector,
-    ValidationRule as ConfigRule, WILDCARD,
+    AttrKind, Config, EdgeDef, RelSelector, Severity, StoreBackend, TypeDef, TypeSelector,
+    ValidationRule as ConfigRule,
 };
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
 use std::collections::{HashMap, HashSet};
@@ -28,8 +28,8 @@ pub enum ValidationIssue {
         path: PathBuf,
         edge_name: String,
         from_type: String,
-        to_types: Vec<String>,
-        via: String,
+        to: TypeSelector,
+        via: RelSelector,
     },
     SupersededParent {
         path: PathBuf,
@@ -144,19 +144,19 @@ impl ValidationResult {
 /// How an unsatisfied edge's `via` reads in the finding. A wildcard is a config
 /// spelling, not a relationship name, so quoting it back says nothing about what
 /// the document is missing.
-fn via_phrase(via: &str) -> String {
-    if via == WILDCARD {
-        return "any relationship".to_string();
+fn via_phrase(via: &RelSelector) -> String {
+    match via {
+        RelSelector::Any => "any relationship".to_string(),
+        RelSelector::Named(name) => format!("\"{name}\""),
     }
-    format!("\"{via}\"")
 }
 
 /// How an unsatisfied edge's target set reads in the finding.
-fn to_phrase(to_types: &[String]) -> String {
-    if to_types == [WILDCARD] {
-        return "to a document of any type".to_string();
+fn to_phrase(to: &TypeSelector) -> String {
+    match to {
+        TypeSelector::Any => "to a document of any type".to_string(),
+        TypeSelector::Types(names) => format!("to one of: {}", names.join(", ")),
     }
-    format!("to one of: {}", to_types.join(", "))
 }
 
 impl std::fmt::Display for ValidationIssue {
@@ -197,7 +197,7 @@ impl std::fmt::Display for ValidationIssue {
                 path,
                 edge_name,
                 from_type,
-                to_types,
+                to,
                 via,
             } => {
                 write!(
@@ -207,7 +207,7 @@ impl std::fmt::Display for ValidationIssue {
                     path.display(),
                     from_type,
                     via_phrase(via),
-                    to_phrase(to_types)
+                    to_phrase(to)
                 )
             }
             ValidationIssue::SupersededParent { path, parent } => {
@@ -629,27 +629,27 @@ impl Checker for ParentLinkRule {
     }
 }
 
-/// The type names an edge position spells out for a finding's message. A
-/// wildcard names none, so it renders as itself.
-fn selector_names(selector: &TypeSelector) -> Vec<String> {
-    match selector {
-        TypeSelector::Any => vec![WILDCARD.to_string()],
-        TypeSelector::Types(names) => names.clone(),
-    }
-}
-
-/// The rows whose requiredness still speaks for a document, out of the rows
-/// that apply to it. ADR-031 takes requiredness from the most specific matching
-/// row, so a strictly more specific row displaces every row it overlaps --
-/// including when the displacing row waives `required` and the demand
-/// disappears. Rows of equal specificity that disagree never reach here: the
+/// The demands that still speak for a document, out of the rows that apply to
+/// it. ADR-031 ranges resolution over the rows that *state* `required`: a row
+/// that omits it declares the edge legal and takes no part at any specificity,
+/// so a documentation-only narrow row cannot silence a broad demand. Among the
+/// demanding rows a strictly more specific one displaces every row it overlaps.
+/// What survives is not the maximal-specificity rows: two rows that overlap
+/// nothing displace nothing, so both survive at whatever specificity each has.
+/// Demanding rows of equal specificity that disagree never reach here: the
 /// config rejects them at load, so resolution never has to break a tie.
-fn most_specific_rows<'a>(rows: &[&'a EdgeDef]) -> Vec<&'a EdgeDef> {
-    rows.iter()
-        .filter(|row| {
-            !rows
+fn undisplaced_demands<'a>(rows: &[&'a EdgeDef]) -> Vec<(&'a EdgeDef, &'a Severity)> {
+    let demands: Vec<(&'a EdgeDef, &'a Severity)> = rows
+        .iter()
+        .filter_map(|row| row.required.as_ref().map(|severity| (*row, severity)))
+        .collect();
+
+    demands
+        .iter()
+        .filter(|(row, _)| {
+            !demands
                 .iter()
-                .any(|other| other.specificity() > row.specificity() && other.overlaps(row))
+                .any(|(other, _)| other.specificity() > row.specificity() && other.overlaps(row))
         })
         .copied()
         .collect()
@@ -686,14 +686,11 @@ impl Checker for RequiredEdgeRule {
                 .filter(|edge| edge.from.matches(doc_type))
                 .collect();
 
-            for edge in most_specific_rows(&applicable) {
-                let Some(severity) = &edge.required else {
-                    continue;
-                };
-
-                // The row's own `via` decides, never "any chain relationship":
-                // that is how `[[rules]]` lets `targets` satisfy a rule that
-                // meant `implements` (RFC-067 §Problem.1).
+            for (edge, severity) in undisplaced_demands(&applicable) {
+                // `from` already matched to get here, so only `via` and `to`
+                // are left to decide. The row's own `via` decides, never "any
+                // chain relationship": that is how `[[rules]]` lets `targets`
+                // satisfy a rule that meant `implements` (RFC-067 §Problem.1).
                 let satisfied = meta.related.iter().any(|r| {
                     let resolved = id_to_path
                         .get(&r.target)
@@ -703,7 +700,7 @@ impl Checker for RequiredEdgeRule {
                     // `related`: a target that resolves to nothing already has
                     // its own broken-link finding.
                     store.docs.get(&resolved).is_some_and(|d| {
-                        edge.matches(doc_type, r.rel_type.as_str(), d.doc_type.as_str())
+                        edge.matches_target(r.rel_type.as_str(), d.doc_type.as_str())
                     })
                 });
 
@@ -713,9 +710,11 @@ impl Checker for RequiredEdgeRule {
                         ValidationIssue::UnsatisfiedEdge {
                             path: path.clone(),
                             edge_name: edge.name.clone(),
-                            from_type: selector_names(&edge.from).join(", "),
-                            to_types: selector_names(&edge.to),
-                            via: edge.via.name().unwrap_or(WILDCARD).to_string(),
+                            // The finding is about this one document, whose type
+                            // is known; `edge.from` may list several.
+                            from_type: doc_type.to_string(),
+                            to: edge.to.clone(),
+                            via: edge.via.clone(),
                         },
                     ));
                 }
@@ -2631,6 +2630,24 @@ mod edge_tests {
         );
     }
 
+    // A finding is about one document, and that document has one type. Naming
+    // every type the row's `from` lists would read "iteration, story needs
+    // ..." against a file that is only ever one of them.
+    #[test]
+    fn a_finding_names_the_documents_own_type_not_the_rows_source_set() {
+        let mut many_from = iterations_implement_work(Some(Severity::Error));
+        many_from.from = types(&["iteration", "story"]);
+
+        assert_eq!(
+            rendered_finding_for(many_from),
+            format!(
+                "unsatisfied edge [iterations-implement-work]: {} \
+                 (iteration needs \"implements\" to one of: spike, story, bug)",
+                iteration_path()
+            )
+        );
+    }
+
     fn edge(
         name: &str,
         from: TypeSelector,
@@ -2710,35 +2727,43 @@ mod edge_tests {
         );
     }
 
-    // The other direction: a concrete row that omits `required` waives what the
-    // wildcard row demands. Waiving is a resolution outcome, not a special case,
-    // so the document gets no finding at all.
+    // ADR-031: a row that omits `required` is documentation and takes no part in
+    // resolution, so however specific it is it cannot silence a broader demand.
+    // The narrow row here scores three to the demand's one and still displaces
+    // nothing: an iteration with no relations at all is a finding.
     #[test]
-    fn a_more_specific_row_without_required_waives_the_wildcard_row() {
+    fn a_more_specific_row_without_required_does_not_displace_a_demand() {
         let config = config_with_edges(vec![
             edge(
-                "iterations-implement-something",
-                types(&["iteration"]),
-                TypeSelector::Any,
-                RelSelector::Named("implements".to_string()),
-                Some(Severity::Error),
-            ),
-            edge(
-                "iterations-implement-stories",
+                "iterations-may-implement-stories",
                 types(&["iteration"]),
                 types(&["story"]),
                 RelSelector::Named("implements".to_string()),
                 None,
             ),
+            edge(
+                "iterations-need-relations",
+                types(&["iteration"]),
+                TypeSelector::Any,
+                RelSelector::Any,
+                Some(Severity::Error),
+            ),
         ]);
 
         let result = validate_full(&lone_iteration(), &config);
 
-        assert!(
-            unsatisfied_edges(&result).is_empty(),
+        let found = unsatisfied_edges(&result);
+        assert_eq!(
+            found.len(),
+            1,
             "got errors {:?} warnings {:?}",
             result.errors,
             result.warnings
+        );
+        assert!(
+            found[0].to_string().contains("iterations-need-relations"),
+            "the demand must survive the documentation-only row, got: {}",
+            found[0]
         );
     }
 
@@ -2791,7 +2816,7 @@ mod edge_tests {
                 types(&["adr"]),
                 types(&["rfc"]),
                 RelSelector::Named("implements".to_string()),
-                None,
+                Some(Severity::Warning),
             ),
         ]);
 

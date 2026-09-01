@@ -45,7 +45,7 @@ One config table owns the document DAG. Each row declares a directed edge kind: 
 Resolved decisions, each with an ADR:
 
 1. **Edges are a first-class table.** `[[edges]]` replaces both rule shapes and absorbs `traversal` from `RelationshipDef`. `parent_type` is untouched and documented as containment-only. (ADR-030)
-2. **Wildcard endpoints, specific-over-wildcard.** `from`/`to`/`via` accept `"*"`. A wildcard row and a specific row for the same triple compose for traversal; for requiredness the most specific row wins. (ADR-031)
+2. **Wildcard endpoints, specific-over-wildcard.** `from`/`to`/`via` accept `"*"`. A wildcard row and a specific row for the same triple compose for traversal; for requiredness the most specific row *that states `required`* wins, and a row that omits `required` takes no part in that resolution. (ADR-031)
 3. **Migration is a mechanical translation.** `fix --config` rewrites `[[rules]]` plus `relationships.traversal` into `[[edges]]`, following ADR-012's lenient-read precedent. (ADR-032)
 
 Decided by precedent:

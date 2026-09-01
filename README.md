@@ -654,12 +654,12 @@ An `[[edges]]` block declares one directed edge kind in the document DAG: a sour
 | Key        | Meaning                                                                                                                    |
 | ---------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `name`     | Identifies the edge in validation findings                                                                                 |
-| `from`     | The source document type, or `"*"` for any type                                                                            |
-| `to`       | The permitted target types, written as one type name, a list of them, or `"*"` for any type. `to = "story"` and `to = ["story"]` are identical |
+| `from`     | The source document types, written as one type name, a list of them, or `"*"` for any type                                 |
+| `to`       | The permitted target types, written the same way. `to = "story"` and `to = ["story"]` are identical, as are the `from` equivalents |
 | `via`      | The relationship that realizes the edge, or `"*"` for any relationship. Required — omitting it is an error, not a shorthand for `"*"` |
 | `required` | `"error"` or `"warning"`: the severity of a finding when the edge is absent. Omit it and the edge is legal but not demanded |
 
-`validate` reports one finding per document of the `from` type that carries no `via` relation to a document of any type listed in `to`. A list of target types is a disjunction, so the edge below is satisfied by an iteration that implements a spike, or a story, or a bug — not one link per member. The finding names the edge and every permitted target type.
+`validate` reports one finding per document whose type is listed in `from` and which carries no `via` relation to a document of any type listed in `to`. Both lists are disjunctions. The edge below is satisfied by an iteration that implements a spike, or a story, or a bug — not one link per member. The finding names the edge, the type of the document it is about, and every permitted target type.
 
 ```toml
 [[edges]]
@@ -675,6 +675,17 @@ from = "story"
 to = "rfc"
 via = "implements"
 required = "warning"
+```
+
+A list on `from` states the same demand of several source types at once, rather than repeating the row per type. The edge below reports an iteration that implements nothing and a bug that implements nothing, each finding naming that document's own type:
+
+```toml
+[[edges]]
+name = "delivery-implements-work"
+from = ["iteration", "bug"]
+to = ["spike", "story"]
+via = "implements"
+required = "error"
 ```
 
 Any of `from`, `to` and `via` may be written as `"*"`, which matches every declared type or relationship. Each position takes `"*"` independently of the others:
@@ -704,13 +715,19 @@ A finding names what a wildcard position matches rather than the spelling `"*"`:
 
 Two rows overlap when one concrete edge is covered by both. Overlapping rows are ordered by specificity: the count of `from`, `to` and `via` positions that name something rather than wildcarding, from zero to three. A named position counts once whether it names one type or six, so `from = "iteration", to = "*"` and `from = "*", to = ["story"]` are equally specific.
 
-Requiredness is resolved per document, not per link. A row applies to a document when `from` matches the document's type; among the applicable rows, one that a more specific applicable row overlaps is discarded. The rows that survive decide, each reporting at its own severity. A more specific row that omits `required` discards the broader row's demand along with it, so documents of that type carry no finding for that edge. Requiredness is the only key specificity resolves.
+Specificity resolves requiredness and nothing else, and it ranges only over the rows that state `required`. A row that omits it declares the edge legal and takes no part: it neither conflicts with a demand nor cancels one, however specific it is.
 
-Two overlapping rows of equal specificity may not disagree on requiredness. Such a pair fails config load, naming both rows and the requiredness each declares. An omitted `required` is one of those declarations: it states that the edge is legal and its absence is not a finding, so it disagrees with `required = "error"` and with `required = "warning"`. Rows that agree on requiredness, rows of unequal specificity, and rows that cannot both cover any one edge raise no such conflict.
+Requiredness is resolved per document, not per link, because it is a claim about absence and a document with no relations at all has no link to resolve against. A row applies to a document when `from` matches the document's type; among the applicable rows that state `required`, one that a more specific such row overlaps is discarded. The demands that survive each report at their own severity. So the `iterations-need-relations` row above still reports an iteration that carries no relations even when a narrower row says an iteration may relate to a story.
+
+Two overlapping rows of equal specificity may not state different severities. Such a pair fails config load, naming both rows and the `required` each writes. Rows stating the same severity, rows of unequal specificity, rows that cannot both cover any one edge, and rows where one or both say nothing about requiredness raise no such conflict.
+
+There is no spelling for "legal here, and stop demanding the broader edge". Narrowing the broader row's `from`, `to` or `via` is how you exempt a case from it.
 
 `required` on a row whose `from` is `"*"` fails config load, naming the edge, because such a row demands the edge of every declared type. A wildcard `from` on a row that omits `required` loads.
 
 The wildcard is always explicit. Leaving `via` out does not mean "any relationship" — it fails config load, naming the edge, because a table whose shape carried a second meaning would be a rule nobody wrote down.
+
+The wildcard also has one spelling: the bare string. A list is read as type names, so `to = ["*"]` fails config load telling you to write `to = "*"`. `["*", "story"]` fails the same way rather than meaning "any type, and also story".
 
 An edge naming a type absent from `[[types]]`, or a relationship absent from `[[relationships]]`, fails config load; `"*"` names neither and is never reported as an unknown identifier. Declared edges appear in `lazyspec config --json` under `edges`, and re-emit in the spelling they were written in.
 
