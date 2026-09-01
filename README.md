@@ -704,7 +704,9 @@ A finding names what a wildcard position matches rather than the spelling `"*"`:
 
 Two rows overlap when one concrete edge is covered by both. Overlapping rows are ordered by specificity: the count of `from`, `to` and `via` positions that name something rather than wildcarding, from zero to three. A named position counts once whether it names one type or six, so `from = "iteration", to = "*"` and `from = "*", to = ["story"]` are equally specific.
 
-Two overlapping rows of equal specificity may not disagree on requiredness. Such a pair fails config load, naming both rows and the requiredness each declares. An omitted `required` is one of those declarations: it states that the edge is legal and its absence is not a finding, so it disagrees with `required = "error"` and with `required = "warning"`. Rows that agree on requiredness, rows of unequal specificity, and rows that cannot both cover any one edge all load.
+Requiredness is resolved per document, not per link. A row applies to a document when `from` matches the document's type; among the applicable rows, one that a more specific applicable row overlaps is discarded. The rows that survive decide, each reporting at its own severity. A more specific row that omits `required` discards the broader row's demand along with it, so documents of that type carry no finding for that edge. Requiredness is the only key specificity resolves.
+
+Two overlapping rows of equal specificity may not disagree on requiredness. Such a pair fails config load, naming both rows and the requiredness each declares. An omitted `required` is one of those declarations: it states that the edge is legal and its absence is not a finding, so it disagrees with `required = "error"` and with `required = "warning"`. Rows that agree on requiredness, rows of unequal specificity, and rows that cannot both cover any one edge raise no such conflict.
 
 `required` on a row whose `from` is `"*"` fails config load, naming the edge, because such a row demands the edge of every declared type. A wildcard `from` on a row that omits `required` loads.
 

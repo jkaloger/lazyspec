@@ -1,6 +1,6 @@
 use crate::engine::config::{
-    AttrKind, Config, Severity, StoreBackend, TypeDef, TypeSelector, ValidationRule as ConfigRule,
-    WILDCARD,
+    AttrKind, Config, EdgeDef, Severity, StoreBackend, TypeDef, TypeSelector,
+    ValidationRule as ConfigRule, WILDCARD,
 };
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
 use std::collections::{HashMap, HashSet};
@@ -638,6 +638,23 @@ fn selector_names(selector: &TypeSelector) -> Vec<String> {
     }
 }
 
+/// The rows whose requiredness still speaks for a document, out of the rows
+/// that apply to it. ADR-031 takes requiredness from the most specific matching
+/// row, so a strictly more specific row displaces every row it overlaps --
+/// including when the displacing row waives `required` and the demand
+/// disappears. Rows of equal specificity that disagree never reach here: the
+/// config rejects them at load, so resolution never has to break a tie.
+fn most_specific_rows<'a>(rows: &[&'a EdgeDef]) -> Vec<&'a EdgeDef> {
+    rows.iter()
+        .filter(|row| {
+            !rows
+                .iter()
+                .any(|other| other.specificity() > row.specificity() && other.overlaps(row))
+        })
+        .copied()
+        .collect()
+}
+
 pub struct RequiredEdgeRule;
 
 impl Checker for RequiredEdgeRule {
@@ -659,17 +676,20 @@ impl Checker for RequiredEdgeRule {
                 continue;
             }
 
-            for edge in &config.edges {
+            let doc_type = meta.doc_type.as_str();
+            // `from` gates the document as a whole: a row that does not apply
+            // must not read as unsatisfied against an empty `related` list, and
+            // it has no standing to displace a row that does apply.
+            let applicable: Vec<&EdgeDef> = config
+                .edges
+                .iter()
+                .filter(|edge| edge.from.matches(doc_type))
+                .collect();
+
+            for edge in most_specific_rows(&applicable) {
                 let Some(severity) = &edge.required else {
                     continue;
                 };
-                let doc_type = meta.doc_type.as_str();
-                // `from` gates the document as a whole: a row that does not
-                // apply must not read as unsatisfied against an empty
-                // `related` list.
-                if !edge.from.matches(doc_type) {
-                    continue;
-                }
 
                 // The row's own `via` decides, never "any chain relationship":
                 // that is how `[[rules]]` lets `targets` satisfy a rule that
@@ -2195,12 +2215,16 @@ mod edge_tests {
     /// The edge under test with `[[rules]]` cleared, so any finding can only
     /// have come from the edge checker.
     fn config_with_edge(edge: EdgeDef) -> Config {
+        config_with_edges(vec![edge])
+    }
+
+    fn config_with_edges(edges: Vec<EdgeDef>) -> Config {
         let mut relationships = crate::engine::config::starter_relationships();
         relationships.push(targets_relationship());
         Config {
             relationships,
             rules: Vec::new(),
-            edges: vec![edge],
+            edges,
             ..Config::default()
         }
     }
@@ -2604,6 +2628,181 @@ mod edge_tests {
                  (iteration needs \"implements\" to a document of any type)",
                 iteration_path()
             )
+        );
+    }
+
+    fn edge(
+        name: &str,
+        from: TypeSelector,
+        to: TypeSelector,
+        via: RelSelector,
+        required: Option<Severity>,
+    ) -> EdgeDef {
+        EdgeDef {
+            name: name.to_string(),
+            from,
+            to,
+            via,
+            required,
+        }
+    }
+
+    fn types(names: &[&str]) -> TypeSelector {
+        TypeSelector::Types(names.iter().map(|n| n.to_string()).collect())
+    }
+
+    fn lone_iteration() -> super::super::store::Store {
+        store_from(vec![doc(
+            "docs/iterations/ITERATION-001.md",
+            "iteration",
+            "ITERATION-001",
+            vec![],
+        )])
+    }
+
+    // STORY-256 AC2 / ADR-031: a wildcard row and a concrete row can both match
+    // one edge. Requiredness comes from the more specific row, so the document
+    // gets one finding at that row's severity -- not one finding per matching
+    // row.
+    #[test]
+    fn the_more_specific_of_two_overlapping_rows_decides_requiredness() {
+        let config = config_with_edges(vec![
+            edge(
+                "iterations-implement-something",
+                types(&["iteration"]),
+                TypeSelector::Any,
+                RelSelector::Named("implements".to_string()),
+                Some(Severity::Warning),
+            ),
+            edge(
+                "iterations-implement-stories",
+                types(&["iteration"]),
+                types(&["story"]),
+                RelSelector::Named("implements".to_string()),
+                Some(Severity::Error),
+            ),
+        ]);
+
+        let result = validate_full(&lone_iteration(), &config);
+
+        let found = unsatisfied_edges(&result);
+        assert_eq!(
+            found.len(),
+            1,
+            "got errors {:?} warnings {:?}",
+            result.errors,
+            result.warnings
+        );
+        assert!(
+            found[0]
+                .to_string()
+                .contains("iterations-implement-stories"),
+            "the concrete row must be the one that fires, got: {}",
+            found[0]
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .all(|w| !matches!(w, ValidationIssue::UnsatisfiedEdge { .. })),
+            "the wildcard row's `warning` must not survive resolution, got: {:?}",
+            result.warnings
+        );
+    }
+
+    // The other direction: a concrete row that omits `required` waives what the
+    // wildcard row demands. Waiving is a resolution outcome, not a special case,
+    // so the document gets no finding at all.
+    #[test]
+    fn a_more_specific_row_without_required_waives_the_wildcard_row() {
+        let config = config_with_edges(vec![
+            edge(
+                "iterations-implement-something",
+                types(&["iteration"]),
+                TypeSelector::Any,
+                RelSelector::Named("implements".to_string()),
+                Some(Severity::Error),
+            ),
+            edge(
+                "iterations-implement-stories",
+                types(&["iteration"]),
+                types(&["story"]),
+                RelSelector::Named("implements".to_string()),
+                None,
+            ),
+        ]);
+
+        let result = validate_full(&lone_iteration(), &config);
+
+        assert!(
+            unsatisfied_edges(&result).is_empty(),
+            "got errors {:?} warnings {:?}",
+            result.errors,
+            result.warnings
+        );
+    }
+
+    // Resolution only silences a row some more specific row displaces. Two rows
+    // that cannot both match one edge are independent demands, and both fire.
+    #[test]
+    fn two_rows_that_do_not_overlap_both_fire() {
+        let config = config_with_edges(vec![
+            edge(
+                "iterations-implement-stories",
+                types(&["iteration"]),
+                types(&["story"]),
+                RelSelector::Named("implements".to_string()),
+                Some(Severity::Error),
+            ),
+            edge(
+                "iterations-target-rfcs",
+                types(&["iteration"]),
+                types(&["rfc"]),
+                RelSelector::Named("targets".to_string()),
+                Some(Severity::Warning),
+            ),
+        ]);
+
+        let result = validate_full(&lone_iteration(), &config);
+
+        assert_eq!(
+            unsatisfied_edges(&result).len(),
+            2,
+            "got errors {:?} warnings {:?}",
+            result.errors,
+            result.warnings
+        );
+    }
+
+    // Rows overlap on a `from` type this document is not, so the specific row
+    // never applied here and has nothing to displace.
+    #[test]
+    fn a_more_specific_row_for_another_from_type_does_not_displace() {
+        let config = config_with_edges(vec![
+            edge(
+                "work-implements-something",
+                types(&["iteration", "adr"]),
+                TypeSelector::Any,
+                RelSelector::Named("implements".to_string()),
+                Some(Severity::Error),
+            ),
+            edge(
+                "adrs-implement-rfcs",
+                types(&["adr"]),
+                types(&["rfc"]),
+                RelSelector::Named("implements".to_string()),
+                None,
+            ),
+        ]);
+
+        let result = validate_full(&lone_iteration(), &config);
+
+        assert_eq!(
+            unsatisfied_edges(&result).len(),
+            1,
+            "got errors {:?} warnings {:?}",
+            result.errors,
+            result.warnings
         );
     }
 }
